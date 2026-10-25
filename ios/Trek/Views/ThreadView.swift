@@ -278,10 +278,15 @@ private struct TranscriptList: View, Equatable {
     /// new rows keep it at the latest.
     @State private var atBottom = true
     /// A page of earlier items is on its way, or just went in above: the bottom keeps still for
-    /// it too, so the rows being read don't move.
+    /// it too, as well as the row being read.
     @State private var earlierLanding = false
     /// The user has a finger on it (dragging or flicking): a big move then is theirs.
     @State private var touching = false
+    /// The row at the top of the screen: scrolled up, it's kept there as rows go in above it (a
+    /// page of earlier items, lazy rows measured as they come into view) or grow below it.
+    @State private var position = ScrollPosition(idType: String.self)
+    /// The first row when the touch began: rows that arrive above it wait till the scroll rests.
+    @State private var touchFirst: String?
 
     /// How many of the latest rows are laid out outside the lazy stack, at least.
     private static let laidOut = 3
@@ -309,7 +314,12 @@ private struct TranscriptList: View, Equatable {
     }
 
     var body: some View {
-        let blocks = store.blocks
+        let all = store.blocks
+        // Rows that arrive above while a finger is on the transcript (or it's still gliding) wait
+        // till it rests: going in mid-drag, the drag put back its own offset on the next frame,
+        // which threw the reader a whole page up.
+        let start = touching ? (touchFirst.flatMap { id in all.firstIndex { $0.id == id } } ?? 0) : 0
+        let blocks = start > 0 ? Array(all[start...]) : all
         // The latest group, turn and message: open, and with their actions out.
         let lastGroup = blocks.last(where: \.isGroup)?.id
         let ends = Set(Block.turnEnds(blocks, open: working))
@@ -335,20 +345,24 @@ private struct TranscriptList: View, Equatable {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 LineageHeader(store: store)
-                if !store.loaded || store.more || !earlier.isEmpty {
+                if !store.loaded || store.more || start > 0 || !earlier.isEmpty {
                     LazyVStack(alignment: .leading, spacing: 18) {
                         if !store.loaded {
                             ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
-                        } else if store.more {
-                            EarlierMarker(loading: store.loadingEarlier)
+                        } else if store.more || start > 0 {
+                            EarlierMarker(loading: store.loadingEarlier || start > 0)
                         }
                         ForEach(earlier) { row($0) }
                     }
+                    .scrollTargetLayout()
                 }
                 // The latest rows are laid out in full, not lazily: an answer still being written
                 // (a chart drawing in) grows many times a second, and a lazy stack loses its place
                 // then, showing blank space where the transcript is.
-                ForEach(blocks.dropFirst(split)) { row($0) }
+                VStack(alignment: .leading, spacing: 18) {
+                    ForEach(blocks.dropFirst(split)) { row($0) }
+                }
+                .scrollTargetLayout()
                 WorkingFooter(store: store)
                 Color.clear.frame(height: 4).id("end")
             }
@@ -360,27 +374,27 @@ private struct TranscriptList: View, Equatable {
         // for rows that are gone, and a lazy stack holding them showed a blank screen.
         .id(store.generation)
         // It opens at the latest. While it's there, a change in size keeps the bottom still, so it
-        // stays with the latest as items arrive (and as a page of earlier items lands above);
-        // scrolled up, the top keeps still, so what's being read isn't pulled down as the answer
-        // grows below it (it was, with the bottom anchored for every change).
+        // stays with the latest as items arrive. Scrolled up, the row being read stays put: a page
+        // of earlier items landing above used to throw the reader a whole page up (a top or bottom
+        // anchor didn't hold through the lazy stack's insert).
         .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(atBottom || earlierLanding ? .bottom : .top, for: .sizeChanges)
+        .defaultScrollAnchor(atBottom || earlierLanding ? .bottom : nil, for: .sizeChanges)
+        .scrollPosition($position, anchor: .top)
         .onChange(of: store.loadingEarlier) { _, loading in
-            if loading {
-                earlierLanding = true
-            } else {
-                // The page goes in with the update that ends the loading: keep still till it has.
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(400))
-                    earlierLanding = store.loadingEarlier
-                }
-            }
+            if loading { earlierLanding = true } else { settleEarlier() }
         }
         .scrollDismissesKeyboard(.interactively)
         // Earlier items load as the user scrolls up towards them (or straight away, while what's
         // loaded doesn't fill the screen); not while the view settles at the bottom.
         .onScrollPhaseChange { _, phase in
+            let rests = phase == .idle && touching
+            if phase != .idle, !touching { touchFirst = store.blocks.first?.id }
             touching = phase != .idle
+            // Rows that waited go in now.
+            if rests, touchFirst != store.blocks.first?.id {
+                earlierLanding = true
+                settleEarlier()
+            }
             guard phase == .interacting, !scrolled else { return }
             scrolled = true
             if nearTop { model.loadEarlier(store.id) }
@@ -438,6 +452,15 @@ private struct TranscriptList: View, Equatable {
         } message: { c in
             Text(c.message)
         }
+        }
+    }
+
+    /// Rows going in above keep the bottom still till they have (the update after the one that
+    /// lands them can still grow the page).
+    private func settleEarlier() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            earlierLanding = store.loadingEarlier
         }
     }
 
