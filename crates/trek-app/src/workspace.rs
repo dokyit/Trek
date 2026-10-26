@@ -1560,6 +1560,9 @@ pub struct Workspace {
     /// The thread the main window's draft last became as it was sent: the terminal dock hands
     /// the draft's shells on to it.
     pub draft_became: Option<String>,
+    /// The paired machine a new thread with no project starts on (`None`: this Mac). For the
+    /// session only; a project's choice is kept in its preferences.
+    pub draft_machine_unfiled: Option<String>,
     /// Threads setting up or maintaining a project's verification skill (`workspace::verification`).
     verify_runs: HashMap<String, verification::VerifyRun>,
     /// What finished turns changed (`turn_changes`).
@@ -1945,6 +1948,7 @@ impl Workspace {
             awaited: HashSet::new(),
             warm_ipc: None,
             draft_became: None,
+            draft_machine_unfiled: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
             end_children_on_quit: (!cfg!(any(test, feature = "test-support")))
@@ -4192,9 +4196,9 @@ impl Workspace {
             // A draft whose project is set to start on another machine starts its thread there.
             Scope::Main => {
                 let machine = match &self.route {
-                    Route::Draft { project: Some(p) } => {
-                        self.draft_machine(p).map(|host| (host, p.clone()))
-                    }
+                    Route::Draft { project } => self
+                        .draft_machine(project.as_deref())
+                        .map(|host| (host, project.clone())),
                     _ => None,
                 };
                 match machine {
@@ -4730,7 +4734,7 @@ impl Workspace {
         match self.route.clone() {
             Route::Thread(id) => self.warm_thread(&id, cx),
             // Not for a thread that starts on another machine.
-            Route::Draft { project: Some(cwd) } if self.draft_machine(&cwd).is_none() => {
+            Route::Draft { project: Some(cwd) } if self.draft_machine(Some(&cwd)).is_none() => {
                 let prefs = self.draft_prefs.clone();
                 self.warm_draft(cwd, prefs, cx);
             }

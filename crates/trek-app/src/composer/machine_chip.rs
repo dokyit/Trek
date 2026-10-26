@@ -31,11 +31,16 @@ impl Composer {
         self.submit(input, window, cx);
     }
 
-    /// Where the draft in `project` starts its thread, with the menu that changes it.
-    pub(super) fn machine_chip(&self, project: PathBuf, cx: &mut Context<Self>) -> AnyElement {
+    /// Where the draft in `project` (none: no project) starts its thread, with the menu that
+    /// changes it.
+    pub(super) fn machine_chip(
+        &self,
+        project: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ws = self.workspace.read(cx);
         let this = crate::words::words().this_computer;
-        let chosen = ws.draft_machine(&project);
+        let chosen = ws.draft_machine(project.as_deref());
         let machines: Vec<(String, String, bool)> = ws
             .machines
             .list
@@ -73,7 +78,9 @@ impl Composer {
                 let (ws, project) = (ws_entity.clone(), project.clone());
                 move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                     let host = host.clone();
-                    ws.update(cx, |ws, cx| ws.set_draft_machine(&project, host, cx))
+                    ws.update(cx, |ws, cx| {
+                        ws.set_draft_machine(project.as_deref(), host, cx)
+                    })
                 }
             };
             // Each item's text carries an id of its own, for the verify driver to click.
@@ -109,7 +116,11 @@ impl Composer {
                     .on_click(pick(Some(id.clone()))),
                 );
             }
-            let (c, project) = (composer.clone(), project.clone());
+            // Cloning is for a project; a thread in no project starts in the machine's home folder.
+            let Some(project) = project.clone() else {
+                return menu;
+            };
+            let c = composer.clone();
             menu.separator().item(
                 PopupMenuItem::element(|_, _| {
                     div()

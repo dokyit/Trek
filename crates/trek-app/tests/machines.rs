@@ -145,7 +145,7 @@ async fn start_on_b(trek: &Trek, cx: &mut TestAppContext, text: &str) -> (String
             },
             cx,
         );
-        ws.set_draft_machine(&project, Some("machine-b".into()), cx);
+        ws.set_draft_machine(Some(&project), Some("machine-b".into()), cx);
     });
     trek.render(cx);
     // What went wrong, if it doesn't open, is said in a toast.
@@ -172,6 +172,52 @@ async fn start_on_b(trek: &Trek, cx: &mut TestAppContext, text: &str) -> (String
     let (_, theirs) = machines::split_id(&id).unwrap();
     let theirs = theirs.to_string();
     (id, theirs)
+}
+
+#[test]
+fn a_new_thread_in_no_project_starts_on_a_paired_machine() {
+    run(async |cx| {
+        let trek = open(cx);
+        let link = serve_as_machine_b(&trek, cx);
+        pair(&trek, cx, link).await;
+        // The draft with no project offers the machine too.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "machine-chip"), "machine chip");
+        trek.click(cx, "machine-chip");
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "machine-pick-machine-b") && !trek.visible(cx, "machine-add-to"),
+            "no project: nothing to clone"
+        );
+        trek.click(cx, "machine-pick-machine-b");
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.draft_machine(None)).as_deref(),
+            Some("machine-b")
+        );
+        trek.type_text(cx, "hello from no project");
+        trek.press(cx, "enter");
+        trek.wait(
+            cx,
+            "the thread on B to open",
+            |ws| matches!(&ws.route, Route::Thread(id) if is_remote(id)),
+        )
+        .await;
+        let id = trek.thread_id(cx);
+        let (_, theirs) = machines::split_id(&id).unwrap();
+        let theirs = theirs.to_string();
+        trek.wait(cx, "B's thread to have the message", |ws| {
+            ws.live
+                .get(&theirs)
+                .is_some_and(|l| said(&l.items, "hello from no project"))
+        })
+        .await;
+        // B started it in no project of its own.
+        assert!(trek.read(cx, |ws, _| {
+            ws.thread(&theirs).is_some_and(|t| t.project_id.is_none())
+        }));
+    });
 }
 
 /// Settings › Phone & Machines, scrolled down to its Machines.
@@ -411,7 +457,7 @@ fn a_thread_started_on_machine_b_runs_there_and_is_followed_here_without_touchin
         assert!(trek.visible(cx, "machine-pick-here") && trek.visible(cx, "machine-add-to"));
         trek.click(cx, "machine-pick-machine-b");
         assert_eq!(
-            trek.read(cx, |ws, _| ws.draft_machine(&trek.project))
+            trek.read(cx, |ws, _| ws.draft_machine(Some(&trek.project)))
                 .as_deref(),
             Some("machine-b")
         );
@@ -609,7 +655,7 @@ fn settings_lists_the_machine_with_its_dot_and_forgetting_it_clears_everything()
             && ws.thread(&id).is_none()));
         assert!(machines::load().1.is_empty(), "gone from machines.json");
         assert_eq!(
-            trek.read(cx, |ws, _| ws.draft_machine(&trek.project)),
+            trek.read(cx, |ws, _| ws.draft_machine(Some(&trek.project))),
             None,
             "the project starts threads here again"
         );
@@ -921,7 +967,8 @@ fn add_to_another_machine_clones_copies_the_ticked_files_and_starts_the_thread_t
             );
         }
         assert_eq!(
-            trek.read(cx, |ws, _| ws.draft_machine(&project)).as_deref(),
+            trek.read(cx, |ws, _| ws.draft_machine(Some(&project)))
+                .as_deref(),
             Some("machine-c"),
             "the chip now says machine C"
         );
@@ -1212,7 +1259,13 @@ fn nothing_is_asked_of_a_machine_out_of_reach_it_is_refused_and_given_back() {
         }));
         // A new thread there: its text goes back too.
         trek.update(cx, |ws, cx| {
-            ws.machine_start_thread("machine-b", project.clone(), "start it".into(), vec![], cx)
+            ws.machine_start_thread(
+                "machine-b",
+                Some(project.clone()),
+                "start it".into(),
+                vec![],
+                cx,
+            )
         });
         {
             let heard = heard.lock().unwrap();
@@ -1352,7 +1405,8 @@ fn a_finished_clone_sends_the_draft_only_while_that_draft_is_on_screen() {
             "the draft on screen isn't the one cloned"
         );
         assert_eq!(
-            trek.read(cx, |ws, _| ws.draft_machine(&project)).as_deref(),
+            trek.read(cx, |ws, _| ws.draft_machine(Some(&project)))
+                .as_deref(),
             Some("machine-c"),
             "the project's draft still starts there"
         );

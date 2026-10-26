@@ -156,6 +156,14 @@ pub fn reduce_motion() -> bool {
 #[cfg(windows)]
 pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    /// `MARGINS`: how far the frame reaches into the window, from each edge.
+    #[repr(C)]
+    struct Margins {
+        left: i32,
+        right: i32,
+        top: i32,
+        bottom: i32,
+    }
     #[link(name = "dwmapi")]
     unsafe extern "system" {
         fn DwmSetWindowAttribute(
@@ -163,6 +171,10 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
             attribute: u32,
             value: *const core::ffi::c_void,
             size: u32,
+        ) -> i32;
+        fn DwmExtendFrameIntoClientArea(
+            hwnd: *mut core::ffi::c_void,
+            margins: *const Margins,
         ) -> i32;
     }
     /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
@@ -193,6 +205,19 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
         };
     };
     set(USE_IMMERSIVE_DARK_MODE, dark as i32);
+    // DWM draws a backdrop material in the window's frame only. Trek draws its own title bar, so
+    // all of its window is client area: without the frame reaching all the way in (-1 on every
+    // side, "sheet of glass"), no material shows anywhere, whatever is asked for. Off, it goes
+    // back to the edges.
+    let reach = if glass { -1 } else { 0 };
+    let margins = Margins {
+        left: reach,
+        right: reach,
+        top: reach,
+        bottom: reach,
+    };
+    // SAFETY: `hwnd` as above; `margins` is a live `MARGINS` (four `i32`s, `repr(C)`) for the call.
+    unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
     if glass {
         set(SYSTEMBACKDROP_TYPE, BACKDROP_ACRYLIC);
     } else {

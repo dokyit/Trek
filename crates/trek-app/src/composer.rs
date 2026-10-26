@@ -3132,12 +3132,10 @@ impl Composer {
         let worktree = ws.thread_in(&self.scope).and_then(|t| t.worktree.clone());
         // The main window's draft in a project picks the machine its thread starts on; a thread
         // on another machine names it. On another machine, this Mac's branch is beside the point.
-        let draft_project = ws
-            .draft_project_in(&self.scope)
-            .filter(|_| is_draft && with_project && self.scope == Scope::Main);
-        let elsewhere = draft_project
-            .as_ref()
-            .is_some_and(|p| ws.draft_machine(p).is_some());
+        let main_draft = is_draft && with_project && self.scope == Scope::Main;
+        let draft_project = ws.draft_project_in(&self.scope).filter(|_| main_draft);
+        let elsewhere = main_draft && ws.draft_machine(draft_project.as_deref()).is_some();
+        let has_machines = !ws.machines.list.is_empty();
         let theme = cx.theme().clone();
         // A chip that only says something (no menu): the chips' size and type, no fill.
         let chip = |id: &'static str| {
@@ -3366,14 +3364,18 @@ impl Composer {
             ),
             _ => None,
         };
-        let machine = draft_project.map(|p| self.machine_chip(p, cx));
+        // No project and no machine paired: nowhere else to start, so no chip for it.
+        let machine = (main_draft && (draft_project.is_some() || has_machines))
+            .then(|| self.machine_chip(draft_project.clone(), cx));
         let on_machine = self.on_machine_chip(cx);
+        // A thread in no project on another machine runs in its home folder there, not "Local".
+        let place = (!(elsewhere && draft_project.is_none())).then_some(place);
         h_flex()
             .gap(px(look::GAP))
             .when(with_project, |el| el.child(self.project_chip(cx)))
             .children(machine)
             .children(on_machine)
-            .child(place)
+            .children(place)
             .children(branch.filter(|_| !elsewhere))
             .into_any_element()
     }

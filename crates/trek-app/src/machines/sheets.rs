@@ -266,7 +266,7 @@ impl CloneSheet {
     ) -> Self {
         let folder = cx.new(|cx| InputState::new(window, cx).placeholder("~/repo"));
         let ws = workspace.read(cx);
-        let target = ws.draft_machine(&project).or_else(|| {
+        let target = ws.draft_machine(Some(&project)).or_else(|| {
             ws.machines
                 .list
                 .iter()

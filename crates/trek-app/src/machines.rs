@@ -1772,31 +1772,38 @@ impl Workspace {
         );
     }
 
-    /// The machine the main window's draft in `project` starts its thread on (`None`: this Mac).
-    pub fn draft_machine(&self, project: &Path) -> Option<String> {
-        self.project_prefs(project)
-            .machine
-            .filter(|m| self.machines.get(m).is_some())
+    /// The machine the main window's draft in `project` (none: no project) starts its thread on
+    /// (`None`: this Mac).
+    pub fn draft_machine(&self, project: Option<&Path>) -> Option<String> {
+        match project {
+            Some(project) => self.project_prefs(project).machine,
+            None => self.draft_machine_unfiled.clone(),
+        }
+        .filter(|m| self.machines.get(m).is_some())
     }
 
-    /// Where new threads in `project` start: on machine `host`, or on this Mac (`None`).
+    /// Where new threads in `project` (none: no project) start: on machine `host`, or on this
+    /// Mac (`None`).
     pub fn set_draft_machine(
         &mut self,
-        project: &Path,
+        project: Option<&Path>,
         host: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.update_project_prefs(project, |p| p.machine = host, cx);
+        match project {
+            Some(project) => self.update_project_prefs(project, |p| p.machine = host, cx),
+            None => self.draft_machine_unfiled = host,
+        }
         cx.notify();
     }
 
-    /// Start a thread on machine `host` in its copy of `project`, with the draft's choices and
-    /// `text`, and open it. Said in a toast (and the message goes back to the composer) when the
+    /// Start a thread on machine `host` in its copy of `project` (none: a thread in no project
+    /// there), with the draft's choices and `text`, and open it. Said in a toast (and the message goes back to the composer) when the
     /// machine has no copy of the project or refuses.
     pub fn machine_start_thread(
         &mut self,
         host: &str,
-        project: PathBuf,
+        project: Option<PathBuf>,
         text: String,
         images: Vec<PathBuf>,
         cx: &mut Context<Self>,
@@ -1823,26 +1830,33 @@ impl Workspace {
         let Some(client) = m.client.clone() else {
             return;
         };
-        let name = self
-            .projects
-            .iter()
-            .find(|p| p.path == project)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| {
-                project
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            });
-        let Some(project_id) = m.project_for(&project, &name) else {
-            return give_back(
-                self,
-                format!(
-                    "{name} isn't on {machine} yet. Choose “Add to another machine…” to clone it there."
-                ),
-                text,
-                cx,
-            );
+        // No project: the machine's own no-project thread (its home folder), named by its id "".
+        let (name, project_id) = match &project {
+            None => (String::new(), String::new()),
+            Some(project) => {
+                let name = self
+                    .projects
+                    .iter()
+                    .find(|p| &p.path == project)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| {
+                        project
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    });
+                let Some(project_id) = m.project_for(project, &name) else {
+                    return give_back(
+                        self,
+                        format!(
+                            "{name} isn't on {machine} yet. Choose “Add to another machine…” to clone it there."
+                        ),
+                        text,
+                        cx,
+                    );
+                };
+                (name, project_id)
+            }
         };
         let prefs = self.draft_prefs.clone();
         // The draft's agent and model when the machine has them; its default agent otherwise.
@@ -1873,7 +1887,8 @@ impl Workspace {
             agent: agent_key,
             model: model.clone(),
             text: text.clone(),
-            worktree: prefs.worktree,
+            // A thread in no project has no repository to make a worktree of.
+            worktree: prefs.worktree && project.is_some(),
             effort: Some(prefs.effort.as_str().to_string()),
             access: Some(access_of(prefs.hand_holding)),
             plan: prefs.plan,
@@ -2155,7 +2170,7 @@ impl Workspace {
                 if let Some(run) = ws.machines.clone_run(&host, &run_folder) {
                     run.stage = CloneStage::Done { project_id };
                 }
-                ws.set_draft_machine(&project, Some(host.clone()), cx);
+                ws.set_draft_machine(Some(&project), Some(host.clone()), cx);
                 // What's typed in the draft goes there now: only if that is still the draft on
                 // screen, not whatever else is being typed by the time a clone is done.
                 if ws.route
