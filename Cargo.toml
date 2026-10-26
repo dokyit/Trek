@@ -73,3 +73,7 @@ gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # instead of staying until the mouse moves. See "Trek:" in vendor/gpui-pre/src/{window.rs,
 # elements/div.rs}.
 gpui-pre = { path = "vendor/gpui-pre" }
+# And to gpui-pre-windows: the window's DirectComposition target isn't topmost, so the WebView2
+# child windows Trek lays over its frame show above it instead of under it. See "Trek:" in
+# vendor/gpui-pre-windows/src/directx_renderer.rs.
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
