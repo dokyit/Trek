@@ -76,6 +76,8 @@ struct Ui {
 impl RenderOnce for Hub {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let ui = window.use_keyed_state("hub-ui", cx, |_, _| Ui::default());
+        // Ask for the computer's name now, so the card has it by the time it opens.
+        let _ = this_computer();
         let max_h = window.viewport_size().height - px(MARGIN);
         let (ws, scope) = (self.ws, self.scope);
         let (on_open_ui, on_open_ws, on_open_scope) = (ui.clone(), ws.clone(), scope.clone());
@@ -757,7 +759,14 @@ fn card(
                     .flex_1()
                     .min_w_0()
                     .gap(px(4.))
-                    .child(div().min_w_0().truncate().child(m.machine.clone()))
+                    // The machine keeps its name whole as far as it can; the project gives way first.
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w(px(170.))
+                            .truncate()
+                            .child(m.machine.clone()),
+                    )
                     .when_some(m.project.clone(), |el, p| {
                         el.child(
                             div()
@@ -767,6 +776,7 @@ fn card(
                         )
                         .child(
                             div()
+                                .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_color(theme.muted_foreground)
