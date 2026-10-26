@@ -64,20 +64,25 @@ fn the_hub_holds_open_in_and_run_and_closes_when_one_is_picked() {
         assert!(trek.visible(cx, "hub-where"));
         assert!(trek.visible(cx, "hub-open"));
         assert!(trek.visible(cx, "hub-run"));
-        // The caret lists the rest of Open's apps (the terminal, at least) in the card itself.
-        assert!(!trek.visible(cx, ("hub-open-in", 1usize)));
-        trek.click(cx, "hub-open-more");
-        assert!(trek.visible(cx, ("hub-open-in", 1usize)));
-        assert!(
-            trek.visible(cx, "hub-card"),
-            "unfolding keeps the card open"
-        );
+        // The caret lists the rest of Open's apps in the card itself: the terminal at least on a
+        // Mac; on Windows whatever editors and terminals are installed, and no caret without any.
+        let more = !cfg!(windows) || !trek_core::open_in::windows_targets().is_empty();
+        assert_eq!(trek.visible(cx, "hub-open-more"), more);
+        if more {
+            assert!(!trek.visible(cx, ("hub-open-in", 1usize)));
+            trek.click(cx, "hub-open-more");
+            assert!(trek.visible(cx, ("hub-open-in", 1usize)));
+            assert!(
+                trek.visible(cx, "hub-card"),
+                "unfolding keeps the card open"
+            );
 
-        // Opened again, it starts folded.
-        trek.press(cx, "escape");
-        assert!(!trek.visible(cx, "hub-card"));
-        trek.click(cx, "hub");
-        assert!(!trek.visible(cx, ("hub-open-in", 1usize)));
+            // Opened again, it starts folded.
+            trek.press(cx, "escape");
+            assert!(!trek.visible(cx, "hub-card"));
+            trek.click(cx, "hub");
+            assert!(!trek.visible(cx, ("hub-open-in", 1usize)));
+        }
 
         // The project's settings, behind the Where row's ⋯.
         trek.click(cx, "hub-project-settings");

@@ -815,14 +815,21 @@ fn card(
                 close(&pop1, window, cx);
                 (first.1)(cx);
             });
-        place = place.child(split(
-            main,
-            caret("hub-open-more", open_in, cx)
-                .test_support()
-                .on_click(toggle(ui, |u| u.open_in = !u.open_in)),
-            cx,
-        ));
-        if open_in {
+        // A caret only when there's somewhere else to open it (a Windows with no editor or
+        // terminal found has the file manager alone).
+        let more = openers.len() > 1;
+        place = if more {
+            place.child(split(
+                main,
+                caret("hub-open-more", open_in, cx)
+                    .test_support()
+                    .on_click(toggle(ui, |u| u.open_in = !u.open_in)),
+                cx,
+            ))
+        } else {
+            place.child(main)
+        };
+        if open_in && more {
             for (i, (name, open)) in openers.into_iter().enumerate().skip(1) {
                 let pop = pop.clone();
                 place = place.child(
