@@ -222,8 +222,17 @@ impl Workspace {
     /// (`usage_in_use`), counting a model's own limit ("Weekly · Fable") only while that model
     /// is the one in use; the nearest of any provider shown when that one reports no limits.
     pub fn usage_focus(&self) -> Option<(AgentId, UsageLimit)> {
-        let rows = self.usage_rows();
         let (agent, model) = self.usage_in_use();
+        self.usage_focus_for(agent, model)
+    }
+
+    /// `usage_focus` for `agent` running `model` (a thread window's thread, say).
+    pub fn usage_focus_for(
+        &self,
+        agent: AgentId,
+        model: Option<String>,
+    ) -> Option<(AgentId, UsageLimit)> {
+        let rows = self.usage_rows();
         let model = model
             .or_else(|| {
                 crate::composer::default_model(&self.models_for(&agent)).map(|m| m.id.clone())

@@ -902,7 +902,7 @@ fn upsert(items: &mut Vec<tr::Item>, item: tr::Item) {
 }
 
 /// This computer's name, as the machines it pairs with list it among their devices.
-fn this_name() -> String {
+pub(crate) fn this_name() -> String {
     #[cfg(target_os = "macos")]
     {
         let name = trek_core::procs::command("scutil")

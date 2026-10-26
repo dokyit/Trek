@@ -160,6 +160,9 @@ impl ThreadWindow {
                     } if *t == this.id => {
                         this.composer.update(cx, |c, cx| c.correct(window, cx));
                     }
+                    WorkspaceEvent::OpenContextCard(Scope::Thread(t)) if *t == this.id => {
+                        this.composer.update(cx, |c, cx| c.open_context_card(cx));
+                    }
                     _ => {}
                 },
             ),
@@ -212,7 +215,7 @@ impl ThreadWindow {
         }
     }
 
-    /// `narrow`: the window is too narrow for the project's name and the Open button's label.
+    /// `narrow`: the window is too narrow for the project's name.
     fn title_bar(&self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let ws = self.workspace.read(cx);
         let theme = cx.theme().clone();
@@ -249,6 +252,7 @@ impl ThreadWindow {
             .title_reveal(&self.id)
             .map(|(p, old)| (p, old.to_string()));
         let transparent = ws.see_through();
+        let hub = crate::hub::shown(ws, &Scope::Thread(self.id.clone()));
         TitleBar::new()
             .when(transparent, |t| t.bg(gpui_kit::transparent_black()))
             .child(
@@ -300,10 +304,13 @@ impl ThreadWindow {
                                 el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
                             }),
                     )
-                    .when_some(folder, |el, dir| {
+                    .when(hub, |el| {
                         el.child(crate::chrome::no_drag(
-                            "open-in",
-                            crate::root::open_in_button(dir, narrow),
+                            "hub",
+                            crate::hub::button(
+                                self.workspace.clone(),
+                                Scope::Thread(self.id.clone()),
+                            ),
                         ))
                     })
                     .when_some(settle_id, |el, id| {

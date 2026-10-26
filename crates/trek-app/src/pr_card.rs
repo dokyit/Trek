@@ -394,6 +394,18 @@ fn latest_pr(live: &crate::workspace::LiveThread) -> Option<(usize, String, Card
         .next_back()
 }
 
+/// The thread's latest pull request card (not a release's or a run's): the title bar's hub
+/// names it under Git.
+pub fn latest_pull_request(live: &crate::workspace::LiveThread) -> Option<Card> {
+    latest_pr(live).map(|(_, _, c)| c)
+}
+
+/// The colour `card`'s state word is in when it's a verdict (ready, merged, conflicts, failed),
+/// as the composer's chip draws it; `None` while work is under way or the state isn't one.
+pub fn verdict_color(card: &Card, cx: &App) -> Option<Hsla> {
+    chip_hue(card, cx).map(|h| h.text)
+}
+
 /// Until when the composer's chip shows `card` (unix ms): the moment it finished well plus
 /// [`Phase::CHIP_LINGER_MS`]. `None` while it's live, and for a failure, which stays until
 /// it's dealt with (the next message sent dismisses it).

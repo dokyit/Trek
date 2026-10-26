@@ -127,11 +127,10 @@ fn macos_keeps_its_system_menus_and_title_bar() {
 }
 
 /// The controls in the title bar's row, each in the area it keeps the window's drag from (`chrome::no_drag`).
-const AGENTS_CONTROLS: [&str; 6] = [
+const AGENTS_CONTROLS: [&str; 5] = [
     "toggle-sidebar",
     "mode-switch",
-    "run-actions",
-    "open-in",
+    "hub",
     "toggle-tools",
     "settle",
 ];
@@ -174,7 +173,7 @@ fn in_a_control(
     })
 }
 
-/// A thread on screen, so the bar has what a thread gives it (Run, Open, pop-out, Settle).
+/// A thread on screen, so the bar has what a thread gives it (the hub, Settle).
 fn thread_on_screen(trek: &Trek, cx: &mut TestAppContext) {
     let id = trek.quiet_thread(cx);
     trek.update(cx, |ws, cx| {
@@ -276,18 +275,18 @@ fn the_empty_strip_of_the_title_bar_is_still_the_windows_handle() {
         let trek = open(cx);
         thread_on_screen(&trek, cx);
         let mid = px(17.);
-        // Between the mode switch and Run is the thread's title and then nothing: both are the
+        // Between the mode switch and the hub is the thread's title and then nothing: both are the
         // handle, so a press there moves the window and a double click maximises it.
         let switch_end = right(&trek, cx, "mode-switch");
-        let run_start = x(&trek, cx, "run-actions");
+        let hub_start = x(&trek, cx, "hub");
         assert!(
-            run_start - switch_end > px(200.),
-            "there's a strip to drag by: {switch_end:?} to {run_start:?}"
+            hub_start - switch_end > px(200.),
+            "there's a strip to drag by: {switch_end:?} to {hub_start:?}"
         );
         for at in [
             switch_end + px(40.),
-            (switch_end + run_start) / 2.,
-            run_start - px(20.),
+            (switch_end + hub_start) / 2.,
+            hub_start - px(20.),
         ] {
             assert!(
                 !in_a_control(&trek, cx, &AGENTS_CONTROLS, gpui_kit::point(at, mid)),
@@ -318,7 +317,7 @@ fn a_press_on_the_handle_is_never_swallowed_so_the_window_can_move_and_maximise(
         // Windows hands a press on the handle to the window first, and only does its own thing
         // (a move; a double click maximises) with one the window left alone.
         let at = point(
-            (right(&trek, cx, "mode-switch") + x(&trek, cx, "run-actions")) / 2.,
+            (right(&trek, cx, "mode-switch") + x(&trek, cx, "hub")) / 2.,
             px(17.),
         );
         let press = |click_count| {

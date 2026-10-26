@@ -445,10 +445,14 @@ fn project_actions_run_in_the_project_folder() {
             t.id
         });
         trek.render(cx);
-        assert!(trek.visible(cx, "run-actions"));
-        trek.click(cx, "run-actions");
-        trek.press(cx, "down");
-        trek.press(cx, "enter");
+        assert!(trek.visible(cx, "hub"));
+        trek.click(cx, "hub");
+        assert!(trek.visible(cx, "hub-card"));
+        trek.click(cx, "hub-run");
+        assert!(
+            !trek.visible(cx, "hub-card"),
+            "running an action closes the hub"
+        );
         assert_eq!(
             *ran.borrow(),
             [("true".to_string(), Some(project.clone()))],
@@ -538,20 +542,22 @@ fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
             trek.render(cx);
         };
 
-        // No actions yet: the menu's only choice is adding one, on this project's settings.
+        // No actions yet: the hub's Run row adds one, on this project's settings.
         trek.render(cx);
-        assert!(trek.visible(cx, "run-actions"));
-        trek.click(cx, "run-actions");
-        // Up wraps to the menu's last item, "Add an action…".
-        trek.press(cx, "up");
-        trek.press(cx, "enter");
+        assert!(trek.visible(cx, "hub"));
+        trek.click(cx, "hub");
+        assert!(
+            !trek.visible(cx, "hub-run-more"),
+            "nothing to list: no caret"
+        );
+        trek.click(cx, "hub-run");
         assert!(ran.borrow().is_empty());
         assert_eq!(
             trek.read(cx, |ws, _| (ws.route.clone(), ws.settings_project.clone())),
-            (Route::Settings(SettingsPage::Project), Some(pid))
+            (Route::Settings(SettingsPage::Project), Some(pid.clone()))
         );
 
-        // Added, then edited: the menu runs what's saved now.
+        // Added, then edited: the row runs what's saved now.
         trek.update(cx, |ws, cx| {
             ws.update_project_prefs(
                 &project,
@@ -565,9 +571,8 @@ fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
             )
         });
         open_thread(&trek, cx);
-        trek.click(cx, "run-actions");
-        trek.press(cx, "down");
-        trek.press(cx, "enter");
+        trek.click(cx, "hub");
+        trek.click(cx, "hub-run");
         assert_eq!(
             ran.borrow().last(),
             Some(&("cargo test".to_string(), Some(project.clone())))
@@ -586,18 +591,24 @@ fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
             )
         });
         open_thread(&trek, cx);
-        for (presses, command) in [(1, "cargo test --workspace"), (2, "npm run dev")] {
-            trek.click(cx, "run-actions");
-            for _ in 0..presses {
-                trek.press(cx, "down");
-            }
-            trek.press(cx, "enter");
+        // The caret lists every action, and the way to edit them.
+        for (ix, command) in [(0usize, "cargo test --workspace"), (1, "npm run dev")] {
+            trek.click(cx, "hub");
+            trek.click(cx, "hub-run-more");
+            trek.click(cx, ("hub-run-action", ix));
             assert_eq!(
                 ran.borrow().last(),
                 Some(&(command.to_string(), Some(project.clone())))
             );
         }
         assert_eq!(ran.borrow().len(), 3);
+        trek.click(cx, "hub");
+        trek.click(cx, "hub-run-more");
+        trek.click(cx, "hub-run-edit");
+        assert_eq!(
+            trek.read(cx, |ws, _| (ws.route.clone(), ws.settings_project.clone())),
+            (Route::Settings(SettingsPage::Project), Some(pid))
+        );
     });
 }
 

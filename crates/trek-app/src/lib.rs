@@ -19,6 +19,7 @@ pub mod cost;
 pub mod deep_link;
 pub use trek_dictate as dictate;
 pub mod editor;
+pub mod hub;
 pub use trek_assets::file_icon;
 pub use trek_assets::fonts;
 pub use trek_format as format;

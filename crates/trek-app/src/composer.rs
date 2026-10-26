@@ -66,6 +66,8 @@ pub struct Composer {
     limit_tick: Option<Task<()>>,
     /// What the context card's Compact now is doing.
     compact: crate::context_popover::Compact,
+    /// The context card is open (from its ring, or from the title bar's hub).
+    context_open: bool,
     /// Counts compact runs, so each one's bar animation is its own.
     compact_gen: u64,
     /// Watches the context after Compact now, to say what it freed.
@@ -385,6 +387,7 @@ impl Composer {
             editing: None,
             limit_tick: None,
             compact: crate::context_popover::Compact::Idle,
+            context_open: false,
             compact_gen: 0,
             _compact_watch: None,
             _chip_expiry: None,
@@ -895,6 +898,59 @@ impl Composer {
         )
     }
 
+    /// Open the context card over its ring (the title bar's hub asks for it). The ring shows
+    /// while the card is open, however little of the window is used.
+    pub fn open_context_card(&mut self, cx: &mut Context<Self>) {
+        if !self.context_open {
+            self.context_card_toggled(true, cx);
+        }
+    }
+
+    /// The context card opened or closed.
+    fn context_card_toggled(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.context_open = open;
+        // Closed after a compaction finished: its result has been seen, and the ring
+        // goes back to showing only past `QUIET`.
+        if !open
+            && matches!(
+                self.compact,
+                crate::context_popover::Compact::Freed { .. }
+                    | crate::context_popover::Compact::Unchanged { .. }
+            )
+        {
+            self.compact = crate::context_popover::Compact::Idle;
+        }
+        if open {
+            // A compaction reported before the context moved on is old news.
+            let used = self
+                .workspace
+                .read(cx)
+                .thread_id_in(&self.scope)
+                .and_then(|id| self.workspace.read(cx).live.get(id).and_then(|l| l.context))
+                .map(|c| c.0);
+            let before = match self.compact {
+                crate::context_popover::Compact::Freed { before, .. }
+                | crate::context_popover::Compact::Unchanged { before } => Some(before),
+                _ => None,
+            };
+            if before.is_some_and(|before| used.is_some_and(|used| used > before)) {
+                self.compact = crate::context_popover::Compact::Idle;
+            }
+            // The plan's limits, read without asking the agent anything, so the card has
+            // them even when the Usage card doesn't show this agent.
+            let agent = self
+                .workspace
+                .read(cx)
+                .thread_in(&self.scope)
+                .map(|t| t.agent.clone());
+            if let Some(agent) = agent {
+                self.workspace
+                    .update(cx, |ws, cx| ws.read_usage_for(agent, cx));
+            }
+        }
+        cx.notify();
+    }
+
     /// The context ring, and the card it opens: what fills the window, the plan's limits, and
     /// Compact now.
     fn context_card(&mut self, used: u64, window: u64, cx: &mut Context<Self>) -> AnyElement {
@@ -904,47 +960,9 @@ impl Composer {
             .anchor(Anchor::BottomRight)
             .offset(px(8.))
             .appearance(false)
+            .open(self.context_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
-                // Closed after a compaction finished: its result has been seen, and the ring
-                // goes back to showing only past `QUIET`.
-                if !*open
-                    && matches!(
-                        this.compact,
-                        crate::context_popover::Compact::Freed { .. }
-                            | crate::context_popover::Compact::Unchanged { .. }
-                    )
-                {
-                    this.compact = crate::context_popover::Compact::Idle;
-                }
-                if *open {
-                    // A compaction reported before the context moved on is old news.
-                    let used = this
-                        .workspace
-                        .read(cx)
-                        .thread_id_in(&this.scope)
-                        .and_then(|id| this.workspace.read(cx).live.get(id).and_then(|l| l.context))
-                        .map(|c| c.0);
-                    let before = match this.compact {
-                        crate::context_popover::Compact::Freed { before, .. }
-                        | crate::context_popover::Compact::Unchanged { before } => Some(before),
-                        _ => None,
-                    };
-                    if before.is_some_and(|before| used.is_some_and(|used| used > before)) {
-                        this.compact = crate::context_popover::Compact::Idle;
-                    }
-                    // The plan's limits, read without asking the agent anything, so the card has
-                    // them even when the Usage card doesn't show this agent.
-                    let agent = this
-                        .workspace
-                        .read(cx)
-                        .thread_in(&this.scope)
-                        .map(|t| t.agent.clone());
-                    if let Some(agent) = agent {
-                        this.workspace
-                            .update(cx, |ws, cx| ws.read_usage_for(agent, cx));
-                    }
-                }
-                cx.notify();
+                this.context_card_toggled(*open, cx);
             }))
             .trigger(crate::context_popover::RingTrigger::new(
                 used,
@@ -3566,6 +3584,10 @@ impl Render for Composer {
             .as_ref()
             .and_then(|t| ws.live.get(&t.id))
             .and_then(|l| l.context);
+        // No ring to hold the card up (another thread, or one with nothing reported yet).
+        if context.is_none() {
+            self.context_open = false;
+        }
         let compact = self.width.get() < px(600.);
         // A side bar's width (the editor's AI side bar): the model pill drops its effort and
         // cuts its name shorter, so the send button stays in view.
@@ -3881,6 +3903,7 @@ impl Render for Composer {
                         context.filter(|(used, window)| {
                             *used as f32 / *window as f32 >= crate::context_popover::QUIET
                                 || !matches!(self.compact, crate::context_popover::Compact::Idle)
+                                || self.context_open
                         }),
                         // The ring keeps its own trigger (`context_popover`); here it only gets
                         // the toolbar's 30 px row.

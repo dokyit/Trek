@@ -1022,6 +1022,8 @@ pub enum EditorCommand {
 pub enum WorkspaceEvent {
     /// Open (or focus) a right-panel tool.
     OpenTool(PanelTool),
+    /// Open the context card over the composer of `scope` (the title bar's hub asks for it).
+    OpenContextCard(Scope),
     /// Open a page in the tools panel's Browser (a link clicked in a terminal).
     OpenInBrowser(String),
     /// A toast-worthy message with an optional undo.

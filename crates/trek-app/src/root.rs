@@ -389,6 +389,10 @@ impl TrekWindow {
                         }
                     }
                     WorkspaceEvent::ComposeIn { .. } => {}
+                    WorkspaceEvent::OpenContextCard(Scope::Main) => {
+                        this.composer.update(cx, |c, cx| c.open_context_card(cx));
+                    }
+                    WorkspaceEvent::OpenContextCard(_) => {}
                     WorkspaceEvent::CorrectRestatement {
                         scope: Scope::Main,
                         thread,
@@ -992,20 +996,11 @@ impl Render for WindowTitle {
             .as_ref()
             .map(|r| ws.project_look(r))
             .unwrap_or_default();
-        let actions = root
-            .as_ref()
-            .map(|r| ws.project_prefs(r).actions)
-            .unwrap_or_default();
-        let project_id = project_entry.map(|p| p.id.clone());
-        // A worktree thread's actions run on its own copy of the code, where its changes are.
-        let run_dir = worktree
-            .as_ref()
-            .filter(|w| !crate::system::lately::worktree_missing(w))
-            .map(|w| w.path.clone())
-            .or_else(|| root.clone());
+        // Where the thread or draft works, and what it has to hand (Open in, Run, git…).
+        let hub = crate::hub::shown(ws, &Scope::Main);
         let transparent = self.workspace.read(cx).see_through();
-        // A narrow window keeps what the bar does and drops what repeats: the wordmark, the
-        // project's name beside its badge, the Open button's label.
+        // A narrow window keeps what the bar does and drops what repeats: the wordmark and the
+        // project's name beside its badge.
         let narrow = window.viewport_size().width < px(TITLE_NARROW);
         TitleBar::new()
             .when(transparent, |t| t.bg(gpui_kit::transparent_black()))
@@ -1083,16 +1078,10 @@ impl Render for WindowTitle {
                                 el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
                             }),
                     )
-                    .when_some(run_dir, |el, dir| {
+                    .when(hub, |el| {
                         el.child(crate::chrome::no_drag(
-                            "run-actions",
-                            run_button(actions, dir, project_id, self.workspace.clone()),
-                        ))
-                    })
-                    .when_some(folder, |el, dir| {
-                        el.child(crate::chrome::no_drag(
-                            "open-in",
-                            open_in_button(dir, narrow),
+                            "hub",
+                            crate::hub::button(self.workspace.clone(), Scope::Main),
                         ))
                     })
                     .child(
@@ -1594,116 +1583,6 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
 
 /// How long a toast whose Undo puts files back stays up.
 pub const UNDO_RESTORE_TOAST: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// "Run" menu: the project's actions, each opening in a terminal tab in `dir`.
-fn run_button(
-    actions: Vec<trek_core::settings::ProjectAction>,
-    dir: std::path::PathBuf,
-    project_id: Option<String>,
-    ws: Entity<Workspace>,
-) -> impl IntoElement {
-    use gpui_kit::component::Sizable as _;
-    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-    Button::new("run-actions")
-        .ghost()
-        .small()
-        .icon(crate::assets::Lucide::Play)
-        .label("Run")
-        .tooltip("Run a project action")
-        .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-            menu = menu.min_w(px(220.));
-            if actions.is_empty() {
-                menu = menu.label("No actions for this project yet");
-            }
-            for a in actions.clone() {
-                let (ws, dir) = (ws.clone(), dir.clone());
-                menu = menu.item(
-                    PopupMenuItem::new(a.name.clone())
-                        .icon(crate::assets::Lucide::Play)
-                        .on_click(move |_, _, cx| {
-                            let (cmd, dir) = (a.command.clone(), dir.clone());
-                            ws.update(cx, |ws, cx| ws.run_project_action(dir, cmd, cx))
-                        }),
-                );
-            }
-            let (ws, pid) = (ws.clone(), project_id.clone());
-            menu.separator().item(
-                PopupMenuItem::new(if actions.is_empty() {
-                    "Add an action…"
-                } else {
-                    "Edit actions…"
-                })
-                .on_click(move |_, _, cx| {
-                    let pid = pid.clone();
-                    ws.update(cx, |ws, cx| ws.open_project_settings(pid, cx))
-                }),
-            )
-        })
-}
-
-/// "Open in" menu for the project folder: the file manager, the terminal, and editors that are
-/// installed. On a Mac the apps are launched through `open -a`; on Windows each is found through
-/// the registry and PATH (`trek_core::open_in`) and started with the folder as its argument.
-pub fn open_in_button(dir: std::path::PathBuf, compact: bool) -> impl IntoElement {
-    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-    gpui_kit::component::button::Button::new("open-in")
-        .outline()
-        .small()
-        .icon(IconName::FolderOpen)
-        .when(!compact, |b| b.label("Open"))
-        .when(compact, |b| b.tooltip("Open in…"))
-        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-            let mut menu = menu.min_w(px(180.));
-            // Checked when the menu opens, not on every frame of the title bar.
-            if cfg!(windows) {
-                let folder = dir.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(crate::words::words().file_manager)
-                        .on_click(move |_, _, cx| cx.open_with_system(&folder)),
-                );
-                for target in trek_core::open_in::windows_targets() {
-                    let (label, dir) = (target.label, dir.clone());
-                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
-                        let Some(launch) = target.launch(&dir) else {
-                            return tracing::warn!(
-                                "open in {label}: {} isn't an absolute path",
-                                dir.display()
-                            );
-                        };
-                        if let Err(e) = trek_core::open_in::spawn(&launch) {
-                            tracing::warn!("open in {label}: {e}");
-                        }
-                    }));
-                }
-                return menu;
-            }
-            let apps = [
-                (crate::words::words().file_manager, "Finder"), // words: ok, the app's own name for `open -a`
-                ("Terminal", "Terminal"),
-                ("Ghostty", "Ghostty"),
-                ("Zed", "Zed"),
-                ("Cursor", "Cursor"),
-                ("VS Code", "Visual Studio Code"),
-                ("Xcode", "Xcode"),
-            ]
-            .into_iter()
-            .filter(|(_, app)| {
-                matches!(*app, "Finder" | "Terminal") // words: ok
-                    || std::path::Path::new(&format!("/Applications/{app}.app")).exists()
-            });
-            for (label, app) in apps {
-                let dir = dir.clone();
-                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {
-                    let _ = std::process::Command::new("/usr/bin/open")
-                        .arg("-a")
-                        .arg(app)
-                        .arg(&dir)
-                        .spawn();
-                }));
-            }
-            menu
-        })
-}
 
 impl TrekWindow {
     fn end_panel_drag(&mut self, cx: &mut Context<Self>) {
