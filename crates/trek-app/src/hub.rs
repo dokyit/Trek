@@ -154,19 +154,8 @@ pub fn column(
 ) -> AnyElement {
     let ui = window.use_keyed_state("hub-column-ui", cx, |_, _| Ui::default());
     let _ = this_computer();
-    // The plan's limits for the thread's agent, read once per agent shown (the popover read them
-    // as it opened).
-    let agent = ws.read(cx).thread_in(&scope).map(|t| t.agent.clone());
-    let asked = window.use_keyed_state("hub-column-usage", cx, |_, _| None::<AgentId>);
-    if agent.is_some() && *asked.read(cx) != agent {
-        asked.update(cx, |a, _| *a = agent.clone());
-        let ws2 = ws.clone();
-        window.defer(cx, move |_, cx| {
-            if let Some(agent) = agent {
-                ws2.update(cx, |ws, cx| ws.read_usage_for(agent, cx));
-            }
-        });
-    }
+    // The Usage row shows the limits Trek already has (the sidebar's usage pill keeps them
+    // fresh); pinned open all the time, the column doesn't ask the agent's CLI on its own.
     // Under the title bar and the tabs; past that the card scrolls.
     let max_h = window.viewport_size().height - px(110.);
     div()

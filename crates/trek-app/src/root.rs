@@ -23,6 +23,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 pub const SIDEBAR_WIDTH: f32 = 272.;
+/// What the pinned hub needs: its own column and a transcript 600 wide beside it.
+const HUB_ROOM: f32 = 600. + 316.;
 
 /// How far the mode arriving (the editor, or Agents back) slides in from its side.
 const MODE_SLIDE: f32 = 14.;
@@ -2075,9 +2077,18 @@ impl TrekWindow {
         let fill = || StyleRefinement::default().size_full();
         let tabs = crate::tabs::strip(&self.workspace, glass.is_some(), cx);
         // The hub, pinned at the right edge under the tabs while it's shown (its button hides it).
+        // Only with room for it beside the transcript: what's left of the window once the sidebar
+        // and a docked tools panel have theirs. A narrower window keeps the transcript whole.
+        let room = window.viewport_size().width.as_f32()
+            - SIDEBAR_WIDTH * shown
+            - if right_open && !overlay {
+                right_width
+            } else {
+                0.
+            };
         let hub_col = {
             let ws = self.workspace.read(cx);
-            ws.settings.layout.hub_open && crate::hub::shown(ws, &Scope::Main)
+            ws.settings.layout.hub_open && room >= HUB_ROOM && crate::hub::shown(ws, &Scope::Main)
         }
         .then(|| crate::hub::column(self.workspace.clone(), Scope::Main, window, cx));
         // The terminal dock, under the chat (threads and drafts) while the one on screen has it shown.

@@ -496,6 +496,9 @@ fn documents_follow_answers_that_move() {
 fn a_long_answer_is_drawn_in_parts_that_add_up_to_it() {
     run(async |cx| {
         let trek = open(cx);
+        // The transcript at the window's full width (the hub hidden): each part stays on screen
+        // while it's the last, as the counts below assume.
+        trek.update(cx, |ws, _| ws.settings.layout.hub_open = false);
         let id = trek.quiet_thread(cx);
         let full = long_answer();
         assert!(full.len() > 12_000, "{} bytes", full.len());
