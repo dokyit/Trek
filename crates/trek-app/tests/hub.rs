@@ -35,7 +35,7 @@ fn tool(id: &str, title: &str, detail: &str) -> Item {
 }
 
 #[test]
-fn the_hub_holds_open_in_and_run_and_closes_when_one_is_picked() {
+fn the_hub_is_pinned_open_holds_open_in_and_run_and_hides_by_its_button() {
     run(async |cx| {
         let trek = open(cx);
         let project = trek.project.clone();
@@ -57,10 +57,15 @@ fn the_hub_holds_open_in_and_run_and_closes_when_one_is_picked() {
         assert!(!trek.visible(cx, "run-actions"));
         assert!(!trek.visible(cx, "open-in"));
         assert!(trek.visible(cx, "hub"));
+        // Pinned at the right edge from the start, beside the transcript.
+        assert!(trek.visible(cx, "hub-column") && trek.visible(cx, "hub-card"));
+        // Its button hides it, and says so in the settings, so it comes back as it was left.
+        trek.click(cx, "hub");
         assert!(!trek.visible(cx, "hub-card"));
-
+        assert!(!trek.read(cx, |ws, _| ws.settings.layout.hub_open));
         trek.click(cx, "hub");
         assert!(trek.visible(cx, "hub-card"));
+        assert!(trek.read(cx, |ws, _| ws.settings.layout.hub_open));
         assert!(trek.visible(cx, "hub-where"));
         assert!(trek.visible(cx, "hub-open"));
         assert!(trek.visible(cx, "hub-run"));
@@ -76,15 +81,12 @@ fn the_hub_holds_open_in_and_run_and_closes_when_one_is_picked() {
                 trek.visible(cx, "hub-card"),
                 "unfolding keeps the card open"
             );
-
-            // Opened again, it starts folded.
+            // Escape doesn't hide a pinned hub; picking an app leaves it up too.
             trek.press(cx, "escape");
-            assert!(!trek.visible(cx, "hub-card"));
-            trek.click(cx, "hub");
-            assert!(!trek.visible(cx, ("hub-open-in", 1usize)));
+            assert!(trek.visible(cx, "hub-card"));
         }
 
-        // The project's settings, behind the Where row's ⋯.
+        // The project's settings, behind the Where row's ⋯: the settings fill the window, no hub.
         trek.click(cx, "hub-project-settings");
         assert!(!trek.visible(cx, "hub-card"));
         assert!(matches!(
@@ -108,7 +110,6 @@ fn a_draft_has_where_and_no_thread_sections() {
             )
         });
         trek.render(cx);
-        trek.click(cx, "hub");
         assert!(trek.visible(cx, "hub-where"));
         assert!(trek.visible(cx, "hub-open"));
         assert!(trek.visible(cx, "hub-run"), "Add a project action…");
@@ -132,7 +133,6 @@ fn the_git_section_names_the_branch_and_switches_it() {
         trek.update(cx, |ws, cx| ws.refresh_git_at(project.clone(), cx));
         cx.run_until_parked();
         trek.render(cx);
-        trek.click(cx, "hub");
         assert!(trek.visible(cx, "hub-branch"));
         assert!(trek.visible(cx, "hub-pull"));
         trek.click(cx, "hub-branch");
@@ -149,7 +149,7 @@ fn the_git_section_names_the_branch_and_switches_it() {
             .flatten()
             .expect("other is listed");
         trek.click(cx, ("hub-branch-to", other));
-        assert!(!trek.visible(cx, "hub-card"));
+        assert!(trek.visible(cx, "hub-card"), "pinned: it stays up");
         cx.run_until_parked();
         let head = std::process::Command::new("git")
             .args(["branch", "--show-current"])
@@ -188,12 +188,11 @@ fn the_thread_section_opens_the_context_card_and_shows_the_pull_request() {
         });
         trek.render(cx);
         assert!(!trek.visible(cx, "context-ring"));
-        trek.click(cx, "hub");
         assert!(trek.visible(cx, "hub-pr"));
         assert!(trek.visible(cx, "hub-context"));
         trek.click(cx, "hub-context");
         trek.render(cx);
-        assert!(!trek.visible(cx, "hub-card"));
+        assert!(trek.visible(cx, "hub-card"), "pinned: it stays up");
         assert!(
             trek.visible(cx, "context-compact"),
             "the context card is open"
@@ -224,7 +223,6 @@ fn sources_list_three_then_all_and_lineage_opens_the_thread_it_names() {
             cx.notify();
         });
         trek.render(cx);
-        trek.click(cx, "hub");
         for i in 0..3usize {
             assert!(trek.visible(cx, ("hub-source", i)));
         }

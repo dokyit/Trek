@@ -446,12 +446,12 @@ fn project_actions_run_in_the_project_folder() {
         });
         trek.render(cx);
         assert!(trek.visible(cx, "hub"));
-        trek.click(cx, "hub");
+        // Pinned open: no click to show it, and running an action leaves it up.
         assert!(trek.visible(cx, "hub-card"));
         trek.click(cx, "hub-run");
         assert!(
-            !trek.visible(cx, "hub-card"),
-            "running an action closes the hub"
+            trek.visible(cx, "hub-card"),
+            "running an action leaves the hub up"
         );
         assert_eq!(
             *ran.borrow(),
@@ -545,7 +545,6 @@ fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
         // No actions yet: the hub's Run row adds one, on this project's settings.
         trek.render(cx);
         assert!(trek.visible(cx, "hub"));
-        trek.click(cx, "hub");
         assert!(
             !trek.visible(cx, "hub-run-more"),
             "nothing to list: no caret"
@@ -571,7 +570,6 @@ fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
             )
         });
         open_thread(&trek, cx);
-        trek.click(cx, "hub");
         trek.click(cx, "hub-run");
         assert_eq!(
             ran.borrow().last(),
@@ -593,7 +591,6 @@ fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
         open_thread(&trek, cx);
         // The caret lists every action, and the way to edit them.
         for (ix, command) in [(0usize, "cargo test --workspace"), (1, "npm run dev")] {
-            trek.click(cx, "hub");
             trek.click(cx, "hub-run-more");
             trek.click(cx, ("hub-run-action", ix));
             assert_eq!(
@@ -602,7 +599,6 @@ fn the_run_menu_offers_to_add_actions_and_runs_them_as_edited() {
             );
         }
         assert_eq!(ran.borrow().len(), 3);
-        trek.click(cx, "hub");
         trek.click(cx, "hub-run-more");
         trek.click(cx, "hub-run-edit");
         assert_eq!(

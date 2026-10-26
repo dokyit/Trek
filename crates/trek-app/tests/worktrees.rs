@@ -735,7 +735,6 @@ fn a_worktree_threads_project_actions_run_in_its_worktree() {
         });
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
         trek.render(cx);
-        trek.click(cx, "hub");
         trek.click(cx, "hub-run");
         assert_eq!(
             *ran.borrow(),
@@ -747,7 +746,6 @@ fn a_worktree_threads_project_actions_run_in_its_worktree() {
         std::fs::remove_dir_all(&wt.path).unwrap();
         trek.update(cx, |_, cx| cx.notify());
         trek.render(cx);
-        trek.click(cx, "hub");
         trek.click(cx, "hub-run");
         assert_eq!(
             ran.borrow().last(),

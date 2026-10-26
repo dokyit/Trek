@@ -1162,6 +1162,8 @@ pub enum UndoAction {
     RemoveOldCopy(PathBuf),
     /// Not an undo: open a thread (one an agent started or handed off to).
     OpenThread(String),
+    /// Not an undo: restart into the update that's staged (`Workspace::restart_to_update`).
+    RestartToUpdate,
 }
 
 /// How long a restart the user asked for while agents worked waits once they're done: they may
@@ -1565,6 +1567,8 @@ pub struct Workspace {
     /// The paired machine a new thread with no project starts on (`None`: this Mac). For the
     /// session only; a project's choice is kept in its preferences.
     pub draft_machine_unfiled: Option<String>,
+    /// The staged update a toast has already announced (once per version).
+    ready_said: Option<String>,
     /// Threads setting up or maintaining a project's verification skill (`workspace::verification`).
     verify_runs: HashMap<String, verification::VerifyRun>,
     /// What finished turns changed (`turn_changes`).
@@ -1951,6 +1955,7 @@ impl Workspace {
             warm_ipc: None,
             draft_became: None,
             draft_machine_unfiled: None,
+            ready_said: None,
             verify_runs: HashMap::new(),
             changes_cache: Default::default(),
             end_children_on_quit: (!cfg!(any(test, feature = "test-support")))
@@ -7945,6 +7950,7 @@ impl Workspace {
                 cx.emit(WorkspaceEvent::ActivateMain);
             }
             UndoAction::OpenThread(_) => {}
+            UndoAction::RestartToUpdate => self.restart_to_update(cx),
             UndoAction::CancelRestart => {
                 self.restart_countdown = None;
                 if let UpdateStatus::RestartPending { version, staged } =
@@ -9074,8 +9080,14 @@ impl Workspace {
         )
     }
 
-    /// Re-check every hour while Trek stays open, an update staged or not (housekeeping calls this
-    /// every minute).
+    /// Trek came to the front: look for an update now if the last look is a few minutes old.
+    pub fn check_for_updates_on_activate(&mut self, cx: &mut Context<Self>) {
+        self.updater.check_on_activate(now_ms());
+        self.maybe_check_for_updates(cx);
+    }
+
+    /// Re-check every quarter hour while Trek stays open, an update staged or not (housekeeping
+    /// calls this every minute).
     fn maybe_check_for_updates(&mut self, cx: &mut Context<Self>) {
         if self
             .updater
@@ -9137,6 +9149,19 @@ impl Workspace {
                     cx.background_executor()
                         .spawn(async move { trek_core::update::discard(&unwanted) })
                         .detach();
+                }
+                // Said once, where it can't be missed: the sidebar's pill alone read as "it never
+                // told me".
+                if let UpdateStatus::Ready { version, .. } = &this.updater.status
+                    && this.ready_said.as_deref() != Some(version.as_str())
+                {
+                    this.ready_said = Some(version.clone());
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: format!(
+                            "Trek {version} is ready. It's installed when Trek quits."
+                        ),
+                        undo: Some(UndoAction::RestartToUpdate),
+                    });
                 }
                 // Test hook (docs/RELEASING.md): restart as soon as the update is ready instead of
                 // waiting for a click or for Trek to quit.

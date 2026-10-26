@@ -24,7 +24,7 @@ use crate::workspace::{
 use gpui_kit::base::PopoverState;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
@@ -117,9 +117,76 @@ impl RenderOnce for Hub {
             )
             .content(move |_, window, cx| {
                 let pop = cx.entity();
-                card(&ws, &scope, &ui, pop, max_h, window, cx)
+                card(&ws, &scope, &ui, Closer::Popover(pop), max_h, window, cx)
             })
     }
+}
+
+/// The main window's hub button: shows and hides the pinned column (`column`), which stays until
+/// it's clicked again (`settings.layout.hub_open`, on to begin with).
+pub fn toggle(ws: Entity<Workspace>, open: bool) -> impl IntoElement {
+    Button::new("hub")
+        .ghost()
+        .small()
+        .selected(open)
+        .icon(Icon::empty().path("icons/hub.svg"))
+        .tooltip(if open {
+            "Hide overview"
+        } else {
+            "Show overview"
+        })
+        .on_click(move |_, _, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.settings.layout.hub_open = !ws.settings.layout.hub_open;
+                ws.save_settings(cx);
+                cx.notify();
+            })
+        })
+}
+
+/// The hub pinned at the main window's right edge, under the tabs, for `scope`: the card's
+/// sections in a column of their own beside the transcript (which keeps its room, never covered).
+pub fn column(
+    ws: Entity<Workspace>,
+    scope: Scope,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let ui = window.use_keyed_state("hub-column-ui", cx, |_, _| Ui::default());
+    let _ = this_computer();
+    // The plan's limits for the thread's agent, read once per agent shown (the popover read them
+    // as it opened).
+    let agent = ws.read(cx).thread_in(&scope).map(|t| t.agent.clone());
+    let asked = window.use_keyed_state("hub-column-usage", cx, |_, _| None::<AgentId>);
+    if agent.is_some() && *asked.read(cx) != agent {
+        asked.update(cx, |a, _| *a = agent.clone());
+        let ws2 = ws.clone();
+        window.defer(cx, move |_, cx| {
+            if let Some(agent) = agent {
+                ws2.update(cx, |ws, cx| ws.read_usage_for(agent, cx));
+            }
+        });
+    }
+    // Under the title bar and the tabs; past that the card scrolls.
+    let max_h = window.viewport_size().height - px(110.);
+    div()
+        .id("hub-column")
+        .test_support()
+        .flex_none()
+        .h_full()
+        .pt(px(8.))
+        .pr(px(12.))
+        .pl(px(4.))
+        .child(card(
+            &ws,
+            &scope,
+            &ui,
+            Closer::Pinned(ui.clone()),
+            max_h,
+            window,
+            cx,
+        ))
+        .into_any_element()
 }
 
 // ---------- what the card shows ----------
@@ -627,9 +694,27 @@ fn openers(dir: &Path) -> Vec<Opener> {
 
 // ---------- the card ----------
 
-/// Close the card.
-fn close(pop: &Entity<PopoverState>, window: &mut Window, cx: &mut App) {
-    pop.update(cx, |p, cx| p.dismiss(window, cx));
+/// What picking a row does to the card around it: a popover (a thread's own window) closes; the
+/// main window's pinned column stays until the hub button hides it, its unfolded lists folding
+/// back as a menu would.
+#[derive(Clone)]
+enum Closer {
+    Popover(Entity<PopoverState>),
+    Pinned(Entity<Ui>),
+}
+
+fn close(pop: &Closer, window: &mut Window, cx: &mut App) {
+    match pop {
+        Closer::Popover(pop) => pop.update(cx, |p, cx| p.dismiss(window, cx)),
+        Closer::Pinned(ui) => ui.update(cx, |u, cx| {
+            let busy = u.busy;
+            *u = Ui {
+                busy,
+                ..Ui::default()
+            };
+            cx.notify();
+        }),
+    }
 }
 
 fn header(text: &'static str, cx: &App) -> Div {
@@ -711,7 +796,7 @@ fn card(
     ws: &Entity<Workspace>,
     scope: &Scope,
     ui: &Entity<Ui>,
-    pop: Entity<PopoverState>,
+    pop: Closer,
     max_h: Pixels,
     _window: &mut Window,
     cx: &mut App,

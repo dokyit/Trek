@@ -420,7 +420,11 @@ impl TrekWindow {
             // Back from a terminal: a branch switched or a commit made there shows.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
-                    this.workspace.update(cx, |ws, cx| ws.refresh_git(cx));
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.refresh_git(cx);
+                        // A release that came out while Trek sat behind other windows.
+                        ws.check_for_updates_on_activate(cx);
+                    });
                 }
             }),
             cx.observe(&composer, |this, _, _| this.composer_changed = true),
@@ -998,6 +1002,7 @@ impl Render for WindowTitle {
             .unwrap_or_default();
         // Where the thread or draft works, and what it has to hand (Open in, Run, git…).
         let hub = crate::hub::shown(ws, &Scope::Main);
+        let hub_open = ws.settings.layout.hub_open;
         let transparent = self.workspace.read(cx).see_through();
         // A narrow window keeps what the bar does and drops what repeats: the wordmark and the
         // project's name beside its badge.
@@ -1091,7 +1096,7 @@ impl Render for WindowTitle {
                     .when(hub, |el| {
                         el.child(crate::chrome::no_drag(
                             "hub",
-                            crate::hub::button(self.workspace.clone(), Scope::Main),
+                            crate::hub::toggle(self.workspace.clone(), hub_open),
                         ))
                     })
                     .child(
@@ -1587,6 +1592,7 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
         UndoAction::MoveTrek => "Move Trek",
         UndoAction::RemoveOldCopy(_) => "Remove old copy",
         UndoAction::OpenThread(_) => "Open thread",
+        UndoAction::RestartToUpdate => "Restart",
         _ => "Undo",
     }
 }
@@ -2068,6 +2074,12 @@ impl TrekWindow {
         // drawn. Each re-renders when it's notified.
         let fill = || StyleRefinement::default().size_full();
         let tabs = crate::tabs::strip(&self.workspace, glass.is_some(), cx);
+        // The hub, pinned at the right edge under the tabs while it's shown (its button hides it).
+        let hub_col = {
+            let ws = self.workspace.read(cx);
+            ws.settings.layout.hub_open && crate::hub::shown(ws, &Scope::Main)
+        }
+        .then(|| crate::hub::column(self.workspace.clone(), Scope::Main, window, cx));
         // The terminal dock, under the chat (threads and drafts) while the one on screen has it shown.
         let dock = self
             .terminal_dock
@@ -2149,32 +2161,39 @@ impl TrekWindow {
                     .min_w_0()
                     .children(tabs)
                     .child(
-                        div()
-                            .relative()
+                        h_flex()
                             .flex_1()
                             .min_h_0()
                             .child(
                                 div()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .size_full()
-                                    .child(self.thread_view.clone().cached(fill())),
+                                    .relative()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .size_full()
+                                            .child(self.thread_view.clone().cached(fill())),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .absolute()
+                                            .top_0()
+                                            .left_0()
+                                            .size_full()
+                                            .justify_center()
+                                            .pb(px(40.))
+                                            .child(Composer::element(
+                                                &self.composer,
+                                                &mut self.composer_changed,
+                                                cx,
+                                            )),
+                                    ),
                             )
-                            .child(
-                                v_flex()
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .size_full()
-                                    .justify_center()
-                                    .pb(px(40.))
-                                    .child(Composer::element(
-                                        &self.composer,
-                                        &mut self.composer_changed,
-                                        cx,
-                                    )),
-                            ),
+                            .children(hub_col),
                     )
                     .children(dock)
                     .into_any_element(),
@@ -2183,22 +2202,37 @@ impl TrekWindow {
                     .min_w_0()
                     .children(tabs)
                     .child(
-                        div()
+                        h_flex()
                             .flex_1()
                             .min_h_0()
-                            .child(self.thread_view.clone().cached(fill())),
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .child(self.thread_view.clone().cached(fill())),
+                                    )
+                                    .child(crate::working_bar::cached(
+                                        &self.working_bar,
+                                        self.thread_view.read(cx).tail.clone(),
+                                        cx,
+                                    ))
+                                    .child(crate::background_strip::cached(
+                                        &self.background_strip,
+                                        cx,
+                                    ))
+                                    .child(Composer::element(
+                                        &self.composer,
+                                        &mut self.composer_changed,
+                                        cx,
+                                    )),
+                            )
+                            .children(hub_col),
                     )
-                    .child(crate::working_bar::cached(
-                        &self.working_bar,
-                        self.thread_view.read(cx).tail.clone(),
-                        cx,
-                    ))
-                    .child(crate::background_strip::cached(&self.background_strip, cx))
-                    .child(Composer::element(
-                        &self.composer,
-                        &mut self.composer_changed,
-                        cx,
-                    ))
                     .children(dock)
                     .into_any_element(),
             }

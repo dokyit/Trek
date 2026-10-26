@@ -276,6 +276,9 @@ pub struct Layout {
     pub terminal_height: f32,
     /// Whether the chat's terminal dock is shown (it comes back as it was left).
     pub terminal_open: bool,
+    /// Whether the hub (the title bar's overview) is pinned open at the window's right edge: on
+    /// until its button hides it, and it comes back as it was left.
+    pub hub_open: bool,
 }
 
 impl Default for Layout {
@@ -284,6 +287,7 @@ impl Default for Layout {
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             terminal_height: DEFAULT_TERMINAL_HEIGHT,
             terminal_open: false,
+            hub_open: true,
         }
     }
 }

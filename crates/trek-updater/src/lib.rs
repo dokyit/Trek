@@ -8,10 +8,12 @@ use trek_core::changelog::{self, Release};
 use trek_core::settings::Channel;
 use trek_core::update::{AvailableUpdate, Blocker, Found};
 
-/// An hour between background checks, on every channel. Stable releases come out several times on
-/// some days too, and a day's wait (stable's, and six hours beta's) left Trek a release or two
-/// behind until someone checked by hand. A check is a small manifest per channel.
-const CHECK_EVERY_MS: i64 = 60 * 60 * 1000;
+/// A quarter of an hour between background checks, on every channel. Stable releases come out
+/// several times on some days, and an hour's wait still read as "it never told me" (the release
+/// was out, Trek hadn't looked yet). A check is a small manifest per channel.
+const CHECK_EVERY_MS: i64 = 15 * 60 * 1000;
+/// Trek coming to the front looks again when the last check is at least this old.
+const ON_ACTIVATE_AFTER_MS: i64 = 5 * 60 * 1000;
 /// After a failure that may pass (offline, server trouble), try again within the hour.
 const RETRY_AFTER_MS: i64 = 60 * 60 * 1000;
 /// A newer version is out without this platform's build: it's added to the release minutes after
@@ -194,6 +196,8 @@ pub struct Updater {
     next_check: Option<i64>,
     /// The channel the last check asked.
     channel: Option<Channel>,
+    /// When the last check started, in wall-clock ms (`check_on_activate`).
+    last_check: Option<i64>,
     /// A check runs while an update is staged (`Ready`), which stays on screen meanwhile.
     rechecking: bool,
     /// A staged update a newer release took the place of, for the caller to delete
@@ -217,6 +221,7 @@ impl Updater {
             _ => self.status = UpdateStatus::Checking,
         }
         self.next_check = Some(now + CHECK_EVERY_MS);
+        self.last_check = Some(now);
         self.channel = Some(channel);
         Some(Ticket(self.generation))
     }
@@ -322,6 +327,17 @@ impl Updater {
     /// (automatic downloads off) is checked again too: channels replace their archives, so an old
     /// offer's download can disappear, and a newer build may be out. So is one staged and waiting
     /// for a restart, which a newer release replaces.
+    /// Trek came to the front: the next background check is due now if the last one is a few
+    /// minutes old, so a release that came out while Trek sat behind other windows shows at once.
+    pub fn check_on_activate(&mut self, now: i64) {
+        if self
+            .last_check
+            .is_some_and(|t| now - t >= ON_ACTIVATE_AFTER_MS)
+        {
+            self.next_check = Some(now);
+        }
+    }
+
     pub fn check_due(&self, auto_check: bool, now: i64) -> bool {
         auto_check
             && self.next_check.is_none_or(|t| now >= t)
@@ -580,7 +596,7 @@ pub fn describe_update(
     }
     match status {
         UpdateStatus::Idle if auto_check => view(
-            "Trek checks for updates every hour.".into(),
+            "Trek checks for updates every 15 minutes.".into(),
             Some(UpdateAction::Check),
         ),
         UpdateStatus::Idle => view(
@@ -643,6 +659,7 @@ mod tests {
 
     const HOUR: i64 = 60 * 60 * 1000;
     const QUARTER: i64 = HOUR / 4;
+    const EVERY: i64 = CHECK_EVERY_MS;
 
     fn release(v: &str) -> AvailableUpdate {
         AvailableUpdate {
@@ -1099,15 +1116,15 @@ mod tests {
     }
 
     #[test]
-    fn every_channel_is_looked_at_hourly() {
+    fn every_channel_is_looked_at_every_quarter_hour() {
         // Stable releases come out several times on some days: a daily check left Trek behind
         // until someone checked by hand.
         for channel in [Channel::Stable, Channel::Beta, Channel::Nightly] {
             let mut u = Updater::default();
             let t = u.begin_check(channel, 0).unwrap();
             assert!(!u.finish_check(t, Ok(Found::Nothing), false, true, 0));
-            assert!(!u.check_due(true, HOUR - 1), "{channel:?}");
-            assert!(u.check_due(true, HOUR), "{channel:?}");
+            assert!(!u.check_due(true, EVERY - 1), "{channel:?}");
+            assert!(u.check_due(true, EVERY), "{channel:?}");
         }
     }
 
@@ -1121,8 +1138,8 @@ mod tests {
         assert!(!u.check_due(true, 2 * HOUR), "not while one runs");
         assert!(!u.finish_check(t, Ok(Found::Nothing), false, true, 0));
         assert_eq!(u.status, UpdateStatus::UpToDate);
-        assert!(!u.check_due(true, HOUR - 1));
-        assert!(u.check_due(true, HOUR));
+        assert!(!u.check_due(true, EVERY - 1));
+        assert!(u.check_due(true, EVERY));
 
         // A background check that fails stays quiet and retries in an hour.
         let t = u.begin_check(Channel::Stable, HOUR).unwrap();
@@ -1135,6 +1152,21 @@ mod tests {
             matches!(&u.status, UpdateStatus::Failed(e) if e.contains("offline")),
             "the user asked: say why"
         );
+    }
+
+    #[test]
+    fn coming_to_the_front_looks_again_once_the_last_check_is_minutes_old() {
+        let mut u = Updater::default();
+        let t = u.begin_check(Channel::Stable, 0).unwrap();
+        assert!(!u.finish_check(t, Ok(Found::Nothing), false, true, 0));
+        // Just checked: coming to the front changes nothing.
+        u.check_on_activate(ON_ACTIVATE_AFTER_MS - 1);
+        assert!(!u.check_due(true, ON_ACTIVATE_AFTER_MS - 1));
+        // Minutes later: due now, not at the quarter hour.
+        u.check_on_activate(ON_ACTIVATE_AFTER_MS);
+        assert!(u.check_due(true, ON_ACTIVATE_AFTER_MS));
+        // Automatic checks off: still nothing.
+        assert!(!u.check_due(false, ON_ACTIVATE_AFTER_MS));
     }
 
     #[test]
@@ -1151,8 +1183,8 @@ mod tests {
             ),
             "automatic downloads off"
         );
-        assert!(!u.check_due(true, HOUR - 1));
-        assert!(u.check_due(true, HOUR));
+        assert!(!u.check_due(true, EVERY - 1));
+        assert!(u.check_due(true, EVERY));
         // A newer build replaces the offer.
         let t = u.begin_check(Channel::Beta, HOUR).unwrap();
         u.finish_check(
@@ -1237,7 +1269,7 @@ mod tests {
     fn a_staged_update_is_checked_past_and_a_newer_release_replaces_it() {
         let mut u = Updater::default();
         let path = staged(&mut u, Channel::Stable, "0.2.1", 0);
-        assert!(!u.check_due(true, HOUR - 1));
+        assert!(!u.check_due(true, EVERY - 1));
         assert!(
             u.check_due(true, HOUR),
             "Trek can stay open for days with an update waiting"
@@ -1247,8 +1279,8 @@ mod tests {
         // Nothing newer, the same release, one on its way, a failure: the staged one stays, and
         // the check never shows (it's still the update to restart into).
         for (result, user, next) in [
-            (Ok(Found::Nothing), false, HOUR),
-            (Ok(Found::Update(release("0.2.1"))), false, HOUR),
+            (Ok(Found::Nothing), false, EVERY),
+            (Ok(Found::Update(release("0.2.1"))), false, EVERY),
             (Ok(Found::Coming("0.2.2".parse().unwrap())), false, QUARTER),
             (Err("offline".to_string()), true, HOUR),
         ] {
@@ -1441,7 +1473,7 @@ mod tests {
         );
         assert_eq!(
             line(UpdateStatus::Idle, Channel::Stable),
-            "Trek checks for updates every hour."
+            "Trek checks for updates every 15 minutes."
         );
     }
 
