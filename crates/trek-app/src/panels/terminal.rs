@@ -523,9 +523,12 @@ struct Session {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     hangup: Hangup,
-    /// Ends after the shell has: its output is over and the child is reaped.
+    /// Ends after the shell has: the child is reaped and `wake` closed.
     thread: std::thread::JoinHandle<()>,
 }
+
+/// How long a shell's last output has to come in after it exits, before its session ends.
+const LAST_OUTPUT: Duration = Duration::from_millis(150);
 
 /// Start `cmd` on a new pty of `size`, pumping its output into `screen` and waking `wake`.
 fn start_session(
@@ -549,15 +552,24 @@ fn start_session(
     let writer = Arc::new(Mutex::new(pty.master.take_writer()?));
     let answering = writer.clone();
     let reaped = hangup.reaped.clone();
-    let thread = std::thread::spawn(move || {
+    // The end of the shell's output can't be what says the shell is over: ConPTY keeps the output
+    // open after the shell has gone (`exit` in PowerShell left the tab at a dead prompt), until
+    // the pseudoconsole is closed, which the panel does once it knows. So a thread waits on the
+    // shell itself and closes `wake` (the panel's word that it's over) once its last output is in.
+    let ended = wake.clone();
+    std::thread::spawn(move || {
         // Only ConPTY asks where the cursor is, and a Mac's shells never got an answer.
         pump(reader, &screen, &wake, |bytes| {
             if cfg!(windows) {
                 write_to(&answering, bytes);
             }
         });
+    });
+    let thread = std::thread::spawn(move || {
         let _ = child.wait();
         reaped.store(true, Ordering::SeqCst);
+        std::thread::sleep(LAST_OUTPUT);
+        ended.close();
     });
     Ok(Session {
         writer,
@@ -902,6 +914,9 @@ impl TerminalPanel {
             }
             let _ = this.update(cx, |this, cx| {
                 this.exited = true;
+                // Closes the pseudoconsole, and with it the output the reading thread waits on.
+                this.master = None;
+                this.writer = None;
                 if let Some(f) = this.on_exit.take() {
                     f(cx);
                 }
@@ -2415,6 +2430,37 @@ mod tests {
 
         fn has_line(text: &str, line: &str) -> bool {
             text.lines().any(|l| l.trim() == line)
+        }
+
+        /// `exit` typed into PowerShell ends the session: ConPTY keeps the shell's output open
+        /// after the shell has gone (until the pseudoconsole is closed), so the end of output
+        /// can't be what says so.
+        #[test]
+        fn exit_typed_into_powershell_ends_the_session() {
+            let (tx, rx) = async_channel::bounded::<()>(1);
+            let session = super::super::start_session(
+                (30, 100),
+                shell_command("powershell", None, None),
+                new_screen(30, 100, 0),
+                tx,
+            )
+            .unwrap();
+            let start = Instant::now();
+            // At its prompt (output has arrived and stopped), then `exit`.
+            let mut last = Instant::now();
+            while start.elapsed() < LIMIT && last.elapsed() < Duration::from_secs(3) {
+                if rx.try_recv().is_ok() {
+                    last = Instant::now();
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            write_to(&session.writer, b"exit\r");
+            let typed = Instant::now();
+            while !rx.is_closed() && typed.elapsed() < Duration::from_secs(20) {
+                let _ = rx.try_recv();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(rx.is_closed(), "the session didn't end 20s after `exit`");
         }
 
         #[test]
