@@ -676,7 +676,6 @@ impl ShareSheet {
         let ws = self.workspace.read(cx);
         let phone = ws.phone_name().unwrap_or_else(|| "iPhone".to_string());
         let phone_ready = ws.can_send_to_phone();
-        let this_computer = crate::words::words().this_computer;
         let on = crate::machines::split_id(&self.id).map(|(h, _)| h.to_string());
         let machines: Vec<(String, String, bool)> = ws
             .machines
@@ -726,12 +725,7 @@ impl ShareSheet {
                 cx,
             ));
         }
-        v_flex().gap(px(8.)).child(list).child(note(
-            format!(
-                "The thread itself stays on {this_computer}; these get a copy of the conversation."
-            ),
-            cx,
-        ))
+        v_flex().child(list)
     }
 
     fn primary_label(&self, cx: &App) -> String {

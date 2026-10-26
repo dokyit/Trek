@@ -192,12 +192,17 @@ pub fn copy(ws: &Entity<Workspace>, id: &str, what: Copy, cx: &mut App) {
 
 /// A menu row with an id (the verify driver clicks by id) and, at its right, the keys that do
 /// the same.
-fn entry(id: &'static str, label: impl Into<SharedString>, shortcut: Option<Id>) -> PopupMenuItem {
+fn entry(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    shortcut: Option<Id>,
+) -> PopupMenuItem {
+    let id: SharedString = id.into();
     let label: SharedString = label.into();
     let hint = shortcut.map(keys::hint).filter(|h| !h.is_empty());
     PopupMenuItem::element(move |_, cx| {
         h_flex()
-            .id(id)
+            .id(id.clone())
             .test_support()
             .w_full()
             .gap_4()
@@ -558,20 +563,14 @@ fn build(
         let item_id = SharedString::from(format!("thread-to-machine-{host}"));
         let (ws, id) = (ws.clone(), f.id.clone());
         menu = menu.item(
-            PopupMenuItem::element(move |_, cx| {
-                h_flex()
-                    .id(item_id.clone())
-                    .test_support()
-                    .gap(px(8.))
-                    .child(crate::composer::reach_dot(reachable, cx))
-                    .child(format!("Continue on {name}"))
-            })
-            .on_click(move |_, _, cx| {
-                let markdown = ws.read(cx).transcript_markdown(&id);
-                ws.update(cx, |ws, cx| {
-                    ws.continue_on_machine(&host, &id, &markdown, cx)
-                })
-            }),
+            entry(item_id, format!("Continue on {name}"), None)
+                .icon(reach_icon(reachable, cx))
+                .on_click(move |_, _, cx| {
+                    let markdown = ws.read(cx).transcript_markdown(&id);
+                    ws.update(cx, |ws, cx| {
+                        ws.continue_on_machine(&host, &id, &markdown, cx)
+                    })
+                }),
         );
     }
     menu.separator()
@@ -579,6 +578,19 @@ fn build(
         .item(rename(weak, &f))
         .item(pin(weak, &f))
         .item(archive(weak, &f))
+}
+
+/// A machine's reachability dot as a menu icon, so it sits in the icons' column: green while
+/// it answers, quiet when it doesn't (`composer::reach_dot`'s colours).
+fn reach_icon(reachable: bool, cx: &App) -> gpui_kit::component::Icon {
+    const DOT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5.5" fill="currentColor"/></svg>"#;
+    gpui_kit::component::Icon::default()
+        .data(DOT)
+        .text_color(if reachable {
+            crate::palette::emerald(cx)
+        } else {
+            cx.theme().foreground.opacity(0.22)
+        })
 }
 
 /// The thread the main window acts on (the route's, or the editor's side bar chat), if any.
