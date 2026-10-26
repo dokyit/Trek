@@ -983,8 +983,11 @@ fn card(
                             })
                     });
                     git = git.child(
+                        // Its own height, up to 180: a scroll box may shrink to nothing in the card
+                        // (which scrolls too), and its rows then ran over the ones below.
                         v_flex()
                             .id("hub-branches")
+                            .flex_shrink_0()
                             .max_h(px(180.))
                             .overflow_y_scroll()
                             .children(list),

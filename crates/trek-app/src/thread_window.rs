@@ -304,6 +304,14 @@ impl ThreadWindow {
                                 el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
                             }),
                     )
+                    .child(crate::chrome::no_drag(
+                        "thread-menu",
+                        crate::thread_menu::button(
+                            self.workspace.clone(),
+                            self.id.clone(),
+                            crate::thread_menu::Place::OwnWindow,
+                        ),
+                    ))
                     .when(hub, |el| {
                         el.child(crate::chrome::no_drag(
                             "hub",
@@ -313,14 +321,6 @@ impl ThreadWindow {
                             ),
                         ))
                     })
-                    .child(crate::chrome::no_drag(
-                        "thread-menu",
-                        crate::thread_menu::button(
-                            self.workspace.clone(),
-                            self.id.clone(),
-                            crate::thread_menu::Place::OwnWindow,
-                        ),
-                    ))
                     .when_some(settle_id, |el, id| {
                         el.child(crate::chrome::no_drag(
                             "settle",

@@ -127,9 +127,10 @@ fn macos_keeps_its_system_menus_and_title_bar() {
 }
 
 /// The controls in the title bar's row, each in the area it keeps the window's drag from (`chrome::no_drag`).
-const AGENTS_CONTROLS: [&str; 5] = [
+const AGENTS_CONTROLS: [&str; 6] = [
     "toggle-sidebar",
     "mode-switch",
+    "thread-menu",
     "hub",
     "toggle-tools",
     "settle",
@@ -275,10 +276,11 @@ fn the_empty_strip_of_the_title_bar_is_still_the_windows_handle() {
         let trek = open(cx);
         thread_on_screen(&trek, cx);
         let mid = px(17.);
-        // Between the mode switch and the hub is the thread's title and then nothing: both are the
-        // handle, so a press there moves the window and a double click maximises it.
+        // Between the mode switch and the thread menu (then the hub) is the thread's title and then
+        // nothing: both are the handle, so a press there moves the window and a double click
+        // maximises it.
         let switch_end = right(&trek, cx, "mode-switch");
-        let hub_start = x(&trek, cx, "hub");
+        let hub_start = x(&trek, cx, "thread-menu");
         assert!(
             hub_start - switch_end > px(200.),
             "there's a strip to drag by: {switch_end:?} to {hub_start:?}"
