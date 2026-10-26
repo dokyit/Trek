@@ -1085,7 +1085,59 @@ pub struct Effects {
     pub changed: Vec<String>,
 }
 
-/// A command call started: surface or move the card it speaks for. `cwd`: where its `gh` runs.
+/// Where a command's `gh` call runs: `cwd`, as moved by the `cd`s (`pushd`, `Set-Location`)
+/// the command line runs before it (`cd ~/Trek && gh run watch 123`). Asked in `cwd` itself,
+/// which may be another repository or none (a chat outside any project has a folder of its
+/// own), `gh` found no run and its card stayed at "Starting".
+fn command_dir(detail: &str, cwd: &Path) -> PathBuf {
+    let mut dir = cwd.to_path_buf();
+    for segment in segments(detail) {
+        let words = shell_words(&segment);
+        if matches!(call_in(&words), Some(c) if !matches!(c, Call::Git(_))) {
+            break;
+        }
+        let words = command(&words);
+        let moves = words.first().is_some_and(|w| {
+            matches!(
+                w.to_ascii_lowercase().as_str(),
+                "cd" | "pushd" | "chdir" | "set-location" | "sl"
+            )
+        });
+        if !moves {
+            continue;
+        }
+        if let Some(to) = words[1..].iter().find(|w| !w.starts_with('-')) {
+            dir = moved_to(&dir, to);
+        }
+    }
+    dir
+}
+
+/// `to`, a `cd`'s argument, from `dir`: `~` is home, `/c/…` (Git Bash's form) is `C:\…` on
+/// Windows, and a relative one is under `dir`.
+fn moved_to(dir: &Path, to: &str) -> PathBuf {
+    if to == "~" {
+        return trek_core::paths::home();
+    }
+    if let Some(rest) = to.strip_prefix("~/").or_else(|| to.strip_prefix("~\\")) {
+        return trek_core::paths::home().join(rest);
+    }
+    if cfg!(windows) {
+        let b = to.as_bytes();
+        if b.len() >= 2
+            && b[0] == b'/'
+            && b[1].is_ascii_alphabetic()
+            && (b.len() == 2 || b[2] == b'/')
+        {
+            let rest = to.get(3..).unwrap_or("").replace('/', "\\");
+            return PathBuf::from(format!("{}:\\{rest}", (b[1] as char).to_ascii_uppercase()));
+        }
+    }
+    dir.join(to)
+}
+
+/// A command call started: surface or move the card it speaks for. `cwd`: where its `gh` runs
+/// unless the command line moves it (`command_dir`).
 pub fn tool_started(
     live: &mut crate::workspace::LiveThread,
     call_id: &str,
@@ -1097,7 +1149,7 @@ pub fn tool_started(
     let Some(call) = call(title, detail) else {
         return fx;
     };
-    let dir = cwd.unwrap_or_else(|| Path::new("")).to_path_buf();
+    let dir = command_dir(detail, cwd.unwrap_or_else(|| Path::new("")));
     match call {
         Call::PrCreate { title, base, head } => {
             let key = format!("creating-{call_id}");
@@ -4969,6 +5021,44 @@ mod tests {
         rerun_started, run_ms, segments, stage_label,
     };
     use std::path::Path;
+
+    /// A watch the command line runs after `cd`-ing elsewhere asks `gh` there, not in the
+    /// thread's folder (a chat outside any project: a repository with no remote, where `gh`
+    /// finds no run and the card never left "Starting").
+    #[test]
+    fn a_watch_after_a_cd_asks_gh_where_the_cd_went() {
+        use super::command_dir;
+        let here = std::env::temp_dir().join("thread");
+        let home = trek_core::paths::home();
+        assert_eq!(
+            command_dir("cd ~/Trek && gh run watch 40359338793 --exit-status", &here),
+            home.join("Trek")
+        );
+        assert_eq!(
+            command_dir("cd repo; pushd sub && gh run watch 1", &here),
+            here.join("repo").join("sub")
+        );
+        assert_eq!(
+            command_dir("gh run watch 1", &here),
+            here,
+            "no cd: the thread's folder"
+        );
+        assert_eq!(
+            command_dir("gh run watch 1 && cd elsewhere", &here),
+            here,
+            "a cd after the watch doesn't move it"
+        );
+        assert_eq!(
+            command_dir(r#"Set-Location -Path "other dir"; gh run watch 1"#, &here),
+            here.join("other dir")
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                command_dir("cd /c/Users/me/Trek && gh run watch 1", &here),
+                Path::new(r"C:\Users\me\Trek")
+            );
+        }
+    }
 
     fn words(s: &str) -> Vec<String> {
         segments(s).iter().map(|s| s.trim().to_string()).collect()
