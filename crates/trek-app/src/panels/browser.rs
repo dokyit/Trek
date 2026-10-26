@@ -416,6 +416,29 @@ struct Tab {
     page: Page,
 }
 
+/// The window a native web view is made in, by its raw handle: what a task can carry there in
+/// place of the `Window` (see `BrowserPanel::build_view`). The editor's preview uses it too.
+pub(crate) struct ParentWindow(raw_window_handle::RawWindowHandle);
+
+impl ParentWindow {
+    /// `None` where there's no native window (GPUI's test windows).
+    pub(crate) fn of(window: &Window) -> Option<Self> {
+        raw_window_handle::HasWindowHandle::window_handle(window)
+            .ok()
+            .map(|h| Self(h.as_raw()))
+    }
+}
+
+impl raw_window_handle::HasWindowHandle for ParentWindow {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // SAFETY: the handle is the window of the view that took it, and only a task of that
+        // view's uses it: the task goes with the view, which goes before its window does.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
+}
+
 /// What a tab knows of its page, kept up to date from its view's events. Nothing here touches
 /// the view, so the bookkeeping is the same on every platform (and tested without one).
 struct Page {
@@ -1044,23 +1067,22 @@ impl BrowserPanel {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
 
+    /// Make tab `id`'s native view, showing `url`, as a child of `parent`. Never from inside an
+    /// update: on Windows wry waits for WebView2 in a message loop of its own, which runs whatever
+    /// GPUI work falls due meanwhile, and that work can't have the app while an update holds it.
+    /// It panics inside a window procedure, which can't unwind, and Trek closes. So it takes
+    /// nothing of the panel's (`tx` and `vars` are the panel's, cloned): reading the panel would
+    /// hold the app too.
     fn build_view(
-        &self,
         id: u64,
         url: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<WebView>> {
+        parent: &ParentWindow,
+        tx: async_channel::Sender<Msg>,
+        vars: Rc<RefCell<String>>,
+    ) -> Option<wry::WebView> {
         let built = {
-            use raw_window_handle::HasWindowHandle;
-            let handle = window.window_handle().ok()?;
-            let (t1, t2, t3, t4) = (
-                self.tx.clone(),
-                self.tx.clone(),
-                self.tx.clone(),
-                self.tx.clone(),
-            );
-            let vars = self.page_vars.clone();
+            let handle = parent;
+            let (t1, t2, t3, t4) = (tx.clone(), tx.clone(), tx.clone(), tx.clone());
             #[cfg(windows)]
             let mut context = wry::WebContext::new(Some(webview_data_dir()));
             // A new view mustn't take the keys from Trek (WebView2 focuses it by default): it gets
@@ -1107,23 +1129,50 @@ impl BrowserPanel {
                     let _ = t4.try_send(Msg::NewWindow(url));
                     wry::NewWindowResponse::Deny
                 })
-                .build_as_child(&handle)
+                .build_as_child(handle)
                 .inspect_err(|e| tracing::warn!("browser: no web view: {e}"))
                 .ok()?
         };
         #[cfg(windows)]
-        native::watch(&built, id, &self.tx);
-        Some(cx.new(|cx| WebView::new(built, window, cx)))
+        native::watch(&built, id, &tx);
+        Some(built)
     }
 
+    /// Open `url` in a new tab. Its view is made in a task of its own, which runs outside any
+    /// update (see `build_view`), so the tab joins a moment later.
     fn new_tab(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;
-        let Some(view) = self.build_view(id, url, window, cx) else {
+        let Some(parent) = ParentWindow::of(window) else {
             self.unavailable = true;
             cx.notify();
             return;
         };
+        let url = url.to_string();
+        let (tx, vars) = (self.tx.clone(), self.page_vars.clone());
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let built = Self::build_view(id, &url, &parent, tx, vars);
+            let _ = this.update_in(cx, |this, window, cx| match built {
+                Some(built) => {
+                    let view = cx.new(|cx| WebView::new(built, window, cx));
+                    this.add_tab(id, view, &url, window, cx);
+                }
+                None => {
+                    this.unavailable = true;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn add_tab(
+        &mut self,
+        id: u64,
+        view: Entity<WebView>,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.stop_picking(cx);
         self.tabs.push(Tab {
             id,

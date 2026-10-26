@@ -412,15 +412,7 @@ impl PreviewView {
                 match self.kind {
                     Kind::Text => cx.emit(PreviewEvent::Reopen { fetched: true }),
                     Kind::Document if p.bytes > WHOLE_LIMIT => self.web = Web::TooBig,
-                    Kind::Document | Kind::Media => {
-                        self.web = match make_web(&self.path, window, cx) {
-                            Some(web) => {
-                                web.set_shown(self.shown, cx);
-                                Web::Made(web)
-                            }
-                            None => Web::Unavailable,
-                        };
-                    }
+                    Kind::Document | Kind::Media => self.make_web(window, cx),
                     Kind::Image | Kind::Binary => {}
                 }
             }
@@ -979,17 +971,49 @@ impl Render for PreviewView {
     }
 }
 
-/// Make the web view a PDF or a video plays in, or `None` when there's none to be had.
-fn make_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn WebSurface>> {
-    #[cfg(any(test, feature = "test-support"))]
-    {
-        let _ = (path, window, cx);
-        FAKE_WEB
-            .with(std::cell::Cell::get)
-            .then(|| Box::new(FakeWeb) as Box<dyn WebSurface>)
+impl PreviewView {
+    /// Make the web view a PDF or a video plays in (`Web::Unavailable` when there's none to be
+    /// had). The native one is made in a task, between updates: on Windows wry waits for WebView2
+    /// in a message loop of its own, which runs whatever GPUI work falls due meanwhile, and inside
+    /// an update that work finds the app taken, panics where it can't unwind, and Trek closes.
+    fn make_web(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let _ = window;
+            self.web = match FAKE_WEB.with(std::cell::Cell::get) {
+                true => {
+                    let web = Box::new(FakeWeb) as Box<dyn WebSurface>;
+                    web.set_shown(self.shown, cx);
+                    Web::Made(web)
+                }
+                false => Web::Unavailable,
+            };
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            let Some(parent) = crate::panels::browser::ParentWindow::of(window) else {
+                self.web = Web::Unavailable;
+                return;
+            };
+            let path = self.path.clone();
+            self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+                let built = native_web(&path, &parent);
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.web = match built {
+                        Some(built) => {
+                            let web = Box::new(NativeWeb(
+                                cx.new(|cx| gpui_wry::WebView::new(built, window, cx)),
+                            )) as Box<dyn WebSurface>;
+                            web.set_shown(this.shown, cx);
+                            Web::Made(web)
+                        }
+                        None => Web::Unavailable,
+                    };
+                    cx.notify();
+                });
+            }));
+        }
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    native_web(path, window, cx)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1173,9 +1197,11 @@ pub fn serve(path: &Path, range: Option<&str>) -> wry::http::Response<Vec<u8>> {
     }
 }
 
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 const PAUSE_JS: &str = "document.querySelectorAll('video,audio').forEach(function(m){m.pause()})";
 
 /// A native web view made for `path`.
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 struct NativeWeb(Entity<gpui_wry::WebView>);
 
 impl WebSurface for NativeWeb {
@@ -1203,10 +1229,11 @@ impl WebSurface for NativeWeb {
     }
 }
 
+/// The native view for `path`, as a child of `parent`. Never from inside an update (see
+/// `make_web`).
 #[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
-fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn WebSurface>> {
-    use raw_window_handle::HasWindowHandle as _;
-    let handle = window.window_handle().ok()?;
+fn native_web(path: &Path, parent: &crate::panels::browser::ParentWindow) -> Option<wry::WebView> {
+    let handle = parent;
     let file = path.to_path_buf();
     let origin = format!("{}/", file_origin(cfg!(windows)));
     #[cfg(windows)]
@@ -1243,12 +1270,10 @@ fn native_web(path: &Path, window: &mut Window, cx: &mut App) -> Option<Box<dyn 
         .with_navigation_handler(move |url| url.starts_with(&origin))
         .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
         .with_download_started_handler(|_, _| false)
-        .build_as_child(&handle)
+        .build_as_child(handle)
         .inspect_err(|e| tracing::warn!("preview: no web view: {e}"))
         .ok()?;
-    Some(Box::new(NativeWeb(
-        cx.new(|cx| gpui_wry::WebView::new(built, window, cx)),
-    )))
+    Some(built)
 }
 
 #[cfg(test)]

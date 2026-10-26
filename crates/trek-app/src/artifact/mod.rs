@@ -871,6 +871,8 @@ pub struct ArtifactState {
     /// A video's page goes here (seconds) once it has loaded: a frame clicked before it had.
     pending_seek: Option<f64>,
     _events: Option<Task<()>>,
+    /// The view being made, outside any update (see `make`).
+    making: Option<Task<()>>,
 }
 
 impl ArtifactState {
@@ -913,6 +915,7 @@ impl ArtifactState {
             height_changes: 0,
             pending_seek: None,
             _events: None,
+            making: None,
         }
     }
 
@@ -995,6 +998,34 @@ impl ArtifactState {
             events: tx,
         };
         match make_surface(spec, window) {
+            Making::Now(made) => self.install(made, rx, window, cx),
+            // On Windows wry waits for WebView2 in a message loop of its own, which runs whatever
+            // GPUI work falls due meanwhile; inside an update (this is called while the window
+            // paints) that work finds the app taken, panics where it can't unwind, and Trek
+            // closes. So the view is made in a task, between updates.
+            Making::Later(build) => {
+                self.making = Some(cx.spawn_in(window, async move |this, cx| {
+                    let made = build();
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.making = None;
+                        this.install(made, rx, window, cx);
+                        // Placed at the next frame.
+                        cx.notify();
+                    });
+                }));
+            }
+        }
+    }
+
+    /// Take the view `make` made, or say why there's none.
+    fn install(
+        &mut self,
+        made: Result<Box<dyn Surface>, String>,
+        rx: async_channel::Receiver<native::Event>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match made {
             Ok(surface) => {
                 self.surface = Some(surface);
                 self.loaded = false;
@@ -1277,6 +1308,7 @@ impl ArtifactState {
         };
         if on
             && self.surface.is_none()
+            && self.making.is_none()
             && self.unavailable.is_none()
             && gap <= viewport
             && window.is_window_active()
@@ -1663,11 +1695,18 @@ pub fn seek(hash: u64, secs: f64, window: &Window, cx: &mut App) -> bool {
 
 // ---------- making views ----------
 
-fn make_surface(spec: native::Spec, window: &mut Window) -> Result<Box<dyn Surface>, String> {
+/// A card's view: made already, or to be made outside any update (see `ArtifactState::make`).
+enum Making {
+    Now(Result<Box<dyn Surface>, String>),
+    #[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+    Later(Box<dyn FnOnce() -> Result<Box<dyn Surface>, String>>),
+}
+
+fn make_surface(spec: native::Spec, window: &mut Window) -> Making {
     #[cfg(any(test, feature = "test-support"))]
     {
         let _ = window;
-        match FAKE.with(|f| f.borrow().clone()) {
+        Making::Now(match FAKE.with(|f| f.borrow().clone()) {
             Some(log) => {
                 {
                     let mut log = log.borrow_mut();
@@ -1681,11 +1720,20 @@ fn make_surface(spec: native::Spec, window: &mut Window) -> Result<Box<dyn Surfa
                 }))
             }
             None => Err("no web view in tests".to_string()),
-        }
+        })
     }
     #[cfg(not(any(test, feature = "test-support")))]
     {
-        native::NativeSurface::new(spec, window).map(|s| Box::new(s) as Box<dyn Surface>)
+        match raw_window_handle::HasWindowHandle::window_handle(window) {
+            Ok(handle) => {
+                let parent = handle.as_raw();
+                Making::Later(Box::new(move || {
+                    native::NativeSurface::new(spec, parent)
+                        .map(|s| Box::new(s) as Box<dyn Surface>)
+                }))
+            }
+            Err(e) => Making::Now(Err(e.to_string())),
+        }
     }
 }
 

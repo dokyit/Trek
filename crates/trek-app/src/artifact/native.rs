@@ -78,11 +78,9 @@ pub struct NativeSurface {
 }
 
 impl NativeSurface {
-    /// A view for `spec` over `window`, hidden until placed.
-    pub fn new(spec: Spec, window: &Window) -> Result<Self, String> {
-        let handle = raw_window_handle::HasWindowHandle::window_handle(window)
-            .map_err(|e| e.to_string())?
-            .as_raw();
+    /// A view for `spec` over the window whose handle is `handle`, hidden until placed. Never
+    /// from inside an update (see `ArtifactState::make`).
+    pub fn new(spec: Spec, handle: raw_window_handle::RawWindowHandle) -> Result<Self, String> {
         let clip = platform::Clip::new(handle).ok_or("Couldn't make the web view's container.")?;
         let parent = clip.handle();
         let Spec {
