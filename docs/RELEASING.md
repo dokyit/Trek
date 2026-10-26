@@ -54,7 +54,10 @@ moving parts. Beta and nightly can't use it (prereleases are never "latest"), so
 prerelease whose tag moves to the newest build and whose assets are replaced: the archive is uploaded first
 and the manifest that points at it last, then older archives are deleted. Beta users also get stable
 releases and nightly users get both: Trek checks every feed at or above its channel and takes the newest
-version. Trek never installs an older or equal version.
+version. Trek never installs an older or equal version, nor one its channel doesn't carry (by the
+version's pre-release: none is stable, `beta.N` beta, anything else nightly), whichever feed has it. So
+while beta and nightly are behind the latest stable release, all three channels offer that release, and
+Settings → Updates says so ("It's a stable release: there's no newer beta.").
 
 Versions follow semver, which decides who gets what:
 
@@ -275,10 +278,13 @@ keeps it.
 
 ## How an update installs
 
-1. Check: on launch, then once a day by the wall clock (sleep counts), and when the channel changes. A
-   failed check, or a download that failed for network reasons, is retried after an hour; a release that
-   doesn't verify waits for the next daily check. With automatic downloads off, the sidebar shows a
-   neutral **Update** pill and the popover offers **Download**.
+1. Check: on launch, then every hour by the wall clock (sleep counts) on every channel, and at once when
+   the channel changes. A failed check, or a download that failed for network reasons, is retried after
+   an hour; a newer version without this platform's build yet after 15 minutes; a release that doesn't
+   verify waits a day. Checks go on while an update is staged and waiting for a restart: a newer release
+   replaces it (the staged copy is deleted). Changing the channel keeps an update the new channel also
+   offers (a stable release, on any channel; a beta, going to Nightly) and drops the rest. With automatic
+   downloads off, the sidebar shows a neutral **Update** pill and the popover offers **Download**.
 2. Download into a folder of its own, `updates/download-<pid>-<n>.noindex/` in Trek's data folder,
    hashing and verifying the minisign signature while streaming. A mismatch deletes the folder. Nothing
    is downloaded at all if the manifest's signature is missing or names another version. Changing the

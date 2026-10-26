@@ -2314,10 +2314,13 @@ impl Workspace {
         if default_prefs_key(&self.settings) != self.applied_defaults {
             self.apply_default_prefs(cx);
         }
-        // Another channel: whatever the old one found, downloaded or staged no longer applies. A
-        // nightly staged before the user left Nightly must not install on quit.
-        if self.updater.channel_changed(self.settings.updates.channel) {
-            self.drop_update(cx);
+        // Another channel: what the old one found, downloaded or staged goes unless the new one
+        // offers it too (a stable release is on every channel). A nightly staged before the user
+        // left Nightly must not install on quit. The new channel is asked at once.
+        let channel = self.settings.updates.channel;
+        if self.updater.channel_changed(channel) {
+            let dropped = self.updater.switch_channel(channel);
+            self.discard_staged(dropped, cx);
             self.check_for_updates(true, cx);
         }
         self.sync_remote(cx);
@@ -8949,6 +8952,7 @@ impl Workspace {
             &self.updater.status,
             self.settings.updates.auto_check,
             blocker,
+            self.settings.updates.channel,
         ))
     }
 
@@ -8972,7 +8976,8 @@ impl Workspace {
     }
 
     /// Ask the release feed for something newer. A background check stays quiet when it fails; a
-    /// check the user asked for reports. Never runs while an update is downloading or waiting.
+    /// check the user asked for reports. Never runs while an update is downloading or a restart
+    /// into one is pending; one staged and ready is replaced by a newer release.
     pub fn check_for_updates(&mut self, user_initiated: bool, cx: &mut Context<Self>) {
         // A dev build (or one macOS runs from a read-only copy) can't replace itself: don't ask.
         // The user asking asks Windows again whether Trek may write where it is.
@@ -9001,11 +9006,12 @@ impl Workspace {
         };
         cx.notify();
         let urls = trek_core::update::manifest_urls(&self.settings.updates);
+        let channel = self.settings.updates.channel;
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
             let _ = tx
                 .send(
-                    trek_core::update::check(&urls)
+                    trek_core::update::check(&urls, channel)
                         .await
                         .map_err(|e| format!("{e:#}")),
                 )
@@ -9016,13 +9022,17 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 let auto_download = this.settings.updates.auto_download;
                 let before = this.updater.offer.as_ref().map(|o| o.version.clone());
-                if this.updater.finish_check(
+                let download = this.updater.finish_check(
                     ticket,
                     result,
                     user_initiated,
                     auto_download,
                     now_ms(),
-                ) {
+                );
+                // A newer release than the one staged: that one goes.
+                let replaced = this.updater.take_replaced();
+                this.discard_staged(replaced, cx);
+                if download {
                     this.download_update(cx);
                 }
                 let found = this.updater.offer.as_ref().map(|o| o.version.clone());
@@ -9085,7 +9095,8 @@ impl Workspace {
         )
     }
 
-    /// Re-check about once a day while Trek stays open (housekeeping calls this every minute).
+    /// Re-check every hour while Trek stays open, an update staged or not (housekeeping calls this
+    /// every minute).
     fn maybe_check_for_updates(&mut self, cx: &mut Context<Self>) {
         if self
             .updater
@@ -9162,10 +9173,10 @@ impl Workspace {
         self.keep(task);
     }
 
-    /// Forget the update in flight or waiting (the channel changed): its download stops, late
-    /// results are ignored, and the staged copy is deleted rather than installed on quit.
-    fn drop_update(&mut self, cx: &mut Context<Self>) {
-        if let Some(staged) = self.updater.drop_update() {
+    /// Delete a staged update that won't be installed (the channel changed, a newer release took
+    /// its place), so it's never installed on quit.
+    fn discard_staged(&mut self, staged: Option<PathBuf>, cx: &mut Context<Self>) {
+        if let Some(staged) = staged {
             cx.background_executor()
                 .spawn(async move { trek_core::update::discard(&staged) })
                 .detach();

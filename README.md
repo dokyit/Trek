@@ -112,7 +112,7 @@ one extra step. Either:
   ```
 
 After that Trek updates itself: Settings → Updates picks the channel (Stable, Beta or Nightly). Updates are
-checked once a day, downloaded in the background, verified (SHA-256 and a minisign signature against the
+checked every hour, downloaded in the background, verified (SHA-256 and a minisign signature against the
 key built into Trek) and installed when you restart or quit Trek — never while an agent is working. If you
 run Trek straight from Downloads without moving it, macOS runs a read-only copy and Trek can't update
 itself until you move it to Applications; the same goes for a folder your account can't write to.

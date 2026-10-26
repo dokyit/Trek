@@ -8,21 +8,17 @@ use trek_core::changelog::{self, Release};
 use trek_core::settings::Channel;
 use trek_core::update::{AvailableUpdate, Blocker, Found};
 
-/// A day between background checks on the stable channel.
-const CHECK_EVERY_MS: i64 = 24 * 60 * 60 * 1000;
-
-/// How long until the next background check on `channel`: a day for stable releases; betas come
-/// faster, and a nightly can be out several times a day, so a day's wait left the nightly channel
-/// a release or two behind without a word.
-fn check_every(channel: Channel) -> i64 {
-    match channel {
-        Channel::Stable => CHECK_EVERY_MS,
-        Channel::Beta => 6 * 60 * 60 * 1000,
-        Channel::Nightly => 60 * 60 * 1000,
-    }
-}
+/// An hour between background checks, on every channel. Stable releases come out several times on
+/// some days too, and a day's wait (stable's, and six hours beta's) left Trek a release or two
+/// behind until someone checked by hand. A check is a small manifest per channel.
+const CHECK_EVERY_MS: i64 = 60 * 60 * 1000;
 /// After a failure that may pass (offline, server trouble), try again within the hour.
 const RETRY_AFTER_MS: i64 = 60 * 60 * 1000;
+/// A newer version is out without this platform's build: it's added to the release minutes after
+/// the other's, so look again soon.
+const COMING_RETRY_MS: i64 = 15 * 60 * 1000;
+/// A release that didn't verify isn't downloaded again for a day (a newer one is, by Check now).
+const BAD_RELEASE_WAIT_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum UpdateStatus {
@@ -193,28 +189,34 @@ pub struct Updater {
     /// fetch.
     pub changelog: Vec<Release>,
     /// When the background check runs next, in wall-clock ms. Not `Instant`: that stops while
-    /// the Mac sleeps, and "once a day" would become once every few days on a laptop.
+    /// the computer sleeps, and "every hour" would become every few hours on a laptop. `None`:
+    /// due now (never checked, or the channel just changed).
     next_check: Option<i64>,
     /// The channel the last check asked.
     channel: Option<Channel>,
+    /// A check runs while an update is staged (`Ready`), which stays on screen meanwhile.
+    rechecking: bool,
+    /// A staged update a newer release took the place of, for the caller to delete
+    /// (`take_replaced`).
+    replaced: Option<PathBuf>,
     generation: u64,
     cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Updater {
-    /// Start a check. `None` while one runs or an update is downloading or waiting to install.
+    /// Start a check. `None` while one runs, an update is downloading, or a restart into one is
+    /// pending. A staged update (`Ready`) doesn't stop it: Trek can stay open for days with one
+    /// waiting, and a newer release takes its place.
     pub fn begin_check(&mut self, channel: Channel, now: i64) -> Option<Ticket> {
-        if matches!(
-            self.status,
+        match self.status {
             UpdateStatus::Checking
-                | UpdateStatus::Downloading { .. }
-                | UpdateStatus::Ready { .. }
-                | UpdateStatus::RestartPending { .. }
-        ) {
-            return None;
+            | UpdateStatus::Downloading { .. }
+            | UpdateStatus::RestartPending { .. } => return None,
+            UpdateStatus::Ready { .. } if self.rechecking => return None,
+            UpdateStatus::Ready { .. } => self.rechecking = true,
+            _ => self.status = UpdateStatus::Checking,
         }
-        self.status = UpdateStatus::Checking;
-        self.next_check = Some(now + check_every(channel));
+        self.next_check = Some(now + CHECK_EVERY_MS);
         self.channel = Some(channel);
         Some(Ticket(self.generation))
     }
@@ -231,6 +233,9 @@ impl Updater {
     ) -> bool {
         if ticket.0 != self.generation {
             return false;
+        }
+        if std::mem::take(&mut self.rechecking) {
+            return self.finish_recheck(result, auto_download, now);
         }
         match result {
             Ok(Found::Update(u)) => {
@@ -250,8 +255,8 @@ impl Updater {
                 self.status = UpdateStatus::Coming {
                     version: version.to_string(),
                 };
-                // This platform's build follows within the hour.
-                self.next_check = Some(now + RETRY_AFTER_MS);
+                // This platform's build follows within minutes.
+                self.next_check = Some(now + COMING_RETRY_MS);
                 false
             }
             Err(e) => {
@@ -272,20 +277,65 @@ impl Updater {
         }
     }
 
+    /// A check made while an update was staged finished: a newer release takes its place (true when
+    /// it should start downloading), anything else leaves it ready. Quiet either way, failures too:
+    /// the update on screen is still the one to restart into. One that arrives after the restart
+    /// was asked for (`RestartPending`) changes nothing.
+    fn finish_recheck(
+        &mut self,
+        result: Result<Found, String>,
+        auto_download: bool,
+        now: i64,
+    ) -> bool {
+        let UpdateStatus::Ready { staged, .. } = &self.status else {
+            return false;
+        };
+        match result {
+            Ok(Found::Update(u)) if self.offer.as_ref().is_none_or(|o| u.version > o.version) => {
+                tracing::info!("update {} replaces the staged one", u.version);
+                self.replaced = Some(staged.clone());
+                self.status = UpdateStatus::Available {
+                    version: u.version.to_string(),
+                };
+                self.offer = Some(u);
+                auto_download
+            }
+            Ok(Found::Coming(_)) => {
+                self.next_check = Some(now + COMING_RETRY_MS);
+                false
+            }
+            Err(e) => {
+                tracing::warn!("update check failed: {e}");
+                self.next_check = Some(now + RETRY_AFTER_MS);
+                false
+            }
+            Ok(_) => false,
+        }
+    }
+
+    /// The staged update a newer release replaced (`finish_check`), once, for the caller to delete.
+    pub fn take_replaced(&mut self) -> Option<PathBuf> {
+        self.replaced.take()
+    }
+
     /// The background check is due (housekeeping asks every minute). An offer not downloaded yet
     /// (automatic downloads off) is checked again too: channels replace their archives, so an old
-    /// offer's download can disappear, and a newer build may be out.
+    /// offer's download can disappear, and a newer build may be out. So is one staged and waiting
+    /// for a restart, which a newer release replaces.
     pub fn check_due(&self, auto_check: bool, now: i64) -> bool {
         auto_check
             && self.next_check.is_none_or(|t| now >= t)
-            && matches!(
-                self.status,
+            && match self.status {
                 UpdateStatus::Idle
-                    | UpdateStatus::UpToDate
-                    | UpdateStatus::Coming { .. }
-                    | UpdateStatus::Available { .. }
-                    | UpdateStatus::Failed(_)
-            )
+                | UpdateStatus::UpToDate
+                | UpdateStatus::Coming { .. }
+                | UpdateStatus::Available { .. }
+                | UpdateStatus::Failed(_) => true,
+                UpdateStatus::Ready { .. } => !self.rechecking,
+                UpdateStatus::Checking
+                | UpdateStatus::Downloading { .. }
+                | UpdateStatus::RestartPending { .. } => false,
+            }
     }
 
     /// Start downloading what the last check found. `None` if nothing is on offer or a download
@@ -344,9 +394,13 @@ impl Updater {
             }
             Err((e, transient)) => {
                 tracing::warn!("update {version} rejected: {e}");
-                if transient {
-                    self.next_check = Some(now + RETRY_AFTER_MS);
-                }
+                self.next_check = Some(
+                    now + if transient {
+                        RETRY_AFTER_MS
+                    } else {
+                        BAD_RELEASE_WAIT_MS
+                    },
+                );
                 self.status =
                     UpdateStatus::Failed(format!("Couldn't update to Trek {version}: {e}"));
             }
@@ -359,10 +413,35 @@ impl Updater {
         self.channel.is_some_and(|c| c != channel)
     }
 
+    /// The channel setting changed to `channel`: what the old channel found goes unless `channel`
+    /// offers it too (a stable release is on every channel; a nightly staged before the user left
+    /// Nightly must not install on quit), and `channel` is asked at once, or as soon as a download
+    /// in flight is done. Returns the staged copy to delete, if one went.
+    pub fn switch_channel(&mut self, channel: Channel) -> Option<PathBuf> {
+        self.channel = Some(channel);
+        self.next_check = None;
+        let kept = !matches!(self.status, UpdateStatus::Checking)
+            && self
+                .offer
+                .as_ref()
+                .is_some_and(|o| changelog::offers(channel, &o.version));
+        if !kept {
+            return self.drop_update();
+        }
+        // A check of the old channel's, running while the update was staged, no longer counts. A
+        // download in flight does (no check runs meanwhile).
+        if !matches!(self.status, UpdateStatus::Downloading { .. }) {
+            self.generation += 1;
+            self.rechecking = false;
+        }
+        None
+    }
+
     /// Forget the update in flight or waiting: stop its download, ignore late results of
     /// earlier checks and downloads. Returns the staged copy to delete, if there was one.
     pub fn drop_update(&mut self) -> Option<PathBuf> {
         self.generation += 1;
+        self.rechecking = false;
         if let Some(cancel) = self.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -435,11 +514,40 @@ pub struct Changes {
     pub compare: Option<String>,
 }
 
-/// The updater's status line and next action for a state.
+/// What the Updates page says of a version on offer on `channel`: nothing when it's the channel's
+/// own; a stable release on Beta (or a beta on Nightly) says that's what it is, since the channel
+/// has nothing newer of its own.
+fn from_steadier_channel(version: &str, channel: Channel) -> Option<String> {
+    let from = changelog::channel_of(&semver::Version::parse(version).ok()?);
+    let kind = match from {
+        _ if from == channel => return None,
+        Channel::Stable => "a stable release",
+        Channel::Beta => "a beta",
+        Channel::Nightly => return None,
+    };
+    let own = match channel {
+        Channel::Stable => return None,
+        Channel::Beta => "beta",
+        Channel::Nightly => "nightly",
+    };
+    Some(format!(" It's {kind}: there's no newer {own}."))
+}
+
+/// What "up to date" covers on `channel`: the channels it gets releases from.
+fn up_to_date_on(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Stable => "",
+        Channel::Beta => " There's no newer beta or stable release.",
+        Channel::Nightly => " There's no newer nightly, beta or stable release.",
+    }
+}
+
+/// The updater's status line and next action for a state, on the `channel` the user picked.
 pub fn describe_update(
     status: &UpdateStatus,
     auto_check: bool,
     blocker: Option<Blocker>,
+    channel: Channel,
 ) -> UpdateView {
     let view = |line: String, action: Option<UpdateAction>| UpdateView {
         line,
@@ -472,7 +580,7 @@ pub fn describe_update(
     }
     match status {
         UpdateStatus::Idle if auto_check => view(
-            "Trek checks for updates once a day.".into(),
+            "Trek checks for updates every hour.".into(),
             Some(UpdateAction::Check),
         ),
         UpdateStatus::Idle => view(
@@ -484,7 +592,11 @@ pub fn describe_update(
             ..view("Checking for updates…".into(), Some(UpdateAction::Check))
         },
         UpdateStatus::UpToDate => view(
-            format!("Trek {} is up to date.", trek_core::VERSION),
+            format!(
+                "Trek {} is up to date.{}",
+                trek_core::VERSION,
+                up_to_date_on(channel)
+            ),
             Some(UpdateAction::Check),
         ),
         UpdateStatus::Coming { version } => view(
@@ -495,7 +607,10 @@ pub fn describe_update(
             Some(UpdateAction::Check),
         ),
         UpdateStatus::Available { version } => view(
-            format!("Trek {version} is available."),
+            format!(
+                "Trek {version} is available.{}",
+                from_steadier_channel(version, channel).unwrap_or_default()
+            ),
             Some(UpdateAction::Download),
         ),
         UpdateStatus::Downloading { version, progress } => UpdateView {
@@ -527,6 +642,7 @@ mod tests {
     use trek_shortcuts::Report;
 
     const HOUR: i64 = 60 * 60 * 1000;
+    const QUARTER: i64 = HOUR / 4;
 
     fn release(v: &str) -> AvailableUpdate {
         AvailableUpdate {
@@ -556,7 +672,7 @@ mod tests {
 
     #[test]
     fn updater_offers_one_next_step_per_state() {
-        let action = |s: UpdateStatus| describe_update(&s, true, None).action;
+        let action = |s: UpdateStatus| describe_update(&s, true, None, Channel::Stable).action;
         let staged = PathBuf::from("/tmp/Trek.app");
         assert_eq!(action(UpdateStatus::Idle), Some(UpdateAction::Check));
         assert_eq!(
@@ -600,6 +716,7 @@ mod tests {
             },
             true,
             None,
+            Channel::Stable,
         );
         assert_eq!(
             (
@@ -610,7 +727,7 @@ mod tests {
             ("Downloading Trek 0.2.1 · 42%", true, Some(0.42))
         );
         assert_eq!(
-            describe_update(&UpdateStatus::Idle, false, None).line,
+            describe_update(&UpdateStatus::Idle, false, None, Channel::Stable).line,
             "Automatic checks are off."
         );
     }
@@ -619,14 +736,31 @@ mod tests {
     fn builds_that_cant_replace_themselves_offer_nothing() {
         // (Windows offers a move out of a shared folder: `trek_can_move_itself_out_of_where_it_cant_update`.)
         let _platform = trek_words::pretend(false);
-        let dev = describe_update(&UpdateStatus::Idle, true, Some(Blocker::DevBuild));
+        let dev = describe_update(
+            &UpdateStatus::Idle,
+            true,
+            Some(Blocker::DevBuild),
+            Channel::Stable,
+        );
         assert_eq!((dev.action, dev.line), (None, Blocker::DevBuild.message()));
         assert_eq!(
-            describe_update(&UpdateStatus::UpToDate, true, Some(Blocker::Translocated)).action,
+            describe_update(
+                &UpdateStatus::UpToDate,
+                true,
+                Some(Blocker::Translocated),
+                Channel::Stable
+            )
+            .action,
             None
         );
         assert_eq!(
-            describe_update(&UpdateStatus::UpToDate, true, Some(Blocker::SharedFolder)).action,
+            describe_update(
+                &UpdateStatus::UpToDate,
+                true,
+                Some(Blocker::SharedFolder),
+                Channel::Stable
+            )
+            .action,
             None
         );
     }
@@ -637,14 +771,25 @@ mod tests {
         // asks again (`blocker_now`). (Windows offers the move instead: `trek_can_move_itself_out_of_where_it_cant_update`.)
         let _platform = trek_words::pretend(false);
         let guarded = Blocker::GuardedFolder(trek_core::update::KnownFolder::Documents);
-        let v = describe_update(&UpdateStatus::UpToDate, true, Some(guarded));
+        let v = describe_update(
+            &UpdateStatus::UpToDate,
+            true,
+            Some(guarded),
+            Channel::Stable,
+        );
         assert_eq!(
             (v.line, v.action),
             (guarded.message(), Some(UpdateAction::Check))
         );
         assert!(v.action.is_some_and(|a| a.label() == "Check now"));
         assert_eq!(
-            describe_update(&UpdateStatus::Idle, true, Some(Blocker::ReadOnlyLocation)).action,
+            describe_update(
+                &UpdateStatus::Idle,
+                true,
+                Some(Blocker::ReadOnlyLocation),
+                Channel::Stable
+            )
+            .action,
             Some(UpdateAction::Check)
         );
     }
@@ -674,7 +819,7 @@ mod tests {
                 UpdateStatus::UpToDate,
                 UpdateStatus::Failed("Couldn't check for updates: offline".into()),
             ] {
-                let v = describe_update(&status, true, Some(blocker));
+                let v = describe_update(&status, true, Some(blocker), Channel::Stable);
                 assert_eq!(
                     v.action,
                     Some(UpdateAction::Move),
@@ -710,7 +855,7 @@ mod tests {
                 UpdateStatus::Failed("Couldn't check for updates: offline".into()),
             ] {
                 assert_eq!(
-                    describe_update(&status, true, Some(blocker)).secondary,
+                    describe_update(&status, true, Some(blocker), Channel::Stable).secondary,
                     secondary,
                     "{blocker:?} in {status:?}"
                 );
@@ -725,7 +870,10 @@ mod tests {
             },
             UpdateStatus::Checking,
         ] {
-            assert_eq!(describe_update(&status, true, None).secondary, None);
+            assert_eq!(
+                describe_update(&status, true, None, Channel::Stable).secondary,
+                None
+            );
         }
         assert_eq!(UpdateAction::Move.label(), "Move Trek to its own folder");
         assert!(
@@ -740,13 +888,18 @@ mod tests {
             Blocker::LinkedFolder,
             Blocker::Translocated,
         ] {
-            let v = describe_update(&UpdateStatus::Idle, true, Some(blocker));
+            let v = describe_update(&UpdateStatus::Idle, true, Some(blocker), Channel::Stable);
             assert_eq!((v.action, v.line), (None, blocker.message()), "{blocker:?}");
         }
         // And not on a Mac, whatever the blocker: its own words and actions are unchanged.
         drop(_platform);
         let _mac = trek_words::pretend(false);
-        let v = describe_update(&UpdateStatus::Idle, true, Some(Blocker::ReadOnlyLocation));
+        let v = describe_update(
+            &UpdateStatus::Idle,
+            true,
+            Some(Blocker::ReadOnlyLocation),
+            Channel::Stable,
+        );
         assert_eq!(
             (v.action, v.secondary, v.line),
             (
@@ -756,7 +909,13 @@ mod tests {
             )
         );
         assert_eq!(
-            describe_update(&UpdateStatus::Idle, true, Some(Blocker::SharedFolder)).action,
+            describe_update(
+                &UpdateStatus::Idle,
+                true,
+                Some(Blocker::SharedFolder),
+                Channel::Stable
+            )
+            .action,
             None
         );
     }
@@ -874,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn a_release_without_this_platforms_build_yet_says_so_and_is_checked_again_within_the_hour() {
+    fn a_release_without_this_platforms_build_yet_says_so_and_is_checked_again_soon() {
         let mut u = Updater::default();
         let t = u.begin_check(Channel::Beta, 0).unwrap();
         assert!(
@@ -896,8 +1055,11 @@ mod tests {
                 true
             )
         );
-        assert!(!u.check_due(true, HOUR - 1));
-        assert!(u.check_due(true, HOUR), "the build follows within the hour");
+        assert!(!u.check_due(true, QUARTER - 1));
+        assert!(
+            u.check_due(true, QUARTER),
+            "the build follows within minutes"
+        );
         assert!(
             u.pending_changes(Channel::Beta, None).is_none(),
             "no notes for what can't be installed yet"
@@ -913,7 +1075,7 @@ mod tests {
             ),
         ] {
             let _platform = trek_words::pretend(windows);
-            let v = describe_update(&u.status, true, None);
+            let v = describe_update(&u.status, true, None, Channel::Stable);
             assert_eq!(
                 (v.line.as_str(), v.action, v.busy),
                 (line, Some(UpdateAction::Check), false)
@@ -937,39 +1099,38 @@ mod tests {
     }
 
     #[test]
-    fn nightlies_are_looked_for_hourly_betas_every_six_hours() {
-        for (channel, every) in [
-            (Channel::Nightly, HOUR),
-            (Channel::Beta, 6 * HOUR),
-            (Channel::Stable, 24 * HOUR),
-        ] {
+    fn every_channel_is_looked_at_hourly() {
+        // Stable releases come out several times on some days: a daily check left Trek behind
+        // until someone checked by hand.
+        for channel in [Channel::Stable, Channel::Beta, Channel::Nightly] {
             let mut u = Updater::default();
             let t = u.begin_check(channel, 0).unwrap();
             assert!(!u.finish_check(t, Ok(Found::Nothing), false, true, 0));
-            assert!(!u.check_due(true, every - 1), "{channel:?}");
-            assert!(u.check_due(true, every), "{channel:?}");
+            assert!(!u.check_due(true, HOUR - 1), "{channel:?}");
+            assert!(u.check_due(true, HOUR), "{channel:?}");
         }
     }
 
     #[test]
-    fn checks_run_daily_by_the_clock_and_retry_within_the_hour() {
+    fn checks_run_hourly_by_the_clock_and_retry_within_the_hour() {
         let mut u = Updater::default();
         assert!(u.check_due(true, 0), "never checked");
         assert!(!u.check_due(false, 0), "automatic checks off");
         let t = u.begin_check(Channel::Stable, 0).unwrap();
         assert!(u.begin_check(Channel::Stable, 0).is_none(), "one at a time");
+        assert!(!u.check_due(true, 2 * HOUR), "not while one runs");
         assert!(!u.finish_check(t, Ok(Found::Nothing), false, true, 0));
         assert_eq!(u.status, UpdateStatus::UpToDate);
-        assert!(!u.check_due(true, 23 * HOUR));
-        assert!(u.check_due(true, 24 * HOUR));
+        assert!(!u.check_due(true, HOUR - 1));
+        assert!(u.check_due(true, HOUR));
 
         // A background check that fails stays quiet and retries in an hour.
-        let t = u.begin_check(Channel::Stable, 24 * HOUR).unwrap();
-        u.finish_check(t, Err("offline".into()), false, true, 24 * HOUR);
+        let t = u.begin_check(Channel::Stable, HOUR).unwrap();
+        u.finish_check(t, Err("offline".into()), false, true, HOUR);
         assert_eq!(u.status, UpdateStatus::Idle);
-        assert!(u.check_due(true, 25 * HOUR));
-        let t = u.begin_check(Channel::Stable, 25 * HOUR).unwrap();
-        u.finish_check(t, Err("offline".into()), true, true, 25 * HOUR);
+        assert!(u.check_due(true, 2 * HOUR));
+        let t = u.begin_check(Channel::Stable, 2 * HOUR).unwrap();
+        u.finish_check(t, Err("offline".into()), true, true, 2 * HOUR);
         assert!(
             matches!(&u.status, UpdateStatus::Failed(e) if e.contains("offline")),
             "the user asked: say why"
@@ -990,16 +1151,16 @@ mod tests {
             ),
             "automatic downloads off"
         );
-        assert!(!u.check_due(true, HOUR));
-        assert!(u.check_due(true, 24 * HOUR));
+        assert!(!u.check_due(true, HOUR - 1));
+        assert!(u.check_due(true, HOUR));
         // A newer build replaces the offer.
-        let t = u.begin_check(Channel::Beta, 24 * HOUR).unwrap();
+        let t = u.begin_check(Channel::Beta, HOUR).unwrap();
         u.finish_check(
             t,
             Ok(Found::Update(release("0.3.0-beta.2"))),
             false,
             false,
-            24 * HOUR,
+            HOUR,
         );
         assert_eq!(
             u.status,
@@ -1070,6 +1231,218 @@ mod tests {
             (UpdateStatus::Idle, true)
         );
         assert!(u.begin_check(Channel::Stable, 0).is_some());
+    }
+
+    #[test]
+    fn a_staged_update_is_checked_past_and_a_newer_release_replaces_it() {
+        let mut u = Updater::default();
+        let path = staged(&mut u, Channel::Stable, "0.2.1", 0);
+        assert!(!u.check_due(true, HOUR - 1));
+        assert!(
+            u.check_due(true, HOUR),
+            "Trek can stay open for days with an update waiting"
+        );
+        let ready = u.status.clone();
+
+        // Nothing newer, the same release, one on its way, a failure: the staged one stays, and
+        // the check never shows (it's still the update to restart into).
+        for (result, user, next) in [
+            (Ok(Found::Nothing), false, HOUR),
+            (Ok(Found::Update(release("0.2.1"))), false, HOUR),
+            (Ok(Found::Coming("0.2.2".parse().unwrap())), false, QUARTER),
+            (Err("offline".to_string()), true, HOUR),
+        ] {
+            let t = u.begin_check(Channel::Stable, HOUR).unwrap();
+            assert_eq!(u.status, ready, "no spinner over Restart to update");
+            assert!(
+                u.begin_check(Channel::Stable, HOUR).is_none(),
+                "one at a time"
+            );
+            assert!(!u.check_due(true, 10 * HOUR), "not while one runs");
+            assert!(!u.finish_check(t, result, user, true, HOUR));
+            assert_eq!(u.status, ready);
+            assert_eq!(u.take_replaced(), None);
+            assert!(!u.check_due(true, HOUR + next - 1));
+            assert!(u.check_due(true, HOUR + next));
+        }
+
+        // A newer one: offered (and downloaded) in its place; the staged copy is handed back once.
+        let t = u.begin_check(Channel::Stable, 2 * HOUR).unwrap();
+        assert!(u.finish_check(
+            t,
+            Ok(Found::Update(release("0.2.2"))),
+            false,
+            true,
+            2 * HOUR
+        ));
+        assert_eq!(
+            u.status,
+            UpdateStatus::Available {
+                version: "0.2.2".into()
+            }
+        );
+        assert_eq!(u.take_replaced(), Some(path));
+        assert_eq!(u.take_replaced(), None);
+        assert_eq!(
+            u.begin_download().unwrap().update.version.to_string(),
+            "0.2.2"
+        );
+    }
+
+    #[test]
+    fn a_restart_asked_for_isnt_overtaken_by_a_check() {
+        let mut u = Updater::default();
+        let path = staged(&mut u, Channel::Stable, "0.2.1", 0);
+        // The check started before Restart was clicked with agents still working.
+        let t = u.begin_check(Channel::Stable, HOUR).unwrap();
+        u.status = UpdateStatus::RestartPending {
+            version: "0.2.1".into(),
+            staged: path.clone(),
+        };
+        assert!(!u.finish_check(t, Ok(Found::Update(release("0.2.2"))), false, true, HOUR));
+        assert_eq!(
+            (u.status.clone(), u.take_replaced()),
+            (
+                UpdateStatus::RestartPending {
+                    version: "0.2.1".into(),
+                    staged: path
+                },
+                None
+            )
+        );
+        assert!(!u.check_due(true, 10 * HOUR));
+        assert!(u.begin_check(Channel::Stable, 10 * HOUR).is_none());
+    }
+
+    #[test]
+    fn switching_channels_keeps_what_the_new_channel_offers_too() {
+        // A stable release is on every channel: switching from Stable keeps it staged, and the
+        // new channel is asked at once for something newer of its own.
+        let mut u = Updater::default();
+        let path = staged(&mut u, Channel::Stable, "0.4.16", 0);
+        assert_eq!(u.switch_channel(Channel::Beta), None);
+        assert!(matches!(u.status, UpdateStatus::Ready { .. }));
+        assert!(!u.channel_changed(Channel::Beta));
+        assert!(u.check_due(true, 1), "asked at once");
+        let t = u.begin_check(Channel::Beta, 1).unwrap();
+        assert!(u.finish_check(
+            t,
+            Ok(Found::Update(release("0.4.17-beta.1"))),
+            false,
+            true,
+            1
+        ));
+        assert_eq!(u.take_replaced(), Some(path));
+
+        // A beta or a nightly isn't on Stable: dropped, never installed on quit.
+        for (from, v, to) in [
+            (Channel::Beta, "0.4.17-beta.1", Channel::Stable),
+            (Channel::Nightly, "0.4.17-nightly.20261027", Channel::Beta),
+            (Channel::Nightly, "0.4.17-nightly.20261027", Channel::Stable),
+        ] {
+            let mut u = Updater::default();
+            let path = staged(&mut u, from, v, 0);
+            assert_eq!(u.switch_channel(to), Some(path), "{v} on {to:?}");
+            assert_eq!(
+                (u.status.clone(), u.offer.is_none()),
+                (UpdateStatus::Idle, true)
+            );
+        }
+        // A beta stays on the way to Nightly.
+        let mut u = Updater::default();
+        staged(&mut u, Channel::Beta, "0.4.17-beta.1", 0);
+        assert_eq!(u.switch_channel(Channel::Nightly), None);
+        assert!(matches!(u.status, UpdateStatus::Ready { .. }));
+    }
+
+    #[test]
+    fn a_check_of_the_old_channel_doesnt_count_after_a_switch_that_kept_the_update() {
+        let mut u = Updater::default();
+        staged(&mut u, Channel::Stable, "0.4.16", 0);
+        assert_eq!(u.switch_channel(Channel::Nightly), None);
+        let old = u.begin_check(Channel::Nightly, HOUR).unwrap();
+        // Back to Stable while Nightly is being asked: the stable release stays, the nightly the
+        // check finds isn't offered, and Stable is asked afresh.
+        assert_eq!(u.switch_channel(Channel::Stable), None);
+        assert!(!u.finish_check(
+            old,
+            Ok(Found::Update(release("0.4.17-nightly.20261027"))),
+            false,
+            true,
+            HOUR
+        ));
+        assert!(matches!(&u.status, UpdateStatus::Ready { version, .. } if version == "0.4.16"));
+        assert_eq!(u.take_replaced(), None);
+        assert!(u.check_due(true, HOUR));
+        assert!(u.begin_check(Channel::Stable, HOUR).is_some());
+
+        // A download the new channel wants too carries on.
+        let mut u = Updater::default();
+        let t = u.begin_check(Channel::Stable, 0).unwrap();
+        assert!(u.finish_check(t, Ok(Found::Update(release("0.4.16"))), false, true, 0));
+        let job = u.begin_download().unwrap();
+        assert_eq!(u.switch_channel(Channel::Beta), None);
+        assert!(!job.cancel.load(Ordering::Relaxed));
+        assert!(u.download_progress(job.ticket, 0.5));
+        let path = PathBuf::from("/tmp/download-1-0.4.16.noindex/Trek.app");
+        assert_eq!(
+            u.finish_download(job.ticket, "0.4.16".into(), Ok(path), 0),
+            None
+        );
+        assert!(matches!(u.status, UpdateStatus::Ready { .. }));
+        assert!(u.check_due(true, 0), "then Beta is asked");
+    }
+
+    #[test]
+    fn the_updates_page_says_when_the_channel_has_nothing_newer_of_its_own() {
+        let line =
+            |status: UpdateStatus, channel| describe_update(&status, true, None, channel).line;
+        let available = |v: &str| UpdateStatus::Available { version: v.into() };
+        assert_eq!(
+            line(available("0.4.16"), Channel::Stable),
+            "Trek 0.4.16 is available."
+        );
+        assert_eq!(
+            line(available("0.4.16"), Channel::Beta),
+            "Trek 0.4.16 is available. It's a stable release: there's no newer beta."
+        );
+        assert_eq!(
+            line(available("0.4.16"), Channel::Nightly),
+            "Trek 0.4.16 is available. It's a stable release: there's no newer nightly."
+        );
+        assert_eq!(
+            line(available("0.4.17-beta.1"), Channel::Nightly),
+            "Trek 0.4.17-beta.1 is available. It's a beta: there's no newer nightly."
+        );
+        for (v, channel) in [
+            ("0.4.17-beta.1", Channel::Beta),
+            ("0.4.17-nightly.20261027", Channel::Nightly),
+        ] {
+            assert_eq!(
+                line(available(v), channel),
+                format!("Trek {v} is available."),
+                "the channel's own"
+            );
+        }
+        let current = trek_core::VERSION;
+        assert_eq!(
+            line(UpdateStatus::UpToDate, Channel::Stable),
+            format!("Trek {current} is up to date.")
+        );
+        assert_eq!(
+            line(UpdateStatus::UpToDate, Channel::Beta),
+            format!("Trek {current} is up to date. There's no newer beta or stable release.")
+        );
+        assert_eq!(
+            line(UpdateStatus::UpToDate, Channel::Nightly),
+            format!(
+                "Trek {current} is up to date. There's no newer nightly, beta or stable release."
+            )
+        );
+        assert_eq!(
+            line(UpdateStatus::Idle, Channel::Stable),
+            "Trek checks for updates every hour."
+        );
     }
 
     #[test]

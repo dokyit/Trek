@@ -137,11 +137,28 @@ fn version_in(text: &str) -> Option<semver::Version> {
 
 /// Whether `channel` offers `release`: stable gets releases, beta also betas, nightly everything.
 pub fn on_channel(release: &Release, channel: Channel) -> bool {
-    let pre = release.version.pre.as_str();
-    match channel {
-        Channel::Stable => pre.is_empty(),
-        Channel::Beta => pre.is_empty() || pre.starts_with("beta"),
-        Channel::Nightly => true,
+    offers(channel, &release.version)
+}
+
+/// The channel `version` is published on, by its pre-release: none for stable, `beta.N` for beta,
+/// anything else (`nightly.<date>`) for nightly.
+pub fn channel_of(version: &semver::Version) -> Channel {
+    let pre = version.pre.as_str();
+    if pre.is_empty() {
+        Channel::Stable
+    } else if pre.starts_with("beta") {
+        Channel::Beta
+    } else {
+        Channel::Nightly
+    }
+}
+
+/// Whether `channel` offers `version`: stable gets releases, beta also betas, nightly everything.
+pub fn offers(channel: Channel, version: &semver::Version) -> bool {
+    match channel_of(version) {
+        Channel::Stable => true,
+        Channel::Beta => channel != Channel::Stable,
+        Channel::Nightly => channel == Channel::Nightly,
     }
 }
 
@@ -225,6 +242,35 @@ mod tests {
         assert_eq!(
             names(Channel::Nightly),
             ["0.3.0-nightly.1", "0.3.0-beta.1", "0.2.0"]
+        );
+    }
+
+    #[test]
+    fn a_versions_pre_release_names_its_channel() {
+        for (version, channel) in [
+            ("0.4.16", Channel::Stable),
+            ("0.4.17-beta.1", Channel::Beta),
+            ("0.4.17-nightly.20261027", Channel::Nightly),
+            ("0.4.17-nightly.20261027.2", Channel::Nightly),
+            ("0.4.17-rc.1", Channel::Nightly),
+        ] {
+            assert_eq!(channel_of(&v(version)), channel, "{version}");
+        }
+        let offered = |c| {
+            ["0.4.16", "0.4.17-beta.1", "0.4.17-nightly.20261027"]
+                .into_iter()
+                .filter(|s| offers(c, &v(s)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            offered(Channel::Stable),
+            ["0.4.16"],
+            "stable: releases only"
+        );
+        assert_eq!(offered(Channel::Beta), ["0.4.16", "0.4.17-beta.1"]);
+        assert_eq!(
+            offered(Channel::Nightly),
+            ["0.4.16", "0.4.17-beta.1", "0.4.17-nightly.20261027"]
         );
     }
 

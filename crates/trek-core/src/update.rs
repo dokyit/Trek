@@ -14,7 +14,9 @@
 //! Channels on GitHub Releases (see docs/RELEASING.md): stable is the latest non-prerelease
 //! release (`releases/latest/download/stable.json`); beta and nightly are prereleases under the
 //! fixed tags `beta` and `nightly`, whose assets are replaced on every publish
-//! (`releases/download/beta/beta.json`). Beta also sees stable releases, nightly sees both.
+//! (`releases/download/beta/beta.json`). Beta also sees stable releases, nightly sees both; a
+//! version a channel doesn't carry (by its pre-release, `changelog::channel_of`) is never offered
+//! on it, whichever feed has it.
 //!
 //! Windows: the artifact (`windows-x86_64`) is a flat zip of `TREK_FILES`, and Trek is installed
 //! as the folder holding them. Trek can't replace the folder it runs from, so `install` only gets
@@ -766,7 +768,8 @@ fn channel_key(c: Channel) -> &'static str {
 
 /// Manifest URLs for the chosen channel, newest channel first. `feed_url` is a GitHub releases
 /// URL (`https://github.com/<owner>/<repo>/releases`), a template with `{channel}`, or one
-/// manifest URL ending in `.json` used for every channel.
+/// manifest URL ending in `.json` used for every channel (each takes only the versions it offers:
+/// `check`).
 pub fn manifest_urls(updates: &Updates) -> Vec<String> {
     let feed = updates.feed_url.trim().trim_end_matches('/');
     let feed = if feed.is_empty() { OFFICIAL_FEED } else { feed };
@@ -871,15 +874,16 @@ pub enum Found {
 }
 
 /// The newest build for this platform newer than this one across the feeds or, if there's none, a
-/// newer version whose build for this platform isn't out yet. Feeds that fail are skipped unless
-/// all of them do.
-pub async fn check(urls: &[String]) -> Result<Found> {
+/// newer version whose build for this platform isn't out yet. Only versions `channel` offers count
+/// (`changelog::offers`). Feeds that fail are skipped unless all of them do.
+pub async fn check(urls: &[String], channel: Channel) -> Result<Found> {
     let client = http()?;
     let results = futures::future::join_all(urls.iter().map(|u| fetch_manifest(&client, u))).await;
     newest(
         results,
         &current_version(),
         skipped_version(&crate::paths::updates_dir()).as_ref(),
+        channel,
     )
 }
 
@@ -893,13 +897,14 @@ fn skipped_version(updates: &Path) -> Option<semver::Version> {
     .ok()
 }
 
-/// The newest build above `current` across the feeds' manifests, `skipped` aside, else the newest
-/// version above it still waiting for this platform's build; the first error only if every feed
-/// failed.
+/// The newest build above `current` across the feeds' manifests, `skipped` and versions `channel`
+/// doesn't offer aside, else the newest version above it still waiting for this platform's build;
+/// the first error only if every feed failed.
 fn newest(
     results: Vec<Result<Manifest>>,
     current: &semver::Version,
     skipped: Option<&semver::Version>,
+    channel: Channel,
 ) -> Result<Found> {
     let mut best: Option<AvailableUpdate> = None;
     let mut coming: Option<semver::Version> = None;
@@ -909,6 +914,19 @@ fn newest(
         match result.and_then(|m| newer_than(m, current)) {
             Ok(found) => {
                 any_ok = true;
+                let version = match &found {
+                    Found::Update(u) => Some(&u.version),
+                    Found::Coming(v) => Some(v),
+                    Found::Nothing => None,
+                };
+                // A feed offering what this channel doesn't carry (a nightly in the stable feed, or
+                // the one manifest a `.json` feed serves every channel) offers it nothing.
+                if let Some(v) = version.filter(|v| !crate::changelog::offers(channel, v)) {
+                    tracing::info!(
+                        "update feed offers {v}, which isn't on the {channel:?} channel"
+                    );
+                    continue;
+                }
                 match found {
                     Found::Update(u)
                         if skipped != Some(&u.version)
@@ -1982,7 +2000,15 @@ mod tests {
         // Across feeds: a build to install beats one on its way, whichever is newer; the newest of
         // those on their way is the one named.
         let feeds = |list: Vec<Manifest>| {
-            found(newest(list.into_iter().map(Ok).collect(), &current, None).unwrap())
+            found(
+                newest(
+                    list.into_iter().map(Ok).collect(),
+                    &current,
+                    None,
+                    Channel::Nightly,
+                )
+                .unwrap(),
+            )
         };
         assert_eq!(
             feeds(vec![elsewhere("0.4.1-beta.2"), manifest("0.4.0")]),
@@ -2007,7 +2033,8 @@ mod tests {
                 newest(
                     vec![Ok(elsewhere("0.4.1-beta.2"))],
                     &current,
-                    Some(&skipped)
+                    Some(&skipped),
+                    Channel::Nightly
                 )
                 .unwrap()
             )
@@ -2111,6 +2138,7 @@ mod tests {
             ],
             &current,
             None,
+            Channel::Beta,
         )
         .unwrap();
         assert_eq!(found(picked), ("update", "0.3.0-beta.1".into()));
@@ -2120,6 +2148,7 @@ mod tests {
             vec![Ok(manifest("0.3.0-beta.1")), Ok(manifest("0.2.1"))],
             &current,
             Some(&skipped),
+            Channel::Beta,
         )
         .unwrap();
         assert_eq!(found(picked), ("update", "0.2.1".into()));
@@ -2128,7 +2157,8 @@ mod tests {
                 newest(
                     vec![Ok(manifest("0.1.0")), Err(anyhow!("404"))],
                     &current,
-                    None
+                    None,
+                    Channel::Stable
                 )
                 .unwrap()
             )
@@ -2140,8 +2170,95 @@ mod tests {
             vec![Err(anyhow!("no release yet")), Err(anyhow!("offline"))],
             &current,
             None,
+            Channel::Stable,
         );
         assert_eq!(all_failed.err().unwrap().to_string(), "no release yet");
+    }
+
+    #[test]
+    fn each_channel_is_offered_its_own_and_steadier_releases_only() {
+        // The feeds as published on 2026-10-26: beta and nightly behind the latest stable.
+        let published = || {
+            vec![
+                Ok(manifest("0.4.15-nightly.20261025.2")),
+                Ok(manifest("0.4.1-beta.4")),
+                Ok(manifest("0.4.16")),
+            ]
+        };
+        let pick = |current: &str, channel, feeds: Vec<Result<Manifest>>| {
+            let current = semver::Version::parse(current).unwrap();
+            found(newest(feeds, &current, None, channel).unwrap())
+        };
+        for channel in [Channel::Stable, Channel::Beta, Channel::Nightly] {
+            assert_eq!(
+                pick("0.4.15", channel, published()),
+                ("update", "0.4.16".into()),
+                "no newer beta or nightly: the stable release, on {channel:?} too"
+            );
+        }
+        // A nightly newer than the stable release: nightly users only.
+        let ahead = || {
+            vec![
+                Ok(manifest("0.4.17-nightly.20261027")),
+                Ok(manifest("0.4.17-beta.1")),
+                Ok(manifest("0.4.16")),
+            ]
+        };
+        assert_eq!(pick("0.4.16", Channel::Stable, ahead()).0, "nothing");
+        assert_eq!(
+            pick("0.4.16", Channel::Beta, ahead()),
+            ("update", "0.4.17-beta.1".into())
+        );
+        assert_eq!(
+            pick("0.4.16", Channel::Nightly, ahead()),
+            ("update", "0.4.17-nightly.20261027".into())
+        );
+        // One manifest for every channel (a `.json` feed), or a feed serving the wrong channel's
+        // release: a stable or beta user isn't given a nightly, built or on its way.
+        for channel in [Channel::Stable, Channel::Beta] {
+            assert_eq!(
+                pick(
+                    "0.4.16",
+                    channel,
+                    vec![Ok(manifest("0.4.17-nightly.20261027"))]
+                ),
+                ("nothing", String::new()),
+                "{channel:?}"
+            );
+            assert_eq!(
+                pick(
+                    "0.4.16",
+                    channel,
+                    vec![Ok(elsewhere("0.4.17-nightly.20261027"))]
+                )
+                .0,
+                "nothing",
+                "{channel:?}"
+            );
+        }
+        assert_eq!(
+            pick(
+                "0.4.16",
+                Channel::Stable,
+                vec![Ok(manifest("0.4.17-beta.1"))]
+            )
+            .0,
+            "nothing"
+        );
+        // Running a nightly and back on stable: the next stable release, never a step back.
+        assert_eq!(
+            pick("0.4.15-nightly.20261025.2", Channel::Stable, published()),
+            ("update", "0.4.16".into())
+        );
+        assert_eq!(
+            pick(
+                "0.4.17-nightly.20261027",
+                Channel::Stable,
+                vec![Ok(manifest("0.4.16"))]
+            )
+            .0,
+            "nothing"
+        );
     }
 
     #[test]

@@ -1420,7 +1420,7 @@ impl SettingsView {
                     ),
                     cx,
                 ),
-                Self::row("Check automatically", "Once a day, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
+                Self::row("Check automatically", "Every hour, in the background.", self.switch("auto-check", s.updates.auto_check, |s, v| s.updates.auto_check = v), cx),
                 Self::row(
                     "Download automatically",
                     "Gets the update ready in the background. It installs when you restart or quit Trek, never while an agent is working.",
