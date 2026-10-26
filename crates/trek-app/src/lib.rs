@@ -52,6 +52,7 @@ pub mod remote;
 pub mod root;
 pub use trek_screenclip as screenclip;
 pub mod settings_view;
+pub mod share;
 pub use trek_shortcuts as shortcuts;
 #[cfg(feature = "shots")]
 pub mod shots;
@@ -60,6 +61,7 @@ pub mod single_instance;
 pub mod system;
 pub mod tabs;
 pub mod terminal_dock;
+pub mod thread_menu;
 pub mod thread_view;
 pub mod thread_window;
 pub use trek_time as time;
@@ -120,7 +122,11 @@ actions!(
         ToggleTerminal,
         FocusScm,
         AddSelectionToChat,
-        AddSelectionToNewChat
+        AddSelectionToNewChat,
+        ShareThread,
+        CopyThreadLink,
+        CopyThreadMarkdown,
+        CopyThreadFolder
     ]
 );
 
@@ -191,6 +197,11 @@ pub fn menus() -> Vec<Menu> {
             name: "Thread".into(),
             items: vec![
                 MenuItem::action("Open in New Window", OpenInNewWindow),
+                MenuItem::separator(),
+                MenuItem::action("Share…", ShareThread),
+                MenuItem::action("Copy Link", CopyThreadLink),
+                MenuItem::action("Copy as Markdown", CopyThreadMarkdown),
+                MenuItem::action("Copy Working Directory", CopyThreadFolder),
                 MenuItem::separator(),
                 MenuItem::action("Settle", SettleThread),
                 MenuItem::action("Toggle Plan Mode", TogglePlan),

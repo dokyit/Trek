@@ -1078,6 +1078,16 @@ impl Render for WindowTitle {
                                 el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
                             }),
                     )
+                    .when_some(thread.as_ref().map(|t| t.id.clone()), |el, id| {
+                        el.child(crate::chrome::no_drag(
+                            "thread-menu",
+                            crate::thread_menu::button(
+                                self.workspace.clone(),
+                                id,
+                                crate::thread_menu::Place::Main,
+                            ),
+                        ))
+                    })
                     .when(hub, |el| {
                         el.child(crate::chrome::no_drag(
                             "hub",
@@ -1584,6 +1594,13 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
 /// How long a toast whose Undo puts files back stays up.
 pub const UNDO_RESTORE_TOAST: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// One of the copies of the thread the main window acts on (`thread_menu::Copy`), if it has one.
+fn copy_focused(ws: &Entity<Workspace>, what: crate::thread_menu::Copy, cx: &mut App) {
+    if let Some(id) = crate::thread_menu::focused(ws, cx) {
+        crate::thread_menu::copy(ws, &id, what, cx);
+    }
+}
+
 impl TrekWindow {
     fn end_panel_drag(&mut self, cx: &mut Context<Self>) {
         if self.panel_drag.take().is_none() {
@@ -1868,6 +1885,20 @@ impl Render for TrekWindow {
                 if let Some(id) = this.workspace.read(cx).focused_thread().map(str::to_string) {
                     crate::thread_window::open(this.workspace.clone(), &id, cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &crate::ShareThread, window, cx| {
+                if let Some(id) = crate::thread_menu::focused(&this.workspace, cx) {
+                    crate::share::open(this.workspace.clone(), &id, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &crate::CopyThreadLink, _, cx| {
+                copy_focused(&this.workspace, crate::thread_menu::Copy::Link, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::CopyThreadMarkdown, _, cx| {
+                copy_focused(&this.workspace, crate::thread_menu::Copy::Markdown, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::CopyThreadFolder, _, cx| {
+                copy_focused(&this.workspace, crate::thread_menu::Copy::Folder, cx)
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|this, _: &ToggleRightPanel, window, cx| {

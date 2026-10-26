@@ -1757,7 +1757,8 @@ fn run_card(
     card
 }
 
-fn gh(dir: &Path) -> Option<std::process::Command> {
+/// `gh`, found on the login PATH and run in `dir` (the Share sheet's gists use it too).
+pub(crate) fn gh(dir: &Path) -> Option<std::process::Command> {
     let gh = trek_core::detect::which("gh")?;
     let mut c = trek_core::procs::command(gh);
     c.env("PATH", trek_core::detect::login_path())

@@ -91,6 +91,29 @@ pub fn note_for(
     }
 }
 
+/// The note that hands thread `id` to the phone ("Continue on iPhone"): tapping it opens the
+/// thread in Trek on iPhone. `names` off: the thread's title stays out of it.
+pub fn phone_handoff_note(
+    topic: &str,
+    title: &str,
+    id: &str,
+    names: bool,
+    host: &trek_remote::HostInfo,
+) -> Note {
+    Note {
+        topic: topic.to_string(),
+        title: format!("Continue on iPhone · {}", host.name),
+        message: if names && !title.trim().is_empty() {
+            title.trim().to_string()
+        } else {
+            "A thread is ready to pick up".into()
+        },
+        click: Some(format!("trek://open?thread={id}&host={}", host.id)),
+        tags: vec!["iphone".into()],
+        priority: 4,
+    }
+}
+
 /// Seconds since the last keyboard or mouse input anywhere on the Mac.
 #[cfg(target_os = "macos")]
 fn idle_seconds() -> f64 {
@@ -253,6 +276,72 @@ impl Workspace {
                 tracing::warn!("phone notification: {e}");
             }
         });
+    }
+
+    /// Whether a thread can be sent to the phone: phone notifications are on, with a topic.
+    pub fn can_send_to_phone(&self) -> bool {
+        let m = &self.settings.mobile;
+        m.push && !m.push_topic.is_empty()
+    }
+
+    /// The paired phone's name, as it gave it when it paired (the last one seen), if any phone
+    /// has paired.
+    pub fn phone_name(&self) -> Option<String> {
+        let remote = self.remote.as_ref()?;
+        let machines: Vec<&str> = self
+            .machines
+            .list
+            .iter()
+            .map(|m| m.entry.name.as_str())
+            .collect();
+        remote
+            .devices
+            .iter()
+            .filter(|d| !machines.contains(&d.name.as_str()))
+            .max_by_key(|d| d.last_seen_at.unwrap_or(d.paired_at))
+            .map(|d| d.name.clone())
+    }
+
+    /// "Continue on iPhone": a notification on the phone that opens thread `id` in Trek there
+    /// when tapped (Trek has no other way to put a thread in front of the phone). Without phone
+    /// notifications, says how to turn them on and opens Settings › Phone & Machines.
+    pub fn send_thread_to_phone(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.can_send_to_phone() {
+            cx.emit(WorkspaceEvent::Toast {
+                message: "Turn on phone notifications first: the thread goes to your iPhone as one, which opens it when tapped.".into(),
+                undo: None,
+            });
+            self.navigate(
+                crate::workspace::Route::Settings(crate::workspace::SettingsPage::Mobile),
+                cx,
+            );
+            return;
+        }
+        let m = self.settings.mobile.clone();
+        let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
+        let note = phone_handoff_note(
+            &m.push_topic,
+            &title,
+            id,
+            m.push_names,
+            &crate::remote::host_info(),
+        );
+        let job = publish(&m.push_server, note, 1);
+        cx.spawn(async move |this, cx| {
+            let result = job.await.map_err(|e| e.to_string()).and_then(|r| r);
+            let message = match result {
+                Ok(()) => "Sent to your iPhone. Tap the notification to open the thread there."
+                    .to_string(),
+                Err(e) => format!("Couldn't send it to your iPhone: {e}"),
+            };
+            let _ = this.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message,
+                    undo: None,
+                })
+            });
+        })
+        .detach();
     }
 
     /// Turn push on (making a topic the first time) or off.
@@ -460,6 +549,24 @@ mod tests {
             a.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "{a}"
+        );
+    }
+
+    #[test]
+    fn handing_a_thread_to_the_phone_opens_it_there() {
+        let host = trek_remote::HostInfo {
+            id: "m1".into(),
+            name: "Studio".into(),
+            version: "0".into(),
+        };
+        let n = phone_handoff_note("trek-abc", "Fix the bug", "t1", true, &host);
+        assert_eq!(n.title, "Continue on iPhone · Studio");
+        assert_eq!(n.message, "Fix the bug");
+        assert_eq!(n.click.as_deref(), Some("trek://open?thread=t1&host=m1"));
+        let unnamed = phone_handoff_note("trek-abc", "Fix the bug", "t1", false, &host);
+        assert!(
+            !unnamed.message.contains("Fix"),
+            "names off keeps the title out"
         );
     }
 }

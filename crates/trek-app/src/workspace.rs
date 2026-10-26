@@ -7756,47 +7756,24 @@ impl Workspace {
     }
 
     /// The conversation as Markdown: your messages with the images you attached, the agent's
-    /// answers, and turns that failed. Thinking, tool calls and sub-agents are left out.
+    /// answers, and turns that failed. Thinking, tool calls and sub-agents are left out (the
+    /// Share sheet chooses otherwise with `share::render`).
     pub fn transcript_markdown(&self, id: &str) -> String {
-        let items = match self.live.get(id).filter(|l| l.loaded) {
+        let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
+        let items = crate::share::render::prepare(
+            self.transcript_items(id),
+            crate::share::render::Options::default(),
+            None,
+        );
+        crate::share::render::markdown(&title, &items)
+    }
+
+    /// Thread `id`'s items: the open transcript's, else as stored.
+    pub fn transcript_items(&self, id: &str) -> Vec<Item> {
+        match self.live.get(id).filter(|l| l.loaded) {
             Some(l) => l.items.to_vec(),
             None => self.store.items(id).unwrap_or_default(),
-        };
-        let title = self.thread(id).map(|t| t.title.clone()).unwrap_or_default();
-        let mut out = format!("# {title}\n");
-        for item in items {
-            match item {
-                Item::User { text, images, .. } => {
-                    out.push_str("\n## You\n");
-                    // As written: what Trek adds for the agent (a consult, a restatement) isn't the user's words.
-                    let text = trek_core::restate::as_written(&text);
-                    if !text.trim().is_empty() {
-                        out.push_str(&format!("\n{}\n", text.trim()));
-                    }
-                    for path in images {
-                        let name = std::path::Path::new(&path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        // Angle brackets keep paths with spaces in one link.
-                        out.push_str(&format!("\n![{name}](<{path}>)\n"));
-                    }
-                }
-                Item::Assistant { text } if !text.trim().is_empty() => {
-                    out.push_str(&format!("\n{}\n", text.trim()))
-                }
-                Item::Error { text } => out.push_str(&format!(
-                    "\n> **Error:** {}\n",
-                    text.trim().replace('\n', "\n> ")
-                )),
-                Item::Limit { text, .. } => out.push_str(&format!(
-                    "\n> **Usage limit:** {}\n",
-                    text.trim().replace('\n', "\n> ")
-                )),
-                _ => {}
-            }
         }
-        out
     }
 
     pub fn title_inputs(&self, id: &str) -> Option<(String, String)> {

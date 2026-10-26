@@ -76,6 +76,12 @@ enum Action {
 enum WindowCommand {
     /// The thread on screen, in a window of its own.
     OpenInNewWindow,
+    /// The Share sheet for the thread on screen.
+    Share,
+    /// One of its copies, as its shortcut does.
+    CopyLink,
+    CopyMarkdown,
+    CopyFolder,
     /// Interrupt the thread on screen's running turn.
     StopAgent,
     /// The composer's plan mode, for the thread on screen or the next one.
@@ -1182,6 +1188,43 @@ impl CommandPalette {
                 .hint(keys::hint(Id::OpenInNewWindow)),
                 "pop out separate window detach",
             );
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(crate::assets::Lucide::Share)),
+                    "Share thread…",
+                    Action::Window(WindowCommand::Share),
+                ),
+                "share link gist export html markdown send phone iphone machine",
+            );
+            for (label, command, id, glyph, words) in [
+                (
+                    "Copy thread link",
+                    WindowCommand::CopyLink,
+                    Id::CopyThreadLink,
+                    Icon::new(crate::assets::Lucide::Link),
+                    "copy url trek link",
+                ),
+                (
+                    "Copy thread as Markdown",
+                    WindowCommand::CopyMarkdown,
+                    Id::CopyThreadMarkdown,
+                    Icon::new(IconName::Copy),
+                    "copy transcript conversation markdown",
+                ),
+                (
+                    "Copy thread's working directory",
+                    WindowCommand::CopyFolder,
+                    Id::CopyThreadFolder,
+                    Icon::new(IconName::FolderOpen),
+                    "copy folder path cwd directory",
+                ),
+            ] {
+                add(
+                    Entry::new(c, icon(glyph), label, Action::Window(command)).hint(keys::hint(id)),
+                    words,
+                );
+            }
         }
         if running {
             add(
@@ -1355,6 +1398,16 @@ impl CommandPalette {
             Action::Window(command) => match command {
                 WindowCommand::OpenInNewWindow => {
                     window.dispatch_action(Box::new(crate::OpenInNewWindow), cx)
+                }
+                WindowCommand::Share => window.dispatch_action(Box::new(crate::ShareThread), cx),
+                WindowCommand::CopyLink => {
+                    window.dispatch_action(Box::new(crate::CopyThreadLink), cx)
+                }
+                WindowCommand::CopyMarkdown => {
+                    window.dispatch_action(Box::new(crate::CopyThreadMarkdown), cx)
+                }
+                WindowCommand::CopyFolder => {
+                    window.dispatch_action(Box::new(crate::CopyThreadFolder), cx)
                 }
                 WindowCommand::StopAgent => window.dispatch_action(Box::new(crate::Interrupt), cx),
                 WindowCommand::TogglePlan => ws.update(cx, |ws, cx| {

@@ -28,9 +28,6 @@ pub struct Sidebar {
     search: Entity<InputState>,
     project_search: Entity<InputState>,
     clone_input: Entity<InputState>,
-    rename_input: Entity<InputState>,
-    /// The thread being renamed while the dialog is open.
-    renaming: Option<String>,
     /// The window is frontmost; spinners hold still when it isn't.
     active: bool,
     open_projects: HashSet<String>,
@@ -131,7 +128,6 @@ impl Sidebar {
         let project_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
-        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("Thread title"));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| {
                 this.sync_clock(cx);
@@ -149,21 +145,6 @@ impl Sidebar {
         ];
         let mut subscriptions = subscriptions;
         subscriptions.push(cx.observe(&project_search, |_, _, cx| cx.notify()));
-        subscriptions.push(cx.subscribe_in(
-            &rename_input,
-            window,
-            |this: &mut Self, input, event: &InputEvent, window, cx| {
-                if !matches!(event, InputEvent::PressEnter { .. }) {
-                    return;
-                }
-                if let Some(id) = this.renaming.take() {
-                    let title = input.read(cx).value().to_string();
-                    this.workspace
-                        .update(cx, |ws, cx| ws.rename(&id, title, cx));
-                    window.close_dialog(cx);
-                }
-            },
-        ));
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             this.active = window.is_window_active();
             // Gone to another app: nothing's under the pointer to hold still for.
@@ -177,8 +158,6 @@ impl Sidebar {
             search,
             project_search,
             clone_input,
-            rename_input,
-            renaming: None,
             active: window.is_window_active(),
             open_projects: Default::default(),
             open_live_projects: Default::default(),
@@ -1267,42 +1246,24 @@ impl Sidebar {
         }
     }
 
-    /// Right-click menu for a thread (T3's set): pin, settle, snooze, rename, copy, project, archive, delete.
+    /// Right-click menu for a thread (T3's set): pin, settle, snooze, rename, copy, project, archive,
+    /// delete. What the title bar's "⋯" has too comes from `thread_menu`, so the two agree.
     fn with_menu<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static>(
         &self,
         row: E,
         t: &Thread,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        use crate::thread_menu;
         let ws = self.workspace.downgrade();
-        let sidebar = cx.entity().downgrade();
         let tid = t.id.clone();
         let title = t.title.clone();
-        let pinned = t.pinned_at.is_some();
         let settled = t.settled_at.is_some();
         let snoozed = t
             .snoozed_until
             .is_some_and(|u| u > trek_core::store::now_ms());
         let never_settle = t.never_settle;
         let imported = t.source != ThreadSource::Trek;
-        let resume_cmd = match (&t.agent, &t.native_id) {
-            (trek_core::AgentId::ClaudeCode, Some(n)) => Some(format!("claude --resume {n}")),
-            (trek_core::AgentId::Codex, Some(n)) => Some(format!("codex resume {n}")),
-            (trek_core::AgentId::OpenCode, Some(n)) => Some(format!("opencode -s {n}")),
-            _ => None,
-        };
-        let cwd = t.cwd.clone();
-        let in_worktree = t.worktree.is_some();
-        let (archive_note, delete_note) = match self.graph.parents.contains(&t.id) {
-            true => {
-                let ws = self.workspace.read(cx);
-                (
-                    ws.sub_agents_note(&t.id, "archived"),
-                    ws.sub_agents_note(&t.id, "deleted"),
-                )
-            }
-            false => (None, None),
-        };
         let project = t.project_id.clone().and_then(|pid| {
             self.workspace
                 .read(cx)
@@ -1310,6 +1271,13 @@ impl Sidebar {
                 .map(|p| (p.id.clone(), p.name.clone()))
         });
         row.context_menu(move |menu, window, cx| {
+            // Read as the menu opens: pinned, its folder, its sub-agents.
+            let Some(f) = ws
+                .upgrade()
+                .and_then(|ws| thread_menu::Facts::read(ws.read(cx), &tid))
+            else {
+                return menu;
+            };
             let item = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
                 let ws = ws.clone();
                 let tid = tid.clone();
@@ -1317,25 +1285,12 @@ impl Sidebar {
                     let _ = ws.update(cx, |ws, cx| f(ws, &tid, cx));
                 })
             };
-            let copy = |label: &'static str, text: String| PopupMenuItem::new(label).on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone())));
             let mut menu = menu
                 .min_w(px(210.))
-                .item(PopupMenuItem::new("Open in new window").icon(crate::assets::Lucide::SquareArrowOutUpRight).on_click({
-                    let (ws, tid) = (ws.clone(), tid.clone());
-                    move |_, _, cx| {
-                        if let Some(ws) = ws.upgrade() {
-                            crate::thread_window::open(ws, &tid, cx);
-                        }
-                    }
-                }))
-                .item(PopupMenuItem::new("Fork thread").icon(crate::assets::Lucide::GitFork).on_click({
-                    let (ws, tid) = (ws.clone(), tid.clone());
-                    move |_, _, cx| {
-                        let _ = ws.update(cx, |ws, cx| ws.fork_thread(&tid, crate::workspace::ForkAt::End, &crate::workspace::Scope::Main, cx));
-                    }
-                }))
+                .item(thread_menu::open_in_new_window(&ws, &tid))
+                .item(thread_menu::fork(&ws, &tid))
                 .separator()
-                .item(item(if pinned { "Unpin thread" } else { "Pin thread" }, |ws, id, cx| ws.toggle_pin(id, cx)))
+                .item(thread_menu::pin(&ws, &f))
                 .item(if settled { item("Move to inbox", |ws, id, cx| ws.unsettle(id, cx)) } else { item("Settle thread", |ws, id, cx| ws.settle(id, cx)) });
             menu = menu.submenu("Snooze", window, cx, {
                 let (ws, tid) = (ws.clone(), tid.clone());
@@ -1354,13 +1309,7 @@ impl Sidebar {
                     if snoozed { menu.separator().item(snooze("Wake now", |ws, id, cx| ws.unsnooze(id, cx))) } else { menu }
                 }
             });
-            menu = menu.separator();
-            menu = menu.item(PopupMenuItem::new("Rename thread").on_click({
-                let (sidebar, tid, title) = (sidebar.clone(), tid.clone(), title.clone());
-                move |_, window, cx| {
-                    let _ = sidebar.update(cx, |s, cx| s.open_rename_dialog(tid.clone(), title.clone(), window, cx));
-                }
-            }));
+            menu = menu.separator().item(thread_menu::rename(&ws, &f));
             menu = menu.item(item("Regenerate title", |ws, id, cx| ws.regenerate_title(id, true, cx))).item(item("Mark unread", |ws, id, cx| ws.mark_unread(id, cx)));
             if let Some((pid, name)) = project.clone() {
                 let ws = ws.clone();
@@ -1385,28 +1334,8 @@ impl Sidebar {
                 }
             });
             menu = menu.separator();
-            menu = menu.submenu("Copy", window, cx, {
-                let (ws, tid, title, resume_cmd, cwd) = (ws.clone(), tid.clone(), title.clone(), resume_cmd.clone(), cwd.clone());
-                move |menu, _, _| {
-                    let mut menu = menu.item(copy("Title", title.clone()));
-                    menu = menu.item(PopupMenuItem::new("Conversation as Markdown").on_click({
-                        let (ws, tid) = (ws.clone(), tid.clone());
-                        move |_, _, cx| {
-                            if let Ok(text) = ws.update(cx, |ws, _| ws.transcript_markdown(&tid)) {
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                            }
-                        }
-                    }));
-                    if let Some(cmd) = resume_cmd.clone() {
-                        menu = menu.item(copy("Resume command", cmd));
-                    }
-                    if let Some(dir) = cwd.clone() {
-                        menu = menu.item(copy("Folder path", dir.display().to_string()));
-                    }
-                    menu
-                }
-            });
-            if let Some(dir) = cwd.clone() {
+            menu = thread_menu::copy_submenu(menu, &ws, &f, window, cx);
+            if let Some(dir) = f.cwd.clone() {
                 menu = menu.item(PopupMenuItem::new(crate::words::words().show_folder_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&dir)));
             }
             if let Some((pid, _)) = project.clone() {
@@ -1416,37 +1345,20 @@ impl Sidebar {
                     let _ = ws.update(cx, |ws, cx| ws.open_project_settings(Some(pid), cx));
                 }));
             }
+            menu = menu.separator().item(thread_menu::archive(&ws, &f));
             // A thread in a worktree asks whether its worktree goes too.
-            let leave = |label: &'static str, leave: Leave| {
+            if f.in_worktree {
                 let (ws, tid) = (ws.clone(), tid.clone());
-                PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                return menu.item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click(move |_, window, cx| {
                     if let Some(ws) = ws.upgrade() {
-                        crate::worktree_ui::confirm_leave(ws, tid.clone(), leave, window, cx);
+                        crate::worktree_ui::confirm_leave(ws, tid.clone(), Leave::Delete, window, cx);
                     }
-                })
-            };
-            if in_worktree {
-                return menu.separator().item(leave("Archive thread…", Leave::Archive)).item(leave("Delete…", Leave::Delete).icon(crate::assets::Lucide::Trash));
+                }));
             }
-            // A thread with sub-agents asks first: they go with it.
-            let archive = match archive_note.clone() {
-                None => item("Archive thread", |ws, id, cx| ws.archive(id, cx)),
-                Some(note) => PopupMenuItem::new("Archive thread…").on_click({
-                    let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());
-                    move |_, window, cx| {
-                        let (ws, tid, title, note) = (ws.clone(), tid.clone(), title.clone(), note.clone());
-                        window.open_alert_dialog(cx, move |alert, _, _| {
-                            let (ws, tid) = (ws.clone(), tid.clone());
-                            alert.title(format!("Archive “{title}”?")).description(note.clone()).confirm().ok_text("Archive").on_ok(move |_, _, cx| {
-                                let _ = ws.update(cx, |ws, cx| ws.archive(&tid, cx));
-                                true
-                            })
-                        });
-                    }
-                }),
-            };
-            menu.separator().item(archive).item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click({
-                let (ws, tid, title, delete_note) = (ws.clone(), tid.clone(), title.clone(), delete_note.clone());
+            // A thread with sub-agents says they go with it.
+            let delete_note = ws.upgrade().and_then(|ws| ws.read(cx).sub_agents_note(&tid, "deleted"));
+            menu.item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click({
+                let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());
                 move |_, window, cx| {
                     let (ws, tid, title, delete_note) = (ws.clone(), tid.clone(), title.clone(), delete_note.clone());
                     window.open_alert_dialog(cx, move |alert, _, _| {
@@ -1522,57 +1434,6 @@ impl Sidebar {
                     });
                 }))
         })
-    }
-
-    fn open_rename_dialog(
-        &mut self,
-        id: String,
-        title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = self.rename_input.clone();
-        input.update(cx, |s, cx| s.set_value(title, window, cx));
-        self.renaming = Some(id.clone());
-        // Put the cursor in the field once the dialog is up, with the old title selected.
-        let focus = input.clone();
-        window.defer(cx, move |window, cx| {
-            focus.update(cx, |s, cx| {
-                s.focus(window, cx);
-                let len = s.value().len();
-                s.set_selected_range(0..len, cx);
-            })
-        });
-        let ws = self.workspace.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let (input2, ws, id) = (input.clone(), ws.clone(), id.clone());
-            dialog
-                .title("Rename thread")
-                .w(px(440.))
-                .child(Input::new(&input))
-                .footer(
-                    gpui_kit::component::dialog::DialogFooter::new()
-                        .gap_2()
-                        .child(
-                            gpui_kit::component::dialog::DialogClose::new().child(
-                                gpui_kit::component::button::Button::new("cancel-rename")
-                                    .outline()
-                                    .label("Cancel"),
-                            ),
-                        )
-                        .child(
-                            gpui_kit::component::dialog::DialogAction::new().child(
-                                gpui_kit::component::button::Button::new("do-rename")
-                                    .primary()
-                                    .label("Rename")
-                                    .on_click(move |_, _, cx| {
-                                        let title = input2.read(cx).value().to_string();
-                                        ws.update(cx, |ws, cx| ws.rename(&id, title, cx));
-                                    }),
-                            ),
-                        ),
-                )
-        });
     }
 
     fn label(text: &str, cx: &App) -> impl IntoElement {

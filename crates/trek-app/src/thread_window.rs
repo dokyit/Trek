@@ -313,6 +313,14 @@ impl ThreadWindow {
                             ),
                         ))
                     })
+                    .child(crate::chrome::no_drag(
+                        "thread-menu",
+                        crate::thread_menu::button(
+                            self.workspace.clone(),
+                            self.id.clone(),
+                            crate::thread_menu::Place::OwnWindow,
+                        ),
+                    ))
                     .when_some(settle_id, |el, id| {
                         el.child(crate::chrome::no_drag(
                             "settle",
@@ -362,6 +370,33 @@ impl Render for ThreadWindow {
             .text_color(theme.foreground)
             .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
+            .on_action(cx.listener(|this, _: &ShareThread, window, cx| {
+                crate::share::open(this.workspace.clone(), &this.id, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyThreadLink, _, cx| {
+                crate::thread_menu::copy(
+                    &this.workspace,
+                    &this.id,
+                    crate::thread_menu::Copy::Link,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &CopyThreadMarkdown, _, cx| {
+                crate::thread_menu::copy(
+                    &this.workspace,
+                    &this.id,
+                    crate::thread_menu::Copy::Markdown,
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &CopyThreadFolder, _, cx| {
+                crate::thread_menu::copy(
+                    &this.workspace,
+                    &this.id,
+                    crate::thread_menu::Copy::Folder,
+                    cx,
+                )
+            }))
             .on_action(cx.listener(|this, _: &SettleThread, _, cx| {
                 let id = this.id.clone();
                 this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))

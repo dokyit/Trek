@@ -267,6 +267,9 @@ pub enum Id {
     OpenPaletteAnywhere,
     InlineEdit,
     OpenInNewWindow,
+    CopyThreadLink,
+    CopyThreadMarkdown,
+    CopyThreadFolder,
     OpenBasecamp,
     LeaveBasecamp,
     OpenNotes,
@@ -472,6 +475,33 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             Same,
             None,
             act!(crate::OpenInNewWindow),
+        ),
+        // The thread on screen's copies (its "⋯" › Copy). Share… has no keys: ⇧⌘S is a snapshot.
+        // Ctrl+Alt+L would be AltGr+L.
+        row(
+            CopyThreadLink,
+            App,
+            "alt-cmd-l",
+            Keys("alt-shift-l"),
+            None,
+            act!(crate::CopyThreadLink),
+        ),
+        row(
+            CopyThreadMarkdown,
+            App,
+            "cmd-shift-m",
+            Same,
+            None,
+            act!(crate::CopyThreadMarkdown),
+        ),
+        // Ctrl+Shift+C is the terminal's copy on Windows: not taken from it.
+        row(
+            CopyThreadFolder,
+            App,
+            "cmd-shift-c",
+            Dropped,
+            None,
+            act!(crate::CopyThreadFolder),
         ),
         row(
             OpenBasecamp,
@@ -1033,6 +1063,12 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
                 "Open the thread in a new window",
                 Bound(Id::OpenInNewWindow),
             ),
+            ("Copy a link to the thread", Bound(Id::CopyThreadLink)),
+            ("Copy the thread as Markdown", Bound(Id::CopyThreadMarkdown)),
+            (
+                "Copy the thread's working directory",
+                Bound(Id::CopyThreadFolder),
+            ),
             ("Settle the current thread", Bound(Id::SettleThread)),
             ("Stop the agent", Bound(Id::Interrupt)),
         ],
@@ -1208,11 +1244,14 @@ mod tests {
             .filter_map(|b| resolve(b, true))
             .map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default()))
             .collect();
-        // The 37 in main.rs, the 13 in notes.rs and the 2 in editor.rs.
-        assert_eq!(mac.len(), 37 + 13 + 2);
+        // The 40 in main.rs, the 13 in notes.rs and the 2 in editor.rs.
+        assert_eq!(mac.len(), 40 + 13 + 2);
         for (keys, ctx) in [
             ("cmd-q", ""),
             ("alt-cmd-e", ""),
+            ("alt-cmd-l", ""),
+            ("cmd-shift-m", ""),
+            ("cmd-shift-c", ""),
             ("cmd-k", "!IdeEditor"),
             ("cmd-k", "IdeEditor"),
             ("alt-cmd-backspace", "IdeEditor && hunks"),
@@ -1304,6 +1343,7 @@ mod tests {
             })
             .collect();
         let want = [
+            (Id::CopyThreadLink, "alt-shift-l"),
             (Id::SwitchMode, "alt-shift-e"),
             (Id::ToggleAiBar, "alt-shift-b"),
             (Id::KeepHunk, "ctrl-shift-y"),
@@ -1557,6 +1597,9 @@ mod tests {
                 "New thread: ⌘ N",
                 "Open a folder: ⌘ O",
                 "Open the thread in a new window: ⌘ ⇧ ↩",
+                "Copy a link to the thread: ⌥ ⌘ L",
+                "Copy the thread as Markdown: ⌘ ⇧ M",
+                "Copy the thread's working directory: ⌘ ⇧ C",
                 "Settle the current thread: ⌘ E",
                 "Stop the agent: ⌘ .",
             ]
@@ -1670,8 +1713,9 @@ mod tests {
                 .into_iter()
                 .map(|g| bindings_for(g, mac).len())
                 .sum();
-            // Windows drops Hide and Minimize and adds Ctrl+Shift+P and Ctrl+F4.
-            assert_eq!(n, if mac { 52 } else { 52 - 2 + 2 }, "mac: {mac}");
+            // Windows drops Hide, Minimize and Copy working directory (Ctrl+Shift+C is the
+            // terminal's copy there) and adds Ctrl+Shift+P and Ctrl+F4.
+            assert_eq!(n, if mac { 55 } else { 55 - 3 + 2 }, "mac: {mac}");
         }
     }
 

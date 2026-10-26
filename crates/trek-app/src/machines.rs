@@ -726,6 +726,15 @@ fn access_of(h: HandHolding) -> tr::Access {
     }
 }
 
+/// The first message of a thread continued on another machine: the conversation so far
+/// (`markdown`), said to come from computer `from`.
+pub fn continuing_text(from: &str, markdown: &str) -> String {
+    format!(
+        "Continuing this conversation from {from}:\n\n{}",
+        markdown.trim()
+    )
+}
+
 /// A transcript as the thread view takes it: rows (the machine's item ids, Trek's items), the
 /// cards waiting on the user, and the answer streaming in, if one is.
 pub struct Mapped {
@@ -1808,16 +1817,68 @@ impl Workspace {
         images: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        let prefs = self.draft_prefs.clone();
+        self.start_on_machine(host, project, text, images, prefs, true, cx)
+    }
+
+    /// Continue thread `id` on machine `host`: a new thread there whose first message is
+    /// `markdown` (the conversation so far), framed as coming from this computer, with the same
+    /// agent and model when the machine has them, in its copy of the project when it has one
+    /// (else in no project). Said in a toast when the machine can't take it.
+    pub fn continue_on_machine(
+        &mut self,
+        host: &str,
+        id: &str,
+        markdown: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(m) = self.machines.get(host) else {
+            return;
+        };
+        let project = self
+            .thread(id)
+            .and_then(|t| self.project_dir(t))
+            .filter(|dir| {
+                let name = self
+                    .projects
+                    .iter()
+                    .find(|p| &p.path == dir)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                m.project_for(dir, &name).is_some()
+            });
+        let mut prefs = self.prefs_in(&Scope::Thread(id.to_string()));
+        prefs.worktree = false;
+        prefs.plan = false;
+        let text = continuing_text(&crate::remote::host_info().name, markdown);
+        self.start_on_machine(host, project, text, vec![], prefs, false, cx)
+    }
+
+    /// `machine_start_thread` with `prefs` for the agent, model, effort and access; `give_back`:
+    /// a message that couldn't start goes back to the composer (one typed there).
+    #[allow(clippy::too_many_arguments)]
+    fn start_on_machine(
+        &mut self,
+        host: &str,
+        project: Option<PathBuf>,
+        text: String,
+        images: Vec<PathBuf>,
+        prefs: crate::workspace::Prefs,
+        give_back: bool,
+        cx: &mut Context<Self>,
+    ) {
         let text = text.trim().to_string();
         if text.is_empty() && images.is_empty() {
             return;
         }
-        let give_back = |ws: &mut Self, why: String, text: String, cx: &mut Context<Self>| {
+        let give_back = move |ws: &mut Self, why: String, text: String, cx: &mut Context<Self>| {
             cx.emit(WorkspaceEvent::Toast {
                 message: why,
                 undo: None,
             });
-            cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+            if give_back {
+                cx.emit(WorkspaceEvent::InsertIntoComposer(text));
+            }
             let _ = ws;
         };
         let Some(m) = self.machines.get(host) else {
@@ -1858,7 +1919,6 @@ impl Workspace {
                 (name, project_id)
             }
         };
-        let prefs = self.draft_prefs.clone();
         // The draft's agent and model when the machine has them; its default agent otherwise.
         let agent = m
             .agents
