@@ -15,13 +15,23 @@
 #                     an install block keeps its own.
 
 # The install block, one bullet per platform. Its wording lives only here: README.md's Install
-# sections say the same things, so change them together (docs/RELEASING.md).
+# sections say the same things, so change them together (docs/RELEASING.md). The Mac's points to
+# the disk image first; the archive is the same app, the one the updater downloads. With
+# TREK_NOTARIZED=1 (release.sh, when Apple notarized the release) it drops the Open Anyway step.
 trek_install_block() {
-  # The quoted heredoc keeps the backticks and the backslashes of the Windows paths as they are.
+  echo "## Install"
+  echo
+  # The quoted heredocs keep the backticks and the backslashes of the Windows paths as they are.
+  if [ "${TREK_NOTARIZED:-0}" = 1 ]; then
+    cat <<'EOF' | sed "s/@VERSION@/$1/g"
+- **macOS** (13 or later, Apple silicon): download `Trek-@VERSION@-darwin-aarch64.dmg`, open it and drag **Trek** onto **Applications**. (`Trek-@VERSION@-darwin-aarch64.app.tar.gz` is the same app as an archive: unpack it and move **Trek.app** to Applications.)
+EOF
+  else
+    cat <<'EOF' | sed "s/@VERSION@/$1/g"
+- **macOS** (13 or later, Apple silicon): download `Trek-@VERSION@-darwin-aarch64.dmg`, open it and drag **Trek** onto **Applications**. Apple hasn't notarized Trek, so macOS won't open it the first time: click **Done**, then in **System Settings › Privacy & Security** scroll to **Security**, click **Open Anyway** beside "Trek was blocked" and **Open Anyway** again. It asks only once. (`Trek-@VERSION@-darwin-aarch64.app.tar.gz` is the same app as an archive: unpack it and move **Trek.app** to Applications.)
+EOF
+  fi
   cat <<'EOF' | sed "s/@VERSION@/$1/g"
-## Install
-
-- **macOS**: `Trek-@VERSION@-darwin-aarch64.app.tar.gz`. Unpack it and move **Trek.app** to Applications (macOS 13 or later, Apple silicon). Apple hasn't notarized it, so the first launch takes one extra step: right-click Trek.app, then **Open**, then **Open** again.
 - **Windows**: `Trek-@VERSION@-windows-x86_64.zip`. Unzip it into a folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or `%LOCALAPPDATA%\Programs\Trek` (not Documents, Desktop, Downloads or Program Files), and run `trek.exe`. SmartScreen warns once: **More info**, then **Run anyway**. Updates install in place from Settings → Updates.
 EOF
 }

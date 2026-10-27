@@ -22,7 +22,8 @@ the user picked, and installs a release only if its archive matches that key.
    so a new certificate means every user grants those permissions again. To publish from another Mac,
    import the same p12 there (`security import codesign.p12 -k login.keychain-db -P "$(cat
    codesign.p12.password)" -T /usr/bin/codesign`) instead of creating a new identity.
-   With an Apple Developer ID you'd set `TREK_SIGN_IDENTITY` and add notarization; neither is done yet.
+   With an Apple Developer ID, `TREK_SIGN_IDENTITY` names it and the release is notarized: see
+   "Gatekeeper and notarization" below. Without one (today), macOS asks once on first launch.
 3. **Update signing key**: `~/.trek-signing/minisign.key` (mode 600), created with
    `minisign -G -p ~/.trek-signing/minisign.pub -s ~/.trek-signing/minisign.key`, which asks for a
    password. Only the public half is in the repository (`assets/update/minisign.pub`), compiled into
@@ -104,12 +105,28 @@ What it does:
    release commits it).
 3. Runs `script/bundle.sh` with `TREK_RELEASE_BUILD=1`: release build of `trek` and `trek-mcp`, icon,
    `Info.plist` (`CFBundleVersion` carries the full semver; the updater checks it; `TrekRelease` marks it
-   as a release), code signing.
+   as a release), code signing. With the `TREK_NOTARY_*` variables set (a Developer ID identity only),
+   `script/notarize.sh` then notarizes the app and staples the ticket to it, before it's archived.
 4. Packs `dist/Trek.app` without extended attributes into
    `dist/release/<version>/Trek-<version>-darwin-aarch64.app.tar.gz`, records its SHA-256, signs it with
    minisign (trusted comment `Trek <version> darwin-aarch64`; Trek refuses a signature whose trusted
    comment names another version) and verifies the signature against `assets/update/minisign.pub`, so a
    mismatched key fails here rather than on users' machines.
+
+   Then makes the disk image people install from, `Trek-<version>-darwin-aarch64.dmg`
+   (`script/dmg.sh`): a window with Trek.app on the left, an Applications link on the right, a
+   background with an arrow, "Drag Trek to Applications" and the Open Anyway path, and Trek's volume
+   icon. It's built with [dmgbuild](https://github.com/dmgbuild/dmgbuild), which writes the window's
+   layout (`.DS_Store`) itself, so no Finder scripting and it works on a headless runner; `dmg.sh`
+   installs it into a virtualenv of its own from `script/lib/dmgbuild-requirements.txt`, pinned by
+   hash (Python 3.10 or later). The layout is `script/lib/dmg-settings.py`; the background is
+   `assets/dmg/background.svg`, rendered to the committed `background.png` and `background@2x.png` by
+   `script/dmg-background.sh` (committed so the text doesn't depend on the build machine's fonts):
+   change the icon positions and the SVG together. The image is ULFO (LZFSE; opens on macOS 10.11 and
+   later). It is signed only with a Developer ID identity (and then notarized): a disk image signed by
+   a certificate macOS doesn't trust is assessed when opened and refused outright, while an unsigned one
+   mounts, and the app inside carries the signature that matters. The updater never downloads the
+   disk image, so it has no `.minisig` and isn't in the manifest.
 5. Writes `notes.md` (commit subjects since the most recent tag of the channel's line — the last stable
    tag for stable, the last version tag for beta, the `nightly` tag for nightly — without merges and
    release commits) and the manifest `<channel>.json`:
@@ -122,7 +139,9 @@ What it does:
    ```
 
    `release-notes.md` is the GitHub release's body: `notes.md`, a blank line and an **Install** block with
-   one bullet per platform. The Mac bullet says how to unpack and open Trek.app; the Windows one gives the
+   one bullet per platform. The Mac bullet sends people to the disk image first (open it, drag Trek to
+   Applications), gives the Open Anyway path for the first launch (left out when the release was
+   notarized), and names the `.app.tar.gz` as the same app in an archive; the Windows one gives the
    zip, the folder rule (see "Windows" below) and the SmartScreen step. The wording lives in one place,
    `trek_install_block` in `script/lib/notes.sh`; `README.md`'s Install sections say the same things, so
    change them together. A `--notes` file that already has an install block (a `## Install` heading, or a
@@ -131,21 +150,21 @@ What it does:
 
 6. Without `--dry-run`:
    - stable: commits `Release v<version>` on the current branch, tags `v<version>`, pushes both and
-     creates the GitHub release (marked latest) with the archive, its `.minisig`, `stable.json`, and
-     `release-notes.md` as its body;
+     creates the GitHub release (marked latest) with the disk image, the archive, its `.minisig`,
+     `stable.json`, and `release-notes.md` as its body;
    - beta / nightly: records the build as a commit off the branch, tags it (`v<version>` for a beta),
      moves the channel tag to it, pushes the tags only, and refreshes the channel's prerelease (its body
-     too): archive
-     first, manifest last, then older archives are deleted. The branch doesn't move and the version
-     bump is undone.
+     too): archive, signature and disk image first, manifest last, then older archives and disk images
+     are deleted. The branch doesn't move and the version bump is undone.
 
    With `--dry-run` the version bump is undone and nothing leaves the machine; the artifacts stay in
    `dist/release/<version>/`.
 
 Environment: `TREK_MINISIGN_KEY` (secret key path), `TREK_MINISIGN_PASSWORD` (its password, for a run with
 no terminal; otherwise it's asked for), `TREK_RELEASE_REPO` (default `dokyit/Trek`),
-`TREK_SIGN_IDENTITY`, and `TREK_RELEASE_DOWNLOAD_URL` to point the manifest's archive URL somewhere else
-(a staging server).
+`TREK_SIGN_IDENTITY`, `TREK_RELEASE_DOWNLOAD_URL` to point the manifest's archive URL somewhere else
+(a staging server), and `TREK_NOTARY_KEY` / `TREK_NOTARY_KEY_ID` / `TREK_NOTARY_ISSUER` to notarize
+(all three, with a Developer ID `TREK_SIGN_IDENTITY`; see "Gatekeeper and notarization").
 
 ## Publishing from anywhere
 
@@ -185,8 +204,9 @@ same version again ("tag … already exists"): take the next version, or delete 
 (`git push origin :refs/tags/v<version>`).
 
 A dry run builds, code-signs and minisigns both halves, verifies the signatures against
-`assets/update/minisign.pub`, shows both manifests and SHA-256s in the run's summary, and publishes
-nothing: no commit, no tag, no release. Without the code-signing secrets below it signs with a throwaway
+`assets/update/minisign.pub`, shows both manifests and SHA-256s in the run's summary, keeps the Mac disk
+image as the run's `mac-dmg` artifact (a week) to open and look at, and publishes nothing: no commit,
+no tag, no release. Without the code-signing secrets below it signs with a throwaway
 "Trek Local Signing" that `script/signing-identity.sh` makes on the runner. A dry run does not prove the
 real p12, the pushes or the release upload; the first real run is the first time those happen.
 
@@ -216,6 +236,62 @@ someone who can run a workflow, which sees both. A key without a password still 
 
 The Mac's own way, `script/release.sh` on the Mac, works as before. Run one or the other for a release,
 not both.
+
+## Gatekeeper and notarization
+
+**Today Trek isn't notarized, so macOS always asks once.** Releases are signed with "Trek Local
+Signing", a self-signed certificate; Gatekeeper trusts only Apple-issued Developer ID signatures that
+Apple has also notarized. A downloaded (quarantined) Trek is blocked on first launch whatever the
+packaging: "Trek" Not Opened → **Done**, then **System Settings › Privacy & Security**, scroll to
+**Security**, **Open Anyway** beside "Trek was blocked to protect your Mac", **Open Anyway** again and
+the login password or Touch ID. Since macOS 15 the old right-click › Open shortcut no longer skips
+this. The disk image's background and the release body's install block both give that path. macOS
+asks only once per installed copy; updates Trek installs itself aren't quarantined and don't ask.
+
+**What it takes to remove the prompt:**
+
+1. **Apple Developer Program**: US$99 a year (individual; an organization also needs a D-U-N-S
+   number). Enrollment takes a day or two to be approved.
+2. **Developer ID Application certificate** (the Account Holder makes it): Xcode › Settings › Accounts ›
+   Manage Certificates › + › Developer ID Application, or a CSR at developer.apple.com › Certificates.
+   Export it with its private key from Keychain Access as a `.p12` with a password.
+3. **App Store Connect API key** for `notarytool`: App Store Connect › Users and Access › Integrations ›
+   App Store Connect API › Team Keys › +, role **Developer**. Download `AuthKey_<id>.p8` (it can be
+   downloaded once) and note the key ID and the issuer ID shown above the list.
+4. **Secrets** (all five, or the workflow skips notarization with a warning):
+
+   ```sh
+   gh secret set TREK_DEVELOPER_ID_P12 --body "$(base64 -i DeveloperID.p12)"
+   gh secret set TREK_DEVELOPER_ID_P12_PASSWORD          # gh asks for it
+   gh secret set APPLE_NOTARY_KEY < AuthKey_ABCDE12345.p8
+   gh secret set APPLE_NOTARY_KEY_ID --body ABCDE12345
+   gh secret set APPLE_NOTARY_ISSUER_ID --body 00000000-0000-0000-0000-000000000000
+   ```
+
+With them, `release.yml`'s "Developer ID and notarization" step imports the certificate into a keychain
+of its own and sets `TREK_SIGN_IDENTITY` to it, and `release.sh` does the rest:
+
+- `script/lib/sign.sh` signs `trek`, `trek-mcp` and the bundle with the hardened runtime, a secure
+  timestamp and `script/lib/hardened-runtime.entitlements` (microphone for dictation, Apple events for
+  computer use; the runtime refuses both without them). Only a Developer ID switches these on; Trek
+  Local Signing builds are signed exactly as before.
+- `script/notarize.sh` sends the app (zipped) to Apple with `xcrun notarytool submit --wait`, staples
+  the ticket to it with `xcrun stapler staple` before the archive is made (so the updater's archive
+  carries it too), then does the same for the signed disk image. A rejection prints Apple's log
+  (`notarytool log`) and stops the release. Each submission usually takes a few minutes.
+- The install block drops the Open Anyway step, and the run's summary says "notarized and stapled".
+
+The same works from the Mac: `TREK_SIGN_IDENTITY="Developer ID Application: … (TEAMID)"
+TREK_NOTARY_KEY=~/.trek-signing/AuthKey_<id>.p8 TREK_NOTARY_KEY_ID=… TREK_NOTARY_ISSUER=…
+script/release.sh <version>`.
+
+**Switching is a one-time break for existing users**, so do it at a release that says so: a new
+certificate changes Trek's designated requirement, so macOS asks again for Accessibility, Screen
+Recording and the microphone, and Keychain items an earlier Trek saved (API keys, MCP tokens) can no
+longer be read without the user's login password; Trek shows them as locked in Settings instead of
+asking, and re-entering a key saves it afresh. After that the requirement names the team, not the
+certificate, so renewing the Developer ID certificate doesn't break it again. Keep `TREK_CODESIGN_P12`
+set as well: the workflow still imports it (and falls back to it if the Developer ID secrets go).
 
 ## Windows
 

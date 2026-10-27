@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 640 420">
+  <!-- The disk image window's background (script/dmg.sh, script/lib/dmg-settings.py): Trek.app's
+       icon sits at (160, 190), Applications at (480, 190), both 128 pt, in a window whose
+       content is 400 pt tall (420 here, so a shorter title bar still shows background). Rendered
+       to background.png and background@2x.png by script/dmg-background.sh; change those together. -->
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FCF9F6"/>
+      <stop offset="1" stop-color="#F3ECE5"/>
+    </linearGradient>
+    <linearGradient id="ember" gradientUnits="userSpaceOnUse" x1="258" y1="0" x2="383" y2="0">
+      <stop offset="0" stop-color="#FF9455"/>
+      <stop offset="1" stop-color="#E5571F"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="420" fill="url(#paper)"/>
+  <text x="320" y="62" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="22" font-weight="600" fill="#2B211B">Drag Trek to Applications</text>
+  <!-- The arrow, between the two icons' edges, on their centre line. -->
+  <path d="M 258 190 H 380" fill="none" stroke="url(#ember)" stroke-width="6" stroke-linecap="round"/>
+  <path d="M 364 172 L 383 190 L 364 208" fill="none" stroke="#E5571F" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="40" y1="312" x2="600" y2="312" stroke="#2B211B" stroke-opacity="0.08" stroke-width="1"/>
+  <text x="320" y="338" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="13" fill="#6F625A">If macOS says Trek can’t be opened:</text>
+  <text x="320" y="359" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+        font-size="13" font-weight="600" fill="#3D3029">System Settings › Privacy &amp; Security › Open Anyway</text>
+</svg>

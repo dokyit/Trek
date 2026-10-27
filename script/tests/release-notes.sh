@@ -90,6 +90,25 @@ out="$WORK/notes-with-windows-line"; mkdir "$out"
 trek_write_notes "$FIX/notes-with-windows-line.md" 0.2.0-beta.2 beta "$out" > /dev/null
 check "$out/release-notes.md" "$FIX/notes-with-windows-line.md" "--notes file with the old Windows line: the body is the file, no block added"
 
+# The Mac's bullet sends people to the disk image first, the archive after it, and says how to
+# get past Gatekeeper; a notarized release has no such step to explain.
+dmg_first() { # file
+  mac=$(grep '^- \*\*macOS\*\*' "$1")
+  dmg=${mac%%darwin-aarch64.dmg*}
+  tar=${mac%%darwin-aarch64.app.tar.gz*}
+  [ "$dmg" != "$mac" ] && [ "$tar" != "$mac" ] && [ ${#dmg} -lt ${#tar} ]
+}
+out="$WORK/auto-beta"
+ensure "install block: the disk image comes before the archive" dmg_first "$out/release-notes.md"
+ensure "install block, not notarized: the Open Anyway path" \
+  grep -q 'System Settings › Privacy & Security\*\* scroll to \*\*Security\*\*, click \*\*Open Anyway\*\*' "$out/release-notes.md"
+out="$WORK/notarized"; mkdir "$out"
+TREK_NOTARIZED=1 trek_write_notes "$FIX/notes-without-block.md" 0.2.0-beta.2 beta "$out" > /dev/null
+ensure "install block, notarized: the disk image comes before the archive" dmg_first "$out/release-notes.md"
+no_open_anyway() { ! grep -q 'Open Anyway' "$1"; }
+ensure "install block, notarized: no Open Anyway step" no_open_anyway "$out/release-notes.md"
+ensure "install block, notarized: one install block" one_block "$out/release-notes.md"
+
 # Nothing since the last tag: the maintenance line.
 git tag v0.2.1
 out="$WORK/maintenance"; mkdir "$out"

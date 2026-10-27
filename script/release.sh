@@ -4,8 +4,11 @@
 #   script/release.sh <version> [--channel stable|beta|nightly] [--notes FILE] [--dry-run]
 #
 # Sets the version, builds and signs Trek.app (script/bundle.sh), packs it as
-# Trek-<version>-darwin-<arch>.app.tar.gz, signs that with minisign, writes the channel manifest
-# (<channel>.json) and release notes, then tags, pushes and creates the GitHub release. --dry-run
+# Trek-<version>-darwin-<arch>.app.tar.gz (what the updater downloads), signs that with minisign,
+# makes the disk image people install from, Trek-<version>-darwin-<arch>.dmg (script/dmg.sh),
+# writes the channel manifest (<channel>.json) and release notes, then tags, pushes and creates
+# the GitHub release. With a Developer ID identity and the TREK_NOTARY_* variables, the app is
+# notarized before it's archived and the disk image after it's made (script/notarize.sh). --dry-run
 # stops before git and GitHub and puts the version back afterwards; everything it built stays in
 # dist/release/<version>/.
 #
@@ -29,6 +32,9 @@
 #   TREK_RELEASE_DOWNLOAD_URL  where the manifest says the archive lives (default: the GitHub
 #                              release); for testing against a local server
 #   TREK_SIGN_IDENTITY         code-signing identity (see script/lib/sign.sh)
+#   TREK_NOTARY_KEY, TREK_NOTARY_KEY_ID, TREK_NOTARY_ISSUER
+#                              an App Store Connect API key (script/notarize.sh): set all three,
+#                              with a Developer ID identity, and the release is notarized
 set -euo pipefail
 SELF=${0:A}
 cd "${SELF:h}/.."
@@ -67,6 +73,7 @@ KEY=${TREK_MINISIGN_KEY:-$HOME/.trek-signing/minisign.key}
 ARCH=$(uname -m); [[ $ARCH == arm64 ]] && ARCH=aarch64
 PLATFORM="darwin-$ARCH"
 NAME="Trek-$VERSION-$PLATFORM.app.tar.gz"
+DMG_NAME="Trek-$VERSION-$PLATFORM.dmg"
 if [[ $CHANNEL == stable ]]; then RELEASE_TAG="v$VERSION"; else RELEASE_TAG=$CHANNEL; fi
 # Nightlies don't get a version tag of their own; they'd bury the real ones.
 VERSION_TAG=""; [[ $CHANNEL != nightly ]] && VERSION_TAG="v$VERSION"
@@ -83,6 +90,16 @@ fi
 if (( ! KEY_LOCKED )); then
   echo "! $KEY has no password: anything running as you (an agent with full access, say) can read it" >&2
   echo "  and sign updates every installed Trek accepts. Give it one: docs/RELEASING.md, \"Update signing key\"." >&2
+fi
+# Notarization (docs/RELEASING.md, "Gatekeeper and notarization"): all three key variables and a
+# Developer ID identity, or none of it. Checked now, not after the build.
+NOTARIZE=0
+if [[ -n ${TREK_NOTARY_KEY:-}${TREK_NOTARY_KEY_ID:-}${TREK_NOTARY_ISSUER:-} ]]; then
+  [[ -f ${TREK_NOTARY_KEY:-} && -n ${TREK_NOTARY_KEY_ID:-} && -n ${TREK_NOTARY_ISSUER:-} ]] \
+    || die "notarizing takes all of TREK_NOTARY_KEY (a .p8 file), TREK_NOTARY_KEY_ID and TREK_NOTARY_ISSUER"
+  trek_is_developer_id "$(trek_sign_identity)" \
+    || die "Apple notarizes only what a Developer ID signed, not \"$(trek_sign_identity)\": set TREK_SIGN_IDENTITY"
+  NOTARIZE=1
 fi
 if (( ! DRY )); then
   # Tags others pushed, and where the channel tags moved: the version checks below read them.
@@ -156,6 +173,12 @@ fi
 TREK_RELEASE_BUILD=1 script/bundle.sh
 [[ $(trek_sign_identity) == "Trek Local Signing" || -n ${TREK_SIGN_IDENTITY:-} ]] \
   || echo "! signed with \"$(trek_sign_identity)\": fine for a dry run, refused for a real release"
+# Before the archive is made: the stapled ticket is part of what the updater downloads.
+if (( NOTARIZE )); then
+  script/notarize.sh dist/Trek.app
+else
+  echo "• not notarized (no TREK_NOTARY_* key): macOS asks once, Privacy & Security › Open Anyway"
+fi
 
 # ---------- archive, checksum, signature ----------
 rm -rf "$OUT"; mkdir -p "$OUT"
@@ -181,10 +204,18 @@ minisign -V -q -p assets/update/minisign.pub -m "$OUT/$NAME" -x "$OUT/$NAME.mini
   || die "$KEY doesn't match assets/update/minisign.pub; Trek would refuse this release"
 echo "• $NAME  sha256 $SHA  (signature verified with assets/update/minisign.pub)"
 
+# ---------- disk image ----------
+# What people install from: the same app, in a window that shows where to drag it. The updater
+# never downloads it, so it has no minisig.
+script/dmg.sh dist/Trek.app "$OUT/$DMG_NAME"
+if (( NOTARIZE )); then
+  script/notarize.sh "$OUT/$DMG_NAME"
+fi
+
 # ---------- notes ----------
 # script/lib/notes.sh: notes.md (the changes: the manifest's notes) and release-notes.md (those, plus
 # the install block: the GitHub release's body).
-trek_write_notes "$NOTES_FILE" "$VERSION" "$CHANNEL" "$OUT"
+TREK_NOTARIZED=$NOTARIZE trek_write_notes "$NOTES_FILE" "$VERSION" "$CHANNEL" "$OUT"
 
 # ---------- manifest ----------
 BASE=${TREK_RELEASE_DOWNLOAD_URL:-https://github.com/$REPO/releases/download/$RELEASE_TAG}
@@ -200,7 +231,7 @@ print(json.dumps({
 PY
 echo "• $OUT/$CHANNEL.json → ${BASE%/}/$NAME"
 
-ASSETS=("$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$CHANNEL.json")
+ASSETS=("$OUT/$DMG_NAME" "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$CHANNEL.json")
 if (( DRY )); then
   echo "• dry run: built $OUT; not committing, tagging, pushing or publishing. Would publish:"
   echo "    $REPO release $RELEASE_TAG ($CHANNEL): ${(j:, :)${ASSETS[@]:t}}"
@@ -240,13 +271,14 @@ else
   git tag -f -a "$CHANNEL" -m "Trek $VERSION" "$BUILT"
   git push -f origin "refs/tags/$CHANNEL"
   if gh release view "$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
-    gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$NAME" "$OUT/$NAME.minisig"
+    gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$NAME" "$OUT/$NAME.minisig" "$OUT/$DMG_NAME"
     gh release upload "$CHANNEL" --repo "$REPO" --clobber "$OUT/$CHANNEL.json"
     # The body is replaced whole from release-notes.md, never appended to: the install block is
     # there once, whatever the earlier builds' bodies said.
     gh release edit "$CHANNEL" --repo "$REPO" --prerelease --title "Trek $VERSION ($CHANNEL)" --notes-file "$OUT/release-notes.md"
     for asset in ${(f)"$(gh release view "$CHANNEL" --repo "$REPO" --json assets --jq '.assets[].name')"}; do
-      if [[ $asset == Trek-*.app.tar.gz* && $asset != "$NAME" && $asset != "$NAME.minisig" ]]; then
+      if [[ ( $asset == Trek-*.app.tar.gz* || $asset == Trek-*-darwin-*.dmg ) \
+            && $asset != "$NAME" && $asset != "$NAME.minisig" && $asset != "$DMG_NAME" ]]; then
         gh release delete-asset "$CHANNEL" "$asset" --repo "$REPO" -y
       fi
     done

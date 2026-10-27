@@ -96,15 +96,17 @@ A turn under the mock agent, captured by `script/capture.sh` — [video](docs/me
 
 ## Install
 
-Download `Trek-<version>-darwin-aarch64.app.tar.gz` from
-[Releases](https://github.com/dokyit/Trek/releases), unpack it (double-click) and move **Trek.app** to
-Applications. Trek needs macOS 13 or later on Apple silicon.
+Download `Trek-<version>-darwin-aarch64.dmg` from
+[Releases](https://github.com/dokyit/Trek/releases), open it and drag **Trek** onto **Applications**.
+Trek needs macOS 13 or later on Apple silicon. (`Trek-<version>-darwin-aarch64.app.tar.gz` is the same app
+as an archive: unpack it and move **Trek.app** to Applications.)
 
 Releases are signed with Trek's own certificate but **not notarized by Apple**, so the first launch needs
 one extra step. Either:
 
-- In Finder, right-click (or Control-click) Trek.app → **Open** → **Open**; or, on macOS 15 and later,
-  try to open it once, then go to System Settings → Privacy & Security and click **Open Anyway**.
+- Open Trek once; when macOS says it can't be opened, click **Done**, then in System Settings →
+  Privacy & Security scroll to Security and click **Open Anyway** beside "Trek was blocked", and
+  **Open Anyway** again. It asks only once. (Right-click → Open no longer does this on macOS 15 and later.)
 - Or clear the download quarantine in Terminal:
 
   ```sh
