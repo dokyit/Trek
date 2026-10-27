@@ -196,6 +196,23 @@ pub fn set_pace(pace: f32) {
     PACE.store((pace.max(0.) * 1000.) as u32, Ordering::Relaxed);
 }
 
+/// What `xcodebuild test` prints for `mock:simtest`.
+const SIM_TEST_OUTPUT: &str = "Testing started
+Test Suite 'All tests' started at 2026-10-26 20:48:10.253.
+Test Case '-[SampleTests.MathTests testAdds]' started.
+Test Case '-[SampleTests.MathTests testAdds]' passed (1.503 seconds).
+Test Case '-[SampleTests.MathTests testAddsNegatives]' started.
+Test Case '-[SampleTests.MathTests testAddsNegatives]' passed (1.507 seconds).
+Test Case '-[SampleTests.MathTests testFailsOnPurpose]' started.
+/tmp/Sample/Tests/SampleTests.swift:7: error: -[SampleTests.MathTests testFailsOnPurpose] : XCTAssertEqual failed: (\"2\") is not equal to (\"3\") - deliberate failure
+Test Case '-[SampleTests.MathTests testFailsOnPurpose]' failed (1.872 seconds).
+Test Case '-[SampleTests.SlowTests testSkips]' started.
+Test Case '-[SampleTests.SlowTests testSkips]' skipped (0.013 seconds).
+Test Case '-[SampleTests.SlowTests testWaitsABit]' started.
+Test Case '-[SampleTests.SlowTests testWaitsABit]' passed (2.001 seconds).
+\t Executed 5 tests, with 1 test skipped and 1 failure (0 unexpected) in 6.896 (6.906) seconds
+** TEST FAILED **";
+
 fn paced(ms: u64) -> Duration {
     Duration::from_millis(ms * PACE.load(Ordering::Relaxed) as u64 / 1000)
 }
@@ -256,6 +273,8 @@ enum Script {
     Background,
     /// Watch a test clip with Trek's `watch_video`, and link it (`mock:video`).
     Video,
+    /// Run an iOS app's tests on a simulator in a shell, one failing (`mock:simtest`).
+    SimTest,
     Limit(Duration),
     /// A 5-hour window nearly used up partway through, resetting after a while (`mock:nearlimit`).
     NearLimit(Duration),
@@ -463,6 +482,7 @@ impl Script {
                 "mcp" if w.starts_with("mock:") => Script::Mcp,
                 "background" if w.starts_with("mock:") => Script::Background,
                 "video" if w.starts_with("mock:") => Script::Video,
+                "simtest" if w.starts_with("mock:") => Script::SimTest,
                 _ => return None,
             })
         });
@@ -528,6 +548,7 @@ pub fn title(request: &str) -> String {
         Script::Mcp => "List the MCP servers",
         Script::Background => "Check the page in the background",
         Script::Video => "Watch the demo clip",
+        Script::SimTest => "Run the iOS tests",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
@@ -1044,6 +1065,17 @@ impl Session {
             Script::Handoff => self.handoff(text).await?,
             Script::Background => self.background_use(text).await?,
             Script::Video => self.watch_video().await?,
+            Script::SimTest => {
+                self.tool(
+                    "Run command",
+                    "xcodebuild test -scheme Sample -destination 'platform=iOS Simulator,name=iPhone 17'",
+                    SIM_TEST_OUTPUT,
+                    6000,
+                )
+                .await?;
+                self.say("4 of the 5 tests pass; `testFailsOnPurpose` fails as written (`sum(1, 1)` is 2, not 3).")
+                    .await?
+            }
             Script::Server(until) => self.server(until).await?,
             Script::Watch(after) => self.watch(after).await?,
             Script::Dev => {
@@ -3747,6 +3779,7 @@ mod tests {
         assert_eq!(Script::parse("mock:told", false), Script::Told);
         assert_eq!(Script::parse("mock:mcp", false), Script::Mcp);
         assert_eq!(Script::parse("mock:video", false), Script::Video);
+        assert_eq!(Script::parse("mock:simtest", false), Script::SimTest);
         assert_eq!(
             Script::parse("what were you told", false),
             Script::Answer,

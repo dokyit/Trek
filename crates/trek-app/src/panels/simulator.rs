@@ -3,6 +3,10 @@
 //! With AXe installed, a resident helper (panels/simhid.rs) streams the framebuffer at up to 30 fps
 //! and delivers touches, keys and buttons over one open HID session. Without it (or while the
 //! helper is being built), frames come from `simctl io screenshot` and input from the AXe CLI.
+//!
+//! It follows an agent's test runs too: a `sim_test` run live, from the log the simulator server
+//! writes as it goes (`runs_dir`), and an `xcodebuild test` the agent ran in a shell from its
+//! output once the call returns. Each test shows with its mark (`trek_ipc::simtest`).
 
 use crate::workspace::{Route, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -45,6 +49,124 @@ const TAP_SLOP: f32 = 6.;
 const LONG_PRESS: Duration = Duration::from_millis(450);
 
 const NEEDS_AXE: &str = "Needs AXe for touch input — install it from the banner";
+
+/// How often the folder of test run logs is looked at.
+const RUNS_POLL: Duration = Duration::from_millis(250);
+/// A run log untouched for longer isn't picked up (it's an old run's).
+const RUN_FRESH: Duration = Duration::from_secs(600);
+
+/// Where the simulator server's `sim_test` writes its run logs, for this panel to follow.
+pub fn runs_dir() -> PathBuf {
+    trek_core::paths::data_dir().join("sim-runs")
+}
+
+/// What an agent did to a simulator, as the workspace saw it in its tool calls.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SimActivity {
+    /// It drove one (Trek's simulator tools, `simctl`, AXe).
+    Drove,
+    /// Tool call `call` runs `xcodebuild test` in a shell.
+    TestStarted { call: String, label: String },
+    /// That call returned with its output.
+    TestFinished {
+        call: String,
+        output: String,
+        ok: bool,
+    },
+}
+
+/// Where the test run on show comes from.
+#[derive(Debug, Clone, PartialEq)]
+enum RunSource {
+    /// A `sim_test` run's log, read up to `offset`.
+    Log { path: PathBuf, offset: u64 },
+    /// A shell call's output, read once it returns.
+    Call(String),
+}
+
+struct TestView {
+    run: trek_ipc::simtest::TestRun,
+    source: RunSource,
+    started: Instant,
+    ended: Option<Instant>,
+    /// What's left of the log after its last full line.
+    partial: String,
+}
+
+impl TestView {
+    fn new(label: &str, source: RunSource) -> Self {
+        Self {
+            run: trek_ipc::simtest::TestRun::new(label),
+            source,
+            started: Instant::now(),
+            ended: None,
+            partial: String::new(),
+        }
+    }
+
+    /// Read what the log gained since the last look; whether anything changed.
+    fn read_log(&mut self) -> bool {
+        use std::io::{Read as _, Seek as _};
+        let RunSource::Log { path, offset } = &mut self.source else {
+            return false;
+        };
+        let Ok(mut file) = std::fs::File::open(&*path) else {
+            return false;
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if len <= *offset || file.seek(std::io::SeekFrom::Start(*offset)).is_err() {
+            return false;
+        }
+        let mut buf = Vec::with_capacity((len - *offset) as usize);
+        if file.read_to_end(&mut buf).is_err() {
+            return false;
+        }
+        *offset += buf.len() as u64;
+        self.partial.push_str(&String::from_utf8_lossy(&buf));
+        let Some(cut) = self.partial.rfind('\n') else {
+            return false;
+        };
+        let complete: String = self.partial.drain(..=cut).collect();
+        for line in complete.lines() {
+            if trek_ipc::simtest::RunHeader::parse(line).is_some() {
+                continue;
+            }
+            if let Some(code) = trek_ipc::simtest::footer_code(line) {
+                self.run.finish(code == 0);
+                self.ended = Some(Instant::now());
+                continue;
+            }
+            self.run.feed(line);
+        }
+        true
+    }
+}
+
+/// The newest run log in `dir` written to lately.
+fn newest_run_log(dir: &Path) -> Option<PathBuf> {
+    let newest = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+        .filter(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t.elapsed().is_ok_and(|d| d < RUN_FRESH))
+        })
+        .max_by_key(|e| e.file_name())?
+        .path();
+    Some(newest)
+}
+
+/// A run log's header (its first line, read alone: the log can be long).
+fn run_header(path: &Path) -> Option<trek_ipc::simtest::RunHeader> {
+    use std::io::BufRead as _;
+    let mut first = String::new();
+    std::io::BufReader::new(std::fs::File::open(path).ok()?)
+        .read_line(&mut first)
+        .ok()?;
+    trek_ipc::simtest::RunHeader::parse(&first)
+}
 
 // ---------------------------------------------------------------------------------------------
 // simctl / AXe plumbing (all of it runs on background threads)
@@ -480,6 +602,13 @@ pub struct SimulatorPanel {
     link_paused: bool,
     link_retry: Option<Instant>,
     _link_events: Option<Task<()>>,
+    /// The test run on show, live or just finished.
+    test: Option<TestView>,
+    /// The test run the user put away (its log), so it doesn't come back.
+    dismissed_log: Option<PathBuf>,
+    last_runs_poll: Instant,
+    /// An agent drove a simulator: show the one it booted once the list has it.
+    follow_booted: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -589,6 +718,10 @@ impl SimulatorPanel {
             link_paused: false,
             link_retry: None,
             _link_events: None,
+            test: None,
+            dismissed_log: None,
+            last_runs_poll: Instant::now() - RUNS_POLL,
+            follow_booted: false,
             _tasks: vec![errors, poll],
             _subscriptions: vec![sub],
         }
@@ -639,15 +772,102 @@ impl SimulatorPanel {
     }
 
     fn on_screen(&self, window: &Window, cx: &App) -> bool {
+        // A window kept behind others for screenshots (`TREK_FORCE_ACTIVE`) counts as seen.
         self.visible
-            && window.is_visible()
+            && (window.is_visible() || crate::mascot::force_active())
             && !matches!(
                 self.workspace.read(cx).route,
                 Route::Settings(_) | Route::Onboarding
             )
     }
 
+    /// What an agent just did to a simulator (see `Workspace` and the root's follow-up).
+    pub fn activity(&mut self, activity: SimActivity, cx: &mut Context<Self>) {
+        match activity {
+            SimActivity::Drove => {
+                self.follow_booted = true;
+                self.last_list = None;
+            }
+            SimActivity::TestStarted { call, label } => {
+                // A live `sim_test` run has the panel; a shell run shows when there's none.
+                let live_log = self.test.as_ref().is_some_and(|t| {
+                    matches!(t.source, RunSource::Log { .. }) && !t.run.phase.done()
+                });
+                if !live_log {
+                    self.test = Some(TestView::new(&label, RunSource::Call(call)));
+                }
+                self.follow_booted = true;
+                self.last_list = None;
+            }
+            SimActivity::TestFinished { call, output, ok } => {
+                if let Some(t) = self
+                    .test
+                    .as_mut()
+                    .filter(|t| t.source == RunSource::Call(call.clone()))
+                {
+                    t.run.feed_all(&output);
+                    t.run.finish(ok);
+                    t.ended = Some(Instant::now());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Follow the newest `sim_test` run log: start on a new one, read what the current one gained.
+    fn poll_runs(&mut self, cx: &mut Context<Self>) {
+        if self.last_runs_poll.elapsed() < RUNS_POLL {
+            return;
+        }
+        self.last_runs_poll = Instant::now();
+        if let Some(path) = newest_run_log(&runs_dir()) {
+            let current = matches!(
+                self.test.as_ref().map(|t| &t.source),
+                Some(RunSource::Log { path: p, .. }) if *p == path
+            );
+            let header = (!current && self.dismissed_log.as_ref() != Some(&path))
+                .then(|| run_header(&path))
+                .flatten();
+            if let Some(header) = header {
+                let mut view = TestView::new(
+                    &header.label,
+                    RunSource::Log {
+                        path: path.clone(),
+                        offset: 0,
+                    },
+                );
+                // Its clock from when the run began, not from when this tool saw it.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or_default();
+                let age =
+                    Duration::from_millis(now_ms.saturating_sub(header.started_ms).max(0) as u64);
+                view.started = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+                self.test = Some(view);
+                // The device the run is on is the one to watch.
+                if self.devices.iter().any(|d| d.udid == header.udid) {
+                    self.selected = Some(header.udid.clone());
+                    self.unchanged = 0;
+                } else {
+                    self.follow_booted = true;
+                    self.last_list = None;
+                }
+                cx.notify();
+            }
+        }
+        if let Some(t) = self.test.as_mut() {
+            if t.read_log() {
+                cx.notify();
+            } else if t.ended.is_none() {
+                // The clock on a run in progress.
+                cx.notify();
+            }
+        }
+    }
+
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.poll_runs(cx);
         if !self.on_screen(window, cx) {
             if let Some(link) = self.link.as_ref().filter(|_| !self.link_paused) {
                 link.send("fps 0");
@@ -747,7 +967,10 @@ impl SimulatorPanel {
                 .selected
                 .as_ref()
                 .is_some_and(|id| this.devices.iter().any(|d| &d.udid == id));
-            if !valid {
+            // An agent drove a simulator: if the one on show isn't running, show the one that is.
+            let follow = std::mem::take(&mut this.follow_booted)
+                && !this.current().is_some_and(|d| d.booted());
+            if !valid || follow && this.devices.iter().any(|d| d.booted()) {
                 this.selected = this
                     .devices
                     .iter()
@@ -2183,6 +2406,197 @@ impl Render for SimulatorPanel {
                 )
             })
             .child(div().flex_1().min_h_0().child(self.body(window, cx)))
+            .children(self.test_card(cx))
+    }
+}
+
+impl SimulatorPanel {
+    /// The test run on show: how it stands, the test running now, and every test with its mark
+    /// (newest first, so the one running is at the top).
+    fn test_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use trek_ipc::simtest::{CaseStatus, Phase};
+        let t = self.test.as_ref()?;
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let (green, red) = (crate::palette::emerald(cx), crate::palette::red(cx));
+        let run = &t.run;
+        let (passed, failed, skipped) = run.counts();
+        let secs = t
+            .ended
+            .unwrap_or_else(Instant::now)
+            .duration_since(t.started)
+            .as_secs();
+        let elapsed = if secs >= 60 {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        } else {
+            format!("{secs}s")
+        };
+        let status: AnyElement = match run.phase {
+            Phase::Building | Phase::Testing => Spinner::new().xsmall().into_any_element(),
+            Phase::Passed => Icon::new(Lucide::CircleCheck)
+                .xsmall()
+                .text_color(green)
+                .into_any_element(),
+            Phase::Failed => Icon::new(Lucide::CircleX)
+                .xsmall()
+                .text_color(red)
+                .into_any_element(),
+        };
+        let now = match (run.phase, run.current()) {
+            (Phase::Building, _) => Some("Building…".to_string()),
+            (_, Some(c)) => Some(format!("Running {}", c.title())),
+            (Phase::Testing, None) => Some("Testing…".to_string()),
+            (Phase::Passed, _) => run.summary.clone().or(Some("All tests passed".into())),
+            (Phase::Failed, _) if run.cases.is_empty() => Some(
+                run.errors
+                    .first()
+                    .cloned()
+                    .unwrap_or("The run failed".into()),
+            ),
+            (Phase::Failed, _) => run.summary.clone(),
+        };
+        let count = |n: usize, icon: Lucide, color: Hsla| {
+            h_flex()
+                .gap(px(3.))
+                .text_color(color)
+                .child(Icon::new(icon).xsmall())
+                .child(n.to_string())
+        };
+        let rows = run.cases.iter().rev().enumerate().map(|(ix, c)| {
+            let (icon, color): (AnyElement, Hsla) = match c.status {
+                CaseStatus::Running => (Spinner::new().xsmall().into_any_element(), muted),
+                CaseStatus::Passed => (
+                    Icon::new(Lucide::Check)
+                        .xsmall()
+                        .text_color(green)
+                        .into_any_element(),
+                    theme.foreground,
+                ),
+                CaseStatus::Failed => (
+                    Icon::new(Lucide::X)
+                        .xsmall()
+                        .text_color(red)
+                        .into_any_element(),
+                    theme.foreground,
+                ),
+                CaseStatus::Skipped => (
+                    Icon::new(Lucide::CircleSlash)
+                        .xsmall()
+                        .text_color(muted)
+                        .into_any_element(),
+                    muted,
+                ),
+            };
+            v_flex()
+                .id(("sim-test-case", ix))
+                .py(px(3.))
+                .gap(px(2.))
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .text_xs()
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(14.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(color)
+                                .child(c.title()),
+                        )
+                        .children(c.seconds.map(|s| {
+                            div()
+                                .flex_none()
+                                .text_color(muted)
+                                .child(format!("{s:.2}s"))
+                        })),
+                )
+                .children(
+                    c.message
+                        .clone()
+                        .filter(|_| c.status == CaseStatus::Failed)
+                        .map(|m| {
+                            div()
+                                .pl(px(22.))
+                                .text_xs()
+                                .text_color(red.opacity(0.9))
+                                .line_clamp(2)
+                                .child(m)
+                        }),
+                )
+        });
+        Some(
+            v_flex()
+                .id("sim-tests")
+                .flex_none()
+                .border_t_1()
+                .border_color(theme.border)
+                .px(px(12.))
+                .pt(px(8.))
+                .pb(px(6.))
+                .gap(px(4.))
+                .child(
+                    h_flex()
+                        .h(px(24.))
+                        .gap(px(8.))
+                        .text_sm()
+                        .child(status)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(format!("Tests · {}", run.label)),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            h_flex()
+                                .gap(px(10.))
+                                .text_xs()
+                                .child(count(passed, Lucide::Check, green))
+                                .when(failed > 0, |el| el.child(count(failed, Lucide::X, red)))
+                                .when(skipped > 0, |el| {
+                                    el.child(count(skipped, Lucide::CircleSlash, muted))
+                                })
+                                .child(div().text_color(muted).child(elapsed)),
+                        )
+                        .child(
+                            crate::ui::icon_button(
+                                "sim-tests-close",
+                                IconName::Close,
+                                "Hide the test run",
+                            )
+                            .xsmall()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(t) = this.test.take() {
+                                    if let RunSource::Log { path, .. } = t.source {
+                                        this.dismissed_log = Some(path);
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                        ),
+                )
+                .children(now.map(|n| div().text_xs().text_color(muted).truncate().child(n)))
+                .when(!run.cases.is_empty(), |el| {
+                    el.child(
+                        v_flex()
+                            .id("sim-test-cases")
+                            .max_h(px(168.))
+                            .overflow_y_scroll()
+                            .children(rows),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 }
 

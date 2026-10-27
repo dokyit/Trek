@@ -17,9 +17,15 @@ pub const AXE_MISSING: &str = "Touch input needs AXe. Turn on 'Simulator touch i
 const INSTRUCTIONS: &str = "iOS Simulator control. Use `sim_list` to find devices and `sim_boot` to start one. \
 `sim_screenshot` returns an image sized in device points (downscaled further only if very large) and reports the \
 mapping; x/y for sim_tap and sim_swipe are pixel coordinates in that screenshot. Every tool takes an optional `udid` \
-(default: the booted simulator). Take a fresh screenshot after acting to verify the result.";
+(default: the booted simulator). Take a fresh screenshot after acting to verify the result. Run XCTest or Swift \
+Testing suites with `sim_test` rather than `xcodebuild test` in a shell: the user watches each test pass or fail live \
+in Trek's Simulator tool, and you get a short report of the failures.";
 
 const SIMCTL_TIMEOUT: Duration = Duration::from_secs(120);
+/// The longest a `sim_test` run may take before it's stopped.
+pub const TEST_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Run logs older than this are deleted when a new run starts.
+const RUN_LOG_KEEP: Duration = Duration::from_secs(24 * 3600);
 const AXE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
@@ -325,6 +331,136 @@ impl Simulator {
         ))])
     }
 
+    /// `xcodebuild test` on a simulator, its output written line by line to a run log that Trek's
+    /// Simulator tool follows (see `trek_ipc::simtest`), its result read back as a short report.
+    fn sim_test(&self, args: &Value) -> ToolResult {
+        use std::io::{BufRead as _, Write as _};
+        use trek_ipc::simtest::{FOOTER, RunHeader, TestRun};
+
+        let scheme = arg_str(args, "scheme")?.trim().to_string();
+        let dev = self.resolve(args)?;
+        let path = PathBuf::from(opt_str(args, "path").unwrap_or("."));
+        let only: Vec<String> = args
+            .get("only_testing")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (cwd, mut cmd_args) = test_target(&path)?;
+        cmd_args.extend([
+            "test".to_string(),
+            "-scheme".into(),
+            scheme.clone(),
+            "-destination".into(),
+            format!("platform=iOS Simulator,id={}", dev.udid),
+        ]);
+        if let Some(plan) = opt_str(args, "test_plan") {
+            cmd_args.extend(["-testPlan".into(), plan.to_string()]);
+        }
+        cmd_args.extend(only.iter().map(|t| format!("-only-testing:{t}")));
+
+        let dir = std::env::var_os(trek_ipc::simtest::ENV_RUNS_DIR)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("trek-sim-runs"));
+        let _ = std::fs::create_dir_all(&dir);
+        prune_run_logs(&dir);
+        let started_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default();
+        let log_path = dir.join(format!("{started_ms}-{}.log", std::process::id()));
+        let mut log = std::fs::File::create(&log_path)
+            .map_err(|e| format!("Couldn't write the run log {}: {e}", log_path.display()))?;
+        let header = RunHeader {
+            label: scheme.clone(),
+            udid: dev.udid.clone(),
+            started_ms,
+        };
+        let _ = log.write_all(header.line().as_bytes());
+
+        let mut child = std::process::Command::new("/usr/bin/xcodebuild") // spawn: ok
+            .args(&cmd_args)
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Couldn't run xcodebuild: {e}"))?;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let readers: Vec<_> = [
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|pipe| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            })
+        })
+        .collect();
+        drop(tx);
+
+        let mut run = TestRun::new(&scheme);
+        let mut tail: std::collections::VecDeque<String> = Default::default();
+        let deadline = std::time::Instant::now() + TEST_TIMEOUT;
+        let mut timed_out = false;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(line) => {
+                    let _ = writeln!(log, "{line}");
+                    run.feed(&line);
+                    tail.push_back(line);
+                    if tail.len() > 40 {
+                        tail.pop_front();
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if std::time::Instant::now() >= deadline {
+                        timed_out = true;
+                        let _ = child.kill();
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        for r in readers {
+            let _ = r.join();
+        }
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        let _ = writeln!(log, "{FOOTER}{code}");
+        run.finish(code == 0);
+
+        let mut out = run.report();
+        if timed_out {
+            out.push_str(&format!(
+                "\nStopped after {} minutes.",
+                TEST_TIMEOUT.as_secs() / 60
+            ));
+        }
+        if run.cases.is_empty() {
+            out.push_str("\nLast lines:\n");
+            out.push_str(&Vec::from(tail).join("\n"));
+        }
+        out.push_str(&format!("\nFull log: {}", log_path.display()));
+        Ok(vec![text(out)])
+    }
+
     fn sim_tap(&self, args: &Value) -> ToolResult {
         let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
         find_axe().ok_or(AXE_MISSING)?;
@@ -419,6 +555,54 @@ impl Simulator {
         let dev = self.resolve_booted(args)?;
         axe(&["button", button, "--udid", &dev.udid], None)?;
         Ok(vec![text(format!("Pressed {button} on {}.", dev.name))])
+    }
+}
+
+/// Where `xcodebuild` runs and how it's told the project: a `.xcworkspace` or `.xcodeproj` by
+/// flag, a folder (with one of them, or a `Package.swift`) by running in it.
+fn test_target(path: &std::path::Path) -> Result<(PathBuf, Vec<String>), String> {
+    if !path.exists() {
+        return Err(format!("{} does not exist", path.display()));
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let flag = match ext {
+        "xcworkspace" => Some("-workspace"),
+        "xcodeproj" => Some("-project"),
+        _ => None,
+    };
+    match flag {
+        Some(flag) => {
+            let cwd = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            Ok((cwd, vec![flag.to_string(), path.display().to_string()]))
+        }
+        None if path.is_dir() => Ok((path.to_path_buf(), vec![])),
+        None => Err(format!(
+            "{} isn't a .xcworkspace, a .xcodeproj or a folder with one (or a Package.swift)",
+            path.display()
+        )),
+    }
+}
+
+/// Delete run logs nobody will look at again.
+fn prune_run_logs(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|d| d > RUN_LOG_KEEP));
+        if old && e.path().extension().is_some_and(|x| x == "log") {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
 }
 
@@ -547,6 +731,23 @@ so its pixel coordinates are what sim_tap and sim_swipe expect. The text block r
                     "required": ["name"],
                 }),
             },
+            ToolDef {
+                name: "sim_test",
+                description: "Run a scheme's tests (XCTest, Swift Testing, UI tests) on a simulator with `xcodebuild test`. \
+The user watches them live in Trek's Simulator tool: the device's screen and each test passing or failing. Returns how \
+the run ended, the counts and every failure with its message, and the path of the full log.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "scheme": {"type": "string", "description": "The scheme to test"},
+                        "path": {"type": "string", "description": "A .xcworkspace, a .xcodeproj, or a folder with one or with a Package.swift (default: the working directory)"},
+                        "only_testing": {"type": "array", "items": {"type": "string"}, "description": "Limit the run: Target, Target/Class or Target/Class/testMethod"},
+                        "test_plan": {"type": "string", "description": "A test plan of the scheme"},
+                        "udid": udid_prop(),
+                    },
+                    "required": ["scheme"],
+                }),
+            },
         ]
     }
 
@@ -563,6 +764,7 @@ so its pixel coordinates are what sim_tap and sim_swipe expect. The text block r
             "sim_swipe" => self.sim_swipe(args),
             "sim_type" => self.sim_type(args),
             "sim_button" => self.sim_button(args),
+            "sim_test" => self.sim_test(args),
             other => Err(format!("Unknown tool {other}")),
         }
     }

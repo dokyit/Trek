@@ -1939,6 +1939,14 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row("Touch input (AXe)", "Taps, swipes and typing in the simulator, for you and for agents.", axe_control, cx),
+                    Self::row(
+                        "Show the simulator live",
+                        "When the agent of the thread you're on starts driving a simulator or running its tests, the Simulator tool opens beside the chat with the device's screen streaming and each test's result.",
+                        self.switch("sim-follow", s.tools.simulator_follow, |s, v| {
+                            s.tools.simulator_follow = v
+                        }),
+                        cx,
+                    ),
                 ],
                 cx,
             ));

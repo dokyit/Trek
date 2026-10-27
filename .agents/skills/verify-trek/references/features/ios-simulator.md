@@ -15,11 +15,11 @@ Press ⌘J and choose **Simulator**. Pick or boot a device, install AXe if promp
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot simulator-panel
 ```
 
-The Trek verification CLI opens the panel only. Device automation belongs to `trek-mcp` (`sim_list`, `sim_boot`, `sim_screenshot`, `sim_tap`, `sim_type`, and related tools) and may change simulator state.
+The Trek verification CLI opens the panel only. `send "mock:simtest"` has the mock agent run `xcodebuild test` in a shell: the Simulator tool comes forward (Settings › Tools › Show the simulator live) and shows each test's mark when the call returns. A live run comes from `trek-mcp simulator`'s `sim_test`, which writes its log to `<data>/sim-runs` (`TREK_SIM_RUNS`) as it goes; the tool tails the newest one. Device automation belongs to `trek-mcp` (`sim_list`, `sim_boot`, `sim_screenshot`, `sim_tap`, `sim_type`, and related tools) and may change simulator state.
 
 ## Code
 
-`crates/trek-app/src/panels/simulator.rs`, `crates/trek-mcp/src/simulator.rs`.
+`crates/trek-app/src/panels/simulator.rs`, `crates/trek-mcp/src/simulator.rs`, `crates/trek-ipc/src/simtest.rs` (the `xcodebuild test` parser).
 
 ## Verify
 

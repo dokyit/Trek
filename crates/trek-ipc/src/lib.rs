@@ -40,6 +40,7 @@ use std::path::PathBuf;
 pub mod instance;
 #[cfg(any(feature = "server", test))]
 pub mod server;
+pub mod simtest;
 #[cfg(windows)]
 mod windows;
 

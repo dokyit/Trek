@@ -6,7 +6,7 @@ pub mod explorer;
 pub mod git;
 pub mod ide_search;
 mod simhid;
-mod simulator;
+pub mod simulator;
 pub mod terminal;
 pub mod terminal_links;
 
@@ -92,7 +92,13 @@ pub struct RightPanel {
     drawn: std::rc::Rc<std::cell::Cell<(bool, bool, bool)>>,
     /// The tab last scrolled into view.
     scrolled_to: Option<u64>,
+    /// When the Simulator tool last opened itself for an agent (`simulator_activity`).
+    sim_followed: Option<std::time::Instant>,
 }
+
+/// After the Simulator tool opened itself for an agent, how long it leaves the panel be: closed
+/// or covered by the user meanwhile, it doesn't keep coming back.
+const SIM_FOLLOW_QUIET: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl RightPanel {
     pub fn new(workspace: Entity<Workspace>) -> Self {
@@ -107,6 +113,7 @@ impl RightPanel {
             tab_scroll: ScrollHandle::new(),
             drawn: Default::default(),
             scrolled_to: None,
+            sim_followed: None,
         }
     }
 
@@ -214,6 +221,35 @@ impl RightPanel {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// An agent drove a simulator. With `follow` (the setting on, its thread in view) the
+    /// Simulator tool comes to the front to show it, unless it did so lately; an open Simulator
+    /// tool hears of it either way (a test run to follow, a device just booted).
+    pub fn simulator_activity(
+        &mut self,
+        activity: simulator::SimActivity,
+        follow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let showing = self.open
+            && self
+                .active_tab()
+                .is_some_and(|t| t.tool == PanelTool::Simulator);
+        let quiet = self
+            .sim_followed
+            .is_some_and(|t| t.elapsed() < SIM_FOLLOW_QUIET);
+        if follow && !showing && !quiet && !cfg!(windows) {
+            self.sim_followed = Some(std::time::Instant::now());
+            self.open_tool(PanelTool::Simulator, window, cx);
+        }
+        if let Some(sim) = self.tabs.iter().find_map(|t| match &t.view {
+            View::Simulator(s) => Some(s.clone()),
+            _ => None,
+        }) {
+            sim.update(cx, |s, cx| s.activity(activity, cx));
+        }
     }
 
     /// The Browser tool, if it's open (the shots harness's `browser` command).

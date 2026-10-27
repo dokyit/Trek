@@ -286,6 +286,14 @@ impl TrekWindow {
                         this.right_panel
                             .update(cx, |p, cx| p.open_tool(tool, window, cx));
                     }
+                    WorkspaceEvent::Simulator {
+                        activity, follow, ..
+                    } => {
+                        let (activity, follow) = (activity.clone(), *follow);
+                        this.right_panel.update(cx, |p, cx| {
+                            p.simulator_activity(activity, follow, window, cx)
+                        });
+                    }
                     // The Browser is the tools panel's, beside the chat, as for `OpenTool`.
                     WorkspaceEvent::OpenInBrowser(url) => {
                         let url = url.clone();

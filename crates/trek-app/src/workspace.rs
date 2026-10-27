@@ -1022,6 +1022,13 @@ pub enum EditorCommand {
 pub enum WorkspaceEvent {
     /// Open (or focus) a right-panel tool.
     OpenTool(PanelTool),
+    /// The agent of `thread` drove a simulator; `follow`: the Simulator tool may come forward to
+    /// show it (the setting is on and the thread is the one in the main window).
+    Simulator {
+        thread: String,
+        activity: crate::panels::simulator::SimActivity,
+        follow: bool,
+    },
     /// Open the context card over the composer of `scope` (the title bar's hub asks for it).
     OpenContextCard(Scope),
     /// Open a page in the tools panel's Browser (a link clicked in a terminal).
@@ -4939,6 +4946,8 @@ impl Workspace {
         // to the composer instead, so the user can rethink them.
         let mut continue_queue = false;
         let mut notify_text: Option<String> = None;
+        // What the agent did to a simulator, for the Simulator tool.
+        let mut sim: Vec<crate::panels::simulator::SimActivity> = vec![];
         // The user stopped the turn: nothing to tell them.
         let mut interrupted = false;
         // The turn ended at a usage limit: the thread pauses until it resets.
@@ -5249,6 +5258,7 @@ impl Workspace {
                         );
                         pr_fx.watch.extend(fx.watch);
                         pr_fx.changed.extend(fx.changed);
+                        sim.extend(sim_activity(&tid, &title, &detail));
                     }
                     AgentEvent::ToolLines {
                         id: tid,
@@ -5277,6 +5287,18 @@ impl Workspace {
                         output,
                         ok,
                     } => {
+                        let testing = live.items.iter().rev().any(|i| {
+                            matches!(i, Item::Tool { id, title, detail, .. } if *id == tid
+                                && matches!(sim_activity(&tid, title, detail),
+                                    Some(crate::panels::simulator::SimActivity::TestStarted { .. })))
+                        });
+                        if testing {
+                            sim.push(crate::panels::simulator::SimActivity::TestFinished {
+                                call: tid.clone(),
+                                output: output.clone(),
+                                ok,
+                            });
+                        }
                         let fx = crate::pr_card::tool_finished(
                             live,
                             &tid,
@@ -5700,6 +5722,18 @@ impl Workspace {
         // Whoever waits on a thread an agent started hears it's finished, or needs the user.
         if finished || asked {
             self.lineage_turn_ended(id, interrupted, cx);
+        }
+        if !sim.is_empty() {
+            let follow = self.settings.tools.simulator_follow
+                && self.mode == Mode::Agents
+                && self.in_main(id);
+            for activity in sim {
+                cx.emit(WorkspaceEvent::Simulator {
+                    thread: id.to_string(),
+                    activity,
+                    follow,
+                });
+            }
         }
         if let Some(message) = notify_text.filter(|_| !side_chat) {
             let button = self
@@ -8833,12 +8867,25 @@ impl Workspace {
             let bin = bin.display().to_string();
             let windows = crate::words::is_windows();
             for family in trek_mcp_families(tools.computer_use, tools.simulator, windows) {
-                out.push(McpServer::stdio(
-                    format!("trek-{family}"),
-                    bin.clone(),
-                    vec![family.into()],
-                    trek_mcp_env(family, tools.computer_background, windows),
-                ));
+                let mut env = trek_mcp_env(family, tools.computer_background, windows);
+                // The simulator's `sim_test` writes its run where the Simulator tool reads it,
+                // and a test run takes minutes.
+                let simulator = family == "simulator";
+                if simulator {
+                    env.push((
+                        trek_ipc::simtest::ENV_RUNS_DIR.to_string(),
+                        crate::panels::simulator::runs_dir().display().to_string(),
+                    ));
+                }
+                out.push(McpServer {
+                    tool_timeout_secs: simulator.then_some(SIM_TEST_TIMEOUT_SECS),
+                    ..McpServer::stdio(
+                        format!("trek-{family}"),
+                        bin.clone(),
+                        vec![family.into()],
+                        env,
+                    )
+                });
             }
             if tools.video {
                 out.push(video_server(&bin));
@@ -10035,6 +10082,34 @@ fn video_server(bin: &str) -> McpServer {
 /// How long a `watch_video` call may take.
 const VIDEO_TIMEOUT_SECS: u64 = 1800;
 
+/// How long a simulator tool call may take: `sim_test` runs a whole test suite (trek-mcp stops
+/// one at 30 minutes).
+const SIM_TEST_TIMEOUT_SECS: u64 = 1860;
+
+/// What tool call `call` (its title and detail, as the transcript has them) does to a simulator:
+/// one of Trek's simulator tools or a shell command that drives one (`simctl`, AXe) or runs tests.
+fn sim_activity(
+    call: &str,
+    title: &str,
+    detail: &str,
+) -> Option<crate::panels::simulator::SimActivity> {
+    use crate::panels::simulator::SimActivity;
+    use trek_ipc::simtest::{SimCommand, is_sim_tool, sim_command};
+    if is_sim_tool(title) {
+        return Some(SimActivity::Drove);
+    }
+    if crate::activity::tool_kind(title) != crate::activity::ToolKind::Command {
+        return None;
+    }
+    match sim_command(detail)? {
+        SimCommand::Drive => Some(SimActivity::Drove),
+        SimCommand::Test(label) => Some(SimActivity::TestStarted {
+            call: call.to_string(),
+            label,
+        }),
+    }
+}
+
 /// The environment Trek's own MCP server `family` starts with: the computer's works in the
 /// background where asked, on a Mac (Windows' works in front).
 fn trek_mcp_env(family: &str, background: bool, windows: bool) -> Vec<(String, String)> {
@@ -10127,6 +10202,36 @@ mod tests {
             "Windows' works in front"
         );
         assert_eq!(trek_mcp_env("simulator", true, false), vec![]);
+    }
+
+    #[test]
+    fn simulator_work_in_tool_calls() {
+        use crate::panels::simulator::SimActivity;
+        assert_eq!(
+            sim_activity("c1", "mcp__trek-simulator__sim_tap", "{\"x\":1}"),
+            Some(SimActivity::Drove)
+        );
+        assert_eq!(
+            sim_activity("c2", "Run command", "xcrun simctl boot 'iPhone 17'"),
+            Some(SimActivity::Drove)
+        );
+        assert_eq!(
+            sim_activity(
+                "c3",
+                "Run command",
+                "xcodebuild test -scheme Sample -destination 'platform=iOS Simulator,name=iPhone 17'"
+            ),
+            Some(SimActivity::TestStarted {
+                call: "c3".into(),
+                label: "Sample".into()
+            })
+        );
+        // Words in a file being read aren't a command.
+        assert_eq!(
+            sim_activity("c4", "Read notes.md", "xcrun simctl boot"),
+            None
+        );
+        assert_eq!(sim_activity("c5", "Run command", "cargo test"), None);
         assert_eq!(trek_mcp_families(false, true, false), ["simulator"]);
         assert_eq!(
             trek_mcp_families(true, true, true),
