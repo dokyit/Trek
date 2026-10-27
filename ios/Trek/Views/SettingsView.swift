@@ -12,8 +12,14 @@ struct SettingsView: View {
 
     var body: some View {
         @Bindable var model = model
+        let update = AppUpdate.available(in: model.links)
         NavigationStack(path: $path) {
             Form {
+                if let update {
+                    Section {
+                        UpdateNote(update: update)
+                    }
+                }
                 Section {
                     ForEach(model.links) { link in
                         NavigationLink {
@@ -68,6 +74,9 @@ struct SettingsView: View {
 
                 Section {
                     LabeledContent("Version", value: ClientMessage.appBuild.map { "\(ClientMessage.appVersion) (\($0))" } ?? ClientMessage.appVersion)
+                    if let update {
+                        LabeledContent("Update available", value: update.version)
+                    }
                     LabeledContent("Protocol", value: "v\(trekProtocolVersion)")
                     Link(destination: URL(string: "https://github.com/dokyit/Trek")!) {
                         Label("Trek on GitHub", systemImage: "arrow.up.right.square")
@@ -75,8 +84,13 @@ struct SettingsView: View {
                 } header: {
                     Text("About")
                 } footer: {
-                    Text("Trek is not affiliated with or endorsed by the makers of the agents it connects. Agent and provider names and logos are trademarks of their respective owners, shown only to identify the agent a thread uses.")
-                        .font(.ui(.footnote))
+                    VStack(alignment: .leading, spacing: 8) {
+                        if update != nil {
+                            Text("Update available — your Mac will install it over Wi-Fi.").font(.ui(.footnote))
+                        }
+                        Text("Trek is not affiliated with or endorsed by the makers of the agents it connects. Agent and provider names and logos are trademarks of their respective owners, shown only to identify the agent a thread uses.")
+                            .font(.ui(.footnote))
+                    }
                 }
             }
             .scrollContentBackground(.hidden)
@@ -238,5 +252,25 @@ private struct SecurityLabelStyle: LabelStyle {
             configuration.icon.font(.ui(.footnote).weight(.semibold))
             configuration.title.fontWeight(.medium)
         }
+    }
+}
+
+/// A newer Trek is on a paired Mac: it's coming, and nothing needs doing here.
+private struct UpdateNote: View {
+    var update: AppUpdate.Available
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Update available — your Mac will install it over Wi-Fi")
+                    .font(.ui(.subheadline).weight(.medium))
+                Text("\(update.mac) has Trek \(update.version); this iPhone has \(ClientMessage.appVersion). Keep the iPhone on the same Wi-Fi as the Mac, or plugged in.")
+                    .font(.ui(.footnote))
+                    .foregroundStyle(Trek.muted)
+            }
+        } icon: {
+            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Trek.link)
+        }
+        .accessibilityElement(children: .combine)
     }
 }

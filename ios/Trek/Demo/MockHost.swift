@@ -31,7 +31,8 @@ final class MockHost: Backend {
     /// The demo's Mac; `-TrekDemoPC` adds a Windows machine beside it (the same threads, on a
     /// machine of another name), for the machine tags and filter.
     init(name: String = "Tobias’s MacBook Pro", id: String = "demo-mac", platform: String = "macos") {
-        host = HostInfo(id: id, name: name, version: "0.3.2")
+        // `-TrekDemoHostVersion 9.9.9`: the demo Mac runs a newer Trek than the app (Settings says an update is coming).
+        host = HostInfo(id: id, name: name, version: UserDefaults.standard.string(forKey: "TrekDemoHostVersion") ?? "0.3.2")
         self.platform = platform
     }
 

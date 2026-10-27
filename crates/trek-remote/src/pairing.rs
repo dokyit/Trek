@@ -345,6 +345,17 @@ pub struct DeviceRecord {
     /// Unix ms.
     #[serde(default)]
     pub last_seen_at: Option<i64>,
+    /// The app's version, as it last said when it connected ("0.4.20").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+    /// What it runs on, as it said: `ios` for the iPhone app, `macos` or `windows` for a machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Connected now. The iPhone app holds its connection only while it's open, so the phone
+    /// updater (`ios/scripts/phone-update.sh`) waits for this to clear before it reinstalls.
+    /// Cleared when the registry loads: a server starting has no connections.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connected: bool,
 }
 
 /// A paired device, as the app lists it (no token hash).
@@ -402,10 +413,19 @@ impl DeviceRegistry {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(err) => return Err(err),
         };
-        Ok(Self {
+        let mut registry = Self {
             path: Some(path),
             devices,
-        })
+        };
+        // Connections are this server's: none yet (one left marked by a server that stopped
+        // without saying so would keep the phone updater waiting).
+        if registry.devices.iter().any(|d| d.connected) {
+            for d in &mut registry.devices {
+                d.connected = false;
+            }
+            registry.save_logged();
+        }
+        Ok(registry)
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -422,6 +442,9 @@ impl DeviceRegistry {
             token_sha256: hash_token(&token),
             paired_at: now,
             last_seen_at: Some(now),
+            app_version: None,
+            platform: None,
+            connected: false,
         };
         let before = self.devices.clone();
         match self.devices.iter_mut().find(|d| d.device_id == device_id) {
@@ -447,6 +470,36 @@ impl DeviceRegistry {
     pub fn touch(&mut self, device_id: &str, now: i64) {
         if let Some(d) = self.devices.iter_mut().find(|d| d.device_id == device_id) {
             d.last_seen_at = Some(now);
+            self.save_logged();
+        }
+    }
+
+    /// The device connected at `now`, saying it runs `app_version` on `platform`.
+    pub fn connected(
+        &mut self,
+        device_id: &str,
+        now: i64,
+        app_version: Option<&str>,
+        platform: Option<&str>,
+    ) {
+        if let Some(d) = self.devices.iter_mut().find(|d| d.device_id == device_id) {
+            d.last_seen_at = Some(now);
+            d.connected = true;
+            if let Some(v) = app_version.filter(|v| !v.is_empty() && v.len() <= 64) {
+                d.app_version = Some(v.to_string());
+            }
+            if let Some(p) = platform.filter(|p| !p.is_empty() && p.len() <= 32) {
+                d.platform = Some(p.to_string());
+            }
+            self.save_logged();
+        }
+    }
+
+    /// The device's connection closed at `now`.
+    pub fn disconnected(&mut self, device_id: &str, now: i64) {
+        if let Some(d) = self.devices.iter_mut().find(|d| d.device_id == device_id) {
+            d.last_seen_at = Some(now);
+            d.connected = false;
             self.save_logged();
         }
     }
@@ -724,6 +777,22 @@ mod tests {
         assert_eq!(r.list().len(), 1);
         r.touch("dev-1", 5);
         assert_eq!(r.get("dev-1").unwrap().last_seen_at, Some(5));
+        r.connected("dev-1", 6, Some("0.4.20"), Some("ios"));
+        let d = r.devices.iter().find(|d| d.device_id == "dev-1").unwrap();
+        assert_eq!(
+            (d.app_version.as_deref(), d.platform.as_deref(), d.connected),
+            (Some("0.4.20"), Some("ios"), true)
+        );
+        r.connected("dev-1", 7, None, None);
+        let d = r.devices.iter().find(|d| d.device_id == "dev-1").unwrap();
+        assert_eq!(
+            d.app_version.as_deref(),
+            Some("0.4.20"),
+            "an app that doesn't say keeps what it said before"
+        );
+        r.disconnected("dev-1", 8);
+        assert_eq!(r.get("dev-1").unwrap().last_seen_at, Some(8));
+        assert!(!r.devices.iter().any(|d| d.connected));
         assert!(r.revoke("dev-1"));
         assert!(!r.revoke("dev-1"));
         assert!(!r.verify("dev-1", &t2));

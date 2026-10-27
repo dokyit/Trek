@@ -70,6 +70,10 @@ pub enum ClientMessage {
         device_name: String,
         #[serde(default)]
         app_version: Option<String>,
+        /// What the app runs on: `ios` for the iPhone app, `std::env::consts::OS` for a machine.
+        /// The Mac keeps it with the device (the phone updater looks for the iPhone by it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
     },
     /// First message of a paired device.
     Hello {
@@ -78,6 +82,9 @@ pub enum ClientMessage {
         token: String,
         #[serde(default)]
         app_version: Option<String>,
+        /// As in `Pair`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
     },
     /// Start receiving a thread's transcript.
     Subscribe {

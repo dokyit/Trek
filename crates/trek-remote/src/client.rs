@@ -1267,12 +1267,14 @@ async fn authenticate(ws: &mut Ws, auth: &Auth, options: &ClientOptions) -> Auth
             device_id,
             device_name,
             app_version: options.app_version.clone(),
+            platform: Some(std::env::consts::OS.to_string()),
         },
         Auth::Hello { device_id, token } => ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             device_id,
             token,
             app_version: options.app_version.clone(),
+            platform: Some(std::env::consts::OS.to_string()),
         },
     };
     let text = serde_json::to_string(&ClientEnvelope {

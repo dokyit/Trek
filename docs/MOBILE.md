@@ -203,8 +203,13 @@ Phone → Mac, first message, either:
 
 ```json
 {"type":"pair","id":"1","protocol":1,"code":"K7Q2-9XMV","device_id":"6F1C…","device_name":"Tobias's iPhone","app_version":"0.1.0"}
-{"type":"hello","id":"1","protocol":1,"device_id":"6F1C…","token":"q3t…","app_version":"0.1.0"}
+{"type":"hello","id":"1","protocol":1,"device_id":"6F1C…","token":"q3t…","app_version":"0.1.0","platform":"ios"}
 ```
+
+`app_version` and `platform` (`ios` from the iPhone app; a machine sends its OS, `macos` or
+`windows`) are optional. The Mac keeps the last of each with the device in `devices.json`, with
+`connected` while the device is connected; the phone updater (`ios/scripts/phone-update.sh`) reads
+them to tell the iPhone's install apart and to wait while Trek is open on it.
 
 Mac → phone:
 

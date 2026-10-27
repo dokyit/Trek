@@ -52,6 +52,7 @@ fn spec_handshake_messages() {
             device_id: "6F1C…".into(),
             device_name: "Tobias's iPhone".into(),
             app_version: Some("0.1.0".into()),
+            platform: None,
         }
     );
     let hello = client_round_trip(

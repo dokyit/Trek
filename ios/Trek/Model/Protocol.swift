@@ -839,10 +839,10 @@ nonisolated enum ClientMessage {
         switch self {
         case .pair(let code, let deviceId, let deviceName):
             o = ["type": "pair", "protocol": trekProtocolVersion, "code": code, "device_id": deviceId,
-                 "device_name": deviceName, "app_version": Self.appVersion]
+                 "device_name": deviceName, "app_version": Self.appVersion, "platform": "ios"]
         case .hello(let deviceId, let token):
             o = ["type": "hello", "protocol": trekProtocolVersion, "device_id": deviceId, "token": token,
-                 "app_version": Self.appVersion]
+                 "app_version": Self.appVersion, "platform": "ios"]
         case .subscribe(let threadId, let afterSeq, let limit):
             o = ["type": "subscribe", "thread_id": threadId, "after_seq": afterSeq.map { $0 as Any } ?? NSNull()]
             if let limit { o["limit"] = limit }

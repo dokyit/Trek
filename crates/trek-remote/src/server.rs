@@ -812,7 +812,12 @@ async fn serve<H: RemoteHost>(
         // A stopped server (restarted with a new port or address) leaves devices.json to the
         // one that replaced it: its list here may be stale by now.
         if !*inner.shutdown.borrow() {
-            state.registry.touch(&device_id, now_ms());
+            if current {
+                state.registry.disconnected(&device_id, now_ms());
+            } else {
+                // A newer connection of the same device took over: it's still connected.
+                state.registry.touch(&device_id, now_ms());
+            }
         }
     }
     tracing::info!(%peer, device_id, "phone disconnected");
@@ -882,17 +887,26 @@ async fn authenticate(
                 return None;
             }
         };
-        let (protocol, device_id) = match &msg {
+        let (protocol, device_id, app_version, platform) = match &msg {
             ClientMessage::Pair {
                 protocol,
                 device_id,
+                app_version,
+                platform,
                 ..
             }
             | ClientMessage::Hello {
                 protocol,
                 device_id,
+                app_version,
+                platform,
                 ..
-            } => (*protocol, device_id.clone()),
+            } => (
+                *protocol,
+                device_id.clone(),
+                app_version.clone(),
+                platform.clone(),
+            ),
             _ => {
                 tracing::info!(%peer, via, kind = msg.kind(), "not authenticated: a request before pair or hello");
                 reject(ws, re, ErrorCode::Unauthorized, "Pair or say hello first").await;
@@ -939,6 +953,12 @@ async fn authenticate(
                                     ))
                                 })?;
                             state.pairing.cancel();
+                            state.registry.connected(
+                                &device_id,
+                                now_ms(),
+                                app_version.as_deref(),
+                                platform.as_deref(),
+                            );
                             Ok((token, register_conn(&mut state, &device_id, kick_tx)))
                         })
                 };
@@ -974,7 +994,12 @@ async fn authenticate(
                 let conn_id = {
                     let mut state = inner.lock();
                     if state.registry.verify(&device_id, &token) {
-                        state.registry.touch(&device_id, now_ms());
+                        state.registry.connected(
+                            &device_id,
+                            now_ms(),
+                            app_version.as_deref(),
+                            platform.as_deref(),
+                        );
                         Some(register_conn(&mut state, &device_id, kick_tx))
                     } else {
                         None
