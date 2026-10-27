@@ -25,7 +25,7 @@ $Settings = @(
 ) -join "`n"
 $Tools = @('git', 'explorer', 'terminal', 'browser', 'sidechat', 'simulator')
 $BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'appearance', 'first', 'onboarding')
-$ControlVerbs = @('range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair', 'limits-demo', 'pr-demo', 'dictate-demo', 'onboarding')
+$ControlVerbs = @('browser', 'range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair', 'limits-demo', 'pr-demo', 'dictate-demo', 'onboarding')
 $ValueFlags = @('--size', '--timeout', '--output', '--lines', '--grep')
 
 $script:Human = $args -contains '--human'
