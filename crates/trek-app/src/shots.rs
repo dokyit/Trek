@@ -28,7 +28,10 @@
 //!
 //! The Browser tool (open it with `tools browser`; its page is a native view, so `shot` doesn't
 //! show it): `browser go <address>|back|forward|reload`, `browser state` (the page, the native
-//! view's rectangle beside the panel's and which window has the keys, to `browser.json`), and
+//! view's rectangle beside the panel's and which window has the keys, to `browser.json`),
+//! `browser focus|unfocus` (the page takes the keys, or gives them back), `browser eval <js>` (the
+//! page's answer, as JSON, to `browser-eval.json`), `browser press <keys>` (macOS: a real key
+//! event such as `cmd-v`, through AppKit as the keyboard sends it), and
 //! `browser snap <name>` (the page as it draws, to `<name>.png`: WebView2's capture on Windows,
 //! WebKit's snapshot on macOS, even with the window behind others).
 //!
@@ -715,7 +718,51 @@ async fn browser(
             #[cfg(not(any(windows, target_os = "macos")))]
             anyhow::bail!("browser snap: Windows and macOS only")
         }
+        "eval" => {
+            anyhow::ensure!(!rest.is_empty(), "browser eval needs a script");
+            let answer = cx
+                .update(|cx| panel.read(cx).shots_eval(rest, cx))
+                .ok_or_else(|| anyhow::anyhow!("browser eval: no page"))?;
+            let json = answer
+                .recv()
+                .await
+                .map_err(|_| anyhow::anyhow!("browser eval: the page closed"))?;
+            std::fs::write(dir.join("browser-eval.json"), json)?;
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        "press" => {
+            anyhow::ensure!(!rest.is_empty(), "browser press needs keys (cmd-v …)");
+            let window = cx
+                .update(|cx| panel.read(cx).shots_key_window(cx))
+                .ok_or_else(|| anyhow::anyhow!("browser press: no page"))?;
+            // Outside any update: the key goes through AppKit and back into GPUI. A key pressed
+            // with Trek in the background takes another path, so it comes to the front first.
+            if crate::panels::browser::activate(&window) {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+            }
+            for keys in rest.split_whitespace() {
+                crate::panels::browser::press(&window, keys)?;
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+            }
+            Ok(())
+        }
         _ => {
+            // The page takes the keys as a click does, in the front window: AppKit hands them to
+            // its own view again when the window comes to the front.
+            #[cfg(target_os = "macos")]
+            if cmd == "focus"
+                && let Some(window) = cx.update(|cx| panel.read(cx).shots_key_window(cx))
+                && crate::panels::browser::activate(&window)
+            {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+            }
             cx.update(|cx| panel.update(cx, |p, cx| p.shots(cmd, rest, cx)))?;
             cx.update(|cx| cx.refresh_windows());
             Ok(())

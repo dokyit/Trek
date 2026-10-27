@@ -2,6 +2,7 @@
 //! start page that finds local dev servers, element picking and page screenshots for the
 //! composer, devtools, and zoom.
 
+use super::browser_extensions::{self, ExtensionsEvent, ExtensionsPage};
 use crate::assets::Lucide;
 use crate::ui;
 use crate::workspace::{Workspace, WorkspaceEvent};
@@ -135,6 +136,53 @@ const PICK_JS: &str = r#"(() => {
 })();"#;
 
 const PICK_STOP_JS: &str = "window.__trekPick && window.__trekPick.stop();";
+
+/// Whether the page is drawn dark, by its background (the body's, or the root's when the body's
+/// is see-through): `true`, `false`, or `null` when it can't tell.
+const DRAWN_DARK_JS: &str = r#"(() => {
+  const bg = (el) => el ? getComputedStyle(el).backgroundColor : '';
+  let c = bg(document.body);
+  if (!c || c === 'transparent' || /^rgba\(.*,\s*0\)$/.test(c)) c = bg(document.documentElement);
+  const m = (c || '').match(/[\d.]+/g);
+  if (!m || m.length < 3 || (m.length > 3 && Number(m[3]) === 0)) return null;
+  const [r, g, b] = m.map(Number);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
+})()"#;
+
+/// Google's search pages are drawn by the server, in the scheme its own script last saw the
+/// browser ask for (`prefers-color-scheme`, kept in Google's cookie): they don't switch when the
+/// view's scheme does, and the first load after a switch still comes in the old one. Only the
+/// next load is right. So a search page drawn in the wrong scheme is loaded again, up to twice
+/// after a switch (see `BrowserPanel::check_drawn_scheme`): search pages are safe to reload,
+/// unlike Docs, Gmail and the rest of Google, which follow the scheme the usual way or not at
+/// all. (A Google account set to one scheme keeps it: the reloads are spent, and it stays.)
+fn scheme_lags_a_load(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !matches!(scheme, "https" | "http") {
+        return false;
+    }
+    let Some(host) = host_of(url) else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let Some(tld) = host.strip_prefix("google.") else {
+        return false;
+    };
+    let path = rest[rest.find(['/', '?', '#']).unwrap_or(rest.len())..]
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("");
+    // Google's own country domains: google.de, google.co.uk, google.com.au; not google.example.com.
+    let country = match tld.split('.').collect::<Vec<_>>()[..] {
+        [one] => !one.is_empty(),
+        [second, top] => matches!(second, "co" | "com") && !top.is_empty(),
+        _ => false,
+    };
+    country && matches!(path, "" | "/" | "/search" | "/webhp")
+}
 
 /// Darkens a page that stays light while it's asked for dark (it has no dark scheme of its own),
 /// or (`false`) takes that back. Pages that declare a dark scheme, or are dark already, are left
@@ -566,6 +614,11 @@ enum Msg {
         body: String,
     },
     NewWindow(String),
+    /// Whether tab `tab`'s page is drawn dark (`None`: can't tell); see `check_drawn_scheme`.
+    Drawn {
+        tab: u64,
+        dark: Option<bool>,
+    },
     /// WebView2 is showing its own error page for `url`: the load failed.
     #[cfg(windows)]
     Failed {
@@ -586,6 +639,11 @@ struct Tab {
     frame: Rc<std::cell::Cell<Bounds<Pixels>>>,
     /// The scheme the view was last asked for: dark or not (`None`: not yet).
     dark: Option<bool>,
+    /// Reloads left for a page drawn in the scheme it was asked for before (see
+    /// `scheme_lags_a_load`): one when the tab opens (Google's own note of the scheme may be
+    /// from before), two each time its scheme changes (the first load after it comes in the
+    /// old one).
+    scheme_reloads: u8,
 }
 
 /// The window a native web view is made in, by its raw handle: what a task can carry there in
@@ -761,6 +819,8 @@ pub struct BrowserPanel {
     /// Set by the right panel: false when the Browser tool isn't on screen.
     visible: bool,
     menu_open: bool,
+    /// The Extensions page (Windows), in the page's place while it's open.
+    extensions: Option<(Entity<ExtensionsPage>, Subscription)>,
     picking: bool,
     capturing: bool,
     #[cfg(windows)]
@@ -1186,6 +1246,7 @@ impl BrowserPanel {
             editing: false,
             visible: true,
             menu_open: false,
+            extensions: None,
             picking: false,
             capturing: false,
             #[cfg(windows)]
@@ -1223,7 +1284,7 @@ impl BrowserPanel {
 
     /// Show exactly one native view: the active tab's, when nothing GPUI-drawn needs that space.
     fn sync_views(&mut self, cx: &mut Context<Self>) {
-        let show_active = self.visible && !self.menu_open;
+        let show_active = self.visible && !self.menu_open && self.extensions.is_none();
         for tab in &self.tabs {
             let show = show_active && tab.page.ready && tab.id == self.active;
             tab.view.update(cx, |v, _| {
@@ -1251,9 +1312,11 @@ impl BrowserPanel {
     /// It panics inside a window procedure, which can't unwind, and Trek closes. So it takes
     /// nothing of the panel's (`tx` and `vars` are the panel's, cloned): reading the panel would
     /// hold the app too.
+    /// `dark`: the scheme pages are asked for, set before the first page loads.
     fn build_view(
         id: u64,
         url: &str,
+        dark: bool,
         parent: &ParentWindow,
         tx: async_channel::Sender<Msg>,
         vars: Rc<RefCell<String>>,
@@ -1268,12 +1331,28 @@ impl BrowserPanel {
             #[cfg(windows)]
             let builder =
                 wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
+            #[cfg(windows)]
+            let builder = {
+                use wry::WebViewBuilderExtWindows as _;
+                builder
+                    .with_theme(if dark {
+                        wry::Theme::Dark
+                    } else {
+                        wry::Theme::Light
+                    })
+                    // Its extensions (see `browser_extensions`). Every view on this data folder
+                    // must ask the same (the editor's preview does), or WebView2 makes none.
+                    .with_browser_extensions_enabled(true)
+            };
             #[cfg(not(windows))]
             let builder = wry::WebViewBuilder::new();
             #[cfg(target_os = "macos")]
             let builder = builder.with_user_agent(user_agent());
+            // WKWebView takes its scheme from its appearance, which is set once it's made: so it
+            // loads its first page after that (below), not as it's made.
+            #[cfg(not(target_os = "macos"))]
+            let builder = builder.with_url(to_view(url));
             builder
-                .with_url(to_view(url))
                 .with_visible(false)
                 .with_devtools(true)
                 .with_accept_first_mouse(true)
@@ -1315,6 +1394,13 @@ impl BrowserPanel {
         };
         #[cfg(windows)]
         native::watch(&built, id, &tx);
+        #[cfg(target_os = "macos")]
+        {
+            native::set_dark(&built, dark);
+            let _ = built.load_url(&to_view(url));
+        }
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let _ = dark;
         Some(built)
     }
 
@@ -1330,12 +1416,13 @@ impl BrowserPanel {
         };
         let url = url.to_string();
         let (tx, vars) = (self.tx.clone(), self.page_vars.clone());
+        let dark = self.wants_dark(cx);
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let built = Self::build_view(id, &url, &parent, tx, vars);
+            let built = Self::build_view(id, &url, dark, &parent, tx, vars);
             let _ = this.update_in(cx, |this, window, cx| match built {
                 Some(built) => {
                     let view = cx.new(|cx| WebView::new(built, window, cx));
-                    this.add_tab(id, view, &url, window, cx);
+                    this.add_tab(id, view, &url, dark, window, cx);
                 }
                 None => {
                     this.unavailable = true;
@@ -1345,11 +1432,13 @@ impl BrowserPanel {
         }));
     }
 
+    /// `dark`: the scheme the view was made with (see `build_view`).
     fn add_tab(
         &mut self,
         id: u64,
         view: Entity<WebView>,
         url: &str,
+        dark: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1360,10 +1449,18 @@ impl BrowserPanel {
             zoom: 1.0,
             page: Page::new(url),
             frame: Rc::default(),
-            dark: None,
+            dark: Some(dark),
+            scheme_reloads: 1,
         });
+        #[cfg(target_os = "macos")]
+        if self.workspace.read(cx).settings.browser.block_trackers
+            && let Some(tab) = self.tabs.last()
+        {
+            browser_extensions::blocker::set(tab.view.read(cx).raw(), true);
+        }
         self.sync_scheme(cx);
         self.active = id;
+        self.extensions = None;
         // Reveal after a moment even if the first load never reports in.
         self._tasks.push(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -1392,6 +1489,8 @@ impl BrowserPanel {
         self.stop_picking(cx);
         self.active = id;
         self.editing = false;
+        // Going to a page leaves the Extensions page.
+        self.extensions = None;
         self.sync_views(cx);
     }
 
@@ -1430,6 +1529,9 @@ impl BrowserPanel {
     /// Load `url` in the active tab and watch for it failing to load.
     fn navigate(&mut self, url: String, cx: &mut Context<Self>) {
         self.stop_picking(cx);
+        if self.extensions.take().is_some() {
+            self.sync_views(cx);
+        }
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == self.active) else {
             return;
         };
@@ -1516,6 +1618,7 @@ impl BrowserPanel {
                 }
                 if finished {
                     self.force_dark_page(id, cx);
+                    self.check_drawn_scheme(id, cx);
                 }
                 self.refresh_nav(id, cx);
                 self.sync_views(cx);
@@ -1528,6 +1631,13 @@ impl BrowserPanel {
             }
             Msg::Ipc { tab, origin, body } => {
                 self.handle_ipc(tab, from_view(origin), body, window, cx)
+            }
+            Msg::Drawn { tab: id, dark } => {
+                let Some(tab) = self.tab_mut(id) else { return };
+                if dark.is_some() && dark != tab.dark && tab.scheme_reloads > 0 {
+                    tab.scheme_reloads -= 1;
+                    let _ = tab.view.read(cx).raw().reload();
+                }
             }
             #[cfg(windows)]
             Msg::Failed { tab: id, url } => {
@@ -1877,6 +1987,22 @@ impl BrowserPanel {
         }
     }
 
+    /// Show the Extensions page in the page's place (`browser_extensions`), or close it.
+    fn set_extensions_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.extensions = None;
+        if open && let Some(tab) = self.active_tab() {
+            let view = tab.view.clone();
+            let page = cx.new(|cx| ExtensionsPage::new(view, window, cx));
+            let closing = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
+                let ExtensionsEvent::Close = event;
+                this.set_extensions_open(false, window, cx);
+            });
+            self.stop_picking(cx);
+            self.extensions = Some((page, closing));
+        }
+        self.sync_views(cx);
+    }
+
     fn set_menu_open(&mut self, open: bool, cx: &mut Context<Self>) {
         self.menu_open = open;
         if open {
@@ -1910,23 +2036,70 @@ impl BrowserPanel {
     /// Ask every view for the page scheme the settings say (Auto: Trek's theme's), and darken
     /// light-only pages where the user asked for that.
     fn sync_scheme(&mut self, cx: &mut Context<Self>) {
-        let browser = &self.workspace.read(cx).settings.browser;
-        let dark = browser.page_scheme.is_dark(cx.theme().mode.is_dark());
-        let forced = browser.force_dark && dark;
+        let dark = self.wants_dark(cx);
+        let forced = self.workspace.read(cx).settings.browser.force_dark && dark;
         let forced_changed = self.forced_dark != forced;
         self.forced_dark = forced;
         // Pages styled by `prefers-color-scheme` switch at once; one that picks its scheme as it
-        // loads (Google, by a cookie) follows on its next load.
+        // loads follows on its next load. Google's search pages are loaded again for it (see
+        // `check_drawn_scheme`).
+        let mut changed = vec![];
         for tab in &mut self.tabs {
             let raw = tab.view.read(cx).raw();
             if tab.dark != Some(dark) {
                 native::set_dark(raw, dark);
                 tab.dark = Some(dark);
+                tab.scheme_reloads = 2;
+                changed.push(tab.id);
             }
             if forced_changed && !tab.page.url.starts_with("trek://") {
                 let _ = raw.evaluate_script(&force_dark_js(forced));
             }
         }
+        for id in changed {
+            self.check_drawn_scheme(id, cx);
+        }
+    }
+
+    /// The scheme pages are asked for now: the setting's, Auto meaning Trek's theme's.
+    fn wants_dark(&self, cx: &App) -> bool {
+        let browser = &self.workspace.read(cx).settings.browser;
+        browser.page_scheme.is_dark(cx.theme().mode.is_dark())
+    }
+
+    /// For a page whose scheme lags a load (Google's search; see `scheme_lags_a_load`): a moment
+    /// after it loads or its scheme changes, by when its script has noted the scheme asked for,
+    /// see how it's drawn; drawn in the other scheme, it's loaded again (`Msg::Drawn`).
+    fn check_drawn_scheme(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
+            return;
+        };
+        if tab.scheme_reloads == 0 || !scheme_lags_a_load(&tab.page.url) {
+            return;
+        }
+        let tx = self.tx.clone();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(tab) = this.tabs.iter().find(|t| t.id == id) else {
+                    return;
+                };
+                if tab.page.loading || !scheme_lags_a_load(&tab.page.url) {
+                    return;
+                }
+                let _ = tab.view.read(cx).raw().evaluate_script_with_callback(
+                    DRAWN_DARK_JS,
+                    move |result| {
+                        let dark = serde_json::from_str::<Option<bool>>(&result).ok().flatten();
+                        let _ = tx.try_send(Msg::Drawn { tab: id, dark });
+                    },
+                );
+            });
+        });
+        self._tasks.retain(|t| !t.is_ready());
+        self._tasks.push(task);
     }
 
     /// A page of tab `id` loaded (or got its DOM): darken it if it needs that.
@@ -1957,6 +2130,27 @@ impl BrowserPanel {
             ws.save_settings(cx);
         });
         self.sync_scheme(cx);
+        cx.notify();
+    }
+
+    /// Block ads and trackers in every tab, or stop (macOS; `browser_extensions::blocker`), and
+    /// load the page in front again so it shows.
+    #[cfg(target_os = "macos")]
+    fn toggle_block_trackers(&mut self, cx: &mut Context<Self>) {
+        let on = self.workspace.update(cx, |ws, cx| {
+            ws.settings.browser.block_trackers = !ws.settings.browser.block_trackers;
+            ws.save_settings(cx);
+            ws.settings.browser.block_trackers
+        });
+        for tab in &self.tabs {
+            browser_extensions::blocker::set(tab.view.read(cx).raw(), on);
+        }
+        if let Some(tab) = self
+            .active_tab()
+            .filter(|t| !t.page.url.starts_with("trek://"))
+        {
+            let _ = tab.view.read(cx).raw().reload();
+        }
         cx.notify();
     }
 
@@ -2148,10 +2342,33 @@ impl BrowserPanel {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_force_dark(cx)))
             .into_any_element();
 
+        #[cfg(target_os = "macos")]
+        let block_row = {
+            let blocking = self.workspace.read(cx).settings.browser.block_trackers;
+            Some(
+                ui::menu_row("browser-block-trackers", false, cx)
+                    .test_support()
+                    .child(Icon::new(Lucide::ShieldCheck).small().text_color(muted))
+                    .child(div().flex_1().child("Block ads and trackers"))
+                    .when(blocking, |el| {
+                        el.child(
+                            Icon::new(IconName::Check)
+                                .small()
+                                .text_color(theme.foreground),
+                        )
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_block_trackers(cx)))
+                    .into_any_element(),
+            )
+        };
+        #[cfg(not(target_os = "macos"))]
+        let block_row: Option<AnyElement> = None;
+
         ui::menu_surface(cx)
             .w(px(280.))
             .child(scheme_row)
             .child(force_row)
+            .children(block_row)
             .child(separator())
             .child(row(
                 "browser-copy-url",
@@ -2191,6 +2408,18 @@ impl BrowserPanel {
                     }
                 },
             ))
+            .when(browser_extensions::AVAILABLE, |el| {
+                el.child(
+                    ui::menu_row("browser-extensions-open", false, cx)
+                        .test_support()
+                        .child(Icon::new(Lucide::Puzzle).small().text_color(muted))
+                        .child(div().flex_1().child("Extensions…"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.set_menu_open(false, cx);
+                            this.set_extensions_open(true, window, cx);
+                        })),
+                )
+            })
             .child(row(
                 "browser-devtools",
                 Icon::new(Lucide::CodeXml),
@@ -2325,6 +2554,7 @@ impl BrowserPanel {
         let zoom = tab.map(|t| t.zoom).unwrap_or(1.0);
         let pill = h_flex()
             .id("browser-url")
+            .test_support()
             .flex_1()
             .min_w_0()
             .h(px(28.))
@@ -2451,11 +2681,43 @@ impl BrowserPanel {
             "back" => self.with_active(cx, native::go_back),
             "forward" => self.with_active(cx, native::go_forward),
             "reload" => self.reload_or_stop(cx),
+            // The page takes the keys, as a click in it does; `unfocus` gives them back to Trek.
+            "focus" => self.with_active(cx, |wv| {
+                let _ = wv.focus();
+            }),
+            "unfocus" => self.with_active(cx, |wv| {
+                let _ = wv.focus_parent();
+            }),
             _ => anyhow::bail!(
-                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|state|snap <name>)"
+                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>)"
             ),
         }
         Ok(())
+    }
+
+    /// The window the active page is in, for `press` (which runs outside any update: the key
+    /// goes through AppKit, back into GPUI).
+    #[cfg(target_os = "macos")]
+    pub fn shots_key_window(
+        &self,
+        cx: &App,
+    ) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        use wry::WebViewExtMacOS as _;
+        self.active_tab().map(|t| t.view.read(cx).raw().ns_window())
+    }
+
+    /// The active page's answer to the JavaScript expression `js`, as JSON.
+    pub fn shots_eval(&self, js: &str, cx: &App) -> Option<async_channel::Receiver<String>> {
+        let tab = self.active_tab()?;
+        let (tx, rx) = async_channel::bounded(1);
+        let _ = tab
+            .view
+            .read(cx)
+            .raw()
+            .evaluate_script_with_callback(js, move |result| {
+                let _ = tx.try_send(result);
+            });
+        Some(rx)
     }
 
     /// The active page, the panel's area for the view (logical px), the native view's rectangle
@@ -2560,6 +2822,87 @@ fn shots_focus(window: &Window) -> String {
 #[cfg(all(feature = "shots", not(windows)))]
 fn shots_focus(_: &Window) -> String {
     "unknown".into()
+}
+
+/// Bring Trek to the front with `window` as its key window, for `press`; `false` when it already
+/// was. AppKit does it on the next turn of the run loop.
+#[cfg(all(feature = "shots", target_os = "macos"))]
+pub fn activate(window: &objc2_app_kit::NSWindow) -> bool {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    if app.isActive() && window.isKeyWindow() {
+        return false;
+    }
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+    window.makeKeyAndOrderFront(None);
+    true
+}
+
+/// Press `keys` (`cmd-v`, `cmd-alt-shift-v`…) in `window` as the keyboard would: a key-down event
+/// through `NSApp sendEvent:`, so it takes the path a real key does (key equivalents, the menu,
+/// the first responder). For the shots harness, outside any GPUI update.
+#[cfg(all(feature = "shots", target_os = "macos"))]
+pub fn press(window: &objc2_app_kit::NSWindow, keys: &str) -> anyhow::Result<()> {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2_foundation::{NSPoint, NSString};
+    let mut flags: usize = 0;
+    let mut key = "";
+    for part in keys.split('-') {
+        match part {
+            "cmd" => flags |= 1 << 20,
+            "shift" => flags |= 1 << 17,
+            "alt" => flags |= 1 << 19,
+            "ctrl" => flags |= 1 << 18,
+            k => key = k,
+        }
+    }
+    // Virtual key codes (ANSI layout) of the keys the harness presses.
+    let code: u16 = match key {
+        "a" => 0,
+        "f" => 3,
+        "z" => 6,
+        "x" => 7,
+        "c" => 8,
+        "v" => 9,
+        "k" => 40,
+        _ => anyhow::bail!("press: no key code for {key:?}"),
+    };
+    let chars = NSString::from_str(&if flags & (1 << 17) != 0 {
+        key.to_uppercase()
+    } else {
+        key.to_string()
+    });
+    let class = AnyClass::get(c"NSEvent").ok_or_else(|| anyhow::anyhow!("press: no NSEvent"))?;
+    let context: *mut AnyObject = std::ptr::null_mut();
+    // A key event's time: seconds since the Mac started, as the keyboard's are.
+    let timestamp = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+    // SAFETY: NSEvent's documented constructor, with arguments of its types (10: key down).
+    let event: Option<Retained<AnyObject>> = unsafe {
+        msg_send![class, keyEventWithType: 10usize, location: NSPoint::new(0., 0.),
+            modifierFlags: flags, timestamp: timestamp, windowNumber: window.windowNumber(),
+            context: context, characters: &*chars, charactersIgnoringModifiers: &*chars,
+            isARepeat: Bool::NO, keyCode: code]
+    };
+    let event = event.ok_or_else(|| anyhow::anyhow!("press: no event for {keys:?}"))?;
+    let mtm = objc2::MainThreadMarker::new()
+        .ok_or_else(|| anyhow::anyhow!("press: not on the main thread"))?;
+    window.makeKeyWindow();
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    // An app in the background has no key window, and AppKit sends a key equivalent to the key
+    // window: a key pressed in the background takes another path than a real one. So Trek comes
+    // to the front for it (the harness waits for that: `activate`).
+    anyhow::ensure!(
+        app.isActive() && app.keyWindow().is_some(),
+        "press: Trek isn't the active app"
+    );
+    // SAFETY: a key event, sent on the main thread.
+    let _: () = unsafe { msg_send![&app, sendEvent: &*event] };
+    Ok(())
 }
 
 /// What the agent sees when an element is picked.
@@ -2683,10 +3026,13 @@ impl Render for BrowserPanel {
         let can_forward = tab.is_some_and(|t| t.page.can_forward);
         let is_page = tab.is_some_and(|t| !t.page.url.starts_with("trek://"));
         let ember = crate::palette::ember(cx);
-        let page = tab.map(|t| Self::page_view(t, cx));
+        let page = match &self.extensions {
+            Some((extensions, _)) => Some(extensions.clone().into_any_element()),
+            None => tab.map(|t| Self::page_view(t, cx)),
+        };
         // The native view only draws once the first page paints; until then, a hint fills the
         // void. Hidden while a menu is open (or the panel is) is suppression, not empty.
-        let blank = tab.is_none_or(|t| !t.page.ready);
+        let blank = self.extensions.is_none() && tab.is_none_or(|t| !t.page.ready);
 
         // One rhythm for the whole head: 8 px sides like the panel's header above, 28 px
         // controls, tabs and toolbar on 40 px rows, one hairline under the toolbar.
@@ -2863,10 +3209,10 @@ mod tests {
     #[cfg(windows)]
     use super::{Captures, Msg, PAGES_SCHEME, native};
     use super::{
-        ERROR_URL, FAVICON_MAX_BYTES, Page, SAFARI_FALLBACK, START_URL, decode_favicon,
-        download_favicon, extract_title, favicon_url, force_dark_js, from_view, from_webview2,
-        host_of, normalize, plist_version, safari_user_agent, same_origin, snap_frame, to_view,
-        to_webview2,
+        DRAWN_DARK_JS, ERROR_URL, FAVICON_MAX_BYTES, Page, SAFARI_FALLBACK, START_URL,
+        decode_favicon, download_favicon, extract_title, favicon_url, force_dark_js, from_view,
+        from_webview2, host_of, normalize, plist_version, safari_user_agent, same_origin,
+        scheme_lags_a_load, snap_frame, to_view, to_webview2,
     };
     use gpui_kit::ImageFormat;
 
@@ -3501,6 +3847,48 @@ mod tests {
         assert!(on.ends_with("(true);") && off.ends_with("(false);"));
         // It leaves pages with a dark scheme of their own alone.
         assert!(on.contains("color-scheme") && on.contains("invert("));
+    }
+
+    #[test]
+    fn only_googles_search_pages_are_reloaded_into_the_scheme() {
+        for url in [
+            "https://www.google.com/search?q=artificial+analysis",
+            "https://www.google.com/",
+            "https://google.com",
+            "https://www.google.co.uk/search?q=x#top",
+            "https://www.google.de/webhp?hl=de",
+            "http://www.google.com/search",
+            "https://WWW.GOOGLE.COM/search?q=x",
+        ] {
+            assert!(scheme_lags_a_load(url), "{url}");
+        }
+        for url in [
+            // The rest of Google keeps what's typed in it; it isn't reloaded.
+            "https://docs.google.com/document/d/1",
+            "https://mail.google.com/mail/u/0/",
+            "https://www.google.com/maps/@52,13,12z",
+            "https://www.google.com/search/howsearchworks",
+            // Not Google.
+            "https://google.example.com/search",
+            "https://notgoogle.com/search",
+            "https://www.google./search",
+            "trek://newtab/",
+            "file:///www.google.com/search",
+        ] {
+            assert!(!scheme_lags_a_load(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_drawn_scheme_is_read_from_the_page_background() {
+        // A JavaScript expression whose value is the answer, so its callback gets JSON.
+        assert!(DRAWN_DARK_JS.starts_with("(() => {") && DRAWN_DARK_JS.ends_with("})()"));
+        for (json, dark) in [("true", Some(true)), ("false", Some(false)), ("null", None)] {
+            assert_eq!(
+                serde_json::from_str::<Option<bool>>(json).ok().flatten(),
+                dark
+            );
+        }
     }
 
     #[test]

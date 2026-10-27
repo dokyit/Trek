@@ -1176,7 +1176,7 @@ fn link_stays_inside(dir: &[String], target: &Path) -> bool {
 /// Unpack a `.zip` into `into`. Names that aren't safe (`enclosed_name`: absolute, or reaching out
 /// with `..`) refuse the archive. A symlink entry is skipped, never created. On Unix a file keeps
 /// the permission bits its entry has.
-pub(crate) fn unpack_zip(archive: &Path, into: &Path) -> Result<()> {
+pub fn unpack_zip(archive: &Path, into: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(std::fs::File::open(archive)?))
         .map_err(|_| anyhow!("The download isn't an archive Trek can open"))?;
     for i in 0..zip.len() {

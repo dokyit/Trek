@@ -108,7 +108,7 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "NSArray", "NSDictionary", "NSValue", "objc2-core-foundation"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility", "NSImage", "NSView", "NSWindow", "NSAppearance", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSPasteboard", "objc2-core-foundation"] }
 # Interactive artifacts: a snapshot of the page stands in while it's covered (`takeSnapshot`).
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration", "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore"] }
 # Dictation: AVAudioRecorder takes the mic, Speech transcribes the take (src/dictate.rs).
 objc2-avf-audio = "0.3"
 objc2-speech = "0.3"
@@ -160,6 +160,8 @@ ctor = "1"
 # Integration tests link the library with its test-only surface (test_support, the views' test
 # hooks) on: this dev-dependency on the crate itself is what enables the feature.
 trek-app = { path = ".", features = ["test-support"] }
+# Extension packages for the Browser's unpacking tests (trek-core's version: nothing new to build).
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.7" }

@@ -1239,8 +1239,15 @@ fn native_web(path: &Path, parent: &crate::panels::browser::ParentWindow) -> Opt
     #[cfg(windows)]
     let mut context = wry::WebContext::new(Some(crate::panels::browser::webview_data_dir()));
     // It mustn't take the keys from Trek (WebView2 focuses a new view): a click on it does.
+    // Extensions on, as the Browser's views have them: WebView2 makes no view on a data folder
+    // whose views ask for different options.
     #[cfg(windows)]
-    let builder = wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
+    let builder = {
+        use wry::WebViewBuilderExtWindows as _;
+        wry::WebViewBuilder::new_with_web_context(&mut context)
+            .with_focused(false)
+            .with_browser_extensions_enabled(true)
+    };
     #[cfg(not(windows))]
     let builder = wry::WebViewBuilder::new();
     // A PDF opens as itself, in the engine's viewer; a video or a song in the page that holds it.
