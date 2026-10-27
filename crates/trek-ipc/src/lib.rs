@@ -39,6 +39,7 @@ use std::path::PathBuf;
 
 pub mod browser;
 pub mod instance;
+pub mod phone;
 #[cfg(any(feature = "server", test))]
 pub mod server;
 pub mod simtest;

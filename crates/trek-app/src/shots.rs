@@ -1196,17 +1196,18 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 }),
                 // The terminal is the dock under the chat, not a tab of the panel.
                 "terminal" => trek.read(cx).terminal_dock.clone().update(cx, |d, cx| d.show(window, cx)),
-                "git" | "explorer" | "browser" | "sidechat" | "simulator" => {
+                "git" | "explorer" | "browser" | "sidechat" | "simulator" | "iphone" => {
                     let tool = match arg {
                         "git" => PanelTool::Git,
                         "explorer" => PanelTool::Explorer,
                         "browser" => PanelTool::Browser,
                         "sidechat" => PanelTool::SideChat,
+                        "iphone" => PanelTool::Phone,
                         _ => PanelTool::Simulator,
                     };
                     panel.update(cx, |p, cx| p.open_tool(tool, window, cx));
                 }
-                _ => anyhow::bail!("tools: unknown argument {arg:?} (on|off|git|explorer|terminal|browser|sidechat|simulator)"),
+                _ => anyhow::bail!("tools: unknown argument {arg:?} (on|off|git|explorer|terminal|browser|sidechat|simulator|iphone)"),
             }
             Ok(())
         })??;

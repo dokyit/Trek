@@ -191,6 +191,7 @@ impl Workspace {
         let bin = super::trek_mcp_binary();
         let orchestrate = self.settings.tools.orchestration && (mock || bin.is_some());
         let browser = self.browser_tools() && (mock || bin.is_some());
+        let phone = self.phone_tools() && bin.is_some();
         let behind = servers.iter().position(|s| {
             s.name == COMPUTER_SERVER
                 && s.env().iter().any(|(k, v)| {
@@ -200,7 +201,7 @@ impl Workspace {
         let Some(ipc) = self
             .ipc
             .as_ref()
-            .filter(|_| orchestrate || browser || behind.is_some())
+            .filter(|_| orchestrate || browser || phone || behind.is_some())
         else {
             return (servers, None);
         };
@@ -213,6 +214,12 @@ impl Workspace {
                 bin.as_ref()
                     .map(|b| b.display().to_string())
                     .unwrap_or_else(|| "trek-mcp".into()),
+                ipc.env(&key),
+            ));
+        }
+        if phone && let Some(bin) = &bin {
+            servers.push(super::phone_use::server(
+                bin.display().to_string(),
                 ipc.env(&key),
             ));
         }
@@ -289,6 +296,10 @@ impl Workspace {
         // Browser use comes the same way, for the Browser tool to answer.
         if trek_ipc::browser::is_method(&call.method) {
             return self.browser_call(call, cx);
+        }
+        // And iPhone use, for the iPhone tool.
+        if trek_ipc::phone::is_method(&call.method) {
+            return self.phone_call(call, cx);
         }
         let result = if self.thread(&call.thread).is_none() {
             Err("This thread isn't in Trek any more.".to_string())

@@ -7,6 +7,7 @@ mod limits;
 mod lineage;
 mod mcp;
 mod orchestrate;
+pub mod phone_use;
 mod tabs;
 #[cfg(any(test, feature = "test-support"))]
 pub use tabs::MAX_TABS;
@@ -955,20 +956,23 @@ pub enum PanelTool {
     Browser,
     SideChat,
     Simulator,
+    /// The user's real iPhone (macOS): its screen live, and agents driving it.
+    Phone,
 }
 
 impl PanelTool {
-    pub const ALL: [PanelTool; 6] = [
+    pub const ALL: [PanelTool; 7] = [
         PanelTool::Terminal,
         PanelTool::Browser,
         PanelTool::Simulator,
+        PanelTool::Phone,
         PanelTool::Explorer,
         PanelTool::SideChat,
         PanelTool::Git,
     ];
 
-    /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
-    /// Windows has no Simulator tab.
+    /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools and
+    /// the iPhone tool macOS's capture and Bluetooth, so Windows has neither tab.
     pub fn offered() -> Vec<PanelTool> {
         Self::offered_on(crate::words::is_windows())
     }
@@ -976,7 +980,7 @@ impl PanelTool {
     pub fn offered_on(windows: bool) -> Vec<PanelTool> {
         Self::ALL
             .into_iter()
-            .filter(|t| !(windows && *t == PanelTool::Simulator))
+            .filter(|t| !(windows && matches!(t, PanelTool::Simulator | PanelTool::Phone)))
             .collect()
     }
     pub fn label(self) -> &'static str {
@@ -987,6 +991,7 @@ impl PanelTool {
             PanelTool::Browser => "Browser",
             PanelTool::SideChat => "Side chat",
             PanelTool::Simulator => "Simulator",
+            PanelTool::Phone => "iPhone",
         }
     }
 }
@@ -1032,6 +1037,8 @@ pub enum WorkspaceEvent {
     },
     /// An agent's browser tool call, for the main window's Browser to take (`browser_use`).
     BrowserUse(crate::panels::browser::AgentCallSlot),
+    /// An agent's iPhone tool call, for the main window's iPhone tool.
+    PhoneUse(phone_use::PhoneCallSlot),
     /// Open the context card over the composer of `scope` (the title bar's hub asks for it).
     OpenContextCard(Scope),
     /// Open a page in the tools panel's Browser (a link clicked in a terminal).
@@ -10273,17 +10280,18 @@ mod tests {
     }
 
     #[test]
-    fn windows_has_no_simulator_tab() {
+    fn windows_has_no_simulator_or_iphone_tab() {
         assert_eq!(PanelTool::offered_on(false), PanelTool::ALL);
         let windows = PanelTool::offered_on(true);
         assert!(!windows.contains(&PanelTool::Simulator));
-        assert_eq!(windows.len(), PanelTool::ALL.len() - 1);
+        assert!(!windows.contains(&PanelTool::Phone));
+        assert_eq!(windows.len(), PanelTool::ALL.len() - 2);
         // The others keep their order.
         assert_eq!(
             windows,
             PanelTool::ALL
                 .into_iter()
-                .filter(|t| *t != PanelTool::Simulator)
+                .filter(|t| !matches!(t, PanelTool::Simulator | PanelTool::Phone))
                 .collect::<Vec<_>>()
         );
     }

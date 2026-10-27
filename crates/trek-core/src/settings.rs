@@ -364,6 +364,12 @@ pub struct Tools {
     pub browser: bool,
     /// Open the Browser tool beside the chat when the agent of the thread in view starts using it.
     pub browser_follow: bool,
+    /// Give agents Trek's iPhone tools (`trek-mcp phone`): they see and drive the user's real
+    /// iPhone (screen over USB, taps and keys as a Bluetooth keyboard and mouse) and install
+    /// apps and copy files over the cable, one agent at a time. macOS.
+    pub phone: bool,
+    /// Open the iPhone tool beside the chat when the agent of the thread in view starts using it.
+    pub phone_follow: bool,
     /// Give agents Trek's video watcher (`watch_video`: frames and a transcript, through ffmpeg).
     pub video: bool,
     /// Give agents Trek's sub-agent tools (`delegate_task` and friends): they can hand work to
@@ -386,6 +392,8 @@ impl Default for Tools {
             simulator_follow: true,
             browser: true,
             browser_follow: true,
+            phone: true,
+            phone_follow: true,
             video: true,
             orchestration: true,
             mcp_servers: vec![],
@@ -1567,6 +1575,10 @@ mod tests {
         assert!(t.browser && t.browser_follow);
         let old: super::Settings = toml::from_str("[tools]\nvideo = false\n").unwrap();
         assert!(old.tools.browser && old.tools.browser_follow && !old.tools.video);
+        assert!(
+            old.tools.phone && old.tools.phone_follow,
+            "iPhone tools on for old files too"
+        );
     }
 
     use super::*;

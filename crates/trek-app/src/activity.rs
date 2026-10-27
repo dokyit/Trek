@@ -180,8 +180,9 @@ pub fn op(title: &str, detail: &str, cwd: Option<&Path>) -> Op {
             file: None,
         };
     }
-    // Trek's browser tools read as what they did to the page, then what they acted on.
-    if let Some(label) = trek_ipc::browser::label(title) {
+    // Trek's browser tools read as what they did to the page, then what they acted on; its
+    // iPhone tools as what they did to the phone.
+    if let Some(label) = trek_ipc::browser::label(title).or_else(|| trek_ipc::phone::label(title)) {
         return Op {
             verb: label.to_string(),
             text: first_line(detail),
@@ -286,6 +287,9 @@ pub fn phrase(title: &str, detail: &str, headline: Option<&str>) -> String {
     }
     if trek_ipc::browser::is_tool(title) {
         return "Using the browser".to_string();
+    }
+    if trek_ipc::phone::is_tool(title) {
+        return "Using your iPhone".to_string();
     }
     let specific = match tool_kind(title) {
         ToolKind::Edit => Some(format!(

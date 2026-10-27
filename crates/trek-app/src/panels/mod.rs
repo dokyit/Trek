@@ -1,4 +1,5 @@
-//! Right panel (Synara-style): tabs of tools — Terminal, Browser, Simulator, Explorer, Side chat, Git.
+//! Right panel (Synara-style): tabs of tools — Terminal, Browser, Simulator, iPhone, Explorer,
+//! Side chat, Git.
 
 pub mod branch_graph;
 pub mod browser;
@@ -6,6 +7,8 @@ pub mod browser_extensions;
 pub mod explorer;
 pub mod git;
 pub mod ide_search;
+#[cfg(target_os = "macos")]
+pub mod phone;
 mod simhid;
 pub mod simulator;
 pub mod terminal;
@@ -27,6 +30,7 @@ pub fn tool_icon(tool: PanelTool) -> Icon {
         PanelTool::SideChat => Icon::new(crate::assets::Lucide::MessageSquare),
         PanelTool::Git => Icon::new(crate::assets::Lucide::GitBranch),
         PanelTool::Simulator => Icon::new(crate::assets::Lucide::Smartphone),
+        PanelTool::Phone => Icon::new(crate::assets::Lucide::Smartphone),
     }
 }
 
@@ -36,6 +40,7 @@ pub fn tool_blurb(tool: PanelTool) -> &'static str {
         PanelTool::Terminal => "A shell in the project's folder",
         PanelTool::Browser => "Preview the app or any page",
         PanelTool::Simulator => "Run and drive an iOS simulator",
+        PanelTool::Phone => "Your real iPhone, live, for you and agents",
         PanelTool::Explorer => "Browse the project's files",
         PanelTool::SideChat => "Ask on the side, off the thread",
         PanelTool::Git => "Changes, commits and branches",
@@ -63,6 +68,8 @@ enum View {
     /// The side chat: the editor's AI side bar, on `Scope::Side`.
     SideChat(Entity<crate::ide::ai::AiPane>),
     Simulator(Entity<simulator::SimulatorPanel>),
+    #[cfg(target_os = "macos")]
+    Phone(Entity<phone::PhonePanel>),
 }
 
 struct Tab {
@@ -97,6 +104,9 @@ pub struct RightPanel {
     sim_followed: Option<std::time::Instant>,
     /// When the Browser tool last came forward for an agent (`browser_call`).
     browser_followed: Option<std::time::Instant>,
+    /// When the iPhone tool last came forward for an agent (`phone_call`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    phone_followed: Option<std::time::Instant>,
 }
 
 /// After the Simulator tool opened itself for an agent, how long it leaves the panel be: closed
@@ -118,6 +128,7 @@ impl RightPanel {
             scrolled_to: None,
             sim_followed: None,
             browser_followed: None,
+            phone_followed: None,
         }
     }
 
@@ -174,6 +185,11 @@ impl RightPanel {
             PanelTool::Simulator => {
                 View::Simulator(cx.new(|cx| simulator::SimulatorPanel::new(ws, window, cx)))
             }
+            #[cfg(target_os = "macos")]
+            PanelTool::Phone => View::Phone(cx.new(|cx| phone::PhonePanel::new(ws, window, cx))),
+            // Not offered off macOS.
+            #[cfg(not(target_os = "macos"))]
+            PanelTool::Phone => return,
         };
         let id = self.next_id;
         self.next_id += 1;
@@ -305,6 +321,54 @@ impl RightPanel {
         });
     }
 
+    /// An agent's iPhone tool call, for the iPhone tool: made if there's none (in front when the
+    /// call may `follow`, else behind the tab in front), as the Browser is for its calls.
+    pub fn phone_call(
+        &mut self,
+        call: crate::workspace::phone_use::PhoneCall,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            let showing = self.open
+                && self
+                    .active_tab()
+                    .is_some_and(|t| t.tool == PanelTool::Phone);
+            let quiet = self
+                .phone_followed
+                .is_some_and(|t| t.elapsed() < SIM_FOLLOW_QUIET);
+            if call.follow && !showing && !quiet {
+                self.phone_followed = Some(std::time::Instant::now());
+                self.open_tool(PanelTool::Phone, window, cx);
+            }
+            let found = self.tabs.iter().find_map(|t| match &t.view {
+                View::Phone(p) => Some(p.clone()),
+                _ => None,
+            });
+            let panel = found.unwrap_or_else(|| {
+                let ws = self.workspace.clone();
+                let p = cx.new(|cx| phone::PhonePanel::new(ws, window, cx));
+                let id = self.next_id;
+                self.next_id += 1;
+                self.tabs.push(Tab {
+                    id,
+                    tool: PanelTool::Phone,
+                    view: View::Phone(p.clone()),
+                });
+                self.sync_native(cx);
+                cx.notify();
+                p
+            });
+            panel.update(cx, |p, cx| p.agent_call(call, window, cx));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (window, cx);
+            call.answer(Err("The iPhone tools run only on macOS.".into()));
+        }
+    }
+
     /// The Browser tool, if it's open (the shots harness's `browser` command).
     #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn browser(&self) -> Option<Entity<browser::BrowserPanel>> {
@@ -374,6 +438,8 @@ impl RightPanel {
         match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
             Some(View::Browser(b)) => b.update(cx, |b, cx| b.set_visible(false, cx)),
             Some(View::Simulator(s)) => s.update(cx, |s, cx| s.release(window, cx)),
+            #[cfg(target_os = "macos")]
+            Some(View::Phone(p)) => p.update(cx, |p, cx| p.release(window, cx)),
             _ => {}
         }
         let ix = self.tabs.iter().position(|t| t.id == id);
@@ -402,6 +468,11 @@ impl RightPanel {
                 View::Simulator(s) => {
                     let show = open && active == Some(t.id);
                     s.update(cx, |s, cx| s.set_visible(show, cx));
+                }
+                #[cfg(target_os = "macos")]
+                View::Phone(p) => {
+                    let show = open && active == Some(t.id);
+                    p.update(cx, |p, cx| p.set_visible(show, cx));
                 }
                 _ => {}
             }
@@ -718,6 +789,8 @@ impl Render for RightPanel {
                 View::Browser(v) => v.clone().into_any_element(),
                 View::SideChat(v) => v.clone().into_any_element(),
                 View::Simulator(v) => v.clone().into_any_element(),
+                #[cfg(target_os = "macos")]
+                View::Phone(v) => v.clone().into_any_element(),
             },
             None => self.tool_grid(cx),
         };

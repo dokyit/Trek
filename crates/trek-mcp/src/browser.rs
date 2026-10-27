@@ -49,7 +49,7 @@ impl ToolSet for Browser {
 
 /// What Trek answered, as MCP content: its text, and the picture it wrote to a file (read, then
 /// removed: it was made for this call alone).
-fn content(result: Value) -> Vec<Value> {
+pub(crate) fn content(result: Value) -> Vec<Value> {
     let mut out = vec![];
     if let Some(path) = result.get("image").and_then(Value::as_str) {
         use base64::Engine as _;

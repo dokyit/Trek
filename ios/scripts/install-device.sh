@@ -10,13 +10,21 @@
 # left is set aside first and Xcode makes a fresh one. The first time, the iPhone asks you to
 # trust the developer: Settings › General › VPN & Device Management. To keep it updated (and
 # signed) over Wi-Fi without running this: ios/scripts/install-phone-update.sh.
+#
+# Building needs Xcode (the iOS SDK and its free signing). Installing doesn't: with a trek-mcp
+# that has `phone-device` (Trek 0.4.22 and later, or this repo's build; TREK_MCP=... to pick one)
+# the app goes over usbmuxd as Finder's installs do, and devicectl is only the fallback.
 set -eu
 cd "$(dirname "$0")/.."
+TREK_MCP="$(sh scripts/trek-mcp-path.sh 2>/dev/null || true)"
 TEAM="${TEAM:-$(defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier 2>/dev/null | grep -o 'teamID = [A-Z0-9]*' | head -1 | cut -d' ' -f3)}"
 if [ -z "$TEAM" ]; then
   echo "No team: add your Apple ID in Xcode › Settings › Accounts (or set TEAM=...)." >&2
   exit 1
 fi
+# The phone on the cable, as usbmuxd sees it; else what devicectl reaches (Wi-Fi too).
+[ -z "${DEVICE:-}" ] && [ -n "$TREK_MCP" ] && \
+  DEVICE="$("$TREK_MCP" phone-device list 2>/dev/null | awk '/ USB$/ {print $1; exit}')"
 DEVICE="${DEVICE:-$(xcrun devicectl list devices 2>/dev/null | awk '/iPhone/ && !/simulated/ && /(^|[^a-z])(available|connected)([^a-z]|$)/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i}' | head -1)}"
 if [ -z "$DEVICE" ]; then
   echo "No iPhone: plug it in, unlock it and trust this Mac." >&2
@@ -54,7 +62,11 @@ xcodebuild -project Trek.xcodeproj -scheme Trek -configuration Debug \
   ${VERSION:+MARKETING_VERSION="$VERSION"} CURRENT_PROJECT_VERSION="$BUILD" \
   build -quiet
 APP="$DD/Build/Products/Debug-iphoneos/Trek.app"
-xcrun devicectl device install app --device "$DEVICE" "$APP"
+if [ -n "$TREK_MCP" ] && "$TREK_MCP" phone-device install "$APP" --udid "$DEVICE"; then
+  :
+else
+  xcrun devicectl device install app --device "$DEVICE" "$APP"
+fi
 # What's on the iPhone now, and when its signing lapses: the phone updater reads it.
 set -- $(expiry "$APP/embedded.mobileprovision")
 mkdir -p "$STATE"

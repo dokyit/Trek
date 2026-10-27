@@ -1,0 +1,18 @@
+[package]
+name = "trek-phone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A real iPhone from the Mac without Xcode: its screen over USB, taps and keys as a Bluetooth keyboard and mouse, and its apps and files over usbmuxd"
+
+# The protocol (hid), paths (files) and the lease build everywhere; the device services (usbmuxd,
+# lockdown, AFC, house_arrest, installation_proxy) and the helper that captures the screen and
+# speaks Bluetooth are macOS-only for now.
+[target.'cfg(target_os = "macos")'.dependencies]
+serde_json.workspace = true
+async-channel.workspace = true
+# MIT; pure Rust over the usbmuxd socket, no libimobiledevice (LGPL) or pymobiledevice3 (GPL).
+# `ring` matches the rustls provider the workspace already builds (reqwest's).
+idevice = { version = "0.1.68", default-features = false, features = ["ring", "usbmuxd", "afc", "house_arrest", "installation_proxy"] }
+plist = "1"
+tokio = { workspace = true }

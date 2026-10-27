@@ -61,6 +61,12 @@ cp "$ICON_CACHE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 echo "• bundle"
 cp "$TARGET_DIR/$PROFILE/trek" "$APP/Contents/MacOS/trek"
 cp "$TARGET_DIR/$PROFILE/trek-mcp" "$APP/Contents/MacOS/trek-mcp"
+# The iPhone tool's helper (screen over USB, Bluetooth keyboard and mouse), built here so a
+# person installing Trek needs no Swift compiler; without one here, Trek builds it on first use.
+# Its Info.plist is linked in as `trek_phone::helper::build` does.
+if ! "$TARGET_DIR/$PROFILE/trek-mcp" phone-device build-helper "$APP/Contents/MacOS/trek-phone-helper"; then
+  echo "• (no iPhone helper bundled: Trek builds it on first use)"
+fi
 # Menu bar glyph as a bundle resource, so menu bar managers (Shelf, …) can show Trek's real
 # template icon instead of the colour app icon when they stand in for an evicted item.
 cp "$ICON_CACHE/MenuBarIconTemplate.png" "$APP/Contents/Resources/MenuBarIconTemplate.png"
@@ -83,6 +89,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Trek records the mic so Speech can transcribe what you dictate into the composer.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Trek transcribes what you dictate into the composer.</string>
+  <key>NSCameraUsageDescription</key><string>Trek shows your iPhone's screen in its iPhone tool: it comes over the USB cable as a camera's picture does.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key><string>Trek is a Bluetooth keyboard and mouse for your iPhone, so you and your agents can tap and type on it from the iPhone tool.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

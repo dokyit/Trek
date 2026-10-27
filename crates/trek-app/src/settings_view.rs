@@ -1971,6 +1971,28 @@ impl SettingsView {
             ],
             cx,
         ));
+        if cfg!(target_os = "macos") {
+            out.push(Self::heading("iPhone", cx));
+            out.push(ui::group(
+                vec![
+                    Self::row(
+                        "iPhone tools",
+                        "Agents use your real iPhone on the cable: its screen over USB, taps and typing as a Bluetooth keyboard and mouse you pair once, and apps and files over the cable. No Xcode, no Developer Mode. One agent at a time; installing and changing files follow the thread's access level. Applies to new sessions.",
+                        self.switch("phone-tools", s.tools.phone, |s, v| s.tools.phone = v),
+                        cx,
+                    ),
+                    Self::row(
+                        "Show the iPhone live",
+                        "When the agent of the thread you're on starts using the iPhone, the iPhone tool opens beside the chat with its screen live and a Stop button to take the phone back.",
+                        self.switch("phone-follow", s.tools.phone_follow, |s, v| {
+                            s.tools.phone_follow = v
+                        }),
+                        cx,
+                    ),
+                ],
+                cx,
+            ));
+        }
         out.push(Self::heading("Video", cx));
         let ffmpeg_control: AnyElement = match probe.as_ref().map(|p| p.ffmpeg) {
             None => checking("install-ffmpeg"),

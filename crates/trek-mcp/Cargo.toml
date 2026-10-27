@@ -32,6 +32,8 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSError", "NSArray", "NSEnumerator"] }
 objc2-speech = "0.3"
 block2 = "0.6"
+# `trek-mcp phone-device`: the iPhone's apps and files over usbmuxd (no Xcode).
+trek-phone = { path = "../trek-phone" }
 
 [target.'cfg(windows)'.dependencies]
 # Input (SendInput), the window list (EnumWindows, DWM), screenshots (GDI) and app launch (ShellExecuteW).

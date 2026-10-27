@@ -304,6 +304,16 @@ impl TrekWindow {
                         }
                     }
                     WorkspaceEvent::BrowserUse(_) => {}
+                    // An agent's iPhone call: the main window's iPhone tool runs it.
+                    WorkspaceEvent::PhoneUse(slot)
+                        if this.workspace.read(cx).main_window == Some(window.window_handle()) =>
+                    {
+                        if let Some(call) = slot.borrow_mut().take() {
+                            this.right_panel
+                                .update(cx, |p, cx| p.phone_call(call, window, cx));
+                        }
+                    }
+                    WorkspaceEvent::PhoneUse(_) => {}
                     // The Browser is the tools panel's, beside the chat, as for `OpenTool`.
                     WorkspaceEvent::OpenInBrowser(url) => {
                         let url = url.clone();

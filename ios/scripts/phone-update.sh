@@ -57,22 +57,41 @@ print $$ > "$STATE/lock/pid"
 TMP=$(mktemp -d)
 trap 'rm -rf "$STATE/lock" "$TMP"' EXIT
 
+# Installing and reading the phone go through Trek's own trek-mcp (`phone-device`, over usbmuxd
+# as Finder does) when there's one that has it; devicectl (Xcode) is the fallback, and still
+# what reaches a phone paired over Wi-Fi only. Building needs Xcode either way.
+TREK_MCP="$(TREK_REPO="$REPO" TREK_MAC_APP="$MAC_APP" sh "$REPO/ios/scripts/trek-mcp-path.sh" 2>/dev/null)"
+
 # 1. The iPhone, reachable now: over USB, or the network (Xcode pairs it once over USB).
-xcrun devicectl list devices > "$TMP/devices.txt" 2>/dev/null
-UDID="${DEVICE:-$(awk '/iPhone/ && /physical/ && /(^|[^a-z])(available|connected)([^a-z]|$)/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i}' "$TMP/devices.txt" | head -1)}"
+UDID="${DEVICE:-}"
+[[ -z "$UDID" && -n "$TREK_MCP" ]] && UDID=$("$TREK_MCP" phone-device list 2>/dev/null | awk '{print $1; exit}')
+VIA_MUX=0
+[[ -n "$UDID" && -n "$TREK_MCP" ]] && "$TREK_MCP" phone-device list 2>/dev/null | grep -q "^$UDID " && VIA_MUX=1
+if [[ -z "$UDID" ]]; then
+  xcrun devicectl list devices > "$TMP/devices.txt" 2>/dev/null
+  UDID=$(awk '/iPhone/ && /physical/ && /(^|[^a-z])(available|connected)([^a-z]|$)/ {for (i=1;i<=NF;i++) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) print $i}' "$TMP/devices.txt" | head -1)
+fi
 if [[ -z "$UDID" ]]; then
   log "no iPhone in reach (not plugged in, and not on this Wi-Fi or asleep too long)"
   exit 0
 fi
 
 # 2. What's on it, and what's on this Mac.
-xcrun devicectl device info apps --device "$UDID" --bundle-id "$BUNDLE" --json-output "$TMP/apps.json" >/dev/null 2>&1
-PHONE=$(/usr/bin/python3 -I -c 'import json,sys
+PHONE=""
+if (( VIA_MUX )); then
+  # "dev.trek.TrekMobile  Trek  0.4.21 (826)" -> "0.4.21 826"
+  PHONE=$("$TREK_MCP" phone-device apps --udid "$UDID" 2>/dev/null \
+    | awk -v b="$BUNDLE" '$1 == b {v=$(NF-1); n=$NF; gsub(/[()]/, "", n); print v, n; exit}')
+fi
+if [[ -z "$PHONE" ]]; then
+  xcrun devicectl device info apps --device "$UDID" --bundle-id "$BUNDLE" --json-output "$TMP/apps.json" >/dev/null 2>&1
+  PHONE=$(/usr/bin/python3 -I -c 'import json,sys
 try:
     a = json.load(open(sys.argv[1]))["result"]["apps"]
     print(a[0]["version"], a[0]["bundleVersion"]) if a else print("")
 except Exception:
     print("")' "$TMP/apps.json")
+fi
 if [[ -z "$PHONE" ]]; then
   log "Trek isn't installed on $UDID (or the iPhone didn't answer): nothing to update"
   exit 0
@@ -202,7 +221,9 @@ if ! (cd "$SRC/ios" && nice -n 10 xcodebuild -project Trek.xcodeproj -scheme Tre
   exit 1
 fi
 APP="$DD/Build/Products/Debug-iphoneos/Trek.app"
-if ! xcrun devicectl device install app --device "$UDID" "$APP" > "$TMP/install.log" 2>&1; then
+if (( VIA_MUX )) && "$TREK_MCP" phone-device install "$APP" --udid "$UDID" > "$TMP/install.log" 2>&1; then
+  log "installed over usbmuxd (no Xcode)"
+elif ! xcrun devicectl device install app --device "$UDID" "$APP" > "$TMP/install.log" 2>&1; then
   log "install failed: $(grep -iE "error" "$TMP/install.log" | head -2 | tr '\n' ' ')"
   exit 1
 fi

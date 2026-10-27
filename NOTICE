@@ -19,6 +19,10 @@ Third-party materials bundled in this repository:
 * crates/trek-mcp/src/desktop/skylight.rs — the recipe for input to a window in the
   background (the window server's event records and event fields) follows the findings of
   cua-driver (Cua AI, github.com/trycua/cua), MIT.
+* crates/trek-phone/src/hid.rs and crates/trek-phone/helper/main.swift — the HID report map
+  (an absolute pointer whose presses go through a second, relative mouse) and the HID over
+  GATT service layout follow iphone-use (NewWave AI, github.com/xhoantran/iphone-use), MIT.
+  The iPhone's own services are reached through the idevice crate (Jackson Coxson), MIT.
 * Agent and provider logos under crates/trek-app/assets/logos and
   ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,
