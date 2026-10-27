@@ -46,6 +46,14 @@ the paired Mac), `-TrekLink '<trek://pair… link>'` (open the pairing confirmat
 `ios/scripts/live-screenshots.sh '<pairing URL>'` pairs with a running demo host (debug-only
 `-TrekPair`) and captures the live threads list and the "Encrypted · pinned" settings.
 
+Measuring the transcript's scrolling: `-TrekBigThread 5000` adds a long thread (`t-big`), as uneven
+as a real one with `-TrekBigRich YES`; `-TrekFixture <path>` serves a real thread's items as
+`t-fixture` (exported read-only by `ios/scripts/export-thread.py`; a relative path is in the app's
+own folder); `-TrekScrollProbe YES` logs each frame to `Library/Caches/scroll-probe.tsv`, and
+`-TrekAutoScroll <n>` (debug builds) scrolls up by itself, for an iPhone where swipes can't be
+scripted. `ios/scripts/scroll-run.sh` swipes up a simulator with AXe, recording it, and
+`ios/scripts/scroll-probe.py` reads the probe for jumps and blank frames.
+
 ## Against a real server
 
 Until Trek itself serves the protocol, run the fake host from `crates/trek-remote`. It serves
@@ -111,7 +119,17 @@ limitation in `docs/MOBILE.md`); scanning pins the whole thing. See `docs/MOBILE
 ## On your iPhone
 
 - **Over USB, free Apple ID:** `ios/scripts/install-device.sh` builds with your Personal Team and
-  installs on the plugged-in iPhone. It runs for 7 days; run it again to renew.
+  installs on the plugged-in iPhone (or one on the same Wi-Fi, once Xcode has paired it). It runs
+  for 7 days from when Xcode made its provisioning profile; installing again with the same profile
+  doesn't extend that, so the script sets a profile with 2 days or less left aside first and Xcode
+  makes a fresh one.
+- **Kept up to date by the Mac:** `ios/scripts/install-phone-update.sh` installs a LaunchAgent
+  that runs `ios/scripts/phone-update.sh` every 30 minutes: when the iPhone is in reach and Trek on
+  the Mac is newer than the app, or the signing has 2 days or less left, it builds the app at the
+  Mac's version tag (in a worktree of its own) and installs it, without opening it. It waits while
+  a build runs and while Trek is open on the iPhone. Log: `~/Library/Logs/trek-phone-update.log`;
+  pause: `touch "~/Library/Application Support/dev.trek.phone-update/off"`; remove:
+  `install-phone-update.sh --uninstall`. Settings on the iPhone says when an update is coming.
 - **TestFlight (keeps a build 90 days, updates over the air):** needs the paid Apple Developer
   Program on the Apple ID in Xcode. Once enrolled:
   1. Xcode › Settings › Accounts: select your Apple ID so Xcode picks up the paid team.

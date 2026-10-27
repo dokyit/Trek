@@ -8,6 +8,9 @@ import QuartzCore
 /// jumps the swipe doesn't explain and for blank screens (`ios/scripts/scroll-probe.py`).
 enum ScrollProbe {
     static let on = UserDefaults.standard.bool(forKey: "TrekScrollProbe")
+    /// `-TrekAutoScroll <n>` (debug builds): the open transcript scrolls itself up, n swipes'
+    /// worth, for a probe run where touches can't be scripted (a real iPhone).
+    static let autoScroll = UserDefaults.standard.integer(forKey: "TrekAutoScroll")
     nonisolated(unsafe) private static var lines: [String] = []
     nonisolated(unsafe) private static var flushing = false
     static let url: URL = {

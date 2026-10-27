@@ -63,7 +63,10 @@ extension DemoMac {
     /// `-TrekFixtureTitle "…"`: the fixture thread's title.
     static var fixtureTitle: String? { UserDefaults.standard.string(forKey: "TrekFixtureTitle") }
 
+    /// A relative path is in the app's own folder (where `devicectl device copy to` puts a file
+    /// on an iPhone).
     static func fixture(at path: String) -> [TItem]? {
+        let path = path.hasPrefix("/") ? path : (NSHomeDirectory() as NSString).appendingPathComponent(path)
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase

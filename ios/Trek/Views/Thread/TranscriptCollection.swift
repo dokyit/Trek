@@ -79,7 +79,9 @@ struct TranscriptCollection: UIViewControllerRepresentable {
         c.edgesChanged = edges
         c.setEnvironment(environment)
         c.setInsets(top: insets.top, bottom: insets.bottom)
-        c.update(rows: rows, generation: generation)
+        // A change made with an animation (a group opened) grows or shrinks its row in step.
+        let t = context.transaction
+        c.update(rows: rows, generation: generation, animated: t.animation != nil && !t.disablesAnimations)
     }
 }
 
@@ -131,6 +133,11 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         view.addSubview(cv)
         collectionView = cv
         if ScrollProbe.on { CADisplayLink(target: self, selector: #selector(probeTick)).add(to: .main, forMode: .common) }
+        #if DEBUG
+        if ScrollProbe.autoScroll > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.startDriving() }
+        }
+        #endif
         view.backgroundColor = .clear
     }
 
@@ -161,7 +168,7 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
 
     // MARK: Rows in
 
-    func update(rows new: [TranscriptRow], generation g: Int) {
+    func update(rows new: [TranscriptRow], generation g: Int, animated: Bool = false) {
         guard isViewLoaded else { return }
         if g != generation {
             // A new thread, or one the host rewrote: drawn afresh at the latest.
@@ -184,6 +191,7 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
             let changed = (0..<new.count).filter { old[$0] != new[$0] }
             rows = new
             reconfigure(changed)
+            if animated, !changed.isEmpty { animateResize() }
             return
         }
         // Rows went in or out: the rows both lists start with and end with stay; what's between
@@ -238,6 +246,18 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         UIView.performWithoutAnimation { collectionView.reconfigureItems(at: paths) }
     }
 
+    /// The rows just redrawn take their new heights, and the rows under them move, over a moment
+    /// (the redrawn rows clip what they don't have room for yet).
+    private func animateResize() {
+        let cells = collectionView.visibleCells
+        cells.forEach { $0.clipsToBounds = true }
+        UIView.animate(withDuration: 0.24, delay: 0, options: [.curveEaseInOut, .allowUserInteraction, .beginFromCurrentState]) {
+            self.collectionView.layoutIfNeeded()
+        } completion: { _ in
+            cells.forEach { $0.clipsToBounds = false }
+        }
+    }
+
     // MARK: Heights
 
     /// Guesses made so far, by row id: a page landing guesses only its own rows (a guess reads
@@ -263,7 +283,9 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         // A row going from empty to drawn (or back) takes (or gives back) the gap before it too.
         if (old == 0) != (h == 0) { delta += h > 0 ? gaps[i] : -gaps[i] }
         let top = cv.contentOffset.y + cv.adjustedContentInset.top
-        return layout.origin(of: i) < top - 0.5 ? delta : nil
+        let above = layout.origin(of: i) < top - 0.5
+        if ScrollProbe.on, abs(delta) > 0.5 { ScrollProbe.note("measured \(rows[i].id): \(Int(old))→\(Int(h))\(above ? ", above the screen: offset \(Int(delta))" : "")") }
+        return above ? delta : nil
     }
 
     // MARK: Keeping the reader's place
@@ -315,7 +337,53 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         cv.setContentOffset(CGPoint(x: cv.contentOffset.x, y: max(minOffset, maxOffset)), animated: animated)
     }
 
-    private var touching: Bool { collectionView.isTracking || collectionView.isDragging || collectionView.isDecelerating }
+    private var touching: Bool {
+        collectionView.isTracking || collectionView.isDragging || collectionView.isDecelerating || driving
+    }
+
+    /// `-TrekAutoScroll <n>` (debug builds): scrolls up by itself, as a reader would, where no
+    /// touches can be scripted (a real iPhone).
+    private var driving = false
+    #if DEBUG
+    private var drive: (link: CADisplayLink, frame: Int, left: Int)?
+
+    private func startDriving() {
+        let link = CADisplayLink(target: self, selector: #selector(driveTick))
+        link.add(to: .main, forMode: .common)
+        drive = (link, 0, ScrollProbe.autoScroll)
+        driving = true
+        userScrolled = true
+        ScrollProbe.note("auto-scroll: \(ScrollProbe.autoScroll) swipes")
+    }
+
+    /// One swipe: up for 45 frames at a speed that eases in and out (a page and a half), then a
+    /// rest of 30 frames. Each frame moves from where the list is now, so the list's own
+    /// corrections (a row measured above, a page landing) stand, as they do under a finger.
+    @objc private func driveTick() {
+        guard var d = drive, let cv = collectionView else { return }
+        let f = d.frame % 75
+        if f < 45 {
+            let t = Double(f) / 45
+            let speed = 70 * sin(t * .pi)
+            cv.contentOffset.y = max(minOffset, cv.contentOffset.y - speed)
+            pinned = false
+        }
+        d.frame += 1
+        if d.frame % 75 == 0 { d.left -= 1 }
+        if d.left <= 0 || cv.contentOffset.y <= minOffset + 0.5 && !edgesNearTopLoading {
+            d.link.invalidate()
+            drive = nil
+            driving = false
+            ScrollProbe.note("auto-scroll done")
+            return
+        }
+        drive = d
+        updateEdges()
+    }
+
+    /// At the top with earlier rows still on their way: wait for them rather than stop.
+    private var edgesNearTopLoading: Bool { rows.contains { if case .earlier = $0 { true } else { false } } }
+    #endif
 
     private func afterLayout() {
         if layout.width != measuredWidth {
