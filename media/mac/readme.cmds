@@ -1,42 +1,78 @@
-# media/mac/readme.cmds — the README/doc set: hero stills and one working-turn clip.
-# Run: script/capture.sh mac/readme     (SIZE=1280x820 FPS=15 TREK_SHOT_UNDER=assets/backgrounds/night.png)
-# Ordering rule of thumb: `wait idle` only passes once every open turn has ended — so shots that
-# leave a permission or plan card up must come AFTER any `wait idle` you still need.
-#
-# The mock agent answers these prompts deterministically: "tools", "permission", "plan",
-# "mock:stream <n>s", "mock:long <n>s", "subagents <n>s", "question", "mock:consult", "error".
-# `pace 0` plays scripts without delays (fast stills); `pace 1` is demo speed (for film).
+# media/mac/readme.cmds — the README's Mac frames (docs/assets/screenshots/mac/).
+# Run: SIZE=1280x800 script/capture.sh mac/readme
+# `@REPO@` is the repository's root, opened as a project (a clone in a folder named `trek` reads
+# best in the sidebar: SHOT_REPO=/path/to/trek).
+# Ordering rule of thumb: `wait idle` only passes once every open turn has ended — so turns that
+# stay open (a permission or plan card, a long build) come after the last `wait idle`.
+# The mock agent picks its script by a keyword anywhere in the prompt ("subagents", "tools",
+# "permission", "plan", "mock:long" …), so the prompts can read like real ones.
+# The `wait 7000`s let the "Finished" toasts fade before a shot.
 
-# A working turn, filmed: the streaming answer is the clip.
+pace 0
+glass off
 theme night
-route draft
-record clip-stream 9000 15
-send mock:stream 8s
+
+# Finished threads in the project.
+project @REPO@
+send Review the API with two subagents 3s
 wait idle 30000
-record wait
-shot 01-working-night
+project @REPO@
+send Walk me through how the app starts
+wait idle 30000
+project @REPO@
+send Add a --verbose flag to the CLI, use your tools
+wait idle 30000
+# The thread's side panel names the machine; the frames go without it.
+click hub
 
-# The same thread a moment later, settled.
-wait idle 5000
-shot 02-finished-night
-
-# Cards that wait on a person — shot them last, they keep their turns open.
+# Threads that wait on a person, or keep working (outside the project, so the plan's thread
+# isn't warned about another thread editing its folder).
 route draft
-send permission
+send Apply the schema migration once I give permission
 wait permission 20000
-shot 03-approval-night
-
 route draft
-send plan
-wait plan 20000
-shot 04-plan-night
+send Run the whole test suite on every platform mock:long 900s
+wait 1500
 
-# The lighter theme and the wider app.
+# The hero: a plan waiting for approval, the sidebar showing what needs you.
+project @REPO@
+send Make a plan for session auth on every route
+wait plan 20000
+wait 7000
+shot hero-night
 theme paper
+wait 800
+shot hero-paper
+
+# An approval card.
+route title:Apply the schema
+wait 800
+shot approval-paper
+theme night
+wait 800
+shot approval-night
+
+# Basecamp: today across every thread.
 route basecamp
-shot 05-basecamp-paper
-tools on
-wait 600
-shot 06-tools-paper
+wait 800
+shot basecamp-night
+theme paper
+wait 800
+shot basecamp-paper
+
+# The editor, with the agent beside it.
+route first
+editor on
+editor root @REPO@
+editor view explorer
+editor open @REPO@/crates/trek-app/src/workspace/worktrees.rs 60
+editor ai on
+wait 1500
+shot editor-paper
+theme night
+wait 800
+shot editor-night
+editor ai off
+editor off
 
 quit

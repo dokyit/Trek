@@ -28,3 +28,8 @@ Third-party materials bundled in this repository:
   implied, and Trek claims no rights in those marks. Trademark holders may
   request removal via a GitHub issue.
 * Model metadata (context windows, pricing) is sourced from models.dev.
+* docs/assets/icons/features — Lucide icons (Lucide Icons and Contributors), ISC
+  (docs/assets/icons/features/LICENSE), recoloured. docs/assets/icons/tech and
+  docs/assets/icons/platforms draw Simple Icons glyphs (CC0 1.0) and a plain four-pane
+  window; the marks they show
+  (Rust, Swift, SQLite, Apple, Windows) belong to their owners.

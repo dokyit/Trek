@@ -53,4 +53,5 @@ Stills go through `ios/scripts/shoot.sh`, `record=` through `ios/scripts/record.
 `-TrekAppearance light|dark`, `-TrekTab`, `-TrekSheet`, `-TrekLink`, `-TrekPair`).
 
 Output lands in `OUT/<suite>/` (gitignored `dist/` by default); copy keepers into
-`ios/screenshots/` or `docs/media/` to commit them.
+`ios/screenshots/` or `docs/assets/screenshots/` to commit them (the README uses
+`mac/readme` and the iPhone demo shots, resized, in `docs/assets/screenshots/`).
