@@ -15,6 +15,15 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job finishes in under ten minutes on GitHub's standard runners (about 7 for the whole run,
+# measured 2026-10-27; it was 35-45). Where the time went: trek-app's 63 test binaries (each links
+# the whole app; ~13 s apiece on Windows), its tests run one binary after another (~18 min on
+# Windows), and caches that held little of what the jobs build. So: the workspace and trek-app
+# halves are jobs of their own, trek-app's test targets are split across several
+# (script/ci-shard.py: every target in exactly one), and each kind of job keeps its own cache of
+# the dependencies, vendor/ included (script/ci-cache.py). The tests, the lints and the way they
+# run (`cargo test`, one test binary at a time) are what they were. A cold cache (a new toolchain;
+# a new dependency only recompiles itself) makes one run take ~20 min.
 env:
   CARGO_TERM_COLOR: always
   # Incremental builds don't help a fresh runner and bloat the cache.
@@ -22,12 +31,18 @@ env:
   # The build stays free of warnings: one fails it. (Crates from crates.io have their lints
   # capped by Cargo; this covers the workspace and vendor/.)
   RUSTFLAGS: -D warnings
+  # trek-core, trek-agents, trek-remote and trek-app at opt-level 0 (.github/ci-profile.toml).
+  CI_PROFILE: .github/ci-profile.toml
+  # How many jobs trek-app's tests are split across, per runner (the matrices below match).
+  APP_SHARDS_MACOS: 3
+  APP_SHARDS_WINDOWS: 9
+  # (Job timeouts leave room for a cold cache: a new dependency, a new toolchain.)
 
 jobs:
   test:
     name: Test (macOS)
     runs-on: macos-15
-    timeout-minutes: 75
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -49,14 +64,30 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
 
-      - uses: Swatinem/rust-cache@v2
+      # trek-app's test targets all land in a shard (prints the split).
+      - name: trek-app shards
+        run: python3 script/ci-shard.py --check "$APP_SHARDS_MACOS"
+
+      # One cache per kind of job (script/ci-cache.py): each builds its own feature set. (One key
+      # shared by this job and Clippy used to be saved by whichever finished first: Clippy's
+      # check-only artifacts, so this job compiled all 640 crates on every push.)
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key test-workspace
+
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          # One cache for the whole workspace; saved from main so pull requests reuse it.
-          shared-key: workspace
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          # Keep the workspace crates' own artifacts too, so a push that touches one crate does
-          # not rebuild the others (trek-core, trek-agents, trek-remote take minutes each).
-          cache-workspace-crates: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
 
       # gpui compiles its Metal shaders at build time with `xcrun metal`. Since Xcode 26 the Metal
       # toolchain is a separate component that an image may not have; `xcrun -f metal` finds a
@@ -71,21 +102,105 @@ jobs:
 
       # Every crate but the app: trek-remote (the phone server's protocol, TLS and pairing) and
       # trek-ipc too. `--no-fail-fast`: one run reports every failing test binary, not just the
-      # first. trek-app is its own step so each half's compile and run time shows separately.
+      # first. trek-app runs in the jobs below.
       - name: Test (workspace, except trek-app)
-        run: cargo test --workspace --exclude trek-app --locked --no-fail-fast
+        run: cargo test --config "$CI_PROFILE" --workspace --exclude trek-app --locked --no-fail-fast
 
-      # The app alone is most of the compile; a step of its own keeps that visible.
+      # trek-app's doc tests: what `cargo test -p trek-app` ran last. Here rather than in a trek-app
+      # job: a `--doc` run resolves features apart from the test targets (it compiles a graph of
+      # its own), and this job has the time.
+      - name: Doc tests (trek-app)
+        run: cargo test --config "$CI_PROFILE" -p trek-app --locked --doc
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  # trek-app's targets split across jobs (script/ci-shard.py): the 1st also runs the unit tests in
+  # src/ (its doc tests run in the job above). Each job compiles the app once and only its own test
+  # binaries.
+  test-app:
+    name: Test (macOS, trek-app ${{ matrix.shard }}/3)
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key test-app
+
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
+
+      - name: Metal toolchain
+        run: |
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
       - name: Test (trek-app)
-        run: cargo test -p trek-app --locked --no-fail-fast
+        run: |
+          targets=$(python3 script/ci-shard.py ${{ matrix.shard }} "$APP_SHARDS_MACOS")
+          echo "targets: $targets"
+          cargo test --config "$CI_PROFILE" -p trek-app --locked --no-fail-fast $targets
+
+      # Every shard builds the same dependencies; the 1st saves them.
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
 
   # The Windows port runs the same suite as the Mac (Phase 5 of the port): the runner's Git for
   # Windows, PowerShell 7 and Windows PowerShell cover what the tests spawn.
   test-windows:
     name: Test (Windows)
     runs-on: windows-2022
-    # Slower than the Mac: a cold build of the whole workspace plus the ConPTY tests' waits.
-    timeout-minutes: 120
+    timeout-minutes: 60
+    env:
+      # LLVM's linker (it ships with the toolchain) links the test binaries about a fifth faster
+      # than link.exe. CI only: releases still link with link.exe.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
     steps:
       # Deep build paths under the runner's workspace can pass MAX_PATH.
       - name: Long paths
@@ -110,26 +225,121 @@ jobs:
         with:
           toolchain: '1.99.0'
 
-      - uses: Swatinem/rust-cache@v2
+      - name: trek-app shards
+        run: python script/ci-shard.py --check $env:APP_SHARDS_WINDOWS
+
+      - name: Cache key
+        id: key
+        run: python script/ci-cache.py key test-workspace
+
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: workspace
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port' }}
-          cache-workspace-crates: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python script/ci-cache.py restore
 
       # Every crate but the app: trek-remote (the phone server's protocol, TLS and pairing) and
       # trek-ipc too. `--no-fail-fast`: one run reports every failing test binary, not just the
-      # first. trek-app is its own step so each half's compile and run time shows separately.
-      # TREK_QUIET_SPAWNS_CONTROL: the console-window check's control, which would flash windows on
-      # a desktop, runs here (crates/trek-core/tests/quiet_spawns.rs).
+      # first. TREK_QUIET_SPAWNS_CONTROL: the console-window check's control, which would flash
+      # windows on a desktop, runs here (crates/trek-core/tests/quiet_spawns.rs).
       - name: Test (workspace, except trek-app)
-        run: cargo test --workspace --exclude trek-app --locked --no-fail-fast
+        run: cargo test --config $env:CI_PROFILE --workspace --exclude trek-app --locked --no-fail-fast
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
 
+      - name: Cache contents
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'
+        run: python script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  # As on the Mac; the 'doc' job runs trek-app's doc tests (the Windows workspace job hasn't the
+  # time for that graph too).
+  test-windows-app:
+    name: Test (Windows, trek-app ${{ matrix.shard == 'doc' && 'doc tests' || format('{0}/9', matrix.shard) }})
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1', '2', '3', '4', '5', '6', '7', '8', '9', doc]
+    steps:
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - name: Cache key
+        id: key
+        run: python script/ci-cache.py key test-app
+
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python script/ci-cache.py restore
+
       - name: Test (trek-app)
-        run: cargo test -p trek-app --locked --no-fail-fast
+        if: matrix.shard != 'doc'
+        run: |
+          $targets = (python script/ci-shard.py ${{ matrix.shard }} $env:APP_SHARDS_WINDOWS) -split ' '
+          if ($LASTEXITCODE -ne 0 -or -not $targets) { throw 'script/ci-shard.py failed' }
+          "targets: $targets"
+          cargo test --config $env:CI_PROFILE -p trek-app --locked --no-fail-fast @targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
+
+      - name: Doc tests (trek-app)
+        if: matrix.shard == 'doc'
+        run: cargo test --config $env:CI_PROFILE -p trek-app --locked --doc
+        env:
+          TREK_QUIET_SPAWNS_CONTROL: "1"
+
+      # Every shard builds the same dependencies; the 1st saves them.
+      - name: Cache contents
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && matrix.shard == '1' && steps.cache.outputs.cache-hit != 'true'
+        run: python script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && matrix.shard == '1' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
 
   # Clippy in its own job, parallel with the tests: run after them in the same job it redoes the
   # whole graph anyway (clippy's RUSTC_WORKSPACE_WRAPPER changes every fingerprint), so it might
@@ -147,14 +357,23 @@ jobs:
           toolchain: '1.99.0'
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key clippy
+
+      - uses: actions/cache/restore@v4
+        id: cache
         with:
-          shared-key: workspace
-          # Its own cache entry, so clippy artifacts don't contend for the test jobs' slot; the
-          # workspace key still serves as the restore prefix.
-          key: clippy
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-workspace-crates: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
 
       - name: Metal toolchain
         run: |
@@ -172,3 +391,17 @@ jobs:
 
       - name: Clippy (workspace lib and bins)
         run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}

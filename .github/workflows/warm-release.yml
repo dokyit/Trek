@@ -1,9 +1,16 @@
 name: Warm release cache
 
 # Release runs build --release, whose artifacts share nothing with ci.yml's dev-profile cache:
-# every release used to compile all of crates.io cold (~15-25 min). A push to main rebuilds the
-# release dependencies under the "release" shared key, so a dispatched release restores them
-# (the version bump rewrites Cargo.lock, so it matches the cache by prefix, not by key).
+# every release used to compile all of crates.io cold (~15-25 min). A push to main builds the
+# release dependencies under the "release" shared key, so a dispatched release restores them.
+#
+# rust-cache's key hashes Cargo.lock and the manifests without the workspace's version, so it
+# changes when a dependency does and a release's version bump keeps it. A key that is already
+# saved is never written again, so then there is nothing to warm and the job stops after the
+# restore (it used to rebuild everything and throw it away, ~13 min on Windows). When the key is
+# new, the build stops short of linking trek: the dependencies are what's kept, and the thin-LTO
+# link of the app (~4 min on the Mac, ~6.5 on Windows) would only be thrown away. (`--lib` leaves
+# the dependencies' artifacts exactly as the full release build wants them.)
 on:
   push:
     branches: [main]
@@ -27,7 +34,7 @@ jobs:
   macos:
     name: Release deps (macOS)
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +43,7 @@ jobs:
           toolchain: '1.99.0'
 
       - uses: Swatinem/rust-cache@v2
+        id: cache
         with:
           # The key the release jobs restore. Workspace crates' artifacts are no use to a
           # release (the version bump rebuilds them anyway), so only deps are kept.
@@ -44,6 +52,7 @@ jobs:
 
       # trek-app's build compiles gpui's Metal shaders (see ci.yml).
       - name: Metal toolchain
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           xcodebuild -version
           if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
@@ -51,14 +60,15 @@ jobs:
           fi
           xcrun -sdk macosx metal --version
 
-      # What script/bundle.sh builds for a release.
+      # What script/bundle.sh builds for a release (-p trek-app -p trek-mcp), short of trek's link.
       - name: cargo build --release
-        run: cargo build --release --locked -p trek-app -p trek-mcp
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --release --locked -p trek-app -p trek-mcp --lib --bin trek-mcp
 
   windows:
     name: Release deps (Windows)
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       # Deep build paths under the runner's workspace can pass MAX_PATH.
       - name: Long paths
@@ -71,10 +81,13 @@ jobs:
           toolchain: '1.99.0'
 
       - uses: Swatinem/rust-cache@v2
+        id: cache
         with:
           shared-key: release
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # What script/release.ps1 builds for a release (trek-update while the crate exists).
+      # What script/release.ps1 builds for a release (trek-update while the crate exists), short
+      # of trek's link.
       - name: cargo build --release
-        run: cargo build --release --locked -p trek-app -p trek-mcp -p trek-update
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo build --release --locked -p trek-app -p trek-mcp -p trek-update --lib --bin trek-mcp --bin trek-update

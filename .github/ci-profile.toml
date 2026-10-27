@@ -1,0 +1,20 @@
+# Cargo config for CI's test builds (`cargo test --config .github/ci-profile.toml`, .github/workflows/ci.yml).
+#
+# Every release bumps the workspace's version, so CI compiles all of its crates on every push, and
+# these four are most of that compile: at opt-level 0 instead of the dev profile's 1, trek-core
+# compiles about 5x faster and trek-app 2x (measured on both runners), and their tests take no
+# longer. Debug assertions and overflow checks are on either way. The other crates keep
+# Cargo.toml's opt-level 1: they're quick to compile, and some (trek-math's parser) recurse deeper
+# than a test thread's stack holds without optimization. Local builds are unaffected.
+
+[profile.dev.package.trek-core]
+opt-level = 0
+
+[profile.dev.package.trek-agents]
+opt-level = 0
+
+[profile.dev.package.trek-remote]
+opt-level = 0
+
+[profile.dev.package.trek-app]
+opt-level = 0

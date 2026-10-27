@@ -190,8 +190,9 @@ either way) and `dry_run`. Run it on the branch you release
 from: a stable release commits `Release v<version>` to that branch and pushes it (as the runner's
 `github-actions[bot]`, so CI doesn't run on that commit, and a protected branch would refuse the push
 before anything is published), and a beta or nightly is built from its head. The macOS job and the Windows `build` job run in
-parallel — each takes about 15–20 minutes once the release-profile cache is warm (`warm-release.yml`
-keeps it warm on every push to main), and only the small `publish` job that merges the Windows asset
+parallel — the Mac about 9 minutes and Windows about 11–13 once the release-profile cache is warm
+(`warm-release.yml` rebuilds it on the first push to main after a dependency changes; the
+thin-LTO link of `trek.exe` alone takes ~6.5 minutes on the 4-core runner), and only the small `publish` job that merges the Windows asset
 into the release waits on both. Between the macOS publish and the Windows publish, Trek on Windows
 sees the new version without a Windows build and says "the Windows build is on its way"; Mac users can
 update at once.
