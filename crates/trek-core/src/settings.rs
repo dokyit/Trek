@@ -768,6 +768,11 @@ pub struct Browser {
     /// macOS: block the big ad and tracker networks in pages (WebKit content rules; the
     /// Browser's tracker list). Windows has extensions for that instead.
     pub block_trackers: bool,
+    /// Block ads with the uBlock Origin the user imported (the Browser's ad blocker: on macOS its
+    /// rules as WebKit content rules, on Windows the extension itself). Turned on by an import.
+    pub ad_blocker: bool,
+    /// Sites the ad blocker leaves alone ("Allow ads on this site"): host names, lowercase.
+    pub ad_allow: Vec<String>,
 }
 
 /// The built-in terminal panel.

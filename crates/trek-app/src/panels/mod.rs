@@ -3,6 +3,7 @@
 
 pub mod branch_graph;
 pub mod browser;
+pub mod browser_adblock;
 pub mod browser_extensions;
 pub mod explorer;
 pub mod git;
