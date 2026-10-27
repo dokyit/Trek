@@ -1141,11 +1141,15 @@ fn card(
             cx,
         ));
         if pull_open {
+            // The rest: what the row itself does isn't listed again under it.
             for (id, op) in [
                 ("hub-git-pull", GitOp::Pull),
                 ("hub-git-push", GitOp::Push),
                 ("hub-git-fetch", GitOp::Fetch),
-            ] {
+            ]
+            .into_iter()
+            .filter(|(_, op)| *op != main_op)
+            {
                 git = git.child(
                     sub_row(id, false, cx)
                         .test_support()
