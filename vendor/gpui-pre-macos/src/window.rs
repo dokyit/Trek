@@ -2634,6 +2634,89 @@ unsafe fn is_ime_input_source_active() -> bool {
     }
 }
 
+/// Trek: the standard Edit command (its AppKit action) a key equivalent stands for: ⌘C, ⌘X,
+/// ⌘V, ⌥⇧⌘V (Paste and Match Style), ⌘A, ⌘Z, ⇧⌘Z.
+fn standard_editing_action(keystroke: &Keystroke) -> Option<&'static str> {
+    let m = &keystroke.modifiers;
+    if !m.platform || m.control || m.function {
+        return None;
+    }
+    match (keystroke.key.as_str(), m.shift, m.alt) {
+        ("c", false, false) => Some("copy:"),
+        ("x", false, false) => Some("cut:"),
+        ("v", false, false) => Some("paste:"),
+        ("v", true, true) => Some("pasteAsPlainText:"),
+        ("a", false, false) => Some("selectAll:"),
+        ("z", false, false) => Some("undo:"),
+        ("z", true, false) => Some("redo:"),
+        _ => None,
+    }
+}
+
+/// Trek: the window's first responder when it's a native view inside `this` (the Browser's web
+/// view, laid over GPUI's content), not GPUI's own view.
+unsafe fn native_responder(this: &Object) -> Option<id> {
+    unsafe {
+        let window: id = msg_send![this, window];
+        if window == nil {
+            return None;
+        }
+        let responder: id = msg_send![window, firstResponder];
+        let this_id = this as *const Object as id;
+        if responder == nil || responder == this_id {
+            return None;
+        }
+        let is_view: BOOL = msg_send![responder, isKindOfClass: class!(NSView)];
+        if is_view == NO {
+            return None;
+        }
+        let inside: BOOL = msg_send![responder, isDescendantOf: this_id];
+        (inside == YES).then_some(responder)
+    }
+}
+
+/// Trek: when a native view inside `this` has the keys (`native_responder`), the editing key
+/// `action` stands for goes to it as it would in any Mac app, and `true` says it was taken.
+/// GPUI's own `performKeyEquivalent:` doesn't hand key equivalents to its subviews, and the app
+/// has no Edit menu, so ⌘V never reached the page: GPUI's keymap had it (pasting into whatever
+/// GPUI view last had focus) or nothing did.
+///
+/// A web view gets the key first, as a key-down: the page sees it (a web app's own ⌘Z, ⌘C) and,
+/// when it leaves it, WebKit sends the same event again through `NSApp sendEvent:`, which brings
+/// it back here (see `do_command_by_selector` for how WebKit learns the page left it). wry's view
+/// says no to `performKeyEquivalent:` itself, so that can't be used. Then, or at once for any
+/// other view, the action goes down the responder chain: `paste:` to the web view, `undo:` to
+/// the window, which asks the web view's undo manager. `false` (GPUI's own view has the keys, or
+/// nothing took the action): GPUI handles the key as before.
+unsafe fn native_responder_edit(this: &Object, native_event: id, action: &str) -> bool {
+    thread_local! {
+        /// The key event last handed to a web view (its address and time), so its return from
+        /// WebKit, unhandled by the page, is told from a new press.
+        static SENT_TO_PAGE: Cell<Option<(usize, f64)>> = const { Cell::new(None) };
+    }
+    unsafe {
+        let Some(responder) = native_responder(this) else {
+            return false;
+        };
+        let timestamp: f64 = msg_send![native_event, timestamp];
+        let event = Some((native_event as usize, timestamp));
+        let is_web = Class::get("WKWebView").is_some_and(|web| {
+            let is: BOOL = msg_send![responder, isKindOfClass: web];
+            is == YES
+        });
+        if is_web && SENT_TO_PAGE.get() != event {
+            SENT_TO_PAGE.set(event);
+            let _: () = msg_send![responder, keyDown: native_event];
+            return true;
+        }
+        SENT_TO_PAGE.set(None);
+        let action = Sel::register(action);
+        let app: id = NSApplication::sharedApplication(nil);
+        let sent: BOOL = msg_send![app, sendAction: action to: nil from: responder];
+        sent == YES
+    }
+}
+
 extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -2658,6 +2741,18 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
 
     match event {
         PlatformInput::KeyDown(key_down_event) => {
+            // Trek: a native view inside this one that has the keys (the Browser's WKWebView)
+            // gets the standard editing keys, not GPUI's keymap. See `native_responder_edit`.
+            if key_equivalent
+                && let Some(action) = standard_editing_action(&key_down_event.keystroke)
+            {
+                drop(lock);
+                if unsafe { native_responder_edit(this, native_event, action) } {
+                    return YES;
+                }
+                lock = window_state.as_ref().lock();
+            }
+
             // For certain keystrokes, macOS will first dispatch a "key equivalent" event.
             // If that event isn't handled, it will then dispatch a "key down" event. GPUI
             // makes no distinction between these two types of events, so we need to ignore
@@ -3458,9 +3553,24 @@ extern "C" fn attributed_substring_for_proposed_range(
 
 // We ignore which selector it asks us to do because the user may have
 // bound the shortcut to something else.
-extern "C" fn do_command_by_selector(this: &Object, _: Sel, _: Sel) {
+extern "C" fn do_command_by_selector(this: &Object, _: Sel, selector: Sel) {
     let state = unsafe { get_window_state(this) };
     let mut lock = state.as_ref().lock();
+    // Trek: a command from a native view inside this one that has the keys (WebKit asks its
+    // responder chain to do the `noop:` a ⌘-key comes to, after the page left the key) isn't
+    // GPUI's: pass it on up the chain, as NSResponder does. WebKit puts a sink at the chain's end
+    // to learn the command went unhandled, and only then sends the key again (to the Edit
+    // command; see `native_responder_edit`). Swallowed here, every key looked handled.
+    if lock.keystroke_for_do_command.is_none() && unsafe { native_responder(this) }.is_some() {
+        drop(lock);
+        unsafe {
+            let next: id = msg_send![this, nextResponder];
+            if next != nil {
+                let _: () = msg_send![next, doCommandBySelector: selector];
+            }
+        }
+        return;
+    }
     let keystroke = lock.keystroke_for_do_command.take();
     let mut event_callback = lock.event_callback.take();
     drop(lock);
@@ -3907,5 +4017,24 @@ mod tests {
     #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {
         assert_eq!(display_id_for_screen(nil), None);
+    }
+
+    // Trek: the keys a native view inside GPUI's (the Browser's web view) gets as Edit commands.
+    #[test]
+    fn standard_editing_keys_map_to_their_appkit_actions() {
+        let action = |s: &str| standard_editing_action(&Keystroke::parse(s).unwrap());
+        assert_eq!(action("cmd-c"), Some("copy:"));
+        assert_eq!(action("cmd-x"), Some("cut:"));
+        assert_eq!(action("cmd-v"), Some("paste:"));
+        assert_eq!(action("cmd-alt-shift-v"), Some("pasteAsPlainText:"));
+        assert_eq!(action("cmd-a"), Some("selectAll:"));
+        assert_eq!(action("cmd-z"), Some("undo:"));
+        assert_eq!(action("cmd-shift-z"), Some("redo:"));
+        // Anything else stays with GPUI's keymap: Trek's own shortcuts keep working in a page.
+        for other in [
+            "cmd-k", "cmd-w", "cmd-f", "cmd-shift-v", "ctrl-v", "cmd-ctrl-c", "v", "cmd-alt-v",
+        ] {
+            assert_eq!(action(other), None, "{other}");
+        }
     }
 }
