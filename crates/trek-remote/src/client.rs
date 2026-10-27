@@ -701,6 +701,14 @@ async fn open_any(
     (None, dialled)
 }
 
+/// Whether `text` is the machine's `Pong` to the ping sent with `id`.
+fn answers(text: &str, id: &str) -> bool {
+    matches!(
+        serde_json::from_str::<ServerEnvelope>(text),
+        Ok(ServerEnvelope { msg: ServerMessage::Pong, re: Some(re) }) if re == id
+    )
+}
+
 async fn write(ws: &mut Ws, message: Message) -> Result<(), String> {
     match tokio::time::timeout(WRITE_TIMEOUT, ws.send(message)).await {
         Ok(Ok(())) => Ok(()),
@@ -1066,14 +1074,23 @@ impl Driver {
         let mut ping = tokio::time::interval_at(Instant::now() + every, every);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut heard = Instant::now();
-        // Set by a network change: when the connection must have answered by.
+        // Set by a network change: when the connection must have answered by. Only the answer to
+        // the ping the change sent (`probe_id`) clears it: a message the machine sent before the
+        // change can still be on its way, and says nothing about the connection now.
         let mut probe: Option<Instant> = None;
+        let mut probes = 0u64;
+        let mut probe_id = String::new();
         let never = Instant::now() + Duration::from_secs(365 * 24 * 3600);
         loop {
             tokio::select! {
                 frame = ws.next() => {
                     heard = Instant::now();
-                    probe = None;
+                    if probe.is_some()
+                        && let Some(Ok(Message::Text(text))) = &frame
+                        && answers(text, &probe_id)
+                    {
+                        probe = None;
+                    }
                     match frame {
                         None => return Ended::Dropped("closed".into()),
                         Some(Err(err)) => return Ended::Dropped(err.to_string()),
@@ -1103,7 +1120,9 @@ impl Driver {
                     Some(Cmd::NetworkChanged) => {
                         if probe.is_none() {
                             probe = Some(Instant::now() + self.options.probe);
-                            let ping = serde_json::to_string(&ClientEnvelope { id: None, msg: ClientMessage::Ping }).expect("ping serializes");
+                            probes += 1;
+                            probe_id = format!("network-probe-{probes}");
+                            let ping = serde_json::to_string(&ClientEnvelope { id: Some(probe_id.clone()), msg: ClientMessage::Ping }).expect("ping serializes");
                             if let Err(err) = write(ws, Message::text(ping)).await {
                                 return Ended::Dropped(err);
                             }
@@ -1170,7 +1189,8 @@ impl Driver {
         write(ws, Message::text(text)).await
     }
 
-    /// A message from the machine: a reply goes to its request, the rest out as events.
+    /// A message from the machine: a reply goes to its request, the rest out as events. (The
+    /// `Pong` to a network change's ping has no request waiting: it only ends the probe.)
     fn receive(&mut self, text: &str, pending: &mut HashMap<String, Pending>) -> Option<Ended> {
         let ServerEnvelope { msg, re } = match serde_json::from_str::<ServerEnvelope>(text) {
             Ok(envelope) => envelope,
