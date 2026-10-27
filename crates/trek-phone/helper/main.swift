@@ -82,6 +82,24 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
   var outbox: [(CBMutableCharacteristic, Data, [CBCentral])] = []
   var state = "starting"
   var onChange: (() -> Void)?
+  /// The state and how many phones listen, for readers off the Bluetooth queue: that queue can
+  /// sit inside CoreBluetooth while macOS asks the user about Bluetooth, and a status report
+  /// must not wait for the answer.
+  let snapshotLock = NSLock()
+  var snapshot: (state: String, hosts: Int) = ("starting", 0)
+
+  func publish() {
+    let count = hosts.count
+    snapshotLock.lock()
+    snapshot = (state, count)
+    snapshotLock.unlock()
+  }
+
+  func current() -> (state: String, hosts: Int) {
+    snapshotLock.lock()
+    defer { snapshotLock.unlock() }
+    return snapshot
+  }
 
   func start() {
     queue.async { self.manager = CBPeripheralManager(delegate: self, queue: self.queue) }
@@ -94,7 +112,9 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
 
   /// Send one report to every phone listening (Trek drives one phone).
   func send(_ id: UInt8, _ bytes: [UInt8]) -> Bool {
-    queue.sync {
+    // Nobody listening (or Bluetooth not up): don't queue behind CoreBluetooth.
+    if current().hosts == 0 { return false }
+    return queue.sync {
       guard let c = inputs[id] else { return false }
       let targets = hosts
       if targets.isEmpty { return false }
@@ -178,6 +198,7 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
 
   func set(_ s: String) {
     state = s
+    publish()
     onChange?()
   }
 
@@ -452,11 +473,11 @@ func status() {
     screen.latest.map { (CVPixelBufferGetWidth($0), CVPixelBufferGetHeight($0)) } ?? (0, 0)
   }
   let age = screen.lastFrame.map { Date().timeIntervalSince($0) } ?? -1
-  let hosts = hid.queue.sync { hid.hosts.count }
+  let (bluetooth, hosts) = hid.current()
   message([
     "event": "status", "camera": screen.camera, "screen": screen.device?.localizedName ?? "",
     "width": w, "height": h, "frames": screen.frames, "frame_age": age,
-    "bluetooth": hid.state, "hosts": hosts,
+    "bluetooth": bluetooth, "hosts": hosts,
   ])
 }
 screen.onChange = { status() }

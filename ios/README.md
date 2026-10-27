@@ -130,6 +130,13 @@ limitation in `docs/MOBILE.md`); scanning pins the whole thing. See `docs/MOBILE
   a build runs and while Trek is open on the iPhone. Log: `~/Library/Logs/trek-phone-update.log`;
   pause: `touch "~/Library/Application Support/dev.trek.phone-update/off"`; remove:
   `install-phone-update.sh --uninstall`. Settings on the iPhone says when an update is coming.
+- **Installing without Xcode:** building still needs Xcode (the iOS SDK, and its free signing),
+  but putting the built app on the phone doesn't. Both scripts install with
+  `trek-mcp phone-device install` when they find a trek-mcp that has it
+  (`ios/scripts/trek-mcp-path.sh`: the installed Trek, then this repo's builds): the app goes over
+  usbmuxd as Finder's installs do, and `devicectl` is only the fallback (and still what reaches a
+  phone paired over Wi-Fi only). `trek-mcp phone-device` also lists apps, copies files to and from
+  the phone, and switches AssistiveTouch; Trek's iPhone tool uses the same path for agents.
 - **TestFlight (keeps a build 90 days, updates over the air):** needs the paid Apple Developer
   Program on the Apple ID in Xcode. Once enrolled:
   1. Xcode › Settings › Accounts: select your Apple ID so Xcode picks up the paid team.

@@ -657,8 +657,10 @@ impl PhonePanel {
             crate::palette::red(cx),
         );
         let s = &self.status;
-        let screen = if self.link.is_none() {
+        let screen = if self.link.is_none() || s.camera.is_empty() {
             (theme.muted_foreground, "Starting…")
+        } else if s.camera == "undetermined" {
+            (amber, "Allow the camera when macOS asks")
         } else if s.camera == "denied" {
             (red, "Allow Camera for Trek")
         } else if s.screen.is_empty() {
@@ -673,7 +675,10 @@ impl PhonePanel {
             "advertising" => (amber, "Pair in iPhone Bluetooth"),
             "off" => (red, "Bluetooth is off"),
             "not allowed" => (red, "Allow Bluetooth for Trek"),
-            "" | "starting" => (theme.muted_foreground, "Starting…"),
+            "" | "starting" => (
+                theme.muted_foreground,
+                "Starting… (allow Bluetooth if asked)",
+            ),
             _ => (red, "Bluetooth unavailable"),
         };
         let at = match self.assistive {

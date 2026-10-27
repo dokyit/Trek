@@ -162,7 +162,7 @@ impl Link {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        let mut child = Command::new(helper)
+        let mut child = Command::new(helper) // spawn: macOS only, and trek-phone has no trek-core
             .args([map, max_width.to_string()])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
