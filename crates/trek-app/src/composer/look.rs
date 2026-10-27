@@ -164,9 +164,9 @@ pub fn circle(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// The design's segmented control: a pill track on the chips' fill; the chosen option is a
 /// near-white thumb (1 px ring, faint shadow) with a medium label, the others muted.
-pub fn segmented<T: Copy + PartialEq + 'static>(
+pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
     id: &'static str,
-    options: Vec<(T, &'static str)>,
+    options: Vec<(T, L)>,
     current: T,
     on_pick: impl Fn(T, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
@@ -215,7 +215,7 @@ pub fn segmented<T: Copy + PartialEq + 'static>(
                             el.text_color(theme.muted_foreground)
                                 .hover(|s| s.text_color(theme.foreground))
                         })
-                        .child(label)
+                        .child(label.into())
                         .on_click(move |_, window, cx| on_pick(value, window, cx))
                 }),
         )

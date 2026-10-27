@@ -32,6 +32,10 @@ use std::time::{Duration, Instant};
 use super::simhid::{LinkEvent, SimLink};
 use crate::assets::Lucide;
 
+/// Adding, renaming, duplicating, erasing and deleting simulators (the device menu's sheets).
+#[cfg(target_os = "macos")]
+mod devices;
+
 /// Mirror cadence while the screen is changing and once it has settled. One `simctl` screenshot
 /// takes ~0.35 s end to end, so while active two captures overlap (staggered) for ~5–6 fps;
 /// once settled it's one at a time.
@@ -180,21 +184,75 @@ struct Device {
     device_type: String,
 }
 
+/// The kinds of device a simulator can be, in the order the device menu groups them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Family {
+    IPhone,
+    IPad,
+    Watch,
+    Tv,
+    Vision,
+}
+
+impl Family {
+    const ALL: [Family; 5] = [
+        Family::IPhone,
+        Family::IPad,
+        Family::Watch,
+        Family::Tv,
+        Family::Vision,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Family::IPhone => "iPhone",
+            Family::IPad => "iPad",
+            Family::Watch => "Apple Watch",
+            Family::Tv => "Apple TV",
+            Family::Vision => "Apple Vision",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        Icon::new(match self {
+            Family::IPhone => Lucide::Smartphone,
+            Family::IPad => Lucide::Tablet,
+            Family::Watch => Lucide::Watch,
+            Family::Tv => Lucide::Tv,
+            Family::Vision => Lucide::Glasses,
+        })
+    }
+}
+
+/// The family of a device on `runtime` (as `pretty_runtime` writes it, "watchOS 12.0"), iOS's
+/// split by device type. `None` for an OS this tool doesn't show.
+fn runtime_family(runtime: &str, device_type: &str, name: &str) -> Option<Family> {
+    let os = runtime.split(' ').next().unwrap_or_default();
+    Some(match os {
+        "iOS" if name.starts_with("iPad") || device_type.contains(".iPad") => Family::IPad,
+        "iOS" => Family::IPhone,
+        "watchOS" => Family::Watch,
+        "tvOS" => Family::Tv,
+        "visionOS" | "xrOS" => Family::Vision,
+        _ => return None,
+    })
+}
+
 impl Device {
     fn booted(&self) -> bool {
         self.state == "Booted"
     }
 
+    fn family(&self) -> Family {
+        runtime_family(&self.runtime, &self.device_type, &self.name).unwrap_or(Family::IPhone)
+    }
+
     fn is_ipad(&self) -> bool {
-        self.name.starts_with("iPad") || self.device_type.contains(".iPad")
+        self.family() == Family::IPad
     }
 
     fn icon(&self) -> Icon {
-        Icon::new(if self.is_ipad() {
-            Lucide::Tablet
-        } else {
-            Lucide::Smartphone
-        })
+        self.family().icon()
     }
 }
 
@@ -263,10 +321,12 @@ fn run_simctl(args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// "com.apple.CoreSimulator.SimRuntime.iOS-27-0" → "iOS 27.0" (same as trek-mcp's simulator tools).
+/// "com.apple.CoreSimulator.SimRuntime.iOS-27-0" → "iOS 27.0" (same as trek-mcp's simulator
+/// tools); visionOS's runtimes are still "xrOS" to simctl.
 fn pretty_runtime(id: &str) -> String {
     let tail = id.rsplit('.').next().unwrap_or(id);
     match tail.split_once('-') {
+        Some(("xrOS", ver)) => format!("visionOS {}", ver.replace('-', ".")),
         Some((os, ver)) => format!("{os} {}", ver.replace('-', ".")),
         None => tail.to_string(),
     }
@@ -282,11 +342,14 @@ fn version_key(runtime: &str) -> Vec<u32> {
         .collect()
 }
 
-/// Available iOS / iPadOS simulators: newest runtime first, then by name.
-fn parse_devices(json_text: &str) -> Result<Vec<Device>, String> {
+/// The simulators Xcode knows (iPhone, iPad, Apple Watch, Apple TV, Vision), newest runtime
+/// first, then by name; and how many are unavailable (their runtime is gone), which "Delete
+/// unavailable devices" clears.
+fn parse_devices(json_text: &str) -> Result<(Vec<Device>, usize), String> {
     let v: Value =
         serde_json::from_str(json_text).map_err(|e| format!("Unexpected simctl output: {e}"))?;
     let mut out = Vec::new();
+    let mut unavailable = 0;
     for (runtime, list) in v
         .get("devices")
         .and_then(Value::as_object)
@@ -294,11 +357,9 @@ fn parse_devices(json_text: &str) -> Result<Vec<Device>, String> {
         .flatten()
     {
         let runtime = pretty_runtime(runtime);
-        if !runtime.starts_with("iOS") {
-            continue;
-        }
         for d in list.as_array().into_iter().flatten() {
             if d.get("isAvailable").and_then(Value::as_bool) == Some(false) {
+                unavailable += 1;
                 continue;
             }
             let s = |k: &str| {
@@ -307,13 +368,16 @@ fn parse_devices(json_text: &str) -> Result<Vec<Device>, String> {
                     .unwrap_or_default()
                     .to_string()
             };
-            out.push(Device {
+            let device = Device {
                 name: s("name"),
                 udid: s("udid"),
                 runtime: runtime.clone(),
                 state: s("state"),
                 device_type: s("deviceTypeIdentifier"),
-            });
+            };
+            if runtime_family(&device.runtime, &device.device_type, &device.name).is_some() {
+                out.push(device);
+            }
         }
     }
     out.sort_by(|a, b| {
@@ -321,11 +385,11 @@ fn parse_devices(json_text: &str) -> Result<Vec<Device>, String> {
             .cmp(&version_key(&a.runtime))
             .then_with(|| a.name.cmp(&b.name))
     });
-    Ok(out)
+    Ok((out, unavailable))
 }
 
-fn list_devices() -> Result<Vec<Device>, String> {
-    parse_devices(&run_simctl(&["list", "devices", "available", "-j"])?)
+fn list_devices() -> Result<(Vec<Device>, usize), String> {
+    parse_devices(&run_simctl(&["list", "devices", "-j"])?)
 }
 
 /// Screen scale (points → pixels) for a device type, from its CoreSimulator profile.
@@ -609,6 +673,10 @@ pub struct SimulatorPanel {
     last_runs_poll: Instant,
     /// An agent drove a simulator: show the one it booted once the list has it.
     follow_booted: bool,
+    /// Device types and runtimes, unavailable devices, a runtime downloading: what the device
+    /// menu's sheets work from.
+    #[cfg(target_os = "macos")]
+    manage: devices::Manage,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -722,6 +790,8 @@ impl SimulatorPanel {
             dismissed_log: None,
             last_runs_poll: Instant::now() - RUNS_POLL,
             follow_booted: false,
+            #[cfg(target_os = "macos")]
+            manage: Default::default(),
             _tasks: vec![errors, poll],
             _subscriptions: vec![sub],
         }
@@ -738,6 +808,9 @@ impl SimulatorPanel {
             self.check_axe(cx);
             self.last_list = None;
             self.unchanged = 0;
+            // What the device menu's "Add device…" offers, read ahead.
+            #[cfg(target_os = "macos")]
+            self.load_catalog(cx);
         }
         cx.notify();
     }
@@ -868,6 +941,9 @@ impl SimulatorPanel {
 
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.poll_runs(cx);
+        // A runtime downloading in the terminal: look for it now and then, shown or not.
+        #[cfg(target_os = "macos")]
+        self.poll_catalog(window, cx);
         if !self.on_screen(window, cx) {
             if let Some(link) = self.link.as_ref().filter(|_| !self.link_paused) {
                 link.send("fps 0");
@@ -951,22 +1027,30 @@ impl SimulatorPanel {
             this.listed = true;
             this.last_list = Some(Instant::now());
             match result {
-                Ok(devices) => {
+                Ok((devices, unavailable)) => {
                     this.list_error = None;
                     if devices != this.devices {
                         this.devices = devices;
                         cx.notify();
                     }
+                    #[cfg(target_os = "macos")]
+                    if this.manage.unavailable != unavailable {
+                        this.manage.unavailable = unavailable;
+                        cx.notify();
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = unavailable;
                 }
                 Err(e) => {
                     this.list_error = Some(e);
                     cx.notify();
                 }
             }
-            let valid = this
-                .selected
-                .as_ref()
-                .is_some_and(|id| this.devices.iter().any(|d| &d.udid == id));
+            // A device being booted stays chosen even when a listing from before it was made
+            // comes back without it.
+            let valid = this.selected.as_ref().is_some_and(|id| {
+                this.devices.iter().any(|d| &d.udid == id) || this.pending.contains_key(id)
+            });
             // An agent drove a simulator: if the one on show isn't running, show the one that is.
             let follow = std::mem::take(&mut this.follow_booted)
                 && !this.current().is_some_and(|d| d.booted());
@@ -1194,10 +1278,17 @@ impl SimulatorPanel {
         );
     }
 
+    /// Boot `udid` and show it.
     fn boot(&mut self, udid: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.select(udid.clone(), window, cx);
+        self.start_boot(udid, window, cx);
+    }
+
+    /// Boot `udid`, leaving the device on show as it is.
+    fn start_boot(&mut self, udid: String, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         self.pending.insert(udid.clone(), "Booting…");
-        self.select(udid.clone(), window, cx);
+        cx.notify();
         let id = udid.clone();
         // `bootstatus -b` boots if needed and returns once SpringBoard is up.
         self.background(
@@ -1735,22 +1826,33 @@ impl SimulatorPanel {
         let selected = self.selected.clone();
         let entity = cx.entity().downgrade();
         let green = crate::palette::emerald(cx);
+        #[cfg(target_os = "macos")]
+        let missing = self.missing_platforms();
         Button::new("sim-device")
             .ghost()
             .small()
             .icon(icon)
             .label(label)
             .dropdown_caret(true)
-            .disabled(self.devices.is_empty())
+            // On a Mac the menu also adds devices, so it opens with none.
+            .disabled(self.devices.is_empty() && !cfg!(target_os = "macos"))
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
-                menu = menu.min_w(px(260.)).max_h(px(420.)).scrollable(true);
-                for (group, ipad) in [("iPhone", false), ("iPad", true)] {
+                menu = menu.min_w(px(260.)).max_h(px(460.)).scrollable(true);
+                // Adding and managing come first: a long device list scrolls.
+                #[cfg(target_os = "macos")]
+                {
+                    menu = devices::menu_entries(menu, &entity, &missing);
+                    if !devices.is_empty() {
+                        menu = menu.separator();
+                    }
+                }
+                for family in Family::ALL {
                     let list: Vec<&Device> =
-                        devices.iter().filter(|d| d.is_ipad() == ipad).collect();
+                        devices.iter().filter(|d| d.family() == family).collect();
                     if list.is_empty() {
                         continue;
                     }
-                    menu = menu.label(group);
+                    menu = menu.label(family.label());
                     for d in list {
                         let (name, runtime, booted, udid) = (
                             d.name.clone(),
@@ -2274,11 +2376,11 @@ impl SimulatorPanel {
                     .child("Boot a device to mirror it here. Click to tap, drag to swipe, and type straight into the app."),
             ),
         );
-        for (group, ipad) in [("iPhone", false), ("iPad", true)] {
+        for family in Family::ALL {
             let list: Vec<Device> = self
                 .devices
                 .iter()
-                .filter(|d| d.is_ipad() == ipad)
+                .filter(|d| d.family() == family)
                 .cloned()
                 .collect();
             if list.is_empty() {
@@ -2291,11 +2393,15 @@ impl SimulatorPanel {
                     .text_xs()
                     .font_medium()
                     .text_color(theme.muted_foreground)
-                    .child(group),
+                    .child(family.label()),
             );
             for d in &list {
                 col = col.child(self.device_card(d, cx));
             }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            col = col.child(self.add_device_card(cx));
         }
         col.into_any_element()
     }
@@ -2330,6 +2436,9 @@ impl SimulatorPanel {
                 .into_any_element();
         }
         if self.devices.is_empty() {
+            #[cfg(target_os = "macos")]
+            return self.no_devices(cx);
+            #[cfg(not(target_os = "macos"))]
             return super::empty(
                 "No iOS simulators found. Add an iOS runtime in Xcode ▸ Settings ▸ Components.",
                 cx,
@@ -2339,25 +2448,33 @@ impl SimulatorPanel {
         let Some(d) = self.current().cloned() else {
             return self.device_list(cx);
         };
-        if self
+        // Booting, or shut down for a while to be erased or copied: say so in its place.
+        if let Some(label) = self
             .pending
             .get(&d.udid)
-            .is_some_and(|l| l.starts_with("Boot"))
+            .filter(|l| l.starts_with("Boot") || l.starts_with("Eras") || l.starts_with("Dupl"))
         {
             let muted = cx.theme().muted_foreground;
+            let booting = label.starts_with("Boot");
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
                 .gap_2()
                 .child(Spinner::new().small())
-                .child(div().text_sm().child(format!("Booting {}…", d.name)))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(muted)
-                        .child("The first boot of a device can take a minute."),
-                )
+                .child(div().text_sm().child(format!(
+                    "{} {}…",
+                    label.trim_end_matches('…'),
+                    d.name
+                )))
+                .when(booting, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("The first boot of a device can take a minute."),
+                    )
+                })
                 .into_any_element();
         }
         if !d.booted() {
@@ -2603,24 +2720,39 @@ impl SimulatorPanel {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's glob exports its own `test` attribute.
-    use super::{clean_error, fit, normalize_url, parse_devices, window_to_points};
+    use super::{Family, clean_error, fit, normalize_url, parse_devices, window_to_points};
     use gpui_kit::{Bounds, point, px, size};
 
     #[test]
-    fn devices_are_ios_only_newest_first() {
+    fn devices_newest_first_unavailable_counted() {
         let j = r#"{"devices":{
             "com.apple.CoreSimulator.SimRuntime.iOS-26-0":[{"name":"iPhone 16","udid":"A","state":"Shutdown","isAvailable":true,"deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16"}],
             "com.apple.CoreSimulator.SimRuntime.iOS-27-0":[
                 {"name":"iPhone 17","udid":"B","state":"Booted","isAvailable":true},
                 {"name":"iPad Air","udid":"C","state":"Shutdown","isAvailable":true,"deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPad-Air"},
                 {"name":"Broken","udid":"D","state":"Shutdown","isAvailable":false}],
-            "com.apple.CoreSimulator.SimRuntime.watchOS-12-0":[{"name":"Watch","udid":"E","state":"Shutdown","isAvailable":true}]}}"#;
-        let d = parse_devices(j).unwrap();
+            "com.apple.CoreSimulator.SimRuntime.watchOS-12-0":[{"name":"Watch","udid":"E","state":"Shutdown","isAvailable":true}],
+            "com.apple.CoreSimulator.SimRuntime.xrOS-3-0":[{"name":"Apple Vision Pro","udid":"F","state":"Shutdown","isAvailable":true}],
+            "com.apple.CoreSimulator.SimRuntime.DriverKit-25-0":[{"name":"Driver","udid":"G","state":"Shutdown","isAvailable":true}]}}"#;
+        let (d, unavailable) = parse_devices(j).unwrap();
         let ids: Vec<_> = d.iter().map(|d| d.udid.as_str()).collect();
-        assert_eq!(ids, ["C", "B", "A"]);
+        assert_eq!(ids, ["C", "B", "A", "E", "F"]);
+        assert_eq!(unavailable, 1);
         assert!(d[0].is_ipad() && !d[1].is_ipad());
         assert!(d[1].booted());
         assert_eq!(d[2].runtime, "iOS 26.0");
+        let families: Vec<_> = d.iter().map(|d| d.family()).collect();
+        assert_eq!(
+            families,
+            [
+                Family::IPad,
+                Family::IPhone,
+                Family::IPhone,
+                Family::Watch,
+                Family::Vision
+            ]
+        );
+        assert_eq!(d[4].runtime, "visionOS 3.0");
     }
 
     #[test]
