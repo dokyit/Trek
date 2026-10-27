@@ -1,0 +1,59 @@
+name: Bug report
+description: Something in Trek doesn't work the way it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Security issues go through [private reporting](https://github.com/dokyit/Trek/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a thread with …
+        2. Click …
+        3. See …
+  - type: input
+    id: version
+    attributes:
+      label: Trek version
+      description: Settings › About (or the release you installed).
+      placeholder: 0.4.21
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - macOS
+        - Windows
+        - iPhone
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS version
+      placeholder: macOS 26.1, Windows 11 24H2, iOS 26.1 …
+  - type: input
+    id: agent
+    attributes:
+      label: Agent or model
+      description: Which agent the thread used, if it matters.
+      placeholder: Claude Code, Codex, OpenCode, Ollama …
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: |
+        Screenshots help a lot. Logs live in `~/Library/Logs/Trek` (macOS) or `%LOCALAPPDATA%\Trek\logs` (Windows). Remove anything private first.

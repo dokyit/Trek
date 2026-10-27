@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/dokyit/Trek/discussions
+    about: Ask a question or talk an idea through before it becomes an issue.
+  - name: Report a security vulnerability
+    url: https://github.com/dokyit/Trek/security/advisories/new
+    about: Please report security issues privately, never in a public issue.
