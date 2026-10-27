@@ -9,7 +9,6 @@ Start with the [README](../README.md) for what Trek is and how to install it.
 | [CONTRIBUTING](../CONTRIBUTING.md) | Setting up, the mock agent, the verify driver, tests, commit style |
 | [iPhone app](../ios/README.md) | Building Trek for iPhone, demo mode, pairing with a Mac |
 | [Capture manifests](../media/README.md) | Making the screenshots and clips in these docs, deterministically |
-| [Editor extension](../extension/README.md) | Jump between Cursor, VS Code or Windsurf and Trek |
 
 ## Design notes
 

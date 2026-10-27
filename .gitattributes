@@ -12,7 +12,6 @@
 *.icns binary
 *.mp4 binary
 *.mov binary
-*.vsix binary
 *.zip binary
 *.gz binary
 *.tar binary
