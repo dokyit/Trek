@@ -20,11 +20,11 @@ enum ScrollProbe {
     /// One frame: `top` is the id of the first row whose bottom is below the screen's top, `index`
     /// its place in the transcript, `topY` where its top is on screen (negative: above it).
     static func frame(offset: CGFloat, contentHeight: CGFloat, top: String?, index: Int?, topY: CGFloat?, visible: Int,
-                      touching: Bool, rows: Int) {
+                      touching: Bool, rows: Int, motion: CGFloat? = nil) {
         guard on else { return }
         let t = CACurrentMediaTime()
-        let line = String(format: "%.4f\t%.1f\t%.1f\t%@\t%d\t%.1f\t%d\t%d\t%d", t, offset, contentHeight, top ?? "-", index ?? -1,
-                          topY ?? 0, visible, touching ? 1 : 0, rows)
+        let line = String(format: "%.4f\t%.1f\t%.1f\t%@\t%d\t%.1f\t%d\t%d\t%d\t%@", t, offset, contentHeight, top ?? "-", index ?? -1,
+                          topY ?? 0, visible, touching ? 1 : 0, rows, motion.map { String(format: "%.1f", $0) } ?? "-")
         lines.append(line)
         guard !flushing else { return }
         flushing = true

@@ -1,7 +1,4 @@
 import SwiftUI
-import os
-
-private let scrollLog = Logger(subsystem: "dev.trek.TrekMobile", category: "scroll")
 
 /// A thread: its transcript, the requests waiting on the user, and the composer.
 ///
@@ -265,49 +262,19 @@ private struct TranscriptList: View, Equatable {
     var retryModels: [ModelOption]
 
     @Environment(AppModel.self) private var model
+    @Environment(\.projectHue) private var projectHue
+    @Environment(\.liveThreadID) private var liveThreadID
+    @Environment(\.trekCalm) private var calm
+    @Environment(\.compactRows) private var compact
+    @Environment(\.openThread) private var openThread
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var groupOpen: [String: Bool] = [:]
     /// Each changes card's folded folders, by item.
     @State private var folded: [String: Set<String>] = [:]
     @State private var confirming: Confirmation?
-    /// The user has scrolled since the thread opened (before that, the view is settling at the bottom).
-    @State private var scrolled = false
-    @State private var nearTop = false
     /// Far enough above the latest that the jump-down button is out.
     @State private var awayFromBottom = false
-    /// At the latest (within a few points of it): what changes size keeps the bottom still, so
-    /// new rows keep it at the latest.
-    @State private var atBottom = true
-    /// A page of earlier items is on its way, or just went in above: the bottom keeps still for
-    /// it too, as well as the row being read.
-    @State private var earlierLanding = false
-    /// The user has a finger on it (dragging or flicking): a big move then is theirs.
-    @State private var touching = false
-    /// The row at the top of the screen: scrolled up, it's kept there as rows go in above it (a
-    /// page of earlier items, lazy rows measured as they come into view) or grow below it.
-    @State private var position = ScrollPosition(idType: String.self)
-    /// The first row when the touch began: rows that arrive above it wait till the scroll rests.
-    @State private var touchFirst: String?
-    @State private var probeBox = ProbeBox()
-    final class ProbeBox { var visible: [String] = [] }
-
-    /// How many of the latest rows are laid out outside the lazy stack, at least.
-    private static let laidOut = 3
-    /// The rows outside it reach to a multiple of this from the start: a row moves into the lazy
-    /// stack once in so many new rows, not with each. (A row that moves between the two is made
-    /// anew, its open parts closed and its height measured again, which showed as the transcript
-    /// shifting under the reader while a busy thread added rows.)
-    private static let laidOutStep = 12
-
-    private struct ScrollEdges: Equatable {
-        /// Within a couple of screens of the top.
-        var nearTop: Bool
-        /// What's loaded doesn't fill the screen.
-        var short: Bool
-        /// More than a screen above the latest.
-        var awayFromBottom: Bool
-        /// At the latest.
-        var atBottom: Bool
-    }
+    @State private var scroller = TranscriptScroller()
 
     nonisolated static func == (a: TranscriptList, b: TranscriptList) -> Bool {
         MainActor.assumeIsolated {
@@ -316,129 +283,27 @@ private struct TranscriptList: View, Equatable {
     }
 
     var body: some View {
-        let all = store.blocks
-        // Rows that arrive above while a finger is on the transcript (or it's still gliding) wait
-        // till it rests: going in mid-drag, the drag put back its own offset on the next frame,
-        // which threw the reader a whole page up.
-        let start = touching ? (touchFirst.flatMap { id in all.firstIndex { $0.id == id } } ?? 0) : 0
-        let blocks = start > 0 ? Array(all[start...]) : all
-        // The latest group, turn and message: open, and with their actions out.
-        let lastGroup = blocks.last(where: \.isGroup)?.id
-        let ends = Set(Block.turnEnds(blocks, open: working))
-        let lastTurn = blocks.last { ends.contains($0.id) }?.id
-        let lastUser = blocks.last(where: \.isUser)?.id
-        ScrollViewReader { proxy in
-        let row = { (block: Block) in
-            let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
-            return BlockRow(block: block, threadID: store.id, projectName: projectName,
-                            expanded: open,
-                            folded: folded[block.id] ?? [],
-                            endsTurn: ends.contains(block.id),
-                            latest: block.id == lastTurn || block.id == lastUser,
-                            busy: working, retryModels: retryModels,
-                            toggle: { groupOpen[block.id] = !open },
-                            fold: { folded[block.id] = $0 },
-                            act: perform)
-                .equatable()
-                .id(block.id)
-        }
-        let split = max(0, blocks.count - Self.laidOut) / Self.laidOutStep * Self.laidOutStep
-        let earlier = blocks.prefix(split)
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                LineageHeader(store: store)
-                if !store.loaded || store.more || start > 0 || !earlier.isEmpty {
-                    LazyVStack(alignment: .leading, spacing: 18) {
-                        if !store.loaded {
-                            ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
-                        } else if store.more || start > 0 {
-                            EarlierMarker(loading: store.loadingEarlier || start > 0)
-                        }
-                        ForEach(earlier) { row($0) }
-                    }
-                    .scrollTargetLayout()
-                }
-                // The latest rows are laid out in full, not lazily: an answer still being written
-                // (a chart drawing in) grows many times a second, and a lazy stack loses its place
-                // then, showing blank space where the transcript is.
-                VStack(alignment: .leading, spacing: 18) {
-                    ForEach(blocks.dropFirst(split)) { row($0) }
-                }
-                .scrollTargetLayout()
-                WorkingFooter(store: store)
-                Color.clear.frame(height: 4).id("end")
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 16)
-        }
-        // Drawn afresh when the host rewrote the transcript (a rewind): the places it kept were
-        // for rows that are gone, and a lazy stack holding them showed a blank screen.
-        .id(store.generation)
-        // It opens at the latest. While it's there, a change in size keeps the bottom still, so it
-        // stays with the latest as items arrive. Scrolled up, the row being read stays put: a page
-        // of earlier items landing above used to throw the reader a whole page up (a top or bottom
-        // anchor didn't hold through the lazy stack's insert).
-        .defaultScrollAnchor(.bottom, for: .initialOffset)
-        .defaultScrollAnchor(atBottom || earlierLanding ? .bottom : nil, for: .sizeChanges)
-        .scrollPosition($position, anchor: .top)
-        .onChange(of: store.loadingEarlier) { _, loading in
-            if loading { earlierLanding = true } else { settleEarlier() }
-        }
-        .scrollDismissesKeyboard(.interactively)
-        // Earlier items load as the user scrolls up towards them (or straight away, while what's
-        // loaded doesn't fill the screen); not while the view settles at the bottom.
-        .onScrollPhaseChange { _, phase in
-            let rests = phase == .idle && touching
-            if phase != .idle, !touching { touchFirst = store.blocks.first?.id }
-            touching = phase != .idle
-            // Rows that waited go in now.
-            if rests, touchFirst != store.blocks.first?.id {
-                earlierLanding = true
-                settleEarlier()
-            }
-            guard phase == .interacting, !scrolled else { return }
-            scrolled = true
-            if nearTop { model.loadEarlier(store.id) }
-        }
-        .onScrollGeometryChange(for: ScrollEdges.self) { geo in
-            ScrollEdges(nearTop: geo.contentOffset.y + geo.contentInsets.top < 1400,
-                        short: geo.contentSize.height < geo.containerSize.height,
-                        awayFromBottom: geo.contentSize.height + geo.contentInsets.bottom
-                            - geo.contentOffset.y - geo.containerSize.height > 520,
-                        atBottom: geo.contentSize.height + geo.contentInsets.bottom
-                            - geo.contentOffset.y - geo.containerSize.height < 32)
-        } action: { _, edge in
-            nearTop = edge.nearTop
-            if edge.atBottom != atBottom { atBottom = edge.atBottom }
-            if edge.awayFromBottom != awayFromBottom { awayFromBottom = edge.awayFromBottom }
-            if edge.short || (edge.nearTop && scrolled) { model.loadEarlier(store.id) }
-        }
-        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.001) { ids in
-            guard ScrollProbe.on else { return }
-            probeBox.visible = ids
-        }
-        .onScrollGeometryChange(for: [CGFloat].self) { [$0.contentOffset.y, $0.contentSize.height] } action: { _, g in
-            guard ScrollProbe.on else { return }
-            let all = store.blocks
-            let top = probeBox.visible.compactMap { id in all.firstIndex { $0.id == id } }.min()
-            ScrollProbe.frame(offset: g[0], contentHeight: g[1], top: top.map { all[$0].id }, index: top, topY: nil,
-                              visible: probeBox.visible.count, touching: touching, rows: all.count)
-        }
-        // A move of more than a screen the user didn't make, or the content shrinking under it:
-        // what "it pulled me down" looks like, said in the log with its cause's neighbours.
-        .onScrollGeometryChange(for: [CGFloat].self) { [$0.contentOffset.y, $0.contentSize.height] } action: { old, new in
-            let (moved, shrank) = (new[0] - old[0], old[1] - new[1])
-            if !touching, abs(moved) > 700 || shrank > 700 {
-                scrollLog.info("transcript \(store.id, privacy: .public): jumped \(Int(moved)) pt, content \(Int(old[1]))→\(Int(new[1])), atBottom \(atBottom), \(store.items.count) items")
-            }
+        // The list itself is UIKit (`TranscriptCollection`): it keeps the reader's place as rows
+        // are measured, earlier pages land and answers grow. SwiftUI says what the rows are.
+        GeometryReader { geo in
+            TranscriptCollection(rows: rows, generation: store.generation,
+                                 environment: TranscriptEnvironment(model: model, projectHue: projectHue, liveThreadID: liveThreadID,
+                                                                    calm: calm, compact: compact, openThread: openThread,
+                                                                    dynamicTypeSize: dynamicTypeSize),
+                                 scroller: scroller,
+                                 loadEarlier: { [model, store] in model.loadEarlier(store.id) },
+                                 edges: { e in if e.awayFromBottom != awayFromBottom { awayFromBottom = e.awayFromBottom } },
+                                 insets: geo.safeAreaInsets)
+            // Under the bars, the composer and the keyboard, as a scroll view is: its insets keep
+            // the rows clear of them.
+            .ignoresSafeArea(.all, edges: .vertical)
         }
         // Jump back to the latest when the transcript has been left behind.
         .overlay(alignment: .bottomTrailing) {
             Group {
                 if awayFromBottom {
                     Button {
-                        withAnimation(.snappy(duration: 0.25)) { proxy.scrollTo("end", anchor: .bottom) }
+                        scroller.scrollToLatest()
                     } label: {
                         Image(systemName: "arrow.down")
                             .font(.system(size: 15, weight: .semibold))
@@ -465,16 +330,50 @@ private struct TranscriptList: View, Equatable {
         } message: { c in
             Text(c.message)
         }
-        }
     }
 
-    /// Rows going in above keep the bottom still till they have (the update after the one that
-    /// lands them can still grow the page).
-    private func settleEarlier() {
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(400))
-            earlierLanding = store.loadingEarlier
+    /// The list's rows: what's above the transcript, its blocks, and what's under it.
+    private var rows: [TranscriptRow] {
+        let blocks = store.blocks
+        // The latest group, turn and message: open, and with their actions out.
+        let lastGroup = blocks.last(where: \.isGroup)?.id
+        let ends = Set(Block.turnEnds(blocks, open: working))
+        let lastTurn = blocks.last { ends.contains($0.id) }?.id
+        let lastUser = blocks.last(where: \.isUser)?.id
+        var rows: [TranscriptRow] = []
+        rows.reserveCapacity(blocks.count + 3)
+        rows.append(.header(store))
+        if !store.loaded {
+            rows.append(.loading)
+        } else if store.more {
+            rows.append(.earlier(loading: store.loadingEarlier))
         }
+        for block in blocks {
+            let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
+            let row = BlockRow(block: block, threadID: store.id, projectName: projectName,
+                               expanded: open,
+                               folded: folded[block.id] ?? [],
+                               endsTurn: ends.contains(block.id),
+                               latest: block.id == lastTurn || block.id == lastUser,
+                               busy: working, retryModels: retryModels,
+                               toggle: { groupOpen[block.id] = !open },
+                               fold: { folded[block.id] = $0 },
+                               act: perform)
+            // A long answer goes in as parts, a few paragraphs each: laid out a part at a time as
+            // the reader comes to it, not several screens at once. Not while it's being written.
+            if case .assistant(let text, false) = block.kind, let parts = AnswerPart.split(text, key: block.id, version: block.version) {
+                for part in parts {
+                    var r = row
+                    r.part = part
+                    r.endsTurn = row.endsTurn && part.index == parts.count - 1
+                    rows.append(.block(r))
+                }
+            } else {
+                rows.append(.block(row))
+            }
+        }
+        rows.append(.footer(store))
+        return rows
     }
 
     private func perform(_ action: RowAction) {
@@ -507,8 +406,182 @@ private struct TranscriptList: View, Equatable {
     }
 }
 
+/// One row of the transcript's list: what's above the transcript (where this thread came from),
+/// the spinner or marker for earlier items, a block, and what's under it (who's working).
+enum TranscriptRow: View, Equatable, Identifiable {
+    case header(ThreadStore)
+    /// The transcript isn't in yet.
+    case loading
+    case earlier(loading: Bool)
+    case block(BlockRow)
+    case footer(ThreadStore)
+
+    var id: String {
+        switch self {
+        case .header: "~header"
+        case .loading: "~loading"
+        case .earlier: "~earlier"
+        case .block(let r): r.part.map { "\(r.block.id)#\($0.index)" } ?? r.block.id
+        case .footer: "~footer"
+        }
+    }
+
+    /// Above the transcript: goes when earlier items have all come in.
+    var isMarker: Bool {
+        switch self {
+        case .loading, .earlier: true
+        default: false
+        }
+    }
+
+    /// The space above the row: a long answer's parts sit as close as its paragraphs do.
+    var gapBefore: CGFloat {
+        if case .block(let r) = self, let part = r.part, part.index > 0 { return 10 }
+        return 18
+    }
+
+    /// Not a block: what's around the transcript.
+    var isChrome: Bool {
+        switch self {
+        case .header, .footer: true
+        default: false
+        }
+    }
+
+    nonisolated static func == (a: TranscriptRow, b: TranscriptRow) -> Bool {
+        MainActor.assumeIsolated {
+            switch (a, b) {
+            case (.header(let x), .header(let y)), (.footer(let x), .footer(let y)): x === y
+            case (.loading, .loading): true
+            case (.earlier(let x), .earlier(let y)): x == y
+            case (.block(let x), .block(let y)): x == y
+            default: false
+            }
+        }
+    }
+
+    var body: some View {
+        switch self {
+        case .header(let store): LineageHeader(store: store)
+        case .loading: ProgressView().frame(maxWidth: .infinity).padding(.top, 80)
+        case .earlier(let loading): EarlierMarker(loading: loading)
+        case .block(let row): row.equatable()
+        case .footer(let store): WorkingFooter(store: store)
+        }
+    }
+
+    /// A guess at the row's height before it's drawn: close enough that the scroll bar doesn't
+    /// lurch as rows are measured (the reader's place doesn't depend on it).
+    func estimatedHeight(width: CGFloat) -> CGFloat {
+        let inner = max(120, width - 40)
+        // About 8.4 pt a character at the body size.
+        let perLine = max(16, Int(inner / 8.4))
+        func lines(_ text: some StringProtocol, per: Int) -> CGFloat { CGFloat(max(1, (text.count + per - 1) / per)) }
+        switch self {
+        case .header, .footer: return 0
+        case .loading: return 100
+        case .earlier: return 28
+        case .block(let row):
+            var h: CGFloat
+            switch row.block.kind {
+            case .user(let text, let images, _, _):
+                h = 22 + 22 * min(lines(text.prefix(4000), per: perLine - 8), 40) + 26 + (images > 0 ? 90 : 0)
+            case .assistant(let text, _):
+                h = Self.markdownHeight(row.part?.text ?? text, perLine: perLine)
+            case .group(let items):
+                h = row.expanded ? 24 + 30 * CGFloat(min(items.count, ToolGroupView.shownAtFirst)) : 22
+            case .resolved: h = 90
+            case .turnEnd: h = 24
+            case .notice, .handoff: h = 22
+            case .error(let text), .limit(let text, _): h = 24 + 20 * lines(text, per: perLine)
+            case .threadLink: h = 44
+            case .changes(let c): h = 54 + 30 * CGFloat(min(c.files.count, 8))
+            }
+            if row.endsTurn, !row.block.isTurnEnd { h += 30 }
+            return h
+        }
+    }
+
+    /// Markdown: text lines wrap, code and table lines don't, gaps between blocks.
+    private static func markdownHeight(_ text: String, perLine: Int) -> CGFloat {
+        var h: CGFloat = 0
+        var code = false
+        var scanned = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            scanned += line.count
+            if scanned > 60_000 { break }
+            if line.hasPrefix("```") { code.toggle(); h += 14; continue }
+            if code { h += 18; continue }
+            if line.isEmpty { h += 10; continue }
+            if line.hasPrefix("|") { h += line.contains("---") ? 0 : 32; continue }
+            if line.hasPrefix("#") { h += 34; continue }
+            h += 24 * CGFloat(max(1, (line.count + perLine - 1) / perLine))
+        }
+        return max(24, h)
+    }
+}
+
+/// A stretch of a long answer: whole Markdown blocks (never inside a code fence, a list, a table
+/// or display maths), about `target` characters.
+struct AnswerPart: Equatable {
+    var index: Int
+    var text: String
+
+    static func == (a: AnswerPart, b: AnswerPart) -> Bool { a.index == b.index && a.text.utf8.count == b.text.utf8.count }
+
+    /// Answers this long or longer are split.
+    static let threshold = 2400
+    static let target = 1200
+
+    nonisolated(unsafe) private static var cache: [String: [AnswerPart]] = [:]
+
+    /// The parts of `text` (the answer `key` at `version`), or nil when it's short enough whole.
+    static func split(_ text: String, key: String, version: Int64) -> [AnswerPart]? {
+        guard text.utf8.count >= threshold else { return nil }
+        let k = "\(key)@\(version)"
+        if let hit = cache[k] { return hit.count > 1 ? hit : nil }
+        let parts = cut(text).enumerated().map { AnswerPart(index: $0.offset, text: $0.element) }
+        if cache.count > 4000 { cache.removeAll() }
+        cache[k] = parts
+        return parts.count > 1 ? parts : nil
+    }
+
+    /// Cuts at blank lines outside fences and display maths, where the next line doesn't carry
+    /// on a list, a quote, a table or indented text.
+    nonisolated static func cut(_ text: String, target: Int = 1200) -> [String] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var parts: [String] = []
+        var current: [Substring] = []
+        var size = 0
+        var fence = false, math = false
+        func continues(_ line: Substring) -> Bool {
+            let t = line.drop { $0 == " " }
+            if line.first == " " || line.first == "\t" || t.hasPrefix(">") || t.hasPrefix("|") { return true }
+            if t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("+ ") { return true }
+            let digits = t.prefix { $0.isNumber }
+            return !digits.isEmpty && (t.dropFirst(digits.count).hasPrefix(". ") || t.dropFirst(digits.count).hasPrefix(") "))
+        }
+        for (i, line) in lines.enumerated() {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("```") || t.hasPrefix("~~~") { fence.toggle() }
+            if !fence, t == "$$" || (t.hasPrefix("$$") && !(t.count > 2 && t.hasSuffix("$$"))) { math.toggle() }
+            if !fence, !math, t.isEmpty, size >= target, i + 1 < lines.count, !continues(lines[i + 1]),
+               lines[(i + 1)...].contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                parts.append(current.joined(separator: "\n"))
+                current = []
+                size = 0
+                continue
+            }
+            current.append(line)
+            size += line.utf8.count + 1
+        }
+        if !current.isEmpty { parts.append(current.joined(separator: "\n")) }
+        return parts
+    }
+}
+
 /// At the top while earlier items exist: a spinner while a page is on its way.
-private struct EarlierMarker: View {
+struct EarlierMarker: View {
     var loading: Bool
 
     var body: some View {
@@ -527,7 +600,7 @@ private struct EarlierMarker: View {
 
 /// Under the transcript while the agent works, or its sub-agents do. Observes the thread's row
 /// itself, so its ticking activity doesn't redraw the transcript.
-private struct WorkingFooter: View {
+struct WorkingFooter: View {
     let store: ThreadStore
 
     var body: some View {
@@ -554,7 +627,7 @@ private struct WorkingFooter: View {
 
 /// One block of the transcript. Equatable on its values (the block compares by id and seqs), so
 /// the list redraws only the rows that changed.
-private struct BlockRow: View, Equatable {
+struct BlockRow: View, Equatable {
     var block: Block
     var threadID: String
     var projectName: String
@@ -570,10 +643,13 @@ private struct BlockRow: View, Equatable {
     var toggle: () -> Void
     var fold: (Set<String>) -> Void
     var act: (RowAction) -> Void
+    /// One stretch of a long answer (it's drawn, and measured, a part at a time).
+    var part: AnswerPart? = nil
 
     nonisolated static func == (a: BlockRow, b: BlockRow) -> Bool {
         MainActor.assumeIsolated {
-            a.block == b.block && a.expanded == b.expanded && a.folded == b.folded && a.endsTurn == b.endsTurn && a.latest == b.latest
+            a.block == b.block && a.part == b.part && a.expanded == b.expanded && a.folded == b.folded && a.endsTurn == b.endsTurn
+                && a.latest == b.latest
                 && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels
         }
     }
@@ -598,7 +674,7 @@ private struct BlockRow: View, Equatable {
                 MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, aside: aside, act: act)
             }
         case .assistant(let text, let streaming):
-            MarkdownText(text: text, live: streaming)
+            MarkdownText(text: part?.text ?? text, live: streaming)
                 .equatable()
                 .textSelection(.enabled)
         case .group(let items):
