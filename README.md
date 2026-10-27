@@ -1,294 +1,289 @@
-# Trek
+<div align="center">
 
-**Every agent. One trail.** Trek is a native app for macOS and Windows (Rust + GPUI) that runs your coding
-agents — Claude Code, Codex, OpenCode, Cursor, Copilot and other ACP agents, plus API and local models —
-from one inbox-style window.
+<img src="docs/assets/trek-icon.png" width="112" height="112" alt="Trek app icon">
 
-Trek is early (0.x). It's used daily by its author, but expect rough edges, and read
-[What isn't done](#what-isnt-done) before you rely on it.
+<h1>Trek</h1>
 
-## What it does
+<p><b>Every agent. One trail.</b></p>
 
-**Your agents, with the logins you already have.** Trek drives each vendor's own CLI as a child
-process, so your subscriptions work as they do in the terminal and Trek never reads or stores those
-credentials:
+<p>A native desktop app that runs your coding agents from one inbox.<br>
+Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS and Windows, with an iPhone companion.</p>
 
-- **Claude Code** through `claude`'s stream-json mode: permission prompts, AskUserQuestion and plan
-  approval as cards, sub-agent progress, switching to Full access mid-thread.
-- **Codex** through `codex app-server` (JSON-RPC): approvals, questions and plan approval as cards, plan
-  progress, sub-agent progress, steering a running turn, OpenAI models.
-- **OpenCode, Factory Droid and ACP agents** (Cursor, GitHub Copilot, Kimi, Qwen Code, Grok,
-  Devin, Goose, Amp, Pi) through the Agent Client Protocol, when they're installed: approvals, plan
-  progress, the agent's own slash commands, resuming saved sessions. OpenCode gets "ask" rules so Trek can
-  gate its edits and commands, added only where your own OpenCode config sets none.
-- **API keys and local models**: Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, xAI, Mistral, Groq,
-  custom OpenAI-compatible endpoints, Ollama, LM Studio and llama.cpp / MLX. Keys live in the macOS
-  Keychain or Windows Credential Manager (or come from your shell's `*_API_KEY` variables). These are
-  chat only for now.
+<p>
+  <a href="https://github.com/dokyit/Trek/releases/latest"><img src="https://img.shields.io/github/v/release/dokyit/Trek?label=release&color=F4692B" alt="Latest release"></a>
+  <a href="https://github.com/dokyit/Trek/actions/workflows/ci.yml"><img src="https://github.com/dokyit/Trek/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20iOS-555" alt="Platforms: macOS, Windows, iOS">
+</p>
 
-**One inbox for all of it.** Running threads and anything waiting on you sit at the top of the sidebar;
-finished work settles on its own (after a few idle days, or when you settle it), and threads can be pinned,
-snoozed, renamed and searched. Search is full text: the sidebar and the ⌘K palette find a thread by its
-title or by anything said in it (imported history included), and a message match opens the thread at that
-message. ⌘K also runs any command: new thread, settings pages, tools, theme, hand-holding. Any thread can
-also open in a window of its own (⌘⇧↩ or the thread menu) with its own composer, while the main window
-carries on. Any message can be edited and sent again, any turn undone or retried (with another model if
-you like) and any point forked into a new thread; the agent forgets what was taken back, and in a git repo
-the files go back too, from a checkpoint Trek takes as each turn starts. Projects get their own icon, defaults for new threads and title-bar actions. Trek imports your
-existing Claude Code, Codex and OpenCode history (read-only) and resumes those threads, titled by what you
-asked and with each message's time. Sessions that aren't your conversations (sub-agents, other apps' title
-generators, one-shot and temp-folder runs) are left out; Settings › Import lists them and brings back any it
-misjudged.
+<p>
+  <a href="https://github.com/dokyit/Trek/releases/latest"><img src="docs/assets/buttons/download-macos.png" width="236" height="56" alt="Download for macOS"></a>
+  &nbsp;
+  <a href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe"><img src="docs/assets/buttons/download-windows.png" width="250" height="56" alt="Download for Windows"></a>
+</p>
 
-**A composer that knows the agent.** Model and effort per agent, four hand-holding levels (Supervised ·
-Auto-accept edits · Auto · Full access, the last one unlocked once in Settings), Plan mode on ⇧Tab,
-follow-ups that steer the running turn or wait in a queue, `@` for files, `/` for commands, `$` for skills,
-images (pasted with ⌘V, dropped or picked), and app snapshots (⌘⇧S) attached straight to the message.
-Cost is shown as money only when you pay per token (an API key); on a subscription such as Claude Max the
-API-price estimate stays in a tooltip, since the plan already covers it.
+<sub><a href="https://github.com/dokyit/Trek/releases">All releases</a> · <a href="#install">Install notes</a> · <a href="#build-from-source">Build from source</a></sub>
 
-**Agents that consult each other.** Any agent in Trek can hand work to another agent and model you have
-(`delegate_task`, through Trek's own MCP server): Codex reviewing Claude's plan, Opus checking a fix. Each
-sub-agent is a thread of its own in the same folder, read-only when it advises; it shows inline with its
-logo, live status and answer, and on its parent's card, and its answer comes back to the agent that asked.
-The composer's **Consult** control (or `/consult sol high, opus max: …`) picks the models to ask and how:
-advise, or discuss until they agree; then implement, or just report. Stop ends the sub-agents too.
+</div>
 
-**Tools next to the thread** (⌘J): a real terminal, an embedded browser with element picking, screenshots
-and devtools, a live iOS Simulator mirror with touch and typing, a file explorer, source control (diff,
-commit, push) and a side chat. Agents get Trek's own MCP server (`trek-mcp`) for the iOS Simulator and,
-once you turn it on in Settings › Tools, computer use, plus any MCP servers you add.
+<br>
 
-**A good Mac citizen.** Menu bar icon (idle / working / needs you), notifications and Dock badge when an
-agent finishes or needs a decision, keeps the Mac awake while agents work, Night and Paper themes, and
-roughly 50 MB on disk. A built-in updater installs signed releases without ever interrupting a running agent.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/mac/hero-night.png">
+  <img src="docs/assets/screenshots/mac/hero-paper.png" alt="Trek on macOS: a plan waiting for approval, with threads that need you in the sidebar">
+</picture>
 
-## Screenshots
-
-<img src="docs/media/01-working-night.png" alt="Trek's inbox: a working turn streaming a plan, threads waiting in the sidebar" width="800">
+## Platforms
 
 <table>
   <tr>
-    <td><img src="docs/media/03-approval-night.png" alt="An approval card waiting for a decision"></td>
-    <td><img src="docs/media/04-plan-night.png" alt="A plan awaiting approval"></td>
-  </tr>
-  <tr>
-    <td><img src="docs/media/05-basecamp-paper.png" alt="Basecamp, the paper theme: today's trek at a glance"></td>
-    <td><img src="docs/media/02-threads-dark.png" alt="The iPhone companion: every thread, approvals on the go"></td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/icons/platforms/macos.svg" width="24" height="24" align="top" alt="">&nbsp; <b>macOS</b> &nbsp;<sub>13+ · Apple silicon</sub>
+      <br><br>
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/mac/approval-night.png">
+        <img src="docs/assets/screenshots/mac/approval-paper.png" alt="Trek on macOS: an approval card waiting for a decision">
+      </picture>
+      <br>
+      <sub>Menu bar icon, Dock badge, notifications, iOS Simulator.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/icons/platforms/windows.svg" width="24" height="24" align="top" alt="">&nbsp; <b>Windows</b> &nbsp;<sub>11 · x64</sub>
+      <br><br>
+      <img src="docs/assets/screenshots/windows/thread-night.png" alt="Trek on Windows: a finished answer in the Night theme">
+      <br>
+      <sub>Tray icon, taskbar badge, toasts, Mica.</sub>
+    </td>
   </tr>
 </table>
 
-A turn under the mock agent, captured by `script/capture.sh` — [video](docs/media/clip-stream.mp4),
-[animated](docs/media/clip-stream.gif):
+<table>
+  <tr>
+    <td colspan="3">
+      <img src="docs/assets/icons/platforms/iphone.svg" width="24" height="24" align="top" alt="">&nbsp; <b>iPhone</b> &nbsp;<sub>iOS 26 · SwiftUI</sub>
+      <br>
+      <sub>The agents keep running on your computer; the phone is the inbox and the remote. Every thread and its status, approvals, questions and plans, steering, new threads, Notes and voice input. Built from source for now (<a href="ios/README.md">ios/README.md</a>).</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="33%" align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/iphone/threads-dark.png">
+        <img src="docs/assets/screenshots/iphone/threads-light.png" width="250" alt="Trek for iPhone: every thread and its status">
+      </picture>
+      <br><sub>Threads</sub>
+    </td>
+    <td width="33%" align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/iphone/approval-dark.png">
+        <img src="docs/assets/screenshots/iphone/approval-light.png" width="250" alt="Trek for iPhone: answering an approval">
+      </picture>
+      <br><sub>Approvals</sub>
+    </td>
+    <td width="33%" align="center">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/iphone/basecamp-dark.png">
+        <img src="docs/assets/screenshots/iphone/basecamp-light.png" width="250" alt="Trek for iPhone: Basecamp, what needs you today">
+      </picture>
+      <br><sub>Basecamp</sub>
+    </td>
+  </tr>
+</table>
 
-<img src="docs/media/clip-stream.gif" alt="A working turn streaming" width="800">
+## Features
 
-### Windows
-
-<img src="docs/media/01-working-night-windows.png" alt="Trek on Windows: a finished answer in the Night theme, with the sidebar and composer" width="800">
+<table>
+  <tr><th colspan="4" align="left">Agents and models</th></tr>
+  <tr>
+    <td width="25%" valign="top"><img src="docs/assets/icons/features/bot.svg" width="22" height="22" alt=""><br><b>Your CLI agents</b><br><sub>With the logins you already have</sub></td>
+    <td width="25%" valign="top"><img src="docs/assets/icons/features/key-round.svg" width="22" height="22" alt=""><br><b>API and local models</b><br><sub>Keys in the system keychain</sub></td>
+    <td width="25%" valign="top"><img src="docs/assets/icons/features/messages-square.svg" width="22" height="22" alt=""><br><b>Agents consult agents</b><br><sub>Codex reviews Claude's plan, and back</sub></td>
+    <td width="25%" valign="top"><img src="docs/assets/icons/features/shield-check.svg" width="22" height="22" alt=""><br><b>You stay in charge</b><br><sub>Four hand-holding levels, plus Plan mode</sub></td>
+  </tr>
+  <tr><th colspan="4" align="left">Inbox and threads</th></tr>
+  <tr>
+    <td valign="top"><img src="docs/assets/icons/features/inbox.svg" width="22" height="22" alt=""><br><b>One inbox</b><br><sub>Running and waiting threads on top</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/search.svg" width="22" height="22" alt=""><br><b>Search everything</b><br><sub>Full-text search and a ⌘K palette</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/undo-2.svg" width="22" height="22" alt=""><br><b>Undo any turn</b><br><sub>Edit, retry or fork; files roll back too</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/download.svg" width="22" height="22" alt=""><br><b>Bring your history</b><br><sub>Imports Claude Code, Codex and OpenCode</sub></td>
+  </tr>
+  <tr><th colspan="4" align="left">Review and git</th></tr>
+  <tr>
+    <td valign="top"><img src="docs/assets/icons/features/file-diff.svg" width="22" height="22" alt=""><br><b>Changes per turn</b><br><sub>See, review or undo each turn's edits</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/git-branch.svg" width="22" height="22" alt=""><br><b>Worktrees</b><br><sub>Give a thread its own branch</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/git-pull-request.svg" width="22" height="22" alt=""><br><b>Pull request cards</b><br><sub>Checks, conflicts and merge, live</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/code-xml.svg" width="22" height="22" alt=""><br><b>Built-in editor</b><br><sub>Keep or undo the agent's hunks</sub></td>
+  </tr>
+  <tr><th colspan="4" align="left">Tools beside the thread</th></tr>
+  <tr>
+    <td valign="top"><img src="docs/assets/icons/features/square-terminal.svg" width="22" height="22" alt=""><br><b>Terminal</b><br><sub>A real one, next to every thread</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/globe.svg" width="22" height="22" alt=""><br><b>Browser</b><br><sub>Element picking, devtools, agent-driven</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/tablet-smartphone.svg" width="22" height="22" alt=""><br><b>iOS Simulator</b><br><sub>A live mirror with touch (macOS)</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/mouse-pointer-click.svg" width="22" height="22" alt=""><br><b>Computer use and MCP</b><br><sub>Opt-in, plus your own MCP servers</sub></td>
+  </tr>
+  <tr><th colspan="4" align="left">Phone and machines</th></tr>
+  <tr>
+    <td valign="top"><img src="docs/assets/icons/features/smartphone.svg" width="22" height="22" alt=""><br><b>Trek for iPhone</b><br><sub>Answer approvals away from your desk</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/bell-ring.svg" width="22" height="22" alt=""><br><b>Push through ntfy</b><br><sub>Know when an agent needs you</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/monitor-smartphone.svg" width="22" height="22" alt=""><br><b>Your other machines</b><br><sub>Start and follow threads on them</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/lock.svg" width="22" height="22" alt=""><br><b>Pinned TLS pairing</b><br><sub>Over your LAN or Tailscale</sub></td>
+  </tr>
+  <tr><th colspan="4" align="left">Native</th></tr>
+  <tr>
+    <td valign="top"><img src="docs/assets/icons/features/app-window-mac.svg" width="22" height="22" alt=""><br><b>Menu bar and tray</b><br><sub>Idle, working or needs you</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/refresh-cw.svg" width="22" height="22" alt=""><br><b>Signed updates</b><br><sub>Stable, Beta or Nightly; never mid-turn</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/palette.svg" width="22" height="22" alt=""><br><b>Night, Paper, glass</b><br><sub>Themes for the whole app</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/feather.svg" width="22" height="22" alt=""><br><b>Light and fast</b><br><sub>Rust and GPUI, drawn on the GPU</sub></td>
+  </tr>
+</table>
 
 <table>
   <tr>
-    <td><img src="docs/media/03-approval-night-windows.png" alt="Trek on Windows: an approval card waiting for a decision"></td>
-    <td><img src="docs/media/05-basecamp-paper-windows.png" alt="Trek on Windows: Basecamp in the paper theme, with the threads that need you"></td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/mac/basecamp-night.png">
+        <img src="docs/assets/screenshots/mac/basecamp-paper.png" alt="Basecamp: what needs you today, with turns, tokens and failures">
+      </picture>
+      <p align="center"><sub><b>Basecamp</b>: today across every agent</sub></p>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/mac/editor-night.png">
+        <img src="docs/assets/screenshots/mac/editor-paper.png" alt="The editor, with the agent's chat and plan beside the code">
+      </picture>
+      <p align="center"><sub><b>Editor</b>: the agent beside your code</sub></p>
+    </td>
+  </tr>
+</table>
+
+## Works with
+
+Trek drives each vendor's own CLI, so your subscriptions work as they do in the terminal. Trek never reads or stores those credentials.
+
+<table>
+  <tr><th colspan="7" align="left">Agents</th></tr>
+  <tr>
+    <td align="center" width="14%"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/claude-code.png"><img src="crates/trek-assets/assets/logos/light/claude-code.png" width="36" height="36" alt=""></picture><br><sub>Claude Code</sub></td>
+    <td align="center" width="14%"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/codex.png"><img src="crates/trek-assets/assets/logos/light/codex.png" width="36" height="36" alt=""></picture><br><sub>Codex</sub></td>
+    <td align="center" width="14%"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/opencode.png"><img src="crates/trek-assets/assets/logos/light/opencode.png" width="36" height="36" alt=""></picture><br><sub>OpenCode</sub></td>
+    <td align="center" width="14%"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/cursor.png"><img src="crates/trek-assets/assets/logos/light/cursor.png" width="36" height="36" alt=""></picture><br><sub>Cursor</sub></td>
+    <td align="center" width="14%"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/github-copilot.png"><img src="crates/trek-assets/assets/logos/light/github-copilot.png" width="36" height="36" alt=""></picture><br><sub>GitHub Copilot</sub></td>
+    <td align="center" width="14%"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/droid.png"><img src="crates/trek-assets/assets/logos/light/droid.png" width="36" height="36" alt=""></picture><br><sub>Factory Droid</sub></td>
+    <td align="center" width="14%"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/kimi.png"><img src="crates/trek-assets/assets/logos/light/kimi.png" width="36" height="36" alt=""></picture><br><sub>Kimi</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/qwen-code.png"><img src="crates/trek-assets/assets/logos/light/qwen-code.png" width="36" height="36" alt=""></picture><br><sub>Qwen Code</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/grok.png"><img src="crates/trek-assets/assets/logos/light/grok.png" width="36" height="36" alt=""></picture><br><sub>Grok</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/devin.png"><img src="crates/trek-assets/assets/logos/light/devin.png" width="36" height="36" alt=""></picture><br><sub>Devin</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/goose.png"><img src="crates/trek-assets/assets/logos/light/goose.png" width="36" height="36" alt=""></picture><br><sub>Goose</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/amp.png"><img src="crates/trek-assets/assets/logos/light/amp.png" width="36" height="36" alt=""></picture><br><sub>Amp</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/pi.png"><img src="crates/trek-assets/assets/logos/light/pi.png" width="36" height="36" alt=""></picture><br><sub>Pi</sub></td>
+    <td align="center"><sub>+ any agent that speaks <a href="https://agentclientprotocol.com">ACP</a></sub></td>
+  </tr>
+  <tr><th colspan="7" align="left">API keys and local models</th></tr>
+  <tr>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/anthropic.png"><img src="crates/trek-assets/assets/logos/light/anthropic.png" width="36" height="36" alt=""></picture><br><sub>Anthropic</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/openai.png"><img src="crates/trek-assets/assets/logos/light/openai.png" width="36" height="36" alt=""></picture><br><sub>OpenAI</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/gemini.png"><img src="crates/trek-assets/assets/logos/light/gemini.png" width="36" height="36" alt=""></picture><br><sub>Gemini</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/openrouter.png"><img src="crates/trek-assets/assets/logos/light/openrouter.png" width="36" height="36" alt=""></picture><br><sub>OpenRouter</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/deepseek.png"><img src="crates/trek-assets/assets/logos/light/deepseek.png" width="36" height="36" alt=""></picture><br><sub>DeepSeek</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/xai.png"><img src="crates/trek-assets/assets/logos/light/xai.png" width="36" height="36" alt=""></picture><br><sub>xAI</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/mistral.png"><img src="crates/trek-assets/assets/logos/light/mistral.png" width="36" height="36" alt=""></picture><br><sub>Mistral</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/groq.png"><img src="crates/trek-assets/assets/logos/light/groq.png" width="36" height="36" alt=""></picture><br><sub>Groq</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/ollama.png"><img src="crates/trek-assets/assets/logos/light/ollama.png" width="36" height="36" alt=""></picture><br><sub>Ollama</sub></td>
+    <td align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="crates/trek-assets/assets/logos/dark/lmstudio.png"><img src="crates/trek-assets/assets/logos/light/lmstudio.png" width="36" height="36" alt=""></picture><br><sub>LM Studio</sub></td>
+    <td align="center"><sub>llama.cpp<br>MLX</sub></td>
+    <td align="center" colspan="3"><sub>+ any OpenAI-compatible endpoint</sub></td>
+  </tr>
+</table>
+
+<sub>API and local models get Trek's own tools (read, edit, write, run) behind the same approval gates.</sub>
+
+## Built with
+
+<table>
+  <tr>
+    <td align="center" width="96"><img src="docs/assets/icons/tech/rust.svg" width="44" height="44" alt=""><br><sub>Rust</sub></td>
+    <td align="center" width="96"><img src="docs/assets/icons/tech/gpui.svg" width="44" height="44" alt=""><br><sub>GPUI</sub></td>
+    <td align="center" width="96"><img src="docs/assets/icons/tech/tokio.svg" width="44" height="44" alt=""><br><sub>Tokio</sub></td>
+    <td align="center" width="96"><img src="docs/assets/icons/tech/sqlite.svg" width="44" height="44" alt=""><br><sub>SQLite</sub></td>
+    <td align="center" width="96"><img src="docs/assets/icons/tech/swift.svg" width="44" height="44" alt=""><br><sub>SwiftUI</sub></td>
   </tr>
 </table>
 
 ## Install
 
-Download `Trek-<version>-darwin-aarch64.dmg` from
-[Releases](https://github.com/dokyit/Trek/releases), open it and drag **Trek** onto **Applications**.
-Trek needs macOS 13 or later on Apple silicon. (`Trek-<version>-darwin-aarch64.app.tar.gz` is the same app
-as an archive: unpack it and move **Trek.app** to Applications.)
+**macOS** (13 or later, Apple silicon)
 
-Releases are signed with Trek's own certificate but **not notarized by Apple**, so the first launch needs
-one extra step. Either:
+1. Download the `.dmg` from [the latest release](https://github.com/dokyit/Trek/releases/latest) and drag **Trek** to **Applications**.
+2. Releases are signed but not notarized yet. On first launch, open **System Settings › Privacy & Security** and click **Open Anyway**. Or run:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Trek.app
+   ```
+3. Install and log in to the agents you use (`claude`, `codex`, `opencode`, …). Trek finds them on your `PATH`.
 
-- Open Trek once; when macOS says it can't be opened, click **Done**, then in System Settings →
-  Privacy & Security scroll to Security and click **Open Anyway** beside "Trek was blocked", and
-  **Open Anyway** again. It asks only once. (Right-click → Open no longer does this on macOS 15 and later.)
-- Or clear the download quarantine in Terminal:
+**Windows** (11, x64)
 
-  ```sh
-  xattr -dr com.apple.quarantine /Applications/Trek.app
-  ```
+1. Run [`Trek-Setup-x86_64.exe`](https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe), or unpack the portable `.zip` from the [release page](https://github.com/dokyit/Trek/releases/latest) into a folder of its own.
+2. Not Authenticode-signed yet: SmartScreen asks once. Click **More info › Run anyway**.
 
-After that Trek updates itself: Settings → Updates picks the channel (Stable, Beta or Nightly). Updates are
-checked every hour, downloaded in the background, verified (SHA-256 and a minisign signature against the
-key built into Trek) and installed when you restart or quit Trek — never while an agent is working. If you
-run Trek straight from Downloads without moving it, macOS runs a read-only copy and Trek can't update
-itself until you move it to Applications; the same goes for a folder your account can't write to.
+<details>
+<summary>How Windows differs from the Mac</summary>
+<br>
 
-To use the agents, install and log in to their CLIs as usual (`claude`, `codex`, `opencode`, …). Trek finds
-them through your login shell's `PATH`; Settings → Agents & Subscriptions shows what it found.
+- A tray icon and taskbar badge instead of the menu bar icon and Dock badge.
+- No menu bar: every command is in the palette (Ctrl+K), Settings or a context menu. Shortcuts use Ctrl where the Mac uses ⌘.
+- Dictation is Windows' own (Win+H). Snapshots go through Snipping Tool.
+- No iOS Simulator tool.
+- The first time the phone server is on, allow Trek through Windows Firewall on private networks.
+- Windows 10 22H2 works on a best-effort basis, with an opaque window instead of Mica.
+- Keep Trek out of folders that Controlled folder access guards (Documents, Desktop…), or updates can't install. Settings › Updates can move it.
+- Logs: `%LOCALAPPDATA%\Trek\logs`.
 
-### Windows
+</details>
 
-Download `Trek-Setup-x86_64.exe` (guided setup installer) or `Trek-<version>-windows-x86_64.zip` (portable archive)
-from the same [Releases](https://github.com/dokyit/Trek/releases) page. The installer sets up Trek in
-`%LOCALAPPDATA%\Programs\Trek`, creates Start Menu and Desktop shortcuts, provides finish options, and registers
-an uninstaller in Windows Settings (*Installed apps* / *Add or remove programs*).
+**iPhone**: build it from source in Xcode ([ios/README.md](ios/README.md)), then pair it in **Settings › Phone & Machines**.
 
-If using the zip, unpack it into a folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or
-`%LOCALAPPDATA%\Programs\Trek` (not Documents, Desktop, Downloads or `Program Files`), and run `trek.exe`. The zip holds
-`trek.exe`, `trek-mcp.exe` and `trek-update.exe`, and nothing else. Nothing is Authenticode-signed yet, so
-SmartScreen warns once on first launch: **More info** > **Run anyway**. Trek targets Windows 11 on x64;
-Windows 10 22H2 is best effort, with an opaque window instead of Mica.
-
-Updates are signed with the same minisign key as the Mac's. `trek-update.exe` swaps the install folder when an
-update is installed, after the signature is checked, so your account has to be able to write to that folder.
-Windows's ransomware protection (Controlled folder access, in Windows Security) guards Documents, Desktop,
-Pictures, Videos, Music and Favorites, in OneDrive too, and turns the update away there; Settings → Updates
-says so if Trek is in one, and its **Move Trek to its own folder** button copies Trek to
-`%LOCALAPPDATA%\Programs\Trek` and starts it from there, with an offer to remove the old copy.
-Logs are in `%LOCALAPPDATA%\Trek\logs`, one file a day.
-
-Windows differs from the Mac in these ways:
-
-- **Tray and taskbar.** A system tray icon in place of the menu bar icon, and a taskbar badge in place of the
-  Dock badge.
-- **No menu bar.** Every command the Mac's menus have is in the command palette (Ctrl+K), Settings, the context
-  menus or a shortcut.
-- **Notifications** are Windows toasts, under Trek's name.
-- **Dictation** has no Dictate button. Press Win+H, which is Windows' own dictation.
-- **Snapshots** go through Snipping Tool: you pick the window, area or screen in its overlay, and Trek attaches
-  the picture. Windows asks for no permission to capture the screen.
-- **Computer use** needs no permission. Once it's on in Settings › Tools, agents can see the screen, click and
-  type. They can't type into apps running as administrator.
-- **No iOS Simulator.** Trek doesn't offer it on Windows, so there's no Simulator tab.
-- **Glass.** On Windows 11 22H2 and later, the wallpaper's tint shows through the window (Mica), while
-  Transparency effects are on.
-- **`trek://` links** open in Trek, which registers the scheme for your account each time it starts.
-- **Phone.** The first time the phone server is on, Windows Firewall asks whether Trek may communicate on
-  private networks. Allow it, or your iPhone can't reach this PC.
-- **Shortcuts** use Ctrl where this README says ⌘. A few differ.
+**Updates**: Trek updates itself from **Settings › Updates** (Stable, Beta or Nightly). Each update is checked against a minisign signature and installed when you restart Trek, never while an agent is working.
 
 ## Build from source
 
-You need macOS 13+, Xcode and Rust (stable, edition 2024). The full Xcode, not just the Command Line Tools:
-GPUI compiles its Metal shaders at build time. Since Xcode 26 the Metal compiler is a separate download; if
-the build stops at "missing Metal Toolchain", run `xcodebuild -downloadComponent MetalToolchain` once.
+macOS needs full Xcode (GPUI compiles Metal shaders); Windows needs Visual Studio 2022 Build Tools (C++) and the Windows SDK. Rust comes from [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ```sh
 git clone https://github.com/dokyit/Trek && cd Trek
-cargo run -p trek-app                 # debug build, runs from target/
-cargo test -p trek-core -p trek-agents -p trek-app -p trek-mcp
+cargo run -p trek-app        # debug build
+cargo test --workspace       # what CI runs
 ```
 
-A development build never updates itself; rebuilding is the update. That's `cargo run`, and also a bundle
-you build with `script/bundle.sh`: only bundles `script/release.sh` makes are releases. To build an app
-bundle:
+On Xcode 26+, a missing Metal compiler is one command away: `xcodebuild -downloadComponent MetalToolchain`. App bundles, the mock agent and environment variables: [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```sh
-brew install resvg                    # renders the app icon
-script/signing-identity.sh            # once: a stable self-signed code-signing identity
-script/bundle.sh [--install]          # dist/Trek.app, optionally copied to /Applications
-```
+## Docs
 
-`bundle.sh` signs with `$TREK_SIGN_IDENTITY`, else the "Trek Local Signing" identity, else "Shelf Dev" (an
-older self-signed identity on the maintainer's Mac), else ad-hoc. Use a stable identity: macOS ties
-Accessibility and Screen Recording permission (computer use, snapshots) to the signing certificate, and an
-ad-hoc signature changes on every build, so you'd be asked again each time.
+| Doc | What's in it |
+| --- | --- |
+| [Design decisions](docs/DECISIONS.md) | Why Trek is built the way it is |
+| [iPhone design and protocol](docs/MOBILE.md) | Pairing, TLS pinning, the wire protocol |
+| [Other machines](docs/MULTI-MACHINE.md) | Running a thread on another computer |
+| [Performance](docs/PERF.md) | How Trek is measured, and the numbers |
+| [Releasing](docs/RELEASING.md) | Channels, signing and the update path |
+| [All docs](docs/README.md) | The full index |
 
-Handy environment variables: `TREK_DATA_DIR=/some/folder` runs Trek against another data folder (your real
-one is `~/Library/Application Support/dev.trek.Trek`), `TREK_BACKGROUND=1` opens behind other apps' windows
-without taking focus, `TREK_OPEN_SETTINGS=updates`, `TREK_OPEN_TOOL=browser` and
-`TREK_OPEN_THREAD_WINDOW=<thread id>` open a settings page, a tool or a thread window at launch,
-`TREK_OPEN_BASECAMP=1` (or `=week`, `=all`) opens Basecamp, and
-`TREK_ONBOARDING=1` replays onboarding. macOS stops drawing windows that other windows cover, so
-screenshots of a `TREK_BACKGROUND=1` launch also need `TREK_FORCE_ACTIVE=1` (below), which keeps every Trek
-window drawing. An update's relaunch keeps `TREK_DATA_DIR` and the like, never these launch-only flags.
+## Status
 
-### Tests and the mock agent
+Trek is **0.x**: used every day, moving fast. Expect rough edges.
+Apple silicon and Windows x64 only (no Linux yet). History import covers Claude Code, Codex and OpenCode.
+See [open issues](https://github.com/dokyit/Trek/issues) and [what's next](docs/NEXT-WAVE.md).
 
-The test command above includes headless UI tests (`crates/trek-app/src/tests`): Trek's real windows and
-views run on GPUI's test platform against an in-memory database and a throwaway data folder (the Keychain
-stays untouched, and nothing reaches a real agent), with the **mock agent** standing in for real ones.
+## Contributing
 
-The mock agent (`crates/trek-agents/src/mock.rs`) is a scripted agent with no process or network. Each
-prompt plays a script picked by a keyword: none (a streamed markdown answer), `tools`, `subagents 5s`,
-`permission`, `question`, `plan`, `mock:long 30s`, `mock:stream 30s`, `error`, or `mock:consult` /
-`mock:delegate` followed by a prompt for a mock sub-agent (waiting for its answer, or woken by it). `TREK_MOCK_AGENT=1` offers it
-as "Mock agent" in the pickers, and `TREK_MOCK_PROMPT="mock:long 60s"` (with the mock on) starts a mock
-thread at launch.
-
-`cargo test -p trek-app [--release] -- --ignored --nocapture rendering_cost` prints what a working-animation
-frame and a batch of streamed text cost, and how fast a 2,000-item thread opens; those numbers cover layout
-and painting only (the test platform has no GPU). For the whole cost, drawing included, run a build with
-`TREK_BACKGROUND=1 TREK_FORCE_ACTIVE=1 TREK_MOCK_AGENT=1 TREK_MOCK_PROMPT="mock:long 60s"` and a throwaway
-`TREK_DATA_DIR`, and sample it with `top -pid`. `TREK_FORCE_ACTIVE=1` is a measurement aid, not a setting: it
-runs the working animation as if the window were in front and keeps drawing the window while it's covered.
-
-### Windows
-
-You need Rust (stable, MSVC toolchain), Visual Studio 2022 Build Tools with the C++ workload, and the Windows
-SDK. Release builds compile GPUI's shaders with the SDK's `fxc.exe`; a debug build doesn't need it. The `.ps1`
-scripts in `script/` need PowerShell 7.
-
-```powershell
-cargo run -p trek-app                 # debug build, runs from target\debug
-```
-
-CI runs `cargo test --workspace --locked` on Windows too.
-
-## Releases
-
-Releases are published to GitHub by `script/release.sh <version> [--channel stable|beta|nightly]`, which
-sets the version, builds and signs the app, signs the archive with minisign, writes the channel manifest
-and creates the GitHub release. Only stable releases commit their version to the branch; betas and
-nightlies are tagged builds off it. Run it with `--dry-run` first. The Release workflow runs the same script on
-GitHub's Mac and then adds the Windows build, so a release can start from any machine (`gh workflow run
-release.yml -f version=<version> -f channel=<channel>`). The full process, the channel layout, the
-keys and how to test an update locally are in [docs/RELEASING.md](docs/RELEASING.md).
-
-## Architecture
-
-```
-crates/trek-core     engine, no UI: types, settings (TOML), SQLite store, agent detection, thread import,
-                     skills, model catalog, updater
-crates/trek-agents   live sessions: Claude Code (stream-json), Codex (app-server JSON-RPC), ACP agents,
-                     direct API / local models, the scripted mock agent; usage limits and auto titles
-crates/trek-app      the GPUI app (gpui-kit 0.7): workspace state, sidebar, thread view, composer, settings,
-                     onboarding, tools panel, menu bar, notifications; headless UI tests
-crates/trek-mcp      MCP server agents use for computer use, the iOS Simulator and sub-agents
-crates/trek-ipc      the local socket protocol between Trek and its trek-mcp servers
-vendor/gpui-base     gpui-base 0.7 with Trek's small markdown patch (semibold emphasis, calmer headings)
-assets/              brand art, backgrounds, the update signing public key
-script/              bundle, release, signing identity, updater end-to-end test, media capture
-media/               capture manifests for screenshots and clips (media/README.md)
-docs/                DECISIONS.md, MOBILE.md (iPhone protocol), RELEASING.md
-```
-
-The engine crates don't depend on the UI toolkit. All I/O runs on one shared tokio runtime and reaches the
-UI over channels; agent output is batched per frame. Data lives in `~/Library/Application
-Support/dev.trek.Trek` (settings.toml, trek.sqlite, snapshots, updates, and acp-agents: what each ACP agent
-last reported, so Trek doesn't open a session to ask again). See
-[docs/DECISIONS.md](docs/DECISIONS.md) for why things are the way they are.
-
-## What isn't done
-
-- **Apple silicon only on Mac, x64 only on Windows.** No Intel Mac build is published, ARM64 Windows is
-  untested, and Linux isn't supported.
-- **Not notarized, not Authenticode-signed.** First launch needs the step above (Gatekeeper on macOS,
-  one SmartScreen prompt on Windows).
-- **No Windows release yet.** The first one hasn't been published, so the Windows zip isn't on Releases.
-- **Windows 10 is best effort.** It isn't tested in CI, and it gets an opaque window instead of Mica.
-- **Windows CI is still being made reliable.**
-- **API keys and local models are chat only.** Trek's own tool loop (read, edit, run with the hand-holding
-  gates) isn't built yet; use a CLI agent for real work in a repository.
-- **Imports** cover Claude Code, Codex and OpenCode; Cursor, Copilot and other agents' history isn't
-  imported yet.
-- **No website yet**, and no delta updates (each update downloads the whole app, about 15 MB).
+Bug reports, ideas and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
+Found a security issue? Please report it privately: [SECURITY.md](SECURITY.md).
 
 ## License
 
-[Apache-2.0](LICENSE). `vendor/gpui-base` is a patched copy of Longbridge's gpui-base, Apache-2.0 under its
-own [license](vendor/gpui-base/LICENSE-APACHE). Third-party attributions live in [NOTICE](NOTICE).
+[Apache-2.0](LICENSE). Third-party notices are in [NOTICE](NOTICE).
 
-## Trademarks
-
-Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft, or any other maker
-of the agents it runs. Agent and provider names and logos belong to their respective owners and
-are shown only to identify which agent a thread uses — the same nominative use as any tool that
-drives several CLIs. If you hold one of those marks and want Trek's copy of it changed or removed,
-open an issue.
+<sub>Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. Their names and logos belong to their owners and are shown only to say which agent a thread uses. To have a mark changed or removed, open an issue.</sub>
