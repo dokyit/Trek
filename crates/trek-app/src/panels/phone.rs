@@ -593,7 +593,7 @@ impl PhonePanel {
             ),
             None => (
                 "No iPhone".to_string(),
-                "Plug it in with a data cable, unlock it and trust this Mac".to_string(),
+                "Plug it in with a data cable, unlock it and trust this Mac".to_string(), // words: ok, the iPhone tool is macOS only
             ),
         };
         h_flex()
@@ -797,7 +797,7 @@ impl PhonePanel {
         let theme = cx.theme().clone();
         let lines: Vec<&str> = if self.phone.is_none() {
             vec![
-                "Plug the iPhone into this Mac with a data cable (a charge-only cable gives no screen).",
+                "Plug the iPhone into this Mac with a data cable (a charge-only cable gives no screen).", // words: ok
                 "Unlock it and tap Trust.",
             ]
         } else if self.status.bluetooth == "advertising" {
@@ -1347,7 +1347,7 @@ impl Run<'_> {
             })
             .map_err(gone)?;
         let phone = phones?.into_iter().next().ok_or(
-            "No iPhone is connected: ask the user to plug it in, unlock it and trust this Mac.",
+            "No iPhone is connected: ask the user to plug it in, unlock it and trust this Mac.", // words: ok
         )?;
         let screen = if status.camera == "denied" {
             "not allowed (System Settings › Privacy & Security › Camera › Trek)".to_string()
