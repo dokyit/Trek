@@ -409,13 +409,26 @@ pub fn load_state(from: &Path) -> Option<Imported> {
 
 /// The lists to compile from what's kept in `from`, with `allowed` sites let through: each
 /// list's identifier (a hash of its JSON: the same rules find the same compiled list) and JSON.
+///
+/// Network rules and element hiding go in lists of their own. In one list, every request a page
+/// makes is checked against each hiding rule's sites too (they match any URL): measured on a
+/// news site, its DOMContentLoaded came about half a second later, and the list took nearly
+/// twice as long to compile. Apart, nothing changes what blocks: the hiding came after every
+/// network rule, so no network rule could undo it; the allowed sites end each list.
 #[cfg_attr(windows, allow(dead_code))] // Windows installs the extension instead.
 pub fn prepared_lists(from: &Path, allowed: &[String]) -> Result<Vec<(String, String)>, String> {
     let rules = match read_json(&from.join("rules.json"))? {
         Value::Array(rules) => rules,
         _ => return Err("The ad blocker's rules are damaged: import again.".into()),
     };
-    Ok(convert::Converted::lists(&rules, allowed)
+    let (hiding, network): (Vec<Value>, Vec<Value>) = rules
+        .into_iter()
+        .partition(|r| r["action"]["type"] == "css-display-none");
+    let mut lists = convert::Converted::lists(&network, allowed);
+    if !hiding.is_empty() {
+        lists.extend(convert::Converted::lists(&hiding, allowed));
+    }
+    Ok(lists
         .into_iter()
         .map(|json| {
             (
@@ -982,12 +995,17 @@ mod tests {
         );
         assert_eq!(load_state(&into), Some(imported));
         let lists = prepared_lists(&into, &["news.com".into()]).unwrap();
-        assert_eq!(lists.len(), 1);
-        let rules: Vec<Value> = serde_json::from_str(&lists[0].1).unwrap();
-        // ads.com (two triggers: the rest, sub-frames), the redirect, the hiding, the allow.
-        assert_eq!(rules.len(), 5);
-        assert_eq!(rules[3]["action"]["type"], "css-display-none");
-        assert_eq!(rules[4]["action"]["type"], "ignore-previous-rules");
+        assert_eq!(lists.len(), 2);
+        let network: Vec<Value> = serde_json::from_str(&lists[0].1).unwrap();
+        let hiding: Vec<Value> = serde_json::from_str(&lists[1].1).unwrap();
+        // ads.com (two triggers: the rest, sub-frames), the redirect, the allow; the hiding, the
+        // allow.
+        assert_eq!(network.len(), 4);
+        assert_eq!(network[3]["action"]["type"], "ignore-previous-rules");
+        assert_eq!(hiding.len(), 2);
+        assert_eq!(hiding[0]["action"]["type"], "css-display-none");
+        assert_eq!(hiding[1]["action"]["type"], "ignore-previous-rules");
+        assert_ne!(lists[0].0, lists[1].0);
         // The same rules, the same identifier; other sites, another.
         assert_eq!(
             prepared_lists(&into, &["news.com".into()]).unwrap()[0].0,
