@@ -1088,7 +1088,7 @@ impl Run<'_> {
                 let tab = p.active_tab().ok_or(NO_TAB)?;
                 let view = tab.view.read(cx);
                 if !p.visible || !view.visible() {
-                    return Err("The Browser isn't on screen, and a page draws nothing there: bring it forward (⌘J › Browser, or turn on Settings › Tools › Show the browser live) to take a screenshot. browser_snapshot and browser_text work either way.".into());
+                    return Err("The Browser isn't on screen, and a page draws nothing there: ask the user to open the Browser tool beside the chat (or turn on Settings › Tools & MCP › Show the browser live) to take a screenshot. browser_snapshot and browser_text work either way.".into());
                 }
                 Ok(page_picture(view.raw()))
             })
