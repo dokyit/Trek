@@ -29,7 +29,8 @@
 //! The Browser tool (open it with `tools browser`; its page is a native view, so `shot` doesn't
 //! show it): `browser go <address>|back|forward|reload`, `browser state` (the page, the native
 //! view's rectangle beside the panel's and which window has the keys, to `browser.json`), and
-//! `browser snap <name>` (the page as its screenshot button captures it, to `<name>.png`; Windows).
+//! `browser snap <name>` (the page as it draws, to `<name>.png`: WebView2's capture on Windows,
+//! WebKit's snapshot on macOS, even with the window behind others).
 //!
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
@@ -697,8 +698,22 @@ async fn browser(
                 std::fs::write(dir.join(format!("{rest}.png")), bytes)?;
                 Ok(())
             }
-            #[cfg(not(windows))]
-            anyhow::bail!("browser snap: Windows only (WebView2's CapturePreview)")
+            #[cfg(target_os = "macos")]
+            {
+                let tiff = cx
+                    .update(|cx| panel.read(cx).shots_capture(cx))
+                    .ok_or_else(|| anyhow::anyhow!("browser snap: no page"))?;
+                let bytes = tiff
+                    .recv()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("browser snap: the page closed"))?
+                    .map_err(|e| anyhow::anyhow!("browser snap: {e}"))?;
+                image::load_from_memory_with_format(&bytes, image::ImageFormat::Tiff)?
+                    .save_with_format(dir.join(format!("{rest}.png")), image::ImageFormat::Png)?;
+                Ok(())
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
+            anyhow::bail!("browser snap: Windows and macOS only")
         }
         _ => {
             cx.update(|cx| panel.update(cx, |p, cx| p.shots(cmd, rest, cx)))?;

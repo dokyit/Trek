@@ -39,6 +39,8 @@ pub struct Settings {
     pub usage: Usage,
     /// The built-in terminal panel.
     pub terminal: Terminal,
+    /// The tools panel's Browser.
+    pub browser: Browser,
     /// What `load` couldn't read, and whether `save` may write the file.
     #[serde(skip)]
     pub guard: SaveGuard,
@@ -354,6 +356,9 @@ pub struct Tools {
     pub background_pip: bool,
     /// Give agents the iOS Simulator MCP tools.
     pub simulator: bool,
+    /// Open the Simulator tool, showing the device live, when the agent of the thread in view
+    /// starts driving a simulator (its MCP tools, `simctl`, `xcodebuild test`).
+    pub simulator_follow: bool,
     /// Give agents Trek's video watcher (`watch_video`: frames and a transcript, through ffmpeg).
     pub video: bool,
     /// Give agents Trek's sub-agent tools (`delegate_task` and friends): they can hand work to
@@ -373,6 +378,7 @@ impl Default for Tools {
             computer_background: true,
             background_pip: true,
             simulator: true,
+            simulator_follow: true,
             video: true,
             orchestration: true,
             mcp_servers: vec![],
@@ -698,9 +704,52 @@ impl Default for Settings {
             mobile: Mobile::default(),
             usage: Usage::default(),
             terminal: Terminal::default(),
+            browser: Browser::default(),
             guard: SaveGuard::default(),
         }
     }
+}
+
+/// The color scheme the Browser asks pages for (CSS `prefers-color-scheme`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PageScheme {
+    /// Trek's own theme: dark pages in a dark theme, light in a light one.
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl PageScheme {
+    /// Whether pages are asked for their dark scheme, Trek's theme being `trek_dark`.
+    pub fn is_dark(self, trek_dark: bool) -> bool {
+        match self {
+            PageScheme::Auto => trek_dark,
+            PageScheme::Light => false,
+            PageScheme::Dark => true,
+        }
+    }
+
+    /// The next one round the toolbar button: Auto, Light, Dark, Auto…
+    pub fn next(self) -> Self {
+        match self {
+            PageScheme::Auto => PageScheme::Light,
+            PageScheme::Light => PageScheme::Dark,
+            PageScheme::Dark => PageScheme::Auto,
+        }
+    }
+}
+
+/// The tools panel's Browser. Its page scheme is one for every site (not per site): it says how
+/// the user wants pages to look, which doesn't change from one site to the next.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Browser {
+    pub page_scheme: PageScheme,
+    /// While pages are asked for dark: darken (invert) one that stays light, having no dark
+    /// scheme of its own.
+    pub force_dark: bool,
 }
 
 /// The built-in terminal panel.
@@ -1489,6 +1538,22 @@ pub mod secrets {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_scheme_follows_trek_only_on_auto() {
+        use super::PageScheme::*;
+        assert!(Auto.is_dark(true) && !Auto.is_dark(false));
+        assert!(Dark.is_dark(false) && !Light.is_dark(true));
+        assert_eq!(
+            [Auto.next(), Light.next(), Dark.next()],
+            [Light, Dark, Auto]
+        );
+        let s: super::Settings =
+            toml::from_str("[browser]\npage_scheme = \"dark\"\nforce_dark = true\n").unwrap();
+        assert_eq!(s.browser.page_scheme, Dark);
+        assert!(s.browser.force_dark);
+        assert!(super::Settings::default().tools.simulator_follow);
+    }
+
     use super::*;
 
     #[test]

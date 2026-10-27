@@ -131,6 +131,78 @@ const PICK_JS: &str = r#"(() => {
 
 const PICK_STOP_JS: &str = "window.__trekPick && window.__trekPick.stop();";
 
+/// Darkens a page that stays light while it's asked for dark (it has no dark scheme of its own),
+/// or (`false`) takes that back. Pages that declare a dark scheme, or are dark already, are left
+/// alone; media is inverted back so photos look like photos.
+fn force_dark_js(on: bool) -> String {
+    const BODY: &str = r#"(on) => {
+  const id = '__trek-force-dark';
+  const old = document.getElementById(id);
+  if (!on) { if (old) old.remove(); return; }
+  if (old || !document.documentElement) return;
+  const meta = document.querySelector('meta[name="color-scheme"], meta[name="supported-color-schemes"]');
+  if (meta && /dark/i.test(meta.content || '')) return;
+  const lum = (el) => {
+    if (!el) return null;
+    const m = (getComputedStyle(el).backgroundColor || '').match(/[\d.]+/g);
+    if (!m || m.length < 3 || (m.length > 3 && +m[3] < 0.1)) return null;
+    return (0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]) / 255;
+  };
+  const l = lum(document.body) ?? lum(document.documentElement) ?? 1;
+  if (l < 0.5) return;
+  const s = document.createElement('style');
+  s.id = id;
+  s.textContent = 'html{filter:invert(0.92) hue-rotate(180deg)!important;background:#fff!important}' +
+    'img,video,picture,canvas,iframe,embed,object,svg image,[style*="background-image"]{filter:invert(1) hue-rotate(180deg)!important}';
+  (document.head || document.documentElement).appendChild(s);
+}"#;
+    format!("({BODY})({on});")
+}
+
+/// What WKWebView says it is ("… (KHTML, like Gecko)") names no browser, so sites take it for an
+/// old or unknown one: Google serves its legacy, fixed-width results page (cut off in a narrow
+/// panel), others fall back to layouts they keep for old browsers. Saying Safari, which it is, gets
+/// the pages Safari gets.
+const SAFARI_FALLBACK: &str = "26.0";
+
+fn safari_user_agent(version: &str) -> String {
+    format!(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) \
+         Version/{version} Safari/605.1.15"
+    )
+}
+
+/// The `<string>` after `<key>key</key>` in an XML property list: a dotted version only.
+fn plist_version(xml: &str, key: &str) -> Option<String> {
+    let after = xml.split_once(&format!("<key>{key}</key>"))?.1;
+    let rest = after.trim_start().strip_prefix("<string>")?;
+    let v = rest.split_once("</string>")?.0.trim();
+    (!v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| v.to_string())
+}
+
+/// The user agent the Browser's views send: Safari's, at the version installed.
+#[cfg(target_os = "macos")]
+fn user_agent() -> &'static str {
+    static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    UA.get_or_init(|| {
+        let version = std::fs::read_to_string("/Applications/Safari.app/Contents/Info.plist")
+            .ok()
+            .and_then(|xml| plist_version(&xml, "CFBundleShortVersionString"))
+            .unwrap_or_else(|| SAFARI_FALLBACK.to_string());
+        safari_user_agent(&version)
+    })
+}
+
+/// A rectangle (window points) moved onto whole device pixels: each edge goes to the nearest
+/// one, so the page fills its area exactly at any scale, with no sliver short or over.
+fn snap_frame(x: f64, y: f64, w: f64, h: f64, scale: f64) -> (f64, f64, f64, f64) {
+    let s = if scale > 0. { scale } else { 1. };
+    let edge = |v: f64| (v * s).round() / s;
+    let (x0, y0) = (edge(x), edge(y));
+    let (x1, y1) = (edge(x + w), edge(y + h));
+    (x0, y0, (x1 - x0).max(0.), (y1 - y0).max(0.))
+}
+
 /// Where to get the WebView2 runtime when a Windows system has none.
 pub const WEBVIEW2_DOWNLOAD: &str = "https://developer.microsoft.com/microsoft-edge/webview2/";
 
@@ -193,6 +265,10 @@ mod native {
     pub fn is_loading(wv: &wry::WebView) -> bool {
         unsafe { wv.webview().isLoading() }
     }
+    /// How far the load has got, 0-1.
+    pub fn progress(wv: &wry::WebView) -> f64 {
+        unsafe { wv.webview().estimatedProgress() }
+    }
     pub fn go_back(wv: &wry::WebView) {
         let _ = unsafe { wv.webview().goBack() };
     }
@@ -207,6 +283,65 @@ mod native {
     }
     pub fn window_number(wv: &wry::WebView) -> Option<isize> {
         Some(wv.ns_window().windowNumber())
+    }
+
+    /// Put the view at `rect` (window points, top-left origin), exactly: wry's `set_bounds` cuts
+    /// both to whole points, which leaves the page short of its area or over its edge by up to a
+    /// point. WebKit sizes the page's viewport to the view and draws it at the window's scale.
+    pub fn place(wv: &wry::WebView, (x, y, w, h): (f64, f64, f64, f64)) {
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        let view = wv.webview();
+        let Some(parent) = (unsafe { view.superview() }) else {
+            return;
+        };
+        let y = if parent.isFlipped() {
+            y
+        } else {
+            parent.frame().size.height - y - h
+        };
+        let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        if view.frame() != frame {
+            view.setFrame(frame);
+        }
+    }
+
+    /// Ask the page for its dark scheme or its light one (CSS `prefers-color-scheme`): WebKit
+    /// answers by the view's appearance.
+    pub fn set_dark(wv: &wry::WebView, dark: bool) {
+        use objc2_app_kit::{
+            NSAppearance, NSAppearanceCustomization as _, NSAppearanceNameAqua,
+            NSAppearanceNameDarkAqua,
+        };
+        let name = unsafe {
+            if dark {
+                NSAppearanceNameDarkAqua
+            } else {
+                NSAppearanceNameAqua
+            }
+        };
+        let appearance = NSAppearance::appearanceNamed(name);
+        wv.webview().setAppearance(appearance.as_deref());
+    }
+
+    /// The page as WebKit draws it, as TIFF bytes.
+    #[cfg(feature = "shots")]
+    pub fn snapshot(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
+        use objc2_app_kit::NSImage;
+        use objc2_foundation::NSError;
+        let (tx, rx) = async_channel::bounded(1);
+        let done = block2::RcBlock::new(move |image: *mut NSImage, _: *mut NSError| {
+            // SAFETY: WebKit hands a valid image or nil.
+            let tiff = unsafe { image.as_ref() }
+                .and_then(|i| i.TIFFRepresentation())
+                .map(|d| d.to_vec());
+            let _ = tx.try_send(tiff.ok_or_else(|| "WebKit took no snapshot".to_string()));
+        });
+        // SAFETY: called on the main thread with a live view; WebKit copies the block.
+        unsafe {
+            wv.webview()
+                .takeSnapshotWithConfiguration_completionHandler(None, &done)
+        };
+        rx
     }
 }
 
@@ -354,6 +489,24 @@ mod native {
             Ok(out)
         }
     }
+
+    /// Put the view at `rect` (window points, top-left origin; already on whole device pixels).
+    pub fn place(wv: &wry::WebView, (x, y, w, h): (f64, f64, f64, f64)) {
+        let _ = wv.set_bounds(wry::Rect {
+            position: wry::dpi::LogicalPosition::new(x, y).into(),
+            size: wry::dpi::LogicalSize::new(w, h).into(),
+        });
+    }
+
+    /// Ask the page for its dark scheme or its light one (CSS `prefers-color-scheme`).
+    pub fn set_dark(wv: &wry::WebView, dark: bool) {
+        use wry::WebViewExtWindows as _;
+        let _ = wv.set_theme(if dark {
+            wry::Theme::Dark
+        } else {
+            wry::Theme::Light
+        });
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -382,6 +535,13 @@ mod native {
     pub fn window_number(_: &wry::WebView) -> Option<isize> {
         None
     }
+    pub fn place(wv: &wry::WebView, (x, y, w, h): (f64, f64, f64, f64)) {
+        let _ = wv.set_bounds(wry::Rect {
+            position: wry::dpi::LogicalPosition::new(x, y).into(),
+            size: wry::dpi::LogicalSize::new(w, h).into(),
+        });
+    }
+    pub fn set_dark(_: &wry::WebView, _: bool) {}
 }
 
 /// Events from the native views, bridged onto the GPUI thread.
@@ -414,6 +574,10 @@ struct Tab {
     view: Entity<WebView>,
     zoom: f64,
     page: Page,
+    /// Where the page is drawn (window points), as last laid out.
+    frame: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    /// The scheme the view was last asked for: dark or not (`None`: not yet).
+    dark: Option<bool>,
 }
 
 /// The window a native web view is made in, by its raw handle: what a task can carry there in
@@ -594,6 +758,8 @@ pub struct BrowserPanel {
     #[cfg(windows)]
     captures: Captures,
     unavailable: bool,
+    /// Light-only pages are being darkened (see `force_dark_js`).
+    forced_dark: bool,
     tx: async_channel::Sender<Msg>,
     /// CSS custom properties for internal pages, shared with every view's protocol handler.
     page_vars: Rc<RefCell<String>>,
@@ -1015,6 +1181,7 @@ impl BrowserPanel {
             #[cfg(windows)]
             captures: Captures::default(),
             unavailable: false,
+            forced_dark: false,
             tx,
             page_vars: Rc::new(RefCell::new(page_vars(cx))),
             favicons: HashMap::new(),
@@ -1092,6 +1259,8 @@ impl BrowserPanel {
                 wry::WebViewBuilder::new_with_web_context(&mut context).with_focused(false);
             #[cfg(not(windows))]
             let builder = wry::WebViewBuilder::new();
+            #[cfg(target_os = "macos")]
+            let builder = builder.with_user_agent(user_agent());
             builder
                 .with_url(to_view(url))
                 .with_visible(false)
@@ -1179,7 +1348,10 @@ impl BrowserPanel {
             view,
             zoom: 1.0,
             page: Page::new(url),
+            frame: Rc::default(),
+            dark: None,
         });
+        self.sync_scheme(cx);
         self.active = id;
         // Reveal after a moment even if the first load never reports in.
         self._tasks.push(cx.spawn(async move |this, cx| {
@@ -1331,6 +1503,9 @@ impl BrowserPanel {
                 if !finished && self.active == id {
                     self.picking = false;
                 }
+                if finished {
+                    self.force_dark_page(id, cx);
+                }
                 self.refresh_nav(id, cx);
                 self.sync_views(cx);
             }
@@ -1379,6 +1554,9 @@ impl BrowserPanel {
         let internal = origin.starts_with("trek://");
         match msg.get("t").and_then(|v| v.as_str()).unwrap_or_default() {
             "meta" => {
+                if !internal {
+                    self.force_dark_page(id, cx);
+                }
                 if let Some(icon) = favicon_url(&str_of("icon"), &origin) {
                     self.load_favicon(id, icon, cx);
                 }
@@ -1628,7 +1806,7 @@ impl BrowserPanel {
             return;
         }
         let view = tab.view.read(cx);
-        let rect = view.bounds();
+        let rect = tab.frame.get();
         let Some(number) = native::window_number(view.raw()) else {
             return;
         };
@@ -1718,6 +1896,103 @@ impl BrowserPanel {
         }
     }
 
+    /// Ask every view for the page scheme the settings say (Auto: Trek's theme's), and darken
+    /// light-only pages where the user asked for that.
+    fn sync_scheme(&mut self, cx: &mut Context<Self>) {
+        let browser = &self.workspace.read(cx).settings.browser;
+        let dark = browser.page_scheme.is_dark(cx.theme().mode.is_dark());
+        let forced = browser.force_dark && dark;
+        let forced_changed = self.forced_dark != forced;
+        self.forced_dark = forced;
+        // Pages styled by `prefers-color-scheme` switch at once; one that picks its scheme as it
+        // loads (Google, by a cookie) follows on its next load.
+        for tab in &mut self.tabs {
+            let raw = tab.view.read(cx).raw();
+            if tab.dark != Some(dark) {
+                native::set_dark(raw, dark);
+                tab.dark = Some(dark);
+            }
+            if forced_changed && !tab.page.url.starts_with("trek://") {
+                let _ = raw.evaluate_script(&force_dark_js(forced));
+            }
+        }
+    }
+
+    /// A page of tab `id` loaded (or got its DOM): darken it if it needs that.
+    fn force_dark_page(&self, id: u64, cx: &App) {
+        if !self.forced_dark {
+            return;
+        }
+        if let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == id && !t.page.url.starts_with("trek://"))
+        {
+            let _ = tab
+                .view
+                .read(cx)
+                .raw()
+                .evaluate_script(&force_dark_js(true));
+        }
+    }
+
+    fn page_scheme(&self, cx: &App) -> trek_core::settings::PageScheme {
+        self.workspace.read(cx).settings.browser.page_scheme
+    }
+
+    fn set_page_scheme(&mut self, scheme: trek_core::settings::PageScheme, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.settings.browser.page_scheme = scheme;
+            ws.save_settings(cx);
+        });
+        self.sync_scheme(cx);
+        cx.notify();
+    }
+
+    fn toggle_force_dark(&mut self, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |ws, cx| {
+            ws.settings.browser.force_dark = !ws.settings.browser.force_dark;
+            ws.save_settings(cx);
+        });
+        self.sync_scheme(cx);
+        cx.notify();
+    }
+
+    /// The active tab's page: a native view laid exactly over its area (see `native::place`).
+    /// The area keeps a hitbox, so GPUI under it gets no hover; a press outside it hands the
+    /// keys back to Trek.
+    fn page_view(tab: &Tab, cx: &App) -> AnyElement {
+        let view = tab.view.read(cx);
+        let (handle, shown) = (view.handle(), view.visible());
+        let frame = tab.frame.clone();
+        let place = handle.clone();
+        canvas(
+            move |bounds, window, _| {
+                frame.set(bounds);
+                if shown {
+                    let rect = snap_frame(
+                        f64::from(f32::from(bounds.origin.x)),
+                        f64::from(f32::from(bounds.origin.y)),
+                        f64::from(f32::from(bounds.size.width)),
+                        f64::from(f32::from(bounds.size.height)),
+                        f64::from(window.scale_factor()),
+                    );
+                    native::place(place.raw(), rect);
+                }
+                window.insert_hitbox(bounds, HitboxBehavior::Normal)
+            },
+            move |bounds, _, window, _| {
+                window.on_mouse_event(move |event: &MouseDownEvent, _, _, _| {
+                    if !bounds.contains(&event.position) {
+                        let _ = handle.raw().focus_parent();
+                    }
+                });
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
+
     fn more_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
@@ -1725,6 +2000,7 @@ impl BrowserPanel {
             .active_tab()
             .map(|t| (!t.page.url.starts_with("trek://"), t.zoom))
             .unwrap_or((false, 1.0));
+        let failed = self.active_tab().is_some_and(|t| t.page.failed.is_some());
         let row = |id: &'static str,
                    icon: Icon,
                    label: &'static str,
@@ -1793,8 +2069,79 @@ impl BrowserPanel {
                 .into_any_element()
         };
 
+        use trek_core::settings::PageScheme;
+        let scheme = self.page_scheme(cx);
+        let forcing = self.workspace.read(cx).settings.browser.force_dark;
+        let segment =
+            |id: &'static str, s: PageScheme, label: &'static str, cx: &mut Context<Self>| {
+                let on = s == scheme;
+                h_flex()
+                    .id(id)
+                    .test_support()
+                    .h(px(24.))
+                    .px(px(8.))
+                    .gap(px(5.))
+                    .rounded(px(6.))
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(on, |el| {
+                        el.bg(theme.popover)
+                            .text_color(theme.foreground)
+                            .shadow_xs()
+                    })
+                    .when(!on, |el| {
+                        el.text_color(muted)
+                            .hover(|st| st.text_color(theme.foreground))
+                    })
+                    .child(Icon::new(scheme_icon(s)).xsmall())
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_page_scheme(s, cx);
+                    }))
+            };
+        let scheme_row = h_flex()
+            .px(px(10.))
+            .h(px(36.))
+            .gap(px(10.))
+            .text_sm()
+            .child(Icon::new(scheme_icon(scheme)).small().text_color(muted))
+            .child(div().flex_1().child("Pages"))
+            .child(
+                h_flex()
+                    .p(px(2.))
+                    .gap(px(2.))
+                    .rounded(px(8.))
+                    .bg(theme.foreground.opacity(0.06))
+                    .child(segment("browser-scheme-auto", PageScheme::Auto, "Auto", cx))
+                    .child(segment(
+                        "browser-scheme-light",
+                        PageScheme::Light,
+                        "Light",
+                        cx,
+                    ))
+                    .child(segment("browser-scheme-dark", PageScheme::Dark, "Dark", cx)),
+            )
+            .into_any_element();
+        let force_row = ui::menu_row("browser-force-dark", false, cx)
+            .test_support()
+            .child(Icon::new(Lucide::Contrast).small().text_color(muted))
+            .child(div().flex_1().child("Darken pages with no dark theme"))
+            .when(forcing, |el| {
+                el.child(
+                    Icon::new(IconName::Check)
+                        .small()
+                        .text_color(theme.foreground),
+                )
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_force_dark(cx)))
+            .into_any_element();
+
         ui::menu_surface(cx)
-            .w(px(250.))
+            .w(px(280.))
+            .child(scheme_row)
+            .child(force_row)
+            .child(separator())
             .child(row(
                 "browser-copy-url",
                 Icon::new(Lucide::Copy),
@@ -1815,6 +2162,32 @@ impl BrowserPanel {
                 cx,
                 |this, cx| {
                     this.with_active(cx, native::hard_reload);
+                },
+            ))
+            .child(row(
+                "browser-external",
+                Icon::new(Lucide::ExternalLink),
+                "Open in default browser",
+                is_page || failed,
+                cx,
+                |this, cx| {
+                    if let Some(url) = this
+                        .active_tab()
+                        .filter(|t| t.page.failed.is_some() || !t.page.url.starts_with("trek://"))
+                        .map(|t| t.page.address())
+                    {
+                        cx.open_url(&url);
+                    }
+                },
+            ))
+            .child(row(
+                "browser-devtools",
+                Icon::new(Lucide::CodeXml),
+                "Developer tools",
+                true,
+                cx,
+                |this, cx| {
+                    this.with_active(cx, |wv| wv.open_devtools());
                 },
             ))
             .child(separator())
@@ -1944,10 +2317,10 @@ impl BrowserPanel {
             .flex_1()
             .min_w_0()
             .h(px(28.))
-            .px(px(10.))
+            .px(px(12.))
             .gap(px(6.))
-            .rounded(px(8.))
-            .text_size(px(12.5))
+            .rounded(px(14.))
+            .text_size(px(13.))
             .border_1();
         if self.editing {
             return pill
@@ -2010,7 +2383,13 @@ impl BrowserPanel {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .child(div().flex_none().text_color(theme.foreground).child(host))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.foreground)
+                                .child(host),
+                        )
                         .child(div().min_w_0().truncate().text_color(muted).child(rest)),
                 )
                 .into_any_element()
@@ -2053,7 +2432,11 @@ impl BrowserPanel {
 impl BrowserPanel {
     pub fn shots(&mut self, cmd: &str, arg: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
         match cmd {
-            "go" => self.navigate(normalize(arg), cx),
+            "go" => {
+                // As the address bar's Enter does.
+                self.editing = false;
+                self.navigate(normalize(arg), cx)
+            }
             "back" => self.with_active(cx, native::go_back),
             "forward" => self.with_active(cx, native::go_forward),
             "reload" => self.reload_or_stop(cx),
@@ -2070,8 +2453,8 @@ impl BrowserPanel {
         let scale = window.scale_factor() as f64;
         let tab = self.active_tab();
         let view = tab.map(|t| t.view.read(cx));
-        let area = view.map(|v| {
-            let b = v.bounds();
+        let area = tab.map(|t| {
+            let b = t.frame.get();
             serde_json::json!([
                 f32::from(b.origin.x),
                 f32::from(b.origin.y),
@@ -2104,6 +2487,16 @@ impl BrowserPanel {
             "native": native,
             "focus": shots_focus(window),
         })
+    }
+
+    /// The page as WebKit draws it (TIFF), whether or not the window is on screen.
+    #[cfg(target_os = "macos")]
+    pub fn shots_capture(
+        &self,
+        cx: &App,
+    ) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
+        self.active_tab()
+            .map(|t| native::snapshot(t.view.read(cx).raw()))
     }
 
     /// The page as `screenshot` would capture it.
@@ -2170,6 +2563,51 @@ fn describe_pick(msg: &serde_json::Value) -> String {
     out
 }
 
+/// The toolbar's buttons: 28 px, one size with the tabs and the address field.
+fn tool_button(
+    id: impl Into<ElementId>,
+    icon: impl Into<Icon>,
+    tooltip: impl Into<SharedString>,
+) -> gpui_kit::component::button::Button {
+    ui::icon_button(id, icon, tooltip).w(px(28.)).h(px(28.))
+}
+
+fn scheme_icon(scheme: trek_core::settings::PageScheme) -> Lucide {
+    match scheme {
+        trek_core::settings::PageScheme::Auto => Lucide::SunMoon,
+        trek_core::settings::PageScheme::Light => Lucide::Sun,
+        trek_core::settings::PageScheme::Dark => Lucide::Moon,
+    }
+}
+
+fn scheme_tooltip(scheme: trek_core::settings::PageScheme) -> &'static str {
+    match scheme {
+        trek_core::settings::PageScheme::Auto => "Pages: Auto, as Trek's theme (click for Light)",
+        trek_core::settings::PageScheme::Light => "Pages: Light (click for Dark)",
+        trek_core::settings::PageScheme::Dark => "Pages: Dark (click for Auto)",
+    }
+}
+
+/// The line under the toolbar while a page loads, filled as far as the load has got (0-1).
+pub fn progress_line(progress: f64, ember: Hsla) -> impl IntoElement {
+    let p = progress.clamp(0.08, 1.) as f32;
+    div()
+        .id("browser-loading")
+        .absolute()
+        .left_0()
+        .bottom(px(-1.))
+        .w_full()
+        .h(px(2.))
+        .child(
+            div()
+                .id("browser-loading-bar")
+                .h_full()
+                .w(relative(p))
+                .rounded(px(1.))
+                .bg(ember),
+        )
+}
+
 /// The line under the toolbar while a page loads: a bar sliding along it, or, with `still` (reduced
 /// motion), the whole line, dimmer. Sliding is what says "loading"; a sliding bar held at its
 /// start would be off the line altogether.
@@ -2208,8 +2646,9 @@ pub fn loading_line(still: bool, ember: Hsla) -> impl IntoElement {
 }
 
 impl Render for BrowserPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_theme(cx);
+        self.sync_scheme(cx);
         let theme = cx.theme().clone();
         if self.unavailable && self.tabs.is_empty() {
             // Windows 11 ships the WebView2 runtime, but it can be removed (and older systems lack it).
@@ -2232,14 +2671,15 @@ impl Render for BrowserPanel {
         let can_back = tab.is_some_and(|t| t.page.can_back);
         let can_forward = tab.is_some_and(|t| t.page.can_forward);
         let is_page = tab.is_some_and(|t| !t.page.url.starts_with("trek://"));
-        let failed = tab.is_some_and(|t| t.page.failed.is_some());
         let ember = crate::palette::ember(cx);
-        let active_view = tab.map(|t| t.view.clone());
+        let page = tab.map(|t| Self::page_view(t, cx));
         // The native view only draws once the first page paints; until then, a hint fills the
         // void. Hidden while a menu is open (or the panel is) is suppression, not empty.
         let blank = tab.is_none_or(|t| !t.page.ready);
 
-        let strip = h_flex().h(px(36.)).px(px(6.)).gap(px(4.)).child(
+        // One rhythm for the whole head: 8 px sides like the panel's header above, 28 px
+        // controls, tabs and toolbar on 40 px rows, one hairline under the toolbar.
+        let strip = h_flex().h(px(40.)).px(px(8.)).gap(px(4.)).child(
             h_flex()
                 .id("browser-tabs")
                 .flex_1()
@@ -2253,7 +2693,7 @@ impl Render for BrowserPanel {
                         .collect::<Vec<_>>(),
                 )
                 .child(
-                    ui::icon_button("browser-new-tab", IconName::Plus, "New tab").on_click(
+                    tool_button("browser-new-tab", IconName::Plus, "New tab").on_click(
                         cx.listener(|this, _, window, cx| this.new_tab(START_URL, window, cx)),
                     ),
                 ),
@@ -2265,20 +2705,30 @@ impl Render for BrowserPanel {
             .appearance(false)
             .open(self.menu_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| this.set_menu_open(*open, cx)))
-            .trigger(ui::icon_button(
+            .trigger(tool_button(
                 "browser-more-button",
                 IconName::Ellipsis,
                 "More",
             ))
             .content(move |_, _, cx| entity.update(cx, |p, cx| p.more_menu(cx)));
 
+        let scheme = self.page_scheme(cx);
         let nav_button = |id: &'static str, icon: Lucide, tooltip: &'static str, enabled: bool| {
-            ui::icon_button(id, icon, tooltip).disabled(!enabled)
+            tool_button(id, icon, tooltip).disabled(!enabled)
         };
+        #[cfg(target_os = "macos")]
+        let progress = tab
+            .filter(|_| loading)
+            .map(|t| native::progress(t.view.read(cx).raw()));
+        #[cfg(not(target_os = "macos"))]
+        let progress: Option<f64> = None;
+        if progress.is_some() {
+            window.request_animation_frame();
+        }
         let toolbar = h_flex()
             .relative()
             .h(px(40.))
-            .px(px(6.))
+            .px(px(8.))
             .gap(px(2.))
             .border_b_1()
             .border_color(theme.border)
@@ -2303,7 +2753,7 @@ impl Render for BrowserPanel {
                 })),
             )
             .child(
-                ui::icon_button(
+                tool_button(
                     "browser-reload",
                     if loading { Lucide::X } else { Lucide::RotateCw },
                     if loading { "Stop" } else { "Reload" },
@@ -2314,7 +2764,17 @@ impl Render for BrowserPanel {
             .child(self.render_url_pill(cx))
             .child(div().w(px(4.)))
             .child(
-                ui::icon_button(
+                tool_button(
+                    "browser-scheme",
+                    scheme_icon(scheme),
+                    scheme_tooltip(scheme),
+                )
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.set_page_scheme(scheme.next(), cx)),
+                ),
+            )
+            .child(
+                tool_button(
                     "browser-pick",
                     Lucide::Crosshair,
                     "Pick an element for the chat",
@@ -2324,7 +2784,7 @@ impl Render for BrowserPanel {
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_picking(cx))),
             )
             .child(
-                ui::icon_button(
+                tool_button(
                     "browser-screenshot",
                     Lucide::Camera,
                     "Screenshot the page into the chat",
@@ -2332,32 +2792,11 @@ impl Render for BrowserPanel {
                 .loading(self.capturing)
                 .on_click(cx.listener(|this, _, window, cx| this.screenshot(window, cx))),
             )
-            .child(
-                ui::icon_button("browser-devtools", Lucide::CodeXml, "Open devtools").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.with_active(cx, |wv| wv.open_devtools());
-                    }),
-                ),
-            )
-            .child(
-                ui::icon_button(
-                    "browser-external",
-                    Lucide::ExternalLink,
-                    "Open in default browser",
-                )
-                .disabled(!is_page && !failed)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(url) = this
-                        .active_tab()
-                        .filter(|t| t.page.failed.is_some() || !t.page.url.starts_with("trek://"))
-                        .map(|t| t.page.address())
-                    {
-                        cx.open_url(&url);
-                    }
-                })),
-            )
             .child(more)
-            .when(loading, |el| el.child(loading_line(still, ember)));
+            .when(loading, |el| match progress {
+                Some(p) => el.child(progress_line(p, ember)),
+                None => el.child(loading_line(still, ember)),
+            });
 
         let picking_hint = self.picking.then(|| {
             h_flex()
@@ -2400,7 +2839,7 @@ impl Render for BrowserPanel {
                                 .left_0(),
                         )
                     })
-                    .children(active_view),
+                    .children(page),
             )
             .into_any_element()
     }
@@ -2412,9 +2851,10 @@ mod tests {
     #[cfg(windows)]
     use super::{Captures, Msg, PAGES_SCHEME, native};
     use super::{
-        ERROR_URL, FAVICON_MAX_BYTES, Page, START_URL, decode_favicon, download_favicon,
-        extract_title, favicon_url, from_view, from_webview2, host_of, normalize, same_origin,
-        to_view, to_webview2,
+        ERROR_URL, FAVICON_MAX_BYTES, Page, SAFARI_FALLBACK, START_URL, decode_favicon,
+        download_favicon, extract_title, favicon_url, force_dark_js, from_view, from_webview2,
+        host_of, normalize, plist_version, safari_user_agent, same_origin, snap_frame, to_view,
+        to_webview2,
     };
     use gpui_kit::ImageFormat;
 
@@ -2992,6 +3432,63 @@ mod tests {
             "https://www.google.com/search?q=rust%20borrow%20checker"
         );
         assert_eq!(normalize(""), START_URL);
+    }
+
+    #[test]
+    fn the_page_fills_its_area_on_whole_device_pixels() {
+        // Whole points: as laid out, at any scale.
+        assert_eq!(
+            snap_frame(841., 159., 431., 654., 2.),
+            (841., 159., 431., 654.)
+        );
+        // Half points are device pixels at 2x: kept.
+        assert_eq!(
+            snap_frame(840.5, 159., 431.5, 654.5, 2.),
+            (840.5, 159., 431.5, 654.5)
+        );
+        // Between device pixels: each edge to the nearest, so the page meets its neighbours
+        // (wry would cut 431.7 to 431 and leave a sliver at the right).
+        let (x, y, w, h) = snap_frame(840.3, 159.2, 431.7, 654.4, 2.);
+        assert_eq!((x, y), (840.5, 159.));
+        assert_eq!((x + w, y + h), (1272., 813.5));
+        // 1x and fractional (1.5x) displays: edges land on whole device pixels.
+        for scale in [1., 1.25, 1.5, 3.] {
+            let (x, y, w, h) = snap_frame(100.4, 50.6, 300.3, 200.2, scale);
+            for edge in [x, y, x + w, y + h] {
+                let px = edge * scale;
+                assert!((px - px.round()).abs() < 1e-9, "{edge} at {scale}x");
+            }
+            assert!((w - 300.3).abs() <= 1. / scale && (h - 200.2).abs() <= 1. / scale);
+        }
+        // A collapsed area stays empty, never negative; a bad scale counts as 1x.
+        assert_eq!(snap_frame(10., 10., 0., 0., 2.), (10., 10., 0., 0.));
+        assert_eq!(snap_frame(1.4, 1.6, 2., 2., 0.), (1., 2., 2., 2.));
+    }
+
+    #[test]
+    fn the_view_says_it_is_safari() {
+        let ua = safari_user_agent("27.2");
+        assert!(
+            ua.starts_with("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15")
+        );
+        assert!(ua.ends_with("Version/27.2 Safari/605.1.15"), "{ua}");
+        let plist = "<dict>\n\t<key>CFBundleName</key>\n\t<string>Safari</string>\n\t<key>CFBundleShortVersionString</key>\n\t<string>27.2</string>\n</dict>";
+        assert_eq!(
+            plist_version(plist, "CFBundleShortVersionString").as_deref(),
+            Some("27.2")
+        );
+        assert_eq!(plist_version(plist, "CFBundleName"), None, "not a version");
+        assert_eq!(plist_version(plist, "CFBundleVersion"), None);
+        assert!(SAFARI_FALLBACK.split('.').all(|p| p.parse::<u32>().is_ok()));
+    }
+
+    #[test]
+    fn forced_dark_is_one_script_both_ways() {
+        let on = force_dark_js(true);
+        let off = force_dark_js(false);
+        assert!(on.ends_with("(true);") && off.ends_with("(false);"));
+        // It leaves pages with a dark scheme of their own alone.
+        assert!(on.contains("color-scheme") && on.contains("invert("));
     }
 
     #[test]
