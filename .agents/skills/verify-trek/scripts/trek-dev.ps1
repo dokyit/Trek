@@ -312,7 +312,7 @@ function Invoke-Check([bool]$Quick) {
         if (-not $Quick) {
             $env:CARGO_TARGET_DIR = $TargetDir
             foreach ($step in @(
-                @('workspace tests', 'cargo test --locked -p trek-core -p trek-agents -p trek-app -p trek-mcp'),
+                @('workspace tests', 'cargo test --locked --workspace'),
                 @('clippy', 'cargo clippy --workspace --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious'))) {
                 $t = Get-Date
                 Push-Location $Root

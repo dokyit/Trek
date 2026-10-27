@@ -623,7 +623,7 @@ def run_check(driver: Driver, *, quick: bool) -> dict[str, Any]:
         if not quick:
             run_step(
                 "workspace tests",
-                ["cargo", "test", "--locked", "-p", "trek-core", "-p", "trek-agents", "-p", "trek-app", "-p", "trek-mcp"],
+                ["cargo", "test", "--locked", "--workspace"],  # every crate, as CI tests them,
             )
         was_running = driver.status()["running"]
         build = driver.build()
