@@ -27,7 +27,7 @@ fn a_pasted_config_adds_its_servers_checks_them_and_edits_keep_their_tokens() {
         // Tall enough for the servers without scrolling.
         cx.simulate_window_resize(
             trek.window,
-            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2400.)),
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2700.)),
         );
         trek.render(cx);
         // Nothing listens at this address: the remote server's check says so.
@@ -183,7 +183,7 @@ fn a_command_line_with_its_token_in_front_is_one_server() {
         // Tall enough for the servers without scrolling.
         cx.simulate_window_resize(
             trek.window,
-            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2400.)),
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2700.)),
         );
         trek.render(cx);
         trek.click(cx, "mcp-command");
