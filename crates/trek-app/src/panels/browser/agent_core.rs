@@ -373,14 +373,15 @@ pub fn ask_for(tool: &str, args: &Value, probe: Option<&Value>) -> Option<Ask> {
             detail: format!("The agent wants to type into {what} on {page}."),
         });
     }
-    if tool == "browser_click" {
-        if let Some(file) = probe["download"].as_str() {
-            return Some(Ask {
-                kind: Sensitive::Download,
-                title: format!("Download a file from {host}"),
-                detail: format!("The agent wants to click {what}, which downloads {file}."),
-            });
-        }
+    if let Some(file) = probe["download"]
+        .as_str()
+        .filter(|_| tool == "browser_click")
+    {
+        return Some(Ask {
+            kind: Sensitive::Download,
+            title: format!("Download a file from {host}"),
+            detail: format!("The agent wants to click {what}, which downloads {file}."),
+        });
     }
     let submits = tool == "browser_click"
         || tool == "browser_press"

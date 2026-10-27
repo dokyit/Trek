@@ -853,8 +853,7 @@ impl Run<'_> {
                 workspace.update(self.cx, |ws, _| ws.browser_ask_pending(&thread, &request));
             let took_over = self.check().is_err();
             if !pending || took_over || started.elapsed() > ASK_WAIT {
-                let _ =
-                    workspace.update(self.cx, |ws, cx| ws.browser_withdraw(&thread, &request, cx));
+                workspace.update(self.cx, |ws, cx| ws.browser_withdraw(&thread, &request, cx));
                 if took_over {
                     return Err(TOOK_OVER.into());
                 }
