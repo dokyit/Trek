@@ -860,6 +860,7 @@ impl SettingsView {
                 (SavedKey::None, None) => "Not set".into(),
             };
             let title = h_flex()
+                .w_full()
                 .gap(px(10.))
                 .child(ui::agent_logo(
                     &AgentId::Direct(p.id.to_string()),
@@ -867,7 +868,10 @@ impl SettingsView {
                     cx,
                 ))
                 .child(
+                    // Wraps, rather than running under the controls (a locked key's line is long).
                     v_flex()
+                        .flex_1()
+                        .min_w_0()
                         .child(div().text_size(px(13.5)).font_medium().child(p.name))
                         .child(div().text_size(px(12.)).text_color(muted).child(status)),
                 );
@@ -952,7 +956,7 @@ impl SettingsView {
                     .when(
                         matches!(state, SavedKey::Locked | SavedKey::Unlocking),
                         |el| {
-                            el.w(px(410.)).child(
+                            el.w(px(380.)).child(
                                 Button::new(SharedString::from(format!("allow-{id}")))
                                     .small()
                                     .ghost()
