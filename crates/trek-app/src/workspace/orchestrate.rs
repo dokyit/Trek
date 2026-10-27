@@ -176,8 +176,8 @@ impl Workspace {
     }
 
     /// MCP servers for a new session of `agent` in `thread` (`None`: a draft's, warmed up before
-    /// its thread exists): `mcp_servers`, plus Trek's orchestration tools with a session key of
-    /// their own. Background computer use gets the same key, to tell Trek what it's doing (for its
+    /// its thread exists): `mcp_servers`, plus Trek's orchestration and browser tools with a
+    /// session key of their own. Background computer use gets the same key, to tell Trek what it's doing (for its
     /// picture-in-picture window). Returns the key too, to name the session's thread and to
     /// retire it.
     pub(super) fn session_mcp(
@@ -190,6 +190,7 @@ impl Workspace {
         let mock = matches!(agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER);
         let bin = super::trek_mcp_binary();
         let orchestrate = self.settings.tools.orchestration && (mock || bin.is_some());
+        let browser = self.browser_tools() && (mock || bin.is_some());
         let behind = servers.iter().position(|s| {
             s.name == COMPUTER_SERVER
                 && s.env().iter().any(|(k, v)| {
@@ -199,13 +200,21 @@ impl Workspace {
         let Some(ipc) = self
             .ipc
             .as_ref()
-            .filter(|_| orchestrate || behind.is_some())
+            .filter(|_| orchestrate || browser || behind.is_some())
         else {
             return (servers, None);
         };
         let key = ipc.open_session(thread);
         if let Some(McpTransport::Stdio { env, .. }) = behind.map(|i| &mut servers[i].transport) {
             env.extend(ipc.env(&key));
+        }
+        if browser {
+            servers.push(super::browser_use::server(
+                bin.as_ref()
+                    .map(|b| b.display().to_string())
+                    .unwrap_or_else(|| "trek-mcp".into()),
+                ipc.env(&key),
+            ));
         }
         if orchestrate {
             servers.push(McpServer {
@@ -277,6 +286,10 @@ impl Workspace {
                 .unwrap_or_default()
                 .to_string()
         };
+        // Browser use comes the same way, for the Browser tool to answer.
+        if trek_ipc::browser::is_method(&call.method) {
+            return self.browser_call(call, cx);
+        }
         let result = if self.thread(&call.thread).is_none() {
             Err("This thread isn't in Trek any more.".to_string())
         } else if call.method != trek_ipc::COMPUTER_ACTIVITY && !self.settings.tools.orchestration {

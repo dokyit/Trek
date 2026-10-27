@@ -23,6 +23,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// Browser use: agents drive this tool's page (`trek-mcp browser`).
+mod agent;
+mod agent_core;
+pub use agent::{AgentCall, AgentCallSlot};
+
 /// Trek's internal pages (start page, load errors) live on this scheme.
 const START_URL: &str = "trek://newtab/";
 const ERROR_URL: &str = "trek://newtab/error";
@@ -768,6 +773,8 @@ pub struct BrowserPanel {
     page_vars: Rc<RefCell<String>>,
     /// Decoded favicons by URL (`None` when the icon couldn't be fetched or decoded).
     favicons: HashMap<String, Option<Arc<Image>>>,
+    /// Agents using the browser (`agent.rs`).
+    agent: agent::Driver,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -1188,6 +1195,7 @@ impl BrowserPanel {
             tx,
             page_vars: Rc::new(RefCell::new(page_vars(cx))),
             favicons: HashMap::new(),
+            agent: Default::default(),
             _tasks: vec![pump],
             _subscriptions: subscriptions,
         };
@@ -2828,6 +2836,7 @@ impl Render for BrowserPanel {
             .child(strip)
             .child(toolbar)
             .children(picking_hint)
+            .children(self.agent_strip(cx))
             .child(
                 div()
                     .relative()

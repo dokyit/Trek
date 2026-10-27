@@ -94,6 +94,8 @@ pub struct RightPanel {
     scrolled_to: Option<u64>,
     /// When the Simulator tool last opened itself for an agent (`simulator_activity`).
     sim_followed: Option<std::time::Instant>,
+    /// When the Browser tool last came forward for an agent (`browser_call`).
+    browser_followed: Option<std::time::Instant>,
 }
 
 /// After the Simulator tool opened itself for an agent, how long it leaves the panel be: closed
@@ -114,6 +116,7 @@ impl RightPanel {
             drawn: Default::default(),
             scrolled_to: None,
             sim_followed: None,
+            browser_followed: None,
         }
     }
 
@@ -250,6 +253,55 @@ impl RightPanel {
         }) {
             sim.update(cx, |s, cx| s.activity(activity, cx));
         }
+    }
+
+    /// An agent's browser tool call, for the Browser tool: made if there's none (in front when
+    /// the call may `follow`, else behind the tab in front), and brought forward as the
+    /// Simulator is (`simulator_activity`).
+    pub fn browser_call(
+        &mut self,
+        call: browser::AgentCall,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A Browser made now puts the keys in its address bar: they go back where they were.
+        let focus = window.focused(cx);
+        let made = !self.tabs.iter().any(|t| t.tool == PanelTool::Browser);
+        let showing = self.open
+            && self
+                .active_tab()
+                .is_some_and(|t| t.tool == PanelTool::Browser);
+        let quiet = self
+            .browser_followed
+            .is_some_and(|t| t.elapsed() < SIM_FOLLOW_QUIET);
+        if call.follow && !showing && !quiet {
+            self.browser_followed = Some(std::time::Instant::now());
+            self.open_tool(PanelTool::Browser, window, cx);
+        }
+        let browser = self.tabs.iter().find_map(|t| match &t.view {
+            View::Browser(b) => Some(b.clone()),
+            _ => None,
+        });
+        let browser = browser.unwrap_or_else(|| {
+            let ws = self.workspace.clone();
+            let b = cx.new(|cx| browser::BrowserPanel::new(ws, window, cx));
+            let id = self.next_id;
+            self.next_id += 1;
+            self.tabs.push(Tab {
+                id,
+                tool: PanelTool::Browser,
+                view: View::Browser(b.clone()),
+            });
+            self.sync_native(cx);
+            cx.notify();
+            b
+        });
+        browser.update(cx, |b, cx| {
+            if made {
+                b.agent_refocus(focus);
+            }
+            b.agent_call(call, window, cx)
+        });
     }
 
     /// The Browser tool, if it's open (the shots harness's `browser` command).

@@ -2,7 +2,7 @@
 
 ## What it does
 
-Discovers agent skills across supported homes, lets users enable/disable them, and configures Trek’s built-in computer/simulator/delegation tools plus additional MCP servers. The composer exposes matching `$` skill mentions.
+Discovers agent skills across supported homes, lets users enable/disable them, and configures Trek’s built-in computer/simulator/browser/delegation tools plus additional MCP servers (browser use: see [Browser](browser.md)). The composer exposes matching `$` skill mentions.
 
 On the Mac, computer use works **in the background** by default (Settings → Tools & MCP → Computer use → Work in the background): the agent picks one window (`open_app` opens an app behind the user's windows; `screenshot` with a `window_id` picks an open one), sees just that window even when covered, and its clicks, keys and scrolls go to that window's app alone. The user's pointer, keyboard and front app are untouched. `trek-mcp computer` (with `TREK_COMPUTER_MODE=background`) reports each step to Trek over the session's IPC channel (`computer_activity`), and Trek shows it in a floating picture-in-picture window: the agent's window live, where it last pointed, what it's doing and for which thread. The picture folds to a pill or is put away, and comes back from the menu bar icon (Show Background Use), the command palette, or the thread's working bar ("… in the background · Show"). It closes a few seconds after the turn ends.
 

@@ -10,6 +10,7 @@ logs go to stderr.
 ```
 trek-mcp computer     # macOS computer use
 trek-mcp simulator    # iOS Simulator (xcrun simctl + AXe)
+trek-mcp browser      # browser use in Trek's own Browser tool (run by Trek, macOS and Windows)
 ```
 
 ## Tool families
@@ -63,6 +64,18 @@ Touch, typing and buttons need [AXe](https://github.com/cameroncooke/AXe). trek-
 `$TREK_AXE_PATH`, then `PATH`, `/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin`. If it is missing
 those tools return: *"Touch input needs AXe. Turn on 'Simulator touch input' in Trek ▸ Settings ▸ Tools to
 install it."*
+
+### `browser`
+
+Trek's Browser tool, driven for the agent while the user watches. Like `orchestrate`, it only works
+in a session Trek started: every call goes to that Trek over its local channel (`TREK_IPC_*`), and
+Trek runs it in the main window's Browser. The tools and their arguments are in
+`crates/trek-ipc/src/browser.rs` (`browser_open`, `browser_tabs`, `browser_switch`, `browser_close`,
+`browser_back`/`forward`/`reload`, `browser_snapshot`, `browser_click`, `browser_type`,
+`browser_press`, `browser_select`, `browser_hover`, `browser_scroll`, `browser_wait`,
+`browser_screenshot`, `browser_text`, `browser_eval`). A screenshot comes back from Trek as a PNG file,
+which trek-mcp reads into an image block and removes. Approvals (passwords, forms sent to another
+site, downloads, `browser_eval`) are Trek's, on the thread's approval card, by its access level.
 
 ## How Trek passes it to agents
 

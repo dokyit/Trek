@@ -1951,6 +1951,26 @@ impl SettingsView {
                 cx,
             ));
         }
+        out.push(Self::heading("Browser", cx));
+        out.push(ui::group(
+            vec![
+                Self::row(
+                    "Browser tools",
+                    "Agents use Trek's Browser as you would: open pages, read them, click, type and take screenshots, while you watch. Typing a password, sending a form to another site, downloads and running scripts follow the thread's access level. Applies to new sessions.",
+                    self.switch("browser-tools", s.tools.browser, |s, v| s.tools.browser = v),
+                    cx,
+                ),
+                Self::row(
+                    "Show the browser live",
+                    "When the agent of the thread you're on starts using the browser, the Browser tool opens beside the chat, with each element it acts on outlined and a Stop button to take the browser back.",
+                    self.switch("browser-follow", s.tools.browser_follow, |s, v| {
+                        s.tools.browser_follow = v
+                    }),
+                    cx,
+                ),
+            ],
+            cx,
+        ));
         out.push(Self::heading("Video", cx));
         let ffmpeg_control: AnyElement = match probe.as_ref().map(|p| p.ffmpeg) {
             None => checking("install-ffmpeg"),

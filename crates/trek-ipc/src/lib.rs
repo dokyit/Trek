@@ -37,6 +37,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::path::PathBuf;
 
+pub mod browser;
 pub mod instance;
 #[cfg(any(feature = "server", test))]
 pub mod server;

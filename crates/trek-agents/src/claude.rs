@@ -221,14 +221,19 @@ fn answer(request_id: &str, request: &Value, answers: Vec<(String, String)>) -> 
     )
 }
 
-/// The answer to a request to use one of Trek's orchestration tools (`trek-orchestrate`): allowed.
+/// The answer to a request to use one of Trek's orchestration tools (`trek-orchestrate`) or its
+/// browser tools (`trek-browser`, which ask the user themselves where the thread's access level
+/// says to): allowed.
 fn trek_tool_allowed(v: &Value) -> Option<Value> {
     let r = &v["request"];
+    let tool = r["tool_name"].as_str()?;
     let ours = v["type"] == "control_request"
         && r["subtype"] == "can_use_tool"
-        && r["tool_name"]
-            .as_str()?
-            .starts_with("mcp__trek-orchestrate__");
+        && (tool.starts_with("mcp__trek-orchestrate__")
+            || tool
+                .strip_prefix("mcp__")
+                .and_then(|t| t.strip_prefix(trek_ipc::browser::SERVER))
+                .is_some_and(|t| t.starts_with("__")));
     ours.then(|| {
         control_response(
             v["request_id"].as_str().unwrap_or_default(),
@@ -2664,6 +2669,11 @@ mod tests {
         assert_eq!(
             ok["response"]["response"],
             json!({"behavior":"allow","updatedInput":{"title":"x"}})
+        );
+        assert!(trek_tool_allowed(&ask("mcp__trek-browser__browser_click")).is_some());
+        assert_eq!(
+            trek_tool_allowed(&ask("mcp__trek-browser-fake__browser_click")),
+            None
         );
         assert_eq!(
             trek_tool_allowed(&ask("mcp__other__delete_everything")),

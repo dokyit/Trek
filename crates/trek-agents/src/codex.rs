@@ -527,7 +527,9 @@ fn activity(item: &Value) -> Option<String> {
 fn mcp_title(item: &Value) -> String {
     let tool = item["tool"].as_str().unwrap_or("Tool");
     match item["server"].as_str() {
-        Some(server) if server == trek_core::orchestrate::SERVER => {
+        Some(server)
+            if server == trek_core::orchestrate::SERVER || server == trek_ipc::browser::SERVER =>
+        {
             format!("mcp__{server}__{tool}")
         }
         _ => tool.to_string(),
@@ -1294,8 +1296,11 @@ impl Session {
             "mcpServer/elicitation/request" => {
                 // Trek's own sub-agent server asks nothing itself: what comes in its name is
                 // Codex checking a call to it, which needs no approval (the sub-agent's own
-                // actions are approved in its thread).
-                let result = if p["serverName"] == "trek-orchestrate" {
+                // actions are approved in its thread). Its browser server asks the user itself,
+                // where the thread's access level says to.
+                let result = if p["serverName"] == "trek-orchestrate"
+                    || p["serverName"] == trek_ipc::browser::SERVER
+                {
                     json!({ "action": "accept", "content": {} })
                 } else {
                     json!({ "action": "decline" })
@@ -2406,6 +2411,10 @@ mod tests {
         assert_eq!(
             mcp_title(&json!({ "server": "trek-orchestrate", "tool": "delegate_task" })),
             "mcp__trek-orchestrate__delegate_task"
+        );
+        assert_eq!(
+            mcp_title(&json!({ "server": "trek-browser", "tool": "browser_click" })),
+            "mcp__trek-browser__browser_click"
         );
         assert_eq!(
             mcp_title(&json!({ "server": "t3-code", "tool": "delegate_task" })),
@@ -3594,6 +3603,11 @@ mod tests {
         assert_eq!(
             out.send,
             vec![json!({"id":9,"result":{"action":"accept","content":{}}})]
+        );
+        let out = s.incoming(&json!({"id":10,"method":"mcpServer/elicitation/request","params":{"threadId":"t","serverName":"trek-browser"}}));
+        assert_eq!(
+            out.send,
+            vec![json!({"id":10,"result":{"action":"accept","content":{}}})]
         );
         let out = s.incoming(&json!({"id":8,"method":"item/tool/call","params":{"threadId":"t"}}));
         assert_eq!(out.send[0]["error"]["code"], -32601);

@@ -2,10 +2,14 @@
 //!
 //! Usage: `trek-mcp computer` (computer use on macOS and Windows), `trek-mcp simulator`
 //! (iOS Simulator via `xcrun simctl` + AXe), `trek-mcp video` (`watch_video`: frames and a
-//! transcript of a video, through ffmpeg) or `trek-mcp orchestrate` (sub-agents, run by the Trek
-//! that started the agent). JSON-RPC 2.0 messages are read
-//! from stdin and written to stdout, one per line. Logs go to stderr only.
+//! transcript of a video, through ffmpeg), `trek-mcp orchestrate` (sub-agents, run by the Trek
+//! that started the agent) or `trek-mcp browser` (browser use in that Trek's own Browser tool).
+//! JSON-RPC 2.0 messages are read from stdin and written to stdout, one per line. Logs go to
+//! stderr only.
 
+// Trek's Browser tool has a web view on macOS and Windows only.
+#[cfg(any(target_os = "macos", windows))]
+mod browser;
 #[cfg(any(target_os = "macos", windows))]
 mod computer;
 #[cfg(any(target_os = "macos", windows))]
@@ -29,6 +33,7 @@ USAGE:
     trek-mcp simulator    iOS Simulator control (simctl + AXe), macOS only
     trek-mcp video        watch_video: a video's frames and transcript (needs ffmpeg)
     trek-mcp orchestrate  sub-agents: delegate work to other agents and models in Trek
+    trek-mcp browser      browser use in Trek's Browser tool (run by the Trek that started the agent)
     trek-mcp --version
 ";
 
@@ -65,6 +70,13 @@ fn main() {
                 std::process::exit(2);
             }
         },
+        #[cfg(any(target_os = "macos", windows))]
+        "browser" => serve(Box::new(browser::Browser::from_env())),
+        #[cfg(not(any(target_os = "macos", windows)))]
+        "browser" => {
+            eprintln!("trek-mcp: the browser tools run only on macOS and Windows");
+            std::process::exit(2);
+        }
         "orchestrate" => {
             eprintln!(
                 "trek-mcp {} (orchestrate) ready on stdio",

@@ -2,6 +2,7 @@
 
 mod added_agents;
 mod agent_updates;
+mod browser_use;
 mod limits;
 mod lineage;
 mod mcp;
@@ -1029,6 +1030,8 @@ pub enum WorkspaceEvent {
         activity: crate::panels::simulator::SimActivity,
         follow: bool,
     },
+    /// An agent's browser tool call, for the main window's Browser to take (`browser_use`).
+    BrowserUse(crate::panels::browser::AgentCallSlot),
     /// Open the context card over the composer of `scope` (the title bar's hub asks for it).
     OpenContextCard(Scope),
     /// Open a page in the tools panel's Browser (a link clicked in a terminal).
@@ -6411,7 +6414,12 @@ impl Workspace {
             live.settle_prompt(request_id);
             still_waiting = !live.permissions.is_empty();
             running = live.turn_started.is_some() && live.commands.is_some();
-            if let Some(tx) = &live.commands {
+            // The Browser's own approvals are answered in Trek; the rest go to the agent.
+            if let Some(tx) = live
+                .commands
+                .as_ref()
+                .filter(|_| !browser_use::answered(request_id, decision))
+            {
                 let _ = tx.try_send(Command::Respond {
                     request_id: request_id.to_string(),
                     decision,

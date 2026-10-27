@@ -359,6 +359,11 @@ pub struct Tools {
     /// Open the Simulator tool, showing the device live, when the agent of the thread in view
     /// starts driving a simulator (its MCP tools, `simctl`, `xcodebuild test`).
     pub simulator_follow: bool,
+    /// Give agents Trek's browser tools (`trek-mcp browser`): they drive the Browser tool's page,
+    /// which the user watches.
+    pub browser: bool,
+    /// Open the Browser tool beside the chat when the agent of the thread in view starts using it.
+    pub browser_follow: bool,
     /// Give agents Trek's video watcher (`watch_video`: frames and a transcript, through ffmpeg).
     pub video: bool,
     /// Give agents Trek's sub-agent tools (`delegate_task` and friends): they can hand work to
@@ -379,6 +384,8 @@ impl Default for Tools {
             background_pip: true,
             simulator: true,
             simulator_follow: true,
+            browser: true,
+            browser_follow: true,
             video: true,
             orchestration: true,
             mcp_servers: vec![],
@@ -1552,6 +1559,11 @@ mod tests {
         assert_eq!(s.browser.page_scheme, Dark);
         assert!(s.browser.force_dark);
         assert!(super::Settings::default().tools.simulator_follow);
+        // Browser use is on, and shown, unless turned off; files from before it have it on.
+        let t = super::Settings::default().tools;
+        assert!(t.browser && t.browser_follow);
+        let old: super::Settings = toml::from_str("[tools]\nvideo = false\n").unwrap();
+        assert!(old.tools.browser && old.tools.browser_follow && !old.tools.video);
     }
 
     use super::*;

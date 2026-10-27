@@ -180,6 +180,14 @@ pub fn op(title: &str, detail: &str, cwd: Option<&Path>) -> Op {
             file: None,
         };
     }
+    // Trek's browser tools read as what they did to the page, then what they acted on.
+    if let Some(label) = trek_ipc::browser::label(title) {
+        return Op {
+            verb: label.to_string(),
+            text: first_line(detail),
+            file: None,
+        };
+    }
     let path = |d: &str| relative(d, cwd);
     let (verb, text, file) = match tool_kind(title) {
         ToolKind::Command => (String::new(), first_line(detail), None),
@@ -275,6 +283,9 @@ pub fn phrase(title: &str, detail: &str, headline: Option<&str>) -> String {
     }
     if orch::tool_label(title).is_some() || orch::is_delegate_call(title) {
         return "Working with sub-agents".to_string();
+    }
+    if trek_ipc::browser::is_tool(title) {
+        return "Using the browser".to_string();
     }
     let specific = match tool_kind(title) {
         ToolKind::Edit => Some(format!(
@@ -704,6 +715,15 @@ mod tests {
         );
         assert_eq!(phrase("Edit", "/p/src/auth.rs", None), "Editing auth.rs");
         assert_eq!(phrase("Write", "docs/NOTES.md", None), "Writing NOTES.md");
+        assert_eq!(
+            phrase("mcp__trek-browser__browser_click", "Send", Some("Checking")),
+            "Using the browser"
+        );
+        let row = op("mcp__trek-browser__browser_type", "Email", None);
+        assert_eq!(
+            (row.verb.as_str(), row.text.as_str()),
+            ("Typed in the page", "Email")
+        );
         assert_eq!(
             phrase("Run command", "cargo test --workspace", None),
             "Running tests"

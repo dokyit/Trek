@@ -47,6 +47,10 @@
 //! | [app]                        | of app `app`), telling Trek each step as `trek-mcp computer`  |
 //! |                              | would, so its picture-in-picture window shows it; nothing is  |
 //! |                              | clicked for real                                              |
+//! | `mock:browser` [`approvals`] | fills in a test site's form in Trek's Browser through the      |
+//! |                              | session's `trek-browser` tools (for real), checking each step |
+//! |                              | and ending with a tally; `approvals` also types a password and|
+//! |                              | runs a script (asked below full access); a URL opens that     |
 //! | `mock:video`                 | makes a 6-second test clip with ffmpeg in Trek's data folder, |
 //! |                              | watches it with Trek's `watch_video` (for real, through the   |
 //! |                              | session's `trek-video` server) and links the clip in its answer|
@@ -104,6 +108,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use trek_core::HandHolding;
+
+mod browser;
 
 pub use trek_core::catalog::MOCK_PROVIDER as PROVIDER;
 
@@ -273,6 +279,8 @@ enum Script {
     Background,
     /// Watch a test clip with Trek's `watch_video`, and link it (`mock:video`).
     Video,
+    /// Use Trek's browser tools on a test site, checking each step (`mock:browser`).
+    Browser,
     /// Run an iOS app's tests on a simulator in a shell, one failing (`mock:simtest`).
     SimTest,
     Limit(Duration),
@@ -482,6 +490,7 @@ impl Script {
                 "mcp" if w.starts_with("mock:") => Script::Mcp,
                 "background" if w.starts_with("mock:") => Script::Background,
                 "video" if w.starts_with("mock:") => Script::Video,
+                "browser" if w.starts_with("mock:") => Script::Browser,
                 "simtest" if w.starts_with("mock:") => Script::SimTest,
                 _ => return None,
             })
@@ -548,6 +557,7 @@ pub fn title(request: &str) -> String {
         Script::Mcp => "List the MCP servers",
         Script::Background => "Check the page in the background",
         Script::Video => "Watch the demo clip",
+        Script::Browser => "Check the sign-up form in the browser",
         Script::SimTest => "Run the iOS tests",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
@@ -635,6 +645,8 @@ struct Session {
     mcp: Vec<String>,
     /// Trek's video watcher, when Trek gave the session it (`mock:video` calls it).
     video: Option<crate::McpServer>,
+    /// The way to Trek's browser tools, when Trek gave the session them (`mock:browser`).
+    browser: Option<trek_ipc::Client>,
 }
 
 /// A six-second test pattern with a tone, at `clip`.
@@ -893,6 +905,11 @@ pub async fn run(
             .iter()
             .find(|m| m.name == trek_core::media::VIDEO_SERVER)
             .cloned(),
+        browser: config
+            .mcp_servers
+            .iter()
+            .find(|m| m.name == trek_ipc::browser::SERVER)
+            .and_then(|m| trek_ipc::Client::from_pairs(m.env())),
         mcp: config
             .mcp_servers
             .iter()
@@ -1065,6 +1082,7 @@ impl Session {
             Script::Handoff => self.handoff(text).await?,
             Script::Background => self.background_use(text).await?,
             Script::Video => self.watch_video().await?,
+            Script::Browser => self.browser_check(text).await?,
             Script::SimTest => {
                 self.tool(
                     "Run command",
@@ -3779,6 +3797,10 @@ mod tests {
         assert_eq!(Script::parse("mock:told", false), Script::Told);
         assert_eq!(Script::parse("mock:mcp", false), Script::Mcp);
         assert_eq!(Script::parse("mock:video", false), Script::Video);
+        assert_eq!(
+            Script::parse("mock:browser approvals", false),
+            Script::Browser
+        );
         assert_eq!(Script::parse("mock:simtest", false), Script::SimTest);
         assert_eq!(
             Script::parse("what were you told", false),
