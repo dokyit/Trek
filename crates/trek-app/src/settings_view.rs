@@ -477,6 +477,9 @@ impl SettingsView {
             cx.new(|cx| InputState::new(window, cx).placeholder("When should an agent use it?"));
         let mut subs = subs;
         subs.push(cx.observe(&skill_filter, |_, _, cx| cx.notify()));
+        // The Browser's ad blocker: an import or a compile under way, done, or failed.
+        let adblock = crate::panels::browser_adblock::AdBlocker::get(cx);
+        subs.push(cx.observe(&adblock, |_, _, cx| cx.notify()));
         // A URL shows the header fields.
         subs.push(cx.observe(&mcp_command, |_, _, cx| cx.notify()));
         // Return in the add row adds (or saves) the server.
@@ -871,6 +874,107 @@ impl SettingsView {
             )
             .child(div().flex_none().child(control))
             .into_any_element()
+    }
+
+    /// Settings › Browser's ad blocker: import the user's uBlock Origin, then its result, on/off,
+    /// Re-import and Remove (`panels::browser_adblock`).
+    fn adblock_rows(&self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::panels::browser_adblock::{self, AdBlocker};
+        use gpui_kit::component::Disableable as _;
+        let blocker = AdBlocker::get(cx);
+        let blocker = blocker.read(cx);
+        let (imported, busy, error) = (
+            blocker.imported.clone(),
+            blocker.busy,
+            blocker.error.clone(),
+        );
+        let theme = cx.theme().clone();
+        let status = |text: String, danger: bool| {
+            div()
+                .pt(px(4.))
+                .text_size(px(12.5))
+                .text_color(if danger {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                })
+                .child(text)
+                .into_any_element()
+        };
+        let what = if crate::words::is_windows() {
+            "Block ads with your own uBlock Origin: pick its folder and Trek installs it as a \
+             browser extension (WebView2 still runs Manifest V2 ones; Edge plans to stop in 2027). \
+             Nothing of uBlock Origin ships with Trek."
+        } else {
+            "Block ads with your own uBlock Origin: pick its folder (or a .zip or .crx of it) and \
+             Trek turns its declarativeNetRequest rules, and its lists' site-specific element \
+             hiding, into WebKit content rules, compiled once into Trek's data folder. WebKit can't \
+             redirect, so redirects block. Nothing of uBlock Origin ships with Trek."
+        };
+        let extra = match (busy, &error) {
+            (Some(busy), _) => Some(status(busy.to_string(), false)),
+            (None, Some(e)) => Some(status(e.clone(), true)),
+            (None, None) => None,
+        };
+        let ws = self.workspace.clone();
+        let Some(imported) = imported else {
+            let import = Button::new("adblock-import")
+                .small()
+                .outline()
+                .label("Import uBlock Origin…")
+                .disabled(busy.is_some())
+                .on_click(move |_, _, cx| browser_adblock::pick_and_import(ws.clone(), cx));
+            return vec![Self::row_with("Ad blocker", what, extra, import, cx)];
+        };
+        // An extension (Windows) is turned on and off on the Browser's Extensions page.
+        let control = if imported.extension {
+            Self::status_dot(palette::emerald(cx), "Installed")
+        } else {
+            Switch::new("adblock-on")
+                .checked(s.browser.ad_blocker)
+                .on_click(move |v: &bool, _, cx| browser_adblock::set_enabled(&ws, *v, cx))
+                .into_any_element()
+        };
+        let mut detail = imported.summary();
+        if !imported.skipped_by.is_empty() {
+            let why: Vec<String> = imported
+                .skipped_by
+                .iter()
+                .map(|(why, n)| format!("{} {why}", browser_adblock::thousands(*n)))
+                .collect();
+            detail.push_str(&format!(". Skipped: {}", why.join(", ")));
+        }
+        if !s.browser.ad_allow.is_empty() {
+            detail.push_str(&format!(
+                ". Ads allowed on {}",
+                s.browser.ad_allow.join(", ")
+            ));
+        }
+        let (ws, again) = (self.workspace.clone(), imported.source.clone());
+        let actions = h_flex()
+            .gap(px(6.))
+            .child(
+                Button::new("adblock-reimport")
+                    .small()
+                    .outline()
+                    .label("Re-import")
+                    .disabled(busy.is_some())
+                    .on_click(move |_, _, cx| browser_adblock::import(&ws, again.clone(), cx)),
+            )
+            .child(
+                Button::new("adblock-remove")
+                    .small()
+                    .outline()
+                    .label("Remove")
+                    .disabled(busy.is_some())
+                    .on_click(|_, _, cx| {
+                        AdBlocker::get(cx).update(cx, |a, cx| a.remove(cx));
+                    }),
+            );
+        vec![
+            Self::row_with("Ad blocker", what, extra, control, cx),
+            Self::row(imported.title(), detail, actions, cx),
+        ]
     }
 
     fn switch(&self, id: &'static str, on: bool, f: fn(&mut Settings, bool)) -> Switch {
@@ -1968,7 +2072,10 @@ impl SettingsView {
                     }),
                     cx,
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(self.adblock_rows(&s, cx))
+            .collect(),
             cx,
         ));
         out.push(Self::heading("Video", cx));

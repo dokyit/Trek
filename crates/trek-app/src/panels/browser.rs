@@ -2,6 +2,7 @@
 //! start page that finds local dev servers, element picking and page screenshots for the
 //! composer, devtools, and zoom.
 
+use super::browser_adblock::{self, AdBlocker};
 use super::browser_extensions::{self, ExtensionsEvent, ExtensionsPage};
 use crate::assets::Lucide;
 use crate::ui;
@@ -821,6 +822,18 @@ pub struct BrowserPanel {
     menu_open: bool,
     /// The Extensions page (Windows), in the page's place while it's open.
     extensions: Option<(Entity<ExtensionsPage>, Subscription)>,
+    /// The ad blocker every Browser shares (`browser_adblock`).
+    adblock: Entity<AdBlocker>,
+    /// Its lists as this Browser's views have them (macOS).
+    #[cfg(target_os = "macos")]
+    adblock_applied: Vec<browser_adblock::webkit::List>,
+    /// The tab whose site was just allowed: its view goes without the lists until they're
+    /// compiled again with the site let through (macOS).
+    #[cfg(target_os = "macos")]
+    adblock_paused: Option<u64>,
+    /// Load the page in front again once the lists next change (a site no longer allowed).
+    #[cfg(target_os = "macos")]
+    adblock_reload: bool,
     picking: bool,
     capturing: bool,
     #[cfg(windows)]
@@ -1210,7 +1223,9 @@ impl BrowserPanel {
                 }
             }
         });
-        let subscriptions = vec![cx.subscribe_in(
+        let adblock = AdBlocker::get(cx);
+        let mut subscriptions = vec![cx.observe(&adblock, |this, _, cx| this.sync_adblock(cx))];
+        subscriptions.push(cx.subscribe_in(
             &address,
             window,
             |this: &mut Self, input, event: &InputEvent, window, cx| match event {
@@ -1236,7 +1251,7 @@ impl BrowserPanel {
                 }
                 _ => {}
             },
-        )];
+        ));
         let mut this = Self {
             workspace,
             tabs: vec![],
@@ -1247,6 +1262,13 @@ impl BrowserPanel {
             visible: true,
             menu_open: false,
             extensions: None,
+            adblock,
+            #[cfg(target_os = "macos")]
+            adblock_applied: vec![],
+            #[cfg(target_os = "macos")]
+            adblock_paused: None,
+            #[cfg(target_os = "macos")]
+            adblock_reload: false,
             picking: false,
             capturing: false,
             #[cfg(windows)]
@@ -1261,6 +1283,7 @@ impl BrowserPanel {
             _subscriptions: subscriptions,
         };
         this.new_tab(START_URL, window, cx);
+        this.compile_adblock(cx);
         this
     }
 
@@ -1458,9 +1481,16 @@ impl BrowserPanel {
         {
             browser_extensions::blocker::set(tab.view.read(cx).raw(), true);
         }
+        #[cfg(target_os = "macos")]
+        if let Some(tab) = self.tabs.last() {
+            browser_adblock::webkit::apply(tab.view.read(cx).raw(), &[], &self.adblock_applied);
+        }
         self.sync_scheme(cx);
         self.active = id;
         self.extensions = None;
+        // An ad blocker imported before this Browser had a view installs into this one.
+        #[cfg(windows)]
+        self.sync_adblock(cx);
         // Reveal after a moment even if the first load never reports in.
         self._tasks.push(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -2154,6 +2184,142 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    /// Have the ad blocker's lists ready for the sites allowed now (macOS; found in WebKit's
+    /// store at once when they were compiled before).
+    fn compile_adblock(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            let browser = &self.workspace.read(cx).settings.browser;
+            if browser.ad_blocker {
+                let allowed = browser.ad_allow.clone();
+                self.adblock.update(cx, |a, cx| a.compile(allowed, cx));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+    }
+
+    /// Put the ad blocker's current lists on every tab's view (macOS), in place of the ones it
+    /// had; load the page in front again when blocking began or stopped.
+    #[cfg(target_os = "macos")]
+    fn sync_adblock(&mut self, cx: &mut Context<Self>) {
+        let on = self.workspace.read(cx).settings.browser.ad_blocker;
+        let lists = if on {
+            self.adblock.read(cx).lists().to_vec()
+        } else {
+            vec![]
+        };
+        let same = lists.len() == self.adblock_applied.len()
+            && lists
+                .iter()
+                .zip(&self.adblock_applied)
+                .all(|(a, b)| objc2::rc::Retained::as_ptr(a) == objc2::rc::Retained::as_ptr(b));
+        if same {
+            cx.notify();
+            return;
+        }
+        let toggled = lists.is_empty() != self.adblock_applied.is_empty();
+        self.adblock_paused = None;
+        for tab in &self.tabs {
+            browser_adblock::webkit::apply(tab.view.read(cx).raw(), &self.adblock_applied, &lists);
+        }
+        self.adblock_applied = lists;
+        if toggled || std::mem::take(&mut self.adblock_reload) {
+            self.reload_page_in_front(cx);
+        }
+        cx.notify();
+    }
+
+    /// Install an imported ad blocker waiting for a view (Windows: the extension itself, in the
+    /// profile every tab shares).
+    #[cfg(windows)]
+    fn sync_adblock(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.active_tab().map(|t| t.view.clone()) else {
+            return;
+        };
+        let Some(folder) = self.adblock.update(cx, |a, _| a.take_pending()) else {
+            cx.notify();
+            return;
+        };
+        let reply = browser_extensions::install(view.read(cx).raw(), &folder);
+        let ws = self.workspace.clone();
+        self._tasks.push(cx.spawn(async move |this, cx| {
+            let answer = reply
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("WebView2 didn't answer.".to_string()));
+            let message = match answer {
+                Ok(ext) => format!("Installed {}: it blocks ads in every tab", ext.name),
+                Err(e) => format!("Couldn't install the ad blocker: {e}"),
+            };
+            let _ = ws.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message,
+                    undo: None,
+                })
+            });
+            let _ = this.update(cx, |this, cx| this.reload_page_in_front(cx));
+        }));
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fn sync_adblock(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
+    }
+
+    /// Load the web page in front again (not one of Trek's own).
+    fn reload_page_in_front(&self, cx: &App) {
+        if let Some(tab) = self
+            .active_tab()
+            .filter(|t| !t.page.url.starts_with("trek://"))
+        {
+            let _ = tab.view.read(cx).raw().reload();
+        }
+    }
+
+    /// The site of the page in front, for "Allow ads on this site" (macOS).
+    #[cfg(target_os = "macos")]
+    fn site_in_front(&self) -> Option<String> {
+        self.active_tab()
+            .filter(|t| t.page.failed.is_none())
+            .and_then(|t| browser_adblock::site_of(&t.page.url))
+    }
+
+    /// Let ads load on `site`, or stop (macOS). Allowing shows at once: the tab in front goes
+    /// without the lists and loads again, while they compile with the site let through (the
+    /// other tabs get them then). Blocking again waits for that compile, then loads again.
+    #[cfg(target_os = "macos")]
+    fn toggle_allow_site(&mut self, site: String, cx: &mut Context<Self>) {
+        let allowed = self.workspace.update(cx, |ws, cx| {
+            let list = &mut ws.settings.browser.ad_allow;
+            let allowed = match list.iter().position(|s| *s == site) {
+                Some(ix) => {
+                    list.remove(ix);
+                    false
+                }
+                None => {
+                    list.push(site);
+                    list.sort();
+                    true
+                }
+            };
+            ws.save_settings(cx);
+            allowed
+        });
+        if allowed {
+            if let Some(tab) = self.active_tab() {
+                let view = tab.view.read(cx).raw();
+                browser_adblock::webkit::apply(view, &self.adblock_applied, &[]);
+                let _ = view.reload();
+                self.adblock_paused = Some(tab.id);
+            }
+        } else {
+            self.adblock_reload = true;
+        }
+        self.compile_adblock(cx);
+        cx.notify();
+    }
+
     fn toggle_force_dark(&mut self, cx: &mut Context<Self>) {
         self.workspace.update(cx, |ws, cx| {
             ws.settings.browser.force_dark = !ws.settings.browser.force_dark;
@@ -2196,6 +2362,115 @@ impl BrowserPanel {
         )
         .size_full()
         .into_any_element()
+    }
+
+    /// The ⋯ menu's ad blocker rows: import, or on/off and the site in front let through
+    /// (macOS); on Windows the import, the extension then managed on the Extensions page.
+    fn adblock_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let check = |on: bool| {
+            on.then(|| {
+                Icon::new(IconName::Check)
+                    .small()
+                    .text_color(theme.foreground)
+            })
+        };
+        let blocker = self.adblock.read(cx);
+        let (imported, busy, error) = (
+            blocker.imported.clone().filter(|i| !i.extension),
+            blocker.busy,
+            blocker.error.clone(),
+        );
+        let settings = &self.workspace.read(cx).settings.browser;
+        let (on, allowed) = (settings.ad_blocker, settings.ad_allow.clone());
+        let mut rows = vec![];
+        let import_row = |label: &'static str, cx: &mut Context<Self>| {
+            ui::menu_row("browser-adblock-import", false, cx)
+                .test_support()
+                .child(Icon::new(Lucide::Shield).small().text_color(muted))
+                .child(div().flex_1().child(label))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_menu_open(false, cx);
+                    browser_adblock::pick_and_import(this.workspace.clone(), cx);
+                }))
+                .into_any_element()
+        };
+        match &imported {
+            None if cfg!(windows) || busy.is_none() => {
+                rows.push(import_row("Import uBlock Origin…", cx));
+            }
+            None => {}
+            Some(imported) => {
+                rows.push(
+                    ui::menu_row("browser-adblock-toggle", false, cx)
+                        .test_support()
+                        .child(Icon::new(Lucide::Shield).small().text_color(muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("Block ads ({})", imported.name)),
+                        )
+                        .children(check(on))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            browser_adblock::set_enabled(&this.workspace.clone(), !on, cx);
+                        }))
+                        .into_any_element(),
+                );
+                #[cfg(target_os = "macos")]
+                if on && let Some(site) = self.site_in_front() {
+                    let allowing = allowed.contains(&site);
+                    rows.push(
+                        ui::menu_row("browser-adblock-allow-site", false, cx)
+                            .test_support()
+                            .child(Icon::new(Lucide::CircleSlash).small().text_color(muted))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(format!("Allow ads on {site}")),
+                            )
+                            .children(check(allowing))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_allow_site(site.clone(), cx);
+                            }))
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        let _ = &allowed;
+        let note = match (busy, error) {
+            (Some(busy), _) => Some(
+                h_flex()
+                    .gap(px(6.))
+                    .child(Spinner::new().xsmall())
+                    .child(busy)
+                    .into_any_element(),
+            ),
+            (None, Some(e)) => Some(div().text_color(theme.danger).child(e).into_any_element()),
+            (None, None) => imported
+                .as_ref()
+                .map(|i| div().child(i.summary()).into_any_element()),
+        };
+        if let Some(note) = note {
+            rows.push(
+                div()
+                    .id("browser-adblock-status")
+                    .test_support()
+                    .px(px(10.))
+                    .pl(px(36.))
+                    .pb(px(6.))
+                    .text_xs()
+                    .text_color(muted)
+                    .child(note)
+                    .into_any_element(),
+            );
+        }
+        rows
     }
 
     fn more_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -2363,12 +2638,14 @@ impl BrowserPanel {
         };
         #[cfg(not(target_os = "macos"))]
         let block_row: Option<AnyElement> = None;
+        let adblock_rows = self.adblock_rows(cx);
 
         ui::menu_surface(cx)
             .w(px(280.))
             .child(scheme_row)
             .child(force_row)
             .children(block_row)
+            .children(adblock_rows)
             .child(separator())
             .child(row(
                 "browser-copy-url",
@@ -2688,8 +2965,19 @@ impl BrowserPanel {
             "unfocus" => self.with_active(cx, |wv| {
                 let _ = wv.focus_parent();
             }),
+            // The ad blocker, without its file picker: import a folder (or archive), turn it on
+            // or off, let the site in front through or not (macOS).
+            "adblock-import" => browser_adblock::import(&self.workspace.clone(), arg.into(), cx),
+            "adblock" => browser_adblock::set_enabled(&self.workspace.clone(), arg == "on", cx),
+            #[cfg(target_os = "macos")]
+            "adblock-allow" => {
+                let site = self.site_in_front();
+                let site =
+                    site.ok_or_else(|| anyhow::anyhow!("adblock-allow: no site in front"))?;
+                self.toggle_allow_site(site, cx);
+            }
             _ => anyhow::bail!(
-                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>)"
+                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|adblock-import <path>|adblock on|off|adblock-allow)"
             ),
         }
         Ok(())

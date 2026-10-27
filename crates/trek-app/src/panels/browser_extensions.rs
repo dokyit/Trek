@@ -356,6 +356,16 @@ mod native {
     }
 }
 
+/// Install the unpacked extension in `folder` into `wv`'s profile (Windows; the imported ad
+/// blocker, `browser_adblock`).
+#[cfg(windows)]
+pub fn install(
+    wv: &wry::WebView,
+    folder: &Path,
+) -> async_channel::Receiver<Result<Extension, String>> {
+    native::add(wv, folder)
+}
+
 /// Whether this Browser can run extensions (and offers the page): WebView2's can.
 pub const AVAILABLE: bool = cfg!(windows);
 
