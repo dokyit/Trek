@@ -9,6 +9,15 @@ use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+/// A line count as the bar shows it: exact below ten thousand, then "35k", "1.2M".
+fn count(n: u32) -> String {
+    if n < 10_000 {
+        n.to_string()
+    } else {
+        crate::context_popover::fmt_tokens(n as u64)
+    }
+}
+
 /// The bar for `thread`, when it has changes pending.
 pub fn pending_bar(
     ws: &Entity<Workspace>,
@@ -61,9 +70,12 @@ pub fn pending_bar(
             .text_size(px(12.))
             .text_color(muted)
             .child(
+                // Clipped, so a narrow chat cuts the counts off rather than drawing them under
+                // Review and Undo all.
                 h_flex()
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .gap(px(5.))
                     .child(div().text_color(ember).child("✦"))
                     .child(
@@ -82,14 +94,14 @@ pub fn pending_bar(
                                     el.child(
                                         div()
                                             .text_color(palette::emerald(cx))
-                                            .child(format!("+{added}")),
+                                            .child(format!("+{}", count(added))),
                                     )
                                 })
                                 .when(removed > 0, |el| {
                                     el.child(
                                         div()
                                             .text_color(palette::red(cx))
-                                            .child(format!("−{removed}")),
+                                            .child(format!("−{}", count(removed))),
                                     )
                                 }),
                             trek_core::file_kind::LineBreakdown::of_changes(&review.pending),
@@ -116,15 +128,12 @@ pub fn pending_bar(
                             .build(window, cx)
                         })
                         .when(armed, |el| el.text_color(palette::red(cx)))
+                        // Its shortcut is in the tooltip: the bar has to fit a narrow chat.
                         .child(if armed {
                             "Undo all? Again to confirm"
                         } else {
                             "Undo all"
                         })
-                        .child(kbd(
-                            crate::keys::hint(crate::keys::Id::UndoAllOrStop),
-                            muted.opacity(0.7),
-                        ))
                         .on_click(move |_, _, cx| {
                             ws_undo.update(cx, |ws, cx| ws.undo_files(&id_undo, None, cx))
                         }),
@@ -155,4 +164,17 @@ pub fn pending_bar(
             )
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count;
+
+    #[test]
+    fn big_counts_shorten() {
+        assert_eq!(count(9_999), "9999");
+        assert_eq!(count(34_992), "35k");
+        assert_eq!(count(10_350), "10.4k");
+        assert_eq!(count(1_200_000), "1.2M");
+    }
 }
