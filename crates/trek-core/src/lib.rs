@@ -16,6 +16,7 @@ pub mod git;
 pub mod hunks;
 pub mod import;
 pub mod inline_edit;
+pub mod keychain;
 pub mod limit;
 pub mod lineage;
 pub mod mcp;

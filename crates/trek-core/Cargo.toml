@@ -19,7 +19,6 @@ uuid.workspace = true
 tracing.workspace = true
 semver.workspace = true
 walkdir.workspace = true
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 sha2 = "0.10"
 hex = "0.4"
 minisign-verify = "0.2"
@@ -33,6 +32,12 @@ trash = "5"
 [target.'cfg(target_os = "macos")'.dependencies]
 # renamex_np(RENAME_SWAP): swap the app bundle for its update in one step.
 libc = "0.2"
+# The login keychain read without prompting (`keychain`): keyring can't turn interaction off.
+security-framework = "3"
+
+# Credential Manager on Windows, the secret service on Linux (`keychain`; macOS has its own).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring = { version = "3", features = ["windows-native", "linux-native"] }
 
 [target.'cfg(windows)'.dependencies]
 # Process ids, start times and trees, for `procs`; an update's version from trek.exe's version

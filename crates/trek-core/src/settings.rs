@@ -593,6 +593,41 @@ impl McpServerConfig {
             })
             .collect()
     }
+
+    /// The Keychain accounts of its saved values, with the name each is for.
+    fn secret_accounts(&self) -> Vec<(String, String)> {
+        let headers = self
+            .headers
+            .iter()
+            .filter(|h| h.secret)
+            .map(|h| (h.name.clone(), secrets::mcp_account(&self.name, &h.name)));
+        let env = self.env.iter().filter(|e| e.secret).map(|e| {
+            (
+                e.name.clone(),
+                secrets::mcp_env_account(&self.name, &e.name),
+            )
+        });
+        headers.chain(env).collect()
+    }
+
+    /// The names of its saved values that macOS keeps locked (saved by another build of Trek),
+    /// as the last quiet read found them: they aren't sent until the user allows access.
+    pub fn locked_secrets(&self) -> Vec<String> {
+        self.secret_accounts()
+            .into_iter()
+            .filter(|(_, account)| crate::keychain::is_locked(account))
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Unlock its locked values (macOS asks the user's login password for each): only for their
+    /// Allow access, off the main thread. How many are still locked.
+    pub fn unlock_secrets(&self) -> usize {
+        self.secret_accounts()
+            .into_iter()
+            .filter(|(_, account)| crate::keychain::unlock(account).is_locked())
+            .count()
+    }
 }
 
 /// Stands for a value kept in the Keychain when a server's command line is shown for editing.
@@ -1368,127 +1403,87 @@ fn set_at(root: &mut toml::Value, path: &[String], value: toml::Value) {
     }
 }
 
-/// API keys and MCP server tokens in the macOS Keychain (or platform secret store).
+/// API keys and MCP server tokens in the macOS Keychain (or platform secret store), through
+/// `keychain`: every read here is quiet (a key another build of Trek saved reads as locked, never
+/// a password prompt); only the `unlock_*` calls, for an Allow access button, may prompt.
 pub mod secrets {
-    const SERVICE: &str = "dev.trek.Trek";
+    use crate::keychain::{self, Lookup};
 
     pub fn set_api_key(provider: &str, key: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !crate::paths::isolated(),
-            "the Keychain is off in this process"
-        );
-        keyring::Entry::new(SERVICE, provider)?.set_password(key)?;
-        Ok(())
+        keychain::write(provider, key)
     }
 
     /// The Keychain account for header `header` of MCP server `server` (its own namespace, so
     /// it can't collide with a provider's API key).
-    fn mcp_account(server: &str, header: &str) -> String {
+    pub fn mcp_account(server: &str, header: &str) -> String {
         format!("mcp-header:{server}:{}", header.to_ascii_lowercase())
     }
 
     /// The same for its environment variable `var` (names are case-sensitive there).
-    fn mcp_env_account(server: &str, var: &str) -> String {
+    pub fn mcp_env_account(server: &str, var: &str) -> String {
         format!("mcp-env:{server}:{var}")
     }
 
-    /// In an isolated process (tests) MCP server tokens are kept in memory instead, so adding,
-    /// editing and removing a server goes the whole way without reaching the user's Keychain.
-    static MEMORY: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
-        std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-    fn memory() -> std::sync::MutexGuard<'static, std::collections::BTreeMap<String, String>> {
-        MEMORY
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn set_mcp(account: &str, value: &str) -> anyhow::Result<()> {
-        if crate::paths::isolated() {
-            memory().insert(account.to_string(), value.to_string());
-            return Ok(());
-        }
-        keyring::Entry::new(SERVICE, account)?.set_password(value)?;
-        Ok(())
-    }
-
-    fn get_mcp(account: &str) -> Option<String> {
-        if crate::paths::isolated() {
-            return memory().get(account).cloned();
-        }
-        keyring::Entry::new(SERVICE, account)
-            .ok()?
-            .get_password()
-            .ok()
-    }
-
-    fn delete_mcp(account: &str) -> anyhow::Result<()> {
-        if crate::paths::isolated() {
-            memory().remove(account);
-            return Ok(());
-        }
-        keyring::Entry::new(SERVICE, account)?.delete_credential()?;
-        Ok(())
-    }
-
     pub fn set_mcp_header(server: &str, header: &str, value: &str) -> anyhow::Result<()> {
-        set_mcp(&mcp_account(server, header), value)
+        keychain::write(&mcp_account(server, header), value)
     }
 
     pub fn mcp_header(server: &str, header: &str) -> Option<String> {
-        get_mcp(&mcp_account(server, header))
+        keychain::read(&mcp_account(server, header)).found()
     }
 
     pub fn delete_mcp_header(server: &str, header: &str) -> anyhow::Result<()> {
-        delete_mcp(&mcp_account(server, header))
+        keychain::delete(&mcp_account(server, header))
     }
 
     pub fn set_mcp_env(server: &str, var: &str, value: &str) -> anyhow::Result<()> {
-        set_mcp(&mcp_env_account(server, var), value)
+        keychain::write(&mcp_env_account(server, var), value)
     }
 
     pub fn mcp_env(server: &str, var: &str) -> Option<String> {
-        get_mcp(&mcp_env_account(server, var))
+        keychain::read(&mcp_env_account(server, var)).found()
     }
 
     pub fn delete_mcp_env(server: &str, var: &str) -> anyhow::Result<()> {
-        delete_mcp(&mcp_env_account(server, var))
+        keychain::delete(&mcp_env_account(server, var))
     }
 
     /// The key for `provider`: its environment variable if set, else the one saved in the Keychain.
     pub fn api_key(provider: &str) -> Option<String> {
-        if crate::paths::isolated() {
-            return None;
+        api_key_lookup(provider).found()
+    }
+
+    /// The same, saying whether a saved key is there but locked (the reason a send can't go).
+    pub fn api_key_lookup(provider: &str) -> Lookup {
+        // An isolated process (tests) doesn't take the developer's shell keys either.
+        if !crate::paths::isolated()
+            && let Some(env) = crate::catalog::direct_provider(provider).and_then(|p| p.env_key)
+            && let Ok(v) = std::env::var(env)
+            && !v.is_empty()
+        {
+            return Lookup::Found(v);
         }
-        if let Some(env) = crate::catalog::direct_provider(provider).and_then(|p| p.env_key) {
-            if let Ok(v) = std::env::var(env) {
-                if !v.is_empty() {
-                    return Some(v);
-                }
-            }
-        }
-        stored_api_key(provider)
+        stored_api_key_lookup(provider)
     }
 
     /// The key saved in the Keychain for `provider`, ignoring its environment variable (what
     /// Remove can remove).
     pub fn stored_api_key(provider: &str) -> Option<String> {
-        if crate::paths::isolated() {
-            return None;
-        }
-        keyring::Entry::new(SERVICE, provider)
-            .ok()?
-            .get_password()
-            .ok()
+        stored_api_key_lookup(provider).found()
+    }
+
+    pub fn stored_api_key_lookup(provider: &str) -> Lookup {
+        keychain::read(provider)
+    }
+
+    /// Read `provider`'s locked key, letting macOS ask the user's login password: only for
+    /// their Allow access, off the main thread (it waits for their answer).
+    pub fn unlock_api_key(provider: &str) -> Lookup {
+        keychain::unlock(provider)
     }
 
     pub fn delete_api_key(provider: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !crate::paths::isolated(),
-            "the Keychain is off in this process"
-        );
-        keyring::Entry::new(SERVICE, provider)?.delete_credential()?;
-        Ok(())
+        keychain::delete(provider)
     }
 }
 

@@ -256,10 +256,34 @@ impl Render for SettingsNav {
     }
 }
 
+/// What Trek says before an Allow access button brings up macOS's password prompt.
+pub(crate) const LOCKED_KEYS_NOTE: &str = "Some saved keys are locked: an earlier copy of Trek saved them, and macOS lets only that copy read them. Trek never asks for them on its own. Paste a key again, or click Allow access and enter your Mac's login password when macOS asks; Trek then keeps a copy of its own, so it won't ask again.";
+
+/// What the Keychain holds for a provider, as the API Keys page shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SavedKey {
+    None,
+    Saved,
+    /// Saved by an earlier copy of Trek: macOS wants the user's say before Trek reads it.
+    Locked,
+    /// Allow access was clicked: macOS's prompt is up.
+    Unlocking,
+}
+
+impl SavedKey {
+    fn of(found: &trek_core::keychain::Lookup) -> Self {
+        match found {
+            trek_core::keychain::Lookup::Found(_) => SavedKey::Saved,
+            trek_core::keychain::Lookup::Locked => SavedKey::Locked,
+            trek_core::keychain::Lookup::Missing => SavedKey::None,
+        }
+    }
+}
+
 pub struct SettingsView {
     workspace: Entity<Workspace>,
     key_inputs: HashMap<&'static str, Entity<InputState>>,
-    saved_keys: HashMap<&'static str, bool>,
+    saved_keys: HashMap<&'static str, SavedKey>,
     mcp_name: Entity<InputState>,
     mcp_command: Entity<InputState>,
     /// A header for a remote MCP server being added (shown once the command is a URL); the
@@ -288,6 +312,10 @@ pub struct SettingsView {
     /// What the Tools and Snapshots pages show from the Mac's setup, and whether the project's
     /// image icon is still there, each read off the main thread.
     tools: Probe<ToolsProbe>,
+    /// The quiet read of the MCP servers' and added agents' saved values (which are locked).
+    secret_scan: Probe<()>,
+    /// An Allow access for them is waiting on macOS's prompts.
+    unlocking_secrets: bool,
     /// Whether the Figma desktop app's MCP server answers (Tools › Connections).
     figma_desktop: Probe<bool>,
     snapshots: Probe<SnapshotsProbe>,
@@ -425,7 +453,8 @@ impl SettingsView {
                 }),
             );
             // What the Keychain holds, not a shell variable: Remove can only remove the former.
-            saved_keys.insert(p.id, secrets::stored_api_key(p.id).is_some());
+            // A quiet read: a key an earlier copy of Trek saved shows as locked, no prompt.
+            saved_keys.insert(p.id, SavedKey::of(&secrets::stored_api_key_lookup(p.id)));
         }
         let subs = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
         let mcp_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. github"));
@@ -620,6 +649,8 @@ impl SettingsView {
             left_out_open: HashSet::new(),
             glass_slider,
             tools: Probe::default(),
+            secret_scan: Probe::default(),
+            unlocking_secrets: false,
             figma_desktop: Probe::default(),
             snapshots: Probe::default(),
             icon_file: Probe::default(),
@@ -661,7 +692,9 @@ impl SettingsView {
             SettingsPage::Tools => {
                 self.probe(|this| &mut this.tools, ToolsProbe::read, cx);
                 self.probe_figma_desktop(cx);
+                self.scan_locked_secrets(cx);
             }
+            SettingsPage::Agents => self.scan_locked_secrets(cx),
             SettingsPage::Snapshots => {
                 self.probe(|this| &mut this.snapshots, SnapshotsProbe::read, cx)
             }
@@ -675,6 +708,81 @@ impl SettingsView {
             }
             _ => {}
         }
+    }
+
+    /// Read the MCP servers' and added agents' saved values quietly (nothing prompts; the
+    /// values are dropped), so their pages can say which are locked.
+    fn scan_locked_secrets(&mut self, cx: &mut Context<Self>) {
+        let s = &self.workspace.read(cx).settings;
+        let (servers, agents) = (s.tools.mcp_servers.clone(), s.added_agents.clone());
+        self.probe(
+            |this| &mut this.secret_scan,
+            move || {
+                for m in &servers {
+                    let _ = (m.resolved_env(), m.resolved_headers());
+                }
+                for a in &agents {
+                    let _ = a.launch_env();
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Trek's word before macOS asks anything: which saved values (`locked`, "server: NAME") are
+    /// locked, and an Allow access that runs `unlock` on a thread of its own (it waits for the
+    /// user to answer macOS's prompts). `None` when nothing is locked.
+    fn locked_banner(
+        &self,
+        id: &'static str,
+        locked: Vec<String>,
+        unlock: impl Fn() + Clone + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if locked.is_empty() {
+            return None;
+        }
+        let waiting = self.unlocking_secrets;
+        let text = format!("{LOCKED_KEYS_NOTE} Locked: {}.", locked.join(", "));
+        Some(
+            v_flex()
+                .id(id)
+                .test_support()
+                .pb(px(16.))
+                .gap(px(8.))
+                .items_start()
+                .child(Self::note(&text, cx))
+                .child(
+                    Button::new(SharedString::from(format!("{id}-allow")))
+                        .small()
+                        .outline()
+                        .label(if waiting {
+                            "Waiting for macOS…"
+                        } else {
+                            "Allow access"
+                        })
+                        .loading(waiting)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.unlocking_secrets = true;
+                            cx.notify();
+                            let (tx, rx) = async_channel::bounded(1);
+                            let unlock = unlock.clone();
+                            std::thread::spawn(move || {
+                                unlock();
+                                let _ = tx.send_blocking(());
+                            });
+                            cx.spawn(async move |this, cx| {
+                                let _ = rx.recv().await;
+                                let _ = this.update(cx, |this, cx| {
+                                    this.unlocking_secrets = false;
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Whether the project's image icon (`file:` spec) is still on disk; `None` until it's known.
@@ -981,6 +1089,25 @@ impl SettingsView {
 
     /// One row per agent: logo, account and plan, enable switch, and Sign in or Install.
     fn agents_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let added = self.workspace.read(cx).settings.added_agents.clone();
+        let locked: Vec<String> = added
+            .iter()
+            .flat_map(|a| {
+                a.locked_secrets()
+                    .into_iter()
+                    .map(move |n| format!("{}: {n}", a.name))
+            })
+            .collect();
+        let banner = self.locked_banner(
+            "agents-locked",
+            locked,
+            move || {
+                for a in &added {
+                    a.unlock_secrets();
+                }
+            },
+            cx,
+        );
         let ws = self.workspace.read(cx);
         let detecting = ws.detecting;
         let muted = cx.theme().muted_foreground;
@@ -997,7 +1124,7 @@ impl SettingsView {
         self.installing_agents
             .borrow_mut()
             .retain(|k, _| missing.iter().any(|m| m.agent.key() == *k));
-        let mut out: Vec<AnyElement> = vec![];
+        let mut out: Vec<AnyElement> = banner.into_iter().collect();
         let setup_key = |a: &AgentId| match a {
             AgentId::Acp(id) => id.clone(),
             other => other.key(),
@@ -1864,6 +1991,25 @@ impl SettingsView {
         out.push(Self::heading("Your MCP servers", cx));
         out.push(Self::note(
             "Passed to every new session, on top of what each agent already loads. Type a command Trek starts or a remote server's URL, or paste the JSON config or claude mcp add line from a server's README.",
+            cx,
+        ));
+        let servers = s.tools.mcp_servers.clone();
+        let locked: Vec<String> = servers
+            .iter()
+            .flat_map(|m| {
+                m.locked_secrets()
+                    .into_iter()
+                    .map(move |n| format!("{}: {n}", m.name))
+            })
+            .collect();
+        out.extend(self.locked_banner(
+            "mcp-locked",
+            locked,
+            move || {
+                for m in &servers {
+                    m.unlock_secrets();
+                }
+            },
             cx,
         ));
         let checks = self.workspace.read(cx).mcp_checks.clone();

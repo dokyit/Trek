@@ -1,7 +1,7 @@
 //! The hand-built settings pages: General, Appearance, Notifications, Shortcuts, API keys,
 //! Permissions, Updates and About. The rest live in settings_view.rs.
 
-use super::SettingsView;
+use super::{LOCKED_KEYS_NOTE, SavedKey, SettingsView};
 use crate::palette;
 use crate::ui;
 use crate::workspace::{Route, UpdateAction};
@@ -17,7 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::catalog::DIRECT_PROVIDERS;
 use trek_core::settings::{
-    Channel, FollowUp, NotifyMode, OnUsageLimit, OpenLinks, RunIn, Settings, ThemeChoice,
+    Channel, FollowUp, NotifyMode, OnUsageLimit, OpenLinks, RunIn, Settings, ThemeChoice, secrets,
 };
 use trek_core::{AgentId, Effort, HandHolding};
 
@@ -842,17 +842,22 @@ impl SettingsView {
             let Some(input) = self.key_inputs.get(p.id).cloned() else {
                 continue;
             };
-            let saved = self.saved_keys.get(p.id).copied().unwrap_or(false);
+            let state = self.saved_keys.get(p.id).copied().unwrap_or(SavedKey::None);
+            let saved = state == SavedKey::Saved;
             let from_env = p
                 .env_key
                 .filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
             let id = p.id;
-            let status: SharedString = match (saved, from_env) {
-                (true, _) => {
+            let status: SharedString = match (state, from_env) {
+                (SavedKey::Saved, _) => {
                     format!("Saved in {}", crate::words::words().your_credential_store).into()
                 }
-                (false, Some(k)) => format!("Using ${k} from your shell").into(),
-                (false, None) => "Not set".into(),
+                (SavedKey::Locked, _) => {
+                    "Saved key is locked: paste it again, or Allow access".into()
+                }
+                (SavedKey::Unlocking, _) => "Waiting for macOS: enter your login password".into(),
+                (SavedKey::None, Some(k)) => format!("Using ${k} from your shell").into(),
+                (SavedKey::None, None) => "Not set".into(),
             };
             let title = h_flex()
                 .gap(px(10.))
@@ -885,8 +890,13 @@ impl SettingsView {
                                     .workspace
                                     .update(cx, |ws, cx| ws.remove_api_key(id, cx))
                                 {
+                                    // An earlier copy's locked key can't be removed by this one:
+                                    // it shows again as locked (Keychain Access can remove it).
                                     Ok(()) => {
-                                        this.saved_keys.insert(id, false);
+                                        this.saved_keys.insert(
+                                            id,
+                                            SavedKey::of(&secrets::stored_api_key_lookup(id)),
+                                        );
                                     }
                                     Err(e) => crate::toast::push(
                                         window,
@@ -920,7 +930,7 @@ impl SettingsView {
                                     .update(cx, |ws, cx| ws.save_api_key(id, &key, cx))
                                 {
                                     Ok(()) => {
-                                        this.saved_keys.insert(id, true);
+                                        this.saved_keys.insert(id, SavedKey::Saved);
                                         input.update(cx, |s, cx| s.set_value("", window, cx));
                                         crate::toast::push(
                                             window,
@@ -939,11 +949,67 @@ impl SettingsView {
                                 }
                             })),
                     )
+                    .when(
+                        matches!(state, SavedKey::Locked | SavedKey::Unlocking),
+                        |el| {
+                            el.w(px(410.)).child(
+                                Button::new(SharedString::from(format!("allow-{id}")))
+                                    .small()
+                                    .ghost()
+                                    .label("Allow access")
+                                    .loading(state == SavedKey::Unlocking)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.allow_key_access(id, cx)
+                                    })),
+                            )
+                        },
+                    )
                     .into_any_element()
             };
             rows.push(Self::row(title, "", control, cx));
         }
-        vec![ui::group(rows, cx)]
+        let mut out = vec![];
+        // Said before macOS asks anything: why, and what Allow access will bring up.
+        if self
+            .saved_keys
+            .values()
+            .any(|s| matches!(s, SavedKey::Locked | SavedKey::Unlocking))
+        {
+            out.push(Self::note(LOCKED_KEYS_NOTE, cx));
+        }
+        out.push(ui::group(rows, cx));
+        out
+    }
+
+    /// Allow access to `id`'s locked key: macOS asks the user's login password (Trek's note
+    /// above the keys has said so), on a thread of its own as it waits for them. Allowed, Trek
+    /// saves its own copy and won't need to ask again.
+    pub(super) fn allow_key_access(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.saved_keys.insert(id, SavedKey::Unlocking);
+        cx.notify();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(secrets::unlock_api_key(id));
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(found) = rx.recv().await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let now = SavedKey::of(&found);
+                this.saved_keys.insert(id, now);
+                if now == SavedKey::Saved {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.forget_keyed_providers();
+                        if !ws.settings.api_providers.iter().any(|p| p == id) {
+                            ws.settings.api_providers.push(id.to_string());
+                            ws.save_settings(cx);
+                        }
+                        ws.fetch_direct_models(id, cx);
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn permissions_page(

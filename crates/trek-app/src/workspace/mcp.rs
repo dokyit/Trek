@@ -52,10 +52,19 @@ impl Workspace {
         cx.notify();
         let (tx, rx) = async_channel::bounded(1);
         trek_core::runtime().spawn(async move {
-            // The Keychain is read here, off the main thread.
-            let server = tokio::task::spawn_blocking(move || mcp_server_of(&config)).await;
+            // The Keychain is read here, off the main thread, quietly: a token an earlier copy of
+            // Trek saved is locked and left out, and the check says so rather than failing on it.
+            let server = tokio::task::spawn_blocking(move || {
+                let server = mcp_server_of(&config);
+                (server, config.locked_secrets())
+            })
+            .await;
             let found = match server {
-                Ok(server) => trek_agents::mcp_check::list_tools(&server).await,
+                Ok((_, locked)) if !locked.is_empty() => Err(format!(
+                    "Its saved {} is locked: an earlier copy of Trek saved it. Allow access above, or edit the server and paste it again.",
+                    locked.join(", ")
+                )),
+                Ok((server, _)) => trek_agents::mcp_check::list_tools(&server).await,
                 Err(e) => Err(e.to_string()),
             };
             let _ = tx.send(found).await;

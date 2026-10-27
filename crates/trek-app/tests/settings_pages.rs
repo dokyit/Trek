@@ -102,6 +102,48 @@ fn the_agents_a_key_makes_ready_are_found_once_until_a_key_changes() {
 }
 
 #[test]
+fn a_key_an_earlier_copy_saved_shows_as_locked_until_the_user_allows_access() {
+    run(async |cx| {
+        // Saved by "another build": macOS would only hand it over with the user's password.
+        trek_core::keychain::plant_locked("deepseek", "sk-from-before");
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::ApiKeys), cx)
+        });
+        trek_app::settings_view::shown::take();
+        trek.render(cx);
+        // Opening Trek and the page read it quietly: locked, not handed to anything.
+        assert_eq!(trek_core::settings::secrets::api_key("deepseek"), None);
+        assert!(
+            trek.visible(cx, "allow-deepseek"),
+            "Allow access is offered"
+        );
+        assert!(
+            trek_app::settings_view::shown::take()
+                .iter()
+                .any(|t| t.contains("Trek never asks for them on its own")),
+            "Trek says what macOS will ask before it asks"
+        );
+        // Allow access (the isolated store stands for the user allowing it at the prompt).
+        trek.click(cx, "allow-deepseek");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while trek.visible(cx, "allow-deepseek") {
+            assert!(std::time::Instant::now() < deadline, "never unlocked");
+            cx.background_executor.timer(Duration::from_millis(5)).await;
+            trek.render(cx);
+        }
+        assert_eq!(
+            trek_core::settings::secrets::api_key("deepseek").as_deref(),
+            Some("sk-from-before")
+        );
+        assert!(
+            trek.visible(cx, "del-deepseek"),
+            "now a saved key, Remove offered"
+        );
+    });
+}
+
+#[test]
 fn a_pairing_code_goes_from_settings_when_it_expires() {
     run(async |cx| {
         let trek = open(cx);

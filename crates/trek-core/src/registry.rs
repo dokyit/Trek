@@ -587,6 +587,27 @@ impl AddedAgent {
             .collect()
     }
 
+    /// The names of its saved variables macOS keeps locked (saved by another build of Trek), as
+    /// the last quiet read found them: they're left out of its environment until allowed.
+    pub fn locked_secrets(&self) -> Vec<String> {
+        self.env
+            .iter()
+            .filter(|v| v.secret && crate::keychain::is_locked(&secret_account(&self.id, &v.name)))
+            .map(|v| v.name.clone())
+            .collect()
+    }
+
+    /// Unlock its locked variables (macOS asks the user's login password for each): only for
+    /// their Allow access, off the main thread. How many are still locked.
+    pub fn unlock_secrets(&self) -> usize {
+        self.env
+            .iter()
+            .filter(|v| {
+                v.secret && crate::keychain::unlock(&secret_account(&self.id, &v.name)).is_locked()
+            })
+            .count()
+    }
+
     /// The command line it runs, for Settings: `npx -y @scope/agent@1.2.3 --acp`.
     pub fn command_line(&self) -> String {
         let program = if !crate::detect::is_bare_name(&self.command) {
@@ -601,38 +622,24 @@ impl AddedAgent {
     }
 }
 
-/// The Keychain service Trek keeps secrets under (API keys too: `settings::secrets`).
-const KEYCHAIN_SERVICE: &str = "dev.trek.Trek";
-
+/// The Keychain account of added agent `agent`'s variable `var`, under the service Trek keeps
+/// every secret under (`keychain::SERVICE`, API keys too).
 fn secret_account(agent: &str, var: &str) -> String {
     format!("agent-env:{agent}:{var}")
 }
 
 pub fn set_secret(agent: &str, var: &str, value: &str) -> Result<()> {
-    anyhow::ensure!(
-        !crate::paths::isolated(),
-        "the Keychain is off in this process"
-    );
-    keyring::Entry::new(KEYCHAIN_SERVICE, &secret_account(agent, var))?.set_password(value)?;
-    Ok(())
+    crate::keychain::write(&secret_account(agent, var), value)
 }
 
+/// Read quietly: one another build of Trek saved reads as `None` and is noted as locked
+/// (`AddedAgent::locked_secrets`), never a password prompt.
 pub fn secret(agent: &str, var: &str) -> Option<String> {
-    if crate::paths::isolated() {
-        return None;
-    }
-    keyring::Entry::new(KEYCHAIN_SERVICE, &secret_account(agent, var))
-        .ok()?
-        .get_password()
-        .ok()
+    crate::keychain::read(&secret_account(agent, var)).found()
 }
 
 fn delete_secret(agent: &str, var: &str) {
-    if !crate::paths::isolated() {
-        if let Ok(e) = keyring::Entry::new(KEYCHAIN_SERVICE, &secret_account(agent, var)) {
-            let _ = e.delete_credential();
-        }
-    }
+    let _ = crate::keychain::delete(&secret_account(agent, var));
 }
 
 /// Drop what probing added agent `id` learned (its models, its login): a new version or command
@@ -1397,6 +1404,26 @@ mod tests {
         let a = custom("A", "", abs, vec![], env("TOKEN"), &[]).unwrap();
         assert_eq!(a.launch_env(), [("TOKEN".to_string(), "v".to_string())]);
         assert_eq!(a.command_line(), abs);
+    }
+
+    #[test]
+    fn a_variable_another_build_saved_is_left_out_until_allowed() {
+        let abs = if cfg!(windows) { r"C:\opt\a" } else { "/opt/a" };
+        let id = format!("locked-{}", uuid::Uuid::new_v4().simple());
+        let mut a = custom("Locked", &id, abs, vec![], vec![], &[]).unwrap();
+        a.env.push(EnvVar {
+            name: "TOKEN".into(),
+            value: String::new(),
+            secret: true,
+        });
+        crate::keychain::plant_locked(&secret_account(&a.id, "TOKEN"), "t0ken");
+        // Starting it reads quietly: no prompt, and no token.
+        assert!(a.launch_env().is_empty());
+        assert_eq!(a.locked_secrets(), ["TOKEN"]);
+        // Allow access (the isolated store stands for the user allowing it).
+        assert_eq!(a.unlock_secrets(), 0);
+        assert!(a.locked_secrets().is_empty());
+        assert_eq!(a.launch_env(), [("TOKEN".to_string(), "t0ken".to_string())]);
     }
 
     #[test]

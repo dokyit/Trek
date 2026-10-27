@@ -10,7 +10,8 @@ thread_local! {
 }
 
 /// Keep this process away from the user's data: everything Trek stores goes under `dir`, and API
-/// keys are neither read from nor written to the Keychain. For tests; the first call wins.
+/// keys and tokens are kept in memory (`keychain`), never in the Keychain. For tests; the first
+/// call wins.
 pub fn isolate(dir: PathBuf) {
     let _ = ISOLATED.set(dir);
 }
@@ -297,9 +298,17 @@ mod tests {
         assert_eq!(
             crate::settings::secrets::api_key("anthropic"),
             None,
-            "no Keychain while isolated"
+            "no Keychain (and no shell keys) while isolated"
         );
-        assert!(crate::settings::secrets::set_api_key("anthropic", "x").is_err());
+        // Saved keys stay in the process's own memory.
+        let probe = format!("isolation-probe-{}", std::process::id());
+        crate::settings::secrets::set_api_key(&probe, "x").unwrap();
+        assert_eq!(
+            crate::settings::secrets::stored_api_key(&probe).as_deref(),
+            Some("x")
+        );
+        crate::settings::secrets::delete_api_key(&probe).unwrap();
+        assert_eq!(crate::settings::secrets::stored_api_key(&probe), None);
     }
 
     #[test]

@@ -182,7 +182,16 @@ pub async fn run(
     };
     let provider =
         direct_provider(provider_id).with_context(|| format!("unknown provider {provider_id}"))?;
-    let key = secrets::api_key(provider.id);
+    // Read quietly: a key an earlier copy of Trek saved is locked, and the way to it is Settings
+    // (which says what macOS will ask), never a password prompt in the middle of a send.
+    let key = match secrets::api_key_lookup(provider.id) {
+        trek_core::keychain::Lookup::Found(k) => Some(k),
+        trek_core::keychain::Lookup::Locked if !provider.local => bail!(
+            "Your saved {} key is locked: an earlier copy of Trek saved it, and macOS only lets that copy read it. Open Settings → API Keys to allow access or paste it again.",
+            provider.name
+        ),
+        _ => None,
+    };
     if !provider.local && key.is_none() {
         bail!(
             "No API key for {}. Add one in Settings → API Keys.",
@@ -2052,6 +2061,36 @@ mod tests {
         ));
         assert!(matches!(kept.pop_front(), Some(Command::Prompt { text, .. }) if text == "steer"));
         assert!(!shutdown && kept.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_locked_key_is_explained_at_send_never_prompted_for() {
+        // Saved by "another build" (isolated: the in-memory store).
+        trek_core::keychain::plant_locked("groq", "gsk-from-before");
+        let config = SessionConfig {
+            agent: AgentId::Direct("groq".into()),
+            cwd: std::env::temp_dir(),
+            model: Some("m".into()),
+            effort: Effort::Off,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            read_only: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
+        };
+        let (_commands, commands_rx) = async_channel::unbounded();
+        let (events_tx, _events) = async_channel::unbounded();
+        let err = run(config, commands_rx, events_tx).await.unwrap_err();
+        assert!(
+            err.to_string().contains("locked") && err.to_string().contains("Settings → API Keys"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

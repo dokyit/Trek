@@ -211,3 +211,60 @@ fn a_command_line_with_its_token_in_front_is_one_server() {
         trek.click(cx, "mcp-del-0");
     });
 }
+
+#[test]
+fn a_token_an_earlier_copy_saved_is_named_as_locked_and_sent_once_allowed() {
+    run(async |cx| {
+        let name = "locked-earlier";
+        // Its token was saved by "another build": reading it would need the user's password.
+        trek_core::keychain::plant_locked(&secrets::mcp_env_account(name, "FAKE_TOKEN"), "abc");
+        let trek = common::open_with(cx, |s| {
+            let mut server = trek_core::settings::McpServerConfig::stdio(
+                name,
+                fake(),
+                vec!["fake-mcp".into(), "ok".into()],
+            );
+            server.env.push(trek_core::settings::McpEnvVar {
+                name: "FAKE_TOKEN".into(),
+                value: String::new(),
+                secret: true,
+            });
+            s.tools.mcp_servers = vec![server];
+        });
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Tools), cx)
+        });
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2400.)),
+        );
+        trek.render(cx);
+        trek.render(cx);
+        // The page's quiet read found it locked, and says so (no prompt, nothing sent).
+        assert!(trek.visible(cx, "mcp-locked"), "the locked token is named");
+        let servers = trek.read(cx, |ws, _| ws.mcp_servers());
+        let mine = servers.iter().find(|s| s.name == name).expect("passed on");
+        assert!(
+            matches!(&mine.transport, McpTransport::Stdio { env, .. } if env.is_empty()),
+            "a session starts it without the locked token"
+        );
+        // Checking it explains instead of failing on a missing token.
+        trek.click(cx, "mcp-check-0");
+        trek.wait(cx, "the check", |ws| {
+            matches!(ws.mcp_checks.get(name), Some(McpCheck::Failed(why)) if why.contains("locked"))
+        })
+        .await;
+        // Allow access (the isolated store stands for the user allowing it at the prompt).
+        trek.click(cx, "mcp-locked-allow");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while trek.visible(cx, "mcp-locked") {
+            assert!(std::time::Instant::now() < deadline, "never unlocked");
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(5))
+                .await;
+            trek.render(cx);
+        }
+        trek.click(cx, "mcp-check-0");
+        trek.wait(cx, "the check with its token", |ws| matches!(ws.mcp_checks.get(name), Some(McpCheck::Works(t)) if t.contains(&"env_ok".to_string()))).await;
+    });
+}
