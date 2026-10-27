@@ -64,7 +64,8 @@ async fn ask_small_model(system: &str, prompt: &str) -> Result<String> {
             system,
         ])
         .current_dir(std::env::temp_dir())
-        .env("PATH", detect::login_path());
+        .env("PATH", detect::login_path())
+        .env("CLAUDE_CODE_ENTRYPOINT", crate::claude::ENTRYPOINT);
     let out = crate::output_group(
         &mut command,
         Some(prompt.as_bytes().to_vec()),

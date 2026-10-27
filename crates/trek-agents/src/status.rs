@@ -120,6 +120,7 @@ async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
         ])
         .current_dir(cwd)
         .env("PATH", detect::login_path())
+        .env("CLAUDE_CODE_ENTRYPOINT", crate::claude::ENTRYPOINT)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

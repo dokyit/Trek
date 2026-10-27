@@ -290,6 +290,14 @@ fn modes_requests(
     out
 }
 
+/// What Claude Code is told it's being run by (`CLAUDE_CODE_ENTRYPOINT`), on every process Trek
+/// starts. Left unset, a headless `claude -p` names itself `sdk-cli`, and Anthropic meters that
+/// label at about 1.7x the interactive CLI's share of a plan's 5-hour window for the same tokens
+/// (anthropics/claude-code#97074); a label of the client's own is metered as the CLI is. Set over
+/// whatever Trek inherited: launched from inside another Claude Code or SDK session, the
+/// environment already says `sdk-cli` or `sdk-ts`.
+pub const ENTRYPOINT: &str = "trek";
+
 /// The CLI's arguments for a session (MCP servers aside).
 fn cli_args(config: &SessionConfig) -> Vec<String> {
     let mode = if config.plan {
@@ -488,6 +496,7 @@ impl Cli {
         }
         cmd.current_dir(&config.cwd)
             .env("PATH", detect::login_path())
+            .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1781,6 +1790,16 @@ fn translate(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn trek_names_itself_to_claude_code_with_a_label_of_its_own() {
+        // Not `sdk-*` (metered at about 1.7x, anthropics/claude-code#97074), and not a label
+        // another client owns.
+        assert!(!ENTRYPOINT.starts_with("sdk-"));
+        assert!(!["cli", "claude-vscode", "claude-desktop"].contains(&ENTRYPOINT));
+        assert!(!ENTRYPOINT.is_empty() && ENTRYPOINT.chars().all(|c| c.is_ascii_lowercase()));
+    }
+
     use super::*;
     use trek_core::HandHolding;
 
