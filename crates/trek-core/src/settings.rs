@@ -1018,7 +1018,41 @@ impl Default for Notifications {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Onboarding {
+    /// Through some onboarding at least once: Trek has been set up here before (threads are
+    /// imported at launch, and an onboarding shown again is a refresher).
     pub completed: bool,
+    /// The onboarding version last finished (or skipped). Below [`ONBOARDING_VERSION`], the
+    /// next launch shows onboarding: on a first run, and once more for everyone when a new
+    /// onboarding ships. 0: from before versions were kept.
+    pub version: u32,
+    /// The step an unfinished onboarding was left on (its key), so the next launch picks up
+    /// there. `None` once it's finished.
+    pub step: Option<String>,
+}
+
+/// The onboarding this build shows. Bump it when onboarding changes enough that everyone should
+/// see it once more (and the `[onboarding] version` the test and verify profiles write).
+pub const ONBOARDING_VERSION: u32 = 2;
+
+impl Onboarding {
+    /// Onboarding shows at launch: never finished, or finished before this version shipped.
+    pub fn due(&self) -> bool {
+        self.version < ONBOARDING_VERSION
+    }
+
+    /// Finished or skipped: not shown again until the next version.
+    pub fn finish(&mut self) {
+        self.completed = true;
+        self.version = self.version.max(ONBOARDING_VERSION);
+        self.step = None;
+    }
+
+    /// Settings that exist but couldn't be read: whoever wrote them was set up, so onboarding
+    /// doesn't take over the window (and saving is blocked anyway).
+    fn assume_done(&mut self) {
+        self.completed = true;
+        self.version = ONBOARDING_VERSION;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1051,7 +1085,7 @@ impl Settings {
             // run on defaults and refuse to save over it.
             Err(e) => {
                 let mut s = Settings::default();
-                s.onboarding.completed = true;
+                s.onboarding.assume_done();
                 s.guard.block("settings.toml couldn't be read");
                 return (
                     Self::migrated(s),
@@ -1080,7 +1114,9 @@ impl Settings {
             Err(e) => {
                 let mut s = Settings::default();
                 // Whoever wrote a settings file got past onboarding.
-                s.onboarding.completed = !text.trim().is_empty();
+                if !text.trim().is_empty() {
+                    s.onboarding.assume_done();
+                }
                 s.guard.block("settings.toml couldn't be read");
                 return (
                     s,
@@ -1877,11 +1913,40 @@ mod tests {
         assert!(problem.unreadable);
         assert!(problem.message().contains("won't save"));
         assert!(
-            s.onboarding.completed,
+            s.onboarding.completed && !s.onboarding.due(),
             "someone who has a settings file has been through onboarding"
         );
         assert!(s.save().is_err());
         assert_eq!(Settings::parse("").1, None);
+    }
+
+    #[test]
+    fn onboarding_shows_on_a_first_run_and_once_more_for_each_new_version() {
+        // A first run: nothing saved.
+        let fresh = Settings::default();
+        assert!(fresh.onboarding.due());
+        // Someone set up before versions were kept sees the new onboarding once.
+        let (old, problem) = Settings::parse("[onboarding]\ncompleted = true\n");
+        assert!(problem.is_none());
+        assert!(old.onboarding.completed && old.onboarding.due());
+        // Finishing (or skipping) it keeps it away until the next version, and forgets the step.
+        let mut s = old;
+        s.onboarding.step = Some("agents".into());
+        s.onboarding.finish();
+        assert!(!s.onboarding.due() && s.onboarding.step.is_none());
+        let back: Settings = toml::from_str(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back.onboarding.version, ONBOARDING_VERSION);
+        assert!(!back.onboarding.due());
+        // A step left half way through is read back, so the next launch resumes there.
+        let (s, _) = Settings::parse("[onboarding]\nversion = 1\nstep = \"providers\"\n");
+        assert!(s.onboarding.due());
+        assert_eq!(s.onboarding.step.as_deref(), Some("providers"));
+        // A newer build's version doesn't bring it back in an older one, nor does finishing lower it.
+        let mut s = Settings::default();
+        s.onboarding.version = ONBOARDING_VERSION + 3;
+        assert!(!s.onboarding.due());
+        s.onboarding.finish();
+        assert_eq!(s.onboarding.version, ONBOARDING_VERSION + 3);
     }
 
     #[test]
@@ -1921,7 +1986,7 @@ mod tests {
         // A folder where the file should be reads as an error other than "not found".
         let (s, problem) = Settings::load_from(&dir);
         assert!(problem.expect("a problem").unreadable);
-        assert!(s.onboarding.completed && s.save().is_err());
+        assert!(s.onboarding.completed && !s.onboarding.due() && s.save().is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

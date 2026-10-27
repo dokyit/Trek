@@ -89,6 +89,7 @@ feed_url = "http://127.0.0.1:$PORT/{channel}.json"
 
 [onboarding]
 completed = true
+version = 2
 
 [import]
 claude_code = false

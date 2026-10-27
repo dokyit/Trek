@@ -4,6 +4,8 @@
 mod connections;
 mod mobile;
 mod pages;
+pub(crate) use mobile::qr;
+pub(crate) use pages::theme_tiles;
 
 /// What the settings pages said, in words, since the last `take`: row titles and descriptions,
 /// headings and notes. The test harness sees elements, not text, so a test asks this instead.

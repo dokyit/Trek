@@ -25,6 +25,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 
 ## Configuration and continuity
 
+- [Onboarding](onboarding.md) — the first-run intro and setup steps (appearance, macOS permissions, agent scan, API keys, local models, phone), shown again from Settings or ⌘K.
 - [Agents, models, and permissions](agents-models-and-permissions.md) — configure CLI agents, API/local models, effort, hand-holding, and approval policy.
 - [Skills, MCP, and computer use](skills-mcp-and-computer-use.md) — discover skills and configure agent tools and MCP servers; background computer use and its picture-in-picture window.
 - [Appearance, notifications, and snapshots](appearance-notifications-and-snapshots.md) — theme Trek, choose alerts, and attach app screenshots.

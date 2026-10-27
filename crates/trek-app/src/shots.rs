@@ -1647,6 +1647,20 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             ("route", "basecamp") => ws.navigate(Route::Basecamp, cx),
             ("route", "notes") => ws.navigate(Route::Notes, cx),
             ("route", "appearance") => ws.navigate(Route::Settings(SettingsPage::Appearance), cx),
+            ("route", "onboarding") => ws.open_onboarding(None, cx),
+            // Onboarding from a step (`onboarding agents`), or with what a set-up Mac would show
+            // (`onboarding demo`: agents signed in on plans, a model server, some permissions on).
+            ("onboarding", "demo") => onboarding_demo(ws, cx),
+            ("onboarding", "") => ws.open_onboarding(None, cx),
+            ("onboarding", key) => {
+                let Some(step) = crate::onboarding::Step::from_key(key) else {
+                    anyhow::bail!(
+                        "onboarding: no step {key:?} ({})",
+                        crate::onboarding::Step::ALL.map(|s| s.key()).join("|")
+                    );
+                };
+                ws.open_onboarding(Some(step), cx)
+            }
             ("route", "first") => {
                 let Some(id) = ws
                     .threads
@@ -1787,6 +1801,58 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     })?;
     cx.refresh_windows();
     Ok(())
+}
+
+/// What onboarding shows on a Mac that's set up, for screenshots of the isolated app (which
+/// looks for no agents and has no permissions of its own): two agents signed in on plans, one to
+/// sign in to, Ollama with models, and some of the permissions on.
+fn onboarding_demo(ws: &mut Workspace, cx: &mut Context<Workspace>) {
+    use trek_core::AgentId;
+    use trek_core::detect::{Availability, DetectedAgent};
+    let found = |agent: AgentId, availability: Availability, version: &str, models: &[&str]| {
+        DetectedAgent {
+            name: agent.display_name(),
+            agent,
+            path: None,
+            version: Some(version.into()),
+            availability,
+            models: models.iter().map(|m| m.to_string()).collect(),
+            install_hint: None,
+        }
+    };
+    ws.agents = vec![
+        found(
+            AgentId::ClaudeCode,
+            Availability::Ready,
+            "2.1.287 (Claude Code)",
+            &[],
+        ),
+        found(AgentId::Codex, Availability::Ready, "codex-cli 0.98.0", &[]),
+        found(AgentId::OpenCode, Availability::NeedsLogin, "1.4.2", &[]),
+        found(
+            AgentId::Direct("ollama".into()),
+            Availability::Ready,
+            "",
+            &["qwen3-coder:30b", "gpt-oss:20b", "llama3.2"],
+        ),
+    ];
+    let status = |account: &str, plan: &str| trek_agents::AgentStatus {
+        account: Some(account.into()),
+        plan: Some(plan.into()),
+        logged_in: true,
+        billing: Some(trek_agents::Billing::Plan(Some(plan.into()))),
+        ..Default::default()
+    };
+    ws.agent_status.insert(
+        AgentId::ClaudeCode.key(),
+        status("ada@example.com", "Claude Max"),
+    );
+    ws.agent_status.insert(
+        AgentId::Codex.key(),
+        status("ada@example.com", "ChatGPT Plus"),
+    );
+    crate::permissions::demo();
+    ws.open_onboarding(Some(crate::onboarding::Step::Agents), cx);
 }
 
 /// An element id as written in a command: `name#3` is a row, ("name", 3).

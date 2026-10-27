@@ -31,6 +31,7 @@ default_agent = "direct:mock"
 
 [onboarding]
 completed = true
+version = 2
 
 [import]
 claude_code = false

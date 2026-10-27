@@ -134,6 +134,7 @@ default_agent = "direct:mock"
 
 [onboarding]
 completed = true
+version = 2
 "@ | Set-Content (Join-Path $data 'settings.toml')
 
 $saved = @{}

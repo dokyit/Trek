@@ -46,6 +46,7 @@ pub mod onboarding;
 pub mod pr_card;
 pub use trek_palette as palette;
 pub mod panels;
+pub mod permissions;
 pub use trek_perf as perf;
 pub mod push;
 pub mod remote;

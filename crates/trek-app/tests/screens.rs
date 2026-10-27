@@ -43,39 +43,65 @@ fn until(cx: &mut TestAppContext, what: &str, f: impl Fn(&mut TestAppContext) ->
     panic!("timed out waiting for {what}");
 }
 
+/// Default settings, as on a machine that has never run Trek, with nothing read from its agents.
+fn first_run_settings() -> Settings {
+    let mut s = Settings::default();
+    s.general.default_agent = mock().key();
+    s.updates.auto_check = false;
+    s.import.claude_code = false;
+    s.import.codex = false;
+    s.import.opencode = false;
+    s.notifications.menu_bar_icon = false;
+    s
+}
+
+fn launch_with(cx: &mut TestAppContext, s: Settings) -> Trek {
+    let (ws, root, window) = launch(cx, Store::in_memory().expect("store"), s);
+    let trek = Trek {
+        ws,
+        root,
+        window,
+        project: PathBuf::new(),
+    };
+    trek.render(cx);
+    trek
+}
+
+/// Clicks while a step animates in are ignored, so each waits that out.
+fn click_after_settling(trek: &Trek, cx: &mut TestAppContext, id: &'static str) {
+    std::thread::sleep(Duration::from_millis(220));
+    trek.click(cx, id);
+    trek.render(cx);
+}
+
 #[test]
 fn first_run_onboarding_from_an_empty_data_folder() {
     run(async |cx| {
-        // Nothing saved yet: default settings, an empty database, no projects. Imports are off
-        // so the threads step reads nothing from this Mac's agents.
-        let mut s = Settings::default();
-        s.general.default_agent = mock().key();
-        s.updates.auto_check = false;
-        s.import.claude_code = false;
-        s.import.codex = false;
-        s.import.opencode = false;
-        s.notifications.menu_bar_icon = false;
-        let (ws, root, window) = launch(cx, Store::in_memory().expect("store"), s);
-        let trek = Trek {
-            ws,
-            root,
-            window,
-            project: PathBuf::new(),
-        };
-        trek.render(cx);
+        // Nothing saved yet: default settings, an empty database, no projects.
+        let trek = launch_with(cx, first_run_settings());
         assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Onboarding);
-        assert!(trek.visible(cx, "ob-next"));
+        assert!(trek.visible(cx, "ob-welcome"), "the intro first");
+        assert!(trek.visible(cx, "ob-start"));
         assert!(!trek.visible(cx, "ob-back"), "nothing to go back to");
 
-        // Clicks while a step animates in are ignored, so each waits that out.
-        let next = |trek: &Trek, cx: &mut TestAppContext| {
-            std::thread::sleep(Duration::from_millis(220));
-            trek.click(cx, "ob-next");
-            trek.render(cx);
-        };
-        next(&trek, cx); // agents
-        next(&trek, cx); // threads (imports nothing)
-        next(&trek, cx); // hand-holding
+        click_after_settling(&trek, cx, "ob-start");
+        assert!(
+            trek.visible(cx, "ob-progress-appearance"),
+            "steps with their progress"
+        );
+        assert!(trek.visible(cx, "ob-glass"));
+        // Quit here and the next launch picks up on this step.
+        let saved = Settings::load();
+        assert_eq!(saved.onboarding.step.as_deref(), Some("appearance"));
+        assert!(saved.onboarding.due());
+
+        // Through every step to Approvals, whatever the platform shows between.
+        for _ in 0..8 {
+            if trek.visible(cx, "ob-hh-Supervised") {
+                break;
+            }
+            click_after_settling(&trek, cx, "ob-next");
+        }
         trek.click(cx, "ob-hh-Supervised");
         assert_eq!(
             trek.read(cx, |ws, _| ws.draft_prefs.hand_holding),
@@ -83,7 +109,10 @@ fn first_run_onboarding_from_an_empty_data_folder() {
         );
         theme(cx, ThemeChoice::Paper);
         trek.render(cx);
-        next(&trek, cx); // project: there are none yet, so one is picked here
+        click_after_settling(&trek, cx, "ob-next"); // phone
+        assert!(trek.visible(cx, "ob-phone-on"));
+        click_after_settling(&trek, cx, "ob-next"); // finish: there are no projects, so one is picked
+        assert!(trek.visible(cx, "ob-summary-approvals"));
         let folder = new_project("first");
         trek.click(cx, "ob-open-folder");
         let picked = folder.clone();
@@ -95,11 +124,12 @@ fn first_run_onboarding_from_an_empty_data_folder() {
                 .contains(&folder.display().to_string())
         }));
         assert!(trek.read(cx, |ws, _| ws.projects.iter().any(|p| p.path == folder)));
-        next(&trek, cx); // ready
-        trek.click(cx, "ob-next"); // Open Trek
+        trek.render(cx);
+        trek.click(cx, "ob-next"); // Start a thread
         trek.render(cx);
         let s = trek.read(cx, |ws, _| ws.settings.clone());
-        assert!(s.onboarding.completed);
+        assert!(s.onboarding.completed && !s.onboarding.due());
+        assert_eq!(s.onboarding.step, None);
         assert_eq!(s.general.hand_holding, HandHolding::Supervised);
         assert_eq!(
             trek.read(cx, |ws, _| ws.route.clone()),
@@ -109,13 +139,137 @@ fn first_run_onboarding_from_an_empty_data_folder() {
         );
         // Saved (in this test's own folder), so the next launch doesn't onboard again.
         let saved = Settings::load();
-        assert!(saved.onboarding.completed);
+        assert!(saved.onboarding.completed && !saved.onboarding.due());
         assert_eq!(saved.general.hand_holding, HandHolding::Supervised);
         assert!(
             saved.user_projects.contains(&folder.display().to_string()),
             "{:?}",
             saved.user_projects
         );
+    });
+}
+
+#[test]
+fn onboarding_resumes_on_the_step_it_was_left_on() {
+    run(async |cx| {
+        let mut s = first_run_settings();
+        s.onboarding.step = Some("providers".into());
+        let trek = launch_with(cx, s);
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Onboarding);
+        assert!(!trek.visible(cx, "ob-welcome"), "not from the start");
+        assert!(trek.visible(cx, "ob-key-openrouter"), "back on API keys");
+        assert!(
+            !trek.visible(cx, "ob-key-groq"),
+            "the rest wait behind More"
+        );
+        trek.click(cx, "ob-keys-more");
+        trek.render(cx);
+        assert!(trek.visible(cx, "ob-key-groq"));
+        // Back goes to the step before; the progress goes anywhere.
+        click_after_settling(&trek, cx, "ob-back");
+        assert!(trek.visible(cx, "ob-rescan"), "the agents step");
+        click_after_settling(&trek, cx, "ob-progress-local-models");
+        assert!(
+            trek.visible(cx, "ob-local-ollama"),
+            "each model server, running or not"
+        );
+    });
+}
+
+#[test]
+fn someone_set_up_before_sees_the_new_onboarding_once_and_can_skip_it() {
+    run(async |cx| {
+        // Set up with an older Trek: onboarding done, but before versions were kept.
+        let mut s = common::settings();
+        s.onboarding = Default::default();
+        s.onboarding.completed = true;
+        let trek = launch_with(cx, s);
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Onboarding);
+        click_after_settling(&trek, cx, "ob-start");
+        // Skip setup from any step finishes it: not shown at the next launch.
+        trek.click(cx, "ob-skip");
+        trek.render(cx);
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Draft { .. }
+        ));
+        let saved = Settings::load();
+        assert!(!saved.onboarding.due());
+        assert_eq!(
+            saved.onboarding.version,
+            trek_core::settings::ONBOARDING_VERSION
+        );
+
+        // Settings › General shows it again, from the start; nothing is reset.
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::General), cx)
+        });
+        trek.render(cx);
+        assert!(
+            trek.window(cx, |window, _| window.try_find("show-onboarding").is_some()),
+            "General has Show onboarding again"
+        );
+        // What the button does (it sits below the fold of the page).
+        trek.update(cx, |ws, cx| ws.open_onboarding(None, cx));
+        trek.render(cx);
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Onboarding);
+        assert!(trek.visible(cx, "ob-welcome"));
+        assert!(!trek.read(cx, |ws, _| ws.settings.onboarding.due()));
+        // And from any step (the command palette and the verify driver use this too).
+        trek.update(cx, |ws, cx| {
+            ws.open_onboarding(Some(trek_app::onboarding::Step::Phone), cx)
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "ob-phone-on"));
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_permissions_step_asks_once_then_opens_the_pane_and_follows_the_system() {
+    use trek_app::permissions::{Permission, Status, fake};
+    run(async |cx| {
+        let trek = open(cx);
+        fake::set(Permission::Microphone, Status::Granted);
+        fake::set(Permission::SpeechRecognition, Status::Denied);
+        trek.update(cx, |ws, cx| {
+            ws.open_onboarding(Some(trek_app::onboarding::Step::Permissions), cx)
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "ob-perm-microphone-on"), "allowed");
+        assert!(
+            trek.visible(cx, "ob-perm-accessibility"),
+            "a button to allow"
+        );
+        assert!(
+            trek.visible(cx, "ob-drag-accessibility"),
+            "Trek's icon to drag in"
+        );
+        assert!(
+            !trek.visible(cx, "ob-drag-microphone"),
+            "no list to drop on"
+        );
+
+        // The first press shows macOS's prompt; the next opens the pane, with the helper.
+        trek.click(cx, "ob-perm-accessibility");
+        assert_eq!(fake::prompted(), [Permission::Accessibility]);
+        trek.render(cx);
+        trek.click(cx, "ob-perm-accessibility");
+        assert_eq!(fake::opened(), [Permission::Accessibility]);
+        // Turned down: straight to the pane, no prompt.
+        trek.click(cx, "ob-perm-speech");
+        assert_eq!(
+            fake::opened(),
+            [Permission::Accessibility, Permission::SpeechRecognition]
+        );
+        assert_eq!(fake::prompted(), [Permission::Accessibility]);
+
+        // Granted in System Settings: the row says so within a second, without a click.
+        fake::set(Permission::Accessibility, Status::Granted);
+        cx.executor().advance_clock(Duration::from_secs(2));
+        trek.render(cx);
+        assert!(trek.visible(cx, "ob-perm-accessibility-on"));
+        assert!(!trek.visible(cx, "ob-drag-accessibility"));
     });
 }
 

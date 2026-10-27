@@ -17,7 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::catalog::DIRECT_PROVIDERS;
 use trek_core::settings::{
-    Channel, FollowUp, NotifyMode, OnUsageLimit, OpenLinks, RunIn, Settings, ThemeChoice, secrets,
+    Channel, FollowUp, NotifyMode, OnUsageLimit, OpenLinks, RunIn, Settings, ThemeChoice,
 };
 use trek_core::{AgentId, Effort, HandHolding};
 
@@ -467,16 +467,31 @@ impl SettingsView {
             ),
             Self::heading("System", cx),
             ui::group(
-                vec![Self::row(
-                    crate::words::words().keep_awake_label,
-                    "Stops idle sleep until every running turn has finished. The display can still sleep.",
-                    self.switch(
-                        "prevent-sleep",
-                        s.general.prevent_sleep_while_running,
-                        |s, v| s.general.prevent_sleep_while_running = v,
+                vec![
+                    Self::row(
+                        crate::words::words().keep_awake_label,
+                        "Stops idle sleep until every running turn has finished. The display can still sleep.",
+                        self.switch(
+                            "prevent-sleep",
+                            s.general.prevent_sleep_while_running,
+                            |s, v| s.general.prevent_sleep_while_running = v,
+                        ),
+                        cx,
                     ),
-                    cx,
-                )],
+                    Self::row(
+                        "Onboarding",
+                        "Appearance, permissions, your agents and keys, local models and your phone, one step at a time. Nothing is reset.",
+                        Button::new("show-onboarding")
+                            .small()
+                            .outline()
+                            .label("Show onboarding again")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.workspace
+                                    .update(cx, |ws, cx| ws.open_onboarding(None, cx))
+                            })),
+                        cx,
+                    ),
+                ],
                 cx,
             ),
         ]
@@ -539,129 +554,7 @@ impl SettingsView {
     }
 
     fn theme_tiles(&self, current: ThemeChoice, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let mock =
-            |bg: u32, side: u32, line: u32, accent: u32| {
-                h_flex()
-                    .size_full()
-                    .bg(rgb(bg))
-                    .child(
-                        v_flex()
-                            .w(px(30.))
-                            .h_full()
-                            .bg(rgb(side))
-                            .p(px(6.))
-                            .gap(px(4.))
-                            .children((0..3).map(move |_| {
-                                div().h(px(3.)).w_full().rounded_full().bg(rgb(line))
-                            })),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .p(px(8.))
-                            .gap(px(5.))
-                            .child(div().h(px(3.)).w(px(46.)).rounded_full().bg(rgb(line)))
-                            .child(div().h(px(3.)).w(px(34.)).rounded_full().bg(rgb(line)))
-                            .child(
-                                div()
-                                    .mt_auto()
-                                    .h(px(10.))
-                                    .w_full()
-                                    .rounded(px(3.))
-                                    .border_1()
-                                    .border_color(rgb(line))
-                                    .child(
-                                        div()
-                                            .ml_auto()
-                                            .mr(px(2.))
-                                            .mt(px(2.))
-                                            .size(px(4.))
-                                            .rounded_full()
-                                            .bg(rgb(accent)),
-                                    ),
-                            ),
-                    )
-                    .into_any_element()
-            };
-        let options = [
-            (
-                ThemeChoice::System,
-                crate::words::words().match_system_theme,
-            ),
-            (ThemeChoice::Night, "Night"),
-            (ThemeChoice::Paper, "Paper"),
-        ];
-        let set = self.setter(|s, v| s.appearance.theme = v);
-        h_flex()
-            .gap(px(14.))
-            .children(options.into_iter().map(|(choice, label)| {
-                let selected = choice == current;
-                let set = set.clone();
-                let preview = match choice {
-                    ThemeChoice::Night => mock(0x0A0A0B, 0x111113, 0x2A2A2F, 0xFF7A3D),
-                    ThemeChoice::Paper => mock(0xFBFAF8, 0xF2F0EC, 0xD9D5CE, 0xE85D1F),
-                    ThemeChoice::System => h_flex()
-                        .size_full()
-                        .child(
-                            div()
-                                .w(relative(0.5))
-                                .h_full()
-                                .overflow_hidden()
-                                .child(mock(0xFBFAF8, 0xF2F0EC, 0xD9D5CE, 0xE85D1F)),
-                        )
-                        .child(
-                            div()
-                                .w(relative(0.5))
-                                .h_full()
-                                .overflow_hidden()
-                                .child(mock(0x0A0A0B, 0x111113, 0x2A2A2F, 0xFF7A3D)),
-                        )
-                        .into_any_element(),
-                };
-                v_flex()
-                    .id(SharedString::from(format!("theme-{label}")))
-                    .gap(px(8.))
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .w(px(132.))
-                            .h(px(84.))
-                            .rounded(px(9.))
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(if selected {
-                                theme.foreground.opacity(0.9)
-                            } else {
-                                theme.foreground.opacity(0.1)
-                            })
-                            .when(selected, |el| {
-                                el.shadow(vec![BoxShadow {
-                                    color: theme.foreground.opacity(0.9),
-                                    offset: point(px(0.), px(0.)),
-                                    blur_radius: px(0.),
-                                    spread_radius: px(1.),
-                                    inset: false,
-                                }])
-                            })
-                            .child(preview),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(if selected {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(label),
-                    )
-                    .on_click(move |_, window, cx| {
-                        set(choice, window, cx);
-                        crate::set_theme(choice, window, cx);
-                    })
-            }))
-            .into_any_element()
+        theme_tiles(current, self.setter(|s, v| s.appearance.theme = v), cx)
     }
 
     pub(super) fn appearance_page(
@@ -988,24 +881,19 @@ impl SettingsView {
                             .ghost()
                             .label("Remove")
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                // A key that is already gone (removed in Keychain Access) counts as removed.
-                                if let Err(e) = secrets::delete_api_key(id) {
-                                    if secrets::stored_api_key(id).is_some() {
-                                        crate::toast::push(
-                                            window,
-                                            format!("Couldn't remove the key: {e}"),
-                                            cx,
-                                        );
-                                        return;
+                                match this
+                                    .workspace
+                                    .update(cx, |ws, cx| ws.remove_api_key(id, cx))
+                                {
+                                    Ok(()) => {
+                                        this.saved_keys.insert(id, false);
                                     }
+                                    Err(e) => crate::toast::push(
+                                        window,
+                                        format!("Couldn't remove the key: {e}"),
+                                        cx,
+                                    ),
                                 }
-                                this.saved_keys.insert(id, false);
-                                this.workspace.update(cx, |ws, cx| {
-                                    ws.forget_keyed_providers();
-                                    ws.settings.api_providers.retain(|p| p != id);
-                                    ws.direct_models.remove(id);
-                                    ws.save_settings(cx);
-                                });
                             })),
                     )
                     .into_any_element()
@@ -1027,18 +915,13 @@ impl SettingsView {
                                 if key.is_empty() {
                                     return;
                                 }
-                                match secrets::set_api_key(id, &key) {
+                                match this
+                                    .workspace
+                                    .update(cx, |ws, cx| ws.save_api_key(id, &key, cx))
+                                {
                                     Ok(()) => {
                                         this.saved_keys.insert(id, true);
                                         input.update(cx, |s, cx| s.set_value("", window, cx));
-                                        this.workspace.update(cx, |ws, cx| {
-                                            ws.forget_keyed_providers();
-                                            if !ws.settings.api_providers.iter().any(|p| p == id) {
-                                                ws.settings.api_providers.push(id.to_string());
-                                            }
-                                            ws.save_settings(cx);
-                                            ws.fetch_direct_models(id, cx);
-                                        });
                                         crate::toast::push(
                                             window,
                                             format!(
@@ -3072,6 +2955,136 @@ fn uuid_like() -> String {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     )
+}
+
+/// The theme picker: a live preview tile for each theme, the current one ringed. `on_pick` saves
+/// the choice; the tile puts the theme up at once (Settings › Appearance, onboarding).
+pub(crate) fn theme_tiles(
+    current: ThemeChoice,
+    set: impl Fn(ThemeChoice, &mut Window, &mut App) + Clone + 'static,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme().clone();
+    let mock = |bg: u32, side: u32, line: u32, accent: u32| {
+        h_flex()
+            .size_full()
+            .bg(rgb(bg))
+            .child(
+                v_flex()
+                    .w(px(30.))
+                    .h_full()
+                    .bg(rgb(side))
+                    .p(px(6.))
+                    .gap(px(4.))
+                    .children(
+                        (0..3).map(move |_| div().h(px(3.)).w_full().rounded_full().bg(rgb(line))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .p(px(8.))
+                    .gap(px(5.))
+                    .child(div().h(px(3.)).w(px(46.)).rounded_full().bg(rgb(line)))
+                    .child(div().h(px(3.)).w(px(34.)).rounded_full().bg(rgb(line)))
+                    .child(
+                        div()
+                            .mt_auto()
+                            .h(px(10.))
+                            .w_full()
+                            .rounded(px(3.))
+                            .border_1()
+                            .border_color(rgb(line))
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .mr(px(2.))
+                                    .mt(px(2.))
+                                    .size(px(4.))
+                                    .rounded_full()
+                                    .bg(rgb(accent)),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    };
+    let options = [
+        (
+            ThemeChoice::System,
+            crate::words::words().match_system_theme,
+        ),
+        (ThemeChoice::Night, "Night"),
+        (ThemeChoice::Paper, "Paper"),
+    ];
+    h_flex()
+        .gap(px(14.))
+        .children(options.into_iter().map(|(choice, label)| {
+            let selected = choice == current;
+            let set = set.clone();
+            let preview = match choice {
+                ThemeChoice::Night => mock(0x0A0A0B, 0x111113, 0x2A2A2F, 0xFF7A3D),
+                ThemeChoice::Paper => mock(0xFBFAF8, 0xF2F0EC, 0xD9D5CE, 0xE85D1F),
+                ThemeChoice::System => h_flex()
+                    .size_full()
+                    .child(
+                        div()
+                            .w(relative(0.5))
+                            .h_full()
+                            .overflow_hidden()
+                            .child(mock(0xFBFAF8, 0xF2F0EC, 0xD9D5CE, 0xE85D1F)),
+                    )
+                    .child(
+                        div()
+                            .w(relative(0.5))
+                            .h_full()
+                            .overflow_hidden()
+                            .child(mock(0x0A0A0B, 0x111113, 0x2A2A2F, 0xFF7A3D)),
+                    )
+                    .into_any_element(),
+            };
+            v_flex()
+                .id(SharedString::from(format!("theme-{label}")))
+                .gap(px(8.))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .w(px(132.))
+                        .h(px(84.))
+                        .rounded(px(9.))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(if selected {
+                            theme.foreground.opacity(0.9)
+                        } else {
+                            theme.foreground.opacity(0.1)
+                        })
+                        .when(selected, |el| {
+                            el.shadow(vec![BoxShadow {
+                                color: theme.foreground.opacity(0.9),
+                                offset: point(px(0.), px(0.)),
+                                blur_radius: px(0.),
+                                spread_radius: px(1.),
+                                inset: false,
+                            }])
+                        })
+                        .child(preview),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(if selected {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(label),
+                )
+                .on_click(move |_, window, cx| {
+                    set(choice, window, cx);
+                    crate::set_theme(choice, window, cx);
+                })
+        }))
+        .into_any_element()
 }
 
 #[cfg(test)]

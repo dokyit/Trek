@@ -189,7 +189,7 @@ pub fn run(test: impl AsyncFnOnce(&mut TestAppContext)) {
 /// permission prompts appear), no auto titles, and no notifications of any kind.
 pub fn settings() -> Settings {
     let mut s = Settings::default();
-    s.onboarding.completed = true;
+    s.onboarding.finish();
     s.general.default_agent = mock().key();
     s.general.hand_holding = HandHolding::Supervised;
     s.general.auto_title = false;

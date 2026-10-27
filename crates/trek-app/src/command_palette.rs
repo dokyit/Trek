@@ -54,6 +54,8 @@ enum Action {
     Settle(String),
     Fork(String),
     CheckForUpdates,
+    /// Onboarding again, from the start.
+    Onboarding,
     /// Go to file — the IDE's ⌘P.
     OpenFile(PathBuf),
     /// Agents ⇄ Editor.
@@ -986,6 +988,15 @@ impl CommandPalette {
             .hint(keys::hint(Id::OpenBasecamp)),
             "recap today week all time summary inbox review usage tokens stats",
         );
+        add(
+            Entry::new(
+                c,
+                icon(Icon::new(crate::assets::Lucide::Compass)),
+                "Show onboarding",
+                Action::Onboarding,
+            ),
+            "welcome setup tour intro permissions agents api keys local models phone first run",
+        );
         // On Basecamp, the span its recap covers.
         if ws.route == Route::Basecamp {
             let current = self.basecamp.read(cx).range();
@@ -1326,6 +1337,7 @@ impl CommandPalette {
                 self.basecamp.update(cx, |b, cx| b.set_range(range, cx))
             }
             Action::Notes => ws.update(cx, |ws, cx| ws.navigate(Route::Notes, cx)),
+            Action::Onboarding => ws.update(cx, |ws, cx| ws.open_onboarding(None, cx)),
             Action::BackgroundUse => {
                 let b = ws.read(cx).background_use.clone();
                 b.update(cx, |b, cx| b.toggle(cx));

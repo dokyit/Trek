@@ -9136,6 +9136,7 @@ dependencies = [
  "objc2-avf-audio",
  "objc2-foundation 0.3.2",
  "objc2-speech",
+ "objc2-user-notifications",
  "objc2-web-kit",
  "png 0.18.1",
  "portable-pty",

@@ -8,7 +8,6 @@ use common::{Trek, launch, mock, open, run, store_items, transcript};
 use gpui_kit::TestAppContext;
 use gpui_kit::test::TestWindowExt as _;
 use std::path::PathBuf;
-use std::time::Duration;
 use trek_app::workspace::{Route, SettingsPage};
 use trek_core::detect::{Availability, DetectedAgent};
 use trek_core::settings::Settings;
@@ -42,8 +41,9 @@ fn onboarding_lists_every_agent_with_the_command_that_sets_it_up() {
             project: PathBuf::new(),
         };
         trek.render(cx);
-        std::thread::sleep(Duration::from_millis(220));
-        trek.click(cx, "ob-next");
+        trek.update(cx, |ws, cx| {
+            ws.open_onboarding(Some(trek_app::onboarding::Step::Agents), cx)
+        });
         trek.render(cx);
         // Nothing detected (an isolated process doesn't look): every agent Trek knows is listed as
         // not installed, the first few with how to install them, never a blank page.

@@ -23,6 +23,19 @@ pub enum Heard {
     Failed(String),
 }
 
+/// Where one of dictation's privacy permissions stands (onboarding's permissions step).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    Granted,
+    /// Never asked: asking shows the system's prompt.
+    NotAsked,
+    /// Turned down (or restricted): only System Settings can change it now.
+    Denied,
+    /// This build can't ask: no usage descriptions in its Info.plist (a bare `cargo run`), or a
+    /// system without the API.
+    Unavailable,
+}
+
 /// A meter reading in dBFS (-160 silent to 0 full scale) as the waveform's 0 to 1: speech sits
 /// around -40 to -10 dB, so -50 dB and below is silence and -8 dB a full bar.
 pub fn loudness_db(db: f32) -> f32 {
@@ -113,6 +126,51 @@ mod imp {
                 }
             }
         }
+    }
+
+    /// The microphone permission, without asking.
+    pub fn mic_access() -> Access {
+        if !packaged() {
+            return Access::Unavailable;
+        }
+        match unsafe { AVAudioApplication::sharedInstance().recordPermission() } {
+            p if p == AVAudioApplicationRecordPermission::Granted => Access::Granted,
+            p if p == AVAudioApplicationRecordPermission::Denied => Access::Denied,
+            _ => Access::NotAsked,
+        }
+    }
+
+    /// The Speech Recognition permission, without asking.
+    pub fn speech_access() -> Access {
+        if !packaged() {
+            return Access::Unavailable;
+        }
+        match unsafe { SFSpeechRecognizer::authorizationStatus() } {
+            s if s == SFSpeechRecognizerAuthorizationStatus::Authorized => Access::Granted,
+            s if s == SFSpeechRecognizerAuthorizationStatus::NotDetermined => Access::NotAsked,
+            _ => Access::Denied,
+        }
+    }
+
+    /// Show macOS's microphone prompt (only a build that declares the mic can: see `packaged`).
+    /// `done` hears whether it was allowed, on another thread.
+    pub fn ask_mic(done: impl Fn(bool) + Send + Sync + 'static) {
+        if !packaged() {
+            return done(false);
+        }
+        let block = RcBlock::new(move |granted: Bool| done(granted.as_bool()));
+        unsafe { AVAudioApplication::requestRecordPermissionWithCompletionHandler(&block) };
+    }
+
+    /// Show macOS's Speech Recognition prompt; `done` hears whether it was allowed.
+    pub fn ask_speech(done: impl Fn(bool) + Send + Sync + 'static) {
+        if !packaged() {
+            return done(false);
+        }
+        let block = RcBlock::new(move |status| {
+            done(status == SFSpeechRecognizerAuthorizationStatus::Authorized)
+        });
+        unsafe { SFSpeechRecognizer::requestAuthorization(&block) };
     }
 
     fn speech_permission(reply: Sender<Result<(), String>>) {
@@ -497,6 +555,22 @@ mod imp {
     }
 
     pub fn ensure_permission(_: Sender<Result<(), String>>) {}
+
+    pub fn mic_access() -> Access {
+        Access::Unavailable
+    }
+
+    pub fn speech_access() -> Access {
+        Access::Unavailable
+    }
+
+    pub fn ask_mic(done: impl Fn(bool) + Send + Sync + 'static) {
+        done(false)
+    }
+
+    pub fn ask_speech(done: impl Fn(bool) + Send + Sync + 'static) {
+        done(false)
+    }
 
     pub fn start(_: Sender<Heard>) -> Result<Dictation, String> {
         Err(unavailable())

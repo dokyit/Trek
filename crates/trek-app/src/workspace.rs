@@ -1360,6 +1360,8 @@ pub struct Workspace {
     pub import_summary: Option<ImportSummary>,
     pub live: HashMap<String, LiveThread>,
     pub route: Route,
+    /// Onboarding is to start over at this step (`open_onboarding`); the onboarding view takes it.
+    pub onboarding_restart: Option<crate::onboarding::Step>,
     pub draft_prefs: Prefs,
     pub updater: crate::updater::Updater,
     /// The agent CLIs' versions and updates asked for.
@@ -1815,10 +1817,11 @@ impl Workspace {
                 vec![]
             }
         };
-        let route = if settings.onboarding.completed {
-            Route::Draft { project: None }
-        } else {
+        // A first run, or a new onboarding since this one was set up.
+        let route = if settings.onboarding.due() {
             Route::Onboarding
+        } else {
+            Route::Draft { project: None }
         };
         let applied_defaults = default_prefs_key(&settings);
         let draft_prefs = Prefs {
@@ -1846,6 +1849,7 @@ impl Workspace {
             import_summary: None,
             live: HashMap::new(),
             route,
+            onboarding_restart: None,
             ide_chat: IdeChat::new(draft_prefs.clone()),
             side_chat: IdeChat::new(draft_prefs.clone()),
             ide_chats_saved: None,
@@ -3993,6 +3997,40 @@ impl Workspace {
     /// A key was saved or removed: read the providers' keys again next time.
     pub fn forget_keyed_providers(&self) {
         *self.keyed_providers.borrow_mut() = None;
+    }
+
+    /// Save `key` for API provider `id` in the platform's secret store, turn the provider on and
+    /// list its models (Settings › API Keys and onboarding).
+    pub fn save_api_key(
+        &mut self,
+        id: &str,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        trek_core::settings::secrets::set_api_key(id, key)?;
+        self.forget_keyed_providers();
+        if !self.settings.api_providers.iter().any(|p| p == id) {
+            self.settings.api_providers.push(id.to_string());
+        }
+        self.save_settings(cx);
+        self.fetch_direct_models(id, cx);
+        Ok(())
+    }
+
+    /// Remove provider `id`'s key and turn it off. A key that is already gone (removed in
+    /// Keychain Access) counts as removed.
+    pub fn remove_api_key(&mut self, id: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        use trek_core::settings::secrets;
+        if let Err(e) = secrets::delete_api_key(id) {
+            if secrets::stored_api_key(id).is_some() {
+                return Err(e);
+            }
+        }
+        self.forget_keyed_providers();
+        self.settings.api_providers.retain(|p| p != id);
+        self.direct_models.remove(id);
+        self.save_settings(cx);
+        Ok(())
     }
 
     /// Agents the user can pick right now.
@@ -8917,13 +8955,41 @@ impl Workspace {
         self.keep(task);
     }
 
-    pub fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
-        self.settings.onboarding.completed = true;
+    /// Onboarding finished or skipped: what it chose becomes the defaults, and it doesn't show
+    /// again until a new version ships. `project`: where the first thread starts (else the first
+    /// project there is).
+    pub fn finish_onboarding(&mut self, project: Option<PathBuf>, cx: &mut Context<Self>) {
+        let first_time = !self.settings.onboarding.completed;
+        self.settings.onboarding.finish();
         self.settings.general.hand_holding = self.draft_prefs.hand_holding;
         self.settings.general.default_agent = self.draft_prefs.agent.key();
         self.save_settings(cx);
-        let project = self.projects.first().map(|p| p.path.clone());
+        // Someone new hasn't had their threads brought over yet (launch does it once set up).
+        if first_time && self.import_summary.is_none() && !self.importing {
+            self.import_threads(cx);
+        }
+        let project = project.or_else(|| self.projects.first().map(|p| p.path.clone()));
         self.navigate(Route::Draft { project }, cx);
+    }
+
+    /// Show onboarding again from `step` (the start when `None`): Settings › General and the
+    /// command palette. Nothing is reset; finishing it again changes only what it's told to.
+    pub fn open_onboarding(
+        &mut self,
+        step: Option<crate::onboarding::Step>,
+        cx: &mut Context<Self>,
+    ) {
+        self.onboarding_restart = Some(step.unwrap_or(crate::onboarding::Step::Welcome));
+        self.navigate(Route::Onboarding, cx);
+        cx.notify();
+    }
+
+    /// Where an unfinished onboarding is, saved so the next launch picks up there.
+    pub fn remember_onboarding_step(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.settings.onboarding.due() && self.settings.onboarding.step.as_deref() != Some(key) {
+            self.settings.onboarding.step = Some(key.to_string());
+            self.save_settings(cx);
+        }
     }
 
     // ---------- updates ----------

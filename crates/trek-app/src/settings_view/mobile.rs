@@ -13,7 +13,7 @@ use gpui_kit::*;
 use trek_core::settings::{Reach, Settings};
 
 /// A QR code as dark squares on white, each `module` points, with the standard quiet zone.
-fn qr(url: &str, module: f32) -> AnyElement {
+pub(crate) fn qr(url: &str, module: f32) -> AnyElement {
     let Ok(code) = qrcode::QrCode::new(url.as_bytes()) else {
         return div()
             .child("The pairing link is too long for a QR code.")

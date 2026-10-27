@@ -1640,12 +1640,35 @@ impl Render for TrekWindow {
                 in_settings,
             );
         if route == Route::Onboarding {
+            // Glass shows on onboarding too, so its Appearance step changes the window live.
+            let glass = self.workspace.read(cx).glass();
+            crate::ui::apply_glass(
+                window,
+                glass.is_some(),
+                cx.theme().mode.is_dark(),
+                &mut self.glass_applied,
+                cx,
+            );
+            // Installs and sign-ins started from the agents step run in the terminal dock, under
+            // the steps.
+            let dock = self
+                .terminal_dock
+                .read(cx)
+                .is_open(cx)
+                .then(|| self.terminal_dock.clone());
             return v_flex()
                 .size_full()
-                .bg(cx.theme().background)
+                .when(glass.is_none(), |el| el.bg(cx.theme().background))
                 .text_color(cx.theme().foreground)
                 .child(TitleBar::new())
-                .child(self.onboarding.clone())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(self.onboarding.clone()),
+                )
+                .children(dock)
                 .child(self.focus_anchor())
                 .children(crate::motion::leaving_sheet(window, cx))
                 .into_any_element();

@@ -17,15 +17,15 @@ $ErrorActionPreference = 'Stop'
 
 $Settings = @(
     '[general]', 'default_agent = "direct:mock"', '',
-    '[onboarding]', 'completed = true', '',
+    '[onboarding]', 'completed = true', 'version = 2', '',
     '[import]', 'claude_code = false', 'codex = false', 'opencode = false', '',
     '[notifications]', 'mode = "off"', 'dock_badge = false', 'menu_bar_icon = false', '',
     '[updates]', 'auto_check = false', 'auto_download = false', '',
     '[mobile]', 'port = 7431'
 ) -join "`n"
 $Tools = @('git', 'explorer', 'terminal', 'browser', 'sidechat', 'simulator')
-$BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'appearance', 'first')
-$ControlVerbs = @('range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair', 'limits-demo', 'pr-demo', 'dictate-demo')
+$BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'appearance', 'first', 'onboarding')
+$ControlVerbs = @('range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair', 'limits-demo', 'pr-demo', 'dictate-demo', 'onboarding')
 $ValueFlags = @('--size', '--timeout', '--output', '--lines', '--grep')
 
 $script:Human = $args -contains '--human'

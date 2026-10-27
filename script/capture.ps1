@@ -122,7 +122,7 @@ function Launch-Trek([string]$Work, [string]$Bin) {
     New-Item -ItemType Directory -Force $script:ShotDir, "$Work\data" | Out-Null
     $settings = @(
         '[general]', 'default_agent = "direct:mock"', '',
-        '[onboarding]', 'completed = true', '',
+        '[onboarding]', 'completed = true', 'version = 2', '',
         '[import]', 'claude_code = false', 'codex = false', 'opencode = false', '',
         '[notifications]', 'mode = "off"', 'dock_badge = false', 'menu_bar_icon = false', '',
         '[updates]', 'auto_check = false', 'auto_download = false'
