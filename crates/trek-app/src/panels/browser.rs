@@ -163,8 +163,10 @@ fn force_dark_js(on: bool) -> String {
 /// old or unknown one: Google serves its legacy, fixed-width results page (cut off in a narrow
 /// panel), others fall back to layouts they keep for old browsers. Saying Safari, which it is, gets
 /// the pages Safari gets.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only macOS sends it; tests run everywhere.
 const SAFARI_FALLBACK: &str = "26.0";
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only macOS sends it; tests run everywhere.
 fn safari_user_agent(version: &str) -> String {
     format!(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) \
@@ -173,6 +175,7 @@ fn safari_user_agent(version: &str) -> String {
 }
 
 /// The `<string>` after `<key>key</key>` in an XML property list: a dotted version only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only macOS sends it; tests run everywhere.
 fn plist_version(xml: &str, key: &str) -> Option<String> {
     let after = xml.split_once(&format!("<key>{key}</key>"))?.1;
     let rest = after.trim_start().strip_prefix("<string>")?;
