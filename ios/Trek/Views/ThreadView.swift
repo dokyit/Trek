@@ -287,6 +287,8 @@ private struct TranscriptList: View, Equatable {
     @State private var position = ScrollPosition(idType: String.self)
     /// The first row when the touch began: rows that arrive above it wait till the scroll rests.
     @State private var touchFirst: String?
+    @State private var probeBox = ProbeBox()
+    final class ProbeBox { var visible: [String] = [] }
 
     /// How many of the latest rows are laid out outside the lazy stack, at least.
     private static let laidOut = 3
@@ -411,6 +413,17 @@ private struct TranscriptList: View, Equatable {
             if edge.atBottom != atBottom { atBottom = edge.atBottom }
             if edge.awayFromBottom != awayFromBottom { awayFromBottom = edge.awayFromBottom }
             if edge.short || (edge.nearTop && scrolled) { model.loadEarlier(store.id) }
+        }
+        .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.001) { ids in
+            guard ScrollProbe.on else { return }
+            probeBox.visible = ids
+        }
+        .onScrollGeometryChange(for: [CGFloat].self) { [$0.contentOffset.y, $0.contentSize.height] } action: { _, g in
+            guard ScrollProbe.on else { return }
+            let all = store.blocks
+            let top = probeBox.visible.compactMap { id in all.firstIndex { $0.id == id } }.min()
+            ScrollProbe.frame(offset: g[0], contentHeight: g[1], top: top.map { all[$0].id }, index: top, topY: nil,
+                              visible: probeBox.visible.count, touching: touching, rows: all.count)
         }
         // A move of more than a screen the user didn't make, or the content shrinking under it:
         // what "it pulled me down" looks like, said in the log with its cause's neighbours.

@@ -891,8 +891,20 @@ final class MockHost: Backend {
                                  ago: 1 + Int64(n), add: 1240, del: 388), at: 0)
                 seq[id] = 0
                 items[id] = []
-                for (body, at) in DemoMac.bigThread(big, endingAt: now) { add(id, body, at: at) }
+                let made = DemoMac.richThread ? DemoMac.richThread(big, endingAt: now) : DemoMac.bigThread(big, endingAt: now)
+                for (body, at) in made { add(id, body, at: at) }
             }
+        }
+
+        // `-TrekFixture <path>`: a real thread's items, exported read-only as wire JSON (see
+        // `ios/scripts/export-thread.py`), to scroll through as the phone would.
+        if let path = DemoMac.fixturePath, let list = DemoMac.fixture(at: path), !list.isEmpty {
+            id = "t-fixture"
+            threads.insert(t(id, DemoMac.fixtureTitle ?? "Fixture (\(list.count) items)", "p-trek", "claude-code", "claude-opus-5-5",
+                             .idle, section: .pinned, pinned: true, branch: "main", ago: 1), at: 0)
+            items[id] = list
+            seq[id] = list.map(\.seq).max() ?? 0
+            counters[id] = list.count
         }
     }
 }
