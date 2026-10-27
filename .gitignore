@@ -11,3 +11,18 @@ research_notes/
 # Local agent state (worktrees made by Claude Code sessions)
 .claude/
 __pycache__/
+
+# Design explorations, internal tooling and planning notes (kept local, not published)
+design/
+.agents/skills/trek-bug-finder/
+docs/NEXT-WAVE.md
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.pem
+*.mobileprovision
+.envrc
