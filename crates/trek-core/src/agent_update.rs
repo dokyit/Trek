@@ -310,7 +310,10 @@ pub const HARNESSES: &[Harness] = &[
         moved_from: None,
         majors: &[],
         self_update: None,
-        installer: None,
+        // Its standalone installer (`catalog`'s line), which installs over what's there.
+        installer: Some(
+            "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
+        ),
         feed: Feed::Npm,
         brew: &["qwen-code"],
         adapter: false,
@@ -2879,6 +2882,46 @@ mod tests {
             .unwrap()
     }
 
+    /// An agent installed with the Node.js Trek set up (`node`) is an npm install whose prefix
+    /// is that Node's folder: its update runs that npm, with that `node`, into the same place.
+    #[test]
+    fn an_agent_installed_with_trek_s_node_updates_with_it() {
+        let root = crate::node::root();
+        let script = if cfg!(windows) {
+            root.join(r"node_modules\@sourcegraph\amp\dist\main.js")
+        } else {
+            root.join("lib/node_modules/@sourcegraph/amp/dist/main.js")
+        };
+        let install = install_of(&script);
+        assert_eq!(
+            install,
+            Install::Npm {
+                package: "@sourcegraph/amp".into(),
+                prefix: root.clone(),
+            }
+        );
+        let bin = crate::node::bin_dir().join("amp");
+        let cmd = update_command(h("acp:amp"), &install, &bin, false, None).unwrap();
+        assert_eq!(cmd.program, Path::new("npm"));
+        assert_eq!(cmd.path, [crate::node::bin_dir()]);
+        assert_eq!(
+            cmd.env,
+            [("npm_config_prefix".to_string(), root.display().to_string())]
+        );
+        // Its npm is the first one the update finds.
+        std::fs::create_dir_all(crate::node::bin_dir()).unwrap();
+        let npm = crate::node::bin_dir().join(if cfg!(windows) { "npm.cmd" } else { "npm" });
+        std::fs::write(&npm, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let found = resolve_program(&cmd.program, &cmd.search_path());
+        let _ = std::fs::remove_file(&npm);
+        assert_eq!(found, Some(npm));
+    }
+
     #[test]
     fn opencode_2_updates_on_its_own_channel() {
         // OpenCode 2 is `@opencode/cli` on npm (binaries `opencode` and `opencode2`), the tap's
@@ -3269,10 +3312,10 @@ mod tests {
             shown("acp:pi", Install::Native, false).as_deref(),
             Some("x update")
         );
+        // No update command: its standalone installer again, as `catalog` has it.
         assert_eq!(
-            shown("acp:qwen-code", Install::Native, false),
-            None,
-            "no update command, no installer"
+            shown("acp:qwen-code", Install::Native, false).as_deref(),
+            crate::catalog::install_hint("qwen-code").map(|h| h.here())
         );
     }
 

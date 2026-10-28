@@ -270,8 +270,10 @@ pub fn provider_display_name(id: &str) -> String {
 }
 
 /// How to install an agent's CLI: the line to run on macOS and on Windows, side by side so the
-/// platform is chosen in one place (`here`). A Windows line is what the vendor documents for
-/// PowerShell (`irm … | iex`), or npm's where its documentation offers nothing else.
+/// platform is chosen in one place (`here`). Each is the vendor's own installer as its
+/// documentation gives it (`curl … | bash`, PowerShell's `irm … | iex`, WinGet), which needs no
+/// Node.js; npm only where the vendor publishes nothing else. Trek sets up Node.js itself before
+/// an npm line on a computer without it (`node`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hint {
     pub unix: &'static str,
@@ -297,11 +299,19 @@ impl Hint {
     }
 }
 
+// From each vendor's install documentation as of 2026-10-28 (code.claude.com/docs/en/setup, the
+// Codex, Copilot CLI and Qwen Code READMEs, kimi.com/code/docs, goose-docs.ai). Their scripts
+// install into the user's home (`~/.local/bin`, `~/.kimi-code/bin`; on Windows
+// `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`, `%LOCALAPPDATA%\qwen-code\bin`), which `detect`
+// searches.
 const CLAUDE_CODE: Hint = Hint {
-    unix: "npm i -g @anthropic-ai/claude-code",
+    unix: "curl -fsSL https://claude.ai/install.sh | bash",
     windows: "irm https://claude.ai/install.ps1 | iex",
 };
-const CODEX: Hint = Hint::same("npm i -g @openai/codex");
+const CODEX: Hint = Hint {
+    unix: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    windows: "irm https://chatgpt.com/codex/install.ps1 | iex",
+};
 // OpenCode has no PowerShell installer (its docs list npm, Scoop, Chocolatey and a release download).
 const OPENCODE: Hint = Hint {
     unix: "curl -fsSL https://opencode.ai/install | bash",
@@ -315,9 +325,20 @@ const CURSOR: Hint = Hint {
     unix: "curl https://cursor.com/install -fsS | bash",
     windows: "irm 'https://cursor.com/install?win32=true' | iex",
 };
-const GITHUB_COPILOT: Hint = Hint::same("npm i -g @github/copilot");
-const KIMI: Hint = Hint::same("npm i -g @moonshot-ai/kimi-code");
-const QWEN_CODE: Hint = Hint::same("npm i -g @qwen-code/qwen-code");
+// Copilot CLI's README gives its script for macOS and Linux, and WinGet or npm for Windows.
+const GITHUB_COPILOT: Hint = Hint {
+    unix: "curl -fsSL https://gh.io/copilot-install | bash",
+    windows: "winget install GitHub.Copilot",
+};
+const KIMI: Hint = Hint {
+    unix: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
+    windows: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
+};
+// The standalone installers bring the Node.js Qwen Code runs on.
+const QWEN_CODE: Hint = Hint {
+    unix: "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
+    windows: "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex",
+};
 const GROK: Hint = Hint {
     unix: "curl -fsSL https://x.ai/cli/install.sh | bash",
     windows: "irm https://x.ai/cli/install.ps1 | iex",
@@ -328,11 +349,14 @@ const DEVIN: Hint = Hint {
     unix: "curl -fsSL https://cli.devin.ai/install.sh | bash",
     windows: "irm https://cli.devin.ai/install.ps1 | iex",
 };
-// Goose's installer for Windows is a script to download and run; it supports x86-64 only.
+// Goose's script, without the interactive `goose configure` it ends with (Sign in runs that).
+// Its installer for Windows is a script to download and run; it supports x86-64 only.
 const GOOSE: Hint = Hint {
-    unix: "brew install block-goose-cli",
+    unix: "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
     windows: r#"Invoke-WebRequest -Uri "https://github.com/aaif-goose/goose/releases/download/stable/download_cli.ps1" -OutFile "download_cli.ps1"; .\download_cli.ps1"#,
 };
+// Amp's CLI has a native installer, but its ACP adapter (`amp-acp`, a Node program) is an npm
+// package only, as are Pi's CLI and adapter.
 const AMP: Hint = Hint::same("npm i -g @sourcegraph/amp amp-acp");
 const PI: Hint = Hint::same("npm i -g @earendil-works/pi-coding-agent pi-acp");
 
@@ -436,23 +460,40 @@ pub struct AgentSetup {
     pub account_url: &'static str,
 }
 
+/// The agents Trek can install, by `AgentId::key()` (an ACP agent's bare id), and their lines.
+const INSTALL_HINTS: &[(&str, Hint)] = &[
+    ("claude-code", CLAUDE_CODE),
+    ("codex", CODEX),
+    ("opencode", OPENCODE),
+    ("droid", DROID),
+    ("cursor", CURSOR),
+    ("github-copilot", GITHUB_COPILOT),
+    ("kimi", KIMI),
+    ("qwen-code", QWEN_CODE),
+    ("grok", GROK),
+    ("devin", DEVIN),
+    ("goose", GOOSE),
+    ("amp", AMP),
+    ("pi", PI),
+];
+
 /// The install lines of the agent `key`, for macOS and for Windows.
 pub fn install_hint(key: &str) -> Option<Hint> {
-    Some(match key {
-        "claude-code" => CLAUDE_CODE,
-        "codex" => CODEX,
-        "opencode" => OPENCODE,
-        "droid" => DROID,
-        "cursor" => CURSOR,
-        "github-copilot" => GITHUB_COPILOT,
-        "kimi" => KIMI,
-        "qwen-code" => QWEN_CODE,
-        "grok" => GROK,
-        "devin" => DEVIN,
-        "goose" => GOOSE,
-        "amp" => AMP,
-        "pi" => PI,
-        _ => return None,
+    INSTALL_HINTS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, hint)| *hint)
+}
+
+/// The name of the agent whose install line on this platform `line` is ("Pi").
+pub fn installed_by(line: &str) -> Option<String> {
+    let (key, _) = INSTALL_HINTS
+        .iter()
+        .find(|(_, hint)| hint.here() == line.trim())?;
+    Some(if ACP_AGENTS.iter().any(|a| a.id == *key) {
+        acp_display_name(key)
+    } else {
+        AgentId::from_key(key).display_name()
     })
 }
 
@@ -544,9 +585,25 @@ mod tests {
     ];
 
     #[test]
-    fn install_lines_for_macos_are_what_they_were() {
+    fn install_lines_for_macos_are_the_vendors_own_installers() {
         let mac = |key: &str| install_hint(key).unwrap().unix;
-        assert_eq!(mac("claude-code"), "npm i -g @anthropic-ai/claude-code");
+        assert_eq!(
+            mac("claude-code"),
+            "curl -fsSL https://claude.ai/install.sh | bash"
+        );
+        assert_eq!(
+            mac("codex"),
+            "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+        );
+        assert_eq!(
+            mac("github-copilot"),
+            "curl -fsSL https://gh.io/copilot-install | bash"
+        );
+        assert_eq!(
+            mac("kimi"),
+            "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"
+        );
+        assert!(mac("qwen-code").ends_with("/install-qwen-standalone.sh | bash"));
         assert_eq!(
             mac("opencode"),
             "curl -fsSL https://opencode.ai/install | bash"
@@ -558,8 +615,23 @@ mod tests {
             mac("devin"),
             "curl -fsSL https://cli.devin.ai/install.sh | bash"
         );
-        assert_eq!(mac("goose"), "brew install block-goose-cli");
+        assert!(mac("goose").contains("aaif-goose/goose/releases/download/stable/download_cli.sh"));
         assert_eq!(mac("pi"), "npm i -g @earendil-works/pi-coding-agent pi-acp");
+    }
+
+    /// A fresh Mac has neither Node.js nor Homebrew: only agents whose vendor publishes nothing
+    /// but npm packages install with npm (Trek sets up Node.js for them), and none needs brew.
+    #[test]
+    fn only_npm_only_agents_need_node_and_none_needs_homebrew() {
+        for key in INSTALLABLE {
+            let hint = install_hint(key).unwrap();
+            for line in [hint.unix, hint.windows] {
+                let npm_only =
+                    matches!(*key, "amp" | "pi") || (*key == "opencode" && line == hint.windows);
+                assert_eq!(crate::node::needs_node(line), npm_only, "{key}: {line}");
+            }
+            assert!(!hint.unix.starts_with("brew "), "{key}: {}", hint.unix);
+        }
     }
 
     #[test]
@@ -570,6 +642,16 @@ mod tests {
             win("claude-code"),
             "irm https://claude.ai/install.ps1 | iex"
         );
+        assert_eq!(
+            win("codex"),
+            "irm https://chatgpt.com/codex/install.ps1 | iex"
+        );
+        assert_eq!(win("github-copilot"), "winget install GitHub.Copilot");
+        assert_eq!(
+            win("kimi"),
+            "irm https://code.kimi.com/kimi-code/install.ps1 | iex"
+        );
+        assert!(win("qwen-code").ends_with("/install-qwen-standalone.ps1 | iex"));
         assert_eq!(
             win("cursor"),
             "irm 'https://cursor.com/install?win32=true' | iex"
@@ -585,7 +667,7 @@ mod tests {
             win("goose")
         );
         // The npm packages are the same on both.
-        for key in ["codex", "github-copilot", "kimi", "qwen-code", "amp", "pi"] {
+        for key in ["amp", "pi"] {
             let hint = install_hint(key).unwrap();
             assert_eq!(hint.unix, hint.windows, "{key}");
             assert!(hint.windows.starts_with("npm i -g "), "{key}");
@@ -603,6 +685,7 @@ mod tests {
             assert!(
                 line.starts_with("irm ")
                     || line.starts_with("npm i -g ")
+                    || line.starts_with("winget install ")
                     || line.starts_with("Invoke-WebRequest "),
                 "{key}: {line}"
             );
@@ -632,5 +715,15 @@ mod tests {
             );
         }
         assert!(install_hint("not-an-agent").is_none() && agent_setup("not-an-agent").is_none());
+        // An install line names its agent, for "Pi needs Node.js".
+        let line = |key: &str| install_hint(key).unwrap().here();
+        assert_eq!(installed_by(line("pi")).as_deref(), Some("Pi"));
+        assert_eq!(installed_by(line("amp")).as_deref(), Some("Amp"));
+        assert_eq!(
+            installed_by(line("claude-code")).as_deref(),
+            Some(AgentId::ClaudeCode.display_name().as_str())
+        );
+        assert_eq!(installed_by("npm i -g something-else"), None);
+        assert_eq!(INSTALL_HINTS.len(), INSTALLABLE.len());
     }
 }

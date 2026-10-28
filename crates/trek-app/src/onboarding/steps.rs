@@ -5,6 +5,7 @@ use super::*;
 use crate::composer::look;
 use crate::palette;
 use crate::ui;
+use crate::workspace::NodeSetup;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
@@ -229,6 +230,97 @@ fn run_in_terminal(ws: &Entity<Workspace>, command: &str, cx: &mut App) {
     ws.update(cx, |_, cx| {
         cx.emit(crate::workspace::WorkspaceEvent::RunInTerminal { command, cwd: None })
     });
+}
+
+/// Install an agent with its line: Node.js first when the line runs npm and there's none
+/// (`Workspace::install_agent`).
+fn install_agent(ws: &Entity<Workspace>, line: &str, cx: &mut App) {
+    ws.update(cx, |ws, cx| ws.install_agent(line, cx));
+}
+
+/// Where setting up Node.js for an agent's install has got, in plain words: Trek installing it,
+/// an install that stopped for want of it (with the fix), or Trek's install of it failing. On
+/// the Agents step and in Settings › Agents. None when there's nothing to say.
+pub(crate) fn node_setup_card(ws: &Entity<Workspace>, cx: &App) -> Option<AnyElement> {
+    let setup = ws.read(cx).node_setup.clone()?;
+    let theme = cx.theme().clone();
+    let this = crate::words::words().this_computer;
+    let then = setup.then().map(str::to_string);
+    let ws = ws.clone();
+    // The fix, and a way to put it away.
+    let install = move |label: &'static str| {
+        let (fix, dismiss, then) = (ws.clone(), ws.clone(), then.clone());
+        h_flex()
+            .gap(px(4.))
+            .child(
+                Button::new("node-install")
+                    .small()
+                    .primary()
+                    .label(label)
+                    .on_click(move |_, _, cx| {
+                        let then = then.clone();
+                        fix.update(cx, |ws, cx| ws.install_node(then, cx))
+                    }),
+            )
+            .child(
+                Button::new("node-dismiss")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(IconName::Close).text_color(theme.muted_foreground))
+                    .tooltip("Not now")
+                    .on_click(move |_, _, cx| {
+                        dismiss.update(cx, |ws, cx| ws.dismiss_node_setup(cx))
+                    }),
+            )
+    };
+    let warn = || {
+        Icon::new(IconName::TriangleAlert)
+            .size(px(18.))
+            .text_color(palette::amber(cx))
+            .into_any_element()
+    };
+    let content = match &setup {
+        NodeSetup::Installing { progress, .. } => row(
+            Some(Spinner::new().small().into_any_element()),
+            "Node.js isn't installed. Trek is installing it for its agents…",
+            progress
+                .as_ref()
+                .map_or_else(|| "Starting…".to_string(), |p| p.label()),
+            div(),
+            cx,
+        ),
+        NodeSetup::Missing { .. } => {
+            let who = setup.agent().unwrap_or_else(|| "This install".into());
+            row(
+                Some(warn()),
+                format!("{who} needs Node.js, which isn't on {this}"),
+                "npm wasn't found, so the install couldn't run. Trek can install Node.js for its agents (from nodejs.org, into its own folder, no password needed) and run the install again.",
+                install("Install Node.js"),
+                cx,
+            )
+        }
+        NodeSetup::Failed { error, .. } => row(
+            Some(warn()),
+            "Trek couldn't install Node.js",
+            error.clone(),
+            install("Try again"),
+            cx,
+        ),
+    };
+    let installing = matches!(setup, NodeSetup::Installing { .. });
+    Some(
+        div()
+            .id("node-setup")
+            .test_support()
+            .pb(px(14.))
+            .child(card(
+                [content
+                    .when(!installing, |el| el.items_start())
+                    .into_any_element()],
+                cx,
+            ))
+            .into_any_element(),
+    )
 }
 
 /// `catalog::agent_setup` is keyed by the ACP id alone.
@@ -610,6 +702,7 @@ impl Onboarding {
         let this = crate::words::words().this_computer;
         let scan = scan_agents(&ws.agents, &ws.agent_status, &ws.acp_info, detecting);
         let authenticating = ws.authenticating_agents.clone();
+        let node_setup = ws.node_setup.clone();
         let (found, missing): (Vec<_>, Vec<_>) = scan
             .into_iter()
             .partition(|a| a.state != AgentState::NotInstalled);
@@ -768,18 +861,25 @@ impl Onboarding {
                             .children(install.map(|i| command_chip(&id, i, cx))),
                     )
                     .children(cmd.map(|cmd| {
+                        // Waiting on the Node.js Trek installs for it.
+                        let waiting = matches!(
+                            &node_setup,
+                            Some(NodeSetup::Installing { then: Some(then), .. }) if *then == cmd
+                        );
                         Button::new(SharedString::from(format!("ob-install-{id}")))
                             .small()
                             .outline()
+                            .loading(waiting)
                             .icon(IconName::ArrowDown)
-                            .label("Install")
-                            .on_click(move |_, _, cx| run_in_terminal(&ws, &cmd, cx))
+                            .label(if waiting { "Installing…" } else { "Install" })
+                            .on_click(move |_, _, cx| install_agent(&ws, &cmd, cx))
                     }))
                     .into_any_element()
             })
             .collect();
         v_flex()
             .child(header("Your agents and subscriptions", body, cx))
+            .children(node_setup_card(&self.workspace, cx))
             .when(detecting, |el| {
                 el.child(
                     h_flex()

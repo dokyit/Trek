@@ -2,7 +2,7 @@
 
 ## What it does
 
-A short intro (the cairn stacks itself while the hiker walks up to it), then one step at a time: Appearance (theme tiles, glass and frost, reduce motion, text size), Permissions (macOS only: Accessibility, Screen & System Audio Recording, Microphone, Speech Recognition, Notifications, Full Disk Access, Local Network — each with its status, the system prompt or the exact System Settings pane, and Trek's icon to drag into list panes), Agents (scan of the agent CLIs, signed in or not, subscription or API key, with Install and Sign in run in the terminal dock), API keys, Local models (Ollama, LM Studio, llama.cpp/MLX), Approvals, Phone & machines, and Finish (summary with Change links, first project, Start a thread).
+A short intro (the cairn stacks itself while the hiker walks up to it), then one step at a time: Appearance (theme tiles, glass and frost, reduce motion, text size), Permissions (macOS only: Accessibility, Screen & System Audio Recording, Microphone, Speech Recognition, Notifications, Full Disk Access, Local Network — each with its status, the system prompt or the exact System Settings pane, and Trek's icon to drag into list panes), Agents (scan of the agent CLIs, signed in or not, subscription or API key, with Install and Sign in run in the terminal dock; Install uses each vendor's own installer, and for the npm-only agents (Amp, Pi; OpenCode on Windows) on a computer without npm Trek first installs Node.js from nodejs.org into its data folder, or says so when an install stopped for want of npm), API keys, Local models (Ollama, LM Studio, llama.cpp/MLX), Approvals, Phone & machines, and Finish (summary with Change links, first project, Start a thread).
 
 It shows on a first run and once more when `ONBOARDING_VERSION` (`crates/trek-core/src/settings.rs`) is bumped; quitting part way resumes on the same step (`[onboarding] step`). Skip setup finishes it from any step.
 
@@ -16,11 +16,12 @@ First launch; **Settings → General → Show onboarding again**; ⌘K **Show on
 ./.agents/skills/verify-trek/scripts/trek-dev open onboarding
 ./.agents/skills/verify-trek/scripts/trek-dev control onboarding permissions   # any step key
 ./.agents/skills/verify-trek/scripts/trek-dev control onboarding demo          # agents signed in, Ollama with models, some permissions on
+./.agents/skills/verify-trek/scripts/trek-dev control onboarding node-missing  # Agents with Node.js missing for Pi (also node-installing, node-failed)
 ./.agents/skills/verify-trek/scripts/trek-dev control wait 2600                # the intro's length
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot onboarding-agents
 ```
 
-Step keys: `welcome`, `appearance`, `permissions`, `agents`, `providers`, `local-models`, `approvals`, `phone`, `finish`. The isolated app finds no agents and has no permissions of its own, so use `demo` before screenshots that should show a set-up Mac. Don't press the permission buttons from the driver: they open the real System Settings.
+Step keys: `welcome`, `appearance`, `permissions`, `agents`, `providers`, `local-models`, `approvals`, `phone`, `finish`. The isolated app finds no agents and has no permissions of its own, so use `demo` before screenshots that should show a set-up Mac. Don't press the permission buttons from the driver: they open the real System Settings. Nor Install or Install Node.js: they run the agent's real installer afterwards. The Node.js download itself is tested into a temp folder by `cargo test -p trek-core node::tests::real -- --ignored`.
 
 ## Code
 

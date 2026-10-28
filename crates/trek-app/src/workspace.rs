@@ -6,6 +6,7 @@ mod browser_use;
 mod limits;
 mod lineage;
 mod mcp;
+mod node_setup;
 mod orchestrate;
 pub mod phone_use;
 mod tabs;
@@ -29,6 +30,7 @@ pub use agent_updates::Hold;
 pub use limits::Clock;
 pub use lineage::{LineageRow, ThreadState};
 pub use mcp::{McpCheck, mcp_server_of};
+pub use node_setup::NodeSetup;
 pub use orchestrate::{TaskState, waiting_label};
 pub use turn_changes::{TurnRange, TurnSpans};
 pub use verification::ago;
@@ -1467,6 +1469,8 @@ pub struct Workspace {
     pub authenticating_agents: HashSet<String>,
     /// The ACP Registry and the agents being added from it (Settings › Agents › Add agent).
     pub added_agents: AddedAgents,
+    /// Node.js being set up for an agent install that runs npm, or found missing by one.
+    pub node_setup: Option<NodeSetup>,
     /// Slash commands an agent offered in its last session in a folder: (`AgentId::key()`, cwd).
     agent_commands: HashMap<(String, PathBuf), Vec<SlashCommand>>,
     pub usage_loading: bool,
@@ -1921,6 +1925,7 @@ impl Workspace {
             acp_info: HashMap::new(),
             authenticating_agents: HashSet::new(),
             added_agents: AddedAgents::default(),
+            node_setup: None,
             usage_loading: false,
             reset_credits_in_flight: HashSet::new(),
             settings_project: None,

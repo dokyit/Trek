@@ -182,10 +182,17 @@ impl TerminalDock {
         let cwd = cwd.or_else(|| self.workspace.read(cx).current_cwd());
         let shell = self.workspace.read(cx).settings.terminal.shell.clone();
         let ws = self.workspace.downgrade();
+        let setup = match &job {
+            Job::Setup(command) => Some(command.clone()),
+            Job::Action(_) => None,
+        };
         let term = cx.new(|cx| {
             let mut t = TerminalPanel::with_command(ws.clone(), cwd, job, shell, cx);
-            t.on_exit(move |cx| {
+            t.on_exit(move |output, cx| {
                 let _ = ws.update(cx, |ws, cx| {
+                    if let Some(command) = &setup {
+                        ws.setup_finished(command, &output, cx);
+                    }
                     ws.acp_info.clear();
                     ws.detect_agents(cx);
                 });
