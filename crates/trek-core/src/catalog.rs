@@ -337,6 +337,12 @@ const KIMI: Hint = Hint {
 // npm, which Trek sets Node.js up for when it's missing: Qwen's standalone installers are served
 // from Hangzhou and didn't answer from the US (2026-10-28).
 const QWEN_CODE: Hint = Hint::same("npm i -g @qwen-code/qwen-code");
+/// Qwen's standalone installers (they bring their own Node.js): what updates a Qwen Code
+/// installed that way (`agent_update`), since it has no update command of its own.
+pub const QWEN_STANDALONE: Hint = Hint {
+    unix: "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
+    windows: "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex",
+};
 const GROK: Hint = Hint {
     unix: "curl -fsSL https://x.ai/cli/install.sh | bash",
     windows: "irm https://x.ai/cli/install.ps1 | iex",

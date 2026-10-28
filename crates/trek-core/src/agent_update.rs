@@ -168,8 +168,12 @@ impl Harness {
         self.windows_installer()
     }
 
-    /// The PowerShell line the vendor documents for installing this CLI on Windows.
+    /// The PowerShell line the vendor documents for installing this CLI on Windows. Qwen Code's
+    /// install line is npm, so its standalone installer comes from its own constant.
     fn windows_installer(&self) -> Option<&'static str> {
+        if self.agent == "acp:qwen-code" {
+            return Some(crate::catalog::QWEN_STANDALONE.windows);
+        }
         crate::catalog::agent_setup(self.agent.strip_prefix("acp:").unwrap_or(self.agent))
             .map(|s| s.install)
     }
@@ -311,9 +315,7 @@ pub const HARNESSES: &[Harness] = &[
         majors: &[],
         self_update: None,
         // Its standalone installer, which installs over what's there (new installs use npm).
-        installer: Some(
-            "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
-        ),
+        installer: Some(crate::catalog::QWEN_STANDALONE.unix),
         feed: Feed::Npm,
         brew: &["qwen-code"],
         adapter: false,
