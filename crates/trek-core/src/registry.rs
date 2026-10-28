@@ -1105,7 +1105,7 @@ fn outside(name: impl std::fmt::Display) -> anyhow::Error {
 /// `..`, or links (symbolically or hard) to something outside `into` refuses the whole archive;
 /// the install folder is a staging one that is discarded then. On Windows symlinks are skipped
 /// (making one needs a privilege), and a file's mode is what the archive says elsewhere.
-fn unpack_tar(archive: &Path, into: &Path) -> Result<()> {
+pub(crate) fn unpack_tar(archive: &Path, into: &Path) -> Result<()> {
     use std::io::Read as _;
     let not_an_archive = |_| anyhow!("The download isn't an archive Trek can open");
     let mut file = std::fs::File::open(archive)?;

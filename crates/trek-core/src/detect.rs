@@ -36,10 +36,25 @@ const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(4);
 /// The PATH child processes get, as a string in the platform's own format (`:`-separated on Unix,
 /// `;` on Windows). Apps launched from Finder or the Start menu get a minimal PATH, so this is
 /// what the user's terminal would have (see `base_path`) plus the folders agent CLIs install into
-/// (see `extra_dirs`), worked out once.
+/// (see `extra_dirs`), and last the folder of the Node.js Trek installs for npm-only agents
+/// (`node::bin_dir`, where their commands land too), worked out once.
 pub fn login_path() -> &'static str {
     static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(|| compose_path(base_path().as_deref(), &crate::paths::home()))
+    PATH.get_or_init(|| {
+        let path = compose_path(base_path().as_deref(), &crate::paths::home());
+        with_last(&path, &crate::node::bin_dir())
+    })
+}
+
+/// `path` (a PATH string) with `dir` added at the end, unless it's on it already.
+fn with_last(path: &str, dir: &Path) -> String {
+    let mut parts: Vec<PathBuf> = std::env::split_paths(path).collect();
+    if !parts.iter().any(|p| dedup_key(p) == dedup_key(dir)) {
+        parts.push(dir.to_path_buf());
+    }
+    std::env::join_paths(parts)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// PATH as a login shell sees it: ask the user's shell once (giving up after a few seconds, then
@@ -132,6 +147,8 @@ fn extra_dirs(home: &Path) -> Vec<PathBuf> {
         ".npm-global/bin",
         ".opencode/bin",
         ".factory/bin",
+        // Kimi Code's installer (`code.kimi.com/kimi-code/install.sh`).
+        ".kimi-code/bin",
     ];
     let absolute = ["/opt/homebrew/bin", "/usr/local/bin"];
     relative
@@ -167,17 +184,21 @@ fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -
         r".cargo\bin",
         r".opencode\bin",
         r".factory\bin",
+        r".kimi-code\bin",
     ]
     .iter()
     .map(|d| home.join(d))
     .collect();
     // The vendor installers that add a folder of their own to the user's PATH: Trek's PATH is
     // worked out once, so one installed while Trek runs is found here on the next check.
-    // Devin's (`irm https://cli.devin.ai/install.ps1 | iex`), Cursor's, Factory's (`~\bin`).
+    // Devin's (`irm https://cli.devin.ai/install.ps1 | iex`), Cursor's, Factory's (`~\bin`),
+    // Codex's and Qwen Code's.
     dirs.extend([
         local.join(r"devin\cli\bin"),
         local.join("cursor-agent"),
         home.join("bin"),
+        local.join(r"Programs\OpenAI\Codex\bin"),
+        local.join(r"qwen-code\bin"),
     ]);
     dirs.extend([
         // Scoop's shims, for the user and for the machine (`scoop install -g`).
@@ -539,23 +560,17 @@ async fn local_server(id: &str) -> DetectedAgent {
 pub async fn detect_all() -> Vec<DetectedAgent> {
     use futures::future::join_all;
 
+    // The install line `catalog` has for this platform, so it and the install chip agree.
+    let hint = |agent: &AgentId| {
+        crate::catalog::install_hint(&agent.key())
+            .map(|h| h.here())
+            .unwrap_or_default()
+    };
     let (claude, codex, opencode, droid) = tokio::join!(
-        cli_agent(
-            AgentId::ClaudeCode,
-            "claude",
-            "npm i -g @anthropic-ai/claude-code"
-        ),
-        cli_agent(AgentId::Codex, "codex", "npm i -g @openai/codex"),
-        cli_agent(
-            AgentId::OpenCode,
-            OPENCODE,
-            "curl -fsSL https://opencode.ai/install | bash"
-        ),
-        cli_agent(
-            AgentId::Droid,
-            "droid",
-            "curl -fsSL https://app.factory.ai/cli | sh"
-        ),
+        cli_agent(AgentId::ClaudeCode, "claude", hint(&AgentId::ClaudeCode)),
+        cli_agent(AgentId::Codex, "codex", hint(&AgentId::Codex)),
+        cli_agent(AgentId::OpenCode, OPENCODE, hint(&AgentId::OpenCode)),
+        cli_agent(AgentId::Droid, "droid", hint(&AgentId::Droid)),
     );
     let mut codex = codex;
     if let (Availability::Ready, Some(path)) = (&codex.availability, &codex.path) {
@@ -686,6 +701,18 @@ mod tests_paths {
         assert!(extras.contains(&home.path().join(".cargo").join("bin")));
     }
 
+    /// Trek's own Node.js (`node::bin_dir`) ends the login PATH: where agents installed with
+    /// its npm are found and get their `node`, after any Node of the user's own.
+    #[test]
+    fn trek_s_own_node_folder_comes_last_and_once() {
+        let home = TempDir::new();
+        let (a, node) = (home.path().join("a"), home.path().join("node").join("bin"));
+        let path = with_last(&join(&[&a]), &node);
+        assert_eq!(entries(&path), [a.clone(), node.clone()]);
+        assert_eq!(with_last(&path, &node), path);
+        assert!(entries(login_path()).last() == Some(&crate::node::bin_dir()));
+    }
+
     #[test]
     fn no_path_leaves_just_the_extras() {
         let home = TempDir::new();
@@ -717,7 +744,7 @@ mod tests_paths {
         let home = Path::new("/home/me");
         assert_eq!(
             compose_path(Some("a:b"), home),
-            "a:b:/home/me/.local/bin:/home/me/.bun/bin:/home/me/.cargo/bin:/home/me/.npm-global/bin:/home/me/.opencode/bin:/home/me/.factory/bin:/opt/homebrew/bin:/usr/local/bin"
+            "a:b:/home/me/.local/bin:/home/me/.bun/bin:/home/me/.cargo/bin:/home/me/.npm-global/bin:/home/me/.opencode/bin:/home/me/.factory/bin:/home/me/.kimi-code/bin:/opt/homebrew/bin:/usr/local/bin"
         );
         // A folder already on it isn't added again.
         assert_eq!(
@@ -785,9 +812,12 @@ mod tests_paths {
                 r"C:\Users\me\.cargo\bin",
                 r"C:\Users\me\.opencode\bin",
                 r"C:\Users\me\.factory\bin",
+                r"C:\Users\me\.kimi-code\bin",
                 r"C:\Users\me\AppData\Local\devin\cli\bin",
                 r"C:\Users\me\AppData\Local\cursor-agent",
                 r"C:\Users\me\bin",
+                r"C:\Users\me\AppData\Local\Programs\OpenAI\Codex\bin",
+                r"C:\Users\me\AppData\Local\qwen-code\bin",
                 r"C:\Users\me\scoop\shims",
                 r"C:\ProgramData\scoop\shims",
                 r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links",

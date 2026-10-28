@@ -1713,6 +1713,33 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             // Onboarding from a step (`onboarding agents`), or with what a set-up Mac would show
             // (`onboarding demo`: agents signed in on plans, a model server, some permissions on).
             ("onboarding", "demo") => onboarding_demo(ws, cx),
+            // The Agents step with Node.js missing for Pi's npm install, being installed by Trek,
+            // or failed to install (`node-missing`, `node-installing`, `node-failed`).
+            ("onboarding", node) if node.starts_with("node-") => {
+                use crate::workspace::NodeSetup;
+                let then = trek_core::catalog::install_hint("pi")
+                    .map(|h| h.here().to_string())
+                    .unwrap_or_default();
+                ws.node_setup = Some(match node {
+                    "node-missing" => NodeSetup::Missing { then },
+                    "node-installing" => NodeSetup::Installing {
+                        progress: Some(trek_core::node::Progress::Downloading {
+                            version: "v24.22.1".into(),
+                            done: 21_000_000,
+                            total: Some(50_000_000),
+                        }),
+                        then: Some(then),
+                    },
+                    "node-failed" => NodeSetup::Failed {
+                        error: "Couldn't reach nodejs.org".into(),
+                        then: Some(then),
+                    },
+                    other => anyhow::bail!(
+                        "onboarding {other}: node-missing|node-installing|node-failed"
+                    ),
+                });
+                ws.open_onboarding(crate::onboarding::Step::from_key("agents"), cx)
+            }
             ("onboarding", "") => ws.open_onboarding(None, cx),
             ("onboarding", key) => {
                 let Some(step) = crate::onboarding::Step::from_key(key) else {

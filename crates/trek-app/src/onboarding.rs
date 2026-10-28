@@ -15,6 +15,8 @@
 mod helper;
 mod steps;
 
+pub(crate) use steps::node_setup_card;
+
 use crate::permissions::{self, Permission, Status};
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};

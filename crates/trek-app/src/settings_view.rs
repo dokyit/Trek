@@ -1465,6 +1465,10 @@ impl SettingsView {
             }
             out.extend(updates);
         }
+        // Node.js being set up for an install, or missing for one that stopped.
+        if let Some(card) = crate::onboarding::node_setup_card(&self.workspace, cx) {
+            out.push(div().pt_4().child(card).into_any_element());
+        }
         if !missing.is_empty() {
             out.push(Self::heading("Not installed", cx));
             let rows = missing
@@ -1503,13 +1507,9 @@ impl SettingsView {
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             Self::start(&install_ref, k_inst.clone(), cx);
-                            let cmd = cmd.clone();
-                            this.workspace.update(cx, |_, cx| {
-                                cx.emit(WorkspaceEvent::RunInTerminal {
-                                    command: cmd,
-                                    cwd: None,
-                                })
-                            })
+                            // Node.js first, when the line runs npm and there's none.
+                            this.workspace
+                                .update(cx, |ws, cx| ws.install_agent(&cmd, cx))
                         }));
                     Self::row(title, install, button, cx)
                 })

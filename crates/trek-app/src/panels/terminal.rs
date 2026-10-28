@@ -83,6 +83,9 @@ fn new_screen(rows: u16, cols: u16, scrollback: usize) -> Screen {
 /// Repaints at most this often while output streams in.
 const FRAME: Duration = Duration::from_millis(16);
 
+/// How many of a finished command's last lines its `on_exit` hears.
+const EXIT_OUTPUT_LINES: usize = 40;
+
 /// Write `bytes` to the shell's input.
 fn write_to(writer: &Mutex<Box<dyn Write + Send>>, bytes: &[u8]) {
     let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
@@ -377,6 +380,13 @@ fn shell_command(setting: &str, cwd: Option<PathBuf>, job: Option<&Job>) -> Comm
         // A shell started from the Start menu has the PATH of whatever started that; a terminal
         // has the one Windows would give a new session (and `login_path` adds agent CLIs' folders).
         cmd.env("PATH", trek_core::detect::login_path());
+    }
+    if matches!(job, Some(Job::Setup(_))) {
+        // An install finds npm where Trek found it (nvm's, which a login shell that doesn't read
+        // .zshrc lacks; Trek's own Node), and keeps what Trek's own npm installs beside it.
+        for (name, value) in trek_core::node::setup_env() {
+            cmd.env(name, value);
+        }
     }
     if let Some(dir) = shell_cwd(cwd, flavor, windows, trek_core::paths::home(), |dir| {
         dir.is_dir()
@@ -755,8 +765,9 @@ pub struct TerminalPanel {
     font: Option<(SharedString, f32, f32)>,
     /// Where the rows were last drawn, in the window.
     grid: Rc<Cell<Bounds<Pixels>>>,
-    /// Runs once when the shell exits (used by Install / Sign in to rescan agents).
-    on_exit: Option<Box<dyn FnOnce(&mut App)>>,
+    /// Runs once when the shell exits, with the last of its output (used by Install / Sign in to
+    /// rescan agents, and to hear that an install found no npm).
+    on_exit: Option<Box<dyn FnOnce(String, &mut App)>>,
     _reader: Option<Task<()>>,
     /// What the wheel has turned short of a whole line, in points.
     wheel: f32,
@@ -918,7 +929,7 @@ impl TerminalPanel {
                 this.master = None;
                 this.writer = None;
                 if let Some(f) = this.on_exit.take() {
-                    f(cx);
+                    f(this.recent_output(EXIT_OUTPUT_LINES), cx);
                 }
                 cx.notify();
             });
@@ -926,8 +937,8 @@ impl TerminalPanel {
         Ok(())
     }
 
-    /// Runs once when the process exits.
-    pub fn on_exit(&mut self, f: impl FnOnce(&mut App) + 'static) {
+    /// Runs once when the process exits, with its last lines of output.
+    pub fn on_exit(&mut self, f: impl FnOnce(String, &mut App) + 'static) {
         self.on_exit = Some(Box::new(f));
     }
 
