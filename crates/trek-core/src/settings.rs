@@ -2140,8 +2140,8 @@ mod tests {
     }
 }
 
-/// The editor (Trek IDE): recent picks, the workbench's layout, and how it follows the agents.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The editor (Trek IDE): recent picks and the workbench's layout.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Ide {
     /// Folders opened as the IDE's workspace, most recent first.
@@ -2149,19 +2149,6 @@ pub struct Ide {
     /// Loose files opened in the editor (from a folder or on their own), most recent first.
     pub recent_files: Vec<String>,
     pub layout: IdeLayout,
-    /// Going back to Agents opens the AI side bar's chat there.
-    pub follow_active_chat: bool,
-}
-
-impl Default for Ide {
-    fn default() -> Self {
-        Self {
-            recent_folders: vec![],
-            recent_files: vec![],
-            layout: IdeLayout::default(),
-            follow_active_chat: true,
-        }
-    }
 }
 
 /// The workbench's regions as the user left them: sizes in points, and which are shown.

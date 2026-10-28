@@ -685,7 +685,10 @@ impl CommandPalette {
             out.extend(self.matching_files(q, 12));
         }
 
-        if searching {
+        // Agents' threads and projects are Agents mode's: the editor lists none (its own chats
+        // are in the AI side bar's history).
+        let ide = ws.ide();
+        if searching && !ide {
             for h in thread_hits(&self.hits) {
                 let Some(t) = ws.thread(&h.thread_id) else {
                     continue;
@@ -719,12 +722,18 @@ impl CommandPalette {
                 e = about(e, t);
                 out.push(e);
             }
-        } else {
-            // Sub-agents show in their parent; a search still finds them.
+        } else if !ide {
+            // Sub-agents show in their parent; a search still finds them. Side chats and editor
+            // chats aren't Agents threads.
             let mut recent: Vec<_> = ws
                 .threads
                 .iter()
-                .filter(|t| t.side_of.is_none() && t.parent_id.is_none() && t.archived_at.is_none())
+                .filter(|t| {
+                    t.side_of.is_none()
+                        && !t.editor_chat
+                        && t.parent_id.is_none()
+                        && t.archived_at.is_none()
+                })
                 .collect();
             recent.sort_by_key(|t| -t.updated_at);
             for (n, t) in recent.into_iter().take(RECENT).enumerate() {
@@ -744,7 +753,7 @@ impl CommandPalette {
 
         // Projects: a new thread in one, or its settings (those only when searching).
         let mut projects = vec![];
-        for p in ws.workspace_projects() {
+        for p in ws.workspace_projects().into_iter().filter(|_| !ide) {
             let glyph = Glyph::Project(p.name.clone(), ws.project_look(&p.path));
             let folder = trek_core::paths::tildify(&p.path);
             let keywords = format!("{} {}", p.remote.clone().unwrap_or_default(), folder);
@@ -866,20 +875,19 @@ impl CommandPalette {
         };
         let icon = |i: Icon| Glyph::Icon(i);
         let c = Group::Commands;
-        add(
-            Entry::new(
-                c,
-                icon(Icon::new(crate::assets::Lucide::SquarePen)),
-                "New thread",
-                Action::NewThread,
-            )
-            .hint(if ws.ide() {
-                String::new()
-            } else {
-                keys::hint(Id::NewThread)
-            }),
-            "create start chat compose",
-        );
+        // A thread is Agents mode's; the editor has New chat (below).
+        if !ws.ide() {
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(crate::assets::Lucide::SquarePen)),
+                    "New thread",
+                    Action::NewThread,
+                )
+                .hint(keys::hint(Id::NewThread)),
+                "create start chat compose",
+            );
+        }
         // Agents ⇄ Editor, and the editor's layout.
         if ws.ide() {
             add(
@@ -1315,10 +1323,6 @@ impl CommandPalette {
         let ws = self.workspace.clone();
         match entry.action {
             Action::OpenThread(id) => ws.update(cx, |ws, cx| ws.open_thread_here(&id, cx)),
-            // In the editor a message match opens its thread in the AI side bar.
-            Action::OpenMessage(id, _) if ws.read(cx).ide() => {
-                ws.update(cx, |ws, cx| ws.ide_open_thread(&id, cx))
-            }
             Action::OpenMessage(id, at) => ws.update(cx, |ws, cx| ws.open_thread_at(&id, at, cx)),
             Action::NewThreadIn(path) => ws.update(cx, |ws, cx| {
                 ws.navigate(

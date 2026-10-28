@@ -489,6 +489,27 @@ impl Trek {
         })
     }
 
+    /// A new editor chat in the project, as the AI side bar's first message makes one, without
+    /// putting it anywhere on screen.
+    pub fn editor_chat(&self, cx: &mut TestAppContext) -> String {
+        self.update(cx, |ws, cx| {
+            let mut t = ws
+                .store
+                .create_thread(
+                    Some(&self.project),
+                    mock(),
+                    None,
+                    trek_core::Effort::Medium,
+                    HandHolding::Auto,
+                )
+                .expect("thread");
+            t.editor_chat = true;
+            ws.store.save_thread(&t).expect("save");
+            ws.reload(cx);
+            t.id
+        })
+    }
+
     /// The working bar's text, `None` while it's hidden.
     pub fn working_bar(&self, cx: &TestAppContext) -> Option<String> {
         cx.read(|cx| self.root.read(cx).working_bar.read(cx).label())

@@ -1325,7 +1325,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     if verb == "editor" {
         // The editor without a pointer: `editor on|off` (Editor mode), `editor root <folder>`,
-        // `editor view explorer|search|scm|agents`, `editor panel terminal|problems|output|tasks|off`,
+        // `editor view explorer|search|scm`, `editor panel terminal|problems|output|tasks|off`,
         // `editor chat new|send <prompt>|<n>`, `editor ai on|off`, and `editor [open] <abs-path> [line]`
         // (a tab in Editor mode, the center surface in the harness). The AI side bar:
         // `editor send <prompt>` (through its input, chips and mode included), `editor type <text>`
@@ -1358,8 +1358,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                         "explorer" => crate::ide::SideView::Explorer,
                         "search" => crate::ide::SideView::Search,
                         "scm" => crate::ide::SideView::Scm,
-                        "agents" => crate::ide::SideView::Agents,
-                        other => anyhow::bail!("editor view: unknown view {other:?} (explorer|search|scm|agents)"),
+                        other => anyhow::bail!("editor view: unknown view {other:?} (explorer|search|scm)"),
                     };
                     ide.update(cx, |ide, cx| ide.show_view(v, window, cx));
                 }

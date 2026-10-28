@@ -486,10 +486,10 @@ impl Store {
         Ok(())
     }
 
-    /// Threads matching `query`, archived threads and side chats left out: title matches first
-    /// (best first), then message matches, the best one per thread, best first. Each list holds
-    /// up to `limit` hits. Messages are searched once a word has three characters (`message_query`).
-    /// Runs on the read-only connection, so saves go on meanwhile.
+    /// Threads matching `query`, archived threads, side chats and editor chats left out: title
+    /// matches first (best first), then message matches, the best one per thread, best first.
+    /// Each list holds up to `limit` hits. Messages are searched once a word has three characters
+    /// (`message_query`). Runs on the read-only connection, so saves go on meanwhile.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let Some(q) = fts_query(query) else {
             return Ok(vec![]);
@@ -501,7 +501,7 @@ impl Store {
             let mut st = c.prepare_cached(
                 "SELECT t.id, t.title, highlight(title_search, 0, ?2, ?3)
                  FROM title_search JOIN title_docs d ON d.pk = title_search.rowid JOIN threads t ON t.id = d.thread_id
-                 WHERE title_search MATCH ?1 AND t.archived_at IS NULL AND t.side_of IS NULL
+                 WHERE title_search MATCH ?1 AND t.archived_at IS NULL AND t.side_of IS NULL AND NOT t.editor_chat
                  ORDER BY bm25(title_search), t.updated_at DESC LIMIT ?4",
             )?;
             let rows = st.query_map(params![q, OPEN, CLOSE, limit], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
@@ -520,7 +520,7 @@ impl Store {
                 "SELECT m.rowid AS rowid, i.thread_id AS thread_id, m.score AS score, t.updated_at AS updated_at
                  FROM (SELECT rowid, rank AS score FROM item_search WHERE item_search MATCH ?1 ORDER BY rank LIMIT ?3) m
                  JOIN items i ON i.pk = m.rowid JOIN threads t ON t.id = i.thread_id
-                 WHERE t.archived_at IS NULL AND t.side_of IS NULL",
+                 WHERE t.archived_at IS NULL AND t.side_of IS NULL AND NOT t.editor_chat",
                 &q,
                 limit,
             )?;
@@ -529,7 +529,7 @@ impl Store {
                 "SELECT m.rowid AS rowid, d.thread_id AS thread_id, m.score AS score, t.updated_at AS updated_at
                  FROM (SELECT rowid, rank AS score FROM import_search WHERE import_search MATCH ?1 ORDER BY rank LIMIT ?3) m
                  JOIN import_docs d ON d.pk = m.rowid JOIN threads t ON t.id = d.thread_id
-                 WHERE t.archived_at IS NULL AND t.side_of IS NULL
+                 WHERE t.archived_at IS NULL AND t.side_of IS NULL AND NOT t.editor_chat
                    AND NOT EXISTS (SELECT 1 FROM items WHERE items.thread_id = d.thread_id)",
                 &q,
                 limit,

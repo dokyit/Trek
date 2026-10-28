@@ -174,6 +174,10 @@ pub struct Thread {
     /// The agent that started it (`started_by`) hears when it finishes or needs the user
     /// (`start_thread`'s `notify`).
     pub notify_starter: bool,
+    /// A chat of Editor mode's AI side bar, about the code open there: listed only there (its
+    /// tabs and history), never with the threads of Agents mode (the sidebar, inbox, Basecamp,
+    /// search, phones). Threads made before there were editor chats stay Agents threads.
+    pub editor_chat: bool,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -229,7 +233,7 @@ impl Thread {
 
     /// Where the thread would sit on its own, a sub-agent too (a search lists those).
     pub fn own_section(&self, now: i64) -> Option<Section> {
-        if self.archived_at.is_some() || self.side_of.is_some() {
+        if self.archived_at.is_some() || self.side_of.is_some() || self.editor_chat {
             return None;
         }
         if self.pinned_at.is_some() {
@@ -500,6 +504,7 @@ const THREAD_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("started_by", "TEXT"),
     ("continued_from", "TEXT"),
     ("notify_starter", "INTEGER NOT NULL DEFAULT 0"),
+    ("editor_chat", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// Migrations; each is a no-op once applied. Run inside one transaction (`with_connection`), so
@@ -721,7 +726,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id, started_by, continued_from, notify_starter";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id, started_by, continued_from, notify_starter, editor_chat";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -774,6 +779,7 @@ impl Store {
             started_by: r.get(33)?,
             continued_from: r.get(34)?,
             notify_starter: r.get::<_, i64>(35)? != 0,
+            editor_chat: r.get::<_, i64>(36)? != 0,
         })
     }
 
@@ -856,6 +862,7 @@ impl Store {
             started_by: None,
             continued_from: None,
             notify_starter: false,
+            editor_chat: false,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -940,7 +947,8 @@ impl Store {
                 t.parent_id,
                 t.started_by,
                 t.continued_from,
-                t.notify_starter as i64
+                t.notify_starter as i64,
+                t.editor_chat as i64
             ],
         )?;
         Ok(())
@@ -1260,6 +1268,7 @@ impl Store {
             started_by: None,
             continued_from: None,
             notify_starter: false,
+            editor_chat: false,
         })
     }
 

@@ -1,6 +1,6 @@
-//! The status bar along the editor's foot: the branch, problems and agents at work on the left;
-//! where the caret is and what the file is on the right. A view of its own, so the caret moving
-//! redraws only this row.
+//! The status bar along the editor's foot: the branch and problems on the left; where the caret
+//! is and what the file is on the right. A view of its own, so the caret moving redraws only
+//! this row.
 
 use super::{IdeWorkbench, PanelTab, SideView};
 use crate::editor::EditorView;
@@ -8,7 +8,6 @@ use crate::workspace::Workspace;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use trek_core::RunState;
 
 pub const HEIGHT: f32 = 24.;
 
@@ -117,25 +116,6 @@ impl Render for IdeStatus {
             .filter(|g| g.is_repo)
             .cloned();
         let (errors, warnings) = ws.diagnostic_counts();
-        let threads = ws.ide_threads();
-        let working = threads
-            .iter()
-            .filter(|t| t.run_state == RunState::Working)
-            .count();
-        let needs = threads.iter().filter(|t| t.needs_you()).count();
-        let ember = crate::palette::ember(cx);
-        let agents = match (working, needs) {
-            (0, 0) => None,
-            (w, 0) => Some(format!(
-                "{w} agent{} working",
-                if w == 1 { "" } else { "s" }
-            )),
-            (0, n) => Some(format!("{n} need{} you", if n == 1 { "s" } else { "" })),
-            (w, n) => Some(format!(
-                "{w} working · {n} need{} you",
-                if n == 1 { "s" } else { "" }
-            )),
-        };
         let editor = self.editor.as_ref().map(|e| {
             let e = e.read(cx);
             (
@@ -194,21 +174,6 @@ impl Render for IdeStatus {
                         wb.show_panel(PanelTab::Problems, window, cx)
                     })),
             )
-            .when_some(agents, |el, text| {
-                el.child(
-                    Self::item("ide-status-agents", cx)
-                        .text_color(if needs > 0 {
-                            crate::palette::amber(cx)
-                        } else {
-                            ember
-                        })
-                        .child(Icon::new(crate::assets::Lucide::Sparkles).size(px(12.)))
-                        .child(text)
-                        .on_click(self.on_workbench(|wb, window, cx| {
-                            wb.show_view(SideView::Agents, window, cx)
-                        })),
-                )
-            })
             .child(div().flex_1())
             .when_some(
                 editor,

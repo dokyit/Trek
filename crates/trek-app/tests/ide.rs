@@ -1,5 +1,6 @@
 //! Trek IDE (Editor mode): the switch and what it carries across, the AI side bar's chats (and
-//! that they're ordinary threads), the editor's tabs, Quick Open and the Explorer's cache.
+//! that they're the editor's own, kept out of Agents mode), the editor's tabs, Quick Open and the
+//! Explorer's cache.
 
 mod common;
 
@@ -93,7 +94,7 @@ fn switching_modes_keeps_the_harness_route_and_the_editor_state() {
 }
 
 #[test]
-fn a_new_chat_in_the_editor_starts_a_thread_without_moving_the_harness() {
+fn a_new_chat_in_the_editor_starts_an_editor_chat_without_moving_the_harness() {
     run(async |cx| {
         let trek = open(cx);
         editor_on_draft(&trek, cx);
@@ -125,7 +126,8 @@ fn a_new_chat_in_the_editor_starts_a_thread_without_moving_the_harness() {
         assert!(!tab_strip.contains(&id), "nor did it get a tab there");
         let t = trek
             .read(cx, |ws, _| ws.thread(&id).cloned())
-            .expect("an ordinary thread");
+            .expect("a thread");
+        assert!(t.editor_chat, "the editor's own chat");
         assert_eq!(
             t.cwd.as_deref(),
             Some(trek.project.as_path()),
@@ -134,12 +136,16 @@ fn a_new_chat_in_the_editor_starts_a_thread_without_moving_the_harness() {
         assert_eq!(trek.read(cx, |ws, _| ws.threads.len()), before + 1);
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(!trek.answers(cx, &id).is_empty(), "the agent answered it");
-        // It's in the harness's inbox, like a thread started there.
+        // Not in Agents mode's inbox, nor counted in its badge; in the side bar's history.
         assert!(trek.read(cx, |ws, _| {
-            ws.sections()
+            !ws.sections()
                 .iter()
                 .any(|(_, list)| list.iter().any(|t| t.id == id))
         }));
+        assert!(
+            trek.read(cx, |ws, _| ws.ide_threads().iter().any(|t| t.id == id)),
+            "the folder's history lists it"
+        );
         // On screen in the editor: no toast or badge for it, and window actions act on it.
         assert_eq!(trek.read(cx, |ws, _| ws.shown_in(&id)), Some(Scope::Ide));
         assert_eq!(
@@ -153,8 +159,9 @@ fn a_new_chat_in_the_editor_starts_a_thread_without_moving_the_harness() {
 fn chat_tabs_open_switch_and_close_without_losing_threads() {
     run(async |cx| {
         let trek = open(cx);
-        let a = trek.quiet_thread(cx);
+        let a = trek.editor_chat(cx);
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
+        trek.update(cx, |ws, cx| ws.ide_open_thread(&a, cx));
         trek.render(cx);
         assert_eq!(
             trek.read(cx, |ws, _| ws.ide_chat.active_thread().map(str::to_string)),
@@ -192,12 +199,13 @@ fn chat_tabs_open_switch_and_close_without_losing_threads() {
 }
 
 #[test]
-fn the_switch_carries_the_thread_both_ways() {
+fn the_switch_carries_the_folder_and_each_mode_keeps_its_own_chats() {
     run(async |cx| {
         let trek = open(cx);
         let elsewhere = common::new_project("elsewhere");
         trek.update(cx, |ws, cx| ws.set_ide_root(elsewhere.clone(), cx));
-        // Harness → editor with a thread open: its folder and its chat come along.
+        // Harness → editor with a thread open: its folder comes along, the thread doesn't (the
+        // side bar keeps chats of its own).
         let a = trek.quiet_thread(cx);
         trek.click(cx, "mode-editor");
         trek.render(cx);
@@ -205,27 +213,15 @@ fn the_switch_carries_the_thread_both_ways() {
             trek.read(cx, |ws, _| ws.ide_root.clone()),
             Some(trek.project.clone())
         );
-        assert_eq!(
-            trek.read(cx, |ws, _| ws.ide_chat.active_thread().map(str::to_string)),
-            Some(a.clone())
-        );
+        assert!(trek.read(cx, |ws, _| ws.ide_chat.is_draft()));
+        // An Agents thread doesn't open in the side bar, nor is it in its history.
+        trek.update(cx, |ws, cx| ws.ide_open_thread(&a, cx));
+        assert!(trek.read(cx, |ws, _| ws.ide_chat.tabs == [IdeTab::Draft]));
+        assert!(trek.read(cx, |ws, _| !ws.ide_threads().iter().any(|t| t.id == a)));
 
-        // Another thread in the AI side bar; the window's actions act on it, not the harness's.
-        let b = trek.update(cx, |ws, cx| {
-            let t = ws
-                .store
-                .create_thread(
-                    Some(&trek.project),
-                    common::mock(),
-                    None,
-                    trek_core::Effort::Medium,
-                    trek_core::HandHolding::Auto,
-                )
-                .unwrap();
-            ws.reload(cx);
-            ws.ide_open_thread(&t.id, cx);
-            t.id
-        });
+        // An editor chat in the AI side bar; the window's actions act on it, not the harness's.
+        let b = trek.editor_chat(cx);
+        trek.update(cx, |ws, cx| ws.ide_open_thread(&b, cx));
         assert_eq!(
             trek.read(cx, |ws, _| (
                 ws.route.clone(),
@@ -238,23 +234,110 @@ fn the_switch_carries_the_thread_both_ways() {
             (None, Some(Scope::Ide))
         );
 
-        // Editor → harness: the side bar's chat opens there.
+        // Editor → harness: the harness is where it was; the editor chat stays in the editor.
         trek.click(cx, "mode-agents");
         trek.render(cx);
         assert_eq!(
             trek.read(cx, |ws, _| (ws.mode, ws.route.clone())),
-            (Mode::Agents, Route::Thread(b.clone()))
+            (Mode::Agents, Route::Thread(a.clone()))
         );
 
-        // Unless following is off: then the harness stays where it was.
-        trek.update(cx, |ws, cx| {
-            ws.settings.ide.follow_active_chat = false;
-            ws.navigate(Route::Thread(a.clone()), cx);
-            ws.set_mode(Mode::Editor, cx);
-            ws.ide_open_thread(&b, cx);
-            ws.set_mode(Mode::Agents, cx);
+        // Asked to show the editor chat (an alert, a link), the window goes to the editor.
+        trek.update(cx, |ws, cx| ws.open_thread_here(&b, cx));
+        assert_eq!(
+            trek.read(cx, |ws, _| (
+                ws.mode,
+                ws.route.clone(),
+                ws.ide_chat.active_thread().map(str::to_string)
+            )),
+            (Mode::Editor, Route::Thread(a.clone()), Some(b.clone()))
+        );
+        trek.update(cx, |ws, cx| ws.set_mode(Mode::Agents, cx));
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(b.clone()), cx));
+        assert_eq!(
+            trek.read(cx, |ws, _| (ws.mode, ws.route.clone())),
+            (Mode::Editor, Route::Thread(a.clone())),
+            "never in the harness"
+        );
+        // And an Agents thread asked for from the editor opens in Agents.
+        trek.update(cx, |ws, cx| ws.open_thread_here(&a, cx));
+        assert_eq!(
+            trek.read(cx, |ws, _| (ws.mode, ws.route.clone())),
+            (Mode::Agents, Route::Thread(a))
+        );
+    });
+}
+
+#[test]
+fn editor_chats_stay_out_of_agents_lists_and_agents_threads_out_of_the_editor() {
+    run(async |cx| {
+        let trek = open(cx);
+        editor_on_draft(&trek, cx);
+        let chat = ai_send(&trek, cx, "explain the startup", "enter");
+        trek.wait_done(cx, &chat, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.rename(&chat, "Editor work".into(), cx));
+        // An Agents thread in the same folder.
+        let agents = trek.update(cx, |ws, cx| {
+            let mut t = ws
+                .store
+                .create_thread(
+                    Some(&trek.project),
+                    common::mock(),
+                    None,
+                    trek_core::Effort::Medium,
+                    trek_core::HandHolding::Auto,
+                )
+                .unwrap();
+            t.title = "Agents work".into();
+            ws.store.save_thread(&t).unwrap();
+            ws.reload(cx);
+            t.id
         });
-        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(a));
+
+        // The sidebar's sections, the Dock badge, Basecamp's lists and phones go by `section`.
+        let listed = |trek: &Trek, cx: &TestAppContext, id: &str| {
+            trek.read(cx, |ws, _| {
+                ws.sections()
+                    .iter()
+                    .any(|(_, list)| list.iter().any(|t| t.id == id))
+            })
+        };
+        assert!(listed(&trek, cx, &agents) && !listed(&trek, cx, &chat));
+        assert!(
+            trek.read(cx, |ws, _| ws
+                .thread(&chat)
+                .is_some_and(|t| t.section(trek_core::store::now_ms()).is_none()))
+        );
+        // Search finds Agents threads only.
+        let hits = |q: &str| {
+            trek.read(cx, |ws, _| ws.store.search(q, 20).unwrap())
+                .into_iter()
+                .map(|h| h.thread_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(hits("work"), [agents.clone()]);
+        assert!(hits("editor").is_empty() && hits("startup").is_empty());
+        // The side bar's history: the editor chat, not the Agents thread.
+        let history: Vec<String> = trek.read(cx, |ws, _| {
+            ws.ide_threads().iter().map(|t| t.id.clone()).collect()
+        });
+        assert_eq!(history, [chat.clone()]);
+
+        // A tab kept from before editor chats (an Agents thread) doesn't come back on the bar.
+        trek.update(cx, |ws, cx| {
+            ws.store
+                .set_ide_chats(
+                    &trek.project.display().to_string(),
+                    &format!(r#"{{"tabs":["{agents}","{chat}"],"active":0}}"#),
+                )
+                .unwrap();
+            ws.set_ide_root(common::new_project("away"), cx);
+            ws.set_ide_root(trek.project.clone(), cx);
+        });
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.ide_chat.tabs.clone()),
+            [IdeTab::Thread(chat.clone())]
+        );
     });
 }
 
@@ -2082,7 +2165,7 @@ fn the_explorer_makes_renames_and_trashes_files_and_tabs_follow() {
 fn chat_tabs_keep_their_width_list_in_a_menu_and_rename() {
     run(async |cx| {
         let trek = open(cx);
-        let ids: Vec<String> = (0..5).map(|_| trek.quiet_thread(cx)).collect();
+        let ids: Vec<String> = (0..5).map(|_| trek.editor_chat(cx)).collect();
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
         for id in &ids {
             trek.update(cx, |ws, cx| ws.ide_open_thread(id, cx));
@@ -2191,8 +2274,8 @@ fn cmd_k_edits_go_to_the_files_own_chat_and_leave_the_open_one_alone() {
 fn each_chat_keeps_its_own_draft() {
     run(async |cx| {
         let trek = open(cx);
-        let a = trek.quiet_thread(cx);
-        let b = trek.quiet_thread(cx);
+        let a = trek.editor_chat(cx);
+        let b = trek.editor_chat(cx);
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
         trek.update(cx, |ws, cx| ws.ide_open_thread(&a, cx));
         let input = ai_input(&trek, cx);
@@ -2447,7 +2530,7 @@ fn a_turn_is_undone_from_the_side_bar_after_saying_which_files_go_back() {
 fn the_ai_transcript_only_redraws_for_its_own_chat() {
     run(async |cx| {
         let trek = open(cx);
-        let shown = trek.quiet_thread(cx);
+        let shown = trek.editor_chat(cx);
         let other = trek.quiet_thread(cx);
         trek.update(cx, |ws, cx| ws.set_mode(Mode::Editor, cx));
         trek.update(cx, |ws, cx| ws.ide_open_thread(&shown, cx));

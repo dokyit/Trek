@@ -5,18 +5,18 @@
 //! ├ primary side bar ─┬ tabs / breadcrumbs ──────────────────┬ AI side bar ─────────┤
 //! │ activity row      │ editor                                │ chat tabs  + 🕘 ⋯     │
 //! │ Explorer · Search │                                       │ transcript            │
-//! │ Source Control ·  ├ Problems · Output · Terminal · Tasks ─┤ composer              │
-//! │ Agents            │                                       │                       │
+//! │ · Source Control  ├ Problems · Output · Terminal · Tasks ─┤ composer              │
+//! │                   │                                       │                       │
 //! ├ status bar ───────┴───────────────────────────────────────┴───────────────────────┤
 //! ```
 //!
 //! Flat like the editors it borrows from: hairlines between regions, no cards. The regions
 //! resize by their edges and hide with ⌘B, ⌥⌘B and ⌘J; the layout is kept in settings. Editor
 //! tabs live here (the harness's lone `Route::Editor` borrows them too), the AI side bar is
-//! `ai::AiPane` over `Scope::Ide`.
+//! `ai::AiPane` over `Scope::Ide`. An editor of its own: the side bar's chats are editor chats,
+//! kept apart from Agents mode's threads, and nothing here lists or opens those.
 
 mod activity;
-mod agents_view;
 pub mod ai;
 pub mod diff_view;
 mod editor_group;

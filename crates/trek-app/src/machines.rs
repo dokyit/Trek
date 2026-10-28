@@ -705,6 +705,7 @@ pub fn thread_of(host: &str, s: &tr::ThreadSummary) -> Thread {
         started_by: None,
         continued_from: None,
         notify_starter: false,
+        editor_chat: false,
     }
 }
 

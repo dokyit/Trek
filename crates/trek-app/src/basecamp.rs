@@ -1160,7 +1160,8 @@ pub fn tables(window: &basecamp::Window, threads: &[ThreadActivity]) -> (Vec<Row
         if !worked && failed == 0 {
             continue;
         }
-        let own = (worked && t.thread.parent_id.is_none()) as usize;
+        // As the recap counts threads: sub-agents and editor chats aren't the user's threads.
+        let own = (worked && t.thread.parent_id.is_none() && !t.thread.editor_chat) as usize;
         let tokens: u64 = usage.iter().map(|u| u.tokens.total()).sum();
         let model = t.thread.model.as_deref().or_else(|| busiest_model(&usage));
         // A report that names no model was the thread's.
