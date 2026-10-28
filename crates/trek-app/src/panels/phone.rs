@@ -5,6 +5,12 @@
 //! apps and files go over usbmuxd as Finder's do (`trek_phone::device`). No Xcode, no Developer
 //! Mode, nothing installed on the phone.
 //!
+//! A phone on the Mac's own Apple Account never takes the Mac as a Bluetooth keyboard (it's
+//! already bonded for Continuity), so its taps and keys go through macOS's iPhone Mirroring
+//! window instead, in the background (`trek_phone::mirror`), and the picture comes from that
+//! window while it shows the phone. Mirroring connects only while the phone is locked; while
+//! it's unlocked the picture comes over USB and the panel says to lock it to tap.
+//!
 //! Agents' `trek-mcp phone` calls come here one at a time (`RightPanel::phone_call`). One thread
 //! holds the phone at a time (`trek_phone::lease`); a strip says who, with Stop to take it back,
 //! as the Browser's does. Installing and changing files ask first by the thread's access level,
@@ -29,9 +35,10 @@ use std::time::{Duration, Instant};
 use trek_agents::Decision;
 use trek_core::HandHolding;
 use trek_ipc::phone::{self as tools, Sensitive};
-use trek_phone::helper::{self, Event, Link, Status};
+use trek_phone::helper::{self, Event, Link, MirrorCmd, Mirrored, Status};
 use trek_phone::hid::{self, Step};
 use trek_phone::lease::{Lease, TOOK_OVER};
+use trek_phone::mirror::{self, State as MirrorState};
 use trek_phone::{device, files};
 
 /// Frames for the panel are at most this wide, and come this often at most.
@@ -46,8 +53,28 @@ const SHOT_EDGE: u32 = 1200;
 const SHOT_MAX: u32 = 2000;
 /// Pointer travel (window px) below which a press is a tap.
 const TAP_SLOP: f32 = 6.;
+/// How often iPhone Mirroring's window is read while Bluetooth can't tap.
+const MIRROR_LOOK: Duration = Duration::from_secs(3);
+/// How long iPhone Mirroring gets to show the phone once opened or told to connect.
+const MIRROR_CONNECT: Duration = Duration::from_secs(20);
 
 const NOT_PAIRED: &str = "The iPhone isn't paired with Trek's Bluetooth keyboard and mouse yet, so taps and keys can't reach it. The user does this once: on the iPhone, Settings › Bluetooth, tap \"Trek\" under Other Devices (Trek's iPhone tool must be open). Screenshots, apps and files work without it.";
+/// Said when the phone is bonded to this Mac for Continuity instead: its restored subscriptions
+/// look like a pairing, but it drops what's sent.
+const LINKED: &str = "This iPhone is linked to this Mac through the user's Apple Account, and over that link iOS doesn't take Trek as a Bluetooth keyboard and mouse; pairing in Settings › Bluetooth can't change that. Taps and keys go through iPhone Mirroring instead."; // words: ok, the iPhone tool is macOS only
+
+/// Before what iPhone Mirroring needs, when Bluetooth isn't paired either.
+const OR_MIRRORING: &str =
+    "With the iPhone on this Mac's own Apple Account, taps go through iPhone Mirroring instead:"; // words: ok, the iPhone tool is macOS only
+
+/// Why taps and keys can't reach the phone now.
+fn not_ready(status: &Status) -> &'static str {
+    if status.linked_only() {
+        LINKED
+    } else {
+        NOT_PAIRED
+    }
+}
 
 /// What needs the user's yes, by the thread's access level: installing an app unless the thread
 /// has full access; writing or removing files unless it's on Auto or full access.
@@ -104,7 +131,15 @@ pub struct PhonePanel {
     allowed: HashSet<(String, Sensitive)>,
     /// The latest screenshot's size: agents' x/y are pixels in it.
     shot_size: Option<(f64, f64)>,
+    /// Whether that screenshot was iPhone Mirroring's window rather than the cable's picture.
+    shot_mirrored: bool,
     shots: u64,
+    /// iPhone Mirroring as last read, while Bluetooth can't tap (`None` before the first look).
+    mirror: Option<MirrorState>,
+    mirror_looked: Option<Instant>,
+    mirror_looking: bool,
+    /// Whether the frames shown come from iPhone Mirroring's window (told to the helper).
+    mirror_frames: bool,
     notice: Option<SharedString>,
     _tasks: Vec<Task<()>>,
 }
@@ -185,7 +220,12 @@ impl PhonePanel {
             last: None,
             allowed: HashSet::new(),
             shot_size: None,
+            shot_mirrored: false,
             shots: 0,
+            mirror: None,
+            mirror_looked: None,
+            mirror_looking: false,
+            mirror_frames: false,
             notice: None,
             _tasks: vec![frames, tick],
         }
@@ -241,10 +281,52 @@ impl PhonePanel {
         if let Some(link) = &self.link {
             link.ask_status();
         }
+        if !self.status.input_ready()
+            && self
+                .mirror_looked
+                .is_none_or(|t| t.elapsed() >= MIRROR_LOOK)
+        {
+            self.look_mirror(window, cx);
+        }
         // The strip goes a while after the last call.
         if self.last.as_ref().is_some_and(|a| {
             !self.busy() && a.at.elapsed() >= STRIP_LINGER && a.at.elapsed() < STRIP_LINGER + TICK
         }) {
+            cx.notify();
+        }
+    }
+
+    /// Read iPhone Mirroring's window (a few Accessibility calls in the helper).
+    fn look_mirror(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(link) = self.link.clone().filter(|_| !self.mirror_looking) else {
+            return;
+        };
+        self.mirror_looking = true;
+        self.mirror_looked = Some(Instant::now());
+        let rx = link.mirror(&MirrorCmd::Look);
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = rx.recv().await.ok();
+            let _ = this.update(cx, |this, cx| {
+                this.mirror_looking = false;
+                if let Some(m) = answer {
+                    this.set_mirror(MirrorState::of(&m.look), cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// iPhone Mirroring's state: while it shows the phone, the picture comes from its window.
+    fn set_mirror(&mut self, state: MirrorState, cx: &mut Context<Self>) {
+        let live = state == MirrorState::Live && !self.status.input_ready();
+        if live != self.mirror_frames
+            && let Some(link) = &self.link
+        {
+            link.mirror_frames(live);
+            self.mirror_frames = live;
+        }
+        if self.mirror.as_ref() != Some(&state) {
+            self.mirror = Some(state);
             cx.notify();
         }
     }
@@ -295,9 +377,18 @@ impl PhonePanel {
                     }
                 }
                 this.assistive = assistive;
+                this.aim();
                 cx.notify();
             },
         );
+    }
+
+    /// Tell the helper which phone to drive: the user's other devices (an Apple Watch) take
+    /// Trek's keyboard too, and only the phone may count as paired or get its reports.
+    fn aim(&self) {
+        if let (Some(link), Some(phone)) = (&self.link, &self.phone) {
+            link.target(&phone.name);
+        }
     }
 
     /// Build the helper once, then keep it running while the tool is wanted.
@@ -335,6 +426,7 @@ impl PhonePanel {
                 Ok((link, events)) => {
                     link.frames(self.visible, LIVE_FPS);
                     self.link = Some(link);
+                    self.aim();
                     self._link_events = Some(cx.spawn_in(window, async move |this, cx| {
                         while let Ok(event) = events.recv().await {
                             let done = matches!(event, Event::Exited);
@@ -384,6 +476,8 @@ impl PhonePanel {
                 self._link_events = None;
                 self.link_retry = Some(Instant::now());
                 self.status = Status::default();
+                self.mirror_frames = false;
+                self.mirror_looking = false;
                 cx.notify();
             }
         }
@@ -461,8 +555,9 @@ impl PhonePanel {
         let Some(start) = self.press.take() else {
             return;
         };
-        if !self.status.input_ready() {
-            self.notice = Some(NOT_PAIRED.into());
+        let mirrored = !self.status.input_ready() && self.mirror_frames;
+        if !self.status.input_ready() && !mirrored {
+            self.notice = Some(self.no_taps().into());
             cx.notify();
             return;
         }
@@ -473,8 +568,25 @@ impl PhonePanel {
         ) else {
             return;
         };
-        self.ensure_assistive(window, cx);
         let moved = ((p.x - start.x).as_f32().powi(2) + (p.y - start.y).as_f32().powi(2)).sqrt();
+        if mirrored {
+            // The picture is iPhone Mirroring's window: its fractions are the window's.
+            let _ = link.mirror(&if moved < TAP_SLOP {
+                MirrorCmd::Tap {
+                    x: a.0,
+                    y: a.1,
+                    hold_ms: 80,
+                }
+            } else {
+                MirrorCmd::Drag {
+                    from: a,
+                    to: b,
+                    ms: 300,
+                }
+            });
+            return;
+        }
+        self.ensure_assistive(window, cx);
         let steps = if moved < TAP_SLOP {
             hid::tap(a.0, a.1, 80)
         } else {
@@ -484,14 +596,27 @@ impl PhonePanel {
     }
 
     fn home(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        match self.link.clone().filter(|_| self.status.input_ready()) {
-            Some(link) => {
+        match self.link.clone() {
+            Some(link) if self.status.input_ready() => {
                 let _ = link.hid(&hid::home());
             }
-            None => {
-                self.notice = Some(NOT_PAIRED.into());
+            Some(link) if self.mirror_frames => {
+                let _ = link.mirror(&MirrorCmd::Menu(mirror::HOME));
+            }
+            _ => {
+                self.notice = Some(self.no_taps().into());
                 cx.notify();
             }
+        }
+    }
+
+    /// Why the user's own taps can't reach the phone now.
+    fn no_taps(&self) -> String {
+        match &self.mirror {
+            Some(m) if self.status.linked_only() && *m != MirrorState::Live => {
+                format!("{} {}", not_ready(&self.status), m.advice())
+            }
+            _ => not_ready(&self.status).to_string(),
         }
     }
 
@@ -670,8 +795,19 @@ impl PhonePanel {
         } else {
             (green, "Live")
         };
+        let mirror = self.mirror.as_ref().map(|m| {
+            let color = match m {
+                MirrorState::Live => green,
+                MirrorState::Missing | MirrorState::NotAllowed => red,
+                MirrorState::Closed => theme.muted_foreground,
+                _ => amber,
+            };
+            (color, m.chip())
+        });
         let input = match s.bluetooth.as_str() {
-            _ if s.input_ready() => (green, "Paired"),
+            _ if s.input_ready() => (green, "Bluetooth"),
+            _ if self.mirror == Some(MirrorState::Live) => (green, "iPhone Mirroring"),
+            _ if s.linked_only() => mirror.unwrap_or((amber, "iPhone Mirroring")),
             "advertising" => (amber, "Pair in iPhone Bluetooth"),
             "off" => (red, "Bluetooth is off"),
             "not allowed" => (red, "Allow Bluetooth for Trek"),
@@ -703,7 +839,7 @@ impl PhonePanel {
             .border_b_1()
             .border_color(theme.border)
             .child(chip("Screen", screen))
-            .child(chip("Keyboard & mouse", input))
+            .child(chip("Taps", input))
             .child(chip("AssistiveTouch", at))
             .into_any_element()
     }
@@ -795,16 +931,38 @@ impl PhonePanel {
     /// Steps for the user while the phone isn't paired, or Trek can't see it.
     fn setup(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
-        let lines: Vec<&str> = if self.phone.is_none() {
+        let lines: Vec<String> = if self.phone.is_none() {
             vec![
-                "Plug the iPhone into this Mac with a data cable (a charge-only cable gives no screen).", // words: ok
-                "Unlock it and tap Trust.",
+                "Plug the iPhone into this Mac with a data cable (a charge-only cable gives no screen).".into(), // words: ok
+                "Unlock it and tap Trust.".into(),
             ]
+        } else if self.status.input_ready() || self.mirror == Some(MirrorState::Live) {
+            return None;
+        } else if self.status.linked_only() {
+            // Bluetooth can't work for this phone: iPhone Mirroring is the way.
+            let mut lines = vec![
+                "This iPhone is on this Mac's Apple Account, so iOS doesn't take Trek as a Bluetooth keyboard and mouse. Trek taps and types through iPhone Mirroring instead.".into(), // words: ok
+                "iPhone Mirroring connects only while the iPhone is locked and nearby; while it's unlocked, Trek shows its screen over USB. Set up iPhone Mirroring on this Mac once, and choose Authenticate Automatically in its Settings so it doesn't ask for Touch ID each time.".into(), // words: ok
+            ];
+            if let Some(note) = self.mirror.as_ref().map(MirrorState::note)
+                && !note.is_empty()
+            {
+                lines.push(note);
+            }
+            lines
         } else if self.status.bluetooth == "advertising" {
-            vec![
-                "To tap and type from Trek, pair once: on the iPhone, Settings › Bluetooth, tap \"Trek\" under Other Devices.",
-                "Trek turns AssistiveTouch on when it needs a pointer, and off again after. Turn Always Show Menu off in Settings › Accessibility › Touch › AssistiveTouch to keep its button out of the way.",
-            ]
+            let mut lines: Vec<String> = vec![
+                "To tap and type from Trek, pair once: on the iPhone, Settings › Bluetooth, tap \"Trek\" under Other Devices.".into(),
+                "Trek turns AssistiveTouch on when it needs a pointer, and off again after. Turn Always Show Menu off in Settings › Accessibility › Touch › AssistiveTouch to keep its button out of the way.".into(),
+            ];
+            if self
+                .mirror
+                .as_ref()
+                .is_some_and(|m| *m != MirrorState::Missing)
+            {
+                lines.push("An iPhone on this Mac's own Apple Account doesn't pair: Trek taps it through iPhone Mirroring instead, with the iPhone locked and nearby.".into()); // words: ok
+            }
+            lines
         } else {
             return None;
         };
@@ -868,7 +1026,9 @@ impl PhonePanel {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .when(self.status.input_ready(), |el| el.cursor_pointer())
+            .when(self.status.input_ready() || self.mirror_frames, |el| {
+                el.cursor_pointer()
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, _, _| this.press = Some(e.position)),
@@ -1045,6 +1205,14 @@ struct Run<'a> {
     stops: u64,
 }
 
+/// How a call's taps and keys reach the phone.
+enum Via {
+    /// Trek's Bluetooth keyboard and mouse, which the phone took (one on another Apple Account).
+    Bluetooth,
+    /// macOS's iPhone Mirroring window, showing the phone.
+    Mirroring(Arc<Link>),
+}
+
 fn gone<E>(_: E) -> String {
     "Trek's iPhone tool closed.".to_string()
 }
@@ -1125,9 +1293,23 @@ impl Run<'_> {
                 self.screenshot(edge).await
             }
             "phone_tap" => {
-                let (x, y) = self.point(&p, "x", "y")?;
                 let hold = p["hold_ms"].as_u64().unwrap_or(80).min(10_000) as u32;
-                self.input(hid::tap(x, y, hold), true).await?;
+                match self.via().await? {
+                    Via::Bluetooth => {
+                        let (x, y) = self.point(&p, "x", "y", false)?;
+                        self.input(hid::tap(x, y, hold), true).await?;
+                    }
+                    Via::Mirroring(link) => {
+                        let (x, y) = self.point(&p, "x", "y", true)?;
+                        let cmd = MirrorCmd::Tap {
+                            x,
+                            y,
+                            hold_ms: hold,
+                        };
+                        let limit = Duration::from_millis(u64::from(hold) + 5000);
+                        self.mirror_act(&link, cmd, limit).await?;
+                    }
+                }
                 text(format!(
                     "{} ({}, {}). Take a screenshot to see what it did.",
                     if hold >= 500 {
@@ -1140,26 +1322,60 @@ impl Run<'_> {
                 ))
             }
             "phone_swipe" => {
-                let from = self.point(&p, "x1", "y1")?;
-                let to = self.point(&p, "x2", "y2")?;
                 let ms = p["duration_ms"].as_u64().unwrap_or(300).clamp(60, 5000) as u32;
-                self.input(hid::swipe(from, to, ms), true).await?;
+                match self.via().await? {
+                    Via::Bluetooth => {
+                        let from = self.point(&p, "x1", "y1", false)?;
+                        let to = self.point(&p, "x2", "y2", false)?;
+                        self.input(hid::swipe(from, to, ms), true).await?;
+                    }
+                    Via::Mirroring(link) => {
+                        let from = self.point(&p, "x1", "y1", true)?;
+                        let to = self.point(&p, "x2", "y2", true)?;
+                        let limit = Duration::from_millis(u64::from(ms) + 5000);
+                        self.mirror_act(&link, MirrorCmd::Drag { from, to, ms }, limit)
+                            .await?;
+                    }
+                }
                 text("Swiped. Take a screenshot to see where it went.")
             }
             "phone_type" => {
-                let mut steps = hid::type_text(&s("text"))?;
-                if p["submit"].as_bool() == Some(true) {
-                    steps.extend(hid::key("enter")?);
+                let submit = p["submit"].as_bool() == Some(true);
+                match self.via().await? {
+                    Via::Bluetooth => {
+                        let mut steps = hid::type_text(&s("text"))?;
+                        if submit {
+                            steps.extend(hid::key("enter")?);
+                        }
+                        self.input(steps, false).await?;
+                    }
+                    Via::Mirroring(link) => {
+                        let typed = s("text");
+                        let limit = Duration::from_millis(typed.chars().count() as u64 * 60 + 5000);
+                        self.mirror_act(&link, MirrorCmd::Text(typed), limit)
+                            .await?;
+                        if submit {
+                            self.mirror_key(&link, "enter").await?;
+                        }
+                    }
                 }
-                self.input(steps, false).await?;
                 text(format!("Typed {} characters.", s("text").chars().count()))
             }
             "phone_key" => {
-                self.input(hid::key(&s("key"))?, false).await?;
+                match self.via().await? {
+                    Via::Bluetooth => self.input(hid::key(&s("key"))?, false).await?,
+                    Via::Mirroring(link) => self.mirror_key(&link, &s("key")).await?,
+                }
                 text(format!("Pressed {}.", s("key")))
             }
             "phone_home" => {
-                self.input(hid::home(), false).await?;
+                match self.via().await? {
+                    Via::Bluetooth => self.input(hid::home(), false).await?,
+                    Via::Mirroring(link) => {
+                        let cmd = MirrorCmd::Menu(mirror::HOME);
+                        self.mirror_act(&link, cmd, Duration::from_secs(5)).await?
+                    }
+                }
                 text("Went to the Home Screen.")
             }
             "phone_open_app" => {
@@ -1167,14 +1383,31 @@ impl Run<'_> {
                 if name.trim().is_empty() {
                     return Err("Which app? Give its name.".into());
                 }
-                let mut steps = hid::home();
-                steps.push(Step::Wait(800));
-                steps.extend(hid::key("cmd+space")?);
-                steps.push(Step::Wait(700));
-                steps.extend(hid::type_text(name.trim())?);
-                steps.push(Step::Wait(1000));
-                steps.extend(hid::key("enter")?);
-                self.input(steps, false).await?;
+                match self.via().await? {
+                    Via::Bluetooth => {
+                        let mut steps = hid::home();
+                        steps.push(Step::Wait(800));
+                        steps.extend(hid::key("cmd+space")?);
+                        steps.push(Step::Wait(700));
+                        steps.extend(hid::type_text(name.trim())?);
+                        steps.push(Step::Wait(1000));
+                        steps.extend(hid::key("enter")?);
+                        self.input(steps, false).await?;
+                    }
+                    Via::Mirroring(link) => {
+                        let menu = |key| (MirrorCmd::Menu(key), Duration::from_secs(5));
+                        let (home, spotlight) = (menu(mirror::HOME), menu(mirror::SPOTLIGHT));
+                        self.mirror_act(&link, home.0, home.1).await?;
+                        self.sleep(Duration::from_millis(800)).await;
+                        self.mirror_act(&link, spotlight.0, spotlight.1).await?;
+                        self.sleep(Duration::from_millis(700)).await;
+                        let typed = MirrorCmd::Text(name.trim().to_string());
+                        self.mirror_act(&link, typed, Duration::from_secs(10))
+                            .await?;
+                        self.sleep(Duration::from_millis(1000)).await;
+                        self.mirror_key(&link, "enter").await?;
+                    }
+                }
                 self.sleep(Duration::from_millis(800)).await;
                 text(format!(
                     "Opened Spotlight, searched for \"{}\" and pressed Return. Take a screenshot to check it's the app.",
@@ -1285,18 +1518,178 @@ impl Run<'_> {
         }
     }
 
-    /// A point of the latest screenshot as fractions of the screen.
-    fn point(&mut self, p: &Value, kx: &str, ky: &str) -> Result<(f64, f64), String> {
+    /// A point of the latest screenshot as fractions of the screen (`mirrored`: of iPhone
+    /// Mirroring's window, which that screenshot must then have been).
+    fn point(
+        &mut self,
+        p: &Value,
+        kx: &str,
+        ky: &str,
+        mirrored: bool,
+    ) -> Result<(f64, f64), String> {
         let (x, y) = (
             p[kx].as_f64().ok_or(format!("{kx} is missing"))?,
             p[ky].as_f64().ok_or(format!("{ky} is missing"))?,
         );
-        let size = self
+        let (size, shot_mirrored) = self
             .this
-            .update(self.cx, |p, _| p.shot_size)
+            .update(self.cx, |p, _| (p.shot_size, p.shot_mirrored))
             .map_err(gone)?;
+        if size.is_some() && shot_mirrored != mirrored {
+            return Err(if mirrored {
+                "Take a phone_screenshot first: the picture comes from iPhone Mirroring now, and x/y are pixels in it."
+            } else {
+                "Take a phone_screenshot first: the picture comes over USB now, and x/y are pixels in it."
+            }
+            .into());
+        }
         let (w, h) = size.unwrap_or((0., 0.));
         hid::fraction(x, y, w, h)
+    }
+
+    fn bluetooth(&mut self) -> Result<bool, String> {
+        self.this
+            .update(self.cx, |p, _| p.status.input_ready())
+            .map_err(gone)
+    }
+
+    /// Whether the cable brings a live picture: the iPhone is unlocked and in use, so iPhone
+    /// Mirroring can't connect.
+    fn usb_live(&mut self) -> Result<bool, String> {
+        self.this
+            .update(self.cx, |p, _| {
+                p.status.frames > 0 && (0. ..3.).contains(&p.status.frame_age)
+            })
+            .map_err(gone)
+    }
+
+    /// How taps and keys reach the phone now: its Bluetooth keyboard and mouse when it took
+    /// them, else iPhone Mirroring, brought to show the phone (or why it can't).
+    async fn via(&mut self) -> Result<Via, String> {
+        let link = self.link().await?;
+        if self.bluetooth()? {
+            return Ok(Via::Bluetooth);
+        }
+        match self.mirror_live(&link).await {
+            Ok(()) => Ok(Via::Mirroring(link)),
+            Err(e) => {
+                let status = self
+                    .this
+                    .update(self.cx, |p, _| p.status.clone())
+                    .map_err(gone)?;
+                Err(if status.linked_only() {
+                    e
+                } else {
+                    format!("{NOT_PAIRED} {OR_MIRRORING} {e}")
+                })
+            }
+        }
+    }
+
+    /// One command for iPhone Mirroring; its state afterwards is the panel's too.
+    async fn mirror_cmd(
+        &mut self,
+        link: &Arc<Link>,
+        cmd: MirrorCmd,
+        limit: Duration,
+    ) -> Result<Mirrored, String> {
+        let rx = link.mirror(&cmd);
+        let m = self
+            .within(rx, limit)
+            .await
+            .ok_or("iPhone Mirroring didn't answer in time.")??;
+        let state = MirrorState::of(&m.look);
+        self.this
+            .update(self.cx, |p, cx| {
+                p.mirror_looked = Some(Instant::now());
+                p.set_mirror(state, cx);
+            })
+            .map_err(gone)?;
+        Ok(m)
+    }
+
+    /// Tap, type or choose a menu item in iPhone Mirroring; its error, with what to do about it.
+    async fn mirror_act(
+        &mut self,
+        link: &Arc<Link>,
+        cmd: MirrorCmd,
+        limit: Duration,
+    ) -> Result<(), String> {
+        self.check()?;
+        let m = self.mirror_cmd(link, cmd, limit).await?;
+        match (m.error, MirrorState::of(&m.look)) {
+            (None, _) => Ok(()),
+            (Some(e), MirrorState::Live) => Err(e),
+            (Some(e), state) => Err(format!("{e} {}", state.advice())),
+        }
+    }
+
+    /// A key through iPhone Mirroring: ⌘Space is its Spotlight menu item, the rest go to its
+    /// window as keystrokes.
+    async fn mirror_key(&mut self, link: &Arc<Link>, combo: &str) -> Result<(), String> {
+        let plain = combo.to_ascii_lowercase().replace(' ', "");
+        let cmd = if ["cmd+space", "command+space", "meta+space"].contains(&plain.as_str()) {
+            MirrorCmd::Menu(mirror::SPOTLIGHT)
+        } else {
+            let (code, flags) = mirror::key(combo)?;
+            MirrorCmd::Key(code, flags)
+        };
+        self.mirror_act(link, cmd, Duration::from_secs(5)).await
+    }
+
+    /// iPhone Mirroring showing the phone: opened behind the user's windows, or told to connect,
+    /// once a call; never while the iPhone is unlocked and in use, which only times it out.
+    async fn mirror_live(&mut self, link: &Arc<Link>) -> Result<(), String> {
+        let first = self
+            .mirror_cmd(link, MirrorCmd::Look, Duration::from_secs(5))
+            .await?;
+        let state = MirrorState::of(&first.look);
+        match state {
+            MirrorState::Live => return Ok(()),
+            MirrorState::Missing | MirrorState::NotAllowed | MirrorState::MacLocked => {
+                return Err(state.advice());
+            }
+            _ => {}
+        }
+        if self.usb_live()? {
+            return Err(MirrorState::PhoneInUse.advice());
+        }
+        let kick = if state == MirrorState::Closed {
+            Some(MirrorCmd::Open)
+        } else if first.look.buttons.iter().any(|b| b == "Connect") {
+            Some(MirrorCmd::Press("Connect".into()))
+        } else {
+            None
+        };
+        if let Some(kick) = kick
+            && let Some(e) = self
+                .mirror_cmd(link, kick, Duration::from_secs(15))
+                .await?
+                .error
+        {
+            return Err(e);
+        }
+        let started = Instant::now();
+        loop {
+            self.sleep(Duration::from_millis(500)).await;
+            self.check()?;
+            let m = self
+                .mirror_cmd(link, MirrorCmd::Look, Duration::from_secs(5))
+                .await?;
+            let state = MirrorState::of(&m.look);
+            match state {
+                MirrorState::Live => {
+                    // The phone's picture settles a moment after it connects.
+                    self.sleep(Duration::from_millis(500)).await;
+                    return Ok(());
+                }
+                MirrorState::Missing | MirrorState::NotAllowed | MirrorState::MacLocked => {
+                    return Err(state.advice());
+                }
+                _ if started.elapsed() > MIRROR_CONNECT => return Err(state.advice()),
+                _ => {}
+            }
+        }
     }
 
     /// Wait (a little) for the helper: built, running, and reporting.
@@ -1361,6 +1754,13 @@ impl Run<'_> {
         };
         let input = if status.input_ready() {
             "paired".to_string()
+        } else if status.linked_only() {
+            format!("not available. {LINKED}")
+        } else if !status.elsewhere.is_empty() && status.bluetooth == "advertising" {
+            format!(
+                "not paired ({} took Trek's keyboard and mouse instead; Trek sends nothing there). {NOT_PAIRED}",
+                status.elsewhere.join(", ")
+            )
         } else {
             match status.bluetooth.as_str() {
                 "advertising" => format!("not paired. {NOT_PAIRED}"),
@@ -1368,8 +1768,24 @@ impl Run<'_> {
                 other => format!("Bluetooth {other}"),
             }
         };
+        let mirroring = match &link {
+            Some(link) if !status.input_ready() => {
+                let m = self
+                    .mirror_cmd(link, MirrorCmd::Look, Duration::from_secs(5))
+                    .await?;
+                Some(MirrorState::of(&m.look))
+            }
+            _ => None,
+        };
+        let taps = match &mirroring {
+            None => "through Trek's Bluetooth keyboard and mouse".to_string(),
+            Some(MirrorState::Live) => {
+                "through iPhone Mirroring, which shows the iPhone now (screenshots come from its window)".to_string()
+            }
+            Some(m) => format!("through iPhone Mirroring, which isn't showing the iPhone: {}", m.advice()),
+        };
         text(format!(
-            "{} (iOS {}, {}, over {}).\nScreen: {screen}.\nKeyboard and mouse: {input}.\nAssistiveTouch: {} (Trek turns it on for taps).\nHeld by: {}.",
+            "{} (iOS {}, {}, over {}).\nScreen over USB: {screen}.\nBluetooth keyboard and mouse: {input}.\nTaps and keys: {taps}\nAssistiveTouch: {} (Trek turns it on for Bluetooth taps).\nHeld by: {}.",
             phone.name,
             phone.ios,
             phone.model,
@@ -1383,8 +1799,71 @@ impl Run<'_> {
         ))
     }
 
+    /// The screen as a picture: iPhone Mirroring's window while it shows the phone (brought up
+    /// when the phone is locked and Bluetooth can't tap), else the cable's.
     async fn screenshot(&mut self, edge: u32) -> Result<Value, String> {
         let link = self.link().await?;
+        let mut why_not = None;
+        if !self.bluetooth()? {
+            let live = self
+                .mirror_cmd(&link, MirrorCmd::Look, Duration::from_secs(5))
+                .await
+                .is_ok_and(|m| MirrorState::of(&m.look) == MirrorState::Live);
+            if live {
+                return self.mirror_screenshot(&link, edge).await;
+            }
+            if !self.usb_live()? {
+                match self.mirror_live(&link).await {
+                    Ok(()) => return self.mirror_screenshot(&link, edge).await,
+                    Err(e) => why_not = Some(e),
+                }
+            }
+        }
+        self.usb_screenshot(&link, edge)
+            .await
+            .map_err(|e| match why_not {
+                Some(m) => format!("{e} {m}"),
+                None => e,
+            })
+    }
+
+    fn shot_path(&mut self) -> Result<PathBuf, String> {
+        let n = self
+            .this
+            .update(self.cx, |p, _| {
+                p.shots += 1;
+                p.shots
+            })
+            .map_err(gone)?;
+        let dir = trek_core::paths::data_dir().join("phone-shots");
+        let _ = std::fs::create_dir_all(&dir);
+        Ok(dir.join(format!("{}-{n}.png", std::process::id())))
+    }
+
+    async fn mirror_screenshot(&mut self, link: &Arc<Link>, edge: u32) -> Result<Value, String> {
+        let path = self.shot_path()?;
+        let rx = link.mirror_shot(&path, edge);
+        let shot = self
+            .within(rx, Duration::from_secs(10))
+            .await
+            .ok_or("iPhone Mirroring's window didn't come in time.")???;
+        let size = (shot.width as f64, shot.height as f64);
+        self.this
+            .update(self.cx, |p, _| {
+                p.shot_size = Some(size);
+                p.shot_mirrored = true;
+            })
+            .map_err(gone)?;
+        Ok(json!({
+            "text": format!(
+                "The iPhone's screen in iPhone Mirroring, {}×{}. x/y for phone_tap and phone_swipe are pixels in this picture. Taps and keys go through iPhone Mirroring, which needs the iPhone to stay locked: if it ends, the user unlocked it.",
+                shot.width, shot.height
+            ),
+            "image": shot.path,
+        }))
+    }
+
+    async fn usb_screenshot(&mut self, link: &Arc<Link>, edge: u32) -> Result<Value, String> {
         // The first frame comes a second or two after the helper finds the screen.
         let started = Instant::now();
         loop {
@@ -1398,16 +1877,7 @@ impl Run<'_> {
             link.ask_status();
             self.sleep(Duration::from_millis(250)).await;
         }
-        let n = self
-            .this
-            .update(self.cx, |p, _| {
-                p.shots += 1;
-                p.shots
-            })
-            .map_err(gone)?;
-        let dir = trek_core::paths::data_dir().join("phone-shots");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("{}-{n}.png", std::process::id()));
+        let path = self.shot_path()?;
         let rx = link.shot(&path, edge);
         let shot = self
             .within(rx, Duration::from_secs(10))
@@ -1415,7 +1885,10 @@ impl Run<'_> {
             .ok_or("The iPhone's screen didn't come in time.")???;
         let size = (shot.width as f64, shot.height as f64);
         self.this
-            .update(self.cx, |p, _| p.shot_size = Some(size))
+            .update(self.cx, |p, _| {
+                p.shot_size = Some(size);
+                p.shot_mirrored = false;
+            })
             .map_err(gone)?;
         let stale = if shot.age > 5. {
             format!(
@@ -1437,12 +1910,14 @@ impl Run<'_> {
     /// Send reports to the phone; `pointer` input needs AssistiveTouch.
     async fn input(&mut self, steps: Vec<Step>, pointer: bool) -> Result<(), String> {
         let link = self.link().await?;
-        let ready = self
+        let not = self
             .this
-            .update(self.cx, |p, _| p.status.input_ready())
+            .update(self.cx, |p, _| {
+                (!p.status.input_ready()).then(|| not_ready(&p.status))
+            })
             .map_err(gone)?;
-        if !ready {
-            return Err(NOT_PAIRED.into());
+        if let Some(why) = not {
+            return Err(why.into());
         }
         if pointer {
             let (on, udid) = self
@@ -1480,7 +1955,11 @@ impl Run<'_> {
             .await
             .ok_or("The keyboard and mouse didn't answer in time.")??;
         if missed > 0 && sent == 0 {
-            return Err(NOT_PAIRED.into());
+            let why = self
+                .this
+                .update(self.cx, |p, _| not_ready(&p.status))
+                .map_err(gone)?;
+            return Err(why.into());
         }
         Ok(())
     }

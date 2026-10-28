@@ -5,6 +5,9 @@
 //! - **Input**: the Mac is a Bluetooth LE keyboard and mouse the iPhone pairs with once; with
 //!   AssistiveTouch on, iOS shows a pointer and takes its clicks as taps (`hid`, sent by the
 //!   helper).
+//! - **Or input through iPhone Mirroring**: a phone on the Mac's own Apple Account never takes the
+//!   Mac as a Bluetooth keyboard; then taps and keys go to macOS's iPhone Mirroring window in the
+//!   background, and the screen comes from it (`mirror`, done by the helper).
 //! - **Apps and files**: the phone's own services over usbmuxd, as Finder uses them (`device`):
 //!   install an app signed for the phone, list apps, copy files to and from its media folder or
 //!   a file-sharing app's Documents, switch AssistiveTouch on and off.
@@ -18,3 +21,5 @@ pub mod lease;
 pub mod device;
 #[cfg(target_os = "macos")]
 pub mod helper;
+#[cfg(target_os = "macos")]
+pub mod mirror;
