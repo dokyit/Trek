@@ -7,6 +7,11 @@
 // it shows a pointer. Trek computes the reports (trek-phone's hid.rs); this only sends them. The
 // GATT layout follows xhoantran/iphone-use (MIT).
 //
+// Mirroring: where Bluetooth can't work (a phone on the Mac's own Apple Account doesn't take it
+// as a keyboard), taps and keys go to macOS's iPhone Mirroring window instead, in the background
+// as Trek's computer use does it (trek-mcp's desktop/skylight.rs: the same private calls and
+// fields), and its state is read through Accessibility (trek-phone's mirror.rs reads it).
+//
 //   trek-phone <report map hex> <frame max width>
 // stdin, one command a line:
 //   hid <id>:<hex> w<ms> ...     send reports to the paired phone, pausing as told
@@ -14,10 +19,17 @@
 //   frames on [fps] | frames off stream JPEG frames of the screen
 //   shot <max edge> <path>       write the newest frame there as PNG (the path may have spaces)
 //   status                       report the state now
+//   mirror look | open | press <label> | menu <key> | tap <fx> <fy> <ms>
+//     | drag <fx> <fy> <fx> <fy> <ms> | text <utf-8 hex> | key <keycode> <flags>
+//                                iPhone Mirroring: act (points as fractions of its window), then
+//                                answer with its state
+//   mirrorshot <max edge> <path> its window as PNG, answered as a shot
+//   mirrorframes on | off        frames from its window instead of the cable
 //   quit
 // stdout, framed: <type u8><length u32 BE><payload>
 //   1  a frame: width u16 BE, height u16 BE (the screen's), then JPEG
 //   2  a message (UTF-8 JSON): {"event":"status",...} | {"event":"shot",...} | {"event":"error",...}
+//      | {"event":"mirror",...}
 
 import AVFoundation
 import AppKit
@@ -411,6 +423,8 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
   var frames = 0
   var lastFrame: Date?
   var streaming = false
+  /// Frames come from iPhone Mirroring's window instead (`mirrorframes`).
+  var mirrored = false
   var fps = 15.0
   var lastSent = Date.distantPast
   var camera = "undetermined"
@@ -494,7 +508,7 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     frames += 1
     lastFrame = Date()
     if first { DispatchQueue.main.async { self.onChange?() } }
-    guard streaming, Date().timeIntervalSince(lastSent) >= 1.0 / fps else { return }
+    guard streaming, !mirrored, Date().timeIntervalSince(lastSent) >= 1.0 / fps else { return }
     lastSent = Date()
     if let jpeg = encode(buffer, maxEdge: nil, maxWidth: Args.maxWidth, png: false) {
       var payload = Data()
@@ -507,7 +521,11 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
   }
 
   func encode(_ buffer: CVPixelBuffer, maxEdge: Int?, maxWidth: Int?, png: Bool) -> Data? {
-    var image = CIImage(cvPixelBuffer: buffer)
+    encodeImage(CIImage(cvPixelBuffer: buffer), maxEdge: maxEdge, maxWidth: maxWidth, png: png)
+  }
+
+  func encodeImage(_ source: CIImage, maxEdge: Int?, maxWidth: Int?, png: Bool) -> Data? {
+    var image = source
     var scale = 1.0
     if let maxWidth { scale = min(scale, Double(maxWidth) / image.extent.width) }
     if let maxEdge { scale = min(scale, Double(maxEdge) / max(image.extent.width, image.extent.height)) }
@@ -553,10 +571,399 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
   }
 }
 
+// MARK: - iPhone Mirroring
+
+/// The window server's private calls background input needs, as trek-mcp's skylight.rs uses them
+/// (it says what each is for); the public ones stand in where one is missing.
+enum Sky {
+  static let loaded = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW | RTLD_GLOBAL)
+  typealias PostToPid = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Void
+  typealias SetField = @convention(c) (UnsafeMutableRawPointer, UInt32, Int64) -> Void
+  typealias SetWindowLocation = @convention(c) (UnsafeMutableRawPointer, CGPoint) -> Void
+  typealias PostRecord = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
+  typealias ProcessForPid = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
+  typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+  static let post: PostToPid? = find("SLEventPostToPid")
+  static let setField: SetField? = find("SLEventSetIntegerValueField")
+  static let setWindowLocation: SetWindowLocation? = find("CGEventSetWindowLocation")
+  static let postRecord: PostRecord? = find("SLPSPostEventRecordTo")
+  static let processForPid: ProcessForPid? = find("GetProcessForPID")
+  /// CGWindowListCreateImage: Swift no longer offers it; the window server still does.
+  static let createImage: CreateImage? = find("CGWindowListCreateImage")
+
+  static func find<T>(_ name: String) -> T? {
+    _ = loaded
+    guard let p = dlsym(UnsafeMutableRawPointer(bitPattern: -2), name) else { return nil }
+    return unsafeBitCast(p, to: T.self)
+  }
+
+  static func ptr(_ e: CGEvent) -> UnsafeMutableRawPointer { Unmanaged.passUnretained(e).toOpaque() }
+
+  static func set(_ e: CGEvent, _ field: UInt32, _ value: Int64) {
+    if let setField { setField(ptr(e), field, value) } else if let f = CGEventField(rawValue: field) {
+      e.setIntegerValueField(f, value: value)
+    }
+  }
+
+  static func post(_ pid: pid_t, _ e: CGEvent) {
+    if let post { post(pid, ptr(e)) } else { e.postToPid(pid) }
+  }
+
+  /// Make window `wid` key inside its app without activating the app or raising the window.
+  static func makeKey(_ pid: pid_t, _ wid: CGWindowID) {
+    guard let postRecord, let processForPid else { return }
+    var psn = [UInt8](repeating: 0, count: 8)
+    guard psn.withUnsafeMutableBytes({ processForPid(pid, $0.baseAddress!) }) == 0 else { return }
+    func record(_ kind: UInt8) -> [UInt8] {
+      var r = [UInt8](repeating: 0, count: 0xf8)
+      r[0x04] = 0xf8
+      withUnsafeBytes(of: wid.littleEndian) { r.replaceSubrange(0x3c..<0x40, with: $0) }
+      r[0x08] = kind
+      return r
+    }
+    var focus = record(0x0d)
+    focus[0x8a] = 0x01
+    var records = [focus]
+    for kind: UInt8 in [0x01, 0x02] {
+      var key = record(kind)
+      key[0x3a] = 0x10
+      for i in 0x20..<0x30 { key[i] = 0xff }
+      records.append(key)
+    }
+    for r in records {
+      _ = psn.withUnsafeBytes { p in r.withUnsafeBytes { postRecord(p.baseAddress!, $0.baseAddress!) } }
+    }
+    Thread.sleep(forTimeInterval: 0.05)
+  }
+}
+
+final class Mirror {
+  static let bundleID = "com.apple.ScreenContinuity"
+  /// One action at a time, off the main thread (taps and drags sleep between events).
+  let queue = DispatchQueue(label: "trek-phone.mirror")
+  /// A point outside every window, for the primer click.
+  let nowhere = CGPoint(x: -1, y: -1)
+
+  struct Win {
+    let id: CGWindowID
+    let pid: pid_t
+    /// Screen points, from the top-left of the main display.
+    let frame: CGRect
+  }
+
+  func app() -> NSRunningApplication? {
+    NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleID).first
+  }
+
+  /// Its main window: the phone's screen.
+  func window() -> Win? {
+    guard let pid = app()?.processIdentifier else { return nil }
+    let list =
+      CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    for w in list where (w[kCGWindowOwnerPID as String] as? Int32) == pid && (w[kCGWindowLayer as String] as? Int) == 0 {
+      guard let b = w[kCGWindowBounds as String] as? NSDictionary,
+        let frame = CGRect(dictionaryRepresentation: b), frame.height > 200,
+        let id = w[kCGWindowNumber as String] as? CGWindowID
+      else { continue }
+      return Win(id: id, pid: pid, frame: frame)
+    }
+    return nil
+  }
+
+  func attr(_ e: AXUIElement, _ name: String) -> AnyObject? {
+    var v: AnyObject?
+    return AXUIElementCopyAttributeValue(e, name as CFString, &v) == .success ? v : nil
+  }
+
+  func children(_ e: AXUIElement) -> [AXUIElement] { attr(e, kAXChildrenAttribute) as? [AXUIElement] ?? [] }
+
+  func axWindow(_ pid: pid_t) -> AXUIElement? {
+    let windows = attr(AXUIElementCreateApplication(pid), kAXWindowsAttribute) as? [AXUIElement] ?? []
+    return windows.first { attr($0, kAXIdentifierAttribute) as? String == "iphone-mirroring-main" } ?? windows.first
+  }
+
+  /// What the window says (its messages: locked, timed out, …) and the buttons it offers.
+  func contents(_ e: AXUIElement, depth: Int = 0, texts: inout [String], buttons: inout [(String, AXUIElement)]) {
+    guard depth < 10 else { return }
+    switch attr(e, kAXRoleAttribute) as? String {
+    case kAXStaticTextRole:
+      if let v = attr(e, kAXValueAttribute) as? String, !v.isEmpty { texts.append(v) }
+    case kAXButtonRole:
+      let label = (attr(e, kAXDescriptionAttribute) as? String).flatMap { $0.isEmpty ? nil : $0 }
+        ?? attr(e, kAXTitleAttribute) as? String ?? ""
+      buttons.append((label, e))
+    default: break
+    }
+    for c in children(e) { contents(c, depth: depth + 1, texts: &texts, buttons: &buttons) }
+  }
+
+  func look() -> [String: Any] {
+    var out: [String: Any] = [
+      "event": "mirror",
+      "installed": NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID) != nil,
+      "trusted": AXIsProcessTrusted(),
+    ]
+    guard let app = app() else {
+      out["running"] = false
+      return out
+    }
+    out["running"] = true
+    if let w = window() {
+      out["window"] = Int(w.id)
+      out["width"] = Double(w.frame.width)
+      out["height"] = Double(w.frame.height)
+    }
+    var texts: [String] = []
+    var buttons: [(String, AXUIElement)] = []
+    if let ax = axWindow(app.processIdentifier) { contents(ax, texts: &texts, buttons: &buttons) }
+    out["texts"] = texts
+    out["buttons"] = buttons.map(\.0)
+    return out
+  }
+
+  func open() -> String? {
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID) else {
+      return "iPhone Mirroring isn't on this Mac (it needs macOS 15 or later)."
+    }
+    let config = NSWorkspace.OpenConfiguration()
+    config.activates = false
+    config.addsToRecentItems = false
+    let done = DispatchSemaphore(value: 0)
+    var failure: String?
+    NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+      failure = error?.localizedDescription
+      done.signal()
+    }
+    _ = done.wait(timeout: .now() + 10)
+    return failure
+  }
+
+  /// Press the window's button called `label` (Connect, Try Again).
+  func press(_ label: String) -> String? {
+    guard let pid = app()?.processIdentifier, let ax = axWindow(pid) else { return "iPhone Mirroring has no window." }
+    var texts: [String] = []
+    var buttons: [(String, AXUIElement)] = []
+    contents(ax, texts: &texts, buttons: &buttons)
+    guard let b = buttons.first(where: { $0.0 == label }) else { return "iPhone Mirroring shows no \(label) button." }
+    return AXUIElementPerformAction(b.1, kAXPressAction as CFString) == .success ? nil : "Couldn't press \(label)."
+  }
+
+  /// Choose the menu item whose shortcut is Command and `key` (View: 1 Home Screen, 2 App
+  /// Switcher, 3 Spotlight): through Accessibility, so no key is pressed anywhere.
+  func menu(_ key: String) -> String? {
+    guard let pid = app()?.processIdentifier,
+      let bar = attr(AXUIElementCreateApplication(pid), kAXMenuBarAttribute)
+    else { return "iPhone Mirroring isn't running." }
+    for top in children(bar as! AXUIElement) {
+      for menu in children(top) {
+        for item in children(menu) {
+          guard attr(item, kAXMenuItemCmdCharAttribute) as? String == key,
+            (attr(item, kAXMenuItemCmdModifiersAttribute) as? Int ?? -1) == 0
+          else { continue }
+          if attr(item, kAXEnabledAttribute) as? Bool == false {
+            return "iPhone Mirroring isn't showing the iPhone, so its \(attr(item, kAXTitleAttribute) as? String ?? "menu item") is off."
+          }
+          return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success ? nil : "Couldn't choose it."
+        }
+      }
+    }
+    return "iPhone Mirroring has no menu item for Command-\(key)."
+  }
+
+  // Pointer input, stamped for the window as skylight.rs does.
+
+  func mouse(_ w: Win, _ type: CGEventType, _ local: CGPoint, phase: Int64, click: Int64, gesture: Int64) {
+    let screen = local == nowhere ? nowhere : CGPoint(x: w.frame.minX + local.x, y: w.frame.minY + local.y)
+    guard
+      let e = CGEvent(
+        mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: type,
+        mouseCursorPosition: screen, mouseButton: .left)
+    else { return }
+    e.flags = []
+    Sky.set(e, 0, phase)
+    Sky.set(e, 7, 3)
+    Sky.set(e, 40, Int64(w.pid))
+    for f: UInt32 in [51, 91, 92] { Sky.set(e, f, Int64(w.id)) }
+    Sky.set(e, 58, gesture)
+    Sky.setWindowLocation?(Sky.ptr(e), local)
+    Sky.set(e, 1, click)
+    Sky.set(e, 3, 0)
+    Sky.post(w.pid, e)
+  }
+
+  /// Hover, then a click nowhere (some apps want one before they take a background click).
+  func approach(_ w: Win, _ at: CGPoint, _ gesture: Int64) {
+    Sky.makeKey(w.pid, w.id)
+    mouse(w, .mouseMoved, at, phase: 2, click: 0, gesture: gesture)
+    Thread.sleep(forTimeInterval: 0.015)
+    mouse(w, .leftMouseDown, nowhere, phase: 1, click: 1, gesture: gesture)
+    Thread.sleep(forTimeInterval: 0.001)
+    mouse(w, .leftMouseUp, nowhere, phase: 2, click: 1, gesture: gesture)
+    Thread.sleep(forTimeInterval: 0.1)
+  }
+
+  func gesture() -> Int64 { Int64(Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1) * 1e9) }
+
+  func point(_ w: Win, _ fx: Double, _ fy: Double) -> CGPoint {
+    CGPoint(x: min(max(fx, 0), 1) * w.frame.width, y: min(max(fy, 0), 1) * w.frame.height)
+  }
+
+  func tap(_ w: Win, _ fx: Double, _ fy: Double, holdMs: Double) {
+    let (at, g) = (point(w, fx, fy), gesture())
+    approach(w, at, g)
+    mouse(w, .leftMouseDown, at, phase: 3, click: 1, gesture: g)
+    Thread.sleep(forTimeInterval: max(holdMs, 1) / 1000)
+    mouse(w, .leftMouseUp, at, phase: 3, click: 1, gesture: g)
+  }
+
+  /// A press dragged from one point to another: a swipe or scroll on the phone.
+  func drag(_ w: Win, from: (Double, Double), to: (Double, Double), ms: Double) {
+    let (a, b, g) = (point(w, from.0, from.1), point(w, to.0, to.1), gesture())
+    approach(w, a, g)
+    mouse(w, .leftMouseDown, a, phase: 3, click: 1, gesture: g)
+    Thread.sleep(forTimeInterval: 0.06)
+    let steps = max(8, Int(ms / 12))
+    for i in 1...steps {
+      let t = Double(i) / Double(steps)
+      let p = CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+      mouse(w, .leftMouseDragged, p, phase: 3, click: 1, gesture: g)
+      Thread.sleep(forTimeInterval: ms / 1000 / Double(steps))
+    }
+    Thread.sleep(forTimeInterval: 0.04)
+    mouse(w, .leftMouseUp, b, phase: 3, click: 1, gesture: g)
+  }
+
+  // Keys go to iPhone Mirroring's process alone, never to the front app.
+
+  func key(_ w: Win, _ code: CGKeyCode, _ flags: UInt64) {
+    let source = CGEventSource(stateID: .privateState)
+    for down in [true, false] {
+      guard let e = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
+      e.flags = CGEventFlags(rawValue: flags)
+      e.postToPid(w.pid)
+      Thread.sleep(forTimeInterval: down ? 0.015 : 0.008)
+    }
+  }
+
+  func type(_ w: Win, _ text: String) {
+    let source = CGEventSource(stateID: .privateState)
+    var chunk: [UniChar] = []
+    func flush() {
+      guard !chunk.isEmpty else { return }
+      for down in [true, false] {
+        guard let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { return }
+        e.flags = []
+        e.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
+        e.postToPid(w.pid)
+      }
+      chunk = []
+      Thread.sleep(forTimeInterval: 0.03)
+    }
+    for c in text {
+      switch c {
+      case "\n", "\r\n":
+        flush()
+        key(w, 36, 0)
+      case "\t":
+        flush()
+        key(w, 48, 0)
+      default:
+        // One character an event: the phone's keyboard takes them as typed.
+        chunk.append(contentsOf: Array(String(c).utf16))
+        flush()
+      }
+    }
+    flush()
+  }
+
+  /// The window as a PNG no longer than `maxEdge`, with its size in pixels.
+  func shot(path: String, maxEdge: Int) -> [String: Any] {
+    guard let w = window() else {
+      return ["event": "shot", "error": "iPhone Mirroring has no window."]
+    }
+    guard let create = Sky.createImage,
+      let cg = create(.null, 1 << 3, w.id, 1 | 1 << 3)?.takeRetainedValue()
+    else {
+      return ["event": "shot", "error": "Couldn't capture iPhone Mirroring's window: Trek needs Screen Recording (System Settings › Privacy & Security)."]
+    }
+    guard let png = screen.encodeImage(CIImage(cgImage: cg), maxEdge: maxEdge, maxWidth: nil, png: true) else {
+      return ["event": "shot", "error": "Couldn't encode the window"]
+    }
+    do {
+      try png.write(to: URL(fileURLWithPath: path))
+    } catch {
+      return ["event": "shot", "error": "Couldn't write \(path): \(error.localizedDescription)"]
+    }
+    let scale = min(1.0, Double(maxEdge) / Double(max(cg.width, cg.height)))
+    return [
+      "event": "shot", "path": path, "width": Int((Double(cg.width) * scale).rounded()),
+      "height": Int((Double(cg.height) * scale).rounded()), "screen_width": cg.width,
+      "screen_height": cg.height, "age": 0,
+    ]
+  }
+
+  /// One frame of the window for the panel: the screen's size, then JPEG.
+  func frame(maxWidth: Int) -> Data? {
+    guard let w = window(), let create = Sky.createImage,
+      let cg = create(.null, 1 << 3, w.id, 1 | 1 << 4)?.takeRetainedValue(),
+      let jpeg = screen.encodeImage(CIImage(cgImage: cg), maxEdge: nil, maxWidth: maxWidth, png: false)
+    else { return nil }
+    var payload = Data()
+    for v in [UInt16(cg.width), UInt16(cg.height)] {
+      var be = v.bigEndian
+      payload.append(Data(bytes: &be, count: 2))
+    }
+    return payload + jpeg
+  }
+
+  /// Run one `mirror` command and answer with the state after it.
+  func run(_ args: [Substring]) {
+    queue.async {
+      var error: String?
+      let num = { (i: Int) -> Double in i < args.count ? Double(args[i]) ?? 0 : 0 }
+      let verb = args.first.map(String.init) ?? "look"
+      let acts = ["tap", "drag", "text", "key"].contains(verb)
+      let w = acts ? self.window() : nil
+      if acts && w == nil {
+        error = "iPhone Mirroring has no window."
+      } else {
+        switch verb {
+        case "look": break
+        case "open": error = self.open()
+        case "press": error = self.press(args.dropFirst().joined(separator: " "))
+        case "menu": error = self.menu(args.count > 1 ? String(args[1]) : "")
+        case "tap": self.tap(w!, num(1), num(2), holdMs: num(3))
+        case "drag": self.drag(w!, from: (num(1), num(2)), to: (num(3), num(4)), ms: max(num(5), 60))
+        case "text":
+          let bytes = args.count > 1 ? hexBytes(args[1]) ?? [] : []
+          self.type(w!, String(decoding: bytes, as: UTF8.self))
+        case "key": self.key(w!, CGKeyCode(num(1)), UInt64(num(2)))
+        default: error = "unknown mirror command \(verb)"
+        }
+      }
+      var out = self.look()
+      if let error { out["error"] = error }
+      message(out)
+    }
+  }
+}
+
 // MARK: - Main
 
 let hid = HID()
 let screen = Screen()
+let mirror = Mirror()
+
+/// While frames stream and come from iPhone Mirroring, its window several times a second.
+let mirrorFrames = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "trek-phone.mirror-frames"))
+mirrorFrames.schedule(deadline: .now(), repeating: .milliseconds(150))
+mirrorFrames.setEventHandler {
+  let (on, fps, last) = screen.queue.sync { (screen.streaming && screen.mirrored, min(screen.fps, 8), screen.lastSent) }
+  guard on, Date().timeIntervalSince(last) >= 1.0 / fps else { return }
+  screen.queue.sync { screen.lastSent = Date() }
+  if let frame = mirror.frame(maxWidth: Args.maxWidth) { emit(1, frame) }
+}
+mirrorFrames.resume()
 
 func status() {
   let (w, h): (Int, Int) = screen.queue.sync {
@@ -611,6 +1018,15 @@ Thread {
         DispatchQueue.main.async { screen.shot(path: String(rest[2]), maxEdge: edge) }
       }
     case "status": DispatchQueue.main.async { status() }
+    case "mirror": mirror.run(Array(parts.dropFirst()))
+    case "mirrorshot":
+      let rest = line.split(separator: " ", maxSplits: 2)
+      if rest.count == 3, let edge = Int(rest[1]) {
+        DispatchQueue.main.async { message(mirror.shot(path: String(rest[2]), maxEdge: edge)) }
+      }
+    case "mirrorframes":
+      let on = parts.count > 1 && parts[1] == "on"
+      screen.queue.async { screen.mirrored = on }
     case "target":
       let rest = line.split(separator: " ", maxSplits: 1)
       if rest.count == 2 { hid.aim(String(rest[1])) }

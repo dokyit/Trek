@@ -15,6 +15,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::hid::{self, Step};
+use crate::mirror::Look;
 
 pub const SOURCE: &str = include_str!("../helper/main.swift");
 /// The helper's own Info.plist, linked in: the usage strings macOS shows when it runs by itself
@@ -69,6 +70,58 @@ impl Status {
     }
 }
 
+/// iPhone Mirroring after a `mirror` command: what it shows, and why the command failed if it did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mirrored {
+    pub look: Look,
+    pub error: Option<String>,
+}
+
+/// A `mirror` command for the helper.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirrorCmd {
+    /// Just say what it shows.
+    Look,
+    /// Launch it behind the user's windows.
+    Open,
+    /// Press a button of its window by label (Connect).
+    Press(String),
+    /// Choose the menu item with this ⌘ shortcut (`mirror::HOME`, …).
+    Menu(&'static str),
+    /// Points are fractions of its window.
+    Tap {
+        x: f64,
+        y: f64,
+        hold_ms: u32,
+    },
+    Drag {
+        from: (f64, f64),
+        to: (f64, f64),
+        ms: u32,
+    },
+    Text(String),
+    /// A macOS keycode and CGEventFlags (`mirror::key`).
+    Key(u16, u64),
+}
+
+impl MirrorCmd {
+    fn line(&self) -> String {
+        match self {
+            MirrorCmd::Look => "mirror look".into(),
+            MirrorCmd::Open => "mirror open".into(),
+            MirrorCmd::Press(label) => format!("mirror press {}", label.replace('\n', " ")),
+            MirrorCmd::Menu(key) => format!("mirror menu {key}"),
+            MirrorCmd::Tap { x, y, hold_ms } => format!("mirror tap {x:.5} {y:.5} {hold_ms}"),
+            MirrorCmd::Drag { from, to, ms } => format!(
+                "mirror drag {:.5} {:.5} {:.5} {:.5} {ms}",
+                from.0, from.1, to.0, to.1
+            ),
+            MirrorCmd::Text(t) => format!("mirror text {}", crate::mirror::hex(t)),
+            MirrorCmd::Key(code, flags) => format!("mirror key {code} {flags}"),
+        }
+    }
+}
+
 /// A screenshot the helper wrote.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shot {
@@ -99,6 +152,7 @@ enum Message {
     Event(Event),
     Shot(Result<Shot, String>),
     Hid { sent: u64, missed: u64 },
+    Mirror(Mirrored),
     Ignored,
 }
 
@@ -139,6 +193,10 @@ fn parse_message(payload: &[u8]) -> Message {
                 age: v["age"].as_f64().unwrap_or(0.),
             }),
         }),
+        Some("mirror") => Message::Mirror(Mirrored {
+            look: Look::parse(&v),
+            error: v["error"].as_str().map(String::from),
+        }),
         Some("hid") => Message::Hid {
             sent: n("sent"),
             missed: n("missed"),
@@ -170,6 +228,7 @@ pub struct Link {
     child: Mutex<Child>,
     shots: Arc<Waiters<Result<Shot, String>>>,
     inputs: Arc<Waiters<(u64, u64)>>,
+    mirrors: Arc<Waiters<Mirrored>>,
 }
 
 impl Link {
@@ -195,7 +254,9 @@ impl Link {
         let (tx, rx) = async_channel::unbounded::<Event>();
         let shots: Arc<Waiters<Result<Shot, String>>> = Arc::default();
         let inputs: Arc<Waiters<(u64, u64)>> = Arc::default();
-        let (shot_waiters, input_waiters) = (shots.clone(), inputs.clone());
+        let mirrors: Arc<Waiters<Mirrored>> = Arc::default();
+        let (shot_waiters, input_waiters, mirror_waiters) =
+            (shots.clone(), inputs.clone(), mirrors.clone());
         let _ = std::thread::Builder::new()
             .name("trek-phone-read".into())
             .spawn(move || {
@@ -219,6 +280,12 @@ impl Link {
                                 }
                                 None
                             }
+                            Message::Mirror(m) => {
+                                if let Some(w) = mirror_waiters.lock().unwrap().pop_front() {
+                                    let _ = w.try_send(m);
+                                }
+                                None
+                            }
                             Message::Hid { sent, missed } => {
                                 if let Some(w) = input_waiters.lock().unwrap().pop_front() {
                                     let _ = w.try_send((sent, missed));
@@ -238,6 +305,7 @@ impl Link {
                 // Whoever waits hears it's gone (their senders drop).
                 shot_waiters.lock().unwrap().clear();
                 input_waiters.lock().unwrap().clear();
+                mirror_waiters.lock().unwrap().clear();
                 let _ = tx.send_blocking(Event::Exited);
             });
         Ok((
@@ -246,6 +314,7 @@ impl Link {
                 child: Mutex::new(child),
                 shots,
                 inputs,
+                mirrors,
             }),
             rx,
         ))
@@ -284,6 +353,33 @@ impl Link {
         waiters.push_back(tx);
         self.send(&hid::encode(steps));
         rx
+    }
+
+    /// Act on iPhone Mirroring (or only look); the answer is its state afterwards.
+    pub fn mirror(&self, cmd: &MirrorCmd) -> async_channel::Receiver<Mirrored> {
+        let (tx, rx) = async_channel::bounded(1);
+        let mut waiters = self.mirrors.lock().unwrap();
+        waiters.push_back(tx);
+        self.send(&cmd.line());
+        rx
+    }
+
+    /// iPhone Mirroring's window as PNG at `path` (answered as a shot of the screen is).
+    pub fn mirror_shot(
+        &self,
+        path: &Path,
+        max_edge: u32,
+    ) -> async_channel::Receiver<Result<Shot, String>> {
+        let (tx, rx) = async_channel::bounded(1);
+        let mut waiters = self.shots.lock().unwrap();
+        waiters.push_back(tx);
+        self.send(&format!("mirrorshot {max_edge} {}", path.display()));
+        rx
+    }
+
+    /// Frames from iPhone Mirroring's window instead of the cable, or back.
+    pub fn mirror_frames(&self, on: bool) {
+        self.send(&format!("mirrorframes {}", if on { "on" } else { "off" }));
     }
 
     /// The newest frame as PNG at `path`, its long side at most `max_edge`.
@@ -418,7 +514,39 @@ mod tests {
             parse_message(br#"{"event":"hid","sent":4,"missed":0}"#),
             Message::Hid { sent: 4, missed: 0 }
         ));
+        match parse_message(
+            br#"{"event":"mirror","installed":true,"running":true,"trusted":true,"window":7,"width":355,"height":782,"texts":[],"buttons":[],"error":"no"}"#,
+        ) {
+            Message::Mirror(m) => {
+                assert_eq!(m.look.window, Some(7));
+                assert_eq!(m.error.as_deref(), Some("no"));
+                assert_eq!(
+                    crate::mirror::State::of(&m.look),
+                    crate::mirror::State::Live
+                );
+            }
+            _ => panic!("mirror"),
+        }
         assert!(matches!(parse_message(b"not json"), Message::Ignored));
+    }
+
+    #[test]
+    fn mirror_commands_are_one_line_each() {
+        let tap = MirrorCmd::Tap {
+            x: 0.5,
+            y: 0.25,
+            hold_ms: 80,
+        };
+        assert_eq!(tap.line(), "mirror tap 0.50000 0.25000 80");
+        assert_eq!(
+            MirrorCmd::Text("hi\nthere".into()).line(),
+            "mirror text 68690a7468657265"
+        );
+        assert_eq!(
+            MirrorCmd::Menu(crate::mirror::SPOTLIGHT).line(),
+            "mirror menu 3"
+        );
+        assert_eq!(MirrorCmd::Key(36, 0).line(), "mirror key 36 0");
     }
 
     #[test]

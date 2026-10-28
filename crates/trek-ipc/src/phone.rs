@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 pub const SERVER: &str = "trek-phone";
 
 /// What the agent is told about the tools as a whole (MCP `instructions`).
-pub const INSTRUCTIONS: &str = "The user's real iPhone, plugged into this Mac: its screen comes over the USB cable and you tap and type as a Bluetooth keyboard and mouse (no Xcode, no Developer Mode, no app on the phone). The user watches in Trek's iPhone tool, so act as you would with them looking over your shoulder. Start with phone_screenshot; x/y for phone_tap and phone_swipe are pixels in the latest screenshot. Take a fresh screenshot after acting. phone_open_app opens an app by name through Spotlight; phone_home goes to the Home Screen. Apps and files go over the cable: phone_apps, phone_install (an .ipa or .app signed for this iPhone), phone_files, phone_push_file, phone_pull_file, phone_remove_file. Only one agent drives the phone at a time: call phone_release when you're done with it. This is the user's own phone: never send messages, buy, delete things, or change settings unless the user asked for exactly that. Installing and changing files may first ask the user, by the thread's access level. If a tool says the user took over the iPhone, stop using it and wait for them.";
+pub const INSTRUCTIONS: &str = "The user's real iPhone, plugged into this Mac (no Xcode, no Developer Mode, no app on the phone). You tap and type one of two ways, whichever works, chosen by itself: as Trek's Bluetooth keyboard and mouse (an iPhone on another Apple Account, paired once), or through macOS's iPhone Mirroring window (an iPhone on this Mac's own Apple Account: it connects only while the iPhone is locked and nearby). The screen comes over the USB cable while the iPhone is unlocked, and from iPhone Mirroring while it mirrors; phone_status says which. If a tool says the user must lock or unlock something, ask them rather than retrying. The user watches in Trek's iPhone tool, so act as you would with them looking over your shoulder. Start with phone_screenshot; x/y for phone_tap and phone_swipe are pixels in the latest screenshot. Take a fresh screenshot after acting. phone_open_app opens an app by name through Spotlight; phone_home goes to the Home Screen. Apps and files go over the cable: phone_apps, phone_install (an .ipa or .app signed for this iPhone), phone_files, phone_push_file, phone_pull_file, phone_remove_file. Only one agent drives the phone at a time: call phone_release when you're done with it. This is the user's own phone: never send messages, buy, delete things, or change settings unless the user asked for exactly that. Installing and changing files may first ask the user, by the thread's access level. If a tool says the user took over the iPhone, stop using it and wait for them.";
 
 fn object(props: Value, required: &[&str]) -> Value {
     json!({
@@ -33,12 +33,12 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
     vec![
         (
             "phone_status",
-            "Whether the iPhone is connected and ready: its name and iOS version, whether its screen is coming over USB (it isn't while the phone is locked), whether it's paired with Trek's Bluetooth keyboard and mouse, AssistiveTouch, and which agent holds it.",
+            "Whether the iPhone is connected and ready: its name and iOS version, whether its screen is coming over USB (it isn't while the phone is locked), whether it took Trek's Bluetooth keyboard and mouse, how taps and keys reach it now (Bluetooth or iPhone Mirroring, and what the user must do if neither works), AssistiveTouch, and which agent holds it.",
             none.clone(),
         ),
         (
             "phone_screenshot",
-            "A picture of the iPhone's screen as it is now (over USB). Coordinates for phone_tap and phone_swipe are pixels in this picture.",
+            "A picture of the iPhone's screen as it is now: iPhone Mirroring's window while it shows the phone, else over USB. Coordinates for phone_tap and phone_swipe are pixels in this picture; take a new one when the source changes.",
             object(
                 json!({ "max_edge": { "type": "integer", "description": "Longest side in pixels (default 1200, at most 2000)." } }),
                 &[],
@@ -70,7 +70,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "phone_type",
-            "Type text into whatever has focus on the iPhone (tap a field first), as a US keyboard: ASCII only. submit presses Return afterwards.",
+            "Type text into whatever has focus on the iPhone (tap a field first). Over Bluetooth it types as a US keyboard, ASCII only; through iPhone Mirroring any text. submit presses Return afterwards.",
             object(
                 json!({
                     "text": { "type": "string" },
@@ -232,7 +232,7 @@ pub fn sensitive(method: &str) -> Option<Sensitive> {
     }
 }
 
-/// Whether `method` sends taps or keys (needs the Bluetooth link and AssistiveTouch).
+/// Whether `method` sends taps or keys (through the Bluetooth link, or iPhone Mirroring).
 pub fn is_input(method: &str) -> bool {
     matches!(
         method,
