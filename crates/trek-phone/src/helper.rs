@@ -46,14 +46,26 @@ pub struct Status {
     pub frame_age: f64,
     /// "starting", "advertising", "connected", "off", "not allowed", …
     pub bluetooth: String,
-    /// Phones subscribed to the keyboard and mouse.
+    /// Phones that took Trek as a keyboard and mouse (they read its report map) and listen.
     pub hosts: u32,
+    /// Phones subscribed to its reports that never took it as a keyboard: a phone bonded to this
+    /// Mac for Continuity (the same Apple Account), whose old subscriptions macOS restored. They
+    /// drop what's sent, and pairing in Settings › Bluetooth can't change that.
+    pub linked: u32,
+    /// Other devices that took Trek as a keyboard and mouse (the user's Apple Watch does as soon
+    /// as Trek advertises), by name. Nothing is sent to them once Trek names the phone (`target`).
+    pub elsewhere: Vec<String>,
 }
 
 impl Status {
     /// Whether a phone listens to the keyboard and mouse.
     pub fn input_ready(&self) -> bool {
         self.hosts > 0
+    }
+
+    /// Whether the only phone listening is linked to this Mac and won't take Trek's input.
+    pub fn linked_only(&self) -> bool {
+        self.hosts == 0 && self.linked > 0
     }
 }
 
@@ -106,6 +118,15 @@ fn parse_message(payload: &[u8]) -> Message {
             frame_age: v["frame_age"].as_f64().unwrap_or(-1.),
             bluetooth: s("bluetooth"),
             hosts: n("hosts") as u32,
+            linked: n("linked") as u32,
+            elsewhere: v["elsewhere"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })),
         Some("shot") => Message::Shot(match v["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -248,6 +269,12 @@ impl Link {
         self.send("status");
     }
 
+    /// The phone to drive, by its name: only it counts as paired and gets reports.
+    pub fn target(&self, name: &str) {
+        let name = name.replace(['\n', '\r'], " ");
+        self.send(&format!("target {}", name.trim()));
+    }
+
     /// Send reports; the answer says how many went out and how many found no phone listening,
     /// once the last pause is over.
     pub fn hid(&self, steps: &[Step]) -> async_channel::Receiver<(u64, u64)> {
@@ -363,8 +390,19 @@ mod tests {
                 assert_eq!(s.screen, "Phone");
                 assert_eq!((s.width, s.height), (1320, 2868));
                 assert!(s.input_ready());
+                assert!(!s.linked_only());
             }
             _ => panic!("status"),
+        }
+        // Subscribed but never a host: a Continuity bond, not "paired".
+        let linked = br#"{"event":"status","bluetooth":"advertising","hosts":0,"linked":1,"elsewhere":["Watch"]}"#;
+        match parse_message(linked) {
+            Message::Event(Event::Status(s)) => {
+                assert!(!s.input_ready());
+                assert!(s.linked_only());
+                assert_eq!(s.elsewhere, ["Watch"]);
+            }
+            _ => panic!("linked status"),
         }
         match parse_message(br#"{"event":"shot","error":"locked"}"#) {
             Message::Shot(Err(e)) => assert_eq!(e, "locked"),

@@ -10,6 +10,7 @@
 //   trek-phone <report map hex> <frame max width>
 // stdin, one command a line:
 //   hid <id>:<hex> w<ms> ...     send reports to the paired phone, pausing as told
+//   target <name>                the phone to drive, by its name: no other device gets reports
 //   frames on [fps] | frames off stream JPEG frames of the screen
 //   shot <max edge> <path>       write the newest frame there as PNG (the path may have spaces)
 //   status                       report the state now
@@ -66,7 +67,7 @@ if Args.reportMap.isEmpty || Args.maxWidth <= 0 {
 
 // MARK: - Bluetooth HID
 
-final class HID: NSObject, CBPeripheralManagerDelegate {
+final class HID: NSObject, CBPeripheralManagerDelegate, CBCentralManagerDelegate {
   let name = "Trek"
   let queue = DispatchQueue(label: "trek-phone.bluetooth")
   var manager: CBPeripheralManager!
@@ -79,23 +80,51 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
   var centrals: [UUID: CBCentral] = [:]
   var subscriptions: [UUID: Set<ObjectIdentifier>] = [:]
   var serviceChangedSent = Set<UUID>()
+  /// Phones that read the report map: real HID hosts. A phone bonded to the Mac for Continuity
+  /// (the same Apple Account) can get old subscriptions restored onto Trek's reports without
+  /// ever taking Trek as a keyboard, and drops what's sent. Kept across runs: a bonded host
+  /// reconnecting trusts its cached map and doesn't read it again.
+  var hidHosts = Set(UserDefaults.standard.stringArray(forKey: "hidHosts") ?? [])
+  /// The phone Trek drives, by its name (`target`); nil until Trek says, and every host counts.
+  /// Other devices of the account take the keyboard too (an Apple Watch reads the map and
+  /// subscribes as soon as Trek advertises), and nothing meant for the phone may reach them.
+  var target: String?
+  /// What each central is called, looked up without connecting to it.
+  var names: [UUID: String] = [:]
+  var lookup: CBCentralManager?
   var outbox: [(CBMutableCharacteristic, Data, [CBCentral])] = []
   var state = "starting"
   var onChange: (() -> Void)?
-  /// The state and how many phones listen, for readers off the Bluetooth queue: that queue can
-  /// sit inside CoreBluetooth while macOS asks the user about Bluetooth, and a status report
-  /// must not wait for the answer.
+  /// The state and who listens, for readers off the Bluetooth queue: that queue can sit inside
+  /// CoreBluetooth while macOS asks the user about Bluetooth, and a status report must not wait
+  /// for the answer.
   let snapshotLock = NSLock()
-  var snapshot: (state: String, hosts: Int) = ("starting", 0)
+  var snapshot = Snapshot()
+
+  struct Snapshot {
+    var state = "starting"
+    /// The phone, subscribed and taking Trek as a keyboard and mouse.
+    var hosts = 0
+    /// The phone, subscribed without ever taking Trek as one (a Continuity bond).
+    var linked = 0
+    /// Other devices taking Trek as a keyboard and mouse, by name.
+    var elsewhere: [String] = []
+  }
 
   func publish() {
-    let count = hosts.count
+    var s = Snapshot(state: state, hosts: hosts.count)
+    for c in subscribers where !hidHosts.contains(c.identifier.uuidString) && isTarget(c) {
+      s.linked += 1
+    }
+    for c in subscribers where hidHosts.contains(c.identifier.uuidString) && !isTarget(c) {
+      s.elsewhere.append(names[c.identifier] ?? "a device without a name")
+    }
     snapshotLock.lock()
-    snapshot = (state, count)
+    snapshot = s
     snapshotLock.unlock()
   }
 
-  func current() -> (state: String, hosts: Int) {
+  func current() -> Snapshot {
     snapshotLock.lock()
     defer { snapshotLock.unlock() }
     return snapshot
@@ -105,12 +134,42 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
     queue.async { self.manager = CBPeripheralManager(delegate: self, queue: self.queue) }
   }
 
-  var hosts: [CBCentral] {
+  /// Drive the phone called `name` from now on.
+  func aim(_ name: String) {
+    queue.async {
+      self.target = name
+      self.set(self.hosts.isEmpty ? (self.published ? "advertising" : self.state) : "connected")
+    }
+  }
+
+  /// Phones subscribed to a report, HID hosts or not.
+  var subscribers: [CBCentral] {
     let ids = Set(inputs.values.map(ObjectIdentifier.init))
     return subscriptions.filter { !$0.value.isDisjoint(with: ids) }.compactMap { centrals[$0.key] }
   }
 
-  /// Send one report to every phone listening (Trek drives one phone).
+  /// Subscribers that are the phone and take Trek as a keyboard and mouse.
+  var hosts: [CBCentral] {
+    subscribers.filter { hidHosts.contains($0.identifier.uuidString) && isTarget($0) }
+  }
+
+  static func plain(_ name: String) -> String {
+    name.replacingOccurrences(of: "\u{2019}", with: "'").trimmingCharacters(in: .whitespaces)
+      .lowercased()
+  }
+
+  /// Whether `central` is the phone Trek drives (a central whose name can't be found isn't).
+  func isTarget(_ central: CBCentral) -> Bool {
+    guard let target else { return true }
+    if names[central.identifier] == nil, let lookup, lookup.state == .poweredOn,
+      let name = lookup.retrievePeripherals(withIdentifiers: [central.identifier]).first?.name
+    {
+      names[central.identifier] = name
+    }
+    return names[central.identifier].map { Self.plain($0) == Self.plain(target) } ?? false
+  }
+
+  /// Send one report to the phone, if it listens.
   func send(_ id: UInt8, _ bytes: [UInt8]) -> Bool {
     // Nobody listening (or Bluetooth not up): don't queue behind CoreBluetooth.
     if current().hosts == 0 { return false }
@@ -138,8 +197,9 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
     let info = CBMutableCharacteristic(
       type: CBUUID(string: "2A4A"), properties: [.read], value: Data([0x11, 0x01, 0x00, 0x02]),
       permissions: [.readable])
+    // No fixed value, so reads come here: only a phone taking Trek as HID reads the map.
     let map = CBMutableCharacteristic(
-      type: CBUUID(string: "2A4B"), properties: [.read], value: Data(Args.reportMap),
+      type: CBUUID(string: "2A4B"), properties: [.read], value: nil,
       permissions: [.readEncryptionRequired])
     controlPoint = CBMutableCharacteristic(
       type: CBUUID(string: "2A4C"), properties: [.writeWithoutResponse], value: nil,
@@ -202,9 +262,16 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
     onChange?()
   }
 
+  /// Names come once the lookup is up: say who listens again then.
+  func centralManagerDidUpdateState(_ c: CBCentralManager) {
+    if c.state == .poweredOn { set(state) }
+  }
+
   func peripheralManagerDidUpdateState(_ p: CBPeripheralManager) {
     switch p.state {
     case .poweredOn:
+      // Only to look names up (retrievePeripherals): it never scans or connects.
+      if lookup == nil { lookup = CBCentralManager(delegate: self, queue: queue) }
       p.removeAllServices()
       inputs = [:]
       published = false
@@ -239,6 +306,9 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
     switch request.characteristic.uuid {
     case CBUUID(string: "2A4E"): value = Data([0x01])
     case CBUUID(string: "2A19"): value = Data([100])
+    case CBUUID(string: "2A4B"):
+      value = Data(Args.reportMap)
+      becameHost(request.central)
     case CBUUID(string: "2A4D"): value = Data(count: length(request.characteristic))
     default:
       p.respond(to: request, withResult: .attributeNotFound)
@@ -264,11 +334,30 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
     centrals[central.identifier] = central
     subscriptions[central.identifier, default: []].insert(ObjectIdentifier(c))
     if let (_, input) = inputs.first(where: { $0.value === c }) {
+      guard hidHosts.contains(central.identifier.uuidString) else {
+        // Restored, or not a host yet: ask it to look again (a host that paired before Trek
+        // remembered hosts reads the map then), and wait for the read.
+        recoverStaleCache(central, force: true)
+        set(hosts.isEmpty ? "advertising" : "connected")
+        return
+      }
+      guard isTarget(central) else {
+        set(hosts.isEmpty ? "advertising" : "connected")
+        return
+      }
       outbox.append((input, Data(count: length(input)), [central]))
       drain()
       set("connected")
       advertise()
     }
+  }
+
+  /// `central` read the report map: it takes Trek as a keyboard and mouse.
+  func becameHost(_ central: CBCentral) {
+    centrals[central.identifier] = central
+    guard hidHosts.insert(central.identifier.uuidString).inserted else { return }
+    UserDefaults.standard.set(Array(hidHosts), forKey: "hidHosts")
+    set(hosts.isEmpty ? "advertising" : "connected")
   }
 
   func peripheralManager(_ p: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom c: CBCharacteristic) {
@@ -286,11 +375,12 @@ final class HID: NSObject, CBPeripheralManagerDelegate {
   }
 
   /// A bonded phone that trusts a stale GATT cache writes the control point but never
-  /// subscribes: Service Changed makes it look again.
-  func recoverStaleCache(_ central: CBCentral) {
+  /// subscribes (or, `force`, is subscribed without having read the map): Service Changed makes
+  /// it look again. Once a run for each phone.
+  func recoverStaleCache(_ central: CBCentral, force: Bool = false) {
     let subscribed = subscriptions[central.identifier] ?? []
     let hasInput = !subscribed.isDisjoint(with: inputs.values.map(ObjectIdentifier.init))
-    guard !hasInput, subscribed.contains(ObjectIdentifier(serviceChanged)),
+    guard force || !hasInput, subscribed.contains(ObjectIdentifier(serviceChanged)),
       !serviceChangedSent.contains(central.identifier)
     else { return }
     serviceChangedSent.insert(central.identifier)
@@ -473,11 +563,11 @@ func status() {
     screen.latest.map { (CVPixelBufferGetWidth($0), CVPixelBufferGetHeight($0)) } ?? (0, 0)
   }
   let age = screen.lastFrame.map { Date().timeIntervalSince($0) } ?? -1
-  let (bluetooth, hosts) = hid.current()
+  let bt = hid.current()
   message([
     "event": "status", "camera": screen.camera, "screen": screen.device?.localizedName ?? "",
     "width": w, "height": h, "frames": screen.frames, "frame_age": age,
-    "bluetooth": bluetooth, "hosts": hosts,
+    "bluetooth": bt.state, "hosts": bt.hosts, "linked": bt.linked, "elsewhere": bt.elsewhere,
   ])
 }
 screen.onChange = { status() }
@@ -521,6 +611,9 @@ Thread {
         DispatchQueue.main.async { screen.shot(path: String(rest[2]), maxEdge: edge) }
       }
     case "status": DispatchQueue.main.async { status() }
+    case "target":
+      let rest = line.split(separator: " ", maxSplits: 1)
+      if rest.count == 2 { hid.aim(String(rest[1])) }
     case "quit": exit(0)
     default: message(["event": "error", "message": "unknown command \(cmd)"])
     }

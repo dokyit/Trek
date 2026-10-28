@@ -48,6 +48,18 @@ const SHOT_MAX: u32 = 2000;
 const TAP_SLOP: f32 = 6.;
 
 const NOT_PAIRED: &str = "The iPhone isn't paired with Trek's Bluetooth keyboard and mouse yet, so taps and keys can't reach it. The user does this once: on the iPhone, Settings › Bluetooth, tap \"Trek\" under Other Devices (Trek's iPhone tool must be open). Screenshots, apps and files work without it.";
+/// Said when the phone is bonded to this Mac for Continuity instead: its restored subscriptions
+/// look like a pairing, but it drops what's sent.
+const LINKED: &str = "This iPhone is linked to this Mac through the user's Apple Account, and over that link iOS doesn't take Trek as a Bluetooth keyboard and mouse, so taps and keys can't reach it. Pairing in Settings › Bluetooth can't change that (it works with an iPhone on another Apple Account). Screenshots, apps and files work."; // words: ok, the iPhone tool is macOS only
+
+/// Why taps and keys can't reach the phone now.
+fn not_ready(status: &Status) -> &'static str {
+    if status.linked_only() {
+        LINKED
+    } else {
+        NOT_PAIRED
+    }
+}
 
 /// What needs the user's yes, by the thread's access level: installing an app unless the thread
 /// has full access; writing or removing files unless it's on Auto or full access.
@@ -295,9 +307,18 @@ impl PhonePanel {
                     }
                 }
                 this.assistive = assistive;
+                this.aim();
                 cx.notify();
             },
         );
+    }
+
+    /// Tell the helper which phone to drive: the user's other devices (an Apple Watch) take
+    /// Trek's keyboard too, and only the phone may count as paired or get its reports.
+    fn aim(&self) {
+        if let (Some(link), Some(phone)) = (&self.link, &self.phone) {
+            link.target(&phone.name);
+        }
     }
 
     /// Build the helper once, then keep it running while the tool is wanted.
@@ -335,6 +356,7 @@ impl PhonePanel {
                 Ok((link, events)) => {
                     link.frames(self.visible, LIVE_FPS);
                     self.link = Some(link);
+                    self.aim();
                     self._link_events = Some(cx.spawn_in(window, async move |this, cx| {
                         while let Ok(event) = events.recv().await {
                             let done = matches!(event, Event::Exited);
@@ -462,7 +484,7 @@ impl PhonePanel {
             return;
         };
         if !self.status.input_ready() {
-            self.notice = Some(NOT_PAIRED.into());
+            self.notice = Some(not_ready(&self.status).into());
             cx.notify();
             return;
         }
@@ -489,7 +511,7 @@ impl PhonePanel {
                 let _ = link.hid(&hid::home());
             }
             None => {
-                self.notice = Some(NOT_PAIRED.into());
+                self.notice = Some(not_ready(&self.status).into());
                 cx.notify();
             }
         }
@@ -672,6 +694,7 @@ impl PhonePanel {
         };
         let input = match s.bluetooth.as_str() {
             _ if s.input_ready() => (green, "Paired"),
+            _ if s.linked_only() => (red, "Can't pair on the same Apple Account"),
             "advertising" => (amber, "Pair in iPhone Bluetooth"),
             "off" => (red, "Bluetooth is off"),
             "not allowed" => (red, "Allow Bluetooth for Trek"),
@@ -799,6 +822,11 @@ impl PhonePanel {
             vec![
                 "Plug the iPhone into this Mac with a data cable (a charge-only cable gives no screen).", // words: ok
                 "Unlock it and tap Trust.",
+            ]
+        } else if self.status.linked_only() {
+            vec![
+                "This iPhone is linked to this Mac through your Apple Account, and over that link iOS doesn't take Trek as a keyboard and mouse: Trek can show its screen and move apps and files, but not tap or type.", // words: ok
+                "Pairing in Settings › Bluetooth can't change that; it works with an iPhone signed in to another Apple Account.",
             ]
         } else if self.status.bluetooth == "advertising" {
             vec![
@@ -1361,6 +1389,13 @@ impl Run<'_> {
         };
         let input = if status.input_ready() {
             "paired".to_string()
+        } else if status.linked_only() {
+            format!("not available. {LINKED}")
+        } else if !status.elsewhere.is_empty() && status.bluetooth == "advertising" {
+            format!(
+                "not paired ({} took Trek's keyboard and mouse instead; Trek sends nothing there). {NOT_PAIRED}",
+                status.elsewhere.join(", ")
+            )
         } else {
             match status.bluetooth.as_str() {
                 "advertising" => format!("not paired. {NOT_PAIRED}"),
@@ -1437,12 +1472,14 @@ impl Run<'_> {
     /// Send reports to the phone; `pointer` input needs AssistiveTouch.
     async fn input(&mut self, steps: Vec<Step>, pointer: bool) -> Result<(), String> {
         let link = self.link().await?;
-        let ready = self
+        let not = self
             .this
-            .update(self.cx, |p, _| p.status.input_ready())
+            .update(self.cx, |p, _| {
+                (!p.status.input_ready()).then(|| not_ready(&p.status))
+            })
             .map_err(gone)?;
-        if !ready {
-            return Err(NOT_PAIRED.into());
+        if let Some(why) = not {
+            return Err(why.into());
         }
         if pointer {
             let (on, udid) = self
@@ -1480,7 +1517,11 @@ impl Run<'_> {
             .await
             .ok_or("The keyboard and mouse didn't answer in time.")??;
         if missed > 0 && sent == 0 {
-            return Err(NOT_PAIRED.into());
+            let why = self
+                .this
+                .update(self.cx, |p, _| not_ready(&p.status))
+                .map_err(gone)?;
+            return Err(why.into());
         }
         Ok(())
     }
