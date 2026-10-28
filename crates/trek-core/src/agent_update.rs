@@ -310,7 +310,7 @@ pub const HARNESSES: &[Harness] = &[
         moved_from: None,
         majors: &[],
         self_update: None,
-        // Its standalone installer (`catalog`'s line), which installs over what's there.
+        // Its standalone installer, which installs over what's there (new installs use npm).
         installer: Some(
             "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
         ),
@@ -3312,10 +3312,10 @@ mod tests {
             shown("acp:pi", Install::Native, false).as_deref(),
             Some("x update")
         );
-        // No update command: its standalone installer again, as `catalog` has it.
-        assert_eq!(
-            shown("acp:qwen-code", Install::Native, false).as_deref(),
-            crate::catalog::install_hint("qwen-code").map(|h| h.here())
+        // No update command: its standalone installer again.
+        assert!(
+            shown("acp:qwen-code", Install::Native, false)
+                .is_some_and(|s| s.contains("install-qwen-standalone"))
         );
     }
 

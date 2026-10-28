@@ -334,11 +334,9 @@ const KIMI: Hint = Hint {
     unix: "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
     windows: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
 };
-// The standalone installers bring the Node.js Qwen Code runs on.
-const QWEN_CODE: Hint = Hint {
-    unix: "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
-    windows: "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex",
-};
+// npm, which Trek sets Node.js up for when it's missing: Qwen's standalone installers are served
+// from Hangzhou and didn't answer from the US (2026-10-28).
+const QWEN_CODE: Hint = Hint::same("npm i -g @qwen-code/qwen-code");
 const GROK: Hint = Hint {
     unix: "curl -fsSL https://x.ai/cli/install.sh | bash",
     windows: "irm https://x.ai/cli/install.ps1 | iex",
@@ -353,7 +351,7 @@ const DEVIN: Hint = Hint {
 // Its installer for Windows is a script to download and run; it supports x86-64 only.
 const GOOSE: Hint = Hint {
     unix: "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
-    windows: r#"Invoke-WebRequest -Uri "https://github.com/aaif-goose/goose/releases/download/stable/download_cli.ps1" -OutFile "download_cli.ps1"; .\download_cli.ps1"#,
+    windows: r#"Invoke-WebRequest -Uri "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1" -OutFile "download_cli.ps1"; .\download_cli.ps1"#,
 };
 // Amp's CLI has a native installer, but its ACP adapter (`amp-acp`, a Node program) is an npm
 // package only, as are Pi's CLI and adapter.
@@ -603,7 +601,7 @@ mod tests {
             mac("kimi"),
             "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"
         );
-        assert!(mac("qwen-code").ends_with("/install-qwen-standalone.sh | bash"));
+        assert_eq!(mac("qwen-code"), "npm i -g @qwen-code/qwen-code");
         assert_eq!(
             mac("opencode"),
             "curl -fsSL https://opencode.ai/install | bash"
@@ -620,14 +618,14 @@ mod tests {
     }
 
     /// A fresh Mac has neither Node.js nor Homebrew: only agents whose vendor publishes nothing
-    /// but npm packages install with npm (Trek sets up Node.js for them), and none needs brew.
+    /// but npm packages (or, Qwen Code, whose other installer is unreachable) install with npm (Trek sets up Node.js for them), and none needs brew.
     #[test]
     fn only_npm_only_agents_need_node_and_none_needs_homebrew() {
         for key in INSTALLABLE {
             let hint = install_hint(key).unwrap();
             for line in [hint.unix, hint.windows] {
-                let npm_only =
-                    matches!(*key, "amp" | "pi") || (*key == "opencode" && line == hint.windows);
+                let npm_only = matches!(*key, "amp" | "pi" | "qwen-code")
+                    || (*key == "opencode" && line == hint.windows);
                 assert_eq!(crate::node::needs_node(line), npm_only, "{key}: {line}");
             }
             assert!(!hint.unix.starts_with("brew "), "{key}: {}", hint.unix);
@@ -651,7 +649,7 @@ mod tests {
             win("kimi"),
             "irm https://code.kimi.com/kimi-code/install.ps1 | iex"
         );
-        assert!(win("qwen-code").ends_with("/install-qwen-standalone.ps1 | iex"));
+        assert_eq!(win("qwen-code"), "npm i -g @qwen-code/qwen-code");
         assert_eq!(
             win("cursor"),
             "irm 'https://cursor.com/install?win32=true' | iex"
