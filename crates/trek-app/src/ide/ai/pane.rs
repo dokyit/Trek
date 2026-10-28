@@ -1,9 +1,10 @@
-//! `AiPane`: the AI side bar. Its header is a strip of chat tabs (each a thread, or a new chat
-//! in the IDE folder) with a run-state mark and ×, which closes the tab only; then + for a new
-//! chat, the folder's history, and ⋯. Under it the active tab: its compact transcript
-//! (`transcript`), the bar of changes pending review (`review`), and the input (`input`), all on
-//! `Scope::Ide`. A new chat's first message starts an ordinary thread, in the inbox like any
-//! other, without moving the harness.
+//! `AiPane`: the AI side bar. Its header is a strip of chat tabs (each an editor chat, or a new
+//! chat in the IDE folder) with a run-state mark and ×, which closes the tab only; then + for a
+//! new chat, the folder's history of editor chats, and ⋯. Under it the active tab: its compact
+//! transcript (`transcript`), the bar of changes pending review (`review`), and the input
+//! (`input`), all on `Scope::Ide`. A new chat's first message starts an editor chat: the
+//! editor's own, never listed in Agents mode (`Thread::editor_chat`). The side chat beside the
+//! harness is drawn by it too, on `Scope::Side`.
 
 use super::context::ContextChip;
 use super::input::AiInput;
@@ -12,15 +13,44 @@ use crate::workspace::{IdeTab, Mode, Route, Scope, SettingsPage, Workspace, Work
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use trek_core::RunState;
+use trek_core::store::Thread;
 
 const HEADER_HEIGHT: f32 = 34.;
 /// Chat tabs are cut to this width; the title shows in full on hover.
 const TAB_MAX: f32 = 168.;
 /// Nor do they get narrower than this: past it the strip scrolls, and ⌄ lists them all.
 const TAB_MIN: f32 = 120.;
+
+/// A chat tab's run-state mark: a spinner while it works, amber when it needs the user, red when
+/// it failed, a quiet dot otherwise.
+fn state_mark(t: &Thread, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    match t.run_state {
+        RunState::Working => Spinner::new()
+            .xsmall()
+            .color(crate::palette::ember(cx))
+            .into_any_element(),
+        _ => {
+            let color = match t.run_state {
+                RunState::NeedsYou => crate::palette::amber(cx),
+                RunState::Failed => crate::palette::red(cx),
+                _ => theme.muted_foreground.opacity(0.45),
+            };
+            div()
+                .size(px(12.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(px(7.)).rounded_full().bg(color))
+                .into_any_element()
+        }
+    }
+}
 
 pub struct AiPane {
     workspace: Entity<Workspace>,
@@ -187,12 +217,7 @@ impl AiPane {
             .map(|(ix, tab)| match tab {
                 IdeTab::Draft => (ix, tab.clone(), "New chat".to_string(), None),
                 IdeTab::Thread(id) => match ws.thread(id) {
-                    Some(t) => (
-                        ix,
-                        tab.clone(),
-                        t.title.clone(),
-                        Some(crate::ide::agents_view::state_mark(t, cx)),
-                    ),
+                    Some(t) => (ix, tab.clone(), t.title.clone(), Some(state_mark(t, cx))),
                     None => (ix, tab.clone(), "Thread".to_string(), None),
                 },
             })
@@ -312,7 +337,7 @@ impl AiPane {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
-                                    // Closes the tab only: the thread stays, in the inbox and history.
+                                    // Closes the tab only: the chat stays, in the history.
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         let scope = this.scope.clone();
@@ -339,6 +364,8 @@ impl AiPane {
                                 let (sc1, sc2, sc3) =
                                     (menu_scope.clone(), menu_scope.clone(), menu_scope.clone());
                                 let id = thread_id.clone();
+                                // An editor chat is the editor's: it doesn't open in Agents.
+                                let side = menu_scope == Scope::Side;
                                 menu.min_w(px(200.))
                                     .item(
                                         PopupMenuItem::new("Rename…")
@@ -349,18 +376,20 @@ impl AiPane {
                                                 });
                                             }),
                                     )
-                                    .item(
-                                        PopupMenuItem::new("Open in Agents")
-                                            .disabled(id.is_none())
-                                            .on_click(move |_, _, cx| {
-                                                if let Some(id) = id.clone() {
-                                                    ws1.update(cx, |ws, cx| {
-                                                        ws.set_mode(Mode::Agents, cx);
-                                                        ws.navigate(Route::Thread(id), cx);
-                                                    });
-                                                }
-                                            }),
-                                    )
+                                    .when(side, |menu| {
+                                        menu.item(
+                                            PopupMenuItem::new("Open in Agents")
+                                                .disabled(id.is_none())
+                                                .on_click(move |_, _, cx| {
+                                                    if let Some(id) = id.clone() {
+                                                        ws1.update(cx, |ws, cx| {
+                                                            ws.set_mode(Mode::Agents, cx);
+                                                            ws.navigate(Route::Thread(id), cx);
+                                                        });
+                                                    }
+                                                }),
+                                        )
+                                    })
                                     .separator()
                                     .item(PopupMenuItem::new("Close").on_click(move |_, _, cx| {
                                         ws2.update(cx, |ws, cx| ws.close_chat_in(&sc1, ix, cx))
@@ -437,7 +466,8 @@ impl AiPane {
             })
     }
 
-    /// 🕘: this folder's threads, newest first, by day; one opens as a chat tab.
+    /// 🕘: this folder's editor chats (the side chat's: the project's side chats), newest first,
+    /// by day; one opens as a chat tab.
     fn history_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let scope = self.scope.clone();
         let entity = self.workspace.clone();
@@ -513,6 +543,7 @@ impl AiPane {
         let ws = self.workspace.clone();
         let me = cx.weak_entity();
         let active_ix = ws.read(cx).chats(&self.scope).active;
+        let side = self.scope == Scope::Side;
         Button::new("ai-more")
             .ghost()
             .small()
@@ -542,10 +573,13 @@ impl AiPane {
                                     me.update(cx, |this, cx| this.begin_rename(active, window, cx));
                             }),
                     )
-                    .item(on_thread("Open in Agents", |ws, id, cx| {
-                        ws.set_mode(Mode::Agents, cx);
-                        ws.navigate(Route::Thread(id.to_string()), cx);
-                    }))
+                    // An editor chat is the editor's: it doesn't open in Agents.
+                    .when(side, |menu| {
+                        menu.item(on_thread("Open in Agents", |ws, id, cx| {
+                            ws.set_mode(Mode::Agents, cx);
+                            ws.navigate(Route::Thread(id.to_string()), cx);
+                        }))
+                    })
                     .item({
                         let (ws, id) = (ws.clone(), thread.clone());
                         PopupMenuItem::new("Open in New Window")
@@ -632,7 +666,7 @@ impl AiPane {
             .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(if side {
                 "A question on the side, in a session of its own: the main thread carries on undisturbed."
             } else {
-                "Ask about this code, or have an agent change it. It's a thread like any other: it shows in Agents too."
+                "Ask about this code, or have the agent change it."
             }))
     }
 }

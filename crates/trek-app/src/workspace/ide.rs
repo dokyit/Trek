@@ -1,8 +1,9 @@
 //! The editor (Trek IDE) side of the workspace: which layout the main window shows, the AI side
-//! bar's chat tabs, and what the language servers say about open files. The editor is another
-//! view over the same threads: a chat started there is an ordinary thread, in the inbox like any
-//! other, and the harness stays on whatever it showed. The chat tabs are kept per IDE folder
-//! in the store, so a folder opens again on the chats it was left with.
+//! bar's chat tabs, and what the language servers say about open files. The editor keeps chats
+//! of its own about the code open there (`Thread::editor_chat`): its tabs and history list only
+//! those, and Agents mode's lists (sidebar, inbox, search, phones) never do; the harness stays
+//! on whatever it showed. The chat tabs are kept per IDE folder in the store, so a folder opens
+//! again on the chats it was left with.
 
 use super::{Prefs, Route, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::Context;
@@ -76,13 +77,13 @@ struct SavedChats {
 /// One chat tab in the editor's AI side bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdeTab {
-    /// A new chat in the IDE folder: its first message starts a thread.
+    /// A new chat in the IDE folder: its first message starts an editor chat.
     Draft,
     Thread(String),
 }
 
-/// The AI side bar's chat tabs. Closing a tab only takes it off the bar: the thread lives on in
-/// the inbox.
+/// The AI side bar's chat tabs. Closing a tab only takes it off the bar: the chat lives on in
+/// the history.
 #[derive(Debug, Clone)]
 pub struct IdeChat {
     pub tabs: Vec<IdeTab>,
@@ -201,10 +202,9 @@ impl Workspace {
         }
     }
 
-    /// Switch the main window between the harness and the editor, carrying the work across:
-    /// into the editor, the thread on screen becomes the AI side bar's chat and its folder the
-    /// IDE folder; back to Agents, the side bar's chat opens there (unless the user turned
-    /// "follow" off). The harness's route is otherwise left as it was.
+    /// Switch the main window between the harness and the editor. Into the editor, the folder of
+    /// the thread on screen becomes the IDE folder (the thread stays in Agents: the side bar keeps
+    /// chats of its own). The harness's route is left as it was.
     pub fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         if self.mode == mode || self.route == Route::Onboarding {
             return;
@@ -217,8 +217,6 @@ impl Workspace {
                         if let Some(cwd) = self.thread(&id).and_then(|t| t.cwd.clone()) {
                             self.move_ide_root(Some(cwd));
                         }
-                        self.ide_chat.show(&id);
-                        self.chats_moved();
                     }
                     Route::Draft { project } => {
                         if self.ide_root.is_none() {
@@ -264,20 +262,7 @@ impl Workspace {
             }
             Mode::Agents => {
                 self.mode = Mode::Agents;
-                let follow = self
-                    .ide_chat
-                    .active_thread()
-                    .filter(|_| self.settings.ide.follow_active_chat)
-                    .map(str::to_string);
-                match follow {
-                    Some(id)
-                        if self.route != Route::Thread(id.clone())
-                            && self.thread(&id).is_some() =>
-                    {
-                        self.navigate(Route::Thread(id), cx)
-                    }
-                    _ => cx.emit(WorkspaceEvent::FocusComposer),
-                }
+                cx.emit(WorkspaceEvent::FocusComposer);
             }
         }
         cx.notify();
@@ -305,14 +290,17 @@ impl Workspace {
         }
     }
 
-    /// Open `id` in the AI side bar as its active chat tab.
+    /// Open editor chat `id` in the AI side bar as its active chat tab.
     pub fn ide_open_thread(&mut self, id: &str, cx: &mut Context<Self>) {
         self.open_chat_in(&Scope::Ide, id, cx)
     }
 
-    /// Open `id` as `scope`'s active chat tab.
+    /// Open `id` as `scope`'s active chat tab. The AI side bar opens editor chats only.
     pub fn open_chat_in(&mut self, scope: &Scope, id: &str, cx: &mut Context<Self>) {
-        if self.thread(id).is_none() {
+        let Some(t) = self.thread(id) else {
+            return;
+        };
+        if *scope == Scope::Ide && !t.editor_chat {
             return;
         }
         self.chats_mut(scope).show(id);
@@ -321,13 +309,32 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Open `id` where the user is: the AI side bar in the editor, the harness otherwise.
+    /// Open `id` where it lives: an editor chat in the editor's AI side bar, any other thread in
+    /// Agents (the window switches to it).
     pub fn open_thread_here(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.ide() {
-            self.ide_open_thread(id, cx)
-        } else {
-            self.navigate(Route::Thread(id.to_string()), cx)
+        if self.thread(id).is_some_and(|t| t.editor_chat) {
+            return self.open_editor_chat(id, cx);
         }
+        if self.ide() {
+            self.set_mode(Mode::Agents, cx);
+        }
+        self.navigate(Route::Thread(id.to_string()), cx)
+    }
+
+    /// Editor chat `id` comes to the front: the editor, on the chat's folder when it's outside
+    /// the one open, with the chat as the AI side bar's active tab.
+    pub(super) fn open_editor_chat(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(cwd) = self.thread(id).and_then(|t| t.cwd.clone()) else {
+            return;
+        };
+        if !self.ide() {
+            self.set_mode(Mode::Editor, cx);
+        }
+        if self.ide_root.as_deref().is_none_or(|r| !cwd.starts_with(r)) {
+            self.set_ide_root(cwd, cx);
+        }
+        self.ide_open_thread(id, cx);
+        cx.emit(WorkspaceEvent::FocusAiInput);
     }
 
     /// Switch the AI side bar to tab `ix`.
@@ -350,7 +357,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Close the AI side bar's tab `ix`. Its thread stays, in the inbox and the history.
+    /// Close the AI side bar's tab `ix`. Its chat stays, in the history.
     pub fn ide_close_chat(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.close_chat_in(&Scope::Ide, ix, cx)
     }
@@ -460,8 +467,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The AI side bar's new chat sends its first message: the thread starts in the IDE folder
-    /// and takes the tab's place. The harness stays where it was (no route change, no tab there).
+    /// The AI side bar's new chat sends its first message: an editor chat starts in the IDE
+    /// folder and takes the tab's place. The harness stays where it was (no route change, no tab there).
     pub(super) fn send_ide_draft(
         &mut self,
         text: String,
@@ -482,7 +489,9 @@ impl Workspace {
             return;
         }
         let prefs = self.ide_chat.draft_prefs.clone();
-        let Some(id) = self.start_thread(self.ide_root.clone(), prefs, &text, &images, cx) else {
+        let root = self.ide_root.clone();
+        let editor_chat = |t: &mut trek_core::store::Thread| t.editor_chat = true;
+        let Some(id) = self.start_thread_with(root, prefs, &text, &images, editor_chat, cx) else {
             return;
         };
         if self.ide_chat.draft_ask {
@@ -533,12 +542,13 @@ impl Workspace {
         }
     }
 
-    /// The chat ⌘K's edits of `path` go to, while it's still there.
+    /// The chat ⌘K's edits of `path` go to, while it's still there (an editor chat: one made
+    /// before there were editor chats is an Agents thread now, and ⌘K starts a new one).
     pub fn inline_chat(&self, path: &Path) -> Option<&str> {
         let id = self.ide_chat.inline.get(path)?;
         self.threads
             .iter()
-            .any(|t| t.id == *id && t.archived_at.is_none())
+            .any(|t| t.id == *id && t.archived_at.is_none() && t.editor_chat)
             .then_some(id.as_str())
     }
 
@@ -609,7 +619,9 @@ impl Workspace {
             Some(id) => id,
             None => {
                 let (title, prefs) = self.inline_target(path);
-                let Some(id) = self.start_thread(root, prefs, &text, &[], cx) else {
+                let editor_chat = |t: &mut trek_core::store::Thread| t.editor_chat = true;
+                let Some(id) = self.start_thread_with(root, prefs, &text, &[], editor_chat, cx)
+                else {
                     return;
                 };
                 // Its own name from the start: the first-answer title never replaces it.
@@ -718,8 +730,8 @@ impl Workspace {
         self.hand_back_queued(id, cx);
     }
 
-    /// The IDE folder becomes `root`: the chat tabs kept for it come back (threads gone since
-    /// left out), or a new chat when none were.
+    /// The IDE folder becomes `root`: the chat tabs kept for it come back (chats gone since, and
+    /// threads kept from before there were editor chats, left out), or a new chat when none were.
     pub(super) fn move_ide_root(&mut self, root: Option<PathBuf>) {
         if self.ide_root == root {
             return;
@@ -747,7 +759,7 @@ impl Workspace {
         let live = |id: &str| {
             self.threads
                 .iter()
-                .any(|t| t.id == id && t.archived_at.is_none())
+                .any(|t| t.id == id && t.archived_at.is_none() && t.editor_chat)
         };
         let mut tabs = vec![];
         let mut active = 0;
@@ -843,8 +855,8 @@ impl Workspace {
         })
     }
 
-    /// Threads working in the IDE folder (or a worktree of it), for the Agents view and the
-    /// status bar: newest first, sub-agents and side chats left to their parents.
+    /// The editor chats of the IDE folder (or a worktree of it), for the AI side bar's history
+    /// and the bottom panel's Tasks and Output: newest first, sub-agents left to their parents.
     pub fn ide_threads(&self) -> Vec<&trek_core::store::Thread> {
         let Some(root) = self.ide_root.as_deref() else {
             return vec![];
@@ -852,7 +864,7 @@ impl Workspace {
         let mut list: Vec<_> = self
             .threads
             .iter()
-            .filter(|t| t.archived_at.is_none() && t.parent_id.is_none() && t.side_of.is_none())
+            .filter(|t| t.editor_chat && t.archived_at.is_none() && t.parent_id.is_none())
             // A project's thread (in a worktree elsewhere, say), by its project: never by walking
             // up from its folder, which can only find `root` for a folder under it anyway.
             .filter(|t| {

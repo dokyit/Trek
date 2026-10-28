@@ -195,7 +195,7 @@ fn a_picture_shown_on_its_own_closes_like_a_file_does() {
 }
 
 #[test]
-fn the_last_tab_closed_in_the_editor_offers_the_way_back_to_agents() {
+fn the_last_tab_closed_in_the_editor_leaves_its_watermark_and_the_switch_goes_back() {
     run(async |cx| {
         let trek = open(cx);
         let file = trek.project.join("only.rs");
@@ -218,8 +218,9 @@ fn the_last_tab_closed_in_the_editor_offers_the_way_back_to_agents() {
         trek.press(cx, "secondary-w");
         trek.render(cx);
         assert_eq!(open_tabs(&trek, cx), 0);
-        assert!(trek.visible(cx, "ide-watermark") && trek.visible(cx, "ide-back-to-agents"));
-        trek.click(cx, "ide-back-to-agents");
+        // An editor of its own: no button back to Agents, the title bar's switch is the way.
+        assert!(trek.visible(cx, "ide-watermark") && !trek.visible(cx, "ide-back-to-agents"));
+        trek.click(cx, "mode-agents");
         trek.render(cx);
         assert_eq!(trek.read(cx, |ws, _| ws.mode), Mode::Agents);
     });

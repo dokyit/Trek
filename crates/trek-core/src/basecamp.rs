@@ -788,8 +788,8 @@ impl Recap {
                 continue;
             }
             // A sub-agent's work counts (its turns and tokens, under its own model), but it isn't
-            // a thread of the user's.
-            let own = t.thread.parent_id.is_none();
+            // a thread of the user's; nor is an editor chat (Editor mode's, not Agents').
+            let own = t.thread.parent_id.is_none() && !t.thread.editor_chat;
             if own {
                 recap.threads += 1;
             }

@@ -12,9 +12,7 @@ use crate::keys::{self, Id};
 use crate::workspace::Route;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
@@ -991,20 +989,6 @@ impl IdeWorkbench {
             .child(row("Show Terminal", keys::hint(Id::ToggleRightPanel)))
             .child(row("Toggle AI Side Bar", keys::hint(Id::ToggleAiBar)))
             .child(row("Switch to Agents", keys::hint(Id::SwitchMode)))
-            // The way out for someone who closed the last file to get back to their threads.
-            .child(
-                div().pt(px(14.)).child(
-                    Button::new("ide-back-to-agents")
-                        .outline()
-                        .small()
-                        .label("Back to Agents")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.workspace.update(cx, |ws, cx| {
-                                ws.set_mode(crate::workspace::Mode::Agents, cx)
-                            })
-                        })),
-                ),
-            )
     }
 
     /// No folder open: what to do, then recent folders and loose files.

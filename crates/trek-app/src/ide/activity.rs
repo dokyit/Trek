@@ -1,5 +1,5 @@
 //! The primary side bar: a row of view icons along its top (as Cursor has them, saving VS Code's
-//! 48 px rail), and the view they pick: Explorer, Search, Source Control or Agents.
+//! 48 px rail), and the view they pick: Explorer, Search or Source Control.
 
 use super::IdeWorkbench;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
@@ -11,23 +11,16 @@ pub enum SideView {
     Explorer,
     Search,
     Scm,
-    Agents,
 }
 
 impl SideView {
-    pub const ALL: [SideView; 4] = [
-        SideView::Explorer,
-        SideView::Search,
-        SideView::Scm,
-        SideView::Agents,
-    ];
+    pub const ALL: [SideView; 3] = [SideView::Explorer, SideView::Search, SideView::Scm];
 
     fn icon(self) -> Icon {
         match self {
             SideView::Explorer => Icon::new(crate::assets::Lucide::Files),
             SideView::Search => Icon::new(IconName::Search),
             SideView::Scm => Icon::new(crate::assets::Lucide::GitBranch),
-            SideView::Agents => Icon::new(crate::assets::Lucide::Sparkles),
         }
     }
 
@@ -36,7 +29,6 @@ impl SideView {
             SideView::Explorer => crate::keys::localize("Explorer (⌘⇧E)"),
             SideView::Search => crate::keys::localize("Search (⌘⇧F)"),
             SideView::Scm => crate::keys::localize("Source Control (⌃⇧G)"),
-            SideView::Agents => "Agents in this folder".into(),
         }
     }
 
@@ -45,7 +37,6 @@ impl SideView {
             SideView::Explorer => "ide-view-explorer",
             SideView::Search => "ide-view-search",
             SideView::Scm => "ide-view-scm",
-            SideView::Agents => "ide-view-agents",
         }
     }
 }
@@ -71,7 +62,7 @@ pub(super) fn section_header(title: impl Into<SharedString>, cx: &App) -> Div {
 }
 
 impl IdeWorkbench {
-    /// The view icons, each with a count where it has news (changed files, agents needing you).
+    /// The view icons, Source Control's with a count of changed files.
     pub(super) fn activity_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
@@ -80,7 +71,6 @@ impl IdeWorkbench {
             .as_ref()
             .and_then(|r| ws.git_info.get(r))
             .map_or(0, |g| g.changed);
-        let needs = ws.ide_threads().iter().filter(|t| t.needs_you()).count();
         let ember = crate::palette::ember(cx);
         h_flex()
             .h(px(36.))
@@ -93,7 +83,6 @@ impl IdeWorkbench {
                 let on = v == self.view;
                 let badge = match v {
                     SideView::Scm => changed,
-                    SideView::Agents => needs,
                     _ => 0,
                 };
                 div()
@@ -173,12 +162,10 @@ impl IdeWorkbench {
                         .map(|g| g.cached(StyleRefinement::default().w_full().flex_1().min_h_0())),
                 )
                 .into_any_element(),
-            SideView::Agents => self.agents_view(cx),
         }
     }
 
-    /// The folder's tree under its name (with New file, Refresh and Collapse), then the agents
-    /// working in it.
+    /// The folder's tree under its name (with New file, Refresh and Collapse).
     fn explorer_view(
         &mut self,
         fill: impl Fn() -> StyleRefinement,
@@ -271,7 +258,6 @@ impl IdeWorkbench {
                     .clone()
                     .cached(StyleRefinement::default().w_full().flex_1().min_h_0()),
             )
-            .children(has_root.then(|| self.agents_section(cx)))
             .into_any_element()
     }
 }

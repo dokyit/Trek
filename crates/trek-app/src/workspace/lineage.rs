@@ -443,6 +443,8 @@ impl Workspace {
         // The thread that started this one follows its continuation too.
         t.started_by = parent.started_by.clone();
         t.continued_from = Some(caller.to_string());
+        // An editor chat's work goes on in another editor chat.
+        t.editor_chat = parent.editor_chat;
         self.store
             .save_thread(&t)
             .map_err(|e| format!("Couldn't start the new thread: {e}"))?;

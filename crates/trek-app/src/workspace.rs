@@ -2510,7 +2510,8 @@ impl Workspace {
 
     /// Threads waiting on the user (approval or failure), as the inbox shows them: a settled
     /// thread that asks again is back in the inbox, so it counts too. Archived ones don't, nor do
-    /// side chats: the inbox doesn't list them, so nothing there could settle them. Sub-agents
+    /// side chats and editor chats: the inbox doesn't list them, so nothing there could settle
+    /// them. Sub-agents
     /// aren't listed either: one waiting on an approval counts as its parent's card, which says
     /// so (a failed one reports to its parent instead).
     pub fn needs_you_count(&self) -> usize {
@@ -2521,6 +2522,7 @@ impl Workspace {
                 t.parent_id.is_none()
                     && t.archived_at.is_none()
                     && t.side_of.is_none()
+                    && !t.editor_chat
                     && (t.needs_you() || sub_agents.contains(&t.id))
             })
             .count()
@@ -2767,6 +2769,13 @@ impl Workspace {
     }
 
     pub fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
+        // An editor chat never shows in the harness: it opens in the editor's AI side bar.
+        if let Route::Thread(id) = &route
+            && self.thread(id).is_some_and(|t| t.editor_chat)
+        {
+            let id = id.clone();
+            return self.open_editor_chat(&id, cx);
+        }
         // A thread on another machine is only followed here: never loaded from the store, given
         // a tab, or kept (`machines`).
         if let Route::Thread(id) = &route
@@ -4140,7 +4149,21 @@ impl Workspace {
         images: &[PathBuf],
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        match self.make_thread(project, prefs, text, true, |_| {}, cx) {
+        self.start_thread_with(project, prefs, text, images, |_| {}, cx)
+    }
+
+    /// `start_thread`, with `shape` adjusting the thread before it's first saved (the editor's
+    /// chats are marked so).
+    pub fn start_thread_with(
+        &mut self,
+        project: Option<PathBuf>,
+        prefs: Prefs,
+        text: &str,
+        images: &[PathBuf],
+        shape: impl FnOnce(&mut Thread),
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        match self.make_thread(project, prefs, text, true, shape, cx) {
             Ok(id) => Some(id),
             Err(e) => {
                 cx.emit(WorkspaceEvent::Toast {
@@ -7434,6 +7457,8 @@ impl Workspace {
             }
         };
         fork.title = format!("{} (fork)", thread.title);
+        // An editor chat's fork is one too.
+        fork.editor_chat = thread.editor_chat;
         // A thread in a worktree forks into the same one: its files are there, and so is the
         // agent's session (agents keep them per folder). The two share it from then on.
         fork.cwd = thread.cwd.clone();

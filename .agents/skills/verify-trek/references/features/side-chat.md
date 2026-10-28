@@ -2,7 +2,7 @@
 
 ## What it does
 
-Opens a conversation beside the main thread in the right panel, in the same project and a session of its own. It is the editor's AI side bar on a scope of its own (`Scope::Side`): chat tabs (each a side chat), + for a new one, the history of side chats in this project, ⋯, the compact transcript in VS Code / Copilot Chat's layout ("You" over each message, the agent's logo, name and model over each answer, "✓ Ran `cmd`" lines, "Used N references"), its request cards (approvals, questions, plans) and the input with context chips, Agent/Ask/Plan, model and access. Side chats stay off the sidebar and are named from their first message.
+Opens a conversation beside the main thread in the right panel, in the same project and a session of its own. It is the editor's AI side bar on a scope of its own (`Scope::Side`): chat tabs (each a side chat), + for a new one, the history of side chats in this project, ⋯, the compact transcript in VS Code / Copilot Chat's layout ("You" over each message, the agent's logo, name and model over each answer, "✓ Ran `cmd`" lines, "Used N references"), its request cards (approvals, questions, plans) and the input with context chips, Agent/Ask/Plan, model and access. Side chats stay off the sidebar and are named from their first message. They are Agents mode's: the editor's AI side bar (same drawing, `Scope::Ide`) keeps editor chats instead, and its menus have no **Open in Agents**; the side chat's do.
 
 ## Reach it as a user
 

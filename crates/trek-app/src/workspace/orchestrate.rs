@@ -520,6 +520,8 @@ impl Workspace {
         child.cwd = parent.cwd.clone();
         child.worktree = parent.worktree.clone();
         child.parent_id = Some(caller.to_string());
+        // An editor chat's sub-agents stay out of Agents' lists (and its search) with it.
+        child.editor_chat = parent.editor_chat;
         self.store
             .save_thread(&child)
             .map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
