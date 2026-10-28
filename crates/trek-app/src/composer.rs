@@ -1047,6 +1047,11 @@ impl Composer {
         let (id, keyed, turn_end, files, can_open_pr) = {
             let ws = self.workspace.read(cx);
             let id = ws.thread_id_in(&self.scope)?.to_string();
+            // An approval, question or plan card sits right above the composer (the thread's
+            // live footer); the row would lie over its buttons, so it waits for the answer.
+            if ws.live.get(&id).is_some_and(|l| !l.permissions.is_empty()) {
+                return None;
+            }
             let keyed = ws.pr_chip_keyed(&id);
             // What the agent last changed: the newest turn that changed files (its "Edited N
             // files" card), as the reference's "4 files +128 −36".
