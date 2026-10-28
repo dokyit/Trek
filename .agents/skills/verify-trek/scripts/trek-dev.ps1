@@ -24,7 +24,7 @@ $Settings = @(
     '[mobile]', 'port = 7431'
 ) -join "`n"
 $Tools = @('git', 'explorer', 'terminal', 'browser', 'sidechat', 'simulator')
-$BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'appearance', 'first', 'onboarding')
+$BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'study', 'appearance', 'first', 'onboarding')
 $ControlVerbs = @('browser', 'range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair', 'limits-demo', 'pr-demo', 'dictate-demo', 'onboarding')
 $ValueFlags = @('--size', '--timeout', '--output', '--lines', '--grep')
 
@@ -296,7 +296,7 @@ function Route-Line([string]$Route) {
         return "tools $tool"
     }
     if ($BasicRoutes -contains $Route -or $Route -match '^(settings|thread|title|project):') { return "route $Route" }
-    Die "Unknown route '$Route'." 'use draft, no-project, basecamp, notes, first, settings:<page>, tool:<name>, title:<query>, thread:<id>, or project:<path>'
+    Die "Unknown route '$Route'." 'use draft, no-project, basecamp, notes, study, first, settings:<page>, tool:<name>, title:<query>, thread:<id>, or project:<path>'
 }
 function Invoke-Check([bool]$Quick) {
     $steps = [System.Collections.Generic.List[object]]::new()

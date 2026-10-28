@@ -50,7 +50,7 @@ port = 7431
 """
 
 TOOLS = {"git", "explorer", "terminal", "browser", "sidechat", "simulator", "iphone"}
-BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "appearance", "first", "onboarding"}
+BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "study", "appearance", "first", "onboarding"}
 CONTROL_VERBS = {"browser", "range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "pair", "limits-demo", "pr-demo", "dictate-demo", "onboarding"}
 
 
@@ -589,7 +589,7 @@ def route_command(route: str) -> str:
         return f"route {route}"
     raise CliError(
         f"Unknown route {route!r}.",
-        hint="use draft, no-project, basecamp, notes, first, onboarding, settings:<page>, tool:<name>, title:<query>, thread:<id>, or project:<path>",
+        hint="use draft, no-project, basecamp, notes, study, first, onboarding, settings:<page>, tool:<name>, title:<query>, thread:<id>, or project:<path>",
     )
 
 
@@ -674,7 +674,7 @@ def parser() -> argparse.ArgumentParser:
     status.epilog = "Example: trek-dev status"
 
     open_p = sub.add_parser("open", help="Open a route or right-panel tool in the isolated app.")
-    open_p.add_argument("route", help="For example basecamp, notes, settings:appearance, tool:git, or title:query.")
+    open_p.add_argument("route", help="For example basecamp, notes, study, settings:appearance, tool:git, or title:query.")
     open_p.add_argument("--dry-run", action="store_true", help="Validate and show the command without sending it.")
     open_p.epilog = "Example: trek-dev open settings:appearance"
 

@@ -347,6 +347,26 @@ impl Sidebar {
             this.workspace
                 .update(cx, |ws, cx| ws.navigate(Route::Notes, cx))
         }));
+        let at_study = self.workspace.read(cx).route == Route::Study;
+        let study = ui::nav_row(
+            "open-study",
+            Icon::new(crate::assets::Lucide::BookOpen),
+            "Study",
+            None,
+            at_study,
+            cx,
+        )
+        .test_support()
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(
+                "Learn anything with a tutor (⌘⇧U)", // keys::shared
+            ))
+            .build(window, cx)
+        })
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.workspace
+                .update(cx, |ws, cx| ws.navigate(Route::Study, cx))
+        }));
         v_flex()
             .child(
                 h_flex()
@@ -376,7 +396,14 @@ impl Sidebar {
                         })),
                     ),
             )
-            .child(div().px_2().pb_1().child(basecamp).child(notes))
+            .child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .child(basecamp)
+                    .child(notes)
+                    .child(study),
+            )
     }
 
     fn project_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {

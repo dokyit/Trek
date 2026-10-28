@@ -41,6 +41,7 @@ pub struct TrekWindow {
     settings_nav: Entity<SettingsNav>,
     pub basecamp: Entity<Basecamp>,
     pub notes: Entity<crate::notes::NotesView>,
+    pub study: Entity<crate::study::StudyView>,
     pub right_panel: Entity<RightPanel>,
     /// The terminal docked under the chat (⌃`).
     pub terminal_dock: Entity<crate::terminal_dock::TerminalDock>,
@@ -171,6 +172,7 @@ impl TrekWindow {
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
         let basecamp = cx.new(|cx| Basecamp::new(workspace.clone(), cx));
         let notes = cx.new(|cx| crate::notes::NotesView::new(workspace.clone(), window, cx));
+        let study = cx.new(|cx| crate::study::StudyView::new(workspace.clone(), window, cx));
         let ide = cx.new(|cx| crate::ide::IdeWorkbench::new(workspace.clone(), window, cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
@@ -261,6 +263,12 @@ impl TrekWindow {
                         if this.workspace.read(cx).route == Route::Notes =>
                     {
                         this.notes.read(cx).focus_handle(cx).focus(window, cx)
+                    }
+                    // Nor has Study: its topic field takes them.
+                    WorkspaceEvent::FocusComposer
+                        if this.workspace.read(cx).route == Route::Study =>
+                    {
+                        this.study.read(cx).focus_handle(cx).focus(window, cx)
                     }
                     WorkspaceEvent::FocusComposer => {
                         this.composer.update(cx, |c, cx| c.focus(window, cx))
@@ -544,6 +552,7 @@ impl TrekWindow {
                 }
                 Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
+                Route::Study => this.study.read(cx).focus_handle(cx).focus(window, cx),
                 Route::Editor { .. } => {
                     if let Some(ev) = this.editor(cx) {
                         ev.update(cx, |e, cx| e.focus(window, cx));
@@ -573,6 +582,7 @@ impl TrekWindow {
             settings_nav,
             basecamp,
             notes,
+            study,
             right_panel,
             terminal_dock,
             working_bar,
@@ -989,6 +999,7 @@ impl Render for WindowTitle {
                 Route::Settings(_) => (None, "Settings".into(), None),
                 Route::Basecamp => (None, "Basecamp".into(), None),
                 Route::Notes => (None, "Notes".into(), None),
+                Route::Study => (None, "Study".into(), None),
                 Route::Editor { path } => {
                     let project = path.parent().map(|d| trek_core::store::project_root(d));
                     let name = path
@@ -2031,6 +2042,10 @@ impl Render for TrekWindow {
                 this.workspace
                     .update(cx, |ws, cx| ws.navigate(Route::Notes, cx))
             }))
+            .on_action(cx.listener(|this, _: &crate::OpenStudy, _, cx| {
+                this.workspace
+                    .update(cx, |ws, cx| ws.navigate(Route::Study, cx))
+            }))
             .on_action(cx.listener(|this, _: &crate::CloseTab, window, cx| {
                 // ⌘W: the editor tab in front, or the file shown on its own (asking first if it
                 // has unsaved edits), else the thread's tab.
@@ -2153,6 +2168,7 @@ impl TrekWindow {
                 Route::Settings(_) => self.settings.clone().into_any_element(),
                 Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
                 Route::Notes => self.notes.clone().into_any_element(),
+                Route::Study => self.study.clone().into_any_element(),
                 Route::Editor { path } => {
                     let ev = self
                         .ide

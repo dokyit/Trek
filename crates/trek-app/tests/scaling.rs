@@ -34,6 +34,7 @@ fn the_title_bar_controls_are_where_windows_hit_tests_them_at_every_scale() {
             Route::Basecamp,
             Route::Settings(SettingsPage::Appearance),
             Route::Notes,
+            Route::Study,
         ] {
             trek.update(cx, |ws, cx| ws.navigate(route.clone(), cx));
             for scale in SCALES {

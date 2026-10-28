@@ -59,6 +59,7 @@ pub use trek_shortcuts as shortcuts;
 pub mod shots;
 pub mod sidebar;
 pub mod single_instance;
+pub mod study;
 pub mod system;
 pub mod tabs;
 pub mod terminal_dock;
@@ -115,6 +116,7 @@ actions!(
         NextTab,
         PreviousTab,
         OpenNotes,
+        OpenStudy,
         ToggleIde,
         ToggleIdeSearch,
         SwitchMode,
@@ -412,6 +414,9 @@ pub fn app_actions(cx: &mut App) {
     });
     cx.on_action(|_: &OpenNotes, cx| {
         in_main(cx, |ws, cx| ws.navigate(workspace::Route::Notes, cx))
+    });
+    cx.on_action(|_: &OpenStudy, cx| {
+        in_main(cx, |ws, cx| ws.navigate(workspace::Route::Study, cx))
     });
     cx.on_action(|_: &SwitchMode, cx| in_main(cx, |ws, cx| ws.toggle_ide(cx)));
     cx.on_action(|_: &CheckForUpdates, cx| {

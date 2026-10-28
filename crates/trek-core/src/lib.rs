@@ -34,6 +34,7 @@ pub mod rewind;
 pub mod settings;
 pub mod skills;
 pub mod store;
+pub mod study;
 pub mod transcript;
 pub mod types;
 pub mod update;

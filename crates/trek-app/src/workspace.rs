@@ -15,6 +15,7 @@ pub use tabs::MAX_TABS;
 mod ide;
 pub mod relocate;
 mod review;
+mod study;
 mod turn_changes;
 pub mod usage;
 mod verification;
@@ -72,6 +73,8 @@ pub enum Route {
     Basecamp,
     /// Notes: things jotted down, in markdown.
     Notes,
+    /// Study: learning anything with an agent as a tutor (`crate::study`).
+    Study,
     /// A file open in the in-app editor.
     Editor {
         path: PathBuf,
@@ -2797,7 +2800,11 @@ impl Workspace {
         if self.ide()
             && matches!(
                 route,
-                Route::Settings(_) | Route::Basecamp | Route::Notes | Route::Onboarding
+                Route::Settings(_)
+                    | Route::Basecamp
+                    | Route::Notes
+                    | Route::Study
+                    | Route::Onboarding
             )
         {
             self.mode = Mode::Agents;
@@ -3220,6 +3227,7 @@ impl Workspace {
                 | Route::Draft { .. }
                 | Route::Basecamp
                 | Route::Notes
+                | Route::Study
                 | Route::Settings(_)),
             ) => self.navigate(route, cx),
             _ => self.new_thread(cx),

@@ -1708,6 +1708,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             ("route", "no-project") => ws.navigate(Route::Draft { project: None }, cx),
             ("route", "basecamp") => ws.navigate(Route::Basecamp, cx),
             ("route", "notes") => ws.navigate(Route::Notes, cx),
+            ("route", "study") => ws.navigate(Route::Study, cx),
             ("route", "appearance") => ws.navigate(Route::Settings(SettingsPage::Appearance), cx),
             ("route", "onboarding") => ws.open_onboarding(None, cx),
             // Onboarding from a step (`onboarding agents`), or with what a set-up Mac would show

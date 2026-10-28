@@ -43,6 +43,7 @@ enum Action {
     Basecamp,
     BasecampRange(trek_core::basecamp::Range),
     Notes,
+    Study,
     NewChat,
     Glass(bool),
     Settings(SettingsPage),
@@ -1054,6 +1055,16 @@ impl CommandPalette {
         add(
             Entry::new(
                 c,
+                icon(Icon::new(crate::assets::Lucide::BookOpen)),
+                "Study",
+                Action::Study,
+            )
+            .hint(keys::hint(Id::OpenStudy)),
+            "learn tutor teach practice quiz flashcards understand course lesson",
+        );
+        add(
+            Entry::new(
+                c,
                 icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)),
                 "New thread without a project",
                 Action::NewChat,
@@ -1341,6 +1352,7 @@ impl CommandPalette {
                 self.basecamp.update(cx, |b, cx| b.set_range(range, cx))
             }
             Action::Notes => ws.update(cx, |ws, cx| ws.navigate(Route::Notes, cx)),
+            Action::Study => ws.update(cx, |ws, cx| ws.navigate(Route::Study, cx)),
             Action::Onboarding => ws.update(cx, |ws, cx| ws.open_onboarding(None, cx)),
             Action::BackgroundUse => {
                 let b = ws.read(cx).background_use.clone();

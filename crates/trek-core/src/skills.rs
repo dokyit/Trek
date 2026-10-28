@@ -107,8 +107,11 @@ pub const PULL_REQUEST_CARD: &str = "pull-request-card";
 pub const MIGRATION_CARD: &str = "database-migration-card";
 pub const CARD_RECIPES: [&str; 3] = [MAP_CARD, PULL_REQUEST_CARD, MIGRATION_CARD];
 
+/// The guide a Study session follows (`crate::study`).
+pub const STUDY: &str = "study";
+
 /// Skills Trek ships: (folder name, SKILL.md).
-pub const SHIPPED: [(&str, &str); 5] = [
+pub const SHIPPED: [(&str, &str); 6] = [
     (
         CREATE_VERIFICATION,
         include_str!("../skills/create-verification-skill/SKILL.md"),
@@ -126,6 +129,7 @@ pub const SHIPPED: [(&str, &str); 5] = [
         MIGRATION_CARD,
         include_str!("../skills/database-migration-card/SKILL.md"),
     ),
+    (STUDY, include_str!("../skills/study/SKILL.md")),
 ];
 
 /// Writes every skill Trek ships into `shipped_root` (or brings it up to this version), so an
@@ -729,7 +733,8 @@ mod tests {
                 MIGRATION_CARD,
                 MAINTAIN_VERIFICATION,
                 MAP_CARD,
-                PULL_REQUEST_CARD
+                PULL_REQUEST_CARD,
+                STUDY
             ]
         );
         assert!(!SkillSource::Trek.editable(), "read-only");

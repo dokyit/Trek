@@ -273,6 +273,7 @@ pub enum Id {
     OpenBasecamp,
     LeaveBasecamp,
     OpenNotes,
+    OpenStudy,
     SwitchMode,
     ToggleIde,
     ToggleIdeSearch,
@@ -526,6 +527,14 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             Same,
             None,
             act!(crate::OpenNotes),
+        ),
+        row(
+            OpenStudy,
+            App,
+            "cmd-shift-u",
+            Same,
+            None,
+            act!(crate::OpenStudy),
         ),
         // ⌥⌘E switches Agents ⇄ Editor. On Windows Ctrl+Alt is AltGr, which types characters on
         // many layouts (German, French, Polish…), so ⌥⌘ chords become Alt+Shift.
@@ -1108,6 +1117,7 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
         &[
             ("Basecamp", Bound(Id::OpenBasecamp)),
             ("Leave Basecamp", Bound(Id::LeaveBasecamp)),
+            ("Study", Bound(Id::OpenStudy)),
             ("Toggle the sidebar", Bound(Id::ToggleSidebar)),
             ("Toggle the tools panel", Bound(Id::ToggleRightPanel)),
             ("Settings", Bound(Id::OpenSettings)),
@@ -1244,14 +1254,15 @@ mod tests {
             .filter_map(|b| resolve(b, true))
             .map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default()))
             .collect();
-        // The 40 in main.rs, the 13 in notes.rs and the 2 in editor.rs.
-        assert_eq!(mac.len(), 40 + 13 + 2);
+        // The 41 in main.rs, the 13 in notes.rs and the 2 in editor.rs.
+        assert_eq!(mac.len(), 41 + 13 + 2);
         for (keys, ctx) in [
             ("cmd-q", ""),
             ("alt-cmd-e", ""),
             ("alt-cmd-l", ""),
             ("cmd-shift-m", ""),
             ("cmd-shift-c", ""),
+            ("cmd-shift-u", ""),
             ("cmd-k", "!IdeEditor"),
             ("cmd-k", "IdeEditor"),
             ("alt-cmd-backspace", "IdeEditor && hunks"),
@@ -1638,6 +1649,7 @@ mod tests {
             [
                 "Basecamp: ⌘ ⇧ H",
                 "Leave Basecamp: esc",
+                "Study: ⌘ ⇧ U",
                 "Toggle the sidebar: ⌘ B",
                 "Toggle the tools panel: ⌘ J",
                 "Settings: ⌘ ,",
@@ -1715,7 +1727,7 @@ mod tests {
                 .sum();
             // Windows drops Hide, Minimize and Copy working directory (Ctrl+Shift+C is the
             // terminal's copy there) and adds Ctrl+Shift+P and Ctrl+F4.
-            assert_eq!(n, if mac { 55 } else { 55 - 3 + 2 }, "mac: {mac}");
+            assert_eq!(n, if mac { 56 } else { 56 - 3 + 2 }, "mac: {mac}");
         }
     }
 
