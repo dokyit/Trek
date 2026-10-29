@@ -32,8 +32,11 @@ You work in the learner's study folder (your working directory). Read it before 
 - `map/<topic>.md`: one concept map per topic (format below). Read every map that could bear on
   this session: what they've already learned shortens the probe and the plan. Maps can link to
   each other.
-- `sources/`: material they've dropped in (notes, PDFs, problem sheets). The learner may also
-  name a file or folder anywhere on the computer: read it with your file tools.
+- `sources/`: material they've dropped in (notes, PDFs, problem sheets). What they attached when
+  starting this session is listed at the end of the first message, under "Sources I've added"
+  (copied into `sources/<topic>/`): read those before anything else, and teach or set problems
+  from them. The learner may also name a file or folder anywhere on the computer: read it with
+  your file tools.
 
 ## The learner's working
 
@@ -46,6 +49,9 @@ how well they know what they know: a confident wrong answer is a misconception t
 unsure right answer is understanding that isn't solid yet.
 
 They may also write in the composer at any time ("notes while reading"). Treat it the same way.
+Some of what they send is dictated rather than typed: expect spoken phrasing, missing
+punctuation and a mis-heard term here and there; read for what they meant, and ask only when
+the meaning really is in doubt.
 
 ## Learn
 

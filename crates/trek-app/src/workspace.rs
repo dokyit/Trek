@@ -1385,6 +1385,8 @@ pub struct Workspace {
     /// Onboarding is to start over at this step (`open_onboarding`); the onboarding view takes it.
     pub onboarding_restart: Option<crate::onboarding::Step>,
     pub draft_prefs: Prefs,
+    /// What the Study screen's composer starts (`study::StudyDraft`).
+    pub study: study::StudyDraft,
     pub updater: crate::updater::Updater,
     /// The agent CLIs' versions and updates asked for.
     pub agent_updates: crate::agent_updates::AgentUpdates,
@@ -1878,6 +1880,7 @@ impl Workspace {
             side_chat: IdeChat::new(draft_prefs.clone()),
             ide_chats_saved: None,
             draft_prefs,
+            study: Default::default(),
             updater: Default::default(),
             agent_updates: Default::default(),
             sidebar_collapsed: false,
@@ -2142,10 +2145,13 @@ impl Workspace {
         }
     }
 
-    /// Working directory for `scope`: its thread's folder, or the main window's draft project.
+    /// Working directory for `scope`: its thread's folder, or the main window's draft project
+    /// (on Study, the study folder: `@` offers its sources and maps).
     pub fn cwd_in(&self, scope: &Scope) -> Option<PathBuf> {
         match scope {
-            Scope::Main => self.current_cwd(),
+            Scope::Main => self
+                .current_cwd()
+                .or_else(|| self.is_study_in(scope).then(trek_core::study::dir)),
             Scope::Thread(id) => self.thread(id).and_then(|t| t.cwd.clone()),
             Scope::Ide => match self.ide_chat.active_thread() {
                 Some(id) => self.thread(id).and_then(|t| t.cwd.clone()),
@@ -4120,7 +4126,7 @@ impl Workspace {
             return;
         }
         // Trek's own commands are answered in a draft too, without starting a thread for them.
-        if matches!(self.route, Route::Draft { .. }) {
+        if matches!(self.route, Route::Draft { .. } | Route::Study) {
             if let Some(reply) = self.run_builtin_command(None, &text, cx) {
                 if !reply.is_empty() {
                     cx.emit(WorkspaceEvent::Toast {
@@ -4143,6 +4149,12 @@ impl Workspace {
                 self.route = Route::Thread(id.clone());
                 self.draft_became = Some(id.clone());
                 id
+            }
+            // Study's composer starts a session of the kind chosen on the screen.
+            Route::Study => {
+                let kind = self.study.kind;
+                let picked = std::mem::take(&mut self.study.picked);
+                return self.start_study_with(kind, text, None, images, picked, cx);
             }
             _ => return,
         };
@@ -9884,8 +9896,9 @@ fn scope_thread<'a>(scope: &'a Scope, route: &'a Route) -> Option<&'a str> {
     }
 }
 
+/// The main window is composing a new thread: a draft, or Study (whose composer starts a session).
 fn scope_is_draft(scope: &Scope, route: &Route) -> bool {
-    *scope == Scope::Main && matches!(route, Route::Draft { .. })
+    *scope == Scope::Main && matches!(route, Route::Draft { .. } | Route::Study)
 }
 
 /// See `Workspace::shown_in`. `main`: the main window's scope showing the thread, if one does;
@@ -10499,7 +10512,10 @@ mod tests {
         assert_eq!(scope_thread(&Scope::Main, &draft), None);
         assert_eq!(scope_thread(&Scope::Main, &settings), None);
         assert!(scope_is_draft(&Scope::Main, &draft));
+        // Study's composer starts a session: a draft too, as far as the composer is concerned.
+        assert!(scope_is_draft(&Scope::Main, &Route::Study));
         assert!(!scope_is_draft(&Scope::Main, &on_a));
+        assert!(!scope_is_draft(&Scope::Main, &settings));
         // A thread window stays on its thread whatever the main window shows.
         assert_eq!(scope_thread(&window_b, &on_a), Some("b"));
         assert_eq!(scope_thread(&window_b, &draft), Some("b"));

@@ -280,7 +280,7 @@ impl Composer {
             TextareaState::new(window, cx)
                 .auto_grow(2, 12)
                 .submit_on_enter(!cmd_enter)
-                .placeholder(placeholder(None).to_string())
+                .placeholder(placeholder(None, false).to_string())
         });
         let pickers = Pickers::new(window, cx);
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
@@ -336,13 +336,16 @@ impl Composer {
                 }
                 // Another thread or draft on screen: what was typed stays with the one it was typed for.
                 this.follow_route(window, cx);
-                // Mid-turn the prompt says where a message goes.
+                // Mid-turn the prompt says where a message goes; on Study, what to learn.
                 let placeholder = {
                     let ws = ws.read(cx);
                     let running = ws
                         .thread_id_in(&this.scope)
                         .is_some_and(|id| ws.turn_running(id));
-                    placeholder(running.then_some(ws.settings.general.follow_up))
+                    placeholder(
+                        running.then_some(ws.settings.general.follow_up),
+                        ws.is_study_in(&this.scope),
+                    )
                 };
                 if this.placeholder != placeholder {
                     this.input.update(cx, |s, cx| {
@@ -409,7 +412,7 @@ impl Composer {
             voice_tasks: Vec::new(),
             voice_focus: cx.focus_handle(),
             draft_key: String::new(),
-            placeholder: placeholder(None),
+            placeholder: placeholder(None, false),
             drafts: Default::default(),
             _subscriptions: subscriptions,
         };
@@ -3514,6 +3517,8 @@ impl Attaching for Composer {
         let ws = self.workspace.read(cx);
         match ws.thread_id_in(&self.scope) {
             Some(id) => format!("thread:{id}"),
+            // What's typed for a session stays with Study, apart from any draft's.
+            None if ws.is_study_in(&self.scope) => "study".into(),
             None if ws.is_draft_in(&self.scope) => format!(
                 "draft:{}",
                 ws.draft_project_in(&self.scope)
@@ -3556,6 +3561,8 @@ impl Render for Composer {
         let prefs = ws.prefs_in(&self.scope);
         let thread = ws.thread_in(&self.scope).cloned();
         let is_draft = ws.is_draft_in(&self.scope);
+        // Study's composer starts a session: no project, worktree or plan mode to choose.
+        let study = ws.is_study_in(&self.scope);
         let main = self.scope == Scope::Main;
         let follow_up = ws.settings.general.follow_up;
         let own_turn = thread
@@ -3892,7 +3899,7 @@ impl Render for Composer {
                     })
                     .child(access_pill)
                     // The same pill on a new thread and in one under way (⇧⇥ either way).
-                    .child(
+                    .when(!study, |el| el.child(
                         Pill::new("plan-pill")
                             .chip()
                             .selected(plan)
@@ -3900,7 +3907,7 @@ impl Render for Composer {
                             .child(Icon::new(crate::assets::Lucide::ListChecks).size(px(look::ICON)).text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
                             .when(!narrow, |p| p.child(div().when(plan, |el| el.text_color(theme.foreground).font_medium()).child("Plan")))
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
-                    )
+                    ))
                     .child(div().flex_1().min_w(px(4.)))
                     // Past `QUIET`, or while Compact now runs and says what it freed: the
                     // compaction itself drops the window below it, and the card must stay.
@@ -3931,7 +3938,7 @@ impl Render for Composer {
             .and_then(|t| self.limit_bar(&t.id, compact, cx));
         // Capy-style context chips above the card on a new thread.
         // The AI side bar's new chat works in the IDE folder: it has no project to pick.
-        let chips = is_draft.then(|| {
+        let chips = (is_draft && !study).then(|| {
             div()
                 .pb(px(8.))
                 .child(self.env_chips(self.scope != Scope::Ide, cx))
@@ -3945,15 +3952,29 @@ impl Render for Composer {
             .child(card)
             .when(picker.is_none(), |el| el.children(status_chips))
             .when_some(picker, |el, p| {
-                el.child(
+                // Over the card; on Study, under it (the page above the card is shorter than
+                // the rows), drawn after the strip below so it lies over that.
+                el.child(if study {
+                    deferred(
+                        div()
+                            .absolute()
+                            .top_full()
+                            .left_0()
+                            .w_full()
+                            .pt(px(9.))
+                            .child(p),
+                    )
+                    .into_any_element()
+                } else {
                     div()
                         .absolute()
                         .bottom_full()
                         .left_0()
                         .w_full()
                         .pb(px(9.))
-                        .child(p),
-                )
+                        .child(p)
+                        .into_any_element()
+                })
             })
             .drag_over::<ExternalPaths>(move |s, _, _, _| s.opacity(0.85).border_color(drop_tint))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
@@ -4038,8 +4059,9 @@ impl Render for Composer {
                     )
                 })
                 .child(div().flex_1())
-                // The terminal docks under the chat in the main window (⌃` too); lit while it's out.
-                .when(main, |el| {
+                // The terminal docks under the chat in the main window (⌃` too); lit while it's
+                // out. Study has no dock under it.
+                .when(main && !study, |el| {
                     let open = self.workspace.read(cx).settings.layout.terminal_open;
                     let tip = crate::keys::shared(if open {
                         "Hide the terminal (⌃`)" // keys::shared
@@ -4166,9 +4188,12 @@ impl Render for Composer {
 }
 
 /// The prompt's placeholder: what to type, or mid-turn (`running`: the default way a message
-/// goes), where a message sent now goes.
-fn placeholder(running: Option<FollowUp>) -> std::borrow::Cow<'static, str> {
+/// goes), where a message sent now goes; on `study`, what to learn and what can come with it.
+fn placeholder(running: Option<FollowUp>, study: bool) -> std::borrow::Cow<'static, str> {
     match running {
+        None if study => {
+            "What do you want to learn? Add notes, PDFs or problems, or press the mic".into()
+        }
         None => "Ask or build · / commands · @ files".into(),
         Some(FollowUp::Steer) => {
             crate::keys::localize("Steer the running turn · ⌥↩ queues for after it")

@@ -172,7 +172,9 @@ impl TrekWindow {
         let settings_nav = cx.new(|cx| SettingsNav::new(workspace.clone(), cx));
         let basecamp = cx.new(|cx| Basecamp::new(workspace.clone(), cx));
         let notes = cx.new(|cx| crate::notes::NotesView::new(workspace.clone(), window, cx));
-        let study = cx.new(|cx| crate::study::StudyView::new(workspace.clone(), window, cx));
+        let study = cx.new(|cx| {
+            crate::study::StudyView::new(workspace.clone(), composer.clone(), window, cx)
+        });
         let ide = cx.new(|cx| crate::ide::IdeWorkbench::new(workspace.clone(), window, cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
@@ -263,12 +265,6 @@ impl TrekWindow {
                         if this.workspace.read(cx).route == Route::Notes =>
                     {
                         this.notes.read(cx).focus_handle(cx).focus(window, cx)
-                    }
-                    // Nor has Study: its topic field takes them.
-                    WorkspaceEvent::FocusComposer
-                        if this.workspace.read(cx).route == Route::Study =>
-                    {
-                        this.study.read(cx).focus_handle(cx).focus(window, cx)
                     }
                     WorkspaceEvent::FocusComposer => {
                         this.composer.update(cx, |c, cx| c.focus(window, cx))
@@ -547,12 +543,12 @@ impl TrekWindow {
         cx.defer_in(window, |this, window, cx| {
             let ws = this.workspace.clone();
             match ws.read(cx).route.clone() {
-                Route::Thread(_) | Route::Draft { .. } => {
+                // Study's starter is the composer too.
+                Route::Thread(_) | Route::Draft { .. } | Route::Study => {
                     this.composer.update(cx, |c, cx| c.focus(window, cx))
                 }
                 Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
-                Route::Study => this.study.read(cx).focus_handle(cx).focus(window, cx),
                 Route::Editor { .. } => {
                     if let Some(ev) = this.editor(cx) {
                         ev.update(cx, |e, cx| e.focus(window, cx));
