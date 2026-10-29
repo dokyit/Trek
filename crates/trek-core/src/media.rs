@@ -201,12 +201,18 @@ fn mention_words(text: &str) -> Vec<&str> {
 /// The video files a message names as `@path` (how a file attached to a message is sent), on disk:
 /// absolute, `~/`, or relative to `cwd`. In order, each once.
 pub fn mentioned_videos(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    mentioned_files(text, cwd)
+        .into_iter()
+        .filter(|p| is_video_name(&p.to_string_lossy()))
+        .collect()
+}
+
+/// Every file a message names as `@path`, on disk: absolute, `~/`, or relative to `cwd`. In
+/// order, each once. (A study session copies them into its sources.)
+pub fn mentioned_files(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for raw in mention_words(text) {
         let raw = raw.trim_end_matches([',', '.', ';', ':', ')', '!', '?']);
-        if !is_video_name(raw) {
-            continue;
-        }
         let path = if let Some(rest) = raw.strip_prefix("~/") {
             crate::paths::home().join(rest)
         } else if Path::new(raw).is_absolute() {

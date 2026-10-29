@@ -25,6 +25,12 @@ pub fn map_dir(dir: &Path) -> PathBuf {
     dir.join("map")
 }
 
+/// The learner's material: what they attach to a session lands in `sources/<topic>/`, and
+/// anything they drop in the folder themselves.
+pub fn sources_dir(dir: &Path) -> PathBuf {
+    dir.join("sources")
+}
+
 /// What `learner.md` starts as.
 const LEARNER: &str = "# About me\n\n<!-- What helps a tutor teach me: background, goals, how I like to learn. \
 The tutor adds to this as it learns about you; edit it freely. -->\n";
@@ -35,7 +41,7 @@ The tutor adds to this as it learns about you; edit it freely. -->\n";
 /// what Trek starts the folder with is committed, so a session's changes are only the session's.
 pub fn ensure(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(map_dir(dir))?;
-    std::fs::create_dir_all(dir.join("sources"))?;
+    std::fs::create_dir_all(sources_dir(dir))?;
     let learner = dir.join("learner.md");
     if !learner.exists() {
         std::fs::write(&learner, LEARNER)?;
@@ -44,39 +50,53 @@ pub fn ensure(dir: &Path) -> std::io::Result<()> {
     if !ignore.exists() {
         std::fs::write(&ignore, "sessions.json\n*.tmp\n")?;
     }
-    if !dir.join(".git").exists() {
-        let git = |args: &[&str]| {
-            crate::procs::command(crate::git::git_program())
-                .args(args)
-                .current_dir(dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        };
-        if git(&["init", "-q"]) && git(&["add", "learner.md", ".gitignore"]) {
-            // A name of its own for the first commit when git has none set up.
-            let _ = git(&["commit", "-q", "-m", "Start the study folder"])
-                || git(&[
-                    "-c",
-                    "user.name=Trek",
-                    "-c",
-                    "user.email=trek@localhost",
-                    "commit",
-                    "-q",
-                    "-m",
-                    "Start the study folder",
-                ]);
-        }
+    if !dir.join(".git").exists() && git(dir, &["init", "-q"]) {
+        commit(dir, &["learner.md", ".gitignore"], "Start the study folder");
     }
     Ok(())
 }
 
+/// Run git in `dir`, quietly; whether it succeeded.
+fn git(dir: &Path, args: &[&str]) -> bool {
+    crate::procs::command(crate::git::git_program())
+        .args(args)
+        .current_dir(dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Commit `paths` (relative to `dir`) as `message`, with a name of Trek's own when git has none
+/// set up. Best effort: the folder works the same uncommitted.
+fn commit(dir: &Path, paths: &[&str], message: &str) {
+    let mut add = vec!["add", "--"];
+    add.extend_from_slice(paths);
+    if !git(dir, &add) {
+        return;
+    }
+    let _ = git(dir, &["commit", "-q", "-m", message])
+        || git(
+            dir,
+            &[
+                "-c",
+                "user.name=Trek",
+                "-c",
+                "user.email=trek@localhost",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+}
+
 /// What a session is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     /// Probe, plan, teach: new understanding.
+    #[default]
     Learn,
     /// Problems that adapt: making it usable.
     Practice,
@@ -222,9 +242,150 @@ pub fn topics(dir: &Path) -> Vec<Topic> {
     out
 }
 
-/// The first message of a session: which kind it is, the guide to follow, and what the learner
-/// asked for (`topic`, in their words). `map`: the topic's map, when the session continues one.
-pub fn prompt(kind: Kind, guide: &Path, dir: &Path, topic: &str, map: Option<&Path>) -> String {
+/// A file in `sources/`, as the Study screen offers it for a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub path: PathBuf,
+    /// Its path under `sources/`, as shown: `transformers/notes.pdf`.
+    pub label: String,
+}
+
+/// Sources listed before the list stops: the screen shows chips, not a file manager.
+const SOURCE_ROWS: usize = 24;
+
+/// Every file under `sources/` (two levels deep: the folder, and a topic's folder in it), the
+/// newest first. Hidden files are skipped.
+pub fn sources(dir: &Path) -> Vec<Source> {
+    let root = sources_dir(dir);
+    let mut out: Vec<(i64, Source)> = vec![];
+    let walk = |at: &Path, depth: usize, out: &mut Vec<(i64, Source)>| {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            return vec![];
+        };
+        let mut dirs = vec![];
+        for path in entries.flatten().map(|e| e.path()) {
+            let hidden = path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'));
+            if hidden {
+                continue;
+            }
+            if path.is_dir() {
+                if depth == 0 {
+                    dirs.push(path);
+                }
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            let at = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as i64);
+            let label = path
+                .strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((at, Source { path, label }));
+        }
+        dirs
+    };
+    for sub in walk(&root, 0, &mut out) {
+        walk(&sub, 1, &mut out);
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.label.cmp(&b.1.label)));
+    out.into_iter().map(|(_, s)| s).take(SOURCE_ROWS).collect()
+}
+
+/// The folder in `sources/` for `topic`'s material: "The transformer, heavy math" →
+/// `the-transformer-heavy-math`.
+pub fn topic_slug(topic: &str) -> String {
+    let slug = crate::skills::slug(topic);
+    let mut cut = slug.as_str();
+    if cut.len() > 40 {
+        cut = &cut[..40];
+        cut = cut.rsplit_once('-').map_or(cut, |(head, _)| head);
+    }
+    let cut = cut.trim_end_matches('-');
+    if cut.is_empty() {
+        "topic".into()
+    } else {
+        cut.to_string()
+    }
+}
+
+/// Keep `files` as sources for `topic`: each is copied into `sources/<topic_slug>/` (one already
+/// in `sources/` stays where it is). Returns where each now is, in order, each once; a file
+/// that can't be read is left out. A copy that already exists with the same size is reused, so
+/// attaching the same notes twice doesn't double them.
+pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
+    let root = sources_dir(dir);
+    let into = root.join(topic_slug(topic));
+    let mut out: Vec<PathBuf> = vec![];
+    for file in files {
+        if !file.is_file() {
+            continue;
+        }
+        if file.starts_with(&root) {
+            if !out.contains(file) {
+                out.push(file.clone());
+            }
+            continue;
+        }
+        let Some(name) = file.file_name() else {
+            continue;
+        };
+        if std::fs::create_dir_all(&into).is_err() {
+            continue;
+        }
+        let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
+        let mut dest = into.join(name);
+        let mut n = 1;
+        while dest.exists() && size(&dest) != size(file) {
+            n += 1;
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let ext = file
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
+            dest = into.join(format!("{stem}-{n}{ext}"));
+        }
+        if dest.exists() || std::fs::copy(file, &dest).is_ok() {
+            if !out.contains(&dest) {
+                out.push(dest);
+            }
+        }
+    }
+    // Committed as Trek's doing, so what the session changes is only the session's.
+    let rel: Vec<String> = out
+        .iter()
+        .filter_map(|p| p.strip_prefix(dir).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    if !rel.is_empty() {
+        let rel: Vec<&str> = rel.iter().map(String::as_str).collect();
+        commit(dir, &rel, &format!("Add sources: {}", topic_slug(topic)));
+    }
+    out
+}
+
+/// The first message of a session: which kind it is, the guide to follow, what the learner
+/// asked for (`topic`, in their words), and the sources they attached (`sources`, in the study
+/// folder). `map`: the topic's map, when the session continues one.
+pub fn prompt(
+    kind: Kind,
+    guide: &Path,
+    dir: &Path,
+    topic: &str,
+    map: Option<&Path>,
+    sources: &[PathBuf],
+) -> String {
     let what = match kind {
         Kind::Learn => "learn",
         Kind::Practice => "practice",
@@ -244,6 +405,12 @@ pub fn prompt(kind: Kind, guide: &Path, dir: &Path, topic: &str, map: Option<&Pa
             out.push_str(&format!("Practise the claims in {}: {topic}", m.display()))
         }
         (Kind::Practice, None) => out.push_str(&format!("What I want to practise: {topic}")),
+    }
+    if !sources.is_empty() {
+        out.push_str("\n\nSources I've added for this session (read them before you start):");
+        for s in sources {
+            out.push_str(&format!("\n- {}", s.display()));
+        }
     }
     out
 }
@@ -353,12 +520,90 @@ mod tests {
             Path::new("/s"),
             "attention",
             Some(Path::new("/s/map/llms.md")),
+            &[],
         );
         assert!(p.starts_with("Study session (practice)."));
         assert!(p.contains("/g/study/SKILL.md") && p.contains("/s/map/llms.md"));
+        assert!(!p.contains("Sources"));
         assert_eq!(
             title(Kind::Learn, "the transformer"),
             "Learn · the transformer"
         );
+        // What the learner attached is listed for the tutor to read first.
+        let p = prompt(
+            Kind::Learn,
+            Path::new("/g/study/SKILL.md"),
+            Path::new("/s"),
+            "attention",
+            None,
+            &[PathBuf::from("/s/sources/attention/notes.pdf")],
+        );
+        assert!(p.ends_with(
+            "What I want to learn: attention\n\nSources I've added for this session (read them \
+             before you start):\n- /s/sources/attention/notes.pdf"
+        ));
+    }
+
+    #[test]
+    fn attached_files_are_copied_into_the_topics_sources() {
+        let dir = std::env::temp_dir().join(format!("trek-study-{}", uuid::Uuid::new_v4()));
+        ensure(&dir).unwrap();
+        // The learner's own files, outside the folder.
+        let outside = dir.with_extension("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let notes = outside.join("notes.md");
+        std::fs::write(&notes, "# notes").unwrap();
+        let other = outside.join("other.txt");
+        std::fs::write(&other, "x").unwrap();
+        // Already in sources/: used where it is.
+        let mine = sources_dir(&dir).join("sheet.md");
+        std::fs::write(&mine, "sheet").unwrap();
+        let got = add_sources(
+            &dir,
+            "The transformer, heavy math!",
+            &[
+                notes.clone(),
+                mine.clone(),
+                dir.join("missing.pdf"),
+                notes.clone(),
+            ],
+        );
+        let copy = sources_dir(&dir)
+            .join("the-transformer-heavy-math")
+            .join("notes.md");
+        assert_eq!(got, vec![copy.clone(), mine.clone()]);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "# notes");
+        // Committed as Trek's doing: nothing shows as changed before the session starts.
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+        // The same file again reuses its copy; a different file of the same name sits beside it.
+        assert_eq!(
+            add_sources(&dir, "the transformer, heavy math", &[notes]),
+            vec![copy.clone()]
+        );
+        std::fs::write(outside.join("notes.md"), "# longer notes").unwrap();
+        let again = add_sources(
+            &dir,
+            "the transformer, heavy math",
+            &[outside.join("notes.md")],
+        );
+        assert_eq!(again[0].file_name().unwrap(), "notes-2.md");
+        // Listed newest first, with their place under sources/.
+        let listed = sources(&dir);
+        let labels: Vec<&str> = listed.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels.len(), 3, "{labels:?}");
+        assert!(labels.contains(&"sheet.md"));
+        assert!(labels.contains(&"the-transformer-heavy-math/notes.md"));
+        assert_eq!(topic_slug("   "), "topic");
+        assert_eq!(
+            topic_slug("a very long topic name that goes on and on and on forever"),
+            "a-very-long-topic-name-that-goes-on-and"
+        );
+        let _ = std::fs::remove_dir_all(outside);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

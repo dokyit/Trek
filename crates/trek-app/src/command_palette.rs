@@ -1055,7 +1055,7 @@ impl CommandPalette {
         add(
             Entry::new(
                 c,
-                icon(Icon::new(crate::assets::Lucide::BookOpen)),
+                icon(Icon::new(crate::assets::Lucide::GraduationCap)),
                 "Study",
                 Action::Study,
             )

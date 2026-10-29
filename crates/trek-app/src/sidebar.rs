@@ -350,7 +350,7 @@ impl Sidebar {
         let at_study = self.workspace.read(cx).route == Route::Study;
         let study = ui::nav_row(
             "open-study",
-            Icon::new(crate::assets::Lucide::BookOpen),
+            Icon::new(crate::assets::Lucide::GraduationCap),
             "Study",
             None,
             at_study,

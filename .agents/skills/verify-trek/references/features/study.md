@@ -8,24 +8,26 @@ A session is an ordinary thread, in no project, that follows the guide Trek ship
 
 ## Reach it as a user
 
-Choose **Study** under Basecamp and Notes in the sidebar (⌘⇧U), or "Study" in ⌘K. Type what to learn and press Return or **Start learning**; **Practice** starts a practice session on the same text. **Your maps** lists each topic's map (ideas, links, problems practised): click a row to open the map in the editor, **Learn more** or **Practice** to start a session on it. **Sessions** lists past sessions; **Study folder** opens the folder in Finder.
+Choose **Study** under Basecamp and Notes in the sidebar (⌘⇧U), or "Study" in ⌘K. The starter is the main composer (ids `attach`, `send`, `dictate`), so everything a draft takes works here: the + menu's files and photos, drag and drop, paste, `@` files, and the mic. Choose **Learn** or **Practice** in the segmented control above it (`study-kind`; the choice is kept), type or dictate what to learn, press Return. Files attached (named `@path` in the text, or images) are copied into the study folder's `sources/<topic-slug>/` and listed at the end of the first message for the tutor to read; files already in `sources/` show as chips under the composer (`study-source-<n>`) to tick for the session. The project, worktree and plan controls don't show: a session has none. **Your maps** shows each topic's map as a card (`study-map-<n>`: ideas, links, problems practised, when last studied): click it to open the map in the editor, **Learn more** (`study-map-learn-<n>`) or **Practice** (`study-map-practice-<n>`) to start a session on it. **Sessions** lists past sessions (`study-session-<thread id>`); **Study folder** (`study-folder`) opens the folder in the file manager. **How it works** is a row of four tiles.
 
 ## Reach it with the CLI
 
 ```sh
 ./.agents/skills/verify-trek/scripts/trek-dev open study
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot study
-./.agents/skills/verify-trek/scripts/trek-dev control type "the transformer architecture, heavy math"
+./.agents/skills/verify-trek/scripts/trek-dev control click study-kind#1      # Practice
+./.agents/skills/verify-trek/scripts/trek-dev control type "the transformer architecture, heavy math @/path/to/notes.pdf"
 ./.agents/skills/verify-trek/scripts/trek-dev control key enter
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot study-session
+./.agents/skills/verify-trek/scripts/trek-dev control dictate-demo "the chain rule"   # voice mode, no mic
 ```
 
-The mock agent answers with its canned reply; the cards themselves need a real agent. To see maps listed, write a file into `<data_dir>/study/map/` (`status` prints `data_dir`) and open Study again.
+The mock agent answers with its canned reply; the cards themselves need a real agent. To see maps listed, write a file into `<data_dir>/study/map/` (`status` prints `data_dir`) and open Study again; a file in `<data_dir>/study/sources/` shows as a chip.
 
 ## Code
 
-`crates/trek-app/src/study.rs` (the screen), `crates/trek-app/src/workspace/study.rs` (`start_study`), `crates/trek-core/src/study.rs` (folder, maps, sessions, first message), `crates/trek-core/skills/study/SKILL.md` (the method and the question card), `sidebar.rs`, `keys.rs` (`OpenStudy`), `command_palette.rs`. Tests: `crates/trek-app/tests/study.rs`, `trek-core` `study::tests`.
+`crates/trek-app/src/study.rs` (the screen), `crates/trek-app/src/workspace/study.rs` (`start_study_with`, `StudyDraft`: the kind and the ticked sources), `crates/trek-app/src/workspace.rs` (`send` on `Route::Study`, `scope_is_draft`), `crates/trek-app/src/composer.rs` (the Study placeholder, the hidden chips), `crates/trek-core/src/study.rs` (folder, maps, sessions, sources, first message), `crates/trek-core/src/media.rs` (`mentioned_files`), `crates/trek-core/skills/study/SKILL.md` (the method and the question card), `sidebar.rs`, `keys.rs` (`OpenStudy`), `command_palette.rs`. Tests: `crates/trek-app/tests/study.rs`, `trek-core` `study::tests`.
 
 ## Verify
 
-Study opens from the sidebar and ⌘⇧U with its field focused; the buttons wake up once something is typed. Return opens a thread titled "Learn · <topic>" working in the study folder, with nothing in that folder shown as changed beforehand. A map file in `map/` is listed with its counts, and Practice on it opens "Practice · <map title>". Check both themes.
+Study opens from the sidebar and ⌘⇧U with the composer focused and its Study placeholder. Return opens a thread titled "Learn · <topic>" (Practice chosen: "Practice · <topic>") working in the study folder, with nothing in that folder shown as changed beforehand; the composer is empty afterwards. A file attached is in `sources/<topic-slug>/` and named in the first message. A map file in `map/` is a card with its counts, and Practice on it opens "Practice · <map title>". Check both themes.
