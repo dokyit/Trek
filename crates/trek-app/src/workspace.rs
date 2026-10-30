@@ -4750,6 +4750,7 @@ impl Workspace {
             mcp_servers,
             instructions,
             read_dirs: vec![trek_core::skills::shipped_root()],
+            script: false,
         });
         self.attach(id, handle, cx);
         self.adopt_ipc_session(id, ipc);
@@ -4895,6 +4896,7 @@ impl Workspace {
             mcp_servers,
             instructions,
             read_dirs: vec![trek_core::skills::shipped_root()],
+            script: false,
         });
         // Replacing the old one drops its command channel, which ends that process.
         self.warm = Some((key, handle, cx.background_executor().now()));

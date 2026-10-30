@@ -63,6 +63,7 @@ impl Session {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         });
         Session { h, seen: vec![] }
     }

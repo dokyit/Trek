@@ -9,7 +9,6 @@ use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, load_image};
 use anyhow::{Context as _, Result, bail};
 use executor::{ExecutorGone, LocalExecutor, ToolExecutor};
 use futures::StreamExt;
-use script::ScriptHost;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -32,8 +31,9 @@ pub struct DirectOptions {
     pub base_url: Option<String>,
     /// Where the tools run.
     pub executor: Arc<dyn ToolExecutor>,
-    /// The `script` tool, offered only with a host (see `script`).
-    pub script: Option<Arc<dyn ScriptHost>>,
+    /// Where each `script` run keeps its JSONL log of calls (`None`: no log). The tool itself
+    /// is on with `SessionConfig::script`.
+    pub script_log_dir: Option<PathBuf>,
     /// Model requests one prompt may take before the answer is cut off.
     pub max_turns: u32,
     /// How long one `bash` command may run (`None`: as long as it takes).
@@ -52,7 +52,7 @@ impl Default for DirectOptions {
             provider: None,
             base_url: None,
             executor: Arc::new(LocalExecutor),
-            script: None,
+            script_log_dir: None,
             max_turns: 30,
             command_timeout: None,
             deadline: None,
@@ -94,8 +94,11 @@ pub trait Observer: Send + Sync {
     fn text(&self, _text: &str) {}
     /// The model called tool `name` with `args` (its JSON, or the raw text when it isn't).
     fn tool_call(&self, _name: &str, _args: &Value) {}
-    /// That call's output, as the model is told it. `nested_calls`: calls a `script` made.
-    fn tool_result(&self, _name: &str, _output: &str, _ok: bool, _nested_calls: u32) {}
+    /// That call's output, as the model is told it.
+    fn tool_result(&self, _name: &str, _output: &str, _ok: bool) {}
+    /// A `script` call's run (told before its `tool_result`): the calls it made, its output's
+    /// size, how long it took.
+    fn script_result(&self, _result: &trek_script::ScriptResult) {}
     /// The answer to a prompt ended, and why.
     fn stopped(&self, _why: &Stop) {}
 }
@@ -147,10 +150,12 @@ fn next_id() -> String {
     format!("{}_{c}", trek_core::store::now_ms())
 }
 
-/// The tools a session offers: the four built in, then `script` when it has a host for it.
-fn tool_defs(script: Option<&dyn ScriptHost>) -> Vec<Value> {
+/// The tools a session offers: the four built in, then `script` when it's on (see `script`).
+fn tool_defs(script: bool) -> Vec<Value> {
     let mut tools = direct_tools();
-    tools.extend(script.map(|s| s.tool_def()));
+    if script {
+        tools.push(script::tool_def());
+    }
     tools
 }
 
@@ -352,7 +357,7 @@ async fn session(
         }
     };
     let past_deadline = || options.deadline.is_some_and(|d| Instant::now() >= d);
-    let tools = tool_defs(options.script.as_deref());
+    let tools = tool_defs(config.script);
     let mut requests = 0u32;
     let mut model = config.model.clone().context("Pick a model first")?;
     let mut effort = config.effort;
@@ -373,7 +378,7 @@ async fn session(
         }))
         .await?;
 
-    let mut system = match &options.system_prompt {
+    let system = match &options.system_prompt {
         Some(own) => {
             let mut p = own.clone();
             if let Some(extra) = &config.instructions {
@@ -389,11 +394,6 @@ async fn session(
             config.instructions.as_deref(),
         ),
     };
-    if let Some(note) = options.script.as_ref().and_then(|s| s.prompt_note()) {
-        system.push('\n');
-        system.push_str(&note);
-        system.push('\n');
-    }
     let mut history: Vec<Value> = Vec::new();
     let mut kept = VecDeque::new();
     let mut shutdown = false;
@@ -554,7 +554,6 @@ async fn session(
                                         observe(&|o| o.tool_call(&call.name, &args));
                                     }
 
-                                    let mut nested_calls = 0;
                                     let ran = execute_tool(
                                         &call.name,
                                         &call.arguments,
@@ -563,7 +562,7 @@ async fn session(
                                         hand_holding,
                                         &mut allowed_for_session,
                                         &options,
-                                        &mut nested_calls,
+                                        config.script,
                                         &events,
                                         &commands,
                                         &mut kept,
@@ -576,9 +575,7 @@ async fn session(
                                         // permission: it ends this turn, not the session.
                                         Err(e) => (format!("{e:#}"), false, None, Some(e)),
                                     };
-                                    observe(&|o| {
-                                        o.tool_result(&call.name, &output, ok, nested_calls)
-                                    });
+                                    observe(&|o| o.tool_result(&call.name, &output, ok));
 
                                     if let Some((added, removed)) = lines {
                                         events
@@ -950,6 +947,60 @@ fn edit_permission(
     (ask, key)
 }
 
+/// Whether `tool` (`bash`, `write_file` or `edit_file`) may go ahead on `target` (the command,
+/// or the path): asks the user when `hand_holding` says to, and remembers "allow for the
+/// session". `Ok(false)`: denied.
+#[allow(clippy::too_many_arguments)]
+async fn permitted(
+    tool: &str,
+    target: &str,
+    cwd: &Path,
+    hand_holding: HandHolding,
+    allowed_for_session: &mut HashSet<String>,
+    events: &async_channel::Sender<AgentEvent>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<bool> {
+    let (need_ask, title, session_key) = match tool {
+        "bash" => {
+            let need_ask = match hand_holding {
+                HandHolding::FullAccess => false,
+                HandHolding::Auto => {
+                    !is_safe_command(target) && !allowed_for_session.contains(target)
+                }
+                HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
+                    !allowed_for_session.contains(target)
+                }
+            };
+            (need_ask, "Run command", target.to_string())
+        }
+        _ => {
+            let (need_ask, key) =
+                edit_permission(tool, hand_holding, target, cwd, allowed_for_session);
+            let title = if tool == "write_file" {
+                "Write file"
+            } else {
+                "Edit file"
+            };
+            (need_ask, title, key)
+        }
+    };
+    if !need_ask {
+        return Ok(true);
+    }
+    Ok(
+        match ask_permission(title, target, events, commands, kept, shutdown).await? {
+            Decision::Allow => true,
+            Decision::AllowForSession => {
+                allowed_for_session.insert(session_key);
+                true
+            }
+            Decision::Deny => false,
+        },
+    )
+}
+
 async fn execute_tool(
     name: &str,
     args_json: &str,
@@ -958,7 +1009,7 @@ async fn execute_tool(
     hand_holding: HandHolding,
     allowed_for_session: &mut HashSet<String>,
     options: &DirectOptions,
-    nested_calls: &mut u32,
+    script: bool,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
@@ -984,27 +1035,20 @@ async fn execute_tool(
             if command.is_empty() {
                 return Ok(("Error: empty command".into(), false, None));
             }
-            let need_ask = match hand_holding {
-                HandHolding::FullAccess => false,
-                HandHolding::Auto => {
-                    !is_safe_command(command) && !allowed_for_session.contains(command)
-                }
-                HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
-                    !allowed_for_session.contains(command)
-                }
-            };
-            if need_ask {
-                match ask_permission("Run command", command, events, commands, kept, shutdown)
-                    .await?
-                {
-                    Decision::Allow => {}
-                    Decision::AllowForSession => {
-                        allowed_for_session.insert(command.to_string());
-                    }
-                    Decision::Deny => {
-                        return Ok(("Permission denied by user".into(), false, None));
-                    }
-                }
+            if !permitted(
+                "bash",
+                command,
+                cwd,
+                hand_holding,
+                allowed_for_session,
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok(("Permission denied by user".into(), false, None));
             }
             let (out, ok) = run_bash_command(
                 exec,
@@ -1058,25 +1102,20 @@ async fn execute_tool(
             if path_str.is_empty() {
                 return Ok(("Error: path parameter is required".into(), false, None));
             }
-            let (need_ask, session_key) = edit_permission(
+            if !permitted(
                 "write_file",
-                hand_holding,
                 path_str,
                 cwd,
+                hand_holding,
                 allowed_for_session,
-            );
-            if need_ask {
-                match ask_permission("Write file", path_str, events, commands, kept, shutdown)
-                    .await?
-                {
-                    Decision::Allow => {}
-                    Decision::AllowForSession => {
-                        allowed_for_session.insert(session_key);
-                    }
-                    Decision::Deny => {
-                        return Ok(("Permission denied by user".into(), false, None));
-                    }
-                }
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok(("Permission denied by user".into(), false, None));
             }
             run_write_file(exec, path_str, content, cwd).await
         }
@@ -1108,31 +1147,27 @@ async fn execute_tool(
                     None,
                 ));
             }
-            let (need_ask, session_key) = edit_permission(
+            if !permitted(
                 "edit_file",
-                hand_holding,
                 path_str,
                 cwd,
+                hand_holding,
                 allowed_for_session,
-            );
-            if need_ask {
-                match ask_permission("Edit file", path_str, events, commands, kept, shutdown)
-                    .await?
-                {
-                    Decision::Allow => {}
-                    Decision::AllowForSession => {
-                        allowed_for_session.insert(session_key);
-                    }
-                    Decision::Deny => {
-                        return Ok(("Permission denied by user".into(), false, None));
-                    }
-                }
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok(("Permission denied by user".into(), false, None));
             }
             run_edit_file(exec, path_str, old_str, new_str, cwd).await
         }
-        // The fifth tool, when the session has a host for it (see `script`). It runs on the same
-        // executor; a Stop drops it like it does a command.
-        "script" if options.script.is_some() => {
+        // The fifth tool, when it's on (see `script`): a program whose calls run on the same
+        // executor. Its approvals are asked here while it waits; a Stop drops it like it does a
+        // command, and the calls it has in flight with it.
+        "script" if script => {
             if read_only {
                 return Ok((
                     "Permission denied: scripts are disabled in read-only mode".into(),
@@ -1140,17 +1175,50 @@ async fn execute_tool(
                     None,
                 ));
             }
-            let host = options.script.as_ref().unwrap();
-            let args: Value = serde_json::from_str(args_json)
-                .unwrap_or_else(|_| Value::String(args_json.to_string()));
-            match until_stopped(host.run(&args, cwd), commands, kept, shutdown).await? {
-                Ok(outcome) => {
-                    *nested_calls = outcome.nested_calls;
-                    Ok((outcome.output, outcome.ok, None))
-                }
-                Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => Err(e),
-                Err(e) => Ok((format!("Script failed: {e:#}"), false, None)),
+            let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+            let code = parsed["code"].as_str().unwrap_or_default();
+            if code.trim().is_empty() {
+                return Ok(("Error: code parameter is required".into(), false, None));
             }
+            let (approvals_tx, mut approvals) = tokio::sync::mpsc::unbounded_channel();
+            let tools = Arc::new(script::ScriptTools {
+                executor: options.executor.clone(),
+                cwd: cwd.to_path_buf(),
+                command_timeout: options.command_timeout,
+                approvals: (hand_holding != HandHolding::FullAccess).then_some(approvals_tx),
+            });
+            let limits = trek_script::ScriptLimits {
+                log_dir: options.script_log_dir.clone(),
+                ..Default::default()
+            };
+            let run = trek_script::run_script(code, tools, limits);
+            tokio::pin!(run);
+            let result = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    Some(ask) = approvals.recv() => {
+                        let ok = permitted(
+                            ask.tool,
+                            &ask.target,
+                            cwd,
+                            hand_holding,
+                            allowed_for_session,
+                            events,
+                            commands,
+                            kept,
+                            shutdown,
+                        )
+                        .await?;
+                        let _ = ask.reply.send(ok);
+                    }
+                    cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
+                }
+            };
+            if let Some(o) = &options.observer {
+                o.script_result(&result);
+            }
+            let ok = result.error.is_none() && !result.timed_out;
+            Ok((result.to_model_text(), ok, None))
         }
         unknown => Ok((
             format!(
@@ -2337,6 +2405,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         };
         let (_commands, commands_rx) = async_channel::unbounded();
         let (events_tx, _events) = async_channel::unbounded();
@@ -2677,7 +2746,7 @@ mod tests {
             HandHolding::Auto,
             &mut allowed,
             &DirectOptions::default(),
-            &mut 0,
+            false,
             &tx_events,
             &rx_cmd,
             &mut kept,
@@ -2704,7 +2773,7 @@ mod tests {
             HandHolding::Auto,
             &mut allowed,
             &DirectOptions::default(),
-            &mut 0,
+            false,
             &tx_events,
             &rx_cmd,
             &mut kept,
@@ -2732,7 +2801,7 @@ mod tests {
             HandHolding::Auto,
             &mut allowed,
             &DirectOptions::default(),
-            &mut 0,
+            false,
             &tx_events,
             &rx_cmd,
             &mut kept,
@@ -2959,7 +3028,14 @@ mod tests {
             hand_holding: HandHolding,
             responses: Vec<(u16, String)>,
         ) -> TestSession {
-            Self::start_with(provider, hand_holding, responses, DirectOptions::default()).await
+            Self::start_with(
+                provider,
+                hand_holding,
+                responses,
+                DirectOptions::default(),
+                false,
+            )
+            .await
         }
 
         async fn start_with(
@@ -2967,6 +3043,7 @@ mod tests {
             hand_holding: HandHolding,
             responses: Vec<(u16, String)>,
             options: DirectOptions,
+            script: bool,
         ) -> TestSession {
             let (url, bodies) = script_server(responses).await;
             let cwd = std::env::temp_dir().join(format!("trek_test_direct_session_{}", next_id()));
@@ -2987,6 +3064,7 @@ mod tests {
                 mcp_servers: vec![],
                 instructions: None,
                 read_dirs: vec![],
+                script,
             };
             let (commands, commands_rx) = async_channel::unbounded();
             let (events_tx, events) = async_channel::unbounded();
@@ -3507,7 +3585,7 @@ mod tests {
             HandHolding::AutoAcceptEdits,
             &mut allowed,
             &DirectOptions::default(),
-            &mut 0,
+            false,
             &events,
             &commands,
             &mut kept,
@@ -3821,7 +3899,7 @@ mod tests {
                 HandHolding::FullAccess,
                 &mut allowed,
                 &options,
-                &mut 0,
+                false,
                 &events,
                 &commands,
                 &mut kept,
@@ -3921,8 +3999,14 @@ mod tests {
         fn tool_call(&self, name: &str, args: &Value) {
             self.push(format!("call {name} {args}"));
         }
-        fn tool_result(&self, name: &str, output: &str, ok: bool, nested_calls: u32) {
-            self.push(format!("result {name} {ok} {nested_calls} {}", output.trim()));
+        fn tool_result(&self, name: &str, output: &str, ok: bool) {
+            self.push(format!("result {name} {ok} {}", output.trim()));
+        }
+        fn script_result(&self, r: &trek_script::ScriptResult) {
+            self.push(format!(
+                "script {} {:?} {}",
+                r.nested_calls, r.calls_by_tool, r.timed_out
+            ));
         }
         fn stopped(&self, why: &Stop) {
             self.push(format!("stopped {why:?}"));
@@ -3958,6 +4042,7 @@ mod tests {
                 observer: Some(log.clone()),
                 ..Default::default()
             },
+            false,
         )
         .await;
         s.prompt("go").await;
@@ -3968,7 +4053,7 @@ mod tests {
                 "start 1",
                 "end 1 Some((60, 40, 5)) Some((0.0012, true)) None",
                 "call bash {\"command\":\"echo hi\"}",
-                "result bash true 0 hi",
+                "result bash true hi",
                 "start 2",
                 "end 2 Some((60, 40, 5)) None None",
                 "text all done",
@@ -3999,6 +4084,7 @@ mod tests {
                 max_turns: 2,
                 ..Default::default()
             },
+            false,
         )
         .await;
         std::fs::write(s.cwd.join("notes.txt"), "hello").unwrap();
@@ -4026,6 +4112,7 @@ mod tests {
                 deadline: Some(Instant::now()),
                 ..Default::default()
             },
+            false,
         )
         .await;
         s.prompt("anything").await;
@@ -4034,30 +4121,46 @@ mod tests {
         s.finish().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn a_script_host_adds_the_tool_and_takes_its_calls() {
+    async fn a_script_runs_its_calls_through_the_executor() {
+        let log = Arc::new(Log::default());
+        let code = r#"
+await write("out/a.txt", "one\ntwo\n");
+const text = await read("out/a.txt", {start: 2});
+const {stdout, exit_code} = await bash("wc -l < out/a.txt");
+print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
+"#;
         let s = TestSession::start_with(
             "ollama",
             HandHolding::FullAccess,
             vec![
-                openai_tool_call("call_1", "script", json!({ "code": "print(1)" })),
+                openai_tool_call("call_1", "script", json!({ "code": code })),
                 openai_text("done"),
             ],
             DirectOptions {
-                script: Some(Arc::new(script::UnbuiltScript::new(Arc::new(
-                    LocalExecutor,
-                )))),
+                observer: Some(log.clone()),
                 system_prompt: Some("You are a benchmark agent.".into()),
                 ..Default::default()
             },
+            true,
         )
         .await;
         s.prompt("go").await;
-        assert_eq!(
-            s.tool_finished().await,
-            ("script tool not built".to_string(), false)
-        );
+        let (out, ok) = s.tool_finished().await;
+        assert!(ok, "{out}");
+        assert_eq!(out.trim(), "line 2: two; lines: 2; exit 0");
         assert_eq!(s.turn_complete().await, None);
+        assert_eq!(
+            std::fs::read_to_string(s.cwd.join("out/a.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+        let lines = log.lines();
+        assert!(
+            lines.contains(&r#"script 3 {"bash": 1, "read": 1, "write": 1} false"#.to_string()),
+            "{lines:#?}"
+        );
+        // The four tools stay, and the script comes after them.
         let tools = s.body(0)["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), 5);
         assert_eq!(tools[4]["function"]["name"], "script");
@@ -4066,6 +4169,49 @@ mod tests {
             s.body(0)["messages"][0]["content"],
             "You are a benchmark agent."
         );
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_scripts_writes_ask_like_the_models_own() {
+        let s = TestSession::start_with(
+            "ollama",
+            HandHolding::Supervised,
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "script",
+                    json!({ "code": "await write('x.txt', '1'); print('wrote')" }),
+                ),
+                openai_text("done"),
+            ],
+            DirectOptions::default(),
+            true,
+        )
+        .await;
+        s.prompt("go").await;
+        let (request_id, title) = s
+            .until(|e| match e {
+                AgentEvent::PermissionRequest {
+                    request_id, title, ..
+                } => Some((request_id.clone(), title.clone())),
+                _ => None,
+            })
+            .await;
+        assert_eq!(title, "Write file");
+        s.send(Command::Respond {
+            request_id,
+            decision: Decision::Deny,
+        })
+        .await;
+        let (out, ok) = s.tool_finished().await;
+        assert!(!ok, "{out}");
+        assert!(out.contains("Permission denied by user"), "{out}");
+        assert!(!out.contains("wrote"), "{out}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(!s.cwd.join("x.txt").exists());
+        // On, the script is offered beside the four.
+        assert_eq!(s.body(0)["tools"].as_array().unwrap().len(), 5);
         s.finish().await;
     }
 

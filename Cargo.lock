@@ -9200,6 +9200,7 @@ dependencies = [
  "tracing",
  "trek-core",
  "trek-ipc",
+ "trek-script",
  "trek-test-fixtures",
  "vt100",
  "windows-sys 0.61.2",

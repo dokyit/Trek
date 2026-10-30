@@ -2338,6 +2338,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         };
         let h = crate::start(config);
         trek_core::runtime().block_on(async {
@@ -2465,6 +2466,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         };
         let h = crate::start(config);
         trek_core::runtime().block_on(async {
@@ -2509,6 +2511,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         };
         let h = crate::start(config);
         let seen = trek_core::runtime().block_on(async {
@@ -2581,6 +2584,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         };
         let h = crate::start(config);
         let efforts =
@@ -2703,6 +2707,7 @@ mod tests {
             mcp_servers: servers,
             instructions: None,
             read_dirs: vec![],
+            script: false,
         };
         let h = crate::start(config);
         let seen = trek_core::runtime().block_on(async {

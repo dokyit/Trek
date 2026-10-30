@@ -25,15 +25,15 @@ pub use direct::{
     load_all_cached_direct_models,
 };
 /// The Direct harness's agent loop with its options exposed: a key given rather than read from
-/// the keychain, another endpoint, the tools run elsewhere (`ToolExecutor`), a `script` tool,
-/// and an `Observer` of each request and tool call. `trek-bench` drives it; Trek's own Direct
+/// the keychain, another endpoint, the tools run elsewhere (`ToolExecutor`), and an `Observer`
+/// of each request, tool call and script run. `trek-bench` drives it; Trek's own Direct
 /// sessions run it with the defaults.
 pub mod direct_harness {
     pub use crate::direct::executor::{
         ExecOutput, ExecutorGone, LocalExecutor, StdioExecutor, ToolExecutor,
     };
-    pub use crate::direct::script::{ScriptHost, ScriptOutcome, UnbuiltScript};
     pub use crate::direct::{DirectOptions, Observer, Stop, endpoint, run_with};
+    pub use trek_script::ScriptResult;
 }
 pub use limits::{Limit, LimitScope};
 pub use opencode::share_history as share_opencode_history;
@@ -80,6 +80,9 @@ pub struct SessionConfig {
     /// Folders outside `cwd` the agent may read without asking (the guides Trek ships): Claude
     /// Code gets them with `--add-dir`; Codex reads anywhere already.
     pub read_dirs: Vec<PathBuf>,
+    /// Offer the `script` tool (`trek-script`: a program that calls the other tools). Direct
+    /// sessions only; off in Trek for now (`trek-bench --script on` turns it on).
+    pub script: bool,
 }
 
 /// An MCP server Trek adds to a session.
@@ -2175,6 +2178,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
             read_only: false,
         });
         trek_core::runtime().block_on(async {
@@ -2296,6 +2300,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
             read_only: false,
         });
         let prompt = "Use the Bash tool with run_in_background=true to run: echo started-bg; sleep 8; echo done-bg. Then immediately reply with just the word: started. When it completes, reply with just: finished.";
@@ -2378,6 +2383,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
             read_only: false,
         });
         let prompt = "Use the Agent tool with run_in_background=true and subagent_type general-purpose, description \"Wait a while\", prompt: \"Run the Bash command `sleep 45` and then reply with just: waited.\" Then immediately reply with just the word: started.";

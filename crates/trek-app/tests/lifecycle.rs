@@ -573,6 +573,7 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
                 mcp_servers: vec![],
                 instructions: None,
                 read_dirs: vec![],
+                script: false,
             };
             let key = (
                 mock(),
