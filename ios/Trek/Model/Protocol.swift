@@ -248,6 +248,9 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     var queued: [QueuedMessage]? = nil
     /// `background` in full: each task's last line, and whether it can be stopped.
     var backgroundTasks: [BackgroundTask]? = nil
+    /// Its turn is over but it still waits on work it started: the Mac's sidebar keeps it at work
+    /// ("Waiting"). Nil from older Macs (`waitsInBackground` works it out then).
+    var busyInBackground: Bool? = nil
 }
 
 nonisolated struct ContextUse: Codable, Hashable {

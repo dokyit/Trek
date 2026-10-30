@@ -29,6 +29,50 @@ final class ComposerState {
     /// What followed `/new` in the message just sent: the new thread's prompt, if the Mac asks
     /// for the sheet.
     @ObservationIgnored var newPrompt = ""
+    /// What was just sent, and when. The keyboard can write it back into the field after it was
+    /// cleared: dictation finishing, or a correction or prediction it was holding being committed
+    /// as the field lets go of it. Then the field keeps showing the message that went.
+    @ObservationIgnored private var sent: (text: String, at: Date)?
+
+    /// How long after a send the keyboard's write-back is told from typing.
+    static let echoWindow: TimeInterval = 1.5
+
+    /// A message went: the composer starts empty.
+    func cleared(after text: String, at now: Date = .now) {
+        sent = (text, now)
+        draft = ""
+        photos = []
+    }
+
+    /// A message put back on purpose (undo, rewind, Edit): not an echo, however soon.
+    func put(_ text: String) {
+        sent = nil
+        draft = text
+    }
+
+    /// The draft changed: if that's the keyboard putting back what was just sent, it's emptied
+    /// again (and true comes back). Anything else typed ends the watch.
+    @discardableResult
+    func dropEcho(at now: Date = .now) -> Bool {
+        guard let s = sent, !draft.isEmpty else { return false }
+        guard now.timeIntervalSince(s.at) < Self.echoWindow, Self.isEcho(draft, of: s.text) else {
+            sent = nil
+            return false
+        }
+        draft = ""
+        return true
+    }
+
+    /// `text` is `sent` written back whole, maybe with its last word corrected: no keystroke
+    /// makes most of a message at once.
+    nonisolated static func isEcho(_ text: String, of sent: String) -> Bool {
+        let a = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let b = sent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        if a == b { return true }
+        let shared = a.commonPrefix(with: b).count
+        return shared >= 4 && shared * 10 >= b.count * 7 && a.count * 10 >= b.count * 7
+    }
 }
 
 private struct ThreadScreen: View {
@@ -43,6 +87,8 @@ private struct ThreadScreen: View {
     @State private var newThread: NewThreadRequest?
     @State private var snoozePicking = false
     @State private var deleteAsk: DeleteAsk?
+    @State private var room: CGFloat = 0
+    @State private var stripHeight: CGFloat = 0
     @Environment(\.dismiss) private var dismiss
 
     private var threadID: String { store.id }
@@ -61,11 +107,16 @@ private struct ThreadScreen: View {
                     ThreadStatusStrip(thread: t)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 6)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { stripHeight = $0 }
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                ComposerArea(store: store, composer: composer, newPromptSent: { composer.newPrompt = $0 })
+                ComposerArea(store: store, composer: composer, room: room - (t == nil ? 0 : stripHeight),
+                             newPromptSent: { composer.newPrompt = $0 })
             }
+            // Between the title bar and the keyboard (or the screen's foot): what the requests
+            // over the composer may take, the strip under the title kept clear.
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { room = $0 }
             .navigationTitle(t?.title ?? "Thread")
             .navigationSubtitle(subtitle)
             .navigationBarTitleDisplayMode(.inline)
@@ -131,76 +182,32 @@ private struct ThreadScreen: View {
         return [t.project?.name, t.branch].compactMap { $0 }.joined(separator: " · ")
     }
 
+    /// The Git button, for a thread whose folder git serves. A thread in no project works in a
+    /// chat folder of its own: the Mac sends it no branch or git state, and an older Mac that
+    /// did refuses its git requests (the sheet says so, then the button goes).
+    private func offersGit(_ t: ThreadSummary) -> Bool {
+        (t.git != nil || t.branch != nil) && model.gitUnavailable[.thread(threadID)]?.refused != true
+    }
+
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        if let t = thread, t.git != nil || t.branch != nil {
+        if let t = thread, offersGit(t) {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingGit = true } label: { GitButtonLabel(changed: t.git?.changed ?? 0) }
             }
             ToolbarSpacer(.fixed, placement: .topBarTrailing)
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                if let t = thread {
-                    Section {
-                        // The agent and model; with its plan's usage under it when the Mac shows
-                        // that plan, and Usage behind it.
-                        let name = t.agent.name + (t.modelLabel.map { " · \($0)" } ?? "")
-                        if let plan = model.link(for: threadID)?.usage?.providers.first(where: { $0.agent.key == t.agent.key }) {
-                            // A menu reads its title, subtitle and icon straight from these.
-                            Button { showingUsage = true } label: {
-                                AgentMenuIcon(agent: t.agent)
-                                Text(name)
-                                if let summary = plan.summary { Text(summary) }
-                            }
-                        } else {
-                            Label { Text(name) } icon: { AgentMenuIcon(agent: t.agent) }
-                        }
-                        if let b = t.branch { Label(b, systemImage: "arrow.triangle.branch") }
-                        if t.additions + t.deletions > 0 { Label("+\(t.additions) −\(t.deletions)", systemImage: "plus.forwardslash.minus") }
-                    }
-                    // A sub-agent isn't in the list: what moves rows around doesn't apply to it.
-                    if t.parentId == nil {
-                        Section {
-                            if t.pinned {
-                                Button("Unpin", systemImage: "pin.slash") { model.threadAction(threadID, .unpin) }
-                            } else {
-                                Button("Pin", systemImage: "pin") { model.threadAction(threadID, .pin, done: "Pinned") }
-                            }
-                            if t.section == .settled {
-                                Button("Back to the inbox", systemImage: "tray.and.arrow.down") { model.threadAction(threadID, .unsettle) }
-                            } else {
-                                Button("Settle", systemImage: "checkmark.circle") { model.threadAction(threadID, .settle, done: "Settled") }
-                            }
-                            if model.serves(.snooze, on: threadID) {
-                                SnoozeMenu(thread: t) { snoozePicking = true }
-                            }
-                            Button("Rename…", systemImage: "pencil") {
-                                newTitle = t.title
-                                renaming = true
-                            }
-                            if model.serves(.regenerateTitle, on: threadID) {
-                                Button("Regenerate title", systemImage: "text.badge.star") { model.regenerateTitle(threadID) }
-                            }
-                            if model.serves(.markUnread, on: threadID) {
-                                Button("Mark unread", systemImage: "circlebadge") { model.markUnread(threadID) }
-                            }
-                        }
-                    }
-                }
-                Button("Copy title", systemImage: "doc.on.doc") { UIPasteboard.general.string = thread?.title }
-                if thread?.runState == .working {
-                    Button(thread?.parentId == nil ? "Stop" : "Stop sub-agent", systemImage: "stop.fill", role: .destructive) { model.interrupt(threadID) }
-                }
-                if thread?.parentId == nil {
-                    Button("Archive", systemImage: "archivebox", role: .destructive) { archiving = true }
-                    if model.serves(.delete, on: threadID), let t = thread {
-                        Button("Delete…", systemImage: "trash", role: .destructive) { model.askToDelete(t, into: $deleteAsk) }
-                    }
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-            }
+            ThreadMenu(shown: thread.map { ThreadMenu.Shown($0, model: model) }, thread: thread,
+                       usage: { showingUsage = true },
+                       pickSnooze: { snoozePicking = true },
+                       rename: {
+                           newTitle = thread?.title ?? ""
+                           renaming = true
+                       },
+                       archive: { archiving = true },
+                       delete: { if let t = thread { model.askToDelete(t, into: $deleteAsk) } })
+                .equatable()
         }
     }
 }
@@ -400,7 +407,7 @@ private struct TranscriptList: View, Equatable {
     private func run(_ c: Confirmation, restoreFiles: Bool) {
         let composer = composer
         model.turnAction(store.id, item: c.item, c.action, model: c.model?.id, restoreFiles: restoreFiles) { text in
-            composer.draft = text
+            composer.put(text)
             if c.edit { composer.focusRequest += 1 }
         }
     }
@@ -728,10 +735,20 @@ struct BlockRow: View, Equatable {
 private struct ComposerArea: View {
     let store: ThreadStore
     let composer: ComposerState
+    /// The height between the strip under the title and the keyboard (or the screen's foot).
+    var room: CGFloat
     var newPromptSent: (String) -> Void
     @Environment(AppModel.self) private var model
+    /// The requests' own height, and that of what's under them (queued, settings, composer).
+    @State private var requestsHeight: CGFloat = 0
+    @State private var restHeight: CGFloat = 0
+    @State private var scroller = RequestScroller()
 
     private var threadID: String { store.id }
+
+    /// What the requests may take: the room left over the composer, with a strip of the
+    /// transcript still showing above them.
+    private var requestRoom: CGFloat { max(140, room - restHeight - 64) }
 
     var body: some View {
         @Bindable var c = composer
@@ -739,35 +756,64 @@ private struct ComposerArea: View {
         let working = thread?.runState == .working
         let query = CommandPicker.query(composer.draft)
         let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
+        let needsKid = thread?.needsThread.flatMap { model.serves(.subAgents, on: threadID) ? $0 : nil }
         VStack(spacing: 10) {
-            if let kid = thread?.needsThread, model.serves(.subAgents, on: threadID) {
-                SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
+            if needsKid != nil || !store.pending.isEmpty {
+                // Requests can be taller than the screen (many questions, each with its options):
+                // they scroll on their own, under the strip and over the composer, and the field
+                // being typed in comes into view over the keyboard.
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 10) {
+                            if let kid = needsKid {
+                                SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
+                            ForEach(store.pending) { item in
+                                PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent", threadID: threadID) { response in
+                                    if let rid = Self.requestId(item) { model.answer(threadID, requestId: rid, response) }
+                                }
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
+                        }
+                        // Room for the cards' shadows, inside what clips them.
+                        .padding(.horizontal, 14)
+                        .padding(.top, 12)
+                        .padding(.bottom, 6)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { requestsHeight = $0 }
+                    }
+                    .frame(height: min(requestsHeight, requestRoom))
+                    .scrollBounceBehavior(.basedOnSize)
+                    .scrollDismissesKeyboard(.interactively)
+                    .padding(.horizontal, -14)
+                    .padding(.top, -12)
+                    .environment(\.requestScroller, scroller)
+                    .onAppear { scroller.proxy = proxy }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            // What stays under the requests, measured for the room it leaves them.
+            VStack(spacing: 10) {
+                if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction, on: threadID) {
+                    QueuedStrip(threadID: threadID, queued: queued) { text in
+                        composer.put(composer.draft.isEmpty ? text : composer.draft + "\n\n" + text)
+                        composer.focusRequest += 1
+                    }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-            ForEach(store.pending) { item in
-                PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent", threadID: threadID) { response in
-                    if let rid = Self.requestId(item) { model.answer(threadID, requestId: rid, response) }
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-            if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction, on: threadID) {
-                QueuedStrip(threadID: threadID, queued: queued) { text in
-                    composer.draft = composer.draft.isEmpty ? text : composer.draft + "\n\n" + text
-                    composer.focusRequest += 1
+                if !commands.isEmpty {
+                    CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
+                        composer.draft = "/\(cmd.name) "
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if let thread {
+                    ThreadSettingsBar(thread: thread)
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos,
+                         placeholder: "Message \(thread?.agent.name ?? "the agent")",
+                         working: working, focusRequest: composer.focusRequest, send: send, stop: { model.interrupt(threadID) })
             }
-            if !commands.isEmpty {
-                CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
-                    composer.draft = "/\(cmd.name) "
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else if let thread {
-                ThreadSettingsBar(thread: thread)
-            }
-            Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos,
-                     placeholder: "Message \(thread?.agent.name ?? "the agent")",
-                     working: working, focusRequest: composer.focusRequest, send: send, stop: { model.interrupt(threadID) })
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { restHeight = $0 }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 6)
@@ -777,6 +823,8 @@ private struct ComposerArea: View {
         .animation(.smooth(duration: 0.3), value: thread?.queued)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .onChange(of: composer.draft) {
+            // The keyboard put back the message just sent: it stays gone.
+            if composer.dropEcho() { return }
             // `/` typed at the start: the picker wants the thread's commands (asked again each
             // time, as the agent's may have changed).
             let draft = composer.draft
@@ -812,8 +860,7 @@ private struct ComposerArea: View {
         newPromptSent(prompt)
         model.send(text.isEmpty ? "Here's a photo." : text, to: threadID,
                    mode: store.summary?.runState == .working ? composer.mode : nil, images: uploads)
-        composer.draft = ""
-        composer.photos = []
+        composer.cleared(after: composer.draft)
     }
 }
 

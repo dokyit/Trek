@@ -204,12 +204,35 @@ struct ApprovalCard: View {
     }
 }
 
+/// Scrolls the requests over the composer to a field being typed in, once the keyboard is up.
+final class RequestScroller {
+    var proxy: ScrollViewProxy?
+
+    func reveal(_ id: String) {
+        // Now, and again once the keyboard has risen (the requests' room shrinks as it does).
+        for delay in [0.05, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                withAnimation(.snappy) { self?.proxy?.scrollTo(id, anchor: .bottom) }
+            }
+        }
+    }
+}
+
+extension EnvironmentValues {
+    @Entry var requestScroller: RequestScroller? = nil
+}
+
 struct QuestionCard: View {
     var request: QuestionRequest
     var agentName: String
     var answer: (AnswerResponse) -> Void
     @State private var picks: [Int: Set<String>] = [:]
     @State private var other: [Int: String] = [:]
+    /// The question whose answer is being typed.
+    @FocusState private var typing: Int?
+    @Environment(\.requestScroller) private var scroller
+
+    private func fieldID(_ qi: Int) -> String { "\(request.requestId)-answer-\(qi)" }
 
     var body: some View {
         CardChrome(tint: nil, symbol: "bubble.left", title: "\(agentName) has a question") {
@@ -245,6 +268,8 @@ struct QuestionCard: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
                         .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .focused($typing, equals: qi)
+                        .id(fieldID(qi))
                 }
             }
             Button {
@@ -256,6 +281,9 @@ struct QuestionCard: View {
             .tint(Trek.ember)
             .controlSize(.large)
             .disabled(answers.count < request.questions.count)
+        }
+        .onChange(of: typing) {
+            if let qi = typing { scroller?.reveal(fieldID(qi)) }
         }
     }
 
@@ -286,6 +314,8 @@ struct PlanCard: View {
     @State private var showAll = false
     @State private var feedback = ""
     @State private var revising = false
+    @FocusState private var writing: Bool
+    @Environment(\.requestScroller) private var scroller
 
     var body: some View {
         CardChrome(tint: Trek.plan, symbol: "checklist", title: "\(agentName)'s plan") {
@@ -306,6 +336,8 @@ struct PlanCard: View {
                     .font(.ui(.subheadline))
                     .padding(10)
                     .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .focused($writing)
+                    .id("\(request.requestId)-feedback")
             } else {
                 Text("Nothing has been changed yet.").font(.ui(.footnote)).foregroundStyle(Trek.muted)
             }
@@ -327,6 +359,9 @@ struct PlanCard: View {
                 .tint(Trek.ember)
                 .controlSize(.large)
             }
+        }
+        .onChange(of: writing) {
+            if writing { scroller?.reveal("\(request.requestId)-feedback") }
         }
     }
 }

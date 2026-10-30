@@ -26,14 +26,19 @@ struct GitSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                branchSection
-                if status?.isRepo == false {
-                    Section { Text("This folder isn't a git repository.").foregroundStyle(Trek.muted) }
+                if status == nil, let why = model.gitUnavailable[target] {
+                    // Nothing to show, and the Mac said why (a thread with no folder of its own):
+                    // that, where the spinners would be.
+                    Section {
+                        ContentUnavailableView {
+                            Label("No Git here", systemImage: "folder.badge.questionmark")
+                        } description: {
+                            Text(why.text)
+                        }
+                    }
+                    .listRowBackground(Color.clear)
                 } else {
-                    changesSection
-                    commitSection
-                    if base != nil { worktreeSection }
-                    branchesSection
+                    sections
                 }
             }
             .scrollContentBackground(.hidden)
@@ -76,6 +81,19 @@ struct GitSheet: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(lose?.text ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var sections: some View {
+        branchSection
+        if status?.isRepo == false {
+            Section { Text("This folder isn't a git repository.").foregroundStyle(Trek.muted) }
+        } else {
+            changesSection
+            commitSection
+            if base != nil { worktreeSection }
+            branchesSection
         }
     }
 

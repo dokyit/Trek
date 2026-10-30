@@ -26,7 +26,7 @@ struct ProjectGroup: Identifiable, Equatable {
 
     var name: String { project?.name ?? "No project" }
     var needs: Int { active.count { $0.waitsOnYou } }
-    var working: Int { active.count { $0.runState == .working } }
+    var working: Int { active.count(where: \.atWork) }
     var unread: Int { quiet.count { $0.unseen } }
     var count: Int { active.count + quiet.count }
     var newest: Int64 { (active + quiet).map(\.updatedAt).max() ?? 0 }
@@ -36,8 +36,20 @@ extension ThreadSummary {
     /// Sub-agents of its own at work right now (the Mac's sidebar pill counts these).
     var runningSubAgents: [SubAgent] { (subAgents ?? []).filter { $0.state == .running || $0.state == .needsYou } }
 
+    /// Its turn is over but it still waits on what it started (sub-agents, its agent's background
+    /// work, their reports on the way): at work, as the Mac's sidebar says "Waiting". The Mac says
+    /// so; an older one doesn't, and then it's what that Mac's own sidebar works out for another
+    /// machine's row (`Machines::waiting`): idle, nothing asked, sub-agents out.
+    var waitsInBackground: Bool {
+        busyInBackground ?? (runState == .idle && needs == nil && !runningSubAgents.isEmpty)
+    }
+
+    /// Working, or waiting on what it started: the Mac counts both as at work (its Working group
+    /// and header).
+    var atWork: Bool { runState == .working || waitsInBackground }
+
     /// A row the Mac draws as a card: it waits on the user, works, or has sub-agents out.
-    var isActive: Bool { waitsOnYou || runState == .working || !runningSubAgents.isEmpty }
+    var isActive: Bool { waitsOnYou || runState == .working || !runningSubAgents.isEmpty || waitsInBackground }
 }
 
 extension AppModel {
@@ -85,7 +97,7 @@ extension AppModel {
     /// Waiting on the user first, then working (longest at it first), then the rest.
     private static func activeOrder(_ a: ThreadSummary, _ b: ThreadSummary) -> Bool {
         if a.waitsOnYou != b.waitsOnYou { return a.waitsOnYou }
-        let aw = a.runState == .working, bw = b.runState == .working
+        let aw = a.atWork, bw = b.atWork
         if aw != bw { return aw }
         return a.updatedAt > b.updatedAt
     }

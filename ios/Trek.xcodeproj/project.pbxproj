@@ -9,7 +9,18 @@
 /* Begin PBXFileReference section */
 		7A0000000000000000000001 /* Trek.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Trek.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7A0000000000000000000020 /* Trek-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Trek-Info.plist"; sourceTree = "<group>"; };
+		7A0000000000000000000040 /* TrekTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TrekTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXContainerItemProxy section */
+		7A0000000000000000000048 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7A0000000000000000000009 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7A0000000000000000000006;
+			remoteInfo = Trek;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		7A0000000000000000000002 /* Trek */ = {
@@ -17,10 +28,22 @@
 			path = Trek;
 			sourceTree = "<group>";
 		};
+		7A0000000000000000000041 /* TrekTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = TrekTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		7A0000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7A0000000000000000000042 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -34,6 +57,7 @@
 			isa = PBXGroup;
 			children = (
 				7A0000000000000000000002 /* Trek */,
+				7A0000000000000000000041 /* TrekTests */,
 				7A0000000000000000000020 /* Trek-Info.plist */,
 				7A0000000000000000000005 /* Products */,
 			);
@@ -43,6 +67,7 @@
 			isa = PBXGroup;
 			children = (
 				7A0000000000000000000001 /* Trek.app */,
+				7A0000000000000000000040 /* TrekTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -73,6 +98,29 @@
 			productReference = 7A0000000000000000000001 /* Trek.app */;
 			productType = "com.apple.product-type.application";
 		};
+		7A0000000000000000000045 /* TrekTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7A0000000000000000000046 /* Build configuration list for PBXNativeTarget "TrekTests" */;
+			buildPhases = (
+				7A0000000000000000000043 /* Sources */,
+				7A0000000000000000000042 /* Frameworks */,
+				7A0000000000000000000044 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7A0000000000000000000047 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				7A0000000000000000000041 /* TrekTests */,
+			);
+			name = TrekTests;
+			packageProductDependencies = (
+			);
+			productName = TrekTests;
+			productReference = 7A0000000000000000000040 /* TrekTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -85,6 +133,10 @@
 				TargetAttributes = {
 					7A0000000000000000000006 = {
 						CreatedOnToolsVersion = 27.0;
+					};
+					7A0000000000000000000045 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 7A0000000000000000000006;
 					};
 				};
 			};
@@ -103,12 +155,20 @@
 			projectRoot = "";
 			targets = (
 				7A0000000000000000000006 /* Trek */,
+				7A0000000000000000000045 /* TrekTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		7A0000000000000000000008 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7A0000000000000000000044 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -149,7 +209,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		7A0000000000000000000043 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		7A0000000000000000000047 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7A0000000000000000000006 /* Trek */;
+			targetProxy = 7A0000000000000000000048 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		7A0000000000000000000011 /* Debug */ = {
@@ -264,9 +339,54 @@
 			};
 			name = Release;
 		};
+		7A0000000000000000000049 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.trek.TrekMobileTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Trek.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Trek";
+			};
+			name = Debug;
+		};
+		7A000000000000000000004A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.trek.TrekMobileTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Trek.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Trek";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		7A0000000000000000000046 /* Build configuration list for PBXNativeTarget "TrekTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7A0000000000000000000049 /* Debug */,
+				7A000000000000000000004A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		7A0000000000000000000010 /* Build configuration list for PBXNativeTarget "Trek" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

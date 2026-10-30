@@ -63,10 +63,50 @@ enum DemoMac {
         case "t-tailscale":
             t.context = ContextUse(used: 104_000, window: 200_000, percent: 52)
             t.cost = Cost(label: "≈ $3.10 at API prices", billing: .plan, plan: "Claude Max", detail: "Included in your Claude Max plan")
+        case "t-chat":
+            // A chat folder of its own: no git there (an older Mac still sent its branch).
+            t.git = oldMac ? t.git : nil
+        case "t-waiting":
+            // Both sub-agents are done; the last one's report is on its way to the thread.
+            t.subAgents = [
+                SubAgent(agent: claude, model: "Sonnet 5.5", title: "Audit tokio and hyper", state: .done, since: now - 300_000),
+                SubAgent(agent: codex, model: "Sol", title: "Audit serde and its derive crates", state: .done, since: now - 200_000),
+            ]
         default:
             break
         }
+        // What the Mac's sidebar says "Waiting" for; a Mac from before rows said so leaves it out.
+        t.busyInBackground = oldMac ? nil : t.id == "t-waiting" || (t.runState == .idle && t.needs == nil && !t.runningSubAgents.isEmpty)
     }
+
+    /// `-TrekDemoOldMac YES`: the demo Mac is one from before rows said whether a thread waits in
+    /// the background, and before it left out a chat folder's branch.
+    static var oldMac: Bool { UserDefaults.standard.bool(forKey: "TrekDemoOldMac") }
+
+    /// Several questions at once, each with its options: taller than the screen.
+    static let quiz: [Question] = [
+        Question(header: "CI", question: "Which CI should run the release?", options: [
+            QuestionOption(label: "GitHub Actions", description: "Where the tests already run"),
+            QuestionOption(label: "Buildkite", description: "The self-hosted agents, faster for Rust"),
+            QuestionOption(label: "Both", description: "Build on Buildkite, publish from Actions")], multi: false, secret: false),
+        Question(header: "Trigger", question: "What starts a release?", options: [
+            QuestionOption(label: "A tag", description: "Push v1.2.3 and it goes"),
+            QuestionOption(label: "A button", description: "Run the workflow by hand"),
+            QuestionOption(label: "Every merge to main", description: "Continuous delivery")], multi: false, secret: false),
+        Question(header: "Targets", question: "Which targets should it build?", options: [
+            QuestionOption(label: "Linux x86-64", description: "The servers"),
+            QuestionOption(label: "Linux arm64", description: "The Graviton fleet"),
+            QuestionOption(label: "macOS", description: "For local runs"),
+            QuestionOption(label: "Windows", description: "Nobody asked yet")], multi: true, secret: false),
+        Question(header: "Publish", question: "Where should the artefacts go?", options: [
+            QuestionOption(label: "GitHub Releases", description: "Next to the tag"),
+            QuestionOption(label: "S3", description: "The internal bucket"),
+            QuestionOption(label: "A container registry", description: "As an image")], multi: true, secret: false),
+        Question(header: "Notes", question: "How should the release notes be written?", options: [
+            QuestionOption(label: "From the commits", description: "Conventional commits, grouped"),
+            QuestionOption(label: "By hand", description: "A draft to edit before it goes"),
+            QuestionOption(label: "Not at all", description: "Just the tag")], multi: false, secret: false),
+    ]
 
     /// What "Regenerate title" comes back with, for a few seeded threads.
     static func betterTitle(for tid: String) -> String? {

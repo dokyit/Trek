@@ -501,7 +501,9 @@ struct ThreadRow: View {
     var hostKind: MachineKind = .unknown
     @Environment(\.compactRows) private var compact
 
-    private var recedes: Bool { thread.runState == .idle && !thread.unseen && thread.needs == nil && thread.runningSubAgents.isEmpty }
+    private var recedes: Bool {
+        thread.runState == .idle && !thread.unseen && thread.needs == nil && thread.runningSubAgents.isEmpty && !thread.waitsInBackground
+    }
 
     var body: some View {
         if compact { compactBody } else { fullBody }
@@ -572,8 +574,8 @@ struct ThreadRow: View {
             WorkingPill(since: thread.workingSince)
         } else if let look = StatusLook.of(thread) {
             StatusPill(look: look)
-        } else if !thread.runningSubAgents.isEmpty {
-            // Its turn is over, but sub-agents it started are still at it.
+        } else if thread.waitsInBackground {
+            // Its turn is over, but what it started is still at it (the Mac's "Waiting").
             StatusPill(look: StatusLook(label: "Waiting", color: Trek.working.opacity(0.8), symbol: nil, pulses: true))
         } else if thread.unseen {
             // Done and not read yet: an emerald dot by the time, as in the Mac's sidebar.

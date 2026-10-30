@@ -272,6 +272,9 @@ final class MockHost: Backend {
         case .deleteNote(let nid):
             notes.removeAll { $0.id == nid }
             ack(id)
+        case .gitStatus(let target) where gitThread(target)?.project?.id.isEmpty == true,
+             .gitBranches(let target) where gitThread(target)?.project?.id.isEmpty == true:
+            refuse(id, .badRequest, "This thread has no folder of its own")
         case .gitStatus(let target):
             deliver(.gitStatus(re: id, DemoMac.gitStatus(thread: gitThread(target))), after: 0.2)
         case .gitDiff(_, let path):
@@ -881,6 +884,42 @@ final class MockHost: Backend {
         add(id, .user(text: DemoMac.mathAsk, images: 0), at: now - 4 * m)
         add(id, .assistant(text: DemoMac.mathAnswer, streaming: false))
         add(id, .turnEnd(tookSecs: 52))
+
+        // A thread in no project: its chat folder has no git (no branch, and git requests are
+        // refused, as the Mac does). `-TrekDemoOldMac YES` plays a Mac from before rows said so:
+        // a branch anyway, and no `busy_in_background`.
+        id = "t-chat"
+        var chat = t(id, "What's a good name for the cat?", "", "claude-code", "claude-opus-5-5", .idle, section: .inbox,
+                     branch: DemoMac.oldMac ? "main" : nil, ago: 5)
+        chat.project = ProjectRef(id: "", name: "No project", hue: 220, monogram: "··")
+        threads.insert(chat, at: 4)
+        seq[id] = 0
+        items[id] = []
+        add(id, .user(text: "Our new cat is grey with one white paw. Suggest a few names.", images: 0), at: now - 6 * m)
+        add(id, .assistant(text: "A few that suit a grey cat with one white paw: **Sock**, **Pewter**, **Mitt**, **Smoke** and **Earl Grey**.", streaming: false))
+        add(id, .turnEnd(tookSecs: 6))
+
+        // An agent asking several things at once: taller than the screen, it scrolls.
+        id = "t-quiz"
+        threads.insert(t(id, "Set up the release pipeline", "p-api", "claude-code", "claude-opus-5-5", .needsYou,
+                         needs: Needs(kind: .question, text: "Which CI should run the release?"), section: .inbox, unseen: true,
+                         branch: "ci/release", ago: 1), at: 4)
+        seq[id] = 0
+        items[id] = []
+        add(id, .user(text: "Set up a release pipeline for the API: build, test, tag and publish.", images: 0), at: now - 3 * m)
+        add(id, .assistant(text: "A few choices before I write it.", streaming: false))
+        add(id, .question(QuestionRequest(requestId: "r-quiz", questions: DemoMac.quiz, state: .pending, answers: nil)))
+
+        // Its turn is over, but its agent's background work isn't: a sub-agent's report is on its
+        // way to it. The Mac's sidebar keeps it at work ("Waiting").
+        id = "t-waiting"
+        threads.insert(t(id, "Audit the dependencies", "p-trek", "claude-code", "claude-opus-5-5", .idle, section: .inbox,
+                         branch: "main", ago: 2), at: 4)
+        seq[id] = 0
+        items[id] = []
+        add(id, .user(text: "Audit our dependencies for known advisories; use sub-agents for the big crates.", images: 0), at: now - 8 * m)
+        add(id, .assistant(text: "I've started two sub-agents on the largest crates and will report when they're done.", streaming: false))
+        add(id, .turnEnd(tookSecs: 40))
 
         // `-TrekBigThread 3000`: a thread as long as a real day's work, to measure with.
         let big = DemoMac.bigThreadSize

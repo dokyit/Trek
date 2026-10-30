@@ -327,6 +327,14 @@ nonisolated enum GitTarget: Hashable {
     @MainActor func owned(by link: HostLink) -> Bool { link.owns(id) }
 }
 
+/// Why a target's git couldn't be read, in the Mac's words.
+nonisolated struct GitUnavailable: Hashable {
+    var text: String
+    /// The Mac refused the request itself ("This thread has no folder of its own"): asking again
+    /// won't change it, so the thread's Git button goes.
+    var refused: Bool
+}
+
 /// A folder's git status, as the Mac's Git panel shows it. For a worktree thread: its changes
 /// against its base (its commits and what isn't committed yet).
 nonisolated struct GitStatus: Codable, Hashable {
