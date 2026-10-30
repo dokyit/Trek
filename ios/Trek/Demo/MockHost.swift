@@ -1157,7 +1157,9 @@ extension MockHost {
                                 runState: .idle, needs: nil, section: .inbox, unseen: false, pinned: false, branch: "feat/session-refresh",
                                 worktree: true, activity: nil, workingSince: nil, updatedAt: now, additions: 128, deletions: 36)
         threads.insert(row, at: min(1, threads.count))
-        seq[id] = 0
+        // As a real Mac numbers them (from when it first served the thread, in µs): a launch
+        // holding another state isn't taken for the copy the phone kept from the last one.
+        seq[id] = now * 1000
         items[id] = []
         let ask = ItemBody.user(text: "Open a PR for the session refresh fix, watch its checks, merge it when it's green, then cut a nightly.",
                                 images: 0)

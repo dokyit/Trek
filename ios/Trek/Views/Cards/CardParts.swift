@@ -152,8 +152,8 @@ struct StateMark: View {
     var body: some View {
         Group {
             switch state {
-            case .pass: glyph("check", CardHue.green.mark)
-            case .fail: glyph("x", CardHue.red.mark)
+            case .pass: glyph("mark-check", CardHue.green.mark)
+            case .fail: glyph("mark-x", CardHue.red.mark)
             case .running: RingSpinner(size: 15, color: CardHue.blue.mark)
             case .queued:
                 Circle().strokeBorder(CardInk.dot, style: StrokeStyle(lineWidth: 1.4, dash: [2, 2])).padding(1.5)
@@ -169,7 +169,7 @@ struct StateMark: View {
 
     private func glyph(_ name: String, _ fill: Color) -> some View {
         Circle().fill(fill)
-            .overlay(CardIcon(name: name, size: 10).foregroundStyle(Trek.background).fontWeight(.bold))
+            .overlay(CardIcon(name: name, size: 10).foregroundStyle(Trek.background))
     }
 }
 
@@ -370,14 +370,14 @@ struct CardFrame<Body: View, Footer: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                if let url = card.url.flatMap(URL.init(string:)) { openURL(url) }
-            } label: {
-                header.contentShape(Rectangle())
+            // Not a disabled button while it has nowhere to go: that would grey the header.
+            if let url = card.url.flatMap(URL.init(string:)) {
+                Button { openURL(url) } label: { header.contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Opens it on GitHub")
+            } else {
+                header
             }
-            .buttonStyle(.plain)
-            .disabled(card.url == nil)
-            .accessibilityHint(card.url == nil ? "" : "Opens it on GitHub")
             content()
             footer()
         }
@@ -430,6 +430,11 @@ struct CardHeader: View {
                 HStack(alignment: .top, spacing: 8) {
                     title
                         .lineLimit(2)
+                        // 20 pt lines, as the design sets Inter 15.
+                        .lineSpacing(2)
+                        .padding(.vertical, 1)
+                        // Its two lines whatever the stack proposes, not one truncated.
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     badge
                 }
@@ -483,11 +488,13 @@ struct CardOutcome<Files: View, Actions: View>: View {
                     Text(title)
                         .font(.ui(size: 15, weight: .medium, relativeTo: .subheadline))
                         .foregroundStyle(Trek.foreground)
+                        .fixedSize(horizontal: false, vertical: true)
                     if !detail.isEmpty {
                         Text(detail)
                             .font(.ui(size: 13, relativeTo: .footnote))
                             .foregroundStyle(Trek.muted)
                             .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

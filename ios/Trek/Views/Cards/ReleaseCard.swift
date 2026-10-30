@@ -34,7 +34,9 @@ struct ReleaseCard: View {
         if !platforms.isEmpty { meta.append(.text(platforms)) }
         let took = card.tookMs(now: now)
         if took > 0 { meta.append(.text(RemoteCard.duration(took))) }
-        return CardHeader(tile: tile, name: name, rest: version,
+        // A long version ("v0.4.28-nightly.20261030") may break after its hyphen.
+        let breakable = version?.replacingOccurrences(of: "-", with: "-\u{200B}")
+        return CardHeader(tile: tile, name: name, rest: breakable,
                           badge: card.channel.isEmpty ? nil : CardBadge(label: card.channelLabel, hue: nil), meta: meta)
     }
 }
