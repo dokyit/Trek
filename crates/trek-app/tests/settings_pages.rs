@@ -181,3 +181,35 @@ fn the_settings_scroll_container_can_be_found_by_the_driver() {
         assert!(trek.visible(cx, "settings-content"));
     });
 }
+
+#[test]
+fn a_saved_key_can_be_copied_and_says_where_it_lives() {
+    run(async |cx| {
+        // Gemini: a provider the other tests here leave alone (the store is shared in-process),
+        // and a row near the top, in view without scrolling.
+        trek_core::settings::secrets::set_api_key("google", "sk-test-copy").unwrap();
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::ApiKeys), cx)
+        });
+        trek_app::settings_view::shown::take();
+        trek.render(cx);
+        assert!(trek.visible(cx, "copy-google"), "Copy is offered");
+        assert!(trek.visible(cx, "del-google"), "Remove is offered");
+        // The status says which Keychain item holds it, so Keychain Access can find it.
+        if cfg!(target_os = "macos") {
+            assert!(
+                trek_app::settings_view::shown::take()
+                    .iter()
+                    .any(|t| t.contains(trek_core::keychain::SERVICE)),
+                "the status names the Keychain item"
+            );
+        }
+        trek.click(cx, "copy-google");
+        trek.render(cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("sk-test-copy")
+        );
+    });
+}

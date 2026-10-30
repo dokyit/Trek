@@ -849,6 +849,12 @@ impl SettingsView {
                 .filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
             let id = p.id;
             let status: SharedString = match (state, from_env) {
+                // Where to find it: Keychain Access lists it by its service name, not "Trek".
+                (SavedKey::Saved, _) if cfg!(target_os = "macos") => format!(
+                    "Saved in your login Keychain (Keychain Access › login › {})", // words: ok, macOS only
+                    trek_core::keychain::SERVICE
+                )
+                .into(),
                 (SavedKey::Saved, _) => {
                     format!("Saved in {}", crate::words::words().your_credential_store).into()
                 }
@@ -859,6 +865,8 @@ impl SettingsView {
                 (SavedKey::None, Some(k)) => format!("Using ${k} from your shell").into(),
                 (SavedKey::None, None) => "Not set".into(),
             };
+            #[cfg(any(test, feature = "test-support"))]
+            super::shown::text(&status);
             let title = h_flex()
                 .w_full()
                 .gap(px(10.))
@@ -883,6 +891,34 @@ impl SettingsView {
                             .text_size(px(12.5))
                             .text_color(muted)
                             .child("••••••••"),
+                    )
+                    .child(
+                        // A quiet read, as everywhere: a key another copy of Trek saved says so
+                        // instead of bringing up macOS's prompt.
+                        Button::new(SharedString::from(format!("copy-{id}")))
+                            .small()
+                            .ghost()
+                            .label("Copy")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                match secrets::stored_api_key_lookup(id) {
+                                    trek_core::keychain::Lookup::Found(key) => {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(key));
+                                        crate::toast::push(window, "Key copied", cx);
+                                    }
+                                    trek_core::keychain::Lookup::Locked => {
+                                        this.saved_keys.insert(id, SavedKey::Locked);
+                                        crate::toast::push(
+                                            window,
+                                            "This key is locked: click Allow access first",
+                                            cx,
+                                        );
+                                    }
+                                    trek_core::keychain::Lookup::Missing => {
+                                        this.saved_keys.insert(id, SavedKey::None);
+                                        crate::toast::push(window, "No key is saved", cx);
+                                    }
+                                }
+                            })),
                     )
                     .child(
                         Button::new(SharedString::from(format!("del-{id}")))

@@ -457,8 +457,12 @@ impl RightPanel {
     /// The Simulator only mirrors (and polls the device) while its tab is on screen.
     pub fn sync_native(&mut self, cx: &mut Context<Self>) {
         let active = self.active;
-        // Editor mode doesn't draw this panel, so its views must not float over the editor.
-        let open = self.open && !self.workspace.read(cx).ide();
+        // Editor mode and Settings don't draw this panel (`root.rs` leaves it out), so its views
+        // must not float over them.
+        let open = {
+            let ws = self.workspace.read(cx);
+            self.open && !ws.ide() && !matches!(ws.route, crate::workspace::Route::Settings(_))
+        };
         let menu_open = self.launcher_open || self.workspace.read(cx).overlay_open;
         for t in &self.tabs {
             match &t.view {
