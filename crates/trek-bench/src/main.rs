@@ -532,35 +532,37 @@ async fn main() {
         eprintln!("trek-bench: {e}");
     }
 
-    let t = observer.totals.lock().unwrap();
-    let cost_source = match (t.reported, t.priced) {
-        (0, 0) => Value::Null,
-        (_, 0) => json!("reported"),
-        (0, _) => json!("priced"),
-        _ => json!("mixed"),
+    // In a block of its own: the guard must be gone before the writer is awaited below.
+    let done = {
+        let t = observer.totals.lock().unwrap();
+        let cost_source = match (t.reported, t.priced) {
+            (0, 0) => Value::Null,
+            (_, 0) => json!("reported"),
+            (0, _) => json!("priced"),
+            _ => json!("mixed"),
+        };
+        json!({
+            "type": "done",
+            "requests": t.requests,
+            "tool_calls": t.tool_calls,
+            "script_calls": t.script_calls,
+            "nested_calls": t.nested_calls,
+            "usage": usage_json(&t.usage),
+            "cost_usd": (t.reported + t.priced > 0).then_some(t.cost),
+            "cost_source": cost_source,
+            "requests_without_cost": t.unpriced,
+            "elapsed_s": started.elapsed().as_secs_f64(),
+            "turns": t.turns,
+            "stopped": stopped,
+            "error": error,
+            "final_text": t.final_text,
+            "model": setup.model,
+            "provider": setup.provider,
+            "base_url": setup.base_url,
+            "executor": setup.executor,
+            "script": setup.script,
+        })
     };
-    let done = json!({
-        "type": "done",
-        "requests": t.requests,
-        "tool_calls": t.tool_calls,
-        "script_calls": t.script_calls,
-        "nested_calls": t.nested_calls,
-        "usage": usage_json(&t.usage),
-        "cost_usd": (t.reported + t.priced > 0).then_some(t.cost),
-        "cost_source": cost_source,
-        "requests_without_cost": t.unpriced,
-        "elapsed_s": started.elapsed().as_secs_f64(),
-        "turns": t.turns,
-        "stopped": stopped,
-        "error": error,
-        "final_text": t.final_text,
-        "model": setup.model,
-        "provider": setup.provider,
-        "base_url": setup.base_url,
-        "executor": setup.executor,
-        "script": setup.script,
-    });
-    drop(t);
     if let Some(path) = &out_file {
         let written = serde_json::to_string_pretty(&done)
             .map_err(anyhow::Error::from)
