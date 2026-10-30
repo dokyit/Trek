@@ -4,6 +4,10 @@
 //! failed load says, and how big a popup's sheet is. `webkit.rs` feeds these from WebKit's
 //! delegates; the panel shows them.
 
+// The bar is fed by WebKit on the Mac (`webkit.rs`); Windows' web view has no asks yet, so
+// nothing there constructs these.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
 /// Something a page waits on the user for, shown in a bar above it until answered.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
