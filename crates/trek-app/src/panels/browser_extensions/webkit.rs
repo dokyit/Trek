@@ -189,6 +189,23 @@ pub fn configuration() -> Option<Retained<WKWebViewConfiguration>> {
     }
 }
 
+/// Put the extensions' controller in `config` (one WebKit made for a page's popup) unless it
+/// already has one: WebKit copies the opener's configuration, so it normally does.
+pub fn attach_controller(config: &WKWebViewConfiguration) {
+    if !ensure() {
+        return;
+    }
+    let Some(controller) = with(|s| s.controller.clone()) else {
+        return;
+    };
+    // SAFETY: main thread (the popup's view is made there); the view isn't made yet.
+    unsafe {
+        if config.webExtensionController().is_none() {
+            config.setWebExtensionController(Some(&controller));
+        }
+    }
+}
+
 /// Load installed extension `entry` (WebKit reads its folder, then it runs).
 fn load(entry: registry::Installed) {
     let Some(mtm) = MainThreadMarker::new() else {

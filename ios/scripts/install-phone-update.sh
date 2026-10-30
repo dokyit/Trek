@@ -1,7 +1,9 @@
 #!/bin/sh
 # Install the LaunchAgent that keeps Trek on your iPhone up to date (and signed) over Wi-Fi:
 # every 30 minutes it runs phone-update.sh, which rebuilds and reinstalls the app when Trek on
-# this Mac is newer or the free signing is about to lapse. See phone-update.sh for the rules.
+# this Mac is newer or the free signing is about to lapse, and updates this Mac's Trek while it's
+# closed. See phone-update.sh for the rules. A published Trek keeps the agent's copy of the script
+# at its own version (`remote::phone_update::refresh_agent_copy`).
 #   ios/scripts/install-phone-update.sh              install (or update) it, and run it once
 #   ios/scripts/install-phone-update.sh --uninstall  remove it
 # Pause it without uninstalling: touch "~/Library/Application Support/dev.trek.phone-update/off".

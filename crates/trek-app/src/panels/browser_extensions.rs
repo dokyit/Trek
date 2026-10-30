@@ -508,6 +508,17 @@ pub fn webview_configuration() -> Option<objc2::rc::Retained<objc2_web_kit::WKWe
     webkit::configuration()
 }
 
+/// A popup's configuration (WebKit's, from its opener) with the extensions in it too.
+#[cfg(target_os = "macos")]
+pub fn with_extensions(
+    config: objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration>,
+) -> objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration> {
+    if supported() {
+        webkit::attach_controller(&config);
+    }
+    config
+}
+
 /// Tell the extensions about Browser `key`'s tabs and which is in front (macOS: `tabs.query`,
 /// `tabs.onActivated` and the like). `open_tab` opens an address in a new tab of it.
 #[cfg(target_os = "macos")]

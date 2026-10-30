@@ -29,6 +29,13 @@ use std::time::{Duration, Instant};
 mod agent;
 mod agent_core;
 pub use agent::{AgentCall, AgentCallSlot};
+// What pages ask of the user, and the WebKit delegates wry leaves out (popups, dialogs,
+// permissions, links for other apps, why a load failed).
+mod asks;
+mod prompts;
+#[cfg(target_os = "macos")]
+mod webkit;
+use asks::{Ask, AskKind, Reply};
 
 /// Trek's internal pages (start page, load errors) live on this scheme.
 const START_URL: &str = "trek://newtab/";
@@ -601,7 +608,29 @@ mod native {
     pub fn set_dark(_: &wry::WebView, _: bool) {}
 }
 
+/// Tab ids, from one count: a popup's view is made (and numbered) inside WebKit's call for it,
+/// away from the panel.
+fn next_tab_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// WebKit's configuration for a view a page opened (`window.open`): the new view must be made
+/// from it (macOS). Elsewhere a popup opens as a plain tab.
+#[cfg(target_os = "macos")]
+type PopupConfig = objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration>;
+#[cfg(not(target_os = "macos"))]
+type PopupConfig = std::convert::Infallible;
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// Popup views made inside WebKit's call, until the panel takes them (`Msg::Popup`).
+    static POPUPS: RefCell<HashMap<u64, wry::WebView>> = RefCell::default();
+}
+
 /// Events from the native views, bridged onto the GPUI thread.
+// The popup, dialog and failure events come from `webkit.rs`, which is macOS's.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum Msg {
     Title(u64, String),
     Load {
@@ -615,6 +644,48 @@ enum Msg {
         body: String,
     },
     NewWindow(String),
+    /// A page opened tab `id` (`window.open`, `target=_blank`) with `opener` as its
+    /// `window.opener`; its view waits in `POPUPS`. `size`: what the page asked for, which makes
+    /// it a sheet over its opener.
+    Popup {
+        id: u64,
+        opener: u64,
+        url: String,
+        size: Option<(f64, f64)>,
+    },
+    /// The page closed itself (`window.close()`).
+    Closed(u64),
+    /// The page waits on the user (`asks.rs`).
+    Ask {
+        tab: u64,
+        id: u64,
+        site: String,
+        kind: AskKind,
+    },
+    /// The page went to an address another app opens.
+    External {
+        tab: u64,
+        url: String,
+    },
+    /// Loading `url` failed before anything of it showed: WebKit's error.
+    LoadFailed {
+        tab: u64,
+        url: String,
+        domain: String,
+        code: i64,
+    },
+    /// The page's web content process ended.
+    Crashed(u64),
+    /// A download started (`path`: where it's saved), or ended.
+    Download {
+        tab: u64,
+        url: String,
+        path: PathBuf,
+    },
+    Downloaded {
+        url: String,
+        ok: bool,
+    },
     /// Whether tab `tab`'s page is drawn dark (`None`: can't tell); see `check_drawn_scheme`.
     Drawn {
         tab: u64,
@@ -645,10 +716,19 @@ struct Tab {
     /// from before), two each time its scheme changes (the first load after it comes in the
     /// old one).
     scheme_reloads: u8,
+    /// The tab whose page opened this one (`window.opener`): it comes back to the front when
+    /// this one closes.
+    opener: Option<u64>,
+    /// The size a popup's page asked for, while it shows as a sheet over its opener (a sign-in
+    /// window, say) rather than as a tab's whole page.
+    sheet: Option<(f64, f64)>,
+    /// When the page's process last ended: once it's reloaded, twice in a minute it's an error.
+    crashed: Option<Instant>,
 }
 
 /// The window a native web view is made in, by its raw handle: what a task can carry there in
 /// place of the `Window` (see `BrowserPanel::build_view`). The editor's preview uses it too.
+#[derive(Clone, Copy)]
 pub(crate) struct ParentWindow(raw_window_handle::RawWindowHandle);
 
 impl ParentWindow {
@@ -740,8 +820,13 @@ impl Page {
     }
 
     /// Loading `url` failed: the error page takes over. Returns its address, for the view.
-    fn failed_to_load(&mut self, url: String) -> String {
-        let error_page = format!("{ERROR_URL}#{}", percent_encode(&url));
+    /// `why`: its heading and what went wrong, when WebKit said (else it says the site can't be
+    /// reached).
+    fn failed_to_load(&mut self, url: String, why: Option<(&str, &str)>) -> String {
+        let query = why
+            .map(|(h, why)| format!("?h={}&why={}", percent_encode(h), percent_encode(why)))
+            .unwrap_or_default();
+        let error_page = format!("{ERROR_URL}{query}#{}", percent_encode(&url));
         self.loading = false;
         self.failed = Some(url);
         self.nav_seq += 1;
@@ -814,7 +899,6 @@ pub struct BrowserPanel {
     workspace: Entity<Workspace>,
     tabs: Vec<Tab>,
     active: u64,
-    next_id: u64,
     address: Entity<InputState>,
     editing: bool,
     /// Set by the right panel: false when the Browser tool isn't on screen.
@@ -848,8 +932,31 @@ pub struct BrowserPanel {
     favicons: HashMap<String, Option<Arc<Image>>>,
     /// Agents using the browser (`agent.rs`).
     agent: agent::Driver,
+    /// What pages wait on the user for, oldest first; the bar shows the front tab's first.
+    asks: Vec<Ask>,
+    /// The text field of a `prompt` on show, by its ask's id (and its Enter).
+    prompt: Option<(u64, Entity<InputState>, Subscription)>,
+    /// The page area, as last laid out (a popup's sheet is sized to fit it).
+    area: Rc<std::cell::Cell<Bounds<Pixels>>>,
+    /// Downloads under way: where each is saved, by its URL.
+    downloads: HashMap<String, PathBuf>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Open `url` in Safari, for a site that won't work in an embedded view (a passkey, say).
+fn open_in_safari(url: &str) {
+    let _ = std::process::Command::new("/usr/bin/open")
+        .args(["-a", "Safari", url])
+        .spawn();
+}
+
+/// Answer WebKit's handler for ask `id` (`webkit.rs`; nothing waits elsewhere).
+fn reply_to_page(id: u64, reply: &Reply) {
+    #[cfg(target_os = "macos")]
+    webkit::answer(id, reply);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (id, reply);
 }
 
 fn host_of(url: &str) -> Option<String> {
@@ -906,6 +1013,14 @@ fn normalize(input: &str) -> String {
         return format!("http://{t}");
     }
     if t.contains("://") || t.starts_with("about:") || t.starts_with("data:") {
+        return t.to_string();
+    }
+    // An app's address (`mailto:a@b.c`, `tel:+1…`), not a host and port (`dev.box:8080`).
+    if let Some(scheme) = asks::scheme_of(t)
+        && !t.contains(char::is_whitespace)
+        && !t[scheme.len() + 1..].starts_with(|c: char| c.is_ascii_digit())
+        && asks::link_kind(t) == asks::LinkKind::App
+    {
         return t.to_string();
     }
     let host = t.split(['/', '?', '#']).next().unwrap_or("");
@@ -1256,7 +1371,6 @@ impl BrowserPanel {
             workspace,
             tabs: vec![],
             active: 0,
-            next_id: 1,
             address,
             editing: false,
             visible: true,
@@ -1279,6 +1393,10 @@ impl BrowserPanel {
             page_vars: Rc::new(RefCell::new(page_vars(cx))),
             favicons: HashMap::new(),
             agent: Default::default(),
+            asks: vec![],
+            prompt: None,
+            area: Rc::default(),
+            downloads: HashMap::new(),
             _tasks: vec![pump],
             _subscriptions: subscriptions,
         };
@@ -1347,7 +1465,9 @@ impl BrowserPanel {
     /// It panics inside a window procedure, which can't unwind, and Trek closes. So it takes
     /// nothing of the panel's (`tx` and `vars` are the panel's, cloned): reading the panel would
     /// hold the app too.
-    /// `dark`: the scheme pages are asked for, set before the first page loads.
+    /// `dark`: the scheme pages are asked for, set before the first page loads. `popup`: the
+    /// view is one a page opened, made from WebKit's configuration for it, and WebKit loads its
+    /// page (`open_popup`).
     fn build_view(
         id: u64,
         url: &str,
@@ -1355,7 +1475,10 @@ impl BrowserPanel {
         parent: &ParentWindow,
         tx: async_channel::Sender<Msg>,
         vars: Rc<RefCell<String>>,
+        popup: Option<PopupConfig>,
     ) -> Option<wry::WebView> {
+        #[cfg(target_os = "macos")]
+        let (is_popup, popup_vars) = (popup.is_some(), vars.clone());
         let built = {
             let handle = parent;
             let (t1, t2, t3, t4) = (tx.clone(), tx.clone(), tx.clone(), tx.clone());
@@ -1383,14 +1506,38 @@ impl BrowserPanel {
             let builder = wry::WebViewBuilder::new();
             #[cfg(target_os = "macos")]
             let builder = builder.with_user_agent(user_agent());
-            // The extensions' controller is in a view's configuration from the start (WebKit).
+            // A popup is made from the configuration WebKit hands over (it keeps its opener);
+            // either way the extensions' controller is in it from the start.
             #[cfg(target_os = "macos")]
-            let builder = match browser_extensions::webview_configuration() {
+            let builder = match popup
+                .map(browser_extensions::with_extensions)
+                .or_else(browser_extensions::webview_configuration)
+            {
                 Some(config) => {
                     use wry::WebViewBuilderExtMacos as _;
                     builder.with_webview_configuration(config)
                 }
                 None => builder,
+            };
+            #[cfg(not(target_os = "macos"))]
+            let _ = popup;
+            // Downloads (a link's `download`, a response the view can't show, a redirect to a
+            // file) go to Downloads, as wry would put them, and the panel says so.
+            #[cfg(target_os = "macos")]
+            let builder = {
+                let (t5, t6) = (tx.clone(), tx.clone());
+                builder
+                    .with_download_started_handler(move |url, path| {
+                        let _ = t5.try_send(Msg::Download {
+                            tab: id,
+                            url,
+                            path: path.clone(),
+                        });
+                        true
+                    })
+                    .with_download_completed_handler(move |url, _, ok| {
+                        let _ = t6.try_send(Msg::Downloaded { url, ok });
+                    })
             };
             // WKWebView takes its scheme from its appearance, which is set once it's made: so it
             // loads its first page after that (below), not as it's made.
@@ -1428,6 +1575,12 @@ impl BrowserPanel {
                         url,
                     });
                 })
+                // On macOS `webkit.rs` answers WebKit's call for a new view itself (with a real
+                // popup), so this is WebView2's: the page opens in a tab of its own, without
+                // `window.opener`. (WebView2 can hand a page a view as its popup too, through
+                // `NewWindowRequested`'s `SetNewWindow`, from a view made on its environment while
+                // the request is deferred; Trek doesn't yet. A sign-in that posts its answer back
+                // to the page that opened it can't finish there.)
                 .with_new_window_req_handler(move |url, _| {
                     let _ = t4.try_send(Msg::NewWindow(url));
                     wry::NewWindowResponse::Deny
@@ -1441,32 +1594,80 @@ impl BrowserPanel {
         #[cfg(target_os = "macos")]
         {
             native::set_dark(&built, dark);
-            let _ = built.load_url(&to_view(url));
+            let make: webkit::MakePopup = {
+                let (tx, vars, parent) = (tx.clone(), popup_vars, *parent);
+                Box::new(move |url, config, size| {
+                    Self::open_popup(
+                        id,
+                        url,
+                        config,
+                        size,
+                        dark,
+                        &parent,
+                        tx.clone(),
+                        vars.clone(),
+                    )
+                })
+            };
+            webkit::hook(&built, id, tx, Some(make));
+            if !is_popup {
+                let _ = built.load_url(&to_view(url));
+            }
         }
         #[cfg(not(any(target_os = "macos", windows)))]
         let _ = dark;
         Some(built)
     }
 
+    /// A page in tab `opener` opened `url` (`window.open`, `target=_blank`): make its view now,
+    /// inside WebKit's call, from WebKit's `config` (the opener's website data, and the opener as
+    /// its `window.opener`), and hand it back for WebKit to load. The panel takes it as a tab
+    /// (`Msg::Popup`): a sheet over the opener when the page asked for a `size`.
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    fn open_popup(
+        opener: u64,
+        url: String,
+        config: PopupConfig,
+        size: Option<(f64, f64)>,
+        dark: bool,
+        parent: &ParentWindow,
+        tx: async_channel::Sender<Msg>,
+        vars: Rc<RefCell<String>>,
+    ) -> Option<objc2::rc::Retained<objc2_web_kit::WKWebView>> {
+        let id = next_tab_id();
+        webkit::own_scripts(&config);
+        let built = Self::build_view(id, &url, dark, parent, tx.clone(), vars, Some(config))?;
+        let view = webkit::web_view(&built);
+        POPUPS.with(|p| p.borrow_mut().insert(id, built));
+        let _ = tx.try_send(Msg::Popup {
+            id,
+            opener,
+            url,
+            size,
+        });
+        Some(view)
+    }
+
     /// Open `url` in a new tab. Its view is made in a task of its own, which runs outside any
     /// update (see `build_view`), so the tab joins a moment later.
-    fn new_tab(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let id = self.next_id;
-        self.next_id += 1;
+    /// Returns the tab's id.
+    fn new_tab(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) -> u64 {
+        let id = next_tab_id();
         let Some(parent) = ParentWindow::of(window) else {
             self.unavailable = true;
             cx.notify();
-            return;
+            return id;
         };
         let url = url.to_string();
         let (tx, vars) = (self.tx.clone(), self.page_vars.clone());
         let dark = self.wants_dark(cx);
         self._tasks.push(cx.spawn_in(window, async move |this, cx| {
-            let built = Self::build_view(id, &url, dark, &parent, tx, vars);
+            let built = Self::build_view(id, &url, dark, &parent, tx, vars, None);
             let _ = this.update_in(cx, |this, window, cx| match built {
                 Some(built) => {
                     let view = cx.new(|cx| WebView::new(built, window, cx));
-                    this.add_tab(id, view, &url, dark, window, cx);
+                    this.add_tab(id, view, &url, dark, None, window, cx);
                 }
                 None => {
                     this.unavailable = true;
@@ -1474,15 +1675,19 @@ impl BrowserPanel {
                 }
             });
         }));
+        id
     }
 
-    /// `dark`: the scheme the view was made with (see `build_view`).
+    /// `dark`: the scheme the view was made with (see `build_view`). `popup`: the tab whose page
+    /// opened this one, and the size it asked for (`Msg::Popup`).
+    #[allow(clippy::too_many_arguments)]
     fn add_tab(
         &mut self,
         id: u64,
         view: Entity<WebView>,
         url: &str,
         dark: bool,
+        popup: Option<(u64, Option<(f64, f64)>)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1495,6 +1700,9 @@ impl BrowserPanel {
             frame: Rc::default(),
             dark: Some(dark),
             scheme_reloads: 1,
+            opener: popup.map(|(opener, _)| opener),
+            sheet: popup.and_then(|(_, size)| size),
+            crashed: None,
         });
         #[cfg(target_os = "macos")]
         if self.workspace.read(cx).settings.browser.block_trackers
@@ -1524,7 +1732,11 @@ impl BrowserPanel {
                 }
             });
         }));
-        self.watch_load(id, 1, url.to_string(), cx);
+        // A popup's first page is WebKit's to load, and `about:blank` (a popup the page writes
+        // into itself) never reports one.
+        if popup.is_none() || url != "about:blank" {
+            self.watch_load(id, 1, url.to_string(), cx);
+        }
         if url == START_URL {
             self.start_editing(window, cx);
         } else {
@@ -1554,15 +1766,51 @@ impl BrowserPanel {
         }
         let tab = self.tabs.remove(ix);
         tab.view.update(cx, |v, _| v.hide());
+        self.forget_asks(id);
+        #[cfg(target_os = "macos")]
+        webkit::unhook(id);
         if self.tabs.is_empty() {
             self.new_tab(START_URL, window, cx);
             return;
         }
         if self.active == id {
-            self.active = self.tabs[ix.min(self.tabs.len() - 1)].id;
+            // A popup gives the front back to the page that opened it.
+            let opener = tab.opener.filter(|o| self.tabs.iter().any(|t| t.id == *o));
+            self.active = opener.unwrap_or(self.tabs[ix.min(self.tabs.len() - 1)].id);
             self.editing = false;
         }
         self.sync_views(cx);
+    }
+
+    /// Tab `id`'s page is going: what it asked goes unanswered ("no" to WebKit).
+    fn forget_asks(&mut self, id: u64) {
+        self.asks.retain(|a| {
+            if a.tab == id {
+                reply_to_page(a.id, &Reply::No);
+            }
+            a.tab != id
+        });
+    }
+
+    /// The user answered the ask at `ix` (`self.asks`).
+    fn answer_ask(&mut self, ix: usize, reply: Reply, cx: &mut Context<Self>) {
+        if ix >= self.asks.len() {
+            return;
+        }
+        let ask = self.asks.remove(ix);
+        match &ask.kind {
+            AskKind::OpenApp { url, app: Some(_) } => {
+                if reply == Reply::Yes {
+                    cx.open_url(url);
+                }
+            }
+            AskKind::OpenApp { .. } => {}
+            _ => reply_to_page(ask.id, &reply),
+        }
+        if self.prompt.as_ref().is_some_and(|(id, ..)| *id == ask.id) {
+            self.prompt = None;
+        }
+        cx.notify();
     }
 
     /// Show `url` (a link from elsewhere in Trek): in the tab in front while it's a new tab,
@@ -1582,7 +1830,13 @@ impl BrowserPanel {
 
     /// Load `url` in the active tab and watch for it failing to load.
     fn navigate(&mut self, url: String, cx: &mut Context<Self>) {
+        // An address only another app opens (typed, or from Trek), goes to it, unasked.
+        if asks::link_kind(&url) == asks::LinkKind::App {
+            cx.open_url(&url);
+            return;
+        }
         self.stop_picking(cx);
+        self.forget_asks(self.active);
         if self.extensions.take().is_some() {
             self.sync_views(cx);
         }
@@ -1602,8 +1856,19 @@ impl BrowserPanel {
 
     /// Loading `url` in tab `id` failed: Trek's error page takes over.
     fn show_load_error(&mut self, id: u64, url: String, cx: &mut Context<Self>) {
+        self.show_load_failure(id, url, None, cx);
+    }
+
+    /// The same, saying why (`asks::load_failure`): a heading and what went wrong.
+    fn show_load_failure(
+        &mut self,
+        id: u64,
+        url: String,
+        why: Option<(&str, &str)>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(tab) = self.tab_mut(id) {
-            let error_page = tab.page.failed_to_load(url);
+            let error_page = tab.page.failed_to_load(url, why);
             let _ = tab.view.read(cx).raw().load_url(&to_view(&error_page));
         }
         self.sync_views(cx);
@@ -1683,6 +1948,140 @@ impl BrowserPanel {
                     self.new_tab(&url, window, cx);
                 }
             }
+            Msg::Popup {
+                id,
+                opener,
+                url,
+                size,
+            } => {
+                #[cfg(target_os = "macos")]
+                if let Some(built) = POPUPS.with(|p| p.borrow_mut().remove(&id)) {
+                    let dark = self
+                        .tab_mut(opener)
+                        .and_then(|t| t.dark)
+                        .unwrap_or_else(|| self.wants_dark(cx));
+                    let view = cx.new(|cx| WebView::new(built, window, cx));
+                    self.add_tab(id, view, &url, dark, Some((opener, size)), window, cx);
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = (id, opener, url, size);
+            }
+            Msg::Closed(id) => {
+                if self.tabs.iter().any(|t| t.id == id) {
+                    self.close_tab(id, window, cx);
+                }
+            }
+            Msg::Ask {
+                tab,
+                id,
+                site,
+                kind,
+            } => {
+                let ask = Ask {
+                    id,
+                    tab,
+                    site,
+                    kind,
+                };
+                if !self.tabs.iter().any(|t| t.id == tab) {
+                    reply_to_page(id, &Reply::No);
+                } else if self.agent.acting() && ask.blocks_page() {
+                    // A page held by a dialog runs nothing (the agent's own scripts included)
+                    // until it's answered, and an agent has no way to: Trek answers as a browser
+                    // driver does (OK to an alert, Cancel to the rest) and the agent is told.
+                    let alert = matches!(ask.kind, AskKind::Alert(_));
+                    reply_to_page(id, if alert { &Reply::Yes } else { &Reply::No });
+                    self.agent.dismissed(format!(
+                        "The page showed a dialog (\"{}\"), which Trek {}: agents can't answer page dialogs.",
+                        ask.message().unwrap_or_default(),
+                        if alert { "closed" } else { "cancelled" }
+                    ));
+                } else {
+                    self.asks.push(ask);
+                }
+            }
+            Msg::External { tab: id, url } => {
+                // The load that went there (a redirect to an app's scheme) didn't fail.
+                let Some(tab) = self.tab_mut(id) else { return };
+                if tab.page.loading && tab.page.committed_seq < tab.page.nav_seq {
+                    tab.page.stopped();
+                }
+                let site = host_of(&tab.page.url).unwrap_or_default();
+                #[cfg(target_os = "macos")]
+                let app = webkit::app_for(&url);
+                #[cfg(not(target_os = "macos"))]
+                let app = Some(String::from("its app"));
+                let kind = AskKind::OpenApp { url, app };
+                if !self.asks.iter().any(|a| a.tab == id && a.kind == kind) {
+                    self.asks.push(Ask {
+                        id: 0,
+                        tab: id,
+                        site,
+                        kind,
+                    });
+                }
+            }
+            Msg::LoadFailed {
+                tab: id,
+                url,
+                domain,
+                code,
+            } => {
+                let url = from_view(url);
+                if url.starts_with("trek://") || self.tab_mut(id).is_none() {
+                    return;
+                }
+                if let Some((heading, why)) = asks::load_failure(&domain, code, &url) {
+                    tracing::info!("browser: {url} failed: {domain} {code}");
+                    self.show_load_failure(id, url, Some((heading, &why)), cx);
+                }
+            }
+            Msg::Crashed(id) => {
+                let Some(tab) = self.tab_mut(id) else { return };
+                let again = tab
+                    .crashed
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(60));
+                tab.crashed = Some(Instant::now());
+                let url = tab.page.address();
+                tracing::warn!("browser: the page's process ended ({url})");
+                if again || url.is_empty() {
+                    self.show_load_failure(id, url, Some(asks::CRASHED), cx);
+                } else {
+                    let _ = tab.view.read(cx).raw().reload();
+                }
+            }
+            Msg::Download { tab: id, url, path } => {
+                let name = asks::file_name(&path);
+                self.downloads.insert(url, path);
+                let mut close = false;
+                if let Some(tab) = self.tab_mut(id) {
+                    // The load that became the download didn't fail; a tab opened only for it
+                    // (a link to the file with `target=_blank`) has nothing to show, and goes.
+                    if tab.page.loading && tab.page.committed_seq < tab.page.nav_seq {
+                        tab.page.stopped();
+                    }
+                    close = tab.opener.is_some() && tab.page.committed_seq == 0;
+                }
+                if close {
+                    self.close_tab(id, window, cx);
+                }
+                self.toast(format!("Downloading {name}…"), cx);
+            }
+            Msg::Downloaded { url, ok } => {
+                let name = self
+                    .downloads
+                    .remove(&url)
+                    .map(|p| asks::file_name(&p))
+                    .unwrap_or_else(|| "the file".into());
+                self.toast(
+                    if ok {
+                        format!("Downloaded {name} to Downloads")
+                    } else {
+                        format!("Couldn’t download {name}")
+                    },
+                    cx,
+                );
+            }
             Msg::Ipc { tab, origin, body } => {
                 self.handle_ipc(tab, from_view(origin), body, window, cx)
             }
@@ -1707,6 +2106,15 @@ impl BrowserPanel {
             Msg::History(id) => self.refresh_nav(id, cx),
         }
         cx.notify();
+    }
+
+    fn toast(&self, message: String, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            })
+        });
     }
 
     fn handle_ipc(
@@ -2718,6 +3126,26 @@ impl BrowserPanel {
                     }
                 },
             ))
+            .when(cfg!(target_os = "macos"), |el| {
+                el.child(row(
+                    "browser-safari",
+                    Icon::new(Lucide::Compass),
+                    "Open in Safari",
+                    is_page || failed,
+                    cx,
+                    |this, _| {
+                        if let Some(url) = this
+                            .active_tab()
+                            .filter(|t| {
+                                t.page.failed.is_some() || !t.page.url.starts_with("trek://")
+                            })
+                            .map(|t| t.page.address())
+                        {
+                            open_in_safari(&url);
+                        }
+                    },
+                ))
+            })
             .when(browser_extensions::AVAILABLE, |el| {
                 el.child(
                     ui::menu_row("browser-extensions-open", false, cx)
@@ -2834,6 +3262,15 @@ impl BrowserPanel {
                     .child(icon),
             )
             .child(div().flex_1().min_w_0().truncate().child(page.label()))
+            .when(!active && self.asks.iter().any(|a| a.tab == id), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(crate::palette::ember(cx)),
+                )
+            })
             .child(
                 div()
                     .id(("browser-tab-close", id as usize))
@@ -2998,6 +3435,27 @@ impl BrowserPanel {
             "unfocus" => self.with_active(cx, |wv| {
                 let _ = wv.focus_parent();
             }),
+            // The bar's answer to what the page in front asks: `yes`, `no`, or `text <words>`
+            // (a `prompt`'s answer).
+            "ask" => {
+                if !self.asks.iter().any(|a| a.tab == self.active) {
+                    anyhow::bail!("browser ask: the page in front asks nothing");
+                }
+                let reply = match arg.split_once(' ') {
+                    Some(("text", text)) => Reply::Text(text.to_string()),
+                    _ if arg == "no" => Reply::No,
+                    _ => Reply::Yes,
+                };
+                self.answer_front_ask(reply, cx);
+            }
+            // Bring tab `<id>` to the front.
+            "tab" => {
+                let id: u64 = arg.trim().parse()?;
+                if !self.tabs.iter().any(|t| t.id == id) {
+                    anyhow::bail!("browser tab: no tab {id}");
+                }
+                self.activate(id, cx);
+            }
             // The ad blocker, without its file picker: import a folder (or archive), turn it on
             // or off, let the site in front through or not (macOS).
             "adblock-import" => browser_adblock::import(&self.workspace.clone(), arg.into(), cx),
@@ -3010,7 +3468,7 @@ impl BrowserPanel {
                 self.toggle_allow_site(site, cx);
             }
             _ => anyhow::bail!(
-                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|adblock-import <path>|adblock on|off|adblock-allow|ext-page|ext-install <folder, file or id>|ext-list|ext-on|ext-off|ext-remove <id or name>|ext-allow|ext-deny|ext-options <id or name>)"
+                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|ask yes|no|text <words>|tab <id>|adblock-import <path>|adblock on|off|adblock-allow|ext-page|ext-install <folder, file or id>|ext-list|ext-on|ext-off|ext-remove <id or name>|ext-allow|ext-deny|ext-options <id or name>|ext-popup <js>)"
             ),
         }
         Ok(())
@@ -3085,6 +3543,24 @@ impl BrowserPanel {
             "area": area,
             "native": native,
             "focus": shots_focus(window),
+            "active": self.active,
+            // Every tab, with the one whose page opened it (a popup) and the sheet size it asked for.
+            "all_tabs": self.tabs.iter().map(|t| serde_json::json!({
+                "id": t.id,
+                "url": t.page.url,
+                "label": t.page.label(),
+                "opener": t.opener,
+                "sheet": t.sheet.map(|(w, h)| [w, h]),
+            })).collect::<Vec<_>>(),
+            // What pages wait on the user for; the front tab's first is on the bar.
+            "asks": self.asks.iter().map(|a| serde_json::json!({
+                "tab": a.tab,
+                "site": a.site,
+                "headline": a.headline(),
+                "message": a.message(),
+                "buttons": a.buttons(),
+                "blocks_page": a.blocks_page(),
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -3354,7 +3830,15 @@ impl Render for BrowserPanel {
         let ember = crate::palette::ember(cx);
         let page = match &self.extensions {
             Some((extensions, _)) => Some(extensions.clone().into_any_element()),
-            None => tab.map(|t| Self::page_view(t, cx)),
+            None => tab.map(|t| match t.sheet {
+                Some(size)
+                    if t.opener
+                        .is_some_and(|o| self.tabs.iter().any(|t| t.id == o)) =>
+                {
+                    self.sheet_view(t, size, cx)
+                }
+                _ => Self::page_view(t, cx),
+            }),
         };
         // The native view only draws once the first page paints; until then, a hint fills the
         // void. Hidden while a menu is open (or the panel is) is suppression, not empty.
@@ -3377,7 +3861,9 @@ impl Render for BrowserPanel {
                 )
                 .child(
                     tool_button("browser-new-tab", IconName::Plus, "New tab").on_click(
-                        cx.listener(|this, _, window, cx| this.new_tab(START_URL, window, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.new_tab(START_URL, window, cx);
+                        }),
                     ),
                 ),
         );
@@ -3507,6 +3993,8 @@ impl Render for BrowserPanel {
                 )
         });
 
+        let ask_bar = self.ask_bar(window, cx);
+        let area = self.area.clone();
         v_flex()
             .size_full()
             .child(strip)
@@ -3514,12 +4002,18 @@ impl Render for BrowserPanel {
             .children(picking_hint)
             .children(browser_extensions::prompt_strips(cx))
             .children(self.agent_strip(cx))
+            .children(ask_bar)
             .child(
                 div()
                     .relative()
                     .flex_1()
                     .min_h_0()
                     .bg(theme.background)
+                    .child(
+                        canvas(move |bounds, _, _| area.set(bounds), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
                     .when(blank, |el| {
                         el.child(
                             super::empty("Search or enter an address", cx)
@@ -3671,10 +4165,15 @@ mod tests {
     fn a_failed_load_shows_the_error_page_with_the_address_kept() {
         let mut page = Page::new(START_URL);
         page.navigating();
-        let error_page = page.failed_to_load("http://localhost:9/app".into());
+        let error_page = page.failed_to_load("http://localhost:9/app".into(), None);
         assert_eq!(
             error_page,
             format!("{ERROR_URL}#http%3A%2F%2Flocalhost%3A9%2Fapp")
+        );
+        // WebKit's reason goes along, in Trek's words.
+        assert_eq!(
+            Page::new(START_URL).failed_to_load("https://x.dev/".into(), Some(("Can’t", "a & b"))),
+            format!("{ERROR_URL}?h=Can%E2%80%99t&why=a%20%26%20b#https%3A%2F%2Fx.dev%2F")
         );
         assert!(!page.loading && page.ready);
         // The error page loading keeps the failure on show.
@@ -4121,6 +4620,14 @@ mod tests {
             "https://www.google.com/search?q=rust%20borrow%20checker"
         );
         assert_eq!(normalize(""), START_URL);
+        // An app's address stays one (it goes to its app); a host and port is still a host.
+        assert_eq!(normalize("mailto:a@b.c"), "mailto:a@b.c");
+        assert_eq!(normalize("tel:+15555550100"), "tel:+15555550100");
+        assert_eq!(normalize("dev.box:8080/x"), "https://dev.box:8080/x");
+        assert_eq!(
+            normalize("note: buy milk"),
+            "https://www.google.com/search?q=note%3A%20buy%20milk"
+        );
     }
 
     #[test]

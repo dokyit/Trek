@@ -794,6 +794,26 @@ icon, a changed file) fetches it again.
 {"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a…","png":"iVBORw0K…","template":true}
 ```
 
+**`update_phone`** (Updating the iPhone app): the app is signed with a free Apple ID, so it can't
+update itself; the Mac builds it and installs it over USB or Wi-Fi (`ios/scripts/phone-update.sh`).
+The snapshot's `release` is the newest Trek the Mac knows of: a stable release its updater found
+and hasn't installed yet (it does when Trek quits), else its own version, with the first line of
+the release notes when the Mac has them (an older Mac has no `release`: the phone compares with
+`host.version`). A phone older than that offers "Trek <version> is available" (Update now, Later).
+`update_phone` asks the Mac to build and install it now, at `version` when that's a newer release
+than the Mac's, and is answered with `ack` once it has started (a run already going counts).
+`phone_update` pushes go to every phone, since installing closes the app that asked (iOS ends a
+running app it replaces; the Mac opens it again when it can): `building`, `installing`, `installed`,
+or `failed` with a `message` in plain words. A Mac that can't build it (no Xcode: Windows) doesn't
+list the feature.
+
+```json
+snapshot: "release":{"version":"0.4.28","note":"Phone: an Update now button"}
+{"type":"update_phone","id":"8","version":"0.4.28"}   → ack
+{"type":"phone_update","state":"building","version":"0.4.28"}
+{"type":"phone_update","state":"failed","message":"Your Mac couldn't reach the iPhone: plug it in or join the same Wi-Fi"}
+```
+
 **Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
 question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
 doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the

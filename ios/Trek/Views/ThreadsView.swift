@@ -44,6 +44,13 @@ struct ThreadsView: View {
                             .listRowSeparator(.hidden)
                             .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
                     }
+                    if let update = model.offeredUpdate {
+                        UpdateCard(update: update)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                     if model.mode == .live {
                         // Each machine that isn't connected says so under its own name.
                         ForEach(model.links.filter { $0.connection != .connected }) { link in

@@ -38,12 +38,55 @@ const SCREEN_RECORDING_ERROR: &str = "Screen Recording permission is missing, so
 Grant it to the app that launched the agent (Trek, or your terminal) in System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording, \
 then restart the agent session.";
 
+/// Said when the app macOS reads this helper's permissions from runs from a file that is gone.
+const HOST_REPLACED: &str = "\nThe app this agent runs under (Trek, or the terminal) was replaced on disk since it started, \
+so macOS has set its permissions aside although System Settings still shows them allowed: quit that app, open it again, \
+then start the agent again.";
+
+/// Whether the app macOS reads this helper's permissions from (the process responsible for it:
+/// Trek, or the terminal that started the agent) runs from a file that is gone or was replaced.
+/// macOS then refuses every permission check for it, until it restarts.
+fn host_replaced_on_disk() -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    type Responsible = unsafe extern "C" fn(libc::pid_t) -> libc::pid_t;
+    // SAFETY: a private but long-standing libSystem symbol, looked up rather than linked so a
+    // macOS without it costs nothing; the path buffer is writable for the length passed.
+    unsafe {
+        let sym = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"responsibility_get_pid_responsible_for_pid".as_ptr(),
+        );
+        if sym.is_null() {
+            return false;
+        }
+        let responsible: Responsible = std::mem::transmute(sym);
+        let host = responsible(std::process::id() as libc::pid_t);
+        if host <= 0 {
+            return false;
+        }
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let n = libc::proc_pidpath(host, buf.as_mut_ptr().cast(), buf.len() as u32);
+        let Ok(n) = usize::try_from(n) else {
+            return false;
+        };
+        n > 0 && !std::path::Path::new(std::ffi::OsStr::from_bytes(&buf[..n])).exists()
+    }
+}
+
 #[derive(Default)]
 pub struct Mac;
 
 impl Desktop for Mac {
     fn may_post_input(&self) -> bool {
         unsafe { AXIsProcessTrusted() != 0 }
+    }
+
+    fn permissions_note(&self) -> String {
+        if host_replaced_on_disk() {
+            HOST_REPLACED.to_string()
+        } else {
+            String::new()
+        }
     }
 
     /// Once per run, ask macOS to prompt for Accessibility: the silent check alone never adds
@@ -109,7 +152,8 @@ impl Desktop for Mac {
                 out.reason()
             };
             return Err(format!(
-                "{SCREEN_RECORDING_ERROR}\n(screencapture: {detail})"
+                "{SCREEN_RECORDING_ERROR}{}\n(screencapture: {detail})",
+                self.permissions_note()
             ));
         }
         let note = if unsafe { CGPreflightScreenCaptureAccess() } {
@@ -290,7 +334,10 @@ impl Desktop for Mac {
         let size = std::fs::metadata(&tmp.0).map(|m| m.len()).unwrap_or(0);
         if !out.success() || size == 0 {
             if !unsafe { CGPreflightScreenCaptureAccess() } {
-                return Err(SCREEN_RECORDING_ERROR.into());
+                return Err(format!(
+                    "{SCREEN_RECORDING_ERROR}{}",
+                    self.permissions_note()
+                ));
             }
             let detail = if out.success() {
                 "empty capture".to_string()

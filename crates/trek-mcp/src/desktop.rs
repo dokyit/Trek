@@ -91,6 +91,11 @@ pub trait Desktop {
     fn may_post_input(&self) -> bool;
     /// Ask the system to let it (macOS prompts for Accessibility, once per run).
     fn ask_to_post_input(&self) {}
+    /// Added to a permission error when the system has set the host app's permissions aside
+    /// (its bundle was replaced while it ran); empty otherwise.
+    fn permissions_note(&self) -> String {
+        String::new()
+    }
     fn display(&self) -> Display;
     /// Windows on screen, front to back.
     fn windows(&self) -> Result<Vec<WindowInfo>, String>;

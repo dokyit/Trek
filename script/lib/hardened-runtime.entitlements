@@ -2,12 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- What Trek needs under the hardened runtime, which only a Developer ID signature switches on
      (script/lib/sign.sh, trek_codesign_bundle): without these the runtime refuses the microphone
-     (dictation), Apple events to other apps (computer use) and the camera (the iPhone tool: a
-     phone's screen over USB is a capture device, trek-phone-helper), with no prompt. -->
+     (dictation), Apple events to other apps (computer use), the camera (the iPhone tool: a
+     phone's screen over USB is a capture device, trek-phone-helper) and Location Services (a web
+     page in the Browser that asks, and that the user lets), with no prompt. -->
 <plist version="1.0">
 <dict>
   <key>com.apple.security.device.audio-input</key><true/>
   <key>com.apple.security.automation.apple-events</key><true/>
   <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.personal-information.location</key><true/>
 </dict>
 </plist>
