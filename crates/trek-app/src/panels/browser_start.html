@@ -126,9 +126,9 @@
   <div class="badge">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20"/><path d="m4.9 4.9 14.2 14.2"/></svg>
   </div>
-  <h1>Can’t reach this page</h1>
+  <h1 id="failed-title">Can’t reach this page</h1>
   <p><span class="url" id="failed-url"></span></p>
-  <p style="margin-top:10px">Check the address, or make sure the server is running.</p>
+  <p style="margin-top:10px" id="failed-why">Check the address, or make sure the server is running.</p>
   <div class="actions">
     <button class="btn primary" id="retry" type="button">Try again</button>
     <button class="btn" id="home" type="button">New tab</button>
@@ -145,6 +145,10 @@
 
   if (location.pathname === '/error') {
     const url = decodeURIComponent(location.hash.slice(1));
+    // WebKit's reason for the failure, in Trek's words (`asks::load_failure`), when it gave one.
+    const params = new URLSearchParams(location.search);
+    if (params.get('h')) $('failed-title').textContent = params.get('h');
+    if (params.get('why')) $('failed-why').textContent = params.get('why');
     document.title = 'Can’t reach page';
     $('start').hidden = true;
     $('failed').hidden = false;

@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>Sign in – Test Accounts</title>
+<style>
+  body { font: 14px -apple-system, system-ui, sans-serif; margin: 0; padding: 28px; }
+  h1 { font-size: 20px; font-weight: 500; }
+  .row { margin: 6px 0; }
+  .bad { color: #b3261e; }
+  button { font: inherit; padding: 9px 18px; border-radius: 18px; border: 0; background: #0b57d0; color: #fff; cursor: pointer; }
+</style>
+<h1>Choose an account</h1>
+<p>to continue to <span id="site"></span></p>
+<div id="checks"></div>
+<!-- Google's popup ends in a form POST to /gsi/transform (response_mode=form_post). -->
+<form id="f" method="post" action="/transform">
+  <input type="hidden" name="credential" value="test-credential-123">
+  <input type="hidden" name="origin" id="origin">
+  <button id="continue" type="submit">Continue as Test User</button>
+</form>
+<script>
+  const origin = new URLSearchParams(location.search).get('origin') || '*';
+  document.getElementById('site').textContent = origin;
+  document.getElementById('origin').value = origin;
+  // What an identity provider looks at before it lets a browser sign in: a Safari-shaped user
+  // agent (no embedded-view marks), no automation, and the page that opened it.
+  window.__idp = { opener: !!window.opener, webdriver: navigator.webdriver === true, ua: navigator.userAgent, safari: null };
+  const row = (ok, text) => {
+    const d = document.createElement('div');
+    d.className = 'row' + (ok ? '' : ' bad');
+    d.textContent = (ok ? '✓ ' : '✗ ') + text;
+    document.getElementById('checks').append(d);
+  };
+  row(window.__idp.opener, 'window.opener is the page that opened this one');
+  row(!window.__idp.webdriver, 'navigator.webdriver is false');
+  fetch('/ua').then((r) => r.json()).then((j) => {
+    window.__idp.safari = j.safari;
+    row(j.safari, 'the request\'s user agent is Safari\'s');
+  });
+</script>
