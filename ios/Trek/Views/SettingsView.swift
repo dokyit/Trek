@@ -12,12 +12,14 @@ struct SettingsView: View {
 
     var body: some View {
         @Bindable var model = model
-        let update = AppUpdate.available(in: model.links)
+        let update = model.appUpdate
         NavigationStack(path: $path) {
             Form {
                 if let update {
                     Section {
-                        UpdateNote(update: update)
+                        UpdateCard(update: update, offersLater: false)
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets())
                     }
                 }
                 Section {
@@ -85,7 +87,7 @@ struct SettingsView: View {
                     Text("About")
                 } footer: {
                     VStack(alignment: .leading, spacing: 8) {
-                        if update != nil {
+                        if let update, !update.canUpdate {
                             Text("Update available — your Mac will install it over Wi-Fi.").font(.ui(.footnote))
                         }
                         Text("Trek is not affiliated with or endorsed by the makers of the agents it connects. Agent and provider names and logos are trademarks of their respective owners, shown only to identify the agent a thread uses.")
@@ -252,25 +254,5 @@ private struct SecurityLabelStyle: LabelStyle {
             configuration.icon.font(.ui(.footnote).weight(.semibold))
             configuration.title.fontWeight(.medium)
         }
-    }
-}
-
-/// A newer Trek is on a paired Mac: it's coming, and nothing needs doing here.
-private struct UpdateNote: View {
-    var update: AppUpdate.Available
-
-    var body: some View {
-        Label {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Update available — your Mac will install it over Wi-Fi")
-                    .font(.ui(.subheadline).weight(.medium))
-                Text("\(update.mac) has Trek \(update.version); this iPhone has \(ClientMessage.appVersion). Keep the iPhone on the same Wi-Fi as the Mac, or plugged in.")
-                    .font(.ui(.footnote))
-                    .foregroundStyle(Trek.muted)
-            }
-        } icon: {
-            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Trek.link)
-        }
-        .accessibilityElement(children: .combine)
     }
 }

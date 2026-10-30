@@ -30,6 +30,8 @@ final class HostLink: Identifiable, Equatable {
     var agents: [AgentOption] = []
     /// It lets threads run with Full access (unlocked in its Permissions settings).
     var fullAccessAllowed = false
+    /// The newest Trek it knows of, from its snapshot (`AppUpdate`).
+    var release: TrekRelease?
 
     /// How the phone reaches it (pinned TLS or plain `ws://`), as the client has it now — it can
     /// tighten from a prefix pin to the full fingerprint after pairing.
