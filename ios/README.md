@@ -132,7 +132,16 @@ limitation in `docs/MOBILE.md`); scanning pins the whole thing. See `docs/MOBILE
   Mac's version tag (in a worktree of its own) and installs it, without opening it. It waits while
   a build runs and while Trek is open on the iPhone. Log: `~/Library/Logs/trek-phone-update.log`;
   pause: `touch "~/Library/Application Support/dev.trek.phone-update/off"`; remove:
-  `install-phone-update.sh --uninstall`. Settings on the iPhone says when an update is coming.
+  `install-phone-update.sh --uninstall`. The same run keeps the Mac's own Trek current while it's
+  closed (`trek-mcp mac-update`, Trek's own updater: the release checked against the key Trek
+  ships, then swapped into /Applications; while Trek is open it's left to Trek, which installs on
+  quit), so the iPhone follows a release even on a day Trek stayed closed.
+- **Update now:** when the Mac has a newer Trek (or has found a newer release), the iPhone shows
+  "Trek <version> is available" with Update now and Later (Later hides it until the next launch or
+  for a day). Update now asks the Mac to run the same build and install at once
+  (`phone-update.sh --asked`), with its progress on the phone; the install closes Trek there and
+  the Mac opens it again. Settings › Phone & Machines on the Mac shows the iPhone's version, how
+  the last update went and an "Update phone now" button.
 - **Installing without Xcode:** building still needs Xcode (the iOS SDK, and its free signing),
   but putting the built app on the phone doesn't. Both scripts install with
   `trek-mcp phone-device install` when they find a trek-mcp that has it

@@ -602,6 +602,8 @@ nonisolated struct Snapshot: Decodable {
     var fullAccess: Bool? = nil
     /// Threads the list leaves out that the phone may open (sub-agents, ones open from a search).
     var unlisted: [ThreadSummary] = []
+    /// The newest Trek the Mac knows of (none from a Mac before `update_phone`).
+    var release: TrekRelease? = nil
 }
 
 nonisolated enum ErrorCode: String, LenientEnum {
@@ -650,6 +652,8 @@ nonisolated enum ServerMessage {
     case noteAsset(re: String?, NoteAsset)
     case noteImage(re: String?, NoteImage)
     case noteFileChunk(re: String?, NoteFileChunk)
+    /// How an iPhone update the Mac runs is going (to every phone, asked or not).
+    case phoneUpdate(PhoneUpdate)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -679,6 +683,7 @@ nonisolated enum ServerMessage {
         var commands: [CommandInfo]?
         var text: String?
         var more: Bool?
+        var release: TrekRelease?
     }
 
     static let decoder: JSONDecoder = {
@@ -699,7 +704,7 @@ nonisolated enum ServerMessage {
         case "snapshot":
             return .snapshot(Snapshot(threads: r.threads?.elements ?? [], projects: r.projects?.elements ?? [],
                                       agents: r.agents?.elements ?? [], fullAccess: r.fullAccess,
-                                      unlisted: r.unlisted?.elements ?? []))
+                                      unlisted: r.unlisted?.elements ?? [], release: r.release))
         case "thread":
             guard let t = r.thread else { throw ProtocolError.missing("thread") }
             return .thread(t)
@@ -739,6 +744,7 @@ nonisolated enum ServerMessage {
         case "note_asset": return .noteAsset(re: r.re, try decoder.decode(NoteAsset.self, from: data))
         case "note_image": return .noteImage(re: r.re, try decoder.decode(NoteImage.self, from: data))
         case "note_file_chunk": return .noteFileChunk(re: r.re, try decoder.decode(NoteFileChunk.self, from: data))
+        case "phone_update": return .phoneUpdate(try decoder.decode(PhoneUpdate.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -839,6 +845,9 @@ nonisolated enum ClientMessage {
     case noteFile(path: String, offset: Int64, length: Int)
     /// Press one of a card's buttons (Merge, Resolve conflicts, Re-run).
     case cardAction(threadId: String, key: String, action: CardAction)
+    /// Build this app on the Mac and install it here (`update_phone`), at `version` when it's one
+    /// the Mac found but hasn't installed itself.
+    case updatePhone(version: String?)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     /// The build (the number of commits it was built from, `install-device.sh`).
@@ -936,6 +945,9 @@ nonisolated enum ClientMessage {
         case .search(let query, let limit):
             o = ["type": "search", "query": query]
             if let limit { o["limit"] = limit }
+        case .updatePhone(let version):
+            o = ["type": "update_phone"]
+            if let version { o["version"] = version }
         case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile,
              .cardAction:
             o = parityJSON

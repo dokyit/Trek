@@ -101,7 +101,8 @@ final class MockHost: Backend {
         deliver(.welcome(re: "auth", host: host, features: Self.features), after: 0.15)
         // Sub-agents' threads aren't listed: they come as unlisted rows.
         deliver(.snapshot(Snapshot(threads: threads.filter { $0.parentId == nil }, projects: projects, agents: agents, fullAccess: true,
-                                   unlisted: threads.filter { $0.parentId != nil })), after: 0.2)
+                                   unlisted: threads.filter { $0.parentId != nil }, release: DemoMac.release(running: host.version))),
+                after: 0.2)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.onState?(.connected) }
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.advanceWorkingThread() }
@@ -335,7 +336,27 @@ final class MockHost: Backend {
             deliver(.settings(re: id, settings))
         case .search(let query, let limit):
             search(query, limit: limit ?? 50, id: id)
+        case .updatePhone(let version):
+            updatePhone(version: version, id: id)
         }
+    }
+
+    /// What a Mac does when the phone asks for an update: `ack`, then how the build and install go,
+    /// minutes squeezed into seconds. `-TrekDemoPhoneUpdate fail` fails at the install, as when the
+    /// iPhone is out of the Mac's reach.
+    private func updatePhone(version: String?, id: String?) {
+        let version = version ?? host.version
+        let fails = UserDefaults.standard.string(forKey: "TrekDemoPhoneUpdate") == "fail"
+        ack(id, after: 0.4)
+        deliver(.phoneUpdate(PhoneUpdate(state: .building, version: version)), after: 0.5)
+        if fails {
+            deliver(.phoneUpdate(PhoneUpdate(state: .failed, version: version,
+                                             message: "Your Mac couldn't reach the iPhone: plug it in or join the same Wi-Fi.")), after: 25)
+            return
+        }
+        deliver(.phoneUpdate(PhoneUpdate(state: .installing, version: version)), after: 25)
+        // A real install closes the app here; the demo keeps running, so it hears the rest.
+        deliver(.phoneUpdate(PhoneUpdate(state: .installed, version: version)), after: 33)
     }
 
     private func thread(_ tid: String) -> ThreadSummary? { threads.first { $0.id == tid } }

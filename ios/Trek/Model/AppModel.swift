@@ -61,6 +61,11 @@ final class AppModel {
     var openRequest: String?
     /// A thread to scroll the list to (and unfold whatever hides it), without opening it.
     var revealRequest: String?
+    /// The iPhone update a Mac is building and installing (AppModel+Update.swift), from the moment
+    /// this phone asks or a Mac says one is under way, until it's done or closed.
+    var phoneUpdate: PhoneUpdate?
+    /// "Later" on an update offer.
+    var updateDismissal = AppUpdate.Dismissal.load()
 
     var mode: AppMode = .unpaired
     /// Every machine the phone is paired with, connected at once. Thread and project ids that
@@ -471,6 +476,7 @@ final class AppModel {
             link.projects = s.projects
             link.agents = s.agents
             link.fullAccessAllowed = s.fullAccess ?? false
+            link.release = s.release
             // Rows the host no longer lists (a sub-agent deleted while this phone was away) go,
             // unless a thread is open on one. Other hosts' unlisted rows are theirs alone.
             let kept = Set(s.unlisted.map { link.qualified($0.id) })
@@ -533,6 +539,8 @@ final class AppModel {
             link.reply(re, message)
         case .unlisted(let t):
             setUnlisted(qualify(t, on: link))
+        case .phoneUpdate(let update):
+            heard(update)
         case .error(let re, let code, let text):
             if let re, link.hasReply(re) { link.reply(re, message) } else if code != .unauthorized { show(text, error: true) }
         case .unknown:

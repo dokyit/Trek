@@ -37,6 +37,9 @@ nonisolated enum MacFeature: String, CaseIterable {
     case machines
     /// A card's Merge, Resolve conflicts and Re-run.
     case cardActions = "card_actions"
+    /// `update_phone`: the Mac builds and installs this app when asked, saying how it goes
+    /// (`phone_update`), and its snapshot names the newest Trek it knows of (`release`).
+    case updatePhone = "update_phone"
 }
 
 /// The Mac's snooze menu.

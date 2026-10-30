@@ -22,6 +22,12 @@ struct TrekApp: App {
                     if let s = Launch.pairNow, let link = PairingLink(s) {
                         model.pair(address: link.address, alternates: link.alternates, code: link.code, transport: link.transport, hostId: link.hostId)
                     }
+                    // Screenshots of an update under way: "Update now", once the demo Mac has said
+                    // what it offers (`-TrekDemoUpdateNow YES`).
+                    if UserDefaults.standard.bool(forKey: "TrekDemoUpdateNow") {
+                        for _ in 0..<60 where model.appUpdate == nil { try? await Task.sleep(for: .seconds(0.5)) }
+                        if let update = model.appUpdate { model.updatePhone(update) }
+                    }
                     #endif
                 }
                 .onOpenURL { url in

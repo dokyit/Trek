@@ -213,3 +213,34 @@ fn a_saved_key_can_be_copied_and_says_where_it_lives() {
         );
     });
 }
+
+#[test]
+fn a_trek_replaced_on_disk_offers_a_restart_in_place_of_allow() {
+    // The Mac's permission rows; Windows asks for none.
+    if trek_app::words::is_windows() {
+        return;
+    }
+    run(async |cx| {
+        use trek_app::permissions::{Permission, Status, fake};
+        fake::set(Permission::Accessibility, Status::Replaced);
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Tools), cx)
+        });
+        // Tall enough for the computer use rows without scrolling.
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(2400.)),
+        );
+        trek.render(cx);
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "ax-perm-restart"),
+            "a permission macOS set aside offers Restart Trek, not the pane"
+        );
+        assert!(
+            trek.visible(cx, "sr-perm"),
+            "one that was never granted still offers Allow"
+        );
+    });
+}

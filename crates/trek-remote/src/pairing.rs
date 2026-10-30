@@ -365,6 +365,12 @@ pub struct DeviceInfo {
     pub name: String,
     pub paired_at: i64,
     pub last_seen_at: Option<i64>,
+    /// The app's version, as it last said ("0.4.20").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
+    /// `ios` for the iPhone app, `macos` or `windows` for a machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 impl From<&DeviceRecord> for DeviceInfo {
@@ -374,6 +380,8 @@ impl From<&DeviceRecord> for DeviceInfo {
             name: r.name.clone(),
             paired_at: r.paired_at,
             last_seen_at: r.last_seen_at,
+            app_version: r.app_version.clone(),
+            platform: r.platform.clone(),
         }
     }
 }

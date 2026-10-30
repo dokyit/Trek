@@ -51,9 +51,11 @@ jobs:
         run: for f in script/*.sh script/lib/*.sh; do zsh -n "$f"; done
 
       # The release notes step (script/lib/notes.sh) against its fixtures: every release body
-      # carries the install block exactly once.
+      # carries the install block exactly once. The phone updater's words, against stand-ins.
       - name: Script tests
-        run: bash script/tests/release-notes.sh
+        run: |
+          bash script/tests/release-notes.sh
+          zsh ios/scripts/tests/phone-update.sh
 
       - uses: dtolnay/rust-toolchain@master
         with:

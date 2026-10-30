@@ -9,9 +9,11 @@ use serde::{Deserialize, Serialize};
 mod cards;
 mod machines;
 mod parity;
+mod phone_update;
 pub use cards::*;
 pub use machines::*;
 pub use parity::*;
+pub use phone_update::*;
 
 /// The protocol version this crate speaks (`hello`/`pair` carry the phone's, `welcome`/`paired`
 /// the Mac's).
@@ -219,6 +221,10 @@ pub enum ClientMessage {
     PutFiles(PutFilesRequest),
     /// Press one of a card's buttons (the Mac lists `card_actions` in `features`).
     CardAction(CardActionRequest),
+    /// Build Trek for the iPhone on the Mac and install it (`phone_update.rs`; the Mac lists
+    /// `update_phone` in `features`). Answered with `ack` once it starts, then `phone_update`
+    /// pushes.
+    UpdatePhone(UpdatePhoneRequest),
 }
 
 impl ClientMessage {
@@ -271,6 +277,7 @@ impl ClientMessage {
             Self::CloneProject(_) => "clone_project",
             Self::PutFiles(_) => "put_files",
             Self::CardAction(_) => "card_action",
+            Self::UpdatePhone(_) => "update_phone",
         }
     }
 }
@@ -522,6 +529,9 @@ pub mod feature {
     pub const MACHINES: &str = "machines";
     /// `card_action`: a card's Merge, Resolve conflicts and Re-run (`card` items).
     pub const CARD_ACTIONS: &str = "card_actions";
+    /// `update_phone` with `phone_update` pushes, and the snapshot's `release`: the Mac builds and
+    /// installs Trek on the iPhone when the phone asks (`phone_update.rs`).
+    pub const UPDATE_PHONE: &str = "update_phone";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -541,6 +551,7 @@ pub mod feature {
         MACHINES,
         NOTE_FILES,
         CARD_ACTIONS,
+        UPDATE_PHONE,
     ];
 }
 
@@ -891,6 +902,8 @@ pub enum ServerMessage {
     /// A line of git's output while a `clone_project` runs, to the machine that asked (`folder`
     /// as it asked for it).
     CloneProgress { folder: String, line: String },
+    /// How an iPhone update is going (`update_phone`), to every phone. Older phones ignore it.
+    PhoneUpdate(PhoneUpdate),
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.
@@ -991,6 +1004,10 @@ pub struct Snapshot {
     /// threads phones have open (see `unlisted`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unlisted: Vec<ThreadSummary>,
+    /// The newest Trek this Mac knows of, for the phone to offer an update when it's older
+    /// (`phone_update.rs`). Missing from an older Mac: the phone compares with `host.version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<TrekRelease>,
 }
 
 /// One thread's row.

@@ -589,6 +589,15 @@ impl Onboarding {
                     theme.muted_foreground,
                     false,
                 ),
+                // Replaced under a running Trek: only a restart brings the permission back.
+                Status::Replaced => {
+                    Button::new(SharedString::from(format!("ob-perm-{id}-restart")))
+                        .small()
+                        .outline()
+                        .label("Restart Trek")
+                        .on_click(cx.listener(|_, _, _, cx| permissions::restart_trek(cx)))
+                        .into_any_element()
+                }
                 _ => {
                     let prompt =
                         p.grant(status, self.asked.contains(&p)) == permissions::Grant::Prompt;
@@ -617,10 +626,14 @@ impl Onboarding {
                 Status::Denied => {
                     format!("{} Turned off: turn Trek on in System Settings.", p.why())
                 }
+                Status::Replaced => format!("{} {}", p.why(), permissions::REPLACED_NOTE),
                 _ => p.why().to_string(),
             };
             let drop_hint = (p.takes_a_drop()
-                && !matches!(status, Status::Granted | Status::NeedsApp))
+                && !matches!(
+                    status,
+                    Status::Granted | Status::NeedsApp | Status::Replaced
+                ))
             .then(|| {
                 h_flex()
                     .pt(px(6.))

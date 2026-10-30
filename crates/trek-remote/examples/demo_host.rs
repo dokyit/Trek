@@ -626,6 +626,7 @@ impl RemoteHost for DemoHost {
             agents: st.agents.clone(),
             full_access: true,
             unlisted: vec![],
+            release: None,
         })
     }
 
