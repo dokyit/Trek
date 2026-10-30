@@ -30,7 +30,7 @@ pub enum Permission {
 }
 
 /// Where a permission stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Status {
     Granted,
     /// Not granted, and macOS would still show its prompt (or can't say whether it would).
@@ -38,9 +38,14 @@ pub enum Status {
     /// Turned down: only System Settings can change it now.
     Denied,
     /// macOS doesn't say (Local Network).
+    #[default]
     Unknown,
     /// This build can't ask (a bare `cargo run` without the usage descriptions in a bundle).
     NeedsApp,
+    /// Can't be read: Trek's bundle was replaced or deleted since it started, and macOS refuses
+    /// its permissions until it restarts (`trek_core::update::replaced_on_disk`), with System
+    /// Settings still showing them as set. The row offers a restart.
+    Replaced,
 }
 
 /// How the row's button grants a permission.
@@ -176,6 +181,19 @@ pub fn status(p: Permission) -> Status {
         return s;
     }
     imp::status(p)
+}
+
+/// What a `Status::Replaced` row says under its reason.
+pub const REPLACED_NOTE: &str = "Trek was replaced on disk since it started, so macOS sets its permissions aside until Trek restarts.";
+
+/// Start Trek again, the way back from `Status::Replaced`: the bundle on disk opens once this
+/// process has quit. For a view without the workspace (onboarding); the workspace's own
+/// `restart_trek` waits for agent turns first.
+pub fn restart_trek(cx: &mut App) {
+    match trek_core::update::restart(crate::system::app_is_active()) {
+        Ok(()) => cx.quit(),
+        Err(e) => tracing::warn!("couldn't restart Trek: {e:#}"),
+    }
 }
 
 /// Statuses a set-up Mac would show, for screenshots of the isolated app (`onboarding demo`).
@@ -380,21 +398,23 @@ mod imp {
         }
     }
 
+    /// `NotYet` when the check says no, unless Trek's bundle was replaced under it: macOS then
+    /// says no whatever is set, until Trek restarts.
+    fn granted_or(allowed: bool) -> Status {
+        if allowed {
+            Status::Granted
+        } else if trek_core::update::replaced_on_disk() {
+            Status::Replaced
+        } else {
+            Status::NotYet
+        }
+    }
+
     pub fn status(p: Permission) -> Status {
         match p {
-            Permission::Accessibility => {
-                if trek_integrations::accessibility_allowed() {
-                    Status::Granted
-                } else {
-                    Status::NotYet
-                }
-            }
+            Permission::Accessibility => granted_or(trek_integrations::accessibility_allowed()),
             Permission::ScreenRecording => {
-                if trek_integrations::screen_recording_allowed() {
-                    Status::Granted
-                } else {
-                    Status::NotYet
-                }
+                granted_or(trek_integrations::screen_recording_allowed())
             }
             Permission::Microphone => from_access(trek_dictate::mic_access()),
             Permission::SpeechRecognition => from_access(trek_dictate::speech_access()),

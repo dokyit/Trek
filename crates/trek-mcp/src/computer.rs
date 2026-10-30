@@ -1184,7 +1184,10 @@ for finding your way.",
     fn call(&mut self, name: &str, args: &Value) -> ToolResult {
         if needs_accessibility(name) && !self.desktop.may_post_input() {
             self.desktop.ask_to_post_input();
-            return Err(ACCESSIBILITY_ERROR.into());
+            return Err(format!(
+                "{ACCESSIBILITY_ERROR}{}",
+                self.desktop.permissions_note()
+            ));
         }
         if self.mode == Mode::Background {
             match name {

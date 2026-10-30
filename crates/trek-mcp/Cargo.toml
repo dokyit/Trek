@@ -23,6 +23,8 @@ trek-test-fixtures.workspace = true
 # Computer use runs on macOS and Windows, the iOS Simulator on macOS; `orchestrate` runs everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.24", features = ["highsierra", "elcapitan"] }
+# `proc_pidpath` and `dlsym`, to tell whether the host app's bundle was replaced under it.
+libc = "0.2"
 core-foundation = "0.10"
 # `ForeignType::as_ptr`, to hand CGEvents to the window server's private calls (desktop/skylight.rs).
 foreign-types = "0.5"

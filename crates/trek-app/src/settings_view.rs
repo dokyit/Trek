@@ -375,8 +375,8 @@ impl<T> Probe<T> {
 /// agent already loads.
 #[derive(Clone, Default)]
 pub(super) struct ToolsProbe {
-    accessibility: bool,
-    screen_recording: bool,
+    accessibility: crate::permissions::Status,
+    screen_recording: crate::permissions::Status,
     axe: bool,
     ffmpeg: bool,
     mcp_bundled: bool,
@@ -399,8 +399,12 @@ impl ToolsProbe {
             .is_some()
         });
         Self {
-            accessibility: crate::integrations::accessibility_allowed(),
-            screen_recording: crate::integrations::screen_recording_allowed(),
+            accessibility: crate::permissions::status(
+                crate::permissions::Permission::Accessibility,
+            ),
+            screen_recording: crate::permissions::status(
+                crate::permissions::Permission::ScreenRecording,
+            ),
             axe: crate::integrations::axe_path().is_some(),
             ffmpeg: crate::integrations::ffmpeg_installed(),
             mcp_bundled: crate::workspace::trek_mcp_binary().is_some(),
@@ -416,7 +420,7 @@ impl ToolsProbe {
 pub(super) struct SnapshotsProbe {
     pub(super) count: usize,
     pub(super) bytes: u64,
-    pub(super) screen_recording: bool,
+    pub(super) screen_recording: crate::permissions::Status,
 }
 
 impl SnapshotsProbe {
@@ -425,7 +429,9 @@ impl SnapshotsProbe {
         Self {
             count,
             bytes,
-            screen_recording: crate::integrations::screen_recording_allowed(),
+            screen_recording: crate::permissions::status(
+                crate::permissions::Permission::ScreenRecording,
+            ),
         }
     }
 }
@@ -1933,21 +1939,42 @@ impl SettingsView {
                 .into_any_element()
         };
         let bundled = probe.as_ref().is_none_or(|p| p.mcp_bundled);
+        let workspace = self.workspace.clone();
         let permission = |id: &'static str,
                           label: &'static str,
-                          ok: Option<bool>,
+                          status: Option<crate::permissions::Status>,
                           pane: &'static str,
                           cx: &mut Context<Self>|
          -> AnyElement {
-            match ok {
+            use crate::permissions::Status;
+            match status {
                 None => checking(id),
-                Some(true) => Self::status_dot(palette::emerald(cx), "Allowed"),
-                Some(false) => Button::new(id)
+                Some(Status::Granted) => Self::status_dot(palette::emerald(cx), "Allowed"),
+                // Replaced under a running Trek: only a restart brings the permission back.
+                Some(Status::Replaced) => {
+                    let workspace = workspace.clone();
+                    Button::new(SharedString::from(format!("{id}-restart")))
+                        .small()
+                        .outline()
+                        .label("Restart Trek")
+                        .on_click(move |_, _, cx| workspace.update(cx, |w, cx| w.restart_trek(cx)))
+                        .into_any_element()
+                }
+                Some(_) => Button::new(id)
                     .small()
                     .outline()
                     .label(format!("Allow {label}"))
                     .on_click(move |_, _, cx| cx.open_url(pane))
                     .into_any_element(),
+            }
+        };
+        // A replaced bundle's rows say why the button is a restart.
+        let with_note = |text: &str, status: Option<crate::permissions::Status>| -> String {
+            match status {
+                Some(crate::permissions::Status::Replaced) => {
+                    format!("{text} {}", crate::permissions::REPLACED_NOTE)
+                }
+                _ => text.to_string(),
             }
         };
         let ax = probe.as_ref().map(|p| p.accessibility);
@@ -1967,7 +1994,7 @@ impl SettingsView {
         if permissions_note.is_none() {
             computer_use.push(Self::row(
                 "Accessibility",
-                "Lets Trek click and type for the agent.",
+                with_note("Lets Trek click and type for the agent.", ax),
                 permission(
                     "ax-perm",
                     "Accessibility",
@@ -1979,7 +2006,7 @@ impl SettingsView {
             ));
             computer_use.push(Self::row(
                 "Screen Recording",
-                "Lets Trek take screenshots of other apps.",
+                with_note("Lets Trek take screenshots of other apps.", sr),
                 permission(
                     "sr-perm",
                     "Screen Recording",

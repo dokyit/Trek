@@ -481,7 +481,8 @@ To roll back by hand on Windows: quit Trek, rename the install folder, rename `<
 back if it's still there (or unzip the previous release in its place), and write the version you left
 into `skip-version` in `%APPDATA%\trek\Trek\data\updates`.
 
-To roll back by hand: quit Trek, then
+To roll back by hand: quit Trek first (a bundle replaced under a running Trek is refused its
+Accessibility and Screen Recording permissions until it restarts), then
 
 ```sh
 cd ~/Library/Application\ Support/dev.trek.Trek/updates

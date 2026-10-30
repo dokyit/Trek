@@ -1649,20 +1649,34 @@ impl SettingsView {
                 })
                 .detach();
             }));
-        let permission: AnyElement = match probe.as_ref().map(|p| p.screen_recording) {
+        let status = probe.as_ref().map(|p| p.screen_recording);
+        let permission: AnyElement = match status {
             None => div()
                 .text_size(px(12.5))
                 .text_color(theme.muted_foreground)
                 .child("Checking…")
                 .into_any_element(),
-            Some(true) => Self::status_dot(palette::emerald(cx), "Allowed"),
-            Some(false) => Button::new("snap-perm")
+            Some(crate::permissions::Status::Granted) => {
+                Self::status_dot(palette::emerald(cx), "Allowed")
+            }
+            // Replaced under a running Trek: only a restart brings the permission back.
+            Some(crate::permissions::Status::Replaced) => {
+                let workspace = self.workspace.clone();
+                Button::new("snap-perm-restart")
+                    .small()
+                    .outline()
+                    .label("Restart Trek")
+                    .on_click(move |_, _, cx| workspace.update(cx, |w, cx| w.restart_trek(cx)))
+                    .into_any_element()
+            }
+            Some(_) => Button::new("snap-perm")
                 .small()
                 .outline()
                 .label("Allow Screen Recording")
                 .on_click(|_, _, cx| cx.open_url(crate::integrations::SCREEN_RECORDING_PANE))
                 .into_any_element(),
         };
+        let replaced = status == Some(crate::permissions::Status::Replaced);
         let words = crate::words::words();
         // Where Snipping Tool does the capturing, it decides the mode and the file's format, and
         // has no shadow, sound or hiding of Trek to set: a sentence says so in place of those rows.
@@ -1724,6 +1738,11 @@ impl SettingsView {
         };
         // The system's permission to capture the screen, where it has one.
         let permission = words.screen_recording.map(|(label, note)| {
+            let note = if replaced {
+                format!("{note} {}", crate::permissions::REPLACED_NOTE)
+            } else {
+                note.to_string()
+            };
             [
                 Self::heading("Permission", cx),
                 ui::group(vec![Self::row(label, note, permission, cx)], cx),

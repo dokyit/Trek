@@ -1540,6 +1540,9 @@ pub struct Workspace {
     tasks: Vec<Task<()>>,
     /// A restart the user asked for while agents worked, counting down now that they're done.
     restart_countdown: Option<Task<()>>,
+    /// A restart asked for to get Trek's permissions back (its bundle was replaced on disk:
+    /// `permissions::Status::Replaced`), waiting for agents like a restart to update.
+    restart_wanted: bool,
     /// A move out of a folder Trek can't update itself in (Windows), under way.
     pub moving: relocate::Moving,
     /// What a move does to the machine; tests replace it.
@@ -1962,6 +1965,7 @@ impl Workspace {
             applied_defaults,
             tasks: vec![],
             restart_countdown: None,
+            restart_wanted: false,
             moving: relocate::Moving::default(),
             mover: relocate::Mover::default(),
             old_copy: None,
@@ -8092,6 +8096,7 @@ impl Workspace {
             UndoAction::RestartToUpdate => self.restart_to_update(cx),
             UndoAction::CancelRestart => {
                 self.restart_countdown = None;
+                self.restart_wanted = false;
                 if let UpdateStatus::RestartPending { version, staged } =
                     self.updater.status.clone()
                 {
@@ -9135,6 +9140,10 @@ impl Workspace {
                 if let UpdateStatus::RestartPending { staged, .. } = self.updater.status.clone() {
                     self.restart_countdown = None;
                     self.install_update(staged, cx);
+                } else if self.restart_wanted {
+                    self.restart_countdown = None;
+                    self.restart_wanted = false;
+                    self.restart_now(cx);
                 }
             }
         }
@@ -9409,7 +9418,8 @@ impl Workspace {
     /// toast that can call it off.
     fn maybe_restart_for_update(&mut self, cx: &mut Context<Self>) {
         self.maybe_move(cx);
-        if !matches!(self.updater.status, UpdateStatus::RestartPending { .. })
+        let to_update = matches!(self.updater.status, UpdateStatus::RestartPending { .. });
+        if !(to_update || self.restart_wanted)
             || self.work_in_flight()
             || self.restart_countdown.is_some()
         {
@@ -9423,7 +9433,7 @@ impl Workspace {
             .filter(|l| l.commands.is_some())
             .flat_map(|l| l.background.iter().map(|b| b.task.title.as_str()))
             .collect();
-        let message = restart_message(RESTART_GRACE.as_secs(), &work);
+        let message = restart_message(RESTART_GRACE.as_secs(), to_update, &work);
         cx.emit(WorkspaceEvent::Toast {
             message,
             undo: Some(UndoAction::CancelRestart),
@@ -9433,10 +9443,14 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.restart_countdown = None;
                 // Work that started meanwhile is waited for again (housekeeping comes back).
-                if let UpdateStatus::RestartPending { staged, .. } = this.updater.status.clone()
-                    && !this.work_in_flight()
-                {
+                if this.work_in_flight() {
+                    return;
+                }
+                if let UpdateStatus::RestartPending { staged, .. } = this.updater.status.clone() {
                     this.install_update(staged, cx);
+                } else if this.restart_wanted {
+                    this.restart_wanted = false;
+                    this.restart_now(cx);
                 }
             });
         }));
@@ -9466,6 +9480,35 @@ impl Workspace {
             };
             self.updater.status = UpdateStatus::Failed(message);
             cx.notify();
+            return;
+        }
+        self.shutdown_sessions();
+        cx.quit();
+    }
+
+    /// Start Trek again: the way back to its permissions once its bundle was replaced on disk
+    /// (`permissions::Status::Replaced`). Now, or once agent turns are over, as "Restart to
+    /// update" does.
+    pub fn restart_trek(&mut self, cx: &mut Context<Self>) {
+        if self.work_in_flight() {
+            self.restart_wanted = true;
+            cx.emit(WorkspaceEvent::Toast {
+                message: "Trek will restart when your agents finish.".into(),
+                undo: None,
+            });
+            cx.notify();
+            return;
+        }
+        self.restart_now(cx);
+    }
+
+    fn restart_now(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = trek_core::update::restart(crate::system::app_is_active()) {
+            tracing::warn!("restart failed: {e:#}");
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("Couldn't restart Trek: {e:#}"),
+                undo: None,
+            });
             return;
         }
         self.shutdown_sessions();
@@ -9621,7 +9664,12 @@ fn whole_session(
 }
 
 /// The toast before an update restart, naming the background work it will end.
-fn restart_message(secs: u64, work: &[&str]) -> String {
+fn restart_message(secs: u64, to_update: bool, work: &[&str]) -> String {
+    let restarts = if to_update {
+        "restarts to update"
+    } else {
+        "restarts"
+    };
     let name = |t: &str| {
         t.lines()
             .next()
@@ -9632,13 +9680,10 @@ fn restart_message(secs: u64, work: &[&str]) -> String {
             .collect::<String>()
     };
     match work {
-        [] => format!("Trek restarts to update in {secs} seconds."),
-        [one] => format!(
-            "Trek restarts to update in {secs} seconds, stopping {}.",
-            name(one)
-        ),
+        [] => format!("Trek {restarts} in {secs} seconds."),
+        [one] => format!("Trek {restarts} in {secs} seconds, stopping {}.", name(one)),
         _ => format!(
-            "Trek restarts to update in {secs} seconds, stopping {} background tasks.",
+            "Trek {restarts} in {secs} seconds, stopping {} background tasks.",
             work.len()
         ),
     }
@@ -10352,16 +10397,21 @@ mod tests {
     #[test]
     fn the_update_toast_names_what_the_restart_stops() {
         assert_eq!(
-            restart_message(10, &[]),
+            restart_message(10, true, &[]),
             "Trek restarts to update in 10 seconds."
         );
         assert_eq!(
-            restart_message(10, &["npm run dev\n# more"]),
+            restart_message(10, true, &["npm run dev\n# more"]),
             "Trek restarts to update in 10 seconds, stopping npm run dev."
         );
         assert_eq!(
-            restart_message(10, &["npm run dev", "cargo watch"]),
+            restart_message(10, true, &["npm run dev", "cargo watch"]),
             "Trek restarts to update in 10 seconds, stopping 2 background tasks."
+        );
+        // A plain restart (permissions after a replaced bundle) says just that.
+        assert_eq!(
+            restart_message(10, false, &["npm run dev"]),
+            "Trek restarts in 10 seconds, stopping npm run dev."
         );
     }
 

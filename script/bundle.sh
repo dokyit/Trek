@@ -109,6 +109,12 @@ echo "• signed with \"$(trek_sign_identity)\" ($(trek_sign_identity_kind))"
 du -sh "$APP"
 
 if [[ "${1:-}" == "--install" ]]; then
+  # A bundle replaced under a running Trek leaves it without its Accessibility and Screen
+  # Recording permissions until it restarts (macOS reads them through the file it runs from).
+  if ps -axo comm= | grep -qx "/Applications/Trek.app/Contents/MacOS/trek"; then
+    echo "• Trek is running from /Applications: quit it first (a bundle replaced under it loses its permissions until it restarts)" >&2
+    exit 1
+  fi
   # ditto without extended attributes: Finder and file-provider metadata on a synced folder
   # would otherwise follow the app and trip strict signature checks.
   rm -rf /Applications/Trek.app && ditto --noextattr --norsrc "$APP" /Applications/Trek.app && echo "• installed to /Applications/Trek.app"

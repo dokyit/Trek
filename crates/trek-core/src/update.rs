@@ -21,6 +21,13 @@
 //! Windows: the artifact (`windows-x86_64`) is a flat zip of `TREK_FILES`, and Trek is installed
 //! as the folder holding them. Trek can't replace the folder it runs from, so `install` only gets
 //! the staged copy ready and `trek-update.exe` (crates/trek-update) swaps it in once Trek has quit.
+//!
+//! macOS reads an app's privacy permissions (Accessibility, Screen Recording) through the file it
+//! runs from. The swap here is a rename, which the kernel follows, and Trek quits right after; but
+//! a bundle replaced or deleted by hand under a running Trek (`script/bundle.sh --install`, an
+//! `rm -rf` and a copy) leaves that Trek refused every permission until it restarts, while System
+//! Settings still shows them allowed. `replaced_on_disk` tells the permission rows, which then
+//! offer "Restart Trek" (`restart`) in place of the pane.
 
 use crate::settings::{Channel, Updates};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -349,6 +356,114 @@ pub fn running_bundle() -> Option<PathBuf> {
 }
 
 pub mod relocate;
+
+// ---------- a bundle replaced under a running Trek ----------
+
+/// Device and inode of the file this process runs from, read at launch (`note_running_exe`).
+#[cfg(target_os = "macos")]
+static EXE_AT_LAUNCH: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+
+/// Note which file Trek runs from, for `replaced_on_disk`: at launch, while its path still names
+/// the running file.
+#[cfg(target_os = "macos")]
+fn note_running_exe() {
+    EXE_AT_LAUNCH.get_or_init(|| std::env::current_exe().ok().and_then(|exe| file_id(&exe)));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn note_running_exe() {}
+
+/// Device and inode: the same file under any name, or `None` when no file is there.
+#[cfg(target_os = "macos")]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.dev(), m.ino()))
+}
+
+/// Whether the bundle this Trek runs from was replaced or deleted since it started: an install
+/// by hand over a running Trek (`script/bundle.sh --install`, an `rm -rf` and a copy). macOS
+/// reads an app's privacy permissions (Accessibility, Screen Recording) through the file it runs
+/// from, so every check then fails until Trek restarts, while System Settings still shows them
+/// allowed. The updater's own swap is a rename, which the kernel follows, and Trek quits right
+/// after. Never on Windows, where a running program's files can't be replaced.
+pub fn replaced_on_disk() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(at_launch) = EXE_AT_LAUNCH.get().copied().flatten() else {
+            return false;
+        };
+        // Where the kernel says the running file is now (it follows renames).
+        let Some(now) = path_of_pid(std::process::id()) else {
+            return false;
+        };
+        replaced_since(at_launch, &now)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// `path` no longer names the file noted at launch: gone, or another file under its name.
+#[cfg(target_os = "macos")]
+fn replaced_since(at_launch: (u64, u64), path: &Path) -> bool {
+    file_id(path) != Some(at_launch)
+}
+
+/// The path of the file `pid` runs from, as the kernel has it now.
+#[cfg(target_os = "macos")]
+pub fn path_of_pid(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: the buffer is writable for the length passed.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let n = usize::try_from(n).ok().filter(|n| *n > 0)?;
+    Some(PathBuf::from(OsStr::from_bytes(&buf[..n])))
+}
+
+/// Start this bundle again once this process has exited; the caller quits right after. The way
+/// back to Trek's permissions after `replaced_on_disk`.
+#[cfg(target_os = "macos")]
+pub fn restart(foreground: bool) -> Result<()> {
+    let bundle = running_bundle().context("not running from an app bundle (dev build)")?;
+    relaunch(
+        &Installed {
+            bundle,
+            backup: None,
+            staged: None,
+        },
+        foreground,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn restart(_foreground: bool) -> Result<()> {
+    bail!("only a Mac Trek starts itself again")
+}
+
+/// Remove a `<bundle>.old` or `<bundle>.old-*` link left next to the running bundle: a bridge
+/// that kept a replaced Trek's permissions alive until this restart (see `replaced_on_disk`).
+/// Links only; a folder of that name is an update's (`clean_old_installs`).
+#[cfg(target_os = "macos")]
+fn remove_old_bundle_links(bundle: &Path) {
+    let (Some(parent), Some(name)) = (bundle.parent(), bundle.file_name()) else {
+        return;
+    };
+    let old = format!("{}.old", name.to_string_lossy());
+    for entry in std::fs::read_dir(parent).into_iter().flatten().flatten() {
+        let n = entry.file_name().to_string_lossy().into_owned();
+        let ours = n == old || n.starts_with(&format!("{old}-"));
+        if !ours || !entry.file_type().is_ok_and(|t| t.is_symlink()) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => tracing::info!("removed the link {}", entry.path().display()),
+            Err(e) => tracing::warn!("couldn't remove the link {}: {e}", entry.path().display()),
+        }
+    }
+}
 
 // ---------- the Windows install folder ----------
 
@@ -1817,10 +1932,15 @@ fn relaunch_env_from(
 /// a dev build sharing the data folder must not take another copy's update or its message.
 /// On Windows, also the folders an update left next to the install (`clean_old_installs`).
 pub fn after_launch() -> Option<String> {
+    note_running_exe();
     if cfg!(windows)
         && let Some(root) = install_root()
     {
         clean_old_installs_later(root, CLEAN_OLD_AFTER);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = running_bundle() {
+        remove_old_bundle_links(&bundle);
     }
     after_launch_in(&crate::paths::updates_dir())
 }
@@ -3655,5 +3775,63 @@ mod tests {
             "Trek is in Desktop, which Windows's ransomware protection (Controlled folder access) guards, so it can't update itself there."
         );
         assert_eq!(Blocker::DevBuild.cause(), "This is a development build.");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod replaced_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "trek-replaced-test-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_file_renamed_is_the_same_but_one_replaced_or_removed_is_not() {
+        let dir = scratch("same");
+        let exe = dir.join("trek");
+        std::fs::write(&exe, b"v1").unwrap();
+        let id = file_id(&exe).unwrap();
+        assert!(!replaced_since(id, &exe));
+        let moved = dir.join("trek-moved");
+        std::fs::rename(&exe, &moved).unwrap();
+        assert!(!replaced_since(id, &moved), "a rename keeps the file");
+        assert!(replaced_since(id, &exe), "gone from under its name");
+        std::fs::write(&exe, b"v2").unwrap();
+        assert!(replaced_since(id, &exe), "another file under its name");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn this_process_runs_from_where_it_started() {
+        note_running_exe();
+        assert!(!replaced_on_disk());
+        let now = path_of_pid(std::process::id()).expect("the kernel knows our file");
+        assert!(now.is_file(), "{}", now.display());
+    }
+
+    #[test]
+    fn old_bundle_links_go_and_folders_and_other_apps_links_stay() {
+        let dir = scratch("links");
+        let bundle = dir.join("Trek.app");
+        let target = dir.join("elsewhere");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("Trek.app.old")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("Trek.app.old-0.4.26")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("Other.app.old")).unwrap();
+        std::fs::create_dir_all(dir.join("Trek.app.old-folder")).unwrap();
+        remove_old_bundle_links(&bundle);
+        assert!(std::fs::symlink_metadata(dir.join("Trek.app.old")).is_err());
+        assert!(std::fs::symlink_metadata(dir.join("Trek.app.old-0.4.26")).is_err());
+        assert!(std::fs::symlink_metadata(dir.join("Other.app.old")).is_ok());
+        assert!(dir.join("Trek.app.old-folder").is_dir());
+        assert!(target.is_dir(), "the link's target is untouched");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
