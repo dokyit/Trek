@@ -1380,7 +1380,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","update_phone"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -1448,4 +1448,86 @@ fn parity_fields_ride_on_rows_and_older_ones_still_read() {
         matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features.is_empty()),
         "an older Mac lists nothing"
     );
+}
+
+#[test]
+fn updating_the_iphone_app() {
+    // Asked for, at the release the phone was offered, or at the Mac's own version.
+    let asked = client_round_trip(r#"{"type":"update_phone","id":"7","version":"0.4.28"}"#);
+    assert_eq!(asked.msg.kind(), "update_phone");
+    assert_eq!(
+        asked.msg,
+        ClientMessage::UpdatePhone(UpdatePhoneRequest {
+            version: Some("0.4.28".into())
+        })
+    );
+    let bare: ClientEnvelope = serde_json::from_str(r#"{"type":"update_phone"}"#).unwrap();
+    assert_eq!(
+        bare.msg,
+        ClientMessage::UpdatePhone(UpdatePhoneRequest::default())
+    );
+    assert!(
+        !bare.msg.is_query(),
+        "it changes the phone, it doesn't read"
+    );
+
+    // How it goes, to every phone; a detail or a reason only when there is one.
+    for line in [
+        r#"{"type":"phone_update","state":"building","version":"0.4.28"}"#,
+        r#"{"type":"phone_update","state":"installing","version":"0.4.28"}"#,
+        r#"{"type":"phone_update","state":"installed","version":"0.4.28"}"#,
+        r#"{"type":"phone_update","state":"failed","message":"Your Mac couldn't reach the iPhone: plug it in or join the same Wi-Fi"}"#,
+    ] {
+        server_round_trip(line);
+    }
+    let failed = ServerEnvelope::push(ServerMessage::PhoneUpdate(PhoneUpdate {
+        state: PhoneUpdateState::Failed,
+        version: None,
+        message: Some("The build failed on your Mac".into()),
+    }));
+    assert_eq!(
+        value(&failed.to_json()),
+        json!({"type": "phone_update", "state": "failed", "message": "The build failed on your Mac"})
+    );
+
+    // The snapshot names the newest Trek the Mac knows; an older Mac's has no `release`, and one
+    // without notes has no `note`.
+    let snapshot = server_round_trip(
+        r#"{"type":"snapshot","threads":[],"projects":[],"agents":[],"release":{"version":"0.4.28","note":"Phone: Update now"}}"#,
+    );
+    let ServerMessage::Snapshot(s) = snapshot.msg else {
+        panic!()
+    };
+    assert_eq!(
+        s.release,
+        Some(TrekRelease {
+            version: "0.4.28".into(),
+            note: Some("Phone: Update now".into())
+        })
+    );
+    let older: ServerEnvelope =
+        serde_json::from_str(r#"{"type":"snapshot","threads":[],"projects":[],"agents":[]}"#)
+            .unwrap();
+    let ServerMessage::Snapshot(s) = older.msg else {
+        panic!()
+    };
+    assert_eq!(s.release, None);
+    server_round_trip(
+        r#"{"type":"snapshot","threads":[],"projects":[],"agents":[],"release":{"version":"0.4.27"}}"#,
+    );
+}
+
+#[test]
+fn a_release_says_what_changed_in_its_first_line() {
+    let first = |notes: &str| TrekRelease::first_note(notes);
+    assert_eq!(
+        first("## What's new\n\n- Phone: an Update now button\n- Mac: updates while closed"),
+        Some("Phone: an Update now button".into())
+    );
+    assert_eq!(first("Faster startup."), Some("Faster startup.".into()));
+    assert_eq!(first("\n  \n"), None);
+    assert_eq!(first("- "), None);
+    let long = first(&format!("- {}", "word ".repeat(60))).unwrap();
+    assert_eq!(long.chars().count(), 160);
+    assert!(long.ends_with('…'));
 }

@@ -1,7 +1,7 @@
 //! Settings › Phone & Machines: the switch for the phone server, which of this Mac's addresses
 //! phones use, the pairing code (a QR code, the code and fingerprint to type, and the link another
-//! machine pastes), the paired phones; then the other machines this one drives (`machines`), with
-//! "Add a machine…".
+//! machine pastes), the paired phones and Trek's version on the iPhone, with "Update phone now";
+//! then the other machines this one drives (`machines`), with "Add a machine…".
 
 use super::SettingsView;
 use crate::palette;
@@ -207,6 +207,7 @@ impl SettingsView {
                 "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. Build it from ios/ in Trek's repository; it isn't on the App Store yet.",
                 cx,
             ));
+            out.extend(self.phone_update_section(&[], cx));
             out.extend(self.machines_section(cx));
             return out;
         };
@@ -382,6 +383,7 @@ impl SettingsView {
         }
 
         // Paired phones.
+        let phone_update = self.phone_update_section(&devices, cx);
         out.push(Self::heading("Paired phones", cx));
         if devices.is_empty() {
             out.push(Self::note("None yet.", cx));
@@ -420,6 +422,7 @@ impl SettingsView {
                 .collect();
             out.push(ui::group(rows, cx));
         }
+        out.extend(phone_update);
         out.push(div().h(px(16.)).into_any_element());
         out.push(Self::note(
             &format!("Connections are encrypted, and each phone checks it's talking to {this} (its certificate is in the pairing code). A phone can answer and steer threads but can't change how much agents may do or run Trek's own commands, and nothing is ever answered for you."),
@@ -427,6 +430,77 @@ impl SettingsView {
         ));
         out.extend(self.machines_section(cx));
         out
+    }
+
+    /// Trek on the iPhone: its version, how the last update went (or the one going now), and
+    /// "Update phone now", which builds and installs it as the phone's own "Update now" does
+    /// (`remote::phone_update`). Only where the iPhone app builds (Xcode), and once there's an
+    /// iPhone to speak of.
+    fn phone_update_section(
+        &mut self,
+        devices: &[trek_remote::DeviceInfo],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use crate::remote::phone_update;
+        use trek_remote::PhoneUpdateState;
+        if !cfg!(target_os = "macos") {
+            return vec![];
+        }
+        let phone = phone_update::phone_version(devices);
+        let last = phone_update::last_attempt();
+        if phone.is_none() && last.is_none() {
+            return vec![];
+        }
+        let ws = self.workspace.read(cx);
+        let running = ws.phone_update.running;
+        let now = ws.phone_update.now.clone();
+        let title = match &phone {
+            Some((version, Some(name))) => format!("Trek {version} on {name}"),
+            Some((version, None)) => format!("Trek {version} on your iPhone"),
+            None => "Trek on your iPhone".to_string(),
+        };
+        let version =
+            |v: &Option<String>| v.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+        let line = match (&now, running, &last) {
+            (Some(step), true, _) => match step.state {
+                PhoneUpdateState::Building => format!("Building Trek{}…", version(&step.version)),
+                PhoneUpdateState::Installing => {
+                    format!("Installing Trek{} on the iPhone…", version(&step.version))
+                }
+                PhoneUpdateState::Installed => format!("Installed Trek{}.", version(&step.version)),
+                PhoneUpdateState::Failed => step.message.clone().unwrap_or_default(),
+            },
+            (None, true, _) => "Starting…".to_string(),
+            // What the run from here ended with, until the updater's record says otherwise.
+            (Some(step), false, last)
+                if step.state == PhoneUpdateState::Failed
+                    && last.as_ref().is_none_or(|l| l.ok) =>
+            {
+                step.message.clone().unwrap_or_default()
+            }
+            (_, false, Some(last)) => format!(
+                "{} {} · {}",
+                if last.ok { "Last update:" } else { "Last update failed:" },
+                last.line,
+                crate::time::relative(last.at)
+            ),
+            (_, false, None) => {
+                "Kept current every half hour while it's in reach, by the phone updater (ios/scripts/install-phone-update.sh).".to_string()
+            }
+        };
+        let ws_entity = self.workspace.clone();
+        let button = Button::new("mobile-update-phone")
+            .small()
+            .outline()
+            .label("Update phone now")
+            // A run already going is joined, not started again (`update_phone`).
+            .loading(running)
+            .on_click(move |_, window, cx| {
+                if let Err(e) = ws_entity.update(cx, |ws, cx| ws.update_phone(None, cx)) {
+                    crate::toast::push(window, e.as_str(), cx);
+                }
+            });
+        vec![ui::group(vec![Self::row(title, line, button, cx)], cx)]
     }
 
     /// The other machines running Trek that this one drives: each with a dot while it's reachable,

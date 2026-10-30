@@ -348,6 +348,7 @@ pub fn running_bundle() -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+pub mod closed;
 pub mod relocate;
 
 // ---------- the Windows install folder ----------
@@ -877,11 +878,20 @@ pub enum Found {
 /// newer version whose build for this platform isn't out yet. Only versions `channel` offers count
 /// (`changelog::offers`). Feeds that fail are skipped unless all of them do.
 pub async fn check(urls: &[String], channel: Channel) -> Result<Found> {
+    check_against(urls, channel, &current_version()).await
+}
+
+/// `check`, for a Trek of version `current` (the installed app, while Trek is closed: `closed`).
+pub async fn check_against(
+    urls: &[String],
+    channel: Channel,
+    current: &semver::Version,
+) -> Result<Found> {
     let client = http()?;
     let results = futures::future::join_all(urls.iter().map(|u| fetch_manifest(&client, u))).await;
     newest(
         results,
-        &current_version(),
+        current,
         skipped_version(&crate::paths::updates_dir()).as_ref(),
         channel,
     )
@@ -1125,9 +1135,27 @@ pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) ->
     if cfg!(windows) {
         return stage_zip(archive, expected, &current_version(), cancel, exe_version);
     }
+    stage_for(
+        archive,
+        expected,
+        running_bundle(),
+        &current_version(),
+        cancel,
+    )
+}
+
+/// macOS: `stage`, for the app at `bundle` (the running one, or the installed one while Trek is
+/// closed: `closed`), whose version is `current`.
+fn stage_for(
+    archive: &Path,
+    expected: &semver::Version,
+    bundle: Option<PathBuf>,
+    current: &semver::Version,
+    cancel: &AtomicBool,
+) -> Result<PathBuf> {
     let dir = archive.parent().context("the download has no folder")?;
     let result = (|| {
-        let bundle = running_bundle().context("not running from an app bundle")?;
+        let bundle = bundle.context("not running from an app bundle")?;
         run(
             "/usr/bin/tar",
             [
@@ -1143,7 +1171,7 @@ pub fn stage(archive: &Path, expected: &semver::Version, cancel: &AtomicBool) ->
             .map(|e| e.path())
             .find(|p| p.extension().is_some_and(|e| e == "app"))
             .context("the update archive has no app in it")?;
-        check_bundle(&app, &bundle_id(&bundle)?, expected, &current_version())?;
+        check_bundle(&app, &bundle_id(&bundle)?, expected, current)?;
         // Downloaded by Trek itself, so normally unquarantined; an archive fetched by a browser
         // would carry the flag into every file.
         let _ = std::process::Command::new("/usr/bin/xattr")
@@ -1570,6 +1598,16 @@ fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
 
 /// Returns the backup of the replaced version, if there is one.
 fn install_into(staged: &Path, bundle: &Path, updates: &Path) -> Result<Option<PathBuf>> {
+    install_over(staged, bundle, updates, crate::VERSION)
+}
+
+/// `install_into`, noting `from` as the version replaced (for "Trek updated" at its next launch).
+fn install_over(
+    staged: &Path,
+    bundle: &Path,
+    updates: &Path,
+    from: &str,
+) -> Result<Option<PathBuf>> {
     let result = replace_bundle(staged, bundle, updates);
     if let Some(dir) = download_dir_of(staged) {
         let _ = std::fs::remove_dir_all(dir);
@@ -1577,7 +1615,7 @@ fn install_into(staged: &Path, bundle: &Path, updates: &Path) -> Result<Option<P
     match result? {
         Replaced::No => Ok(None),
         Replaced::Yes { backup } => {
-            let _ = std::fs::write(updates.join(UPDATED_MARKER), crate::VERSION);
+            let _ = std::fs::write(updates.join(UPDATED_MARKER), from);
             Ok(backup)
         }
     }

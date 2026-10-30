@@ -34,6 +34,8 @@ objc2-speech = "0.3"
 block2 = "0.6"
 # `trek-mcp phone-device`: the iPhone's apps and files over usbmuxd (no Xcode).
 trek-phone = { path = "../trek-phone" }
+# `trek-mcp mac-update`: Trek's own updater, for the installed app while Trek is closed.
+trek-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Input (SendInput), the window list (EnumWindows, DWM), screenshots (GDI) and app launch (ShellExecuteW).
