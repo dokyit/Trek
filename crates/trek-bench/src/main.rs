@@ -10,7 +10,8 @@
 //!   `script_result {nested_calls, calls_by_tool, printed_bytes, truncated_bytes, elapsed_ms,
 //!   timed_out}`
 //! - with `--executor stdio`, tool requests too (`exec`, `read`, `write`, each with an `id`),
-//!   answered on stdin; see `StdioExecutor` in `trek-agents` for their shapes
+//!   answered on stdin, and `cancel {id}` (no answer) for one no longer wanted; see
+//!   `StdioExecutor` in `trek-agents` for their shapes
 //! - last, `done` (also written to `--out`), then the process exits: 0 when the model ended its
 //!   turn, 3 when the turn cap or the time limit ended it, 2 on an error.
 //!
@@ -48,6 +49,9 @@ usage: trek-bench --prompt-file P --cwd DIR --model MODEL [options]
   --instructions-file F    extra system instructions, after the system prompt
   --system-prompt-file F   the whole system prompt, in place of Trek's
   --script-log-dir DIR     where script runs log their calls (default: script-logs by --out)";
+
+/// The longest `--time-limit-s` and `--command-timeout-s` taken.
+const LONGEST: Duration = Duration::from_secs(7 * 24 * 3600);
 
 #[derive(Debug)]
 struct Args {
@@ -90,17 +94,18 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args> {
         system_prompt_file: None,
         script_log_dir: None,
     };
+    // At most a week: the deadlines worked out from these stay far from overflowing.
     let secs = |v: String, flag: &str| -> Result<Duration> {
         let s: f64 = v.parse().with_context(|| format!("{flag} takes seconds"))?;
-        if s.is_nan() || s <= 0.0 || !s.is_finite() {
-            bail!("{flag} must be more than 0");
+        if !(s.is_finite() && s > 0.0 && s <= LONGEST.as_secs_f64()) {
+            bail!(
+                "{flag} must be more than 0 and at most {} (a week)",
+                LONGEST.as_secs()
+            );
         }
         Ok(Duration::from_secs_f64(s))
     };
     while let Some(flag) = argv.next() {
-        if flag == "-h" || flag == "--help" {
-            bail!("{USAGE}");
-        }
         let value = argv
             .next()
             .with_context(|| format!("{flag} needs a value\n\n{USAGE}"))?;
@@ -388,7 +393,11 @@ async fn bench(
     setup.base_url = Some(endpoint(&provider, args.base_url.as_deref()));
 
     let executor: Arc<dyn ToolExecutor> = if args.stdio {
-        Arc::new(StdioExecutor::new(out.clone(), tokio::io::stdin()))
+        Arc::new(StdioExecutor::new(
+            out.clone(),
+            tokio::io::stdin(),
+            args.command_timeout,
+        ))
     } else {
         Arc::new(LocalExecutor)
     };
@@ -396,7 +405,11 @@ async fn bench(
         let out = args.out.as_ref()?;
         Some(out.parent().unwrap_or(out.as_path()).join("script-logs"))
     });
-    let deadline = started + args.time_limit;
+    // The flags are at most a week, so neither this nor `hard` below can overflow; checked
+    // all the same.
+    let deadline = started
+        .checked_add(args.time_limit)
+        .context("--time-limit-s is too long")?;
     let config = SessionConfig {
         agent: AgentId::Direct(provider.id.to_string()),
         cwd: args.cwd.clone(),
@@ -440,8 +453,10 @@ async fn bench(
 
     // The limit is soft (the running request or tool finishes); past it by a command's own
     // limit and a minute more, the turn is stopped outright.
-    let hard =
-        tokio::time::Instant::from_std(deadline + args.command_timeout) + Duration::from_secs(60);
+    let hard = deadline
+        .checked_add(args.command_timeout + Duration::from_secs(60))
+        .map(tokio::time::Instant::from_std)
+        .context("--command-timeout-s is too long")?;
     let mut interrupted = false;
     let ended = loop {
         tokio::select! {
@@ -476,8 +491,31 @@ async fn bench(
     Ok((interrupted, error))
 }
 
+/// `done`'s `stopped` and `error`: why the turn ended as the session told it (`why`), whether
+/// the bench had to interrupt it past the time limit, and the bench's own error. A turn that
+/// ended by itself is reported as it ended, even if the interrupt was already on its way.
+fn outcome(
+    why: Option<&Stop>,
+    interrupted: bool,
+    error: Option<String>,
+) -> (&'static str, Option<String>) {
+    match why {
+        Some(Stop::EndTurn) => ("end_turn", error),
+        Some(Stop::MaxTurns) => ("max_turns", error),
+        Some(Stop::TimeLimit) => ("time_limit", error),
+        // The interrupt's own "Interrupted" says nothing; the bench's error, if any, does.
+        _ if interrupted => ("time_limit", error),
+        Some(Stop::Error(e)) => ("error", Some(e.clone())),
+        None => ("error", error),
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    if std::env::args().skip(1).any(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}");
+        return;
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -510,19 +548,8 @@ async fn main() {
     let (stopped, error) = match parsed {
         Ok(args) => match bench(args, out.clone(), observer.clone(), &mut setup).await {
             Ok((interrupted, error)) => {
-                let t = observer.totals.lock().unwrap();
-                let stopped = match (&t.stopped, interrupted) {
-                    (_, true) => "time_limit",
-                    (Some(Stop::EndTurn), _) => "end_turn",
-                    (Some(Stop::MaxTurns), _) => "max_turns",
-                    (Some(Stop::TimeLimit), _) => "time_limit",
-                    (Some(Stop::Error(_)), _) | (None, _) => "error",
-                };
-                let error = match &t.stopped {
-                    Some(Stop::Error(e)) => Some(e.clone()),
-                    _ => error,
-                };
-                (stopped, if stopped == "error" { error } else { None })
+                let why = observer.totals.lock().unwrap().stopped.clone();
+                outcome(why.as_ref(), interrupted, error)
             }
             Err(e) => ("error", Some(format!("{e:#}"))),
         },
@@ -566,7 +593,12 @@ async fn main() {
     if let Some(path) = &out_file {
         let written = serde_json::to_string_pretty(&done)
             .map_err(anyhow::Error::from)
-            .and_then(|s| std::fs::write(path, s + "\n").map_err(Into::into));
+            .and_then(|s| {
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(path, s + "\n").map_err(Into::into)
+            });
         if let Err(e) = written {
             eprintln!("trek-bench: writing {}: {e:#}", path.display());
         }
@@ -651,5 +683,49 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn limits_past_a_week_are_refused() {
+        let base = ["--prompt-file", "p", "--cwd", "/app", "--model", "m"];
+        for (flag, value) in [
+            ("--time-limit-s", "1e19"),
+            ("--time-limit-s", "604801"),
+            ("--command-timeout-s", "inf"),
+            ("--command-timeout-s", "NaN"),
+            ("--time-limit-s", "0"),
+        ] {
+            let mut list = base.to_vec();
+            list.extend([flag, value]);
+            assert!(args(&list).is_err(), "{flag} {value}");
+        }
+        let mut list = base.to_vec();
+        list.extend(["--time-limit-s", "604800"]);
+        assert_eq!(args(&list).unwrap().time_limit, LONGEST);
+    }
+
+    #[test]
+    fn a_turn_that_ended_is_reported_as_it_ended() {
+        // It ended by itself while the interrupt was on its way.
+        assert_eq!(
+            outcome(Some(&Stop::EndTurn), true, None),
+            ("end_turn", None)
+        );
+        assert_eq!(
+            outcome(Some(&Stop::MaxTurns), true, None),
+            ("max_turns", None)
+        );
+        // Interrupted: the time limit, and the bench's own error is kept.
+        assert_eq!(
+            outcome(Some(&Stop::Error("Interrupted".into())), true, None),
+            ("time_limit", None)
+        );
+        let late = Some("the turn didn't stop after the time limit".to_string());
+        assert_eq!(outcome(None, true, late.clone()), ("time_limit", late));
+        assert_eq!(
+            outcome(Some(&Stop::Error("boom".into())), false, None),
+            ("error", Some("boom".to_string()))
+        );
+        assert_eq!(outcome(None, false, None), ("error", None));
     }
 }

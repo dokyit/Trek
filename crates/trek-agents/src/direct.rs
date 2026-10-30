@@ -455,7 +455,8 @@ async fn session(
                                 .await
                             }
                             _ => {
-                                let usage = REPORTS_USAGE.contains(&provider.id);
+                                let usage = REPORTS_USAGE.contains(&provider.id)
+                                    || direct_provider(provider.id).is_none();
                                 openai_turn(
                                     &client,
                                     &config.agent,
@@ -1093,7 +1094,19 @@ async fn execute_tool(
                 .get("end_line")
                 .and_then(|e| e.as_u64())
                 .map(|e| e as usize);
-            let (out, ok) = run_read_file(exec, path_str, start, end, cwd).await?;
+            let (out, ok) = run_read_file(
+                exec,
+                path_str,
+                start,
+                end,
+                cwd,
+                &mut Waiting {
+                    commands,
+                    kept: &mut *kept,
+                    shutdown: &mut *shutdown,
+                },
+            )
+            .await?;
             Ok((out, ok, None))
         }
         "write_file" => {
@@ -1131,7 +1144,18 @@ async fn execute_tool(
             {
                 return Ok(("Permission denied by user".into(), false, None));
             }
-            run_write_file(exec, path_str, content, cwd).await
+            run_write_file(
+                exec,
+                path_str,
+                content,
+                cwd,
+                &mut Waiting {
+                    commands,
+                    kept: &mut *kept,
+                    shutdown: &mut *shutdown,
+                },
+            )
+            .await
         }
         "edit_file" => {
             if read_only {
@@ -1176,7 +1200,19 @@ async fn execute_tool(
             {
                 return Ok(("Permission denied by user".into(), false, None));
             }
-            run_edit_file(exec, path_str, old_str, new_str, cwd).await
+            run_edit_file(
+                exec,
+                path_str,
+                old_str,
+                new_str,
+                cwd,
+                &mut Waiting {
+                    commands,
+                    kept: &mut *kept,
+                    shutdown: &mut *shutdown,
+                },
+            )
+            .await
         }
         // The fifth tool, when it's on (see `script`): a program whose calls run on the same
         // executor. Its approvals are asked here while it waits; a Stop drops it like it does a
@@ -1194,23 +1230,39 @@ async fn execute_tool(
             if code.trim().is_empty() {
                 return Ok(("Error: code parameter is required".into(), false, None));
             }
-            let (approvals_tx, mut approvals) = tokio::sync::mpsc::unbounded_channel();
-            let tools = Arc::new(script::ScriptTools {
-                executor: options.executor.clone(),
-                cwd: cwd.to_path_buf(),
-                command_timeout: options.command_timeout,
-                approvals: (hand_holding != HandHolding::FullAccess).then_some(approvals_tx),
-            });
-            let limits = trek_script::ScriptLimits {
+            let (to_session, mut from_script) = tokio::sync::mpsc::unbounded_channel();
+            let tools = Arc::new(script::ScriptTools::new(
+                options.executor.clone(),
+                cwd.to_path_buf(),
+                options.command_timeout,
+                hand_holding != HandHolding::FullAccess,
+                options.deadline,
+                to_session,
+            ));
+            let mut limits = trek_script::ScriptLimits {
                 log_dir: options.script_log_dir.clone(),
                 ..Default::default()
             };
+            // Within the session's time limit too: the program stops with it.
+            if let Some(deadline) = options.deadline {
+                limits.wall_clock = limits
+                    .wall_clock
+                    .min(deadline.saturating_duration_since(Instant::now()));
+            }
             let run = trek_script::run_script(code, tools, limits);
             tokio::pin!(run);
             let result = loop {
                 tokio::select! {
                     result = &mut run => break result,
-                    Some(ask) = approvals.recv() => {
+                    Some(said) = from_script.recv() => {
+                        let ask = match said {
+                            script::ToSession::Approval(ask) => ask,
+                            // The executor is gone: the program ends here (`run` dropped), and
+                            // the turn with it, as it would for one of the model's own calls.
+                            script::ToSession::Gone(reason) => {
+                                return Err(ExecutorGone(reason).into());
+                            }
+                        };
                         let ok = permitted(
                             ask.tool,
                             &ask.target,
@@ -1297,18 +1349,35 @@ async fn run_bash_command(
         out.push_str("\n... [output truncated]");
     }
     if ran.timed_out {
-        let limit = timeout.map_or(0, |t| t.as_secs());
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!(
-            "[Command timed out after {limit} seconds and was stopped]"
-        ));
+        out.push_str(&match timeout {
+            Some(limit) => format!(
+                "[Command timed out after {} seconds and was stopped]",
+                limit.as_secs()
+            ),
+            None => "[Command timed out and was stopped]".to_string(),
+        });
     }
     if out.trim().is_empty() {
         out = "(Command finished with no output)".to_string();
     }
     Ok((out, ok))
+}
+
+/// A tool's way to hear a Stop while it waits on the executor (see `until_stopped`): a read or
+/// write the sandbox never answers mustn't hold the turn.
+struct Waiting<'a> {
+    commands: &'a async_channel::Receiver<Command>,
+    kept: &'a mut VecDeque<Command>,
+    shutdown: &'a mut bool,
+}
+
+impl Waiting<'_> {
+    async fn on<T>(&mut self, run: impl std::future::Future<Output = T>) -> Result<T> {
+        until_stopped(run, self.commands, self.kept, self.shutdown).await
+    }
 }
 
 /// `path_str` as the executor gets it: relative paths are in `cwd`.
@@ -1326,8 +1395,9 @@ async fn read_text(
     exec: &dyn ToolExecutor,
     path: &Path,
     path_str: &str,
+    waiting: &mut Waiting<'_>,
 ) -> Result<std::result::Result<String, String>> {
-    match exec.read(path).await {
+    match waiting.on(exec.read(path)).await? {
         Ok(Some(bytes)) => Ok(String::from_utf8(bytes)
             .map_err(|_| format!("Error reading {path_str}: stream did not contain valid UTF-8"))),
         Ok(None) => Ok(Err(format!("File not found: {path_str}"))),
@@ -1342,9 +1412,10 @@ async fn run_read_file(
     start_line: Option<usize>,
     end_line: Option<usize>,
     cwd: &Path,
+    waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool)> {
     let path = tool_path(path_str, cwd);
-    let content = match read_text(exec, &path, path_str).await? {
+    let content = match read_text(exec, &path, path_str, waiting).await? {
         Ok(c) => c,
         Err(message) => return Ok((message, false)),
     };
@@ -1386,10 +1457,11 @@ async fn run_write_file(
     path_str: &str,
     content: &str,
     cwd: &Path,
+    waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool, Option<(u32, u32)>)> {
     let path = tool_path(path_str, cwd);
     let added = content.lines().count() as u32;
-    match exec.write(&path, content.as_bytes()).await {
+    match waiting.on(exec.write(&path, content.as_bytes())).await? {
         Ok(()) => Ok((
             format!("Successfully wrote {added} lines to {path_str}"),
             true,
@@ -1406,9 +1478,10 @@ async fn run_edit_file(
     old_str: &str,
     new_str: &str,
     cwd: &Path,
+    waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool, Option<(u32, u32)>)> {
     let path = tool_path(path_str, cwd);
-    let content = match read_text(exec, &path, path_str).await? {
+    let content = match read_text(exec, &path, path_str, waiting).await? {
         Ok(c) => c,
         Err(message) => return Ok((message, false, None)),
     };
@@ -1432,7 +1505,7 @@ async fn run_edit_file(
         ));
     }
     let updated = content.replacen(old_str, new_str, 1);
-    match exec.write(&path, updated.as_bytes()).await {
+    match waiting.on(exec.write(&path, updated.as_bytes())).await? {
         Ok(()) => {
             let removed = old_str.lines().count() as u32;
             let added = new_str.lines().count() as u32;
@@ -3467,18 +3540,39 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let lines: Vec<String> = (1..=100).map(|n| format!("line {n}")).collect();
         std::fs::write(dir.join("a.txt"), lines.join("\n")).unwrap();
-        let (out, ok) = run_read_file(&LocalExecutor, "a.txt", Some(50), Some(10), &dir)
-            .await
-            .unwrap();
+        let (out, ok) = run_read_file(
+            &LocalExecutor,
+            "a.txt",
+            Some(50),
+            Some(10),
+            &dir,
+            &mut waiting(),
+        )
+        .await
+        .unwrap();
         assert!(!ok);
         assert!(out.contains("before start line 50"), "{out}");
-        let (_, ok) = run_read_file(&LocalExecutor, "a.txt", Some(5), Some(0), &dir)
-            .await
-            .unwrap();
+        let (_, ok) = run_read_file(
+            &LocalExecutor,
+            "a.txt",
+            Some(5),
+            Some(0),
+            &dir,
+            &mut waiting(),
+        )
+        .await
+        .unwrap();
         assert!(!ok);
-        let (out, ok) = run_read_file(&LocalExecutor, "a.txt", Some(10), Some(10), &dir)
-            .await
-            .unwrap();
+        let (out, ok) = run_read_file(
+            &LocalExecutor,
+            "a.txt",
+            Some(10),
+            Some(10),
+            &dir,
+            &mut waiting(),
+        )
+        .await
+        .unwrap();
         assert!(
             ok && out.contains("line 10") && !out.contains("line 11"),
             "{out}"
@@ -4290,6 +4384,135 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
             tool_display("script", &args.to_string()),
             ("Run script", "const x = 1;".to_string())
         );
+    }
+
+    /// A `Waiting` no Stop ever reaches, for calling the file tools directly.
+    fn waiting() -> Waiting<'static> {
+        let (tx, rx) = async_channel::unbounded::<Command>();
+        std::mem::forget(tx);
+        Waiting {
+            commands: Box::leak(Box::new(rx)),
+            kept: Box::leak(Box::new(VecDeque::new())),
+            shutdown: Box::leak(Box::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_ends_a_read_the_sandbox_never_answers() {
+        let (out, mut requests) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (_to_exec, replies) = tokio::io::duplex(1 << 16);
+        let options = DirectOptions {
+            executor: Arc::new(executor::StdioExecutor::new(
+                out,
+                replies,
+                Duration::from_secs(600),
+            )),
+            ..Default::default()
+        };
+        let (events, _rx) = async_channel::unbounded();
+        let (tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tx.send(Command::Interrupt).await.unwrap();
+            // Kept open: a closed channel would read as a shutdown.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let started = Instant::now();
+        let e = execute_tool(
+            "read_file",
+            &json!({ "path": "a.txt" }).to_string(),
+            Path::new("/app"),
+            false,
+            HandHolding::FullAccess,
+            &mut allowed,
+            &options,
+            false,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("Interrupted"), "{e:#}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // The peer is told it needn't answer.
+        let read: Value = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        let cancel: Value = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        assert_eq!(read["type"], "read");
+        assert_eq!(cancel, json!({ "type": "cancel", "id": read["id"] }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_stops_at_the_sessions_deadline() {
+        let log = Arc::new(Log::default());
+        let options = DirectOptions {
+            deadline: Some(Instant::now() + Duration::from_millis(1500)),
+            observer: Some(log.clone()),
+            ..Default::default()
+        };
+        let (events, _rx) = async_channel::unbounded();
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        let code = "for (let i = 0; i < 100; i++) { await bash('sleep 0.2'); } print('all done')";
+        let started = Instant::now();
+        let (out, ok, _) = execute_tool(
+            "script",
+            &json!({ "code": code }).to_string(),
+            &std::env::temp_dir(),
+            false,
+            HandHolding::FullAccess,
+            &mut allowed,
+            &options,
+            true,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "{out}");
+        assert!(!ok && !out.contains("all done"), "{out}");
+        let lines = log.lines();
+        let script = lines.iter().find(|l| l.starts_with("script ")).unwrap();
+        // Well short of a hundred calls.
+        let calls: u32 = script.split(' ').nth(1).unwrap().parse().unwrap();
+        assert!(calls < 20, "{script}");
+    }
+
+    #[tokio::test]
+    async fn a_gone_sandbox_ends_a_script_and_its_turn() {
+        let memory = Arc::new(MemoryExecutor::default());
+        let options = DirectOptions {
+            executor: memory.clone(),
+            ..Default::default()
+        };
+        let (events, _rx) = async_channel::unbounded();
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        // A program that would swallow every failure and go on.
+        let code = "for (let i = 0; i < 500; i++) { try { await bash('gone'); } catch (e) {} }";
+        let e = execute_tool(
+            "script",
+            &json!({ "code": code }).to_string(),
+            Path::new("/sandbox/app"),
+            false,
+            HandHolding::FullAccess,
+            &mut allowed,
+            &options,
+            true,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.downcast_ref::<ExecutorGone>().is_some(), "{e:#}");
+        assert_eq!(memory.ran.lock().unwrap().len(), 1);
     }
 
     #[test]

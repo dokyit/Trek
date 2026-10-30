@@ -1,5 +1,7 @@
 //! trek-bench end to end: the binary against a fake OpenAI-wire server, with tools run here or
-//! by this test playing the sandbox over stdio.
+//! by this test playing the sandbox over stdio. Unix only: the tools run a real `sh` (`wc`,
+//! `echo` without a trailing space, `/` paths).
+#![cfg(unix)]
 
 use serde_json::{Value, json};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -412,4 +414,50 @@ fn the_turn_cap_ends_the_run_with_its_own_code() {
     assert_eq!(done["requests"], 1);
     assert_eq!(done["tool_calls"], 1);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_limit_too_long_is_an_error_with_a_done() {
+    let dir = scratch("huge");
+    let run = bench(
+        &dir,
+        &["--cwd", "/tmp", "--model", "m", "--time-limit-s", "1e19"],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(run.status.code(), Some(2));
+    let out = lines(&run.stdout);
+    assert_eq!(types(&out), ["done"]);
+    assert!(
+        out[0]["error"].as_str().unwrap().contains("--time-limit-s"),
+        "{}",
+        out[0]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_done_file_gets_its_folders() {
+    let dir = scratch("outdir");
+    let out_file = dir.join("made/on/demand/result.json");
+    let run = bench(&dir, &["--cwd", "/tmp", "--model", "m"])
+        .arg("--out")
+        .arg(&out_file)
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(2));
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(&out_file).unwrap()).unwrap();
+    assert_eq!(written["type"], "done");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn help_prints_the_usage_and_succeeds() {
+    let run = Command::new(env!("CARGO_BIN_EXE_trek-bench"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&run.stdout).starts_with("usage: trek-bench"));
 }
