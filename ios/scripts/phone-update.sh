@@ -158,7 +158,9 @@ if pgrep -x xcodebuild >/dev/null; then
   log "due (${(j:; :)why}), but an Xcode build is running; next time"
   exit 0
 fi
-if (( ! URGENT_NOW )) && { pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; }; then
+# TREK_PHONE_UPDATE_IGNORE_BUILDS=1 (set for one run with `launchctl setenv`) goes ahead over a
+# cargo build: for a Mac that builds all day, when the user wants the phone updated now.
+if (( ! URGENT_NOW )) && [[ -z "${TREK_PHONE_UPDATE_IGNORE_BUILDS:-}" ]] && { pgrep -x cargo >/dev/null || pgrep -x rustc >/dev/null; }; then
   log "due (${(j:; :)why}), but a cargo build is running; next time"
   exit 0
 fi
