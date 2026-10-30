@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>Links and dialogs check</title>
+<style>
+  body { font: 14px -apple-system, system-ui, sans-serif; margin: 32px auto; max-width: 560px; padding: 0 16px; }
+  li { margin: 8px 0; }
+  pre { background: #f4f4f5; padding: 10px; border-radius: 8px; font-size: 12px; white-space: pre-wrap; }
+</style>
+<h1>Links, popups and dialogs</h1>
+<ul>
+  <li><a id="blank" href="/no-frames" target="_blank">target=_blank</a> (a tab; no window.opener: browsers imply rel=noopener)</li>
+  <li><a id="withopener" href="/no-frames" target="_blank" rel="opener">target=_blank rel=opener</a> (a tab with this page as its window.opener)</li>
+  <li><button id="written" onclick="written()">window.open() and write into it</button></li>
+  <li><a id="mail" href="mailto:someone@example.com">mailto:</a> (Mail, after the bar asks)</li>
+  <li><a id="app" href="trek-test-app://open">a scheme no app opens</a></li>
+  <li><a id="toapp" href="/to-app">a redirect to an app's scheme</a></li>
+  <li><a id="download" href="/download">a redirect to a download</a></li>
+  <li><a id="noframes" href="/no-frames">a page that refuses frames, loaded top level</a></li>
+  <li><button id="alert" onclick="window.__check.alert = (alert('Hello from the page'), 'done')">alert()</button>
+      <button id="confirm" onclick="window.__check.confirm = confirm('Leave this page?')">confirm()</button>
+      <button id="prompt" onclick="window.__check.prompt = prompt('Your name?', 'Ada')">prompt()</button></li>
+  <li><button id="camera" onclick="media()">camera and microphone</button>
+      <button id="where" onclick="where()">location</button>
+      <button id="notify" onclick="notify()">notifications</button></li>
+</ul>
+<pre id="out"></pre>
+<script>
+  window.__check = {};
+  const show = () => { document.getElementById('out').textContent = JSON.stringify(window.__check, null, 2); };
+  setInterval(show, 300);
+  function written() {
+    const w = window.open();
+    window.__check.written = !!w;
+    if (w) { w.document.write('<title>Written</title><h1 id=w>Written by its opener</h1>'); w.document.close(); }
+  }
+  async function media() {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      window.__check.media = 'granted';
+      s.getTracks().forEach((t) => t.stop());
+    } catch (e) { window.__check.media = e.name; }
+  }
+  function where() {
+    if (!navigator.geolocation) { window.__check.location = 'unsupported'; return; }
+    navigator.geolocation.getCurrentPosition(
+      () => { window.__check.location = 'granted'; },
+      (e) => { window.__check.location = 'error ' + e.code; },
+      { timeout: 15000 });
+  }
+  async function notify() {
+    if (!('Notification' in window)) { window.__check.notifications = 'unsupported'; return; }
+    window.__check.notifications = await Notification.requestPermission();
+  }
+</script>

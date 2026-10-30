@@ -131,9 +131,21 @@ pub(super) struct Driver {
     /// What had the keys before the Browser was made for an agent: a new Browser puts them in
     /// its address bar, and the user may be typing elsewhere.
     refocus: Option<FocusHandle>,
+    /// Page dialogs Trek answered during the call under way (`dismissed`), for its answer.
+    dialogs: Vec<String>,
 }
 
 impl Driver {
+    /// Whether an agent's call is under way.
+    pub(super) fn acting(&self) -> bool {
+        self.running
+    }
+
+    /// The page put up a dialog while an agent acted, and Trek answered it (`what`: how).
+    pub(super) fn dismissed(&mut self, what: String) {
+        self.dialogs.push(what);
+    }
+
     /// Why `call` can't run now: the user has the browser, for the turn it's from.
     fn refused(&mut self, call: &AgentCall) -> Option<String> {
         match self.taken.get(&call.thread) {
@@ -180,6 +192,7 @@ impl BrowserPanel {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let next = this.update(cx, |p, _| {
+                    p.agent.dialogs.clear();
                     let next = p.agent.queue.pop_front();
                     if next.is_none() {
                         p.agent.running = false;
@@ -643,7 +656,11 @@ impl Run<'_> {
             self.settle(LOAD_WAIT, false).await?;
         }
         let now = self.page()?;
-        Ok(if let Some(id) = opened {
+        let dialogs = self
+            .this
+            .update(self.cx, |p, _| std::mem::take(&mut p.agent.dialogs))
+            .map_err(gone)?;
+        let mut out = if let Some(id) = opened {
             format!(
                 " It opened tab {id}, now in front: {} ({}).",
                 now.url, now.title
@@ -654,7 +671,12 @@ impl Run<'_> {
             format!(" The page went to {} ({}).", now.url, now.title)
         } else {
             String::new()
-        })
+        };
+        for d in dialogs {
+            out.push(' ');
+            out.push_str(&d);
+        }
+        Ok(out)
     }
 
     async fn open(&mut self, url: &str, new_tab: bool) -> Result<Value, String> {
@@ -668,9 +690,7 @@ impl Run<'_> {
                     .is_some_and(|t| t.page.is_start() && !t.page.can_back);
                 let new = new_tab && !blank || p.tabs.is_empty();
                 if new {
-                    let id = p.next_id;
-                    p.new_tab(&target, window, cx);
-                    Some(id)
+                    Some(p.new_tab(&target, window, cx))
                 } else {
                     p.editing = false;
                     p.navigate(target.clone(), cx);

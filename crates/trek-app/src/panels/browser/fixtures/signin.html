@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>Sign-in check</title>
+<style>
+  body { font: 15px -apple-system, system-ui, sans-serif; margin: 40px auto; max-width: 520px; padding: 0 16px; }
+  button { font: inherit; padding: 9px 14px; border-radius: 8px; border: 1px solid #dadce0; background: #fff; cursor: pointer; }
+  pre { background: #f4f4f5; padding: 10px; border-radius: 8px; white-space: pre-wrap; font-size: 12px; }
+</style>
+<h1>Sign in to Example</h1>
+<p>Google Identity Services, as a site uses it: a popup the size Google asks for, on Google's origin
+(here <code>localhost</code>), that posts the credential back to this page through
+<code>window.opener</code> and closes itself.</p>
+<button id="google" onclick="signIn()">Sign in with Google</button>
+<pre id="out">Not signed in.</pre>
+<script>
+  // What the checks read (`control browser eval window.__check`).
+  window.__check = { popup: null, credential: null, from: null, closed: null };
+  const out = document.getElementById('out');
+  const show = () => { out.textContent = JSON.stringify(window.__check, null, 2); };
+  let popup = null;
+  function signIn() {
+    const idp = location.origin.replace('127.0.0.1', 'localhost') + '/idp.html?origin=' + encodeURIComponent(location.origin);
+    // GSI's own call: a named window at 500×600 (590×830 with its larger-popup experiment).
+    popup = window.open(idp, 'g_auth_popup', 'width=500,height=600');
+    window.__check.popup = !!popup;
+    show();
+    // GSI watches `popup.closed` to notice the user closing it.
+    const watch = setInterval(() => {
+      if (popup && popup.closed) { window.__check.closed = true; clearInterval(watch); show(); }
+    }, 200);
+    return !!popup;
+  }
+  window.addEventListener('message', (e) => {
+    if (!e.data || e.data.type !== 'credential') return;
+    window.__check.credential = e.data.credential;
+    window.__check.from = e.origin;
+    out.textContent = 'Signed in.\n' + JSON.stringify(window.__check, null, 2);
+  });
+</script>

@@ -87,9 +87,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Trek records the mic so Speech can transcribe what you dictate into the composer.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Trek records the mic so Speech can transcribe what you dictate into the composer, and for a web page in its Browser that you let use it.</string>
   <key>NSSpeechRecognitionUsageDescription</key><string>Trek transcribes what you dictate into the composer.</string>
-  <key>NSCameraUsageDescription</key><string>Trek shows your iPhone's screen in its iPhone tool: it comes over the USB cable as a camera's picture does.</string>
+  <key>NSLocationUsageDescription</key><string>A web page in Trek's Browser asked for your location; Trek asks you first, for each site.</string>
+  <key>NSCameraUsageDescription</key><string>Trek shows your iPhone's screen in its iPhone tool (it comes over the USB cable as a camera's picture does), and the camera to a web page in its Browser that you let use it.</string>
   <key>NSBluetoothAlwaysUsageDescription</key><string>Trek is a Bluetooth keyboard and mouse for your iPhone, so you and your agents can tap and type on it from the iPhone tool.</string>
   <key>CFBundleURLTypes</key>
   <array>
