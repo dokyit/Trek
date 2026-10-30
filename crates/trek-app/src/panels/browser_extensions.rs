@@ -559,6 +559,7 @@ fn wake_on_change(cx: &mut App) {
 /// The toolbar's room for extensions' buttons: past it the address field gets too narrow in a
 /// panel beside the chat, so the rest are behind one button (`more`: the Extensions page, where
 /// each one's icon opens its popup too).
+#[cfg(target_os = "macos")] // the toolbar buttons are WebKit's; WebView2 draws none
 const TOOLBAR_BUTTONS: usize = 2;
 
 /// The extensions' own toolbar buttons, for the Browser's toolbar (macOS): each opens its popup
@@ -923,6 +924,8 @@ pub struct ExtensionsPage {
     items: Vec<Extension>,
     loaded: bool,
     /// The backend's changes seen (macOS: `webkit::generation`), to list again after one.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    // read where WebKit reports changes
     seen: u64,
     /// What's under way ("Downloading…"), while something is.
     busy: Option<&'static str>,
