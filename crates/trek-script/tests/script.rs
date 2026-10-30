@@ -70,6 +70,7 @@ impl FakeHost {
                 Ok(json!({}))
             }
             "big" => Ok(json!({ "stdout": format!("BEGIN{}END", "x".repeat(100_000)) })),
+            "fail_big" => Err("E".repeat(10_000_000)),
             "hang" => {
                 let _guard = SetOnDrop(self.hang_dropped.clone());
                 tokio::time::sleep(Duration::from_secs(60)).await;
@@ -348,7 +349,7 @@ async fn the_log_has_every_call_and_print() {
 }
 
 #[tokio::test]
-async fn a_big_result_is_cut_for_the_program_but_logged_whole() {
+async fn a_big_result_is_cut_for_the_program_and_logged_to_64_kib() {
     let host = Arc::new(FakeHost::default());
     let dir = temp_dir("big");
     let limits = ScriptLimits {
@@ -364,7 +365,16 @@ async fn a_big_result_is_cut_for_the_program_but_logged_whole() {
     .await;
     assert_eq!(r.printed, "true true true\n");
     let log = std::fs::read_to_string(r.log_path.unwrap()).unwrap();
-    assert!(log.contains(&"x".repeat(100_000)));
+    let call: Value = serde_json::from_str(log.lines().nth(1).unwrap()).unwrap();
+    // The log has more than the program got, and says how big the whole was.
+    let logged = call["result"]["stdout"].as_str().unwrap();
+    assert!(
+        logged.len() > 60_000 && logged.len() <= 64 * 1024,
+        "{}",
+        logged.len()
+    );
+    assert!(logged.starts_with("BEGIN") && logged.ends_with("END"));
+    assert!(call["bytes"].as_u64().unwrap() > 100_000);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -410,7 +420,7 @@ async fn the_sandbox_has_no_way_out_but_the_tools() {
 }
 
 #[tokio::test]
-async fn unawaited_calls_finish_before_the_run_ends() {
+async fn quick_unawaited_calls_finish_in_the_grace() {
     let host = Arc::new(FakeHost::default());
     let r = run(
         "write('a.txt', 'x'); bash('ls').then((o) => print(o.stdout.trim()));",
@@ -420,7 +430,265 @@ async fn unawaited_calls_finish_before_the_run_ends() {
     .await;
     assert_eq!(r.error, None);
     assert_eq!(r.printed, "ran ls\n");
+    assert_eq!(r.detached, 0);
     assert_eq!(host.files.lock().unwrap()["a.txt"], "x");
+}
+
+#[tokio::test]
+async fn slow_detached_work_is_stopped_after_the_grace_not_the_clock() {
+    let host = Arc::new(FakeHost::default());
+    let dir = temp_dir("detached");
+    let limits = ScriptLimits {
+        log_dir: Some(dir.clone()),
+        ..ScriptLimits::default()
+    };
+    let t = Instant::now();
+    let r = run(
+        "setTimeout(() => print('late'), 300_000); tool('hang'); print('done');",
+        &host,
+        limits,
+    )
+    .await;
+    assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+    assert!(!r.timed_out, "the program returned");
+    assert_eq!(r.error, None);
+    assert_eq!(r.printed, "done\n");
+    assert_eq!(r.detached, 2);
+    assert!(r.to_model_text().contains("2 detached calls or timers"));
+    // The stopped call is logged, with how long it ran.
+    let log = std::fs::read_to_string(r.log_path.unwrap()).unwrap();
+    let hang: Value = log
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|l| l["tool"] == "hang")
+        .expect("a record for the stopped call");
+    assert_eq!(hang["ok"], false);
+    assert!(hang["ms"].as_u64().unwrap() >= 1_500, "{hang}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(host.hang_dropped.load(Ordering::SeqCst));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_cleared_timer_neither_fires_nor_holds_the_run() {
+    let host = Arc::new(FakeHost::default());
+    let t = Instant::now();
+    let r = run(
+        "const id = setTimeout(() => print('no'), 100); clearTimeout(id); setTimeout(() => print('yes'), 10); await sleep(200);",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(r.printed, "yes\n");
+    assert_eq!(r.detached, 0);
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+}
+
+#[tokio::test]
+async fn wide_chars_past_the_cap_keep_the_output() {
+    let host = Arc::new(FakeHost::default());
+    let r = run(
+        "for (let i = 0; i < 2000; i++) print('€'.repeat(100));",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(r.error, None);
+    assert!(r.truncated_bytes > 0);
+    assert!(r.printed.starts_with('€') && r.printed.ends_with("€\n"));
+}
+
+#[tokio::test]
+async fn a_huge_error_is_capped() {
+    let host = Arc::new(FakeHost::default());
+    let r = run(
+        "throw new Error('A'.repeat(1e7))",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert!(r.error.as_ref().unwrap().starts_with("Error: AAAA"));
+    assert!(
+        r.to_model_text().len() < 8 * 1024,
+        "{}",
+        r.to_model_text().len()
+    );
+
+    let r = run("await tool('fail_big')", &host, ScriptLimits::default()).await;
+    assert!(
+        r.error
+            .as_ref()
+            .unwrap()
+            .starts_with("Error: fail_big: EEEE")
+    );
+    assert!(
+        r.to_model_text().len() < 8 * 1024,
+        "{}",
+        r.to_model_text().len()
+    );
+}
+
+#[tokio::test]
+async fn unhandled_rejections_become_warnings() {
+    let host = Arc::new(FakeHost::default());
+    let r = run(
+        "setTimeout(() => { throw new Error('late'); }, 10); tool('nope'); await sleep(100); print('ok');",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(r.error, None);
+    assert_eq!(r.printed, "ok\n");
+    assert_eq!(r.warnings.len(), 2, "{:?}", r.warnings);
+    assert!(r.warnings.iter().any(|w| w.contains("Error: late")));
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("nope: unknown tool nope"))
+    );
+    assert!(r.to_model_text().contains("[warning] unhandled rejection"));
+
+    // One handled later, after it failed, isn't a warning.
+    let r = run(
+        "const p = tool('nope'); await sleep(50); try { await p } catch (e) { print('caught') }",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(r.printed, "caught\n");
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+}
+
+#[tokio::test]
+async fn a_polluted_prototype_doesnt_break_calls() {
+    let host = Arc::new(FakeHost::default());
+    host.files
+        .lock()
+        .unwrap()
+        .insert("a.txt".into(), "hi".into());
+    let r = run(
+        "Object.prototype.e = 1; Object.prototype.content = 'wrong'; JSON.parse = () => ({}); print(await read('a.txt'), (await bash('x')).exit_code);",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(r.error, None);
+    assert_eq!(r.printed, "hi 0\n");
+}
+
+#[tokio::test]
+async fn bad_arguments_throw() {
+    let host = Arc::new(FakeHost::default());
+    let r = run(
+        "await tool('bash', () => 1)",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert!(r.error.unwrap().starts_with("TypeError: bash: arguments"));
+    assert_eq!(r.nested_calls, 0);
+}
+
+#[tokio::test]
+async fn the_log_is_capped() {
+    let host = Arc::new(FakeHost::default());
+    let dir = temp_dir("logcap");
+    let limits = ScriptLimits {
+        log_dir: Some(dir.clone()),
+        max_log_bytes: 300_000,
+        ..ScriptLimits::default()
+    };
+    let r = run(
+        "await write('big.txt', 'w'.repeat(200_000)); for (let i = 0; i < 100_000; i++) print(`line ${i}`);",
+        &host,
+        limits,
+    )
+    .await;
+    assert_eq!(r.error, None);
+    let path = r.log_path.unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() < 310_000);
+    let lines: Vec<Value> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    // The write's 200 KB argument is kept to 64 KiB, its ends intact.
+    let content = lines[1]["args"]["content"].as_str().unwrap();
+    assert!(content.len() <= 64 * 1024 && content.starts_with("www") && content.ends_with("www"));
+    let kinds: Vec<&str> = lines
+        .iter()
+        .rev()
+        .take(2)
+        .map(|l| l["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["end", "capped"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn the_engine_holds_up_under_abuse() {
+    let host = Arc::new(FakeHost::default());
+    // What's there: no shared memory (Atomics.wait would block past the clock), no wasm.
+    let r = run(
+        "print(typeof SharedArrayBuffer, typeof Atomics, typeof WebAssembly, typeof WeakRef, typeof FinalizationRegistry, typeof queueMicrotask)",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(
+        r.printed,
+        "undefined undefined undefined function function function\n"
+    );
+
+    let limits = ScriptLimits {
+        wall_clock: Duration::from_millis(500),
+        ..ScriptLimits::default()
+    };
+    let t = Instant::now();
+    let r = run(
+        "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)",
+        &host,
+        limits.clone(),
+    )
+    .await;
+    assert!(r.error.unwrap().starts_with("ReferenceError"));
+    assert!(t.elapsed() < Duration::from_secs(1));
+
+    // A huge allocation is a catchable error, not an abort.
+    let r = run(
+        "try { new ArrayBuffer(2 ** 30); print('allocated') } catch (e) { print('caught', e.name) } print('alive')",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(r.error, None);
+    assert!(
+        r.printed.starts_with("caught") && r.printed.ends_with("alive\n"),
+        "{}",
+        r.printed
+    );
+
+    // Deep recursion is a catchable error.
+    let r = run(
+        "const f = (n) => f(n + 1) + 1; try { f(0) } catch (e) { print('caught', e.name) }",
+        &host,
+        ScriptLimits::default(),
+    )
+    .await;
+    assert_eq!(r.error, None);
+    assert!(r.printed.starts_with("caught"), "{}", r.printed);
+
+    // Catastrophic backtracking still answers to the clock.
+    let t = Instant::now();
+    let r = run(
+        "print('start'); /(a+)+$/.test('a'.repeat(40) + 'b'); print('done')",
+        &host,
+        limits,
+    )
+    .await;
+    assert!(r.timed_out);
+    assert_eq!(r.printed, "start\n");
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
 }
 
 #[test]

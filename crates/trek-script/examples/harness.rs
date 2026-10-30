@@ -38,8 +38,19 @@ impl Executor {
         ))
     }
 
-    fn path(&self, p: &str) -> PathBuf {
-        self.cwd.join(p)
+    /// `p` inside the working directory, or an error: this example's executor keeps the script
+    /// to it, so absolute paths and `..` are refused. (Lexically: a symlink inside that points
+    /// out is the host's to judge.)
+    fn path(&self, p: &str) -> Result<PathBuf, String> {
+        use std::path::Component;
+        let rel = Path::new(p);
+        if rel
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(format!("{p} is outside the working directory"));
+        }
+        Ok(self.cwd.join(rel))
     }
 
     async fn read(&self, path: &Path) -> Result<String, String> {
@@ -75,24 +86,28 @@ impl ScriptHost for Host {
                 Ok(json!({ "stdout": stdout, "stderr": stderr, "exit_code": exit_code }))
             }
             "read" => {
-                let text = self.0.read(&self.0.path(&str_arg("path")?)).await?;
+                let text = self.0.read(&self.0.path(&str_arg("path")?)?).await?;
                 let start = args["start_line"].as_u64().unwrap_or(1).max(1) as usize;
-                let end = args["end_line"].as_u64().map(|e| e as usize);
+                let end = args["end_line"].as_u64().map_or(usize::MAX, |e| e as usize);
+                // An end before the start is an empty range, not an underflow.
                 let lines = text
                     .lines()
                     .skip(start - 1)
-                    .take(end.map_or(usize::MAX, |e| e + 1 - start));
+                    .take(end.saturating_sub(start - 1));
                 Ok(json!({ "content": lines.collect::<Vec<_>>().join("\n") }))
             }
             "write" => {
                 self.0
-                    .write(&self.0.path(&str_arg("path")?), &str_arg("content")?)
+                    .write(&self.0.path(&str_arg("path")?)?, &str_arg("content")?)
                     .await?;
                 Ok(json!({}))
             }
             "edit" => {
-                let path = self.0.path(&str_arg("path")?);
+                let path = self.0.path(&str_arg("path")?)?;
                 let (old, new) = (str_arg("old")?, str_arg("new")?);
+                if old.is_empty() {
+                    return Err("old must not be empty".into());
+                }
                 let text = self.0.read(&path).await?;
                 match text.matches(old.as_str()).count() {
                     1 => self.0.write(&path, &text.replacen(&old, &new, 1)).await?,
@@ -116,6 +131,8 @@ const {stdout} = await bash("grep -l 'status: todo' note-*.txt | sort");
 const todo = stdout.trim().split("\n");
 print(`${todo.length} files still todo: ${todo.join(", ")}`);
 print((await read("note-0.txt", {start: 2})).trim());
+// This executor keeps scripts to their directory.
+try { await read("../outside.txt"); } catch (e) { print(e.message); }
 "#;
 
 #[tokio::main]

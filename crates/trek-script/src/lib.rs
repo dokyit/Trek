@@ -39,22 +39,26 @@ pub trait ScriptHost: Send + Sync {
 /// How far one program may go. `Default` is what [`tool_definition`] tells the model.
 #[derive(Debug, Clone)]
 pub struct ScriptLimits {
-    /// Wall clock for the whole run; after it the output so far comes back with `timed_out`.
+    /// Wall clock for the whole run (taken as at most a day); after it the output so far comes
+    /// back with `timed_out`. Once the program returns, what it left running (calls it didn't
+    /// await, timers) gets 2 more seconds within this, then is stopped (`ScriptResult::detached`).
     pub wall_clock: Duration,
     /// Printed text returned to the model; beyond it the head and tail are kept.
     pub max_output_bytes: usize,
     /// Tool calls in one run; past it a call throws.
     pub max_calls: u32,
     /// One result's JSON as the program receives it; longer strings in it lose their middle.
-    /// The log keeps the whole result.
+    /// The log keeps up to 64 KiB of each field.
     pub max_result_bytes: usize,
-    /// Tool calls in flight at once.
+    /// Tool calls in flight at once; 0 is taken as 1.
     pub max_concurrency: usize,
     /// QuickJS heap; past it the program gets an out-of-memory error.
     pub max_memory_bytes: usize,
     /// Where the run's JSONL log goes (one file per run, the directory is created). `None` keeps
     /// no log.
     pub log_dir: Option<PathBuf>,
+    /// One run's log; past it a `capped` record, then only the `end` record.
+    pub max_log_bytes: u64,
 }
 
 impl Default for ScriptLimits {
@@ -67,6 +71,7 @@ impl Default for ScriptLimits {
             max_concurrency: 8,
             max_memory_bytes: 256 * 1024 * 1024,
             log_dir: None,
+            max_log_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -82,13 +87,22 @@ pub struct ScriptResult {
     pub nested_calls: u32,
     pub calls_by_tool: BTreeMap<String, u32>,
     pub elapsed_ms: u64,
-    /// The wall clock ran out; `printed` is the output up to then.
+    /// The wall clock ran out before the program returned; `printed` is the output up to then.
+    /// Never set for a program that returned (see `detached`).
     pub timed_out: bool,
-    /// The program's uncaught error (name, message and stack), or a failure to run it at all.
+    /// The program's uncaught error (name, message and stack, at most about 4 KiB), or a
+    /// failure to run it at all.
     pub error: Option<String>,
     /// The run's JSONL log: a `start` record with the code, then `print` and `call` records in
-    /// order (a call with its args, `bytes`, `ms`, and the full `result` or `error`), then `end`.
+    /// order (a call with its args, `bytes`, `ms` from call to answer, and its `result` or
+    /// `error`), then `end`. Each field is kept to 64 KiB; see `ScriptLimits::max_log_bytes`.
     pub log_path: Option<PathBuf>,
+    /// Calls and timers the program left running when it returned that were still running 2 s
+    /// later, and were stopped.
+    pub detached: u32,
+    /// Things the model should hear about that didn't stop the program: rejected promises no
+    /// one handled.
+    pub warnings: Vec<String>,
 }
 
 impl ScriptResult {
@@ -99,7 +113,8 @@ impl ScriptResult {
         }
     }
 
-    /// The tool result for the model: the printed text, then a line for a timeout or an error.
+    /// The tool result for the model: the printed text, then a line each for a timeout, work
+    /// left running, warnings and an error.
     pub fn to_model_text(&self) -> String {
         let mut text = self.printed.clone();
         let mut note = |line: String| {
@@ -114,6 +129,15 @@ impl ScriptResult {
                 "[the script ran out of time after {} s; output so far is above]",
                 self.elapsed_ms / 1000
             ));
+        }
+        if self.detached > 0 {
+            note(format!(
+                "[the script ended with {} detached calls or timers still running; they were stopped]",
+                self.detached
+            ));
+        }
+        for w in &self.warnings {
+            note(format!("[warning] {w}"));
         }
         if let Some(e) = &self.error {
             note(format!("[the script failed] {e}"));
@@ -150,8 +174,11 @@ pub async fn run_script(
         .name("trek-script".into())
         .stack_size(sandbox::STACK_BYTES)
         .spawn(move || {
-            let r = sandbox::run_blocking(code, host, limits, spawner, cancel, started);
-            let _ = tx.send(r);
+            // `run_blocking` catches its own panics; this is the last line, for one in between.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sandbox::run_blocking(code, host, limits, spawner, cancel, started)
+            }));
+            let _ = tx.send(r.unwrap_or_else(|p| ScriptResult::failed(sandbox::panic_error(p))));
         });
     if let Err(e) = spawned {
         return ScriptResult::failed(format!("couldn't start the script thread: {e}"));
