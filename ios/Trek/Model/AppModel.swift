@@ -108,6 +108,9 @@ final class AppModel {
     var gitBranches: [GitTarget: GitBranches] = [:]
     /// Git work under way (commit, push, switch, merge, remove), by target: views show a spinner.
     var gitBusy: Set<GitTarget> = []
+    /// Why a target's git couldn't be read, while none of it has been: the Git sheet says it where
+    /// its sections would be, rather than spin.
+    var gitUnavailable: [GitTarget: GitUnavailable] = [:]
     /// Each thread's slash commands, as its host's `/` picker lists them (qualified ids).
     var commands: [String: [CommandInfo]] = [:]
 
@@ -355,6 +358,7 @@ final class AppModel {
         gitStatus = gitStatus.filter { !$0.key.owned(by: link) }
         gitBranches = gitBranches.filter { !$0.key.owned(by: link) }
         gitBusy = gitBusy.filter { !$0.owned(by: link) }
+        gitUnavailable = gitUnavailable.filter { !$0.key.owned(by: link) }
         link.failPending()
     }
 
@@ -414,6 +418,7 @@ final class AppModel {
         gitStatus = [:]
         gitBranches = [:]
         gitBusy = []
+        gitUnavailable = [:]
         commands = [:]
         newThreadPrompt = nil
     }
@@ -566,7 +571,7 @@ final class AppModel {
                 for (id, s) in stores { s.setSummary(byID[id] ?? unlisted[id]) }
             }
         }
-        let working = threads.count { $0.runState == .working }
+        let working = threads.count(where: \.atWork)
         let needs = threads.count { $0.waitsOnYou && $0.section != .snoozed }
         if working != workingCount { workingCount = working }
         if needs != needsYouCount { needsYouCount = needs }
@@ -1046,8 +1051,10 @@ final class AppModel {
     func loadGitStatus(_ target: GitTarget) {
         request(.gitStatus(target)) { [weak self] reply in
             switch reply {
-            case .gitStatus(_, let s): withAnimation(.snappy) { self?.gitStatus[target] = s }
-            case .error(_, _, let text): self?.show(text, error: true)
+            case .gitStatus(_, let s):
+                self?.gitUnavailable[target] = nil
+                withAnimation(.snappy) { self?.gitStatus[target] = s }
+            case .error(_, let code, let text): self?.gitFailed(target, code, text)
             default: break
             }
         }
@@ -1068,9 +1075,19 @@ final class AppModel {
         request(.gitBranches(target)) { [weak self] reply in
             switch reply {
             case .gitBranches(_, let b): self?.gitBranches[target] = b
-            case .error(_, _, let text): self?.show(text, error: true)
+            case .error(_, let code, let text): self?.gitFailed(target, code, text)
             default: break
             }
+        }
+    }
+
+    /// Reading `target`'s git failed. Before anything of it came in, the sheet says why in place
+    /// of its spinners (a toast would land behind it); once it shows something, a toast says so.
+    private func gitFailed(_ target: GitTarget, _ code: ErrorCode, _ text: String) {
+        if gitStatus[target] == nil {
+            gitUnavailable[target] = GitUnavailable(text: text, refused: code == .badRequest)
+        } else {
+            show(text, error: true)
         }
     }
 
@@ -1176,12 +1193,12 @@ final class AppModel {
     }
 
     var working: [ThreadSummary] {
-        threads.filter { ($0.section == .working || ($0.section == .inbox && $0.runState == .working)) && !$0.waitsOnYou }
+        threads.filter { ($0.section == .working || ($0.section == .inbox && $0.atWork)) && !$0.waitsOnYou }
             .sorted { ($0.workingSince ?? $0.updatedAt) > ($1.workingSince ?? $1.updatedAt) }
     }
 
     var recent: [ThreadSummary] {
-        threads.filter { ($0.section == .inbox && !$0.waitsOnYou && $0.runState != .working) || $0.section == .settled }
+        threads.filter { ($0.section == .inbox && !$0.waitsOnYou && !$0.atWork) || $0.section == .settled }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 

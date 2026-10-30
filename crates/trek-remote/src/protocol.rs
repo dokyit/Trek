@@ -1072,6 +1072,12 @@ pub struct ThreadSummary {
     /// `background`, in full: what each is, its last line, Stop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub background_tasks: Vec<BackgroundTask>,
+    /// Its turn is over but it still waits on work it started (its sub-agents, its agent's own
+    /// in the background, their reports on the way): the sidebar keeps it at work ("Waiting").
+    /// The Mac always says (`false` too), so a phone tells "no" from a Mac too old to say, whose
+    /// rows it works out from `sub_agents` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_in_background: Option<bool>,
 }
 
 /// A context window's use.

@@ -322,6 +322,13 @@ Thread details, each optional and left out when there's nothing to say (older Ma
   `model`) and the agent's own (no `model`), `state` `running` · `needs_you` · `done` · `failed` ·
   `stopped`, `since` when it started (ms, to the second). `background`: the rest of what the agent
   runs in the background, by title.
+- `busy_in_background`: its turn is over but it still waits on what it started (its sub-agents,
+  its agent's own in the background, their reports on the way), so the Mac's sidebar keeps it at
+  work, "Waiting". The Mac always sends it, `false` too; a row without it is from an older Mac,
+  and the phone takes an idle row with nothing asked and sub-agents running as waiting.
+- `branch` and `git` are left out for a thread in no project that works in a chat folder of its
+  own: git doesn't serve it (`git_status` there is a `bad_request`, "This thread has no folder of
+  its own").
 - `base`: for a worktree thread, the branch it merges into (`branch` is the worktree's own).
 - `git`: the folder's state as the Mac last read it (it reads it again on `git_status`).
 - `snoozed_until`: when a snoozed thread wakes (ms).

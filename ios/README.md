@@ -26,7 +26,8 @@ xcrun simctl launch booted dev.trek.TrekMobile -TrekDemo YES
 ```
 
 The project uses a file-system-synchronized group: new files under `ios/Trek/` are part of the
-target without touching `project.pbxproj`. For a device build, set your team in Signing &
+target without touching `project.pbxproj` (and files under `ios/TrekTests/` are the unit tests':
+`xcodebuild … test` with the same destination). For a device build, set your team in Signing &
 Capabilities.
 
 ## Demo mode
@@ -39,6 +40,8 @@ same protocol messages a Mac does, so everything in the app works without one.
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
 `t-ratelimit`, `t-settings`), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
 `-TrekOpen`: the model picker), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
+`-TrekDemoOldMac YES` (the demo Mac is one from before rows carried `busy_in_background` and left
+out a chat folder's branch: `t-chat`, `t-waiting`; `t-quiz` asks five questions at once),
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
 one page), `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
 the paired Mac), `-TrekLink '<trek://pair… link>'` (open the pairing confirmation for it).

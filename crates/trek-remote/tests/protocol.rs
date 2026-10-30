@@ -912,10 +912,23 @@ fn thread_details_ride_on_the_row_and_older_rows_still_read() {
         "background",
         "base",
         "git",
+        "busy_in_background",
     ] {
         assert!(v.get(key).is_none(), "{key} should be skipped when empty");
     }
     assert!(v["agent"].get("logo").is_none());
+    // Waiting on its sub-agents: said either way when the Mac says it, absent from older Macs.
+    for busy in [false, true] {
+        let row = ThreadSummary {
+            id: "t".into(),
+            busy_in_background: Some(busy),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["busy_in_background"], json!(busy));
+        assert_eq!(serde_json::from_value::<ThreadSummary>(v).unwrap(), row);
+    }
+    assert_eq!(t.busy_in_background, None, "an older Mac's row");
 }
 
 #[test]

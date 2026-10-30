@@ -1712,9 +1712,13 @@ impl Workspace {
             })
         });
         let (sub_agents, background) = self.remote_at_work(t);
-        let git = t
+        // A thread in no project works in a chat folder of its own, which git doesn't serve
+        // (`git_place`): no branch or git state, so phones offer no Git sheet for it.
+        let own = t
             .cwd
             .as_ref()
+            .filter(|c| !trek_core::paths::is_chat_dir(c));
+        let git = own
             .and_then(|c| self.git_info.get(c))
             .filter(|g| g.is_repo)
             .map(|g| tr::GitSummary {
@@ -1742,9 +1746,7 @@ impl Workspace {
             unseen: t.is_unseen(),
             pinned: t.pinned_at.is_some(),
             branch: t.worktree.as_ref().map(|w| w.branch.clone()).or_else(|| {
-                t.cwd
-                    .as_ref()
-                    .and_then(|c| self.git_info.get(c))
+                own.and_then(|c| self.git_info.get(c))
                     .and_then(|g| g.branch.clone())
             }),
             worktree: t.worktree.is_some(),
@@ -1775,6 +1777,8 @@ impl Workspace {
             needs_thread: None,
             queued: self.remote_queued(t),
             background_tasks: self.remote_background(t),
+            // As the sidebar's card says "Waiting" (`waiting_threads`).
+            busy_in_background: Some(self.waiting(&t.id)),
         };
         self.remote_sub_agent_needs(t, &mut row);
         row

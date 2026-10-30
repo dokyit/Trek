@@ -20,7 +20,8 @@ struct ThreadStatusStrip: View {
 
     var body: some View {
         let earlier = earlier
-        if thread.context != nil || thread.cost != nil || !agents.isEmpty || !background.isEmpty || earlier > 0 {
+        let waiting = thread.waitsInBackground
+        if thread.context != nil || thread.cost != nil || !agents.isEmpty || !background.isEmpty || earlier > 0 || waiting {
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
                     if thread.context != nil || thread.cost != nil {
@@ -36,16 +37,16 @@ struct ThreadStatusStrip: View {
                         .accessibilityLabel(ContextCostLabel.spoken(thread.context, thread.cost))
                         .accessibilityHint("Shows context and cost")
                     }
-                    if !agents.isEmpty || !background.isEmpty || earlier > 0 {
+                    if !agents.isEmpty || !background.isEmpty || earlier > 0 || waiting {
                         Button { showingWork = true } label: {
-                            AtWorkLabel(agents: agents, background: background.count, earlier: earlier)
+                            AtWorkLabel(agents: agents, background: background.count, earlier: earlier, waiting: waiting)
                         }
                         .buttonStyle(.plain)
                         .glassEffect(.regular.interactive(), in: Capsule())
                         .sheet(isPresented: $showingWork) {
                             AtWorkSheet(threadID: thread.id)
                         }
-                        .accessibilityLabel(AtWorkLabel.spoken(agents, background.count, earlier: earlier))
+                        .accessibilityLabel(AtWorkLabel.spoken(agents, background.count, earlier: earlier, waiting: waiting))
                         .accessibilityHint("Lists them")
                     }
                     Spacer(minLength: 0)
@@ -218,6 +219,8 @@ struct AtWorkLabel: View {
     var background: Int
     /// Sub-agents that are done, shown when nothing is at work.
     var earlier = 0
+    /// Its turn is over and it waits on them (`waitsInBackground`): the Mac's "Waiting".
+    var waiting = false
 
     /// The agents at work, in order of first appearance, with how many each runs.
     static func byAgent(_ agents: [SubAgent]) -> [(agent: AgentRef, count: Int)] {
@@ -231,6 +234,13 @@ struct AtWorkLabel: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            if waiting {
+                HStack(spacing: 5) {
+                    BeaconDot(color: Trek.working, pulses: true, size: 6)
+                    Text("Waiting")
+                }
+                .foregroundStyle(Trek.working)
+            }
             ForEach(Self.byAgent(agents), id: \.agent.key) { entry in
                 HStack(spacing: 3) {
                     AgentGlyph(entry.agent, size: 15)
@@ -257,8 +267,8 @@ struct AtWorkLabel: View {
         .contentShape(Capsule())
     }
 
-    static func spoken(_ agents: [SubAgent], _ background: Int, earlier: Int = 0) -> String {
-        var parts: [String] = []
+    static func spoken(_ agents: [SubAgent], _ background: Int, earlier: Int = 0, waiting: Bool = false) -> String {
+        var parts: [String] = waiting ? ["Waiting on what it started"] : []
         if agents.isEmpty, background == 0, earlier > 0 { parts.append("\(earlier) sub-agent\(earlier == 1 ? "" : "s") done") }
         if !agents.isEmpty { parts.append("\(agents.count) sub-agent\(agents.count == 1 ? "" : "s") at work") }
         if background > 0 { parts.append("\(background) background task\(background == 1 ? "" : "s")") }
