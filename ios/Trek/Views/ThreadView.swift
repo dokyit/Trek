@@ -503,6 +503,7 @@ enum TranscriptRow: View, Equatable, Identifiable {
             case .error(let text), .limit(let text, _): h = 24 + 20 * lines(text, per: perLine)
             case .threadLink: h = 44
             case .changes(let c): h = 54 + 30 * CGFloat(min(c.files.count, 8))
+            case .card(let c): h = 150 + 34 * CGFloat(c.stages.count + c.checks.count + min(c.history.count, 3))
             }
             if row.endsTurn, !row.block.isTurnEnd { h += 30 }
             return h
@@ -724,6 +725,8 @@ struct BlockRow: View, Equatable {
         case .changes(let changes):
             ChangesCard(changes: changes, threadID: threadID, rootName: projectName,
                         folded: Binding(get: { folded }, set: { fold($0) }))
+        case .card(let card):
+            TranscriptCard(card: card, threadID: threadID)
         }
     }
 }
@@ -794,6 +797,11 @@ private struct ComposerArea: View {
             }
             // What stays under the requests, measured for the room it leaves them.
             VStack(spacing: 10) {
+                // The newest card's chip, as the Mac's composer has it; it waits while a request
+                // is pinned here.
+                if needsKid == nil, store.pending.isEmpty {
+                    CardChipRow(store: store)
+                }
                 if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction, on: threadID) {
                     QueuedStrip(threadID: threadID, queued: queued) { text in
                         composer.put(composer.draft.isEmpty ? text : composer.draft + "\n\n" + text)

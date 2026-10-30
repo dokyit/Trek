@@ -1380,7 +1380,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -1448,4 +1448,81 @@ fn parity_fields_ride_on_rows_and_older_ones_still_read() {
         matches!(welcome.msg, ServerMessage::Welcome { ref features, .. } if features.is_empty()),
         "an older Mac lists nothing"
     );
+}
+
+#[test]
+fn live_cards_and_their_buttons() {
+    // A pull request checking, with its commits; a run that failed; a release published.
+    let pr = item_round_trip(
+        r#"{"id":"i40","seq":90,"at":null,"kind":"card","card":{"key":"https://github.com/o/r/pull/128","kind":"pr","phase":"checking","title":"Refresh sessions","number":128,"url":"https://github.com/o/r/pull/128","head":"feat/session-refresh","base":"main","repo":"o/r","commits":3,
+            "history":[{"title":"Add session refresh tests","oid":"d29f50a","author":"tobias","committed_ms":1791020000000}],"added":128,"removed":36,
+            "checks":[{"name":"build (macos)","state":"pass"},{"name":"build (windows)","state":"running"},{"name":"clippy","state":"queued"}],"created_ms":1791019000000,"phase_at_ms":1791020000000}}"#,
+    );
+    let ItemBody::Card { card } = &pr.body else {
+        panic!("{:?}", pr.body)
+    };
+    assert_eq!(
+        (card.kind, card.phase, card.number),
+        (CardKind::Pr, CardPhase::Checking, Some(128))
+    );
+    assert_eq!(card.checks[1].state, CardCheckState::Running);
+    assert_eq!(pr.body.kind(), "card");
+    assert!(!pr.body.is_request() && !pr.body.is_attached());
+    // Where it isn't drawn (another Trek driving this one): its line, as the Mac words it.
+    assert_eq!(card.summary(), "Pull request #128 · Checking");
+
+    let run = item_round_trip(
+        r#"{"id":"i41","seq":91,"at":null,"kind":"card","card":{"key":"run-39779843418","kind":"run","phase":"failed","title":"CI","number":39779843418,"head":"main","step":"Failed: Test (Windows)",
+            "stages":[{"label":"Clippy","state":"pass","started_ms":1791020000000,"ended_ms":1791020250000},{"label":"Test (Windows)","state":"fail","started_ms":1791020000000,"ended_ms":1791021440000}],
+            "subject":"Side chat","event":"push","started_ms":1791020000000,"ended_ms":1791021450000,"actions":["rerun"]}}"#,
+    );
+    let ItemBody::Card { card } = &run.body else {
+        panic!()
+    };
+    assert_eq!(card.actions, [CardActionKind::Rerun]);
+    assert_eq!(card.stages[1].state, CardCheckState::Fail);
+
+    item_round_trip(
+        r#"{"id":"i42","seq":92,"at":null,"kind":"card","card":{"key":"release-0.4.28","kind":"release","phase":"published","title":"Release v0.4.28","version":"0.4.28","channel":"stable",
+            "stages":[{"label":"macOS app","state":"pass"},{"label":"Publish","state":"pass"}],"notes_url":"https://github.com/o/r/releases/tag/v0.4.28"}}"#,
+    );
+
+    // A card from a newer Mac (a kind, phase or check state this build doesn't know, fields it
+    // doesn't have) still reads; one with nothing in it is a pull request being created.
+    let newer: Item = serde_json::from_str(
+        r#"{"id":"i43","seq":93,"kind":"card","card":{"key":"k","kind":"deploy","phase":"rolling_out","checks":[{"name":"x","state":"timed_out"}],"preview":{"url":"https://x"}}}"#,
+    )
+    .unwrap();
+    let ItemBody::Card { card } = newer.body else {
+        panic!()
+    };
+    assert_eq!((card.kind, card.phase), (CardKind::Other, CardPhase::Other));
+    assert_eq!(card.checks[0].state, CardCheckState::Skipped);
+    let empty: Item =
+        serde_json::from_str(r#"{"id":"i44","seq":94,"kind":"card","card":{}}"#).unwrap();
+    assert_eq!(
+        empty.body,
+        ItemBody::Card {
+            card: RemoteCard::default()
+        }
+    );
+
+    // Its buttons: acked, not reads (they wait their turn behind the requests before them).
+    for line in [
+        r#"{"type":"card_action","id":"1","thread_id":"t","key":"https://github.com/o/r/pull/128","action":"merge"}"#,
+        r#"{"type":"card_action","id":"2","thread_id":"t","key":"https://github.com/o/r/pull/128","action":"resolve"}"#,
+        r#"{"type":"card_action","id":"3","thread_id":"t","key":"run-39779843418","action":"rerun"}"#,
+    ] {
+        let env = client_round_trip(line);
+        assert_eq!(env.msg.kind(), "card_action");
+        assert!(!env.msg.is_query());
+    }
+    assert!(
+        serde_json::from_str::<ClientEnvelope>(
+            r#"{"type":"card_action","thread_id":"t","key":"k","action":"force_push"}"#
+        )
+        .is_err(),
+        "only the buttons the card has"
+    );
+    assert!(feature::ALL.contains(&feature::CARD_ACTIONS));
 }

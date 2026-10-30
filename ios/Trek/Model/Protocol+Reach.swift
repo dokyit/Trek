@@ -35,6 +35,8 @@ nonisolated enum MacFeature: String, CaseIterable {
     case noteFiles = "note_files"
     /// `machine_info` (and running another Trek's threads, which the phone doesn't).
     case machines
+    /// A card's Merge, Resolve conflicts and Re-run.
+    case cardActions = "card_actions"
 }
 
 /// The Mac's snooze menu.

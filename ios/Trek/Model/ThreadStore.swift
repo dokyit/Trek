@@ -25,6 +25,8 @@ nonisolated struct Block: Identifiable, Equatable {
         case threadLink(ThreadLink)
         /// The files a turn changed, under its end.
         case changes(TurnChanges)
+        /// A live card: a pull request, a workflow run, a release.
+        case card(RemoteCard)
     }
 
     let id: String
@@ -57,6 +59,7 @@ nonisolated struct Block: Identifiable, Equatable {
         case .changes(let c):
             guard !c.files.isEmpty else { return nil }
             kind = .changes(c)
+        case .card(let c): kind = .card(c)
         case .reasoning, .tool, .unknown: return nil
         }
         return Block(id: item.id, itemID: item.id, kind: kind, version: item.seq, count: 1)
@@ -87,7 +90,7 @@ nonisolated struct Block: Identifiable, Equatable {
             case .group, .assistant, .resolved: worked = true; stop = nil
             case .error, .limit: stop = b.id
             case .notice: if worked { stop = b.id }
-            case .changes, .handoff, .threadLink: break
+            case .changes, .handoff, .threadLink, .card: break
             }
         }
         if !open { close() }

@@ -18,7 +18,9 @@ use crate::protocol::{
     SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary,
     Transcript, TranscriptPage, TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
-use crate::protocol::{CloneProjectRequest, FileUpload, MachineInfo, ServerMessage};
+use crate::protocol::{
+    CardActionRequest, CloneProjectRequest, FileUpload, MachineInfo, ServerMessage,
+};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -375,6 +377,12 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = (project_id, files);
         unsupported("receive files")
     }
+    /// A card's button (Merge, Resolve conflicts, Re-run), as the Mac's own does: `not_found`
+    /// for a card that isn't there, `conflict` for one that doesn't offer it any more.
+    fn card_action(&self, req: CardActionRequest) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = req;
+        unsupported("act on cards")
+    }
 
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
@@ -598,6 +606,11 @@ pub enum HostRequest {
     PutFiles {
         project_id: String,
         files: Vec<FileUpload>,
+        reply: Reply<()>,
+    },
+    /// See [`RemoteHost::card_action`].
+    CardAction {
+        req: CardActionRequest,
         reply: Reply<()>,
     },
 }
@@ -901,5 +914,10 @@ impl RemoteHost for ChannelHost {
             reply,
         })
         .await
+    }
+
+    async fn card_action(&self, req: CardActionRequest) -> HostResult<()> {
+        self.call(|reply| HostRequest::CardAction { req, reply })
+            .await
     }
 }

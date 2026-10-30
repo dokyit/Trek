@@ -6,8 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
+mod cards;
 mod machines;
 mod parity;
+pub use cards::*;
 pub use machines::*;
 pub use parity::*;
 
@@ -215,6 +217,8 @@ pub enum ClientMessage {
     CloneProject(CloneProjectRequest),
     /// Write files under a project's folder (answered with `ack`).
     PutFiles(PutFilesRequest),
+    /// Press one of a card's buttons (the Mac lists `card_actions` in `features`).
+    CardAction(CardActionRequest),
 }
 
 impl ClientMessage {
@@ -266,6 +270,7 @@ impl ClientMessage {
             Self::MachineInfo => "machine_info",
             Self::CloneProject(_) => "clone_project",
             Self::PutFiles(_) => "put_files",
+            Self::CardAction(_) => "card_action",
         }
     }
 }
@@ -515,6 +520,8 @@ pub mod feature {
     /// `machine_info`, `clone_project` (with `clone_progress`) and `put_files`: another Trek
     /// may run threads here (`docs/MULTI-MACHINE.md`).
     pub const MACHINES: &str = "machines";
+    /// `card_action`: a card's Merge, Resolve conflicts and Re-run (`card` items).
+    pub const CARD_ACTIONS: &str = "card_actions";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -533,6 +540,7 @@ pub mod feature {
         NOTE_IMAGES,
         MACHINES,
         NOTE_FILES,
+        CARD_ACTIONS,
     ];
 }
 
@@ -1479,6 +1487,12 @@ pub enum ItemBody {
         #[serde(default = "yes")]
         open: bool,
     },
+    /// A live card for work the agent pushed out (a pull request, a workflow run, a release),
+    /// sent again under the same id as it moves on. Older phones leave it out, as any kind they
+    /// don't know.
+    Card {
+        card: RemoteCard,
+    },
     /// The files a turn changed, after its `turn_end`.
     Changes {
         files: Vec<ChangedFile>,
@@ -1537,6 +1551,7 @@ impl ItemBody {
             Self::Handoff { .. } => "handoff",
             Self::ThreadLink { .. } => "thread_link",
             Self::Changes { .. } => "changes",
+            Self::Card { .. } => "card",
         }
     }
 }

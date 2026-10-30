@@ -37,6 +37,7 @@ mod attachments;
 mod background;
 mod basecamp;
 pub mod bonjour;
+mod cards;
 mod commands;
 mod git;
 mod icons;
@@ -1114,6 +1115,9 @@ impl Workspace {
                 files,
                 reply,
             } => self.remote_put_files(&project_id, files, reply, cx),
+            tr::HostRequest::CardAction { req, reply } => {
+                let _ = reply.send(self.remote_card_action(req, cx));
+            }
         }
     }
 
@@ -2659,10 +2663,16 @@ fn item_body(
         Item::Tool { id, detail, .. } if trek_core::lineage::of_row(id).is_some() => {
             thread_link(ws, id, detail)
         }
-        // A PR/release card (`pr_card`): the phone gets its one-line form.
+        // A PR, run or release card (`pr_card`): the card itself, or its one-line form when its
+        // JSON doesn't read.
         Item::Tool { id, detail, .. } if crate::pr_card::of_row(id).is_some() => {
-            tr::ItemBody::Notice {
-                text: clip_text(&crate::pr_card::summary(detail)),
+            match (crate::pr_card::of_row(id), crate::pr_card::read(id, detail)) {
+                (Some(key), Some(card)) => tr::ItemBody::Card {
+                    card: cards::remote_card(key, &card),
+                },
+                _ => tr::ItemBody::Notice {
+                    text: clip_text(&crate::pr_card::summary(detail)),
+                },
             }
         }
         Item::Tool {

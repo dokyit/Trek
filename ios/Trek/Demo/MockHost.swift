@@ -24,6 +24,11 @@ final class MockHost: Backend {
     private var settings = DemoMac.settings()
     /// The visualizations thread's answer still being written: its item, and the text to come.
     private var vizStream: (tid: String, id: String, text: String, rest: [String])?
+    /// The `t-card` thread's cards, by family (`pr`, `run`, `release`): their item and state.
+    private var cardItems: [String: String] = [:]
+    private var cardStates: [String: String] = [:]
+    /// Its run was re-run: this time it passes.
+    private var cardRerun = false
     private let host: HostInfo
     /// What it says it runs on (`machine_info`).
     private let platform: String
@@ -77,6 +82,7 @@ final class MockHost: Backend {
         seed()
         seedReach()
         seedLinks()
+        seedCards()
         // What the Mac's composer shows for each: efforts per model, each thread's effort and access.
         let efforts = ["low", "medium", "high", "xhigh", "max"]
         agents = (agents + DemoMac.addedAgents).map { a in
@@ -171,6 +177,8 @@ final class MockHost: Backend {
             deliver(.machineInfo(re: id, MachineInfo(name: host.name, platform: platform)))
         case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile:
             takeParity(message, id: id)
+        case .cardAction(let tid, let key, let action):
+            takeCardAction(tid, key: key, action, id: id)
         case .interrupt(let tid):
             ack(id)
             for item in items[tid] ?? [] {
@@ -1136,6 +1144,74 @@ extension MockHost {
 extension MockHost {
     /// A thread whose agent started two threads and then handed its work to a fresh one, those
     /// threads (each with its row back), and a note with a picture in it.
+    /// A thread whose agent opened a pull request, then watched CI and cut a release: each a live
+    /// card that moves on by itself and waits where the user has a button to press (Resolve
+    /// conflicts, Merge, Re-run). `-TrekDemoCard <state>` holds one card in one state instead.
+    private func seedCards() {
+        let now = Self.now
+        let m: Int64 = 60_000
+        let id = "t-card"
+        let a = agents.first { $0.key == "claude-code" }!
+        let row = ThreadSummary(id: id, title: "Ship the session refresh fix", project: projects.first { $0.id == "p-trek" }?.ref,
+                                agent: a.ref, model: "claude-opus-5-5", modelLabel: a.models.first { $0.id == "claude-opus-5-5" }?.label,
+                                runState: .idle, needs: nil, section: .inbox, unseen: false, pinned: false, branch: "feat/session-refresh",
+                                worktree: true, activity: nil, workingSince: nil, updatedAt: now, additions: 128, deletions: 36)
+        threads.insert(row, at: min(1, threads.count))
+        seq[id] = 0
+        items[id] = []
+        let ask = ItemBody.user(text: "Open a PR for the session refresh fix, watch its checks, merge it when it's green, then cut a nightly.",
+                                images: 0)
+        put(id, TItem(id: newID(id, ask), seq: 0, at: now - 6 * m, body: ask))
+        append(id, .assistant(text: "Pushing the branch and opening the pull request.", streaming: false))
+        if let held = DemoMac.heldCard {
+            showCard(held, then: false)
+        } else {
+            showCard("pr-creating", then: true)
+        }
+    }
+
+    /// The `t-card` thread's card of `state`'s family shows `state` (a new card when the family
+    /// is new), and (`then`) moves on by itself when the demo says it does.
+    private func showCard(_ state: String, then: Bool) {
+        let tid = "t-card"
+        let family = String(state.prefix { $0 != "-" })
+        if cardItems[family] == nil {
+            switch family {
+            case "run": append(tid, .assistant(text: "Merged #128. CI is running on main.", streaming: false))
+            case "release": append(tid, .assistant(text: "CI is green. Cutting a nightly.", streaming: false))
+            default: break
+            }
+        }
+        let body = ItemBody.card(DemoMac.card(state))
+        let iid = cardItems[family] ?? newID(tid, body)
+        cardItems[family] = iid
+        cardStates[family] = state
+        put(tid, TItem(id: iid, seq: 0, body: body))
+        guard then else { return }
+        var next = DemoMac.nextCard(after: state)
+        if state == "run-running", cardRerun { next = ("run-passed", 4) }
+        guard let (after, secs) = next else { return }
+        later(secs) { [weak self] in
+            // Moved on meanwhile (a button was pressed): that one goes on from there.
+            guard let self, self.cardStates[family] == state else { return }
+            self.showCard(after, then: true)
+        }
+    }
+
+    /// A card's button pressed on the phone.
+    func takeCardAction(_ tid: String, key: String, _ action: CardAction, id: String?) {
+        let family = cardStates.first { DemoMac.card($0.value).key == key }?.key
+        guard tid == "t-card", let family, let state = cardStates[family] else {
+            return deliver(.error(re: id, code: .notFound, message: "That card isn't in the thread any more"))
+        }
+        guard let next = DemoMac.cardAfter(action, on: state) else {
+            return deliver(.error(re: id, code: .conflict, message: "It can't do that right now"))
+        }
+        ack(id)
+        if action == .rerun, family == "run" { cardRerun = true }
+        later(0.4) { [weak self] in self?.showCard(next, then: DemoMac.heldCard == nil) }
+    }
+
     private func seedLinks() {
         let now = Self.now
         let m: Int64 = 60_000

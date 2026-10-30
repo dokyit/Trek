@@ -589,7 +589,8 @@ final class AppModel {
              .send(let tid, _, _, _), .threadAction(let tid, _), .answer(let tid, _, _),
              .interrupt(let tid), .markSeen(let tid), .worktreeMerge(let tid),
              .commands(let tid), .turnAction(let tid, _, _, _, _), .queueAction(let tid, _, _, _, _),
-             .attachment(let tid, _, _, _), .backgroundOutput(let tid, _), .stopBackground(let tid, _):
+             .attachment(let tid, _, _, _), .backgroundOutput(let tid, _), .stopBackground(let tid, _),
+             .cardAction(let tid, _, _):
             return t(tid)
         case .setPrefs(let tid, _, _, _, _, _):
             return t(tid)
@@ -642,6 +643,7 @@ final class AppModel {
         case .attachment(let tid, let iid, let ix, let px): return .attachment(threadId: b(tid), itemId: iid, index: ix, maxPx: px)
         case .backgroundOutput(let tid, let task): return .backgroundOutput(threadId: b(tid), taskId: task)
         case .stopBackground(let tid, let task): return .stopBackground(threadId: b(tid), taskId: task)
+        case .cardAction(let tid, let key, let action): return .cardAction(threadId: b(tid), key: key, action: action)
         case .turnAction(let tid, let iid, let a, let mo, let rf):
             return .turnAction(threadId: b(tid), itemId: iid, action: a, model: mo, restoreFiles: rf)
         case .noteAsset(let nid, let path, let px): return .noteAsset(noteId: b(nid), path: path, maxPx: px)

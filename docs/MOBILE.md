@@ -453,6 +453,25 @@ higher seq), `at` (ms or null) and `kind`:
   reads the thread's own row when it has it, which is live. `open: false`: it was archived or
   deleted. Macs before this sent these as a `handoff` or `notice` with the title quoted; older
   phones leave `thread_link` out, as any kind they don't know (that text couldn't open anything).
+- `card`: a live card for work the agent pushed out, as the Mac's transcript draws it
+  (`pr_card.rs`): a pull request it opened, watches or merges (`kind: "pr"`), a workflow run it
+  watches (`run`), a release (`release`). It is sent again under the same id whenever it moves on
+  (its `phase`, checks, jobs, conflicts, a merge in flight); each tick compares what the phone
+  would read, so a card `gh` keeps rewriting unchanged sends nothing. `key` is stable for the card
+  in its thread (a PR's url, `release-<version>`, a run's id) and is what `card_action` names.
+  `phase`: `creating` · `open` · `checking` · `conflicted` · `ready` · `merging` · `merged` ·
+  `closed` · `releasing` · `published` · `passed` · `failed`; checks' and jobs' `state`: `queued` ·
+  `running` · `pass` · `fail` · `skipped`. Times are ms (0 or missing: not known yet): the phone
+  keeps a running job's and run's clock going between updates. `actions` lists the buttons the
+  card shows on the Mac right now (`merge` · `resolve` · `rerun`). Every field may be missing;
+  unknown kinds, phases and states read as `other`/`skipped`. Macs before this sent a card as a
+  `notice` with its one line ("Pull request #128 · Merged"); older phones leave `card` out, as any
+  kind they don't know.
+
+```json
+{"id":"i40","seq":90,"at":null,"kind":"card","card":{"key":"https://github.com/o/r/pull/128","kind":"pr","phase":"conflicted","title":"Refresh sessions in the auth middleware","number":128,"url":"https://github.com/o/r/pull/128","head":"feat/session-refresh","base":"main","commits":3,"history":[{"title":"Add session refresh tests","oid":"d29f50a","author":"tobias","committed_ms":1791020000000}],"added":128,"removed":36,"checks":[{"name":"clippy","state":"pass"}],"conflicts":["src/middleware.ts","src/auth.ts"],"created_ms":1791019700000,"phase_at_ms":1791020000000,"actions":["resolve"]}}
+{"id":"i41","seq":91,"at":null,"kind":"card","card":{"key":"run-39779843418","kind":"run","phase":"checking","title":"CI","number":39779843418,"url":"https://github.com/o/r/actions/runs/39779843418","head":"main","subject":"Side chat","event":"push","stages":[{"label":"Clippy","state":"pass","started_ms":1791020000000,"ended_ms":1791020250000},{"label":"Test (Windows)","state":"running","started_ms":1791020000000}],"started_ms":1791020000000}}
+```
 
 ### Actions (phone → Mac)
 
@@ -794,6 +813,17 @@ icon, a changed file) fetches it again.
 {"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a…","png":"iVBORw0K…","template":true}
 ```
 
+**`card_actions`**: a `card`'s buttons, as the Mac's own: `merge` (`gh pr merge --merge
+--delete-branch`, the card says `merging` meanwhile), `resolve` (the thread's agent is asked to
+merge the base in, resolve and push; the card counts the files down), `rerun` (`gh run rerun
+--failed` on a failed run or release workflow). Acked once started; the card's next update says
+how it goes. `not_found` for a card that isn't in the thread, `conflict` for one that doesn't offer
+that button any more (it moved on meanwhile). The phone asks before it merges.
+
+```json
+{"type":"card_action","id":"8","thread_id":"t","key":"https://github.com/o/r/pull/128","action":"merge"}   → ack
+```
+
 **Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
 question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
 doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the
@@ -870,6 +900,69 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
   not let devices see each other. Trying Tailscale…") with Try now while it waits, its addresses
   (Wi-Fi, Tailscale), "Encrypted · pinned" / "Unencrypted", fingerprint, follow-up default, demo
   mode, unpair.
+
+### Transcript components: Mac and phone
+
+What the Mac's transcript and composer draw, and what the phone draws for the same thing
+(inventory of 2026-10-30, after the live cards). *same*: the phone draws it as the Mac does, in
+its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw text.
+
+| Component (Mac source) | Phone | Phone source | Note |
+|---|---|---|---|
+| PR card: creating, checks, conflicts, Resolve conflicts, ready, Merge, merging, merged, closed (`pr_card.rs`, Row::Pr) | same | `Views/Cards/PrCard.swift` | A `card` item, live. Checks and commits as a list where the Mac draws a branch graph; Merge asks first. |
+| CI run card: jobs, elapsed, passed/failed, Re-run, View log (`pr_card.rs` Kind::Run) | same | `Views/Cards/RunCard.swift` | Jobs as rows (spinner, tick, cross, time) where the Mac draws lanes; the clocks tick on the phone. |
+| Release card: version, channel, platforms, building, publishing, published, notes, failed (`pr_card.rs` Kind::Release) | same | `Views/Cards/ReleaseCard.swift` | "Assets" are the platforms the jobs build ("Mac and Windows downloads are up"), as on the Mac. |
+| Composer status chip for the newest card (`composer.rs` chip_row, `pr_card::status_chip`) | same | `Views/Cards/CardChip.swift` | Lingers 4 s after a good finish; a failure stays until the next message. Tap shows the card in a sheet. |
+| Composer chip: "Create PR" | missing | n/a | The phone has no button that asks the agent to open a PR ("Creating PR" does show while one is made). |
+| Composer chip: last turn's changes "N files +a −r" | reduced | `Thread/GitSheet.swift` | The toolbar shows the working tree's count, not the last turn's. |
+| User message bubble, long text (Row::User) | same | `Transcript.swift` UserBubble | "Show all" opens the whole message in a sheet. |
+| User message images (Row::User) | same | `Thread/MessageImages.swift` | |
+| User message actions: time, edit, rewind, fork, copy | same | `Thread/MessageActions.swift` | |
+| Consult line under a message (`orch::split_consult`) | missing | n/a | The raw `<trek-consult …>` block shows in the bubble. |
+| "Asked to restate it first" line (`restate::split_restate`) | missing | n/a | The raw `<trek-restate>` block shows in the bubble. |
+| Videos attached to a message (`video::AttachedVideos`) | missing | n/a | |
+| Wake row: folded "↳ summary" of sub-agent results (Row::Wake) | reduced | UserBubble | A whole "[Trek] …" user bubble, with edit/rewind/fork offered. |
+| Assistant answer, long-answer parts (Row::Assistant) | same | `MarkdownText.swift` | |
+| Code blocks (`md.rs`) | reduced | MarkdownText | No language label, no copy button. |
+| Tables (`md.rs`) | same | MarkdownText | Scroll sideways. |
+| Math, inline and display (`math`) | same | `Views/Math` | |
+| `trek-viz` visualizations, all 11 kinds (`visualization/`) | same | `Views/Viz` | |
+| `trek-html` interactive artifacts (`artifact/`) | same | `LivePage.swift` | |
+| Local images in answers, `![](path)` (`md.rs` LocalImage) | missing | n/a | |
+| Videos linked in answers (`video::AnswerVideos`) | missing | n/a | |
+| File and path chips in answers (`md::link_path`) | reduced | `InlineMarkdown.swift` | Drawn, but a tap doesn't open the file. |
+| Reasoning, "Thought" (Row::Reasoning) | reduced | Transcript ToolRow | Plain text inside the group, not markdown. |
+| Tool group summary (Row::ToolGroup) | same | Transcript ToolGroupView | |
+| Tool row: chips, status, output (Row::Tool) | reduced | Transcript ToolRow | Output is the last 4 KiB; status as a tint. |
+| `watch_video` row with player and frames (`video::WatchedVideo`) | missing | n/a | A plain tool row. |
+| Sub-agent row: live state, answer as markdown (Row::SubAgent) | reduced | ToolRow, `Thread/SubAgentsCard.swift` | In the transcript an "Agent" step with 4 KiB of raw output; live state in the footer card. |
+| Notice row (Row::Notice) | same | ThreadView `.notice` | Markdown marks show raw. |
+| Error row (Row::Error) | same | ThreadView `.error` | |
+| Limit row (Row::Limit) | same | ThreadView `.limit` | |
+| Handoff row (Row::Handoff) | reduced | ThreadView `.handoff` | Words only, no agent glyphs. |
+| Thread links (Row::Lineage) | same | `Thread/ThreadLinkRow.swift` | |
+| Turn footer: copy, time, undo, retry, fork (Row::TurnEnd) | same | MessageActions TurnActions | |
+| "Verified" badge on the turn footer | missing | n/a | Not sent. |
+| Restate check: "Is that what you meant?" | missing | n/a | |
+| Changes card (`changes_card.rs`) | same | `Thread/ChangesCard.swift`, DiffSheet | |
+| Rewind/undo/retry confirmation with its files (`confirm_card`) | reduced | ThreadView confirmationDialog | No list of files. |
+| Approval card (`live_footer`) | same | `RequestCards.swift` | |
+| Question card (`question_card`) | reduced | RequestCards QuestionCard | A secret answer isn't masked. |
+| Plan card (`plan_card`) | same | RequestCards PlanCard | |
+| Working bar and live group (`working_bar.rs`, `activity.rs`) | reduced | WorkingLine, WorkingFooter | One "doing now" line. |
+| Background strip (`background_strip.rs`) | reduced | `Thread/BackgroundTaskView.swift` | Behind the "at work" chip. |
+| Context ring and popover (`context_popover.rs`) | reduced | `Thread/ThreadStatus.swift` | No breakdown, usage windows or Compact. |
+| Limit bar: Resume at reset, Try again, Snooze, Switch agent (`composer.rs`) | missing | n/a | Only the queued messages carry over. |
+| Queued follow-ups (composer) | same | `Thread/QueuedStrip.swift` | |
+| Slash command picker (`composer/pickers.rs`) | same | `Thread/CommandPicker.swift` | |
+| Model, effort and access chips (`composer.rs`) | same | `ThreadSettingsBar.swift` | |
+| Consult pill (`composer.rs`) | missing | n/a | `/consult` typed works. |
+| Composer status lines ("Another thread is also editing this folder", …) | missing | n/a | |
+
+The cards were designed for the phone first, in Figma (file `WxoskpLua3zzkzKxiymR1A`, page
+"Phone · cards": every state in light and dark, and the chip), and the demo Mac plays them
+(`Demo/DemoCards.swift`; the thread "Ship the session refresh fix", `-TrekDemoCard <state>` to
+hold one state).
 
 ### Voice input
 
