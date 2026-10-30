@@ -140,6 +140,22 @@ static LIMITS: LazyLock<Mutex<HashMap<String, i64>>> = LazyLock::new(Default::de
 /// stays what it was, but the mock doesn't let a message through once that time has passed.
 static HELD: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock::new(Default::default);
 
+/// Sessions whose turns of their own (a watcher caught something) stay at work until
+/// `release_wake`, however long the real clock runs on.
+static HELD_WAKES: LazyLock<Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(Default::default);
+
+/// Keep session `id`'s next turn of its own at work until `release_wake`: it is otherwise at
+/// work for a quarter of a second, a window a test on a loaded machine can miss altogether.
+pub fn hold_wake(id: &str) {
+    HELD_WAKES.lock().unwrap().insert(id.to_string());
+}
+
+/// Let session `id`'s turns of their own go on and finish.
+pub fn release_wake(id: &str) {
+    HELD_WAKES.lock().unwrap().remove(id);
+}
+
 /// Lift session `id`'s usage limit now, as if it had reset (tests run on a clock of their own).
 pub fn lift_limit(id: &str) {
     LIMITS.lock().unwrap().remove(id);
@@ -1521,6 +1537,9 @@ impl Session {
                     self.think("The watcher has something.").await?;
                     // Real time, whatever the pace: a turn of its own is seen at work, not just done.
                     tokio::time::sleep(Duration::from_millis(250)).await;
+                    while HELD_WAKES.lock().unwrap().contains(&self.native_id) {
+                        self.pause(Duration::from_millis(10)).await?;
+                    }
                     self.tool(
                         "Read",
                         "tests/parser.rs",
