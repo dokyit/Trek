@@ -751,6 +751,78 @@ async fn browser(
             }
             Ok(())
         }
+        // The Browser's extensions, without the page's file picker or its Install prompt.
+        "ext-install" | "ext-list" | "ext-on" | "ext-off" | "ext-remove" => {
+            use crate::panels::browser_extensions as ext;
+            let view = cx.update(|cx| panel.read(cx).shots_view());
+            let fail = |e: String| anyhow::anyhow!("browser {cmd}: {e}");
+            match cmd {
+                "ext-install" => {
+                    anyhow::ensure!(
+                        !rest.is_empty(),
+                        "browser ext-install needs a folder, a .zip/.crx or a store id"
+                    );
+                    let name = ext::install_for_driver(rest.to_string(), view, cx)
+                        .await
+                        .map_err(fail)?;
+                    tracing::info!("browser ext-install: {name}");
+                }
+                "ext-list" => {
+                    let list = ext::list_for_driver(view, cx).await.map_err(fail)?;
+                    std::fs::write(
+                        dir.join("browser-extensions.json"),
+                        serde_json::to_string_pretty(&list)?,
+                    )?;
+                }
+                _ => {
+                    anyhow::ensure!(
+                        !rest.is_empty(),
+                        "browser {cmd} needs an extension's id or name"
+                    );
+                    let enable = match cmd {
+                        "ext-on" => Some(true),
+                        "ext-off" => Some(false),
+                        _ => None,
+                    };
+                    ext::change_for_driver(rest.to_string(), enable, view, cx)
+                        .await
+                        .map_err(fail)?;
+                }
+            }
+            cx.update(|cx| cx.refresh_windows());
+            Ok(())
+        }
+        "ext-page" => {
+            main.update(cx, |_, window, cx| {
+                panel.update(cx, |p, cx| p.open_extensions(window, cx))
+            })?;
+            Ok(())
+        }
+        "ext-allow" | "ext-deny" => {
+            let name = crate::panels::browser_extensions::answer_prompt(cmd == "ext-allow")
+                .map_err(|e| anyhow::anyhow!("browser {cmd}: {e}"))?;
+            tracing::info!("browser {cmd}: {name}");
+            cx.update(|cx| cx.refresh_windows());
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        "ext-popup" => {
+            anyhow::ensure!(!rest.is_empty(), "browser ext-popup needs a script");
+            let answer = cx.update(|_| crate::panels::browser_extensions::webkit::popup_eval(rest));
+            let text = answer
+                .recv()
+                .await
+                .map_err(|_| anyhow::anyhow!("browser ext-popup: the popup closed"))?
+                .map_err(|e| anyhow::anyhow!("browser ext-popup: {e}"))?;
+            std::fs::write(dir.join("browser-popup.txt"), text)?;
+            Ok(())
+        }
+        #[cfg(target_os = "macos")]
+        "ext-options" => {
+            crate::panels::browser_extensions::options_for_driver(rest)
+                .map_err(|e| anyhow::anyhow!("browser ext-options: {e}"))?;
+            Ok(())
+        }
         _ => {
             // The page takes the keys as a click does, in the front window: AppKit hands them to
             // its own view again when the window comes to the front.
