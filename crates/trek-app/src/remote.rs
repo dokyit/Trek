@@ -43,6 +43,7 @@ mod icons;
 pub mod link;
 mod machines;
 mod notes;
+pub mod phone_update;
 mod queue;
 pub mod search;
 mod settings;
@@ -788,7 +789,14 @@ impl Workspace {
                     });
                     config.devices_path = Some(mobile_dir().join("devices.json"));
                     config.tls = Some(identity);
-                    config.features = tr::feature::ALL.iter().map(|f| f.to_string()).collect();
+                    // The iPhone app builds on a Mac only (Xcode).
+                    config.features = tr::feature::ALL
+                        .iter()
+                        .filter(|f| cfg!(target_os = "macos") || **f != tr::feature::UPDATE_PHONE)
+                        .map(|f| f.to_string())
+                        .collect();
+                    #[cfg(target_os = "macos")]
+                    phone_update::refresh_agent_copy();
                     let (host, requests) = tr::ChannelHost::new();
                     let host = Arc::new(host);
                     let handle = trek_core::runtime()
@@ -961,6 +969,7 @@ impl Workspace {
                         &snapshot.projects,
                         &snapshot.agents,
                         snapshot.full_access,
+                        &snapshot.release,
                     )));
                 }
                 let _ = reply.send(Ok(snapshot));
@@ -1114,6 +1123,12 @@ impl Workspace {
                 files,
                 reply,
             } => self.remote_put_files(&project_id, files, reply, cx),
+            tr::HostRequest::UpdatePhone { req, reply } => {
+                let _ = reply.send(
+                    self.update_phone(req.version, cx)
+                        .map_err(tr::HostError::other),
+                );
+            }
         }
     }
 
@@ -1874,6 +1889,7 @@ impl Workspace {
             agents,
             full_access,
             unlisted,
+            release: Some(phone_update::release(&self.updater)),
         }
     }
 
@@ -2380,8 +2396,10 @@ impl Workspace {
         // Projects, agents and their models, Full access: only a snapshot carries them, so a new
         // one goes when they change (agents found or signed in after a phone connected, models
         // fetched, a project added, Full access unlocked).
+        // And the newest Trek this Mac knows of, which phones offer to update to.
         let choices = self.remote_choices();
-        let choices_key = hash(&choices);
+        let release = Some(phone_update::release(&self.updater));
+        let choices_key = hash(&(&choices.0, &choices.1, choices.2, &release));
         let snapshot = (remote.snapshot_key != Some(choices_key)).then(|| {
             let threads: Vec<tr::ThreadSummary> = self
                 .remote_threads()
@@ -2396,6 +2414,7 @@ impl Workspace {
                 agents,
                 full_access,
                 unlisted,
+                release,
             }
         });
         let Some(remote) = self.remote.as_mut() else {

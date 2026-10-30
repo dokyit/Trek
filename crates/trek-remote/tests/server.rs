@@ -2514,3 +2514,66 @@ unsafe extern "C" {
     #[link_name = "if_nametoindex"]
     fn libc_if_nametoindex(name: *const std::ffi::c_char) -> u32;
 }
+
+#[tokio::test]
+async fn the_iphone_app_is_updated_when_a_phone_asks() {
+    let mut config = ServerConfig::new(host_info());
+    config.bind = "127.0.0.1:0".parse().unwrap();
+    config.features = vec![feature::UPDATE_PHONE.into()];
+    let (host, requests) = ChannelHost::new();
+    let handle = RemoteServer::start(config, Arc::new(host)).await.unwrap();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    tokio::spawn(async move {
+        while let Ok(req) = requests.recv().await {
+            match req {
+                HostRequest::Snapshot { reply } => drop(reply.send(Ok(Snapshot::default()))),
+                HostRequest::UpdatePhone { req, reply } => {
+                    seen.lock().unwrap().push(req.version);
+                    drop(reply.send(Ok(())));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    });
+    let (mut a, _) = pair(&handle, "phone-a").await;
+    let (mut b, _) = pair(&handle, "phone-b").await;
+    send(
+        &mut a,
+        json!({"type": "update_phone", "id": "4", "version": "0.4.28"}),
+    )
+    .await;
+    let ack = recv(&mut a).await;
+    assert_eq!(
+        (ack["type"].as_str(), ack["re"].as_str()),
+        (Some("ack"), Some("4"))
+    );
+    assert_eq!(*asked.lock().unwrap(), vec![Some("0.4.28".to_string())]);
+
+    // Every phone hears how it goes: the one that asked closes when the app is installed over it.
+    handle.push(HostEvent::PhoneUpdate(PhoneUpdate {
+        state: PhoneUpdateState::Building,
+        version: Some("0.4.28".into()),
+        message: None,
+    }));
+    let building = json!({"type": "phone_update", "state": "building", "version": "0.4.28"});
+    assert_eq!(recv(&mut a).await, building);
+    assert_eq!(recv(&mut b).await, building);
+}
+
+#[tokio::test]
+async fn a_mac_that_cant_update_the_iphone_app_says_so() {
+    let (handle, _) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    send(&mut c, json!({"type": "update_phone", "id": "9"})).await;
+    let reply = recv(&mut c).await;
+    assert_eq!(
+        (
+            reply["type"].as_str(),
+            reply["re"].as_str(),
+            reply["code"].as_str()
+        ),
+        (Some("error"), Some("9"), Some("bad_request"))
+    );
+    assert_eq!(reply["message"], "This Mac can't update the iPhone app");
+}

@@ -39,6 +39,8 @@ USAGE:
     trek-mcp browser      browser use in Trek's Browser tool (run by the Trek that started the agent)
     trek-mcp phone        the user's real iPhone through Trek's iPhone tool (macOS)
     trek-mcp phone-device the iPhone's apps and files over USB, no Xcode (run alone for help)
+    trek-mcp mac-update [--status] [--app PATH]
+                          update the installed Trek while it's closed (macOS)
     trek-mcp --version
 ";
 
@@ -89,8 +91,13 @@ fn main() {
             let rest: Vec<String> = std::env::args().skip(2).collect();
             std::process::exit(phone::device_cli(&rest));
         }
+        #[cfg(target_os = "macos")]
+        "mac-update" => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            std::process::exit(mac_update(&rest));
+        }
         #[cfg(not(target_os = "macos"))]
-        "phone" | "phone-device" => {
+        "phone" | "phone-device" | "mac-update" => {
             eprintln!("trek-mcp: the {arg} tools run only on macOS");
             std::process::exit(2);
         }
@@ -106,6 +113,41 @@ fn main() {
         other => {
             eprintln!("trek-mcp: unknown or missing tool family {other:?}\n\n{USAGE}");
             std::process::exit(2);
+        }
+    }
+}
+
+/// `trek-mcp mac-update`: Trek's own updater for the installed app while Trek is closed
+/// (`trek_core::update::closed`), for the phone updater's LaunchAgent. `--app` is the bundle (by
+/// default the one this `trek-mcp` is in, else /Applications/Trek.app); `--status` says what it
+/// would do. Prints one line; exits 1 when the update failed, 2 on bad arguments.
+#[cfg(target_os = "macos")]
+fn mac_update(args: &[String]) -> i32 {
+    let mut status = false;
+    let mut app = None;
+    let mut args = args.iter();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--status" => status = true,
+            "--app" => app = args.next().map(std::path::PathBuf::from),
+            other => {
+                eprintln!("trek-mcp mac-update: unknown argument {other:?}\n\n{USAGE}");
+                return 2;
+            }
+        }
+    }
+    let app = app
+        .or_else(trek_core::update::running_bundle)
+        .unwrap_or_else(|| "/Applications/Trek.app".into());
+    let run = trek_core::update::closed::update(&app, !status);
+    match trek_core::runtime().block_on(run) {
+        Ok(line) => {
+            println!("{line}");
+            0
+        }
+        Err(e) => {
+            println!("{e:#}");
+            1
         }
     }
 }

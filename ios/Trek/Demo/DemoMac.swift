@@ -7,6 +7,19 @@ enum DemoMac {
     static let claude = AgentRef(key: "claude-code", name: "Claude Code", logo: "claude-code")
     static let codex = AgentRef(key: "codex", name: "Codex", logo: "codex")
 
+    /// The newest Trek the demo Mac knows of: `-TrekDemoRelease 0.4.28` (or "newer": a step past
+    /// this app) is a release its updater found, with a line of notes, so the update offer shows;
+    /// else the version it runs.
+    static func release(running: String) -> TrekRelease {
+        guard var version = UserDefaults.standard.string(forKey: "TrekDemoRelease") else { return TrekRelease(version: running) }
+        if version == "newer" {
+            var parts = ClientMessage.appVersion.split(separator: ".").map { Int($0) ?? 0 }
+            parts[parts.count - 1] += 1
+            version = parts.map(String.init).joined(separator: ".")
+        }
+        return TrekRelease(version: version, note: "Update the iPhone app from the iPhone: the Mac builds and installs it when you tap Update now.")
+    }
+
     // MARK: Thread details
 
     /// The details a Mac row carries, for the seeded threads (context, cost, sub-agents…).

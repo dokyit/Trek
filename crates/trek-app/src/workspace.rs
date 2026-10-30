@@ -1400,6 +1400,8 @@ pub struct Workspace {
     pub remote_starting: bool,
     /// Why the phone server last failed to start; it's tried again shortly (`remote::RETRY`).
     pub remote_error: Option<String>,
+    /// An update of the iPhone app run from here (`remote::phone_update`).
+    pub phone_update: crate::remote::phone_update::PhoneUpdates,
     pub remote_retry: Option<Task<()>>,
     pub settled_open: bool,
     /// The sidebar's search text. Change it with `set_search`, which also searches messages.
@@ -1896,6 +1898,7 @@ impl Workspace {
             machines: Default::default(),
             remote_starting: false,
             remote_error: None,
+            phone_update: Default::default(),
             remote_retry: None,
             settled_open: false,
             search: String::new(),

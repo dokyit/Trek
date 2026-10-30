@@ -9497,6 +9497,7 @@ dependencies = [
  "png 0.18.1",
  "serde_json",
  "tokio",
+ "trek-core",
  "trek-ipc",
  "trek-phone",
  "trek-test-fixtures",

@@ -18,7 +18,9 @@ use crate::protocol::{
     SearchResults, SendRequest, SettingsChange, Snapshot, ThreadActionRequest, ThreadSummary,
     Transcript, TranscriptPage, TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
-use crate::protocol::{CloneProjectRequest, FileUpload, MachineInfo, ServerMessage};
+use crate::protocol::{
+    CloneProjectRequest, FileUpload, MachineInfo, PhoneUpdate, ServerMessage, UpdatePhoneRequest,
+};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -376,6 +378,14 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("receive files")
     }
 
+    /// Build Trek for the iPhone and install it (`phone_update.rs`, feature `update_phone`):
+    /// return once it has started (a run already going counts), and report how it goes through
+    /// [`HostEvent::PhoneUpdate`]. A Mac that can't start it says why, in plain words.
+    fn update_phone(&self, req: UpdatePhoneRequest) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = req;
+        unsupported("update the iPhone app")
+    }
+
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -407,6 +417,8 @@ pub enum HostEvent {
     Item { thread_id: String, item: Item },
     /// The thread was rewound or rewritten; subscribers re-subscribe (to phones subscribed to it).
     TranscriptReset(String),
+    /// How an iPhone update is going, as `phone_update` (to every authenticated phone).
+    PhoneUpdate(PhoneUpdate),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -598,6 +610,11 @@ pub enum HostRequest {
     PutFiles {
         project_id: String,
         files: Vec<FileUpload>,
+        reply: Reply<()>,
+    },
+    /// See [`RemoteHost::update_phone`].
+    UpdatePhone {
+        req: UpdatePhoneRequest,
         reply: Reply<()>,
     },
 }
@@ -901,5 +918,10 @@ impl RemoteHost for ChannelHost {
             reply,
         })
         .await
+    }
+
+    async fn update_phone(&self, req: UpdatePhoneRequest) -> HostResult<()> {
+        self.call(|reply| HostRequest::UpdatePhone { req, reply })
+            .await
     }
 }
