@@ -187,6 +187,8 @@ mod tests {
     }
 
     /// The install step against a bundle in a temporary folder, standing in for /Applications.
+    /// The swap is the Mac updater's (`renamex_np`, `ditto`): there is no bundle on Windows.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_closed_trek_is_swapped_and_its_next_launch_knows_from_what() {
         let dir = std::env::temp_dir().join(format!("trek-closed-{}", uuid::Uuid::new_v4()));
