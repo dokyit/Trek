@@ -4030,7 +4030,8 @@ mod tests {
     }
 
     /// `response` with a usage chunk (prompt 100, 40 of it cached, output 5) before its end, and
-    /// OpenRouter's `cost` when given.
+    /// OpenRouter's `cost` when given. Its tests run a real shell, so unix only, as they are.
+    #[cfg(unix)]
     fn with_usage((status, body): (u16, String), cost: Option<f64>) -> (u16, String) {
         let mut usage = json!({ "prompt_tokens": 100, "completion_tokens": 5, "prompt_tokens_details": { "cached_tokens": 40 } });
         if let Some(cost) = cost {
