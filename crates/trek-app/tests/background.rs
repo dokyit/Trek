@@ -193,6 +193,13 @@ fn background_work_that_reports_makes_the_agent_work_again() {
         // Watching through the checks below: a loaded runner can take seconds to reach them.
         let id = trek.send(cx, "mock:watch 8s");
         trek.wait_done(cx, &id, RunState::Idle).await;
+        // The turn the watcher wakes the agent for is held at work until the checks on it are
+        // made: it is a quarter of a second otherwise, which a loaded runner can go past between
+        // two looks.
+        let session = trek
+            .read(cx, |ws, _| ws.thread(&id).and_then(|t| t.native_id.clone()))
+            .expect("a session");
+        trek_agents::mock::hold_wake(&session);
         assert_eq!(
             section(&trek, cx, &id),
             Some(Section::Inbox),
@@ -209,6 +216,7 @@ fn background_work_that_reports_makes_the_agent_work_again() {
         })
         .await;
         assert_eq!(section(&trek, cx, &id), Some(Section::Working));
+        trek_agents::mock::release_wake(&session);
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(
             trek.answers(cx, &id).contains("caught a failure"),
