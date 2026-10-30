@@ -1260,13 +1260,12 @@ async fn run_bash_command(
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<(String, bool)> {
-    let ran = match until_stopped(exec.exec(command, cwd, timeout), commands, kept, shutdown)
-        .await?
-    {
-        Ok(ran) => ran,
-        Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => return Err(e),
-        Err(e) => return Ok((format!("Failed to execute command: {e:#}"), false)),
-    };
+    let ran =
+        match until_stopped(exec.exec(command, cwd, timeout), commands, kept, shutdown).await? {
+            Ok(ran) => ran,
+            Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => return Err(e),
+            Err(e) => return Ok((format!("Failed to execute command: {e:#}"), false)),
+        };
     let ok = ran.success();
     let mut out = ran.stdout;
     if !ran.stderr.is_empty() {
@@ -1288,7 +1287,9 @@ async fn run_bash_command(
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!("[Command timed out after {limit} seconds and was stopped]"));
+        out.push_str(&format!(
+            "[Command timed out after {limit} seconds and was stopped]"
+        ));
     }
     if out.trim().is_empty() {
         out = "(Command finished with no output)".to_string();
@@ -1313,9 +1314,8 @@ async fn read_text(
     path_str: &str,
 ) -> Result<std::result::Result<String, String>> {
     match exec.read(path).await {
-        Ok(Some(bytes)) => Ok(String::from_utf8(bytes).map_err(|_| {
-            format!("Error reading {path_str}: stream did not contain valid UTF-8")
-        })),
+        Ok(Some(bytes)) => Ok(String::from_utf8(bytes)
+            .map_err(|_| format!("Error reading {path_str}: stream did not contain valid UTF-8"))),
         Ok(None) => Ok(Err(format!("File not found: {path_str}"))),
         Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => Err(e),
         Err(e) => Ok(Err(format!("Error reading {path_str}: {e:#}"))),
@@ -3947,7 +3947,9 @@ mod tests {
             ("Failed to execute command: no shell here", false)
         );
         // An executor that's gone ends the turn instead of telling the model.
-        let e = tool("bash", json!({ "command": "gone" })).await.unwrap_err();
+        let e = tool("bash", json!({ "command": "gone" }))
+            .await
+            .unwrap_err();
         assert!(e.downcast_ref::<ExecutorGone>().is_some());
         // The script tool isn't offered without a host.
         let (out, ok, _) = tool("script", json!({ "code": "1" })).await.unwrap();
@@ -4021,7 +4023,10 @@ mod tests {
             usage["cost"] = json!(cost);
         }
         let chunk = format!("data: {}\n\n", json!({ "choices": [], "usage": usage }));
-        (status, body.replace("data: [DONE]", &format!("{chunk}data: [DONE]")))
+        (
+            status,
+            body.replace("data: [DONE]", &format!("{chunk}data: [DONE]")),
+        )
     }
 
     #[cfg(unix)]

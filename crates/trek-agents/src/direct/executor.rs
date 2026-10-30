@@ -272,7 +272,10 @@ impl StdioExecutor {
             }
             Err(_) => {
                 self.pending.lock().unwrap().waiting.remove(&id);
-                bail!("the sandbox didn't answer within {} seconds", limit.as_secs());
+                bail!(
+                    "the sandbox didn't answer within {} seconds",
+                    limit.as_secs()
+                );
             }
         };
         if let Some(e) = reply.get("error").filter(|e| !e.is_null()) {
@@ -422,7 +425,10 @@ mod tests {
         assert_eq!(out.stderr, "warn");
         assert_eq!(out.exit_code, Some(3));
         assert!(!out.timed_out && !out.success());
-        let e = exec.exec("fail", Path::new("/app"), None).await.unwrap_err();
+        let e = exec
+            .exec("fail", Path::new("/app"), None)
+            .await
+            .unwrap_err();
         assert_eq!(e.to_string(), "no shell");
         assert!(e.downcast_ref::<ExecutorGone>().is_none());
 

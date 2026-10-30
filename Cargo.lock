@@ -9311,6 +9311,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-bench"
+version = "0.4.26"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+ "trek-agents",
+ "trek-core",
+]
+
+[[package]]
 name = "trek-brand"
 version = "0.4.26"
 dependencies = [
