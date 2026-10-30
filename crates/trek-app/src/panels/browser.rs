@@ -1692,6 +1692,9 @@ impl BrowserPanel {
         cx: &mut Context<Self>,
     ) {
         self.stop_picking(cx);
+        // A new Browser's own start tab arrives after its view is built, which can be after the
+        // Extensions page was asked for (Settings' Extensions… opens both at once): it stays.
+        let first = self.tabs.is_empty() && url == START_URL;
         self.tabs.push(Tab {
             id,
             view,
@@ -1716,7 +1719,10 @@ impl BrowserPanel {
         }
         self.sync_scheme(cx);
         self.active = id;
-        self.extensions = None;
+        let keep_extensions = first && self.extensions.is_some();
+        if !keep_extensions {
+            self.extensions = None;
+        }
         // An ad blocker imported before this Browser had a view installs into this one.
         #[cfg(windows)]
         self.sync_adblock(cx);
@@ -1737,7 +1743,7 @@ impl BrowserPanel {
         if popup.is_none() || url != "about:blank" {
             self.watch_load(id, 1, url.to_string(), cx);
         }
-        if url == START_URL {
+        if url == START_URL && !keep_extensions {
             self.start_editing(window, cx);
         } else {
             self.editing = false;
