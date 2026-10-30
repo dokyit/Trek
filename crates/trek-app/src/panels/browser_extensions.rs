@@ -1,12 +1,26 @@
-//! The Browser's extensions (Windows). WebView2 runs unpacked Chromium extensions, loaded into
-//! the browser's profile, where they stay from one run to the next: `AddBrowserExtension` from a
-//! folder, then each one listed, turned on or off, or removed. There's no store in WebView2 and
-//! no toolbar for an extension's own button or popup; what runs is what works without them
-//! (content scripts: ad blockers, dark modes, password fillers' autofill). So this page takes a
-//! Chrome Web Store or Edge Add-ons link (the store's CRX download, unpacked here) or a folder.
+//! The Browser's extensions, and the Extensions page that finds, installs and manages them. The
+//! page is the same everywhere (and tested on a Mac); `backend` is each system's own:
 //!
-//! WKWebView (macOS) can't run extensions of any kind: Safari Web Extensions load in Safari only.
-//! The page's logic is the same everywhere (and tested on a Mac); only `native` talks to WebView2.
+//! - Windows: WebView2 runs unpacked Chromium extensions, loaded into the browser's profile,
+//!   where they stay from one run to the next (`AddBrowserExtension`, then each one listed,
+//!   turned on or off, or removed). It shows no toolbar for an extension's own button or popup;
+//!   what runs is what works without them (content scripts: ad blockers, dark modes).
+//! - macOS 15.4 and later: WebKit's own Web Extensions (`webkit`), which run the same Chrome
+//!   packages: background service workers, content scripts, declarativeNetRequest rules, an
+//!   extension's toolbar button and popup, its options page. Trek keeps what's installed
+//!   (`registry`) and asks before an extension gets more than it was installed with.
+//!
+//! Extensions come from a Chrome Web Store (or Edge Add-ons) link or id, whose CRX the store
+//! sends and Trek unpacks; a `.zip` or `.crx` file; or an unpacked folder, run where it is. The
+//! page's starter list (`catalog`) says which well-known ones work here. Nothing ships with Trek.
+//! Before anything installs, the page shows what it may do (`manifest`), and waits for Install.
+
+pub mod catalog;
+pub mod manifest;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // WebView2 keeps its own list.
+pub mod registry;
+#[cfg(target_os = "macos")]
+pub mod webkit;
 
 use crate::ui;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -14,13 +28,17 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gpui_wry::WebView;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// The Extensions page's address: the Browser opens the page for it (Settings links here).
+pub const PAGE_URL: &str = "trek://extensions";
 
 /// A store an extension can be installed from, by its link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,12 +47,21 @@ pub enum Store {
     Edge,
 }
 
-/// An installed extension, as WebView2 lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An installed extension, as the backend lists it (WebView2 tells only its id, name and state).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extension {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub version: String,
+    pub icon: Option<PathBuf>,
+    pub has_options: bool,
+    /// What it may do, in words (`manifest::describe`).
+    pub permissions: Vec<String>,
+    /// What went wrong running it (WebKit's errors: an API it lacks stops a background).
+    pub problems: Vec<String>,
+    /// It doesn't run: it didn't load, or its background stopped at an error.
+    pub broken: bool,
 }
 
 /// A store's extension ids: 32 letters a–p (a key's hash, in Chromium's own alphabet).
@@ -115,10 +142,15 @@ pub fn extensions_dir() -> PathBuf {
     super::browser::webview_data_dir().with_file_name("WebView2-extensions")
 }
 
-/// (Nothing installs elsewhere: the page is offered on Windows only.)
+/// Where extensions are unpacked (one folder each, by id) and listed (`registry`): Trek's data.
 #[cfg(not(windows))]
 pub fn extensions_dir() -> PathBuf {
-    std::env::temp_dir().join("trek-browser-extensions")
+    trek_core::paths::data_dir().join("browser-extensions")
+}
+
+/// Where a download or a package waits, unpacked, for the user to install it.
+fn incoming_dir() -> PathBuf {
+    extensions_dir().join(".incoming")
 }
 
 /// Unpack the CRX `bytes` into `dest` (replacing what was there). Chromium refuses to load a
@@ -149,8 +181,8 @@ pub fn unpack_crx(bytes: &[u8], dest: &Path) -> Result<(), String> {
     std::fs::rename(&staging, dest).map_err(|e| e.to_string())
 }
 
-/// Download extension `id` from `store` and unpack it into its folder (`extensions_dir`), on
-/// Trek's runtime; the folder, for WebView2.
+/// Download extension `id` from `store` and unpack it to wait for the user (`incoming_dir`), on
+/// Trek's runtime; the folder.
 fn download(store: Store, id: String) -> async_channel::Receiver<Result<PathBuf, String>> {
     const MAX_BYTES: usize = 64 << 20;
     let (tx, rx) = async_channel::bounded(1);
@@ -170,11 +202,39 @@ fn download(store: Store, id: String) -> async_channel::Receiver<Result<PathBuf,
             if bytes.len() > MAX_BYTES {
                 return Err("The extension is too large.".to_string());
             }
-            let dest = extensions_dir().join(&id);
+            let dest = incoming_dir().join(&id);
             unpack_crx(&bytes, &dest)?;
             Ok(dest)
         }
         .await;
+        let _ = tx.send(result).await;
+    });
+    rx
+}
+
+/// Unpack the `.zip` or `.crx` at `path` to wait for the user (`incoming_dir`), under the id its
+/// manifest's key gives it (else one from its bytes); the folder.
+fn unpack_file(path: PathBuf) -> async_channel::Receiver<Result<PathBuf, String>> {
+    let (tx, rx) = async_channel::bounded(1);
+    trek_core::runtime().spawn(async move {
+        let result = (|| {
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            let staging = incoming_dir().join(format!("file-{}", std::process::id()));
+            unpack_crx(&bytes, &staging)?;
+            let m = manifest::read(&staging)?;
+            let id = m.key_id.clone().unwrap_or_else(|| {
+                use sha2::Digest as _;
+                let hash = sha2::Sha256::digest(&bytes);
+                hash[..16]
+                    .iter()
+                    .flat_map(|b| [b >> 4, b & 0xf])
+                    .map(|n| (b'a' + n) as char)
+                    .collect()
+            });
+            let dest = incoming_dir().join(&id);
+            registry::replace_dir(&staging, &dest)?;
+            Ok(dest)
+        })();
         let _ = tx.send(result).await;
     });
     rx
@@ -224,6 +284,7 @@ mod native {
             id: text(|p| unsafe { ext.Id(p) }),
             name: text(|p| unsafe { ext.Name(p) }),
             enabled: enabled.as_bool(),
+            ..Default::default()
         }
     }
 
@@ -333,26 +394,68 @@ mod native {
     }
 }
 
-/// Elsewhere there are no extensions (and the page isn't offered: see `available`).
-#[cfg(not(windows))]
-mod native {
+/// Each system's extension calls, answered on a channel (WebView2's once it has, WebKit's at once).
+/// WebView2's are on a Browser view's profile, so they need one; WebKit's are the app's.
+mod backend {
     use super::Extension;
+    use std::path::Path;
 
     pub type Reply<T> = async_channel::Receiver<Result<T, String>>;
 
-    fn none<T>() -> Reply<T> {
+    #[cfg_attr(windows, allow(dead_code))]
+    fn now<T>(answer: Result<T, String>) -> Reply<T> {
         let (tx, rx) = async_channel::bounded(1);
-        let _ = tx.try_send(Err("Extensions run on Windows only.".to_string()));
+        let _ = tx.try_send(answer);
         rx
     }
-    pub fn list(_: &wry::WebView) -> Reply<Vec<Extension>> {
-        none()
+
+    #[cfg(windows)]
+    const NO_VIEW: &str = "Open a page in the Browser first.";
+
+    #[cfg(windows)]
+    pub fn list(wv: Option<&wry::WebView>) -> Reply<Vec<Extension>> {
+        wv.map(super::native::list)
+            .unwrap_or_else(|| now(Err(NO_VIEW.into())))
     }
-    pub fn add(_: &wry::WebView, _: &std::path::Path) -> Reply<Extension> {
-        none()
+    #[cfg(windows)]
+    pub fn add(wv: Option<&wry::WebView>, folder: &Path, _id: &str) -> Reply<Extension> {
+        wv.map(|wv| super::native::add(wv, folder))
+            .unwrap_or_else(|| now(Err(NO_VIEW.into())))
     }
-    pub fn change(_: &wry::WebView, _: String, _: Option<bool>) -> Reply<()> {
-        none()
+    #[cfg(windows)]
+    pub fn change(wv: Option<&wry::WebView>, id: String, enable: Option<bool>) -> Reply<()> {
+        wv.map(|wv| super::native::change(wv, id, enable))
+            .unwrap_or_else(|| now(Err(NO_VIEW.into())))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn list(_: Option<&wry::WebView>) -> Reply<Vec<Extension>> {
+        now(if super::webkit::ensure() {
+            Ok(super::webkit::list())
+        } else {
+            Err(super::webkit::unsupported())
+        })
+    }
+    #[cfg(target_os = "macos")]
+    pub fn add(_: Option<&wry::WebView>, folder: &Path, id: &str) -> Reply<Extension> {
+        now(super::webkit::add(folder, id))
+    }
+    #[cfg(target_os = "macos")]
+    pub fn change(_: Option<&wry::WebView>, id: String, enable: Option<bool>) -> Reply<()> {
+        now(super::webkit::change(&id, enable))
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn list(_: Option<&wry::WebView>) -> Reply<Vec<Extension>> {
+        now(Err("This Browser runs no extensions.".into()))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn add(_: Option<&wry::WebView>, _: &Path, _: &str) -> Reply<Extension> {
+        now(Err("This Browser runs no extensions.".into()))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    pub fn change(_: Option<&wry::WebView>, _: String, _: Option<bool>) -> Reply<()> {
+        now(Err("This Browser runs no extensions.".into()))
     }
 }
 
@@ -366,23 +469,456 @@ pub fn install(
     native::add(wv, folder)
 }
 
-/// Whether this Browser can run extensions (and offers the page): WebView2's can.
-pub const AVAILABLE: bool = cfg!(windows);
+/// Whether this Browser can run extensions (and offers the page): WebView2's can, and WebKit's
+/// (the page says so where macOS is older than 15.4).
+pub const AVAILABLE: bool = cfg!(any(windows, target_os = "macos"));
+
+/// Settings › Browser's line on extensions: where they come from, and (macOS) what's installed.
+pub fn settings_summary() -> String {
+    let what = "Chrome Web Store extensions in the Browser: find, install and manage them on its \
+                Extensions page (also in the Browser's ⋯ menu).";
+    #[cfg(target_os = "macos")]
+    {
+        if !webkit::supported() {
+            return format!("{what} {}", webkit::unsupported());
+        }
+        let all = registry::load(&extensions_dir());
+        let on = all.iter().filter(|e| e.enabled).count();
+        match all.len() {
+            0 => what.to_string(),
+            n => format!("{what} {n} installed, {on} on."),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    what.to_string()
+}
+
+/// Whether extensions run here now: WebKit's need macOS 15.4.
+fn supported() -> bool {
+    #[cfg(target_os = "macos")]
+    return webkit::supported();
+    #[cfg(not(target_os = "macos"))]
+    return AVAILABLE;
+}
+
+/// A new Browser view's WebKit configuration, with the extensions in it (macOS 15.4 and later).
+#[cfg(target_os = "macos")]
+pub fn webview_configuration() -> Option<objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration>>
+{
+    webkit::configuration()
+}
+
+/// Tell the extensions about Browser `key`'s tabs and which is in front (macOS: `tabs.query`,
+/// `tabs.onActivated` and the like). `open_tab` opens an address in a new tab of it.
+#[cfg(target_os = "macos")]
+pub fn sync_tabs<'a>(
+    key: u64,
+    tabs: impl Iterator<Item = (u64, &'a wry::WebView)>,
+    active: u64,
+    open_tab: impl Fn(String) + 'static,
+) {
+    use wry::WebViewExtMacOS as _;
+    if !webkit::supported() {
+        return;
+    }
+    let tabs = tabs
+        .map(|(id, wv)| (id, objc2::rc::Retained::into_super(wv.webview())))
+        .collect();
+    webkit::sync_tabs(key, tabs, active, std::rc::Rc::new(open_tab));
+}
+
+/// Redraw the app when an extension changes something the Browser shows (macOS: WebKit tells
+/// Trek outside GPUI). Once.
+#[cfg(target_os = "macos")]
+fn wake_on_change(cx: &mut App) {
+    if webkit::has_waker() {
+        return;
+    }
+    let (tx, rx) = async_channel::unbounded();
+    webkit::set_waker(tx);
+    cx.spawn(async move |cx| {
+        while rx.recv().await.is_ok() {
+            while rx.try_recv().is_ok() {}
+            cx.update(|cx| cx.refresh_windows());
+        }
+    })
+    .detach();
+}
+
+/// The toolbar's room for extensions' buttons: past it the address field gets too narrow in a
+/// panel beside the chat, so the rest are behind one button (`more`: the Extensions page, where
+/// each one's icon opens its popup too).
+const TOOLBAR_BUTTONS: usize = 2;
+
+/// The extensions' own toolbar buttons, for the Browser's toolbar (macOS): each opens its popup
+/// under it, as WebKit presents it, or tells the extension it was clicked. `more` opens the
+/// Extensions page, for the buttons that don't fit.
+pub fn toolbar(
+    window: &mut Window,
+    cx: &mut App,
+    more: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Vec<AnyElement> {
+    #[cfg(target_os = "macos")]
+    {
+        if !webkit::supported() {
+            return vec![];
+        }
+        wake_on_change(cx);
+        webkit::sync_tab_properties();
+        let theme = cx.theme().clone();
+        let _ = window;
+        let actions = webkit::actions();
+        let hidden = actions.len().saturating_sub(TOOLBAR_BUTTONS);
+        let overflow = (hidden > 0).then(|| {
+            div()
+                .id("browser-extensions-more")
+                .test_support()
+                .child(
+                    Button::new("browser-extensions-more-button")
+                        .ghost()
+                        .small()
+                        .w(px(28.))
+                        .h(px(28.))
+                        .icon(Icon::new(crate::assets::Lucide::Puzzle))
+                        .tooltip(format!("{hidden} more extensions"))
+                        .on_click(more),
+                )
+                .into_any_element()
+        });
+        actions
+            .into_iter()
+            .take(TOOLBAR_BUTTONS)
+            .enumerate()
+            .map(|(ix, action)| {
+                let id = action.id.clone();
+                let icon: AnyElement = match &action.icon {
+                    Some(path) => img(path.clone()).size(px(16.)).into_any_element(),
+                    None => Icon::new(crate::assets::Lucide::Puzzle)
+                        .small()
+                        .into_any_element(),
+                };
+                let badge = (!action.badge.is_empty()).then(|| {
+                    div()
+                        .absolute()
+                        .bottom(px(1.))
+                        .right(px(0.))
+                        .px(px(3.))
+                        .rounded(px(4.))
+                        .bg(crate::palette::ember(cx))
+                        .text_color(gpui::white())
+                        .text_size(px(8.5))
+                        .line_height(px(11.))
+                        .child(action.badge.clone())
+                });
+                div()
+                    .id(("browser-extension-action", ix))
+                    .test_support()
+                    .relative()
+                    .child(
+                        Button::new(("browser-extension-action-button", ix))
+                            .ghost()
+                            .small()
+                            .w(px(28.))
+                            .h(px(28.))
+                            .tooltip(if action.label.is_empty() {
+                                id.clone()
+                            } else {
+                                action.label.clone()
+                            })
+                            .disabled(!action.enabled)
+                            .child(icon)
+                            .on_click(move |event, window, _| {
+                                let at = event.position();
+                                click_action(&id, at, window);
+                            }),
+                    )
+                    .children(badge)
+                    .text_color(theme.foreground)
+                    .into_any_element()
+            })
+            .chain(overflow)
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, cx, more);
+        vec![]
+    }
+}
+
+/// Click extension `id`'s toolbar button, pressed at `at` (window points): its popup shows under
+/// the button.
+#[cfg(target_os = "macos")]
+fn click_action(id: &str, at: Point<Pixels>, window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: `ns_view` is the live NSView GPUI made for this window, on the main thread.
+    let Some(view) = (unsafe {
+        objc2::rc::Retained::retain(appkit.ns_view.as_ptr().cast::<objc2_app_kit::NSView>())
+    }) else {
+        return;
+    };
+    // The button's square, from where it was pressed: 28 points, centred on the toolbar's row.
+    let rect = objc2_foundation::NSRect::new(
+        objc2_foundation::NSPoint::new(
+            f64::from(f32::from(at.x)) - 14.,
+            f64::from(f32::from(at.y)) - 14.,
+        ),
+        objc2_foundation::NSSize::new(28., 28.),
+    );
+    webkit::perform_action(id, view, rect);
+}
+
+/// Extensions' requests for more than they were installed with, as strips above the page: what
+/// it asks, Don't allow and Allow (macOS; WebKit waits for the answer).
+pub fn prompt_strips(cx: &mut App) -> Vec<AnyElement> {
+    #[cfg(target_os = "macos")]
+    {
+        if !webkit::supported() {
+            return vec![];
+        }
+        let theme = cx.theme().clone();
+        let amber = crate::palette::amber(cx);
+        webkit::prompts()
+            .into_iter()
+            .map(|p| {
+                let (deny, allow) = (p.id, p.id);
+                h_flex()
+                    .id(("browser-extension-prompt", p.id))
+                    .min_h(px(36.))
+                    .px(px(12.))
+                    .py(px(6.))
+                    .gap(px(10.))
+                    .text_xs()
+                    .bg(amber.opacity(0.1))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        Icon::new(crate::assets::Lucide::ShieldCheck)
+                            .xsmall()
+                            .text_color(amber),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().font_medium().child(format!("{} wants to:", p.name)))
+                            .children(p.asks.iter().map(|a| {
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("• {a}"))
+                            })),
+                    )
+                    .child(
+                        Button::new(("browser-extension-deny", p.id))
+                            .small()
+                            .ghost()
+                            .label("Don't allow")
+                            .on_click(move |_, _, cx| {
+                                webkit::answer(deny, false);
+                                cx.refresh_windows();
+                            }),
+                    )
+                    .child(
+                        Button::new(("browser-extension-allow", p.id))
+                            .small()
+                            .primary()
+                            .label("Allow")
+                            .on_click(move |_, _, cx| {
+                                webkit::answer(allow, true);
+                                cx.refresh_windows();
+                            }),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cx;
+        vec![]
+    }
+}
+
+/// Answer the first waiting prompt (the shots driver's `ext-allow` / `ext-deny`).
+pub fn answer_prompt(allow: bool) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let p = webkit::prompts()
+            .into_iter()
+            .next()
+            .ok_or("No extension is asking.")?;
+        webkit::answer(p.id, allow);
+        Ok(p.name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = allow;
+        Err("Extensions ask nothing here.".into())
+    }
+}
+
+/// Install from what the shots driver names: a folder, a `.zip`/`.crx` file, or a store link or
+/// id (downloaded). No prompt: the driver stands in for the user's Install. The extension's name.
+pub async fn install_for_driver(
+    spec: String,
+    view: Option<Entity<WebView>>,
+    cx: &mut AsyncApp,
+) -> Result<String, String> {
+    let path = PathBuf::from(&spec);
+    let folder = if path.is_dir() {
+        path
+    } else if path.is_file() {
+        unpack_file(path)
+            .recv()
+            .await
+            .map_err(|e| e.to_string())??
+    } else {
+        let (store, id) = store_id(&spec).ok_or("Not a folder, a package or a store id.")?;
+        download(store, id)
+            .recv()
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    let m = manifest::read(&folder)?;
+    let (folder, id) = settle(&folder, &m)?;
+    let reply = cx.update(|cx| backend::add(view.as_ref().map(|v| v.read(cx).raw()), &folder, &id));
+    let ext = reply.recv().await.map_err(|e| e.to_string())??;
+    Ok(if ext.name.is_empty() {
+        m.name
+    } else {
+        ext.name
+    })
+}
+
+/// The installed list as JSON lines for the shots driver's `ext-list`.
+pub async fn list_for_driver(
+    view: Option<Entity<WebView>>,
+    cx: &mut AsyncApp,
+) -> Result<serde_json::Value, String> {
+    let reply = cx.update(|cx| backend::list(view.as_ref().map(|v| v.read(cx).raw())));
+    let items = reply.recv().await.map_err(|e| e.to_string())??;
+    #[cfg(target_os = "macos")]
+    let actions = webkit::actions();
+    Ok(serde_json::Value::Array(
+        items
+            .into_iter()
+            .map(|e| {
+                #[cfg(target_os = "macos")]
+                let action = actions.iter().find(|a| a.id == e.id).map(|a| {
+                    serde_json::json!({ "label": a.label, "badge": a.badge, "enabled": a.enabled })
+                });
+                #[cfg(not(target_os = "macos"))]
+                let action: Option<serde_json::Value> = None;
+                serde_json::json!({
+                    "id": e.id,
+                    "name": e.name,
+                    "version": e.version,
+                    "enabled": e.enabled,
+                    "has_options": e.has_options,
+                    "permissions": e.permissions,
+                    "problems": e.problems, "broken": e.broken,
+                    "action": action,
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// Turn extension `id` (or the first whose name has it) on or off, or remove it, for the driver.
+pub async fn change_for_driver(
+    spec: String,
+    enable: Option<bool>,
+    view: Option<Entity<WebView>>,
+    cx: &mut AsyncApp,
+) -> Result<(), String> {
+    let reply = cx.update(|cx| backend::list(view.as_ref().map(|v| v.read(cx).raw())));
+    let items = reply.recv().await.map_err(|e| e.to_string())??;
+    let needle = spec.to_lowercase();
+    let ext = items
+        .iter()
+        .find(|e| e.id == spec)
+        .or_else(|| {
+            items
+                .iter()
+                .find(|e| e.name.to_lowercase().contains(&needle))
+        })
+        .ok_or_else(|| format!("No extension {spec:?} is installed."))?;
+    let id = ext.id.clone();
+    let reply =
+        cx.update(|cx| backend::change(view.as_ref().map(|v| v.read(cx).raw()), id, enable));
+    reply.recv().await.map_err(|e| e.to_string())?
+}
+
+/// Open the extension pages of extension `spec` (its options), for the driver.
+#[cfg(target_os = "macos")]
+pub fn options_for_driver(spec: &str) -> Result<(), String> {
+    let needle = spec.to_lowercase();
+    let list = webkit::list();
+    let ext = list
+        .iter()
+        .find(|e| e.id == spec)
+        .or_else(|| {
+            list.iter()
+                .find(|e| e.name.to_lowercase().contains(&needle))
+        })
+        .ok_or_else(|| format!("No extension {spec:?} is installed."))?;
+    webkit::open_options(&ext.id);
+    Ok(())
+}
+
+/// Where the unpacked extension in `folder` installs, and its id: a download or package waiting
+/// in `incoming_dir` moves to its own folder by id; a folder of the user's stays where it is
+/// (Chromium's id for it, from its path or its key).
+fn settle(folder: &Path, m: &manifest::Manifest) -> Result<(PathBuf, String), String> {
+    if folder.starts_with(incoming_dir()) {
+        let id = folder
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let dest = extensions_dir().join(&id);
+        registry::replace_dir(folder, &dest)?;
+        Ok((dest, id))
+    } else {
+        Ok((folder.to_path_buf(), manifest::folder_id(folder, m)))
+    }
+}
 
 pub enum ExtensionsEvent {
     Close,
+    /// Open an address in a Browser tab (the store's search).
+    Open(String),
+}
+
+/// An extension unpacked and read, waiting for the user's Install.
+struct Pending {
+    folder: PathBuf,
+    manifest: manifest::Manifest,
+    /// The starter list's word on it, when it's there.
+    fit: Option<catalog::Fit>,
 }
 
 /// The Extensions page, in the Browser's page area while it's open.
 pub struct ExtensionsPage {
-    /// A view of the Browser's (they share one profile, and so its extensions).
-    view: Entity<WebView>,
-    link: Entity<InputState>,
+    /// A view of the Browser's (WebView2: they share one profile, and so its extensions).
+    view: Option<Entity<WebView>>,
+    search: Entity<InputState>,
+    query: String,
     items: Vec<Extension>,
     loaded: bool,
+    /// The backend's changes seen (macOS: `webkit::generation`), to list again after one.
+    seen: u64,
     /// What's under way ("Downloading…"), while something is.
     busy: Option<&'static str>,
     error: Option<String>,
+    pending: Option<Pending>,
+    /// The installed extension whose permissions are shown.
+    expanded: Option<String>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -390,31 +926,56 @@ pub struct ExtensionsPage {
 impl EventEmitter<ExtensionsEvent> for ExtensionsPage {}
 
 impl ExtensionsPage {
-    pub fn new(view: Entity<WebView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let link = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Chrome Web Store or Edge Add-ons link")
+    /// `view`: a Browser view (WebView2 needs one); `address`: the page in front, whose store
+    /// link (an extension's page on the Chrome Web Store) fills the search.
+    pub fn new(
+        view: Option<Entity<WebView>>,
+        address: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search, or paste a Chrome Web Store link or extension id")
         });
+        if let Some(address) = address.filter(|a| store_id(a).is_some()) {
+            search.update(cx, |s, cx| s.set_value(address, window, cx));
+        }
         let subscriptions = vec![cx.subscribe_in(
-            &link,
+            &search,
             window,
-            |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.install_link(window, cx);
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.submit(window, cx),
+                InputEvent::Change => {
+                    this.query = this.search.read(cx).value().to_string();
+                    cx.notify();
                 }
+                _ => {}
             },
         )];
+        let query = search.read(cx).value().to_string();
         let mut this = Self {
             view,
-            link,
+            search,
+            query,
             items: vec![],
             loaded: false,
+            seen: 0,
             busy: None,
             error: None,
+            pending: None,
+            expanded: None,
             _tasks: vec![],
             _subscriptions: subscriptions,
         };
-        this.refresh(cx);
+        if supported() {
+            this.refresh(cx);
+        }
         this
+    }
+
+    fn raw<'a>(&self, cx: &'a App) -> Option<&'a wry::WebView> {
+        self.view.as_ref().map(|v| v.read(cx).raw())
     }
 
     /// Wait for `reply`, saying `what` meanwhile; then `done` with its answer, or the error shown.
@@ -431,7 +992,7 @@ impl ExtensionsPage {
             let answer = reply
                 .recv()
                 .await
-                .unwrap_or_else(|_| Err("WebView2 didn't answer.".to_string()));
+                .unwrap_or_else(|_| Err("The Browser didn't answer.".to_string()));
             let _ = this.update(cx, |this, cx| {
                 this.busy = None;
                 match answer {
@@ -447,59 +1008,119 @@ impl ExtensionsPage {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let reply = native::list(self.view.read(cx).raw());
+        #[cfg(target_os = "macos")]
+        {
+            self.seen = webkit::generation();
+        }
+        let reply = backend::list(self.raw(cx));
         self.run("Loading…", reply, cx, |this, items, _| {
             this.items = items;
             this.loaded = true;
         });
     }
 
-    fn install_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.link.read(cx).value().to_string();
-        let Some((store, id)) = store_id(&typed) else {
-            self.error = Some(
-                "Paste an extension's page from the Chrome Web Store \
-                 (chromewebstore.google.com/detail/…) or Edge Add-ons."
-                    .into(),
-            );
-            cx.notify();
-            return;
-        };
-        self.link.update(cx, |s, cx| s.set_value("", window, cx));
+    /// Enter in the search: a store link or id installs; a name only filters the list.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.search.read(cx).value().to_string();
+        if let Some((store, id)) = store_id(&typed) {
+            self.search.update(cx, |s, cx| s.set_value("", window, cx));
+            self.query.clear();
+            self.install_from_store(store, id, cx);
+        } else if let [only] = catalog::search(&typed)[..]
+            && !typed.trim().is_empty()
+        {
+            self.install_from_store(Store::Chrome, only.id.to_string(), cx);
+        }
+    }
+
+    fn install_from_store(&mut self, store: Store, id: String, cx: &mut Context<Self>) {
+        self.pending = None;
+        let fit = catalog::by_id(&id).map(catalog::fit);
         self.run(
             "Downloading…",
             download(store, id),
             cx,
-            |this, folder, cx| this.install_folder(folder, cx),
+            move |this, folder, cx| this.review(folder, fit, cx),
         );
     }
 
-    fn pick_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn pick(&mut self, folders: bool, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
+            files: !folders,
+            directories: folders,
             multiple: false,
-            prompt: Some("Install".into()),
+            prompt: Some("Choose".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else {
                 return;
             };
-            if let Some(folder) = paths.into_iter().next() {
-                let _ = this.update(cx, |this, cx| this.install_folder(folder, cx));
+            if let Some(path) = paths.into_iter().next() {
+                let _ = this.update(cx, |this, cx| {
+                    if folders {
+                        this.review(path, None, cx);
+                    } else {
+                        this.run("Unpacking…", unpack_file(path), cx, |this, folder, cx| {
+                            this.review(folder, None, cx)
+                        });
+                    }
+                });
             }
         })
         .detach();
     }
 
-    fn install_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
-        let reply = native::add(self.view.read(cx).raw(), &folder);
+    /// Show what the extension in `folder` may do, and wait for Install.
+    fn review(&mut self, folder: PathBuf, fit: Option<catalog::Fit>, cx: &mut Context<Self>) {
+        match manifest::read(&folder) {
+            Ok(manifest) => {
+                self.pending = Some(Pending {
+                    folder,
+                    manifest,
+                    fit,
+                })
+            }
+            Err(e) => {
+                self.discard(&folder);
+                self.error = Some(e);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Drop a download or package that waited (never a folder of the user's).
+    fn discard(&self, folder: &Path) {
+        if folder.starts_with(incoming_dir()) {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+    }
+
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(p) = self.pending.take() {
+            self.discard(&p.folder);
+        }
+        cx.notify();
+    }
+
+    fn install(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.pending.take() else {
+            return;
+        };
+        let (folder, id) = match settle(&p.folder, &p.manifest) {
+            Ok(settled) => settled,
+            Err(e) => {
+                self.error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        let reply = backend::add(self.raw(cx), &folder, &id);
         self.run("Installing…", reply, cx, |this, _, cx| this.refresh(cx));
     }
 
     /// Turn extension `id` on or off (`Some`), or remove it (`None`).
     fn change(&mut self, id: String, enable: Option<bool>, cx: &mut Context<Self>) {
-        let reply = native::change(self.view.read(cx).raw(), id, enable);
+        let reply = backend::change(self.raw(cx), id, enable);
         let what = if enable.is_some() {
             "Saving…"
         } else {
@@ -508,50 +1129,345 @@ impl ExtensionsPage {
         self.run(what, reply, cx, |this, (), cx| this.refresh(cx));
     }
 
-    fn row(&self, ext: &Extension, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn icon(path: Option<&PathBuf>, name: &str, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let (on_id, off_id) = (ext.id.clone(), ext.id.clone());
+        match path {
+            Some(path) => img(path.clone())
+                .size(px(24.))
+                .flex_none()
+                .into_any_element(),
+            None => div()
+                .size(px(24.))
+                .flex_none()
+                .rounded(px(6.))
+                .bg(theme.muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_semibold()
+                .text_color(theme.muted_foreground)
+                .child(
+                    name.chars()
+                        .find(|c| c.is_alphanumeric())
+                        .unwrap_or('?')
+                        .to_uppercase()
+                        .to_string(),
+                )
+                .into_any_element(),
+        }
+    }
+
+    fn fit_label(fit: catalog::Fit, cx: &App) -> (Hsla, &'static str, Option<&'static str>) {
+        match fit {
+            catalog::Fit::Works => (crate::palette::emerald(cx), "Works here", None),
+            catalog::Fit::Limited(why) => (crate::palette::amber(cx), "Partly works", Some(why)),
+            catalog::Fit::Broken(why) => (crate::palette::red(cx), "Doesn't run here", Some(why)),
+        }
+    }
+
+    fn installed_row(&self, ext: &Extension, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let (on_id, off_id, perm_id) = (ext.id.clone(), ext.id.clone(), ext.id.clone());
+        let expanded = self.expanded.as_deref() == Some(&ext.id);
+        let busy = self.busy.is_some();
+        // A broken one says why (the error, not WebKit's "failed to load" after it); a page's
+        // script errors wait under Permissions.
+        let why = ext
+            .problems
+            .iter()
+            .find(|p| !p.contains("failed to load"))
+            .or(ext.problems.first());
+        let detail = match why {
+            Some(problem) if ext.enabled && ext.broken => div()
+                .text_xs()
+                .text_color(theme.danger)
+                .truncate()
+                .child(format!("Doesn't run: {problem}")),
+            _ => div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .truncate()
+                .child(if ext.version.is_empty() {
+                    ext.id.clone()
+                } else {
+                    format!("{} · {}", ext.version, ext.id)
+                }),
+        };
+        #[cfg(target_os = "macos")]
+        let options = (ext.has_options && ext.enabled).then(|| {
+            let id = ext.id.clone();
+            ui::icon_button(
+                ("browser-extension-options", ix),
+                IconName::Settings2,
+                "Options",
+            )
+            .on_click(move |_, _, _| webkit::open_options(&id))
+        });
+        #[cfg(not(target_os = "macos"))]
+        let options: Option<Button> = None;
+        // Its icon is its toolbar button too (macOS): the toolbar shows only a few.
+        let icon = Self::icon(ext.icon.as_ref(), &ext.name, cx);
+        #[cfg(target_os = "macos")]
+        let icon = if ext.enabled {
+            let id = ext.id.clone();
+            div()
+                .id(("browser-extension-row-action", ix))
+                .test_support()
+                .cursor_pointer()
+                .child(icon)
+                .on_click(move |event, window, _| click_action(&id, event.position(), window))
+                .into_any_element()
+        } else {
+            icon
+        };
+        v_flex()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                h_flex()
+                    .id(("browser-extension", ix))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .gap(px(10.))
+                    .child(icon)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().truncate().child(if ext.name.is_empty() {
+                                ext.id.clone()
+                            } else {
+                                ext.name.clone()
+                            }))
+                            .child(detail),
+                    )
+                    .children(options)
+                    .when(
+                        !ext.permissions.is_empty() || !ext.problems.is_empty(),
+                        |el| {
+                            el.child(
+                                ui::icon_button(
+                                    ("browser-extension-permissions", ix),
+                                    Icon::new(crate::assets::Lucide::ShieldCheck),
+                                    "Permissions",
+                                )
+                                .selected(expanded)
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.expanded =
+                                            if this.expanded.as_deref() == Some(&perm_id) {
+                                                None
+                                            } else {
+                                                Some(perm_id.clone())
+                                            };
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                        },
+                    )
+                    .child(
+                        Switch::new(("browser-extension-on", ix))
+                            .checked(ext.enabled)
+                            .small()
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, on: &bool, _, cx| {
+                                this.change(on_id.clone(), Some(*on), cx)
+                            })),
+                    )
+                    .child(
+                        ui::icon_button(
+                            ("browser-extension-remove", ix),
+                            Icon::new(crate::assets::Lucide::Trash),
+                            "Remove",
+                        )
+                        .disabled(busy)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.change(off_id.clone(), None, cx)
+                            }),
+                        ),
+                    ),
+            )
+            .when(expanded, |el| {
+                el.child(
+                    v_flex()
+                        .pl(px(46.))
+                        .pr(px(12.))
+                        .pb(px(10.))
+                        .gap(px(2.))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .when(!ext.permissions.is_empty(), |el| {
+                            el.child(div().text_color(theme.foreground).child("It can:"))
+                                .children(
+                                    ext.permissions
+                                        .iter()
+                                        .map(|p| div().child(format!("• {p}"))),
+                                )
+                        })
+                        .when(!ext.problems.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .pt(px(4.))
+                                    .text_color(theme.foreground)
+                                    .child("What went wrong running it:"),
+                            )
+                            .children(
+                                ext.problems.iter().take(6).map(|p| {
+                                    div().text_color(theme.danger).child(format!("• {p}"))
+                                }),
+                            )
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn starter_row(
+        &self,
+        e: &'static catalog::Entry,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let installed = self.items.iter().any(|i| i.id == e.id);
+        let (color, verdict, why) = Self::fit_label(catalog::fit(e), cx);
         h_flex()
-            .id(("browser-extension", ix))
+            .id(("browser-extension-starter", ix))
             .px(px(12.))
             .py(px(8.))
             .gap(px(10.))
             .border_b_1()
             .border_color(theme.border)
+            .child(Self::icon(None, e.name, cx))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().child(if ext.name.is_empty() {
-                        ext.id.clone()
-                    } else {
-                        ext.name.clone()
-                    }))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(div().text_sm().child(e.name))
+                            .child(
+                                div()
+                                    .px(px(6.))
+                                    .rounded(px(4.))
+                                    .text_size(px(10.5))
+                                    .bg(color.opacity(0.14))
+                                    .text_color(color)
+                                    .child(verdict),
+                            ),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .truncate()
-                            .child(ext.id.clone()),
+                            .child(match why {
+                                Some(why) => format!("{} It {why}.", e.blurb),
+                                None => e.blurb.to_string(),
+                            }),
                     ),
             )
             .child(
-                Switch::new(("browser-extension-on", ix))
-                    .checked(ext.enabled)
+                Button::new(("browser-extension-get", ix))
                     .small()
-                    .disabled(self.busy.is_some())
-                    .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                        this.change(on_id.clone(), Some(*on), cx)
+                    .when(!installed, |b| b.outline())
+                    .when(installed, |b| b.ghost())
+                    .label(if installed { "Installed" } else { "Install" })
+                    .disabled(installed || self.busy.is_some())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.install_from_store(Store::Chrome, e.id.to_string(), cx)
                     })),
             )
+            .into_any_element()
+    }
+
+    fn review_card(&self, p: &Pending, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let m = &p.manifest;
+        let asks = manifest::describe(m);
+        let fit = p.fit.map(|f| Self::fit_label(f, cx));
+        v_flex()
+            .id("browser-extension-review")
+            .p(px(12.))
+            .gap(px(8.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
             .child(
-                ui::icon_button(
-                    ("browser-extension-remove", ix),
-                    Icon::new(crate::assets::Lucide::Trash),
-                    "Remove",
-                )
-                .disabled(self.busy.is_some())
-                .on_click(cx.listener(move |this, _, _, cx| this.change(off_id.clone(), None, cx))),
+                h_flex()
+                    .gap(px(10.))
+                    .child(Self::icon(m.icon.as_ref(), &m.name, cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .child(format!("Install {}?", m.name)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .truncate()
+                                    .child(if m.version.is_empty() {
+                                        m.description.clone()
+                                    } else {
+                                        format!("{} · {}", m.version, m.description)
+                                    }),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap(px(2.))
+                    .text_xs()
+                    .child(div().child(if asks.is_empty() {
+                        "It asks for no permissions.".to_string()
+                    } else {
+                        "It will be able to:".to_string()
+                    }))
+                    .children(asks.iter().map(|a| {
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("• {a}"))
+                    })),
+            )
+            .when_some(
+                fit.and_then(|(c, v, why)| why.map(|w| (c, v, w))),
+                |el, (color, verdict, why)| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(color)
+                            .child(format!("{verdict}: it {why}.")),
+                    )
+                },
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap(px(6.))
+                    .child(
+                        Button::new("browser-extension-cancel")
+                            .small()
+                            .ghost()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+                    )
+                    .child(
+                        Button::new("browser-extension-install")
+                            .small()
+                            .primary()
+                            .label("Install")
+                            .on_click(cx.listener(|this, _, _, cx| this.install(cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -559,15 +1475,59 @@ impl ExtensionsPage {
 
 impl Render for ExtensionsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // WebKit changed something (an extension loaded or failed): list again.
+        #[cfg(target_os = "macos")]
+        if self.loaded && self.busy.is_none() && webkit::generation() != self.seen {
+            self.seen = webkit::generation();
+            self.items = webkit::list();
+        }
         let theme = cx.theme().clone();
-        let rows: Vec<AnyElement> = self
+        let busy = self.busy.is_some();
+        let installed: Vec<AnyElement> = self
             .items
             .clone()
             .iter()
             .enumerate()
-            .map(|(ix, ext)| self.row(ext, ix, cx))
+            .map(|(ix, ext)| self.installed_row(ext, ix, cx))
             .collect();
-        let busy = self.busy.is_some();
+        let starters: Vec<AnyElement> = catalog::search(&self.query)
+            .into_iter()
+            .enumerate()
+            .map(|(ix, e)| self.starter_row(e, ix, cx))
+            .collect();
+        let review = self
+            .pending
+            .as_ref()
+            .map(|p| (p.folder.clone(), p.manifest.clone(), p.fit))
+            .map(|(folder, manifest, fit)| {
+                self.review_card(
+                    &Pending {
+                        folder,
+                        manifest,
+                        fit,
+                    },
+                    cx,
+                )
+            });
+        let query = self.query.trim().to_string();
+        let searching_name = !query.is_empty() && store_id(&query).is_none();
+        let heading = |text: &'static str| {
+            div()
+                .pt(px(6.))
+                .text_xs()
+                .font_medium()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let about = if cfg!(windows) {
+            "Chromium extensions from the Chrome Web Store or Edge Add-ons, a .zip or .crx, or an \
+             unpacked folder. They run in every page; WebView2 shows no toolbar button or popup \
+             for them."
+        } else {
+            "Chrome extensions from the Chrome Web Store, a .zip or .crx, or an unpacked folder, \
+             run by WebKit: content scripts, blocking rules, toolbar buttons and popups. Some need \
+             Chrome APIs WebKit doesn't have; the list below says which."
+        };
         v_flex()
             .id("browser-extensions")
             .size_full()
@@ -590,64 +1550,106 @@ impl Render for ExtensionsPage {
                         ),
                     ),
             )
-            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                "Chromium extensions from the Chrome Web Store or Edge Add-ons, or an \
-                         unpacked folder. They run in every page; WebView2 shows no toolbar \
-                         button or popup for them.",
-            ))
             .child(
-                h_flex()
-                    .gap(px(6.))
-                    .child(div().flex_1().child(Input::new(&self.link).small()))
-                    .child(
-                        Button::new("browser-extensions-install")
-                            .small()
-                            .primary()
-                            .label("Install")
-                            .disabled(busy)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.install_link(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("browser-extensions-folder")
-                            .small()
-                            .label("Folder…")
-                            .disabled(busy)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.pick_folder(window, cx)),
-                            ),
-                    ),
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(about),
             )
-            .when_some(self.busy, |el, what| {
+            .when(!supported(), |el| {
+                #[cfg(target_os = "macos")]
+                let why = webkit::unsupported();
+                #[cfg(not(target_os = "macos"))]
+                let why = String::new();
+                el.child(div().text_sm().text_color(theme.danger).child(why))
+            })
+            .when(supported(), |el| {
                 el.child(
                     h_flex()
-                        .gap(px(8.))
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(Spinner::new().small())
-                        .child(what),
+                        .gap(px(6.))
+                        .child(div().flex_1().child(Input::new(&self.search).small()))
+                        .child(
+                            Button::new("browser-extensions-folder")
+                                .small()
+                                .label("Folder…")
+                                .disabled(busy)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.pick(true, window, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("browser-extensions-file")
+                                .small()
+                                .label("File…")
+                                .disabled(busy)
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.pick(false, window, cx)),
+                                ),
+                        ),
                 )
-            })
-            .when_some(self.error.clone(), |el, e| {
-                el.child(div().text_xs().text_color(theme.danger).child(e))
-            })
-            .when(self.loaded || !rows.is_empty(), |el| {
-                el.child(
+                .when_some(self.busy, |el, what| {
+                    el.child(
+                        h_flex()
+                            .gap(px(8.))
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(Spinner::new().small())
+                            .child(what),
+                    )
+                })
+                .when_some(self.error.clone(), |el, e| {
+                    el.child(div().text_xs().text_color(theme.danger).child(e))
+                })
+                .children(review)
+                .child(heading("Installed"))
+                .child(
                     v_flex()
                         .rounded(px(8.))
                         .border_1()
                         .border_color(theme.border)
-                        .when(rows.is_empty() && self.loaded, |el| {
+                        .when(installed.is_empty(), |el| {
                             el.child(
                                 div()
                                     .p(px(12.))
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child("No extensions yet."),
+                                    .child(if self.loaded {
+                                        "No extensions yet."
+                                    } else {
+                                        "Loading…"
+                                    }),
                             )
                         })
-                        .children(rows),
+                        .children(installed),
+                )
+                .child(heading("From the Chrome Web Store"))
+                .child(
+                    v_flex()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .children(starters)
+                        .when(searching_name, |el| {
+                            let url = catalog::store_search_url(&query);
+                            el.child(
+                                h_flex()
+                                    .id("browser-extensions-store-search")
+                                    .px(px(12.))
+                                    .py(px(8.))
+                                    .gap(px(8.))
+                                    .text_xs()
+                                    .text_color(crate::palette::link(cx))
+                                    .cursor_pointer()
+                                    .child(Icon::new(crate::assets::Lucide::Search).xsmall())
+                                    .child(format!(
+                                        "Search the Chrome Web Store for “{query}”, then paste the \
+                                         extension's link here"
+                                    ))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(ExtensionsEvent::Open(url.clone()))
+                                    })),
+                            )
+                        }),
                 )
             })
     }

@@ -56,6 +56,9 @@ chrono.workspace = true
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Browser extensions: an unpacked extension's id from its manifest key or folder (as Chromium makes it).
+base64 = "0.22"
+sha2 = "0.10"
 semver.workspace = true
 # The Share sheet: its HTML page's Markdown (the version gpui-component uses), and hiding paths and
 # keys in a shared copy.
@@ -107,10 +110,10 @@ trek-phone = { path = "../trek-phone" }
 core-graphics = { version = "0.24", features = ["highsierra"] }
 # Same versions tray-icon already pulls in; used for the Dock badge.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "NSArray", "NSDictionary", "NSValue", "objc2-core-foundation"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility", "NSImage", "NSView", "NSWindow", "NSAppearance", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSPasteboard", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "NSArray", "NSDictionary", "NSValue", "NSSet", "NSDate", "NSEnumerator", "NSURLRequest", "NSUUID", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSDockTile", "NSWorkspace", "NSAccessibility", "NSImage", "NSView", "NSWindow", "NSAppearance", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSPasteboard", "NSPopover", "NSGraphics", "objc2-core-foundation"] }
 # Interactive artifacts: a snapshot of the page stands in while it's covered (`takeSnapshot`).
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration", "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration", "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore", "objc2-core-foundation", "WKWebExtension", "WKWebExtensionAction", "WKWebExtensionContext", "WKWebExtensionController", "WKWebExtensionControllerConfiguration", "WKWebExtensionControllerDelegate", "WKWebExtensionMatchPattern", "WKWebExtensionPermission", "WKWebExtensionTab", "WKWebExtensionTabConfiguration", "WKWebExtensionWindow", "WKWebExtensionWindowConfiguration", "WKWebExtensionDataRecord", "WKWebExtensionDataType", "WKNavigation"] }
 # Dictation: AVAudioRecorder takes the mic, Speech transcribes the take (src/dictate.rs).
 objc2-avf-audio = "0.3"
 objc2-speech = "0.3"

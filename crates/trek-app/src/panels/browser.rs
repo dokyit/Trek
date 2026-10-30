@@ -1307,6 +1307,18 @@ impl BrowserPanel {
 
     /// Show exactly one native view: the active tab's, when nothing GPUI-drawn needs that space.
     fn sync_views(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            let tx = self.tx.clone();
+            browser_extensions::sync_tabs(
+                cx.entity_id().as_u64(),
+                self.tabs.iter().map(|t| (t.id, t.view.read(cx).raw())),
+                self.active,
+                move |url| {
+                    let _ = tx.try_send(Msg::NewWindow(url));
+                },
+            );
+        }
         let show_active = self.visible && !self.menu_open && self.extensions.is_none();
         for tab in &self.tabs {
             let show = show_active && tab.page.ready && tab.id == self.active;
@@ -1371,6 +1383,15 @@ impl BrowserPanel {
             let builder = wry::WebViewBuilder::new();
             #[cfg(target_os = "macos")]
             let builder = builder.with_user_agent(user_agent());
+            // The extensions' controller is in a view's configuration from the start (WebKit).
+            #[cfg(target_os = "macos")]
+            let builder = match browser_extensions::webview_configuration() {
+                Some(config) => {
+                    use wry::WebViewBuilderExtMacos as _;
+                    builder.with_webview_configuration(config)
+                }
+                None => builder,
+            };
             // WKWebView takes its scheme from its appearance, which is set once it's made: so it
             // loads its first page after that (below), not as it's made.
             #[cfg(not(target_os = "macos"))]
@@ -1547,6 +1568,9 @@ impl BrowserPanel {
     /// Show `url` (a link from elsewhere in Trek): in the tab in front while it's a new tab,
     /// else in a tab of its own.
     pub fn open_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if url == browser_extensions::PAGE_URL {
+            return self.open_extensions(window, cx);
+        }
         let url = normalize(url);
         if self.active_tab().is_some_and(|t| t.page.url == START_URL) {
             self.editing = false;
@@ -2017,14 +2041,23 @@ impl BrowserPanel {
         }
     }
 
+    /// Show the Extensions page (Settings' link, the shots driver).
+    pub fn open_extensions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_extensions_open(true, window, cx);
+    }
+
     /// Show the Extensions page in the page's place (`browser_extensions`), or close it.
     fn set_extensions_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.extensions = None;
-        if open && let Some(tab) = self.active_tab() {
-            let view = tab.view.clone();
-            let page = cx.new(|cx| ExtensionsPage::new(view, window, cx));
+        // WebKit's extensions need no view (WebView2's are a view's profile's: the page says so).
+        if open && (self.active_tab().is_some() || cfg!(target_os = "macos")) {
+            let view = self.active_tab().map(|t| t.view.clone());
+            let address = self.active_tab().map(|t| t.page.address());
+            let page = cx.new(|cx| ExtensionsPage::new(view, address, window, cx));
             let closing = cx.subscribe_in(&page, window, |this, _, event, window, cx| {
-                let ExtensionsEvent::Close = event;
+                if let ExtensionsEvent::Open(url) = event {
+                    this.new_tab(url, window, cx);
+                }
                 this.set_extensions_open(false, window, cx);
             });
             self.stop_picking(cx);
@@ -2977,7 +3010,7 @@ impl BrowserPanel {
                 self.toggle_allow_site(site, cx);
             }
             _ => anyhow::bail!(
-                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|adblock-import <path>|adblock on|off|adblock-allow)"
+                "browser: unknown command {cmd:?} (go <address>|back|forward|reload|focus|unfocus|press <keys>|eval <js>|state|snap <name>|adblock-import <path>|adblock on|off|adblock-allow|ext-page|ext-install <folder, file or id>|ext-list|ext-on|ext-off|ext-remove <id or name>|ext-allow|ext-deny|ext-options <id or name>)"
             ),
         }
         Ok(())
@@ -2992,6 +3025,11 @@ impl BrowserPanel {
     ) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
         use wry::WebViewExtMacOS as _;
         self.active_tab().map(|t| t.view.read(cx).raw().ns_window())
+    }
+
+    /// The active tab's view (the extensions driver's: WebView2's calls go through one).
+    pub fn shots_view(&self) -> Option<Entity<WebView>> {
+        self.active_tab().map(|t| t.view.clone())
     }
 
     /// The active page's answer to the JavaScript expression `js`, as JSON.
@@ -3370,6 +3408,9 @@ impl Render for BrowserPanel {
         if progress.is_some() {
             window.request_animation_frame();
         }
+        let all_extensions =
+            cx.listener(|this, _, window, cx| this.set_extensions_open(true, window, cx));
+        let extension_buttons = browser_extensions::toolbar(window, cx, all_extensions);
         let toolbar = h_flex()
             .relative()
             .h(px(40.))
@@ -3437,6 +3478,7 @@ impl Render for BrowserPanel {
                 .loading(self.capturing)
                 .on_click(cx.listener(|this, _, window, cx| this.screenshot(window, cx))),
             )
+            .children(extension_buttons)
             .child(more)
             .when(loading, |el| match progress {
                 Some(p) => el.child(progress_line(p, ember)),
@@ -3470,6 +3512,7 @@ impl Render for BrowserPanel {
             .child(strip)
             .child(toolbar)
             .children(picking_hint)
+            .children(browser_extensions::prompt_strips(cx))
             .children(self.agent_strip(cx))
             .child(
                 div()

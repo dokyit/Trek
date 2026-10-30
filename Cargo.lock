@@ -9212,6 +9212,7 @@ version = "0.4.27"
 dependencies = [
  "anyhow",
  "async-channel",
+ "base64 0.22.1",
  "block2 0.6.2",
  "chrono",
  "core-graphics 0.24.0",
@@ -9249,6 +9250,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "tracing-log",

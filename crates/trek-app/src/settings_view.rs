@@ -977,6 +977,32 @@ impl SettingsView {
         ]
     }
 
+    /// Settings › Browser's extensions: what's installed, and the Browser's Extensions page
+    /// (`panels::browser_extensions`), where they're found, installed and managed.
+    fn extensions_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::panels::browser_extensions as ext;
+        if !ext::AVAILABLE {
+            return None;
+        }
+        let ws = self.workspace.clone();
+        let open = Button::new("browser-extensions-manage")
+            .small()
+            .outline()
+            .label("Extensions…")
+            .on_click(move |_, _, cx| {
+                // Back to the threads, where the Browser is beside the chat.
+                ws.update(cx, |ws, cx| {
+                    let back = ws
+                        .focused_thread()
+                        .map(|id| Route::Thread(id.to_string()))
+                        .unwrap_or(Route::Draft { project: None });
+                    ws.navigate(back, cx);
+                    cx.emit(WorkspaceEvent::OpenInBrowser(ext::PAGE_URL.to_string()))
+                })
+            });
+        Some(Self::row("Extensions", ext::settings_summary(), open, cx))
+    }
+
     fn switch(&self, id: &'static str, on: bool, f: fn(&mut Settings, bool)) -> Switch {
         let set = self.setter(f);
         Switch::new(id)
@@ -2075,6 +2101,7 @@ impl SettingsView {
             ]
             .into_iter()
             .chain(self.adblock_rows(&s, cx))
+            .chain(self.extensions_row(cx))
             .collect(),
             cx,
         ));
