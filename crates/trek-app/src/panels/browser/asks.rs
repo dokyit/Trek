@@ -68,8 +68,9 @@ impl Ask {
             AskKind::Location => format!("{site} wants to know your location"),
             AskKind::OpenApp { app: Some(app), .. } => format!("{site} wants to open {app}"),
             AskKind::OpenApp { url, app: None } => format!(
-                "{site} tried to open a {}: link, which no app on this Mac opens",
-                scheme_of(url).unwrap_or("custom")
+                "{site} tried to open a {}: link, which no app on {} opens",
+                scheme_of(url).unwrap_or("custom"),
+                crate::words::words().this_computer
             ),
         }
     }
@@ -209,7 +210,10 @@ pub fn load_failure(domain: &str, code: i64, url: &str) -> Option<(&'static str,
         ),
         ("NSURLErrorDomain", -1201) => (
             SECURE,
-            format!("{host}’s certificate has expired or isn’t valid yet. Check this Mac’s date and time."),
+            format!(
+                "{host}’s certificate has expired or isn’t valid yet. Check {}’s date and time.",
+                crate::words::words().this_computer
+            ),
         ),
         ("NSURLErrorDomain", c) if (-1206..=-1200).contains(&c) || c == -9806 || c == -9802 => (
             SECURE,
