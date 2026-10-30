@@ -92,7 +92,11 @@ impl trek_script::ScriptHost for ScriptTools {
         };
         match tool {
             "bash" => {
-                let command = text("command")?;
+                // Trimmed as the model's own `bash` is, so "allow for the session" keys match.
+                let command = text("command")?.trim().to_string();
+                if command.is_empty() {
+                    return Err("empty command".into());
+                }
                 self.approve("bash", &command).await?;
                 let timeout = args["timeout_s"]
                     .as_f64()

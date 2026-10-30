@@ -867,6 +867,20 @@ fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
                 .unwrap_or(args_json);
             ("Edit", path.to_string())
         }
+        // The model's own few words on what the program does, else its first line.
+        "script" => {
+            let described = parsed["description"]
+                .as_str()
+                .map(str::trim)
+                .filter(|d| !d.is_empty());
+            let first_line = || {
+                parsed["code"]
+                    .as_str()
+                    .and_then(|c| c.lines().map(str::trim).find(|l| !l.is_empty()))
+            };
+            let line = described.or_else(first_line).unwrap_or(args_json);
+            ("Run script", line.to_string())
+        }
         _ => ("Tool", args_json.to_string()),
     }
 }
@@ -4218,6 +4232,63 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
         // On, the script is offered beside the four.
         assert_eq!(s.body(0)["tools"].as_array().unwrap().len(), 5);
         s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_scripts_commands_ask_like_the_models_own() {
+        let s = TestSession::start_with(
+            "ollama",
+            HandHolding::Supervised,
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "script",
+                    json!({ "code": "await bash('  touch ran.txt  '); print('ran')" }),
+                ),
+                openai_text("done"),
+            ],
+            DirectOptions::default(),
+            true,
+        )
+        .await;
+        s.prompt("go").await;
+        let (request_id, title, detail) = s
+            .until(|e| match e {
+                AgentEvent::PermissionRequest {
+                    request_id,
+                    title,
+                    detail,
+                    ..
+                } => Some((request_id.clone(), title.clone(), detail.clone())),
+                _ => None,
+            })
+            .await;
+        assert_eq!(title, "Run command");
+        // Trimmed, as the model's own command is, so a session allowance would match.
+        assert_eq!(detail, "touch ran.txt");
+        s.send(Command::Respond {
+            request_id,
+            decision: Decision::Deny,
+        })
+        .await;
+        let (out, ok) = s.tool_finished().await;
+        assert!(!ok && out.contains("Permission denied by user"), "{out}");
+        assert!(!s.cwd.join("ran.txt").exists());
+        s.finish().await;
+    }
+
+    #[test]
+    fn a_script_shows_its_description() {
+        let args = json!({ "code": "\n  const x = 1;\nprint(x)", "description": "Count notes" });
+        assert_eq!(
+            tool_display("script", &args.to_string()),
+            ("Run script", "Count notes".to_string())
+        );
+        let args = json!({ "code": "\n  const x = 1;\nprint(x)" });
+        assert_eq!(
+            tool_display("script", &args.to_string()),
+            ("Run script", "const x = 1;".to_string())
+        );
     }
 
     #[test]

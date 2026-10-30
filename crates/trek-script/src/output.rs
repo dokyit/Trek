@@ -38,7 +38,7 @@ impl Output {
         // Trim only once the tail is well over its share, so a stream of small prints doesn't
         // shift the buffer on every line.
         let keep = self.cap - self.head.len();
-        if self.tail.len() > keep.max(1024) * 2 {
+        if self.tail.len() > keep.max(1024).saturating_mul(2) {
             self.trim_tail(keep);
         }
     }
@@ -62,7 +62,7 @@ impl Output {
             return (self.head, 0);
         }
         // Start the tail at a line where one is near, so it doesn't open mid-word.
-        if let Some(nl) = self.tail[..self.tail.len().min(200)].find('\n') {
+        if let Some(nl) = self.tail[..floor_char(&self.tail, 200)].find('\n') {
             self.dropped += nl as u64 + 1;
             self.tail.drain(..=nl);
         }
@@ -81,6 +81,21 @@ impl Output {
         text.push_str(&self.tail);
         (text, self.dropped)
     }
+}
+
+/// `s` in at most about `max` bytes: its head and tail, with a marker for the middle.
+pub(crate) fn cap_text(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let head = floor_char(s, max / 2);
+    let tail = ceil_char(s, s.len() - max / 2);
+    format!(
+        "{}\n[... {} bytes dropped ...]\n{}",
+        &s[..head],
+        tail - head,
+        &s[tail..]
+    )
 }
 
 /// The largest index at most `i` that falls on a char boundary of `s`.
@@ -127,6 +142,29 @@ mod tests {
         assert!(
             dropped > total - 1000 && dropped < total - 900,
             "{dropped} of {total}"
+        );
+    }
+
+    #[test]
+    fn a_tail_of_wide_chars_finishes() {
+        // `finish` looks for a line start in the tail's first 200 bytes; with 3-byte chars,
+        // byte 200 is mid-char.
+        let mut o = Output::new(1000);
+        for _ in 0..50 {
+            o.push_line(&"€".repeat(100));
+        }
+        let (text, dropped) = o.finish(None);
+        assert!(dropped > 0);
+        assert!(text.ends_with(&format!("{}\n", "€".repeat(100))));
+    }
+
+    #[test]
+    fn cap_text_keeps_both_ends() {
+        assert_eq!(cap_text("short", 10), "short");
+        let t = cap_text(&format!("A{}Z", "é".repeat(5000)), 100);
+        assert!(
+            t.starts_with('A') && t.ends_with('Z') && t.len() < 150,
+            "{t}"
         );
     }
 
