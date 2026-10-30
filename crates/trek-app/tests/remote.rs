@@ -1293,6 +1293,47 @@ fn git_from_the_phone_reviews_commits_and_switches_as_the_panel_does() {
             (status.is_repo, status.branch.as_deref(), status.can_switch),
             (true, Some("main"), true)
         );
+        // A thread in no project works in a chat folder git doesn't serve: its row has no branch
+        // or git state (phones offer no Git sheet), even where a repo above it has a branch.
+        let chat = trek.update(cx, |ws, cx| {
+            let mut t = ws
+                .store
+                .create_thread(
+                    None,
+                    common::mock(),
+                    None,
+                    trek_core::Effort::Medium,
+                    HandHolding::Auto,
+                )
+                .expect("thread");
+            let folder = trek_core::paths::chats_dir().join("no-git-here");
+            std::fs::create_dir_all(&folder).unwrap();
+            t.cwd = Some(folder.clone());
+            ws.store.save_thread(&t).expect("save");
+            ws.reload(cx);
+            ws.git_info.insert(
+                folder,
+                trek_app::workspace::GitInfo {
+                    is_repo: true,
+                    branch: Some("main".into()),
+                    ..Default::default()
+                },
+            );
+            t.id
+        });
+        let r = row(&trek, cx, &chat);
+        assert_eq!((r.branch, r.git), (None, None));
+        assert_eq!(r.busy_in_background, Some(false), "said either way");
+        assert_eq!(
+            ask_later(&trek, cx, |reply| tr::HostRequest::GitStatus {
+                target: tr::GitTarget::thread(chat.clone()),
+                reply,
+            })
+            .await
+            .unwrap_err()
+            .code,
+            tr::ErrorCode::BadRequest
+        );
         let files: Vec<(&str, tr::FileStatus, u32)> = status
             .files
             .iter()

@@ -1714,10 +1714,7 @@ impl Workspace {
         let (sub_agents, background) = self.remote_at_work(t);
         // A thread in no project works in a chat folder of its own, which git doesn't serve
         // (`git_place`): no branch or git state, so phones offer no Git sheet for it.
-        let own = t
-            .cwd
-            .as_ref()
-            .filter(|c| !trek_core::paths::is_chat_dir(c));
+        let own = t.cwd.as_ref().filter(|c| !trek_core::paths::is_chat_dir(c));
         let git = own
             .and_then(|c| self.git_info.get(c))
             .filter(|g| g.is_repo)
