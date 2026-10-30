@@ -19,14 +19,20 @@ pub struct Ask {
 pub enum AskKind {
     Alert(String),
     Confirm(String),
-    Prompt { message: String, default: String },
+    Prompt {
+        message: String,
+        default: String,
+    },
     Camera,
     Microphone,
     CameraAndMicrophone,
     Location,
     /// Open `url` in the app that takes its scheme (`app`: that app's name; `None`: no app on this
     /// Mac does).
-    OpenApp { url: String, app: Option<String> },
+    OpenApp {
+        url: String,
+        app: Option<String>,
+    },
 }
 
 /// The user's answer: the bar's main button (OK, Allow, Open), the other one (Cancel, Don't
@@ -309,7 +315,10 @@ mod tests {
     #[test]
     fn schemes_are_read_only_when_they_are_schemes() {
         assert_eq!(scheme_of("mailto:x"), Some("mailto"));
-        assert_eq!(scheme_of("x-apple.systempreferences:"), Some("x-apple.systempreferences"));
+        assert_eq!(
+            scheme_of("x-apple.systempreferences:"),
+            Some("x-apple.systempreferences")
+        );
         assert_eq!(scheme_of("localhost:3000/x"), Some("localhost"));
         assert_eq!(scheme_of("1http:x"), None);
         assert_eq!(scheme_of("no scheme"), None);
@@ -318,18 +327,29 @@ mod tests {
 
     #[test]
     fn a_failed_load_says_why_in_trek_words() {
-        let (title, why) = load_failure("NSURLErrorDomain", -1003, "https://nope.invalid/a").unwrap();
+        let (title, why) =
+            load_failure("NSURLErrorDomain", -1003, "https://nope.invalid/a").unwrap();
         assert_eq!(title, "Can’t reach this page");
         assert!(why.contains("nope.invalid"), "{why}");
         let (_, why) = load_failure("NSURLErrorDomain", -1004, "http://localhost:5173/").unwrap();
-        assert!(why.contains("localhost:5173") && why.contains("running"), "{why}");
-        let (title, _) = load_failure("NSURLErrorDomain", -1202, "https://self-signed.badssl.com").unwrap();
+        assert!(
+            why.contains("localhost:5173") && why.contains("running"),
+            "{why}"
+        );
+        let (title, _) =
+            load_failure("NSURLErrorDomain", -1202, "https://self-signed.badssl.com").unwrap();
         assert_eq!(title, "Can’t connect securely");
         let (_, why) = load_failure("WebKitErrorDomain", 101, "foo:bar").unwrap();
         assert!(why.contains("foo:"), "{why}");
         // Not failures: a load replaced or stopped, a download, a link handed to an app.
-        assert_eq!(load_failure("NSURLErrorDomain", -999, "https://x.dev"), None);
-        assert_eq!(load_failure("WebKitErrorDomain", 102, "https://x.dev/file.zip"), None);
+        assert_eq!(
+            load_failure("NSURLErrorDomain", -999, "https://x.dev"),
+            None
+        );
+        assert_eq!(
+            load_failure("WebKitErrorDomain", 102, "https://x.dev/file.zip"),
+            None
+        );
         // Anything else still says something, with the code to look up.
         let (_, why) = load_failure("NSPOSIXErrorDomain", 54, "https://x.dev").unwrap();
         assert!(why.contains("NSPOSIXErrorDomain 54"), "{why}");

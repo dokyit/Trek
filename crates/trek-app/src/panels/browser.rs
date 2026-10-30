@@ -1580,7 +1580,16 @@ impl BrowserPanel {
             let make: webkit::MakePopup = {
                 let (tx, vars, parent) = (tx.clone(), popup_vars, *parent);
                 Box::new(move |url, config, size| {
-                    Self::open_popup(id, url, config, size, dark, &parent, tx.clone(), vars.clone())
+                    Self::open_popup(
+                        id,
+                        url,
+                        config,
+                        size,
+                        dark,
+                        &parent,
+                        tx.clone(),
+                        vars.clone(),
+                    )
                 })
             };
             webkit::hook(&built, id, tx, Some(make));
@@ -1749,9 +1758,7 @@ impl BrowserPanel {
         }
         if self.active == id {
             // A popup gives the front back to the page that opened it.
-            let opener = tab
-                .opener
-                .filter(|o| self.tabs.iter().any(|t| t.id == *o));
+            let opener = tab.opener.filter(|o| self.tabs.iter().any(|t| t.id == *o));
             self.active = opener.unwrap_or(self.tabs[ix.min(self.tabs.len() - 1)].id);
             self.editing = false;
         }
@@ -3100,7 +3107,9 @@ impl BrowserPanel {
                     |this, _| {
                         if let Some(url) = this
                             .active_tab()
-                            .filter(|t| t.page.failed.is_some() || !t.page.url.starts_with("trek://"))
+                            .filter(|t| {
+                                t.page.failed.is_some() || !t.page.url.starts_with("trek://")
+                            })
                             .map(|t| t.page.address())
                         {
                             open_in_safari(&url);
@@ -3788,7 +3797,10 @@ impl Render for BrowserPanel {
         let page = match &self.extensions {
             Some((extensions, _)) => Some(extensions.clone().into_any_element()),
             None => tab.map(|t| match t.sheet {
-                Some(size) if t.opener.is_some_and(|o| self.tabs.iter().any(|t| t.id == o)) => {
+                Some(size)
+                    if t.opener
+                        .is_some_and(|o| self.tabs.iter().any(|t| t.id == o)) =>
+                {
                     self.sheet_view(t, size, cx)
                 }
                 _ => Self::page_view(t, cx),

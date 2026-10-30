@@ -20,7 +20,9 @@ use super::asks::{AskKind, LinkKind, Reply, link_kind, scheme_of};
 use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject, Sel};
-use objc2::{DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send};
+use objc2::{
+    DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send,
+};
 use objc2_app_kit::NSEventModifierFlags;
 use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_web_kit::{
@@ -34,8 +36,13 @@ use wry::WebViewExtMacOS as _;
 
 /// Makes the view a page opens (`window.open`): its URL, WebKit's configuration for it, and the
 /// size the page asked for. `None` refuses it (the page's `window.open` returns `null`).
-pub type MakePopup =
-    Box<dyn Fn(String, Retained<WKWebViewConfiguration>, Option<(f64, f64)>) -> Option<Retained<WKWebView>>>;
+pub type MakePopup = Box<
+    dyn Fn(
+        String,
+        Retained<WKWebViewConfiguration>,
+        Option<(f64, f64)>,
+    ) -> Option<Retained<WKWebView>>,
+>;
 
 /// WebKit's `WKPermissionDecision` and `WKNavigationActionPolicy` (both `NSInteger`).
 const GRANT: isize = 1;
@@ -102,7 +109,15 @@ pub fn answer_all(tab: u64) {
 fn ask(tab: u64, tx: &async_channel::Sender<Msg>, site: String, kind: AskKind, waiting: Waiting) {
     let id = NEXT_ASK.fetch_add(1, Ordering::Relaxed);
     WAITING.with(|w| w.borrow_mut().insert(id, (tab, waiting)));
-    if tx.try_send(Msg::Ask { tab, id, site, kind }).is_err() {
+    if tx
+        .try_send(Msg::Ask {
+            tab,
+            id,
+            site,
+            kind,
+        })
+        .is_err()
+    {
         answer(id, &Reply::No);
     }
 }
@@ -289,7 +304,11 @@ impl TrekUiDelegate {
         }
         let size = unsafe { features.width().zip(features.height()) }
             .map(|(w, h)| (w.doubleValue(), h.doubleValue()));
-        let url = if url.is_empty() { "about:blank".into() } else { url };
+        let url = if url.is_empty() {
+            "about:blank".into()
+        } else {
+            url
+        };
         // WebKit checks the view was made from this very configuration (its opener is in it).
         (v.popup.as_ref()?)(url, configuration.retain(), size)
     }
@@ -408,8 +427,9 @@ pub fn hook(wv: &wry::WebView, tab: u64, tx: async_channel::Sender<Msg>, popup: 
         return;
     };
     let view = wv.webview();
-    let (Some(ui), Some(nav)) = (unsafe { view.UIDelegate() }, unsafe { view.navigationDelegate() })
-    else {
+    let (Some(ui), Some(nav)) = (unsafe { view.UIDelegate() }, unsafe {
+        view.navigationDelegate()
+    }) else {
         return;
     };
     let ivars = |inner: Retained<AnyObject>, popup| Ivars {
@@ -472,6 +492,8 @@ pub fn app_for(url: &str) -> Option<String> {
     let url = NSURL::URLWithString(&NSString::from_str(url))?;
     let app = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&url)?;
     let path = app.path()?;
-    let name = NSFileManager::defaultManager().displayNameAtPath(&path).to_string();
+    let name = NSFileManager::defaultManager()
+        .displayNameAtPath(&path)
+        .to_string();
     Some(name.strip_suffix(".app").unwrap_or(&name).to_string())
 }

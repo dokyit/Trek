@@ -13,7 +13,11 @@ use gpui_kit::*;
 
 impl BrowserPanel {
     /// The front tab's oldest ask, as a bar above its page (`None`: it asks nothing).
-    pub(super) fn ask_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn ask_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let ask = self.asks.iter().find(|a| a.tab == self.active)?.clone();
         let theme = cx.theme().clone();
         let ember = crate::palette::ember(cx);
@@ -36,7 +40,9 @@ impl BrowserPanel {
             self.prompt = Some((ask.id, input, sub));
         }
         let icon = match &ask.kind {
-            AskKind::Alert(_) | AskKind::Confirm(_) | AskKind::Prompt { .. } => Lucide::MessageSquare,
+            AskKind::Alert(_) | AskKind::Confirm(_) | AskKind::Prompt { .. } => {
+                Lucide::MessageSquare
+            }
             AskKind::Camera | AskKind::CameraAndMicrophone => Lucide::Camera,
             AskKind::Microphone => Lucide::Mic,
             AskKind::Location => Lucide::Compass,
@@ -118,11 +124,19 @@ impl BrowserPanel {
     /// was, under a header with its title, its site, and a way to make it a tab or close it.
     /// The opener's own view is hidden meanwhile (a native view can't be drawn over), so the
     /// sheet sits on a plain backdrop.
-    pub(super) fn sheet_view(&self, tab: &Tab, size: (f64, f64), cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn sheet_view(
+        &self,
+        tab: &Tab,
+        size: (f64, f64),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         let area = self.area.get().size;
         let area = if area.width > px(0.) {
-            (f64::from(f32::from(area.width)), f64::from(f32::from(area.height)))
+            (
+                f64::from(f32::from(area.width)),
+                f64::from(f32::from(area.height)),
+            )
         } else {
             (size.0 + 48., size.1 + 84.)
         };
@@ -161,9 +175,13 @@ impl BrowserPanel {
                             .border_b_1()
                             .border_color(theme.border)
                             .child(
-                                Icon::new(if secure { Lucide::Lock } else { Lucide::AppWindow })
-                                    .xsmall()
-                                    .text_color(theme.muted_foreground),
+                                Icon::new(if secure {
+                                    Lucide::Lock
+                                } else {
+                                    Lucide::AppWindow
+                                })
+                                .xsmall()
+                                .text_color(theme.muted_foreground),
                             )
                             .child(
                                 h_flex()
@@ -181,13 +199,19 @@ impl BrowserPanel {
                                     }),
                             )
                             .child(
-                                tool_button("browser-sheet-tab", Lucide::Maximize2, "Show as a tab")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                tool_button(
+                                    "browser-sheet-tab",
+                                    Lucide::Maximize2,
+                                    "Show as a tab",
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         if let Some(tab) = this.tab_mut(id) {
                                             tab.sheet = None;
                                         }
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
                                 tool_button("browser-sheet-close", Lucide::X, "Close").on_click(
