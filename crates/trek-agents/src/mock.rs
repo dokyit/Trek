@@ -4079,6 +4079,7 @@ mod tests {
                 mcp_servers: vec![],
                 instructions: None,
                 read_dirs: vec![],
+                script: false,
             };
             Live::of(config)
         }
@@ -4162,6 +4163,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         }
     }
 

@@ -1,0 +1,12 @@
+[package]
+name = "trek-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app: the `script` tool, a sandboxed JavaScript program that calls the agent's tools."
+
+[dependencies]
+rquickjs = { version = "0.14", features = ["futures"] }
+async-trait = "0.1"
+serde_json.workspace = true
+tokio = { workspace = true }

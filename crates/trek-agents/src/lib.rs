@@ -24,6 +24,17 @@ pub use direct::{
     cache_direct_models, cached_direct_models, direct_provider_models,
     load_all_cached_direct_models,
 };
+/// The Direct harness's agent loop with its options exposed: a key given rather than read from
+/// the keychain, another endpoint, the tools run elsewhere (`ToolExecutor`), and an `Observer`
+/// of each request, tool call and script run. `trek-bench` drives it; Trek's own Direct
+/// sessions run it with the defaults.
+pub mod direct_harness {
+    pub use crate::direct::executor::{
+        ExecOutput, ExecutorGone, LocalExecutor, StdioExecutor, ToolExecutor,
+    };
+    pub use crate::direct::{DirectOptions, Observer, Stop, endpoint, run_with};
+    pub use trek_script::ScriptResult;
+}
 pub use limits::{Limit, LimitScope};
 pub use opencode::share_history as share_opencode_history;
 pub use status::{
@@ -69,6 +80,9 @@ pub struct SessionConfig {
     /// Folders outside `cwd` the agent may read without asking (the guides Trek ships): Claude
     /// Code gets them with `--add-dir`; Codex reads anywhere already.
     pub read_dirs: Vec<PathBuf>,
+    /// Offer the `script` tool (`trek-script`: a program that calls the other tools). Direct
+    /// sessions only; off in Trek for now (`trek-bench --script on` turns it on).
+    pub script: bool,
 }
 
 /// An MCP server Trek adds to a session.
@@ -962,6 +976,24 @@ mod job {
             // SAFETY: a job handle this owns, with all access.
             unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) };
         }
+
+        /// Close the job without ending what's in it: the kill-on-close limit is lifted first,
+        /// so processes still running go on by themselves.
+        pub(crate) fn release(self) {
+            // SAFETY: all zeroes is a valid limit information (integers only): no limits.
+            let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of_val(&info) as u32;
+            // SAFETY: a job handle this owns; `info` is the structure the class names, `size`
+            // long.
+            unsafe {
+                SetInformationJobObject(
+                    self.0.as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    size,
+                )
+            };
+        }
     }
 }
 
@@ -1035,6 +1067,19 @@ impl GroupChild {
         finish_group(child, self.group).await;
         #[cfg(windows)]
         finish_group(child, self.group, self.job.take()).await;
+    }
+
+    /// Let the child and what it started go on by themselves: nothing is ended when this is
+    /// dropped. For a command that has exited and may have left something running on purpose
+    /// (a server it started in the background).
+    pub(crate) fn release(mut self) {
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.release();
+        }
+        if self.child.take().is_some() {
+            trek_core::procs::unregister(self.group);
+        }
     }
 
     /// End the group at once, with no grace: KILL (the job's, on Windows), then reap. For a
@@ -2164,6 +2209,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
             read_only: false,
         });
         trek_core::runtime().block_on(async {
@@ -2285,6 +2331,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
             read_only: false,
         });
         let prompt = "Use the Bash tool with run_in_background=true to run: echo started-bg; sleep 8; echo done-bg. Then immediately reply with just the word: started. When it completes, reply with just: finished.";
@@ -2367,6 +2414,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
             read_only: false,
         });
         let prompt = "Use the Agent tool with run_in_background=true and subagent_type general-purpose, description \"Wait a while\", prompt: \"Run the Bash command `sleep 45` and then reply with just: waited.\" Then immediately reply with just the word: started.";

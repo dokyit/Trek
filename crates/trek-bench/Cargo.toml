@@ -1,0 +1,16 @@
+[package]
+name = "trek-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Part of the Trek app: runs Trek's own agent loop (the Direct harness) on one prompt, headless, and reports its tokens, requests and time. Driven by a Terminal-Bench (Harbor) adapter."
+
+[dependencies]
+trek-core.workspace = true
+trek-agents.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+# Stdin for the stdio executor's replies, stdout for the protocol.
+tokio = { workspace = true, features = ["io-std"] }
+async-channel.workspace = true
+tracing-subscriber.workspace = true

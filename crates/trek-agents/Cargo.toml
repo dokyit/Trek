@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 trek-core.workspace = true
 trek-ipc.workspace = true
+# The `script` tool of the Direct harness (`direct/script.rs`).
+trek-script = { path = "../trek-script" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

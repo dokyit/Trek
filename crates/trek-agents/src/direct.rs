@@ -2,16 +2,106 @@
 //! execution (read_file, edit_file, write_file, bash) with HandHolding permission gates and
 //! streaming tool-call accumulation, including fallback XML tool-call parsing for fine-tuned models.
 
+pub mod executor;
+pub mod script;
+
 use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, load_image};
 use anyhow::{Context as _, Result, bail};
+use executor::{ExecutorGone, LocalExecutor, ToolExecutor};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use trek_core::catalog::{DirectProvider, ModelInfo, Wire, direct_provider};
 use trek_core::settings::secrets;
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
+
+/// How a Direct session runs beyond its `SessionConfig`. Trek's own sessions use the defaults
+/// (`run`); `trek-bench` sets the rest (`run_with`).
+pub struct DirectOptions {
+    /// The key to send. `None`: the provider's saved key, from the keychain.
+    pub api_key: Option<Option<String>>,
+    /// A provider that isn't in the catalog (any OpenAI- or Anthropic-compatible endpoint), in
+    /// place of looking `SessionConfig::agent`'s id up.
+    pub provider: Option<DirectProvider>,
+    /// Where requests go, in place of the provider's own endpoint: the base URL for the OpenAI
+    /// wire (`…/v1`), the API's root or its messages endpoint for Anthropic's.
+    pub base_url: Option<String>,
+    /// Where the tools run.
+    pub executor: Arc<dyn ToolExecutor>,
+    /// Where each `script` run keeps its JSONL log of calls (`None`: no log). The tool itself
+    /// is on with `SessionConfig::script`.
+    pub script_log_dir: Option<PathBuf>,
+    /// Model requests one prompt may take before the answer is cut off.
+    pub max_turns: u32,
+    /// How long one `bash` command may run (`None`: as long as it takes).
+    pub command_timeout: Option<Duration>,
+    /// No new model request, and no further tool call, after this: the one running finishes.
+    pub deadline: Option<Instant>,
+    /// The whole system prompt, in place of Trek's (`SessionConfig::instructions` still follow).
+    pub system_prompt: Option<String>,
+    pub observer: Option<Arc<dyn Observer>>,
+}
+
+impl Default for DirectOptions {
+    fn default() -> Self {
+        DirectOptions {
+            api_key: None,
+            provider: None,
+            base_url: None,
+            executor: Arc::new(LocalExecutor),
+            script_log_dir: None,
+            max_turns: 30,
+            command_timeout: None,
+            deadline: None,
+            system_prompt: None,
+            observer: None,
+        }
+    }
+}
+
+/// Why an answer to a prompt ended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stop {
+    /// The model ended its turn.
+    EndTurn,
+    /// `DirectOptions::max_turns` requests were made.
+    MaxTurns,
+    /// `DirectOptions::deadline` passed.
+    TimeLimit,
+    /// A request or the executor failed, or the turn was stopped.
+    Error(String),
+}
+
+/// What a session did, told as it happens and in order (all from the session's own task), for a
+/// benchmark's log. Every method does nothing unless implemented.
+pub trait Observer: Send + Sync {
+    /// Model request `n` (1-based, counted over the session) is about to be sent.
+    fn request_start(&self, _n: u32) {}
+    /// Request `n` ended: what it used and cost when the provider said (`None` for an `error`).
+    fn request_end(
+        &self,
+        _n: u32,
+        _usage: Option<&TokenUsage>,
+        _cost: Option<UsageCost>,
+        _elapsed: Duration,
+        _error: Option<&str>,
+    ) {
+    }
+    /// The model's text in one answer, when it wrote any.
+    fn text(&self, _text: &str) {}
+    /// The model called tool `name` with `args` (its JSON, or the raw text when it isn't).
+    fn tool_call(&self, _name: &str, _args: &Value) {}
+    /// That call's output, as the model is told it.
+    fn tool_result(&self, _name: &str, _output: &str, _ok: bool) {}
+    /// A `script` call's run (told before its `tool_result`): the calls it made, its output's
+    /// size, how long it took.
+    fn script_result(&self, _result: &trek_script::ScriptResult) {}
+    /// The answer to a prompt ended, and why.
+    fn stopped(&self, _why: &Stop) {}
+}
 
 /// The error for a failed request: a usage limit for a 429 (said with `AgentEvent::LimitReached`),
 /// else `message` as it is.
@@ -58,6 +148,15 @@ static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 fn next_id() -> String {
     let c = ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("{}_{c}", trek_core::store::now_ms())
+}
+
+/// The tools a session offers: the four built in, then `script` when it's on (see `script`).
+fn tool_defs(script: bool) -> Vec<Value> {
+    let mut tools = direct_tools();
+    if script {
+        tools.push(script::tool_def());
+    }
+    tools
 }
 
 fn direct_tools() -> Vec<Value> {
@@ -168,6 +267,8 @@ pub struct TurnResponse {
     /// providers route a turn through a model that wants its own thinking returned.
     pub reasoning_details: Vec<Value>,
     pub tool_calls: Vec<AccumulatedToolCall>,
+    /// What the request used and cost, when the provider said (also sent as `AgentEvent::Usage`).
+    pub usage: Option<(TokenUsage, Option<UsageCost>)>,
 }
 
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -177,20 +278,38 @@ pub async fn run(
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
+    run_with(config, DirectOptions::default(), commands, events).await
+}
+
+/// `run`, with what `options` set: a key given rather than read from the keychain, another
+/// endpoint, the tools run elsewhere, and so on.
+pub async fn run_with(
+    config: SessionConfig,
+    options: DirectOptions,
+    commands: async_channel::Receiver<Command>,
+    events: async_channel::Sender<AgentEvent>,
+) -> Result<()> {
     let AgentId::Direct(provider_id) = &config.agent else {
         unreachable!()
     };
-    let provider =
-        direct_provider(provider_id).with_context(|| format!("unknown provider {provider_id}"))?;
-    // Read quietly: a key an earlier copy of Trek saved is locked, and the way to it is Settings
-    // (which says what macOS will ask), never a password prompt in the middle of a send.
-    let key = match secrets::api_key_lookup(provider.id) {
-        trek_core::keychain::Lookup::Found(k) => Some(k),
-        trek_core::keychain::Lookup::Locked if !provider.local => bail!(
-            "Your saved {} key is locked: an earlier copy of Trek saved it, and macOS only lets that copy read it. Open Settings → API Keys to allow access or paste it again.",
-            provider.name
-        ),
-        _ => None,
+    let provider = match options.provider {
+        Some(p) => p,
+        None => *direct_provider(provider_id)
+            .with_context(|| format!("unknown provider {provider_id}"))?,
+    };
+    let key = match &options.api_key {
+        Some(given) => given.clone(),
+        // Read quietly: a key an earlier copy of Trek saved is locked, and the way to it is
+        // Settings (which says what macOS will ask), never a password prompt in the middle of
+        // a send.
+        None => match secrets::api_key_lookup(provider.id) {
+            trek_core::keychain::Lookup::Found(k) => Some(k),
+            trek_core::keychain::Lookup::Locked if !provider.local => bail!(
+                "Your saved {} key is locked: an earlier copy of Trek saved it, and macOS only lets that copy read it. Open Settings → API Keys to allow access or paste it again.",
+                provider.name
+            ),
+            _ => None,
+        },
     };
     if !provider.local && key.is_none() {
         bail!(
@@ -198,11 +317,26 @@ pub async fn run(
             provider.name
         );
     }
-    let url = match provider.wire {
-        Wire::Anthropic => ANTHROPIC_MESSAGES_URL,
-        _ => provider.base_url,
+    let url = endpoint(&provider, options.base_url.as_deref());
+    session(config, &provider, &url, key, options, commands, events).await
+}
+
+/// Where `provider`'s requests go: the messages endpoint for Anthropic, the base URL for the
+/// OpenAI wire. `base_url` replaces the provider's; for Anthropic it may be the API's root
+/// (`/v1/messages` is added) or the messages endpoint itself.
+pub fn endpoint(provider: &DirectProvider, base_url: Option<&str>) -> String {
+    let Some(base) = base_url.map(|b| b.trim_end_matches('/')) else {
+        return match provider.wire {
+            Wire::Anthropic => ANTHROPIC_MESSAGES_URL.to_string(),
+            _ => provider.base_url.to_string(),
+        };
     };
-    session(config, provider, url, key, commands, events).await
+    match provider.wire {
+        Wire::Anthropic if base.ends_with("/messages") => base.to_string(),
+        Wire::Anthropic if base.ends_with("/v1") => format!("{base}/messages"),
+        Wire::Anthropic => format!("{base}/v1/messages"),
+        _ => base.to_string(),
+    }
 }
 
 /// A session with `provider`, its requests sent to `url` (the messages endpoint for Anthropic,
@@ -212,9 +346,19 @@ async fn session(
     provider: &DirectProvider,
     url: &str,
     key: Option<String>,
+    options: DirectOptions,
     commands: async_channel::Receiver<Command>,
     events: async_channel::Sender<AgentEvent>,
 ) -> Result<()> {
+    let observer = options.observer.clone();
+    let observe = |f: &dyn Fn(&dyn Observer)| {
+        if let Some(o) = &observer {
+            f(o.as_ref());
+        }
+    };
+    let past_deadline = || options.deadline.is_some_and(|d| Instant::now() >= d);
+    let tools = tool_defs(config.script);
+    let mut requests = 0u32;
     let mut model = config.model.clone().context("Pick a model first")?;
     let mut effort = config.effort;
     let mut hand_holding = config.hand_holding;
@@ -234,11 +378,22 @@ async fn session(
         }))
         .await?;
 
-    let system = system_prompt(
-        &config.cwd,
-        config.read_only,
-        config.instructions.as_deref(),
-    );
+    let system = match &options.system_prompt {
+        Some(own) => {
+            let mut p = own.clone();
+            if let Some(extra) = &config.instructions {
+                p.push_str("\n\n");
+                p.push_str(extra);
+                p.push('\n');
+            }
+            p
+        }
+        None => system_prompt(
+            &config.cwd,
+            config.read_only,
+            config.instructions.as_deref(),
+        ),
+    };
     let mut history: Vec<Value> = Vec::new();
     let mut kept = VecDeque::new();
     let mut shutdown = false;
@@ -270,8 +425,17 @@ async fn session(
                     // Multi-turn agent loop for tool calls
                     let mut turn_count = 0;
                     let mut turn_error = None;
-                    while turn_count < 30 {
+                    let mut why = None;
+                    while turn_count < options.max_turns {
+                        if past_deadline() {
+                            why = Some(Stop::TimeLimit);
+                            break;
+                        }
                         turn_count += 1;
+                        requests += 1;
+                        let n = requests;
+                        observe(&|o| o.request_start(n));
+                        let sent = Instant::now();
                         let result = match provider.wire {
                             Wire::Anthropic => {
                                 anthropic_turn(
@@ -282,6 +446,7 @@ async fn session(
                                     effort,
                                     &system,
                                     &history,
+                                    &tools,
                                     &events,
                                     &commands,
                                     &mut kept,
@@ -290,7 +455,8 @@ async fn session(
                                 .await
                             }
                             _ => {
-                                let usage = REPORTS_USAGE.contains(&provider.id);
+                                let usage = REPORTS_USAGE.contains(&provider.id)
+                                    || direct_provider(provider.id).is_none();
                                 openai_turn(
                                     &client,
                                     &config.agent,
@@ -302,6 +468,7 @@ async fn session(
                                     effort,
                                     &system,
                                     &history,
+                                    &tools,
                                     &events,
                                     &commands,
                                     &mut kept,
@@ -310,6 +477,23 @@ async fn session(
                                 .await
                             }
                         };
+                        let elapsed = sent.elapsed();
+                        match &result {
+                            Ok(resp) => {
+                                let (tokens, cost) = match &resp.usage {
+                                    Some((t, c)) => (Some(t), *c),
+                                    None => (None, None),
+                                };
+                                observe(&|o| o.request_end(n, tokens, cost, elapsed, None));
+                                if !resp.text.is_empty() {
+                                    observe(&|o| o.text(&resp.text));
+                                }
+                            }
+                            Err(e) => {
+                                let e = format!("{e:#}");
+                                observe(&|o| o.request_end(n, None, None, elapsed, Some(&e)));
+                            }
+                        }
                         match result {
                             Ok(resp) => {
                                 let anthropic = resp.content.is_some();
@@ -345,6 +529,7 @@ async fn session(
                                     }
                                 }
                                 if resp.tool_calls.is_empty() {
+                                    why = Some(Stop::EndTurn);
                                     break;
                                 }
 
@@ -352,6 +537,7 @@ async fn session(
                                 // started: providers reject a history with a call left unanswered.
                                 let mut results = Vec::new();
                                 let mut stopped = None;
+                                let mut timed_out = false;
                                 for (i, call) in resp.tool_calls.iter().enumerate() {
                                     let (title, detail) = tool_display(&call.name, &call.arguments);
                                     events
@@ -361,6 +547,13 @@ async fn session(
                                             detail: detail.clone(),
                                         })
                                         .await?;
+                                    if observer.is_some() {
+                                        let args = serde_json::from_str(&call.arguments)
+                                            .unwrap_or_else(|_| {
+                                                Value::String(call.arguments.clone())
+                                            });
+                                        observe(&|o| o.tool_call(&call.name, &args));
+                                    }
 
                                     let ran = execute_tool(
                                         &call.name,
@@ -369,6 +562,8 @@ async fn session(
                                         config.read_only,
                                         hand_holding,
                                         &mut allowed_for_session,
+                                        &options,
+                                        config.script,
                                         &events,
                                         &commands,
                                         &mut kept,
@@ -381,6 +576,7 @@ async fn session(
                                         // permission: it ends this turn, not the session.
                                         Err(e) => (format!("{e:#}"), false, None, Some(e)),
                                     };
+                                    observe(&|o| o.tool_result(&call.name, &output, ok));
 
                                     if let Some((added, removed)) = lines {
                                         events
@@ -412,6 +608,18 @@ async fn session(
                                         stopped = Some(e);
                                         break;
                                     }
+                                    // Past the time limit, the call that ran is the last.
+                                    if past_deadline() && i + 1 < resp.tool_calls.len() {
+                                        for rest in &resp.tool_calls[i + 1..] {
+                                            results.push((
+                                                rest.id.clone(),
+                                                "Not run: the time limit was reached".to_string(),
+                                                false,
+                                            ));
+                                        }
+                                        timed_out = true;
+                                        break;
+                                    }
                                 }
                                 push_tool_results(&mut history, anthropic, results);
                                 if let Some(e) = stopped {
@@ -421,12 +629,18 @@ async fn session(
                                 if shutdown {
                                     break;
                                 }
-                                if turn_count >= 30 {
+                                if timed_out {
+                                    why = Some(Stop::TimeLimit);
+                                    break;
+                                }
+                                if turn_count >= options.max_turns {
                                     // The runaway guard ends the loop next check; say so, or the
                                     // answer looks like it just stopped mid-work.
-                                    events.send(AgentEvent::Notice(
-                                        "Stopped at 30 tool-call rounds in one answer — send a message and it picks up where it left off.".into(),
-                                    )).await?;
+                                    events.send(AgentEvent::Notice(format!(
+                                        "Stopped at {} tool-call rounds in one answer — send a message and it picks up where it left off.",
+                                        options.max_turns
+                                    ))).await?;
+                                    why = Some(Stop::MaxTurns);
                                     break;
                                 }
                             }
@@ -444,6 +658,12 @@ async fn session(
                             }
                         }
                     }
+                    let why = match (&turn_error, why) {
+                        (Some(e), _) => Stop::Error(e.clone()),
+                        (None, Some(why)) => why,
+                        (None, None) => Stop::Error("Interrupted".into()),
+                    };
+                    observe(&|o| o.stopped(&why));
                     if let Some(err) = turn_error {
                         error.get_or_insert(err);
                     }
@@ -648,6 +868,20 @@ fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
                 .unwrap_or(args_json);
             ("Edit", path.to_string())
         }
+        // The model's own few words on what the program does, else its first line.
+        "script" => {
+            let described = parsed["description"]
+                .as_str()
+                .map(str::trim)
+                .filter(|d| !d.is_empty());
+            let first_line = || {
+                parsed["code"]
+                    .as_str()
+                    .and_then(|c| c.lines().map(str::trim).find(|l| !l.is_empty()))
+            };
+            let line = described.or_else(first_line).unwrap_or(args_json);
+            ("Run script", line.to_string())
+        }
         _ => ("Tool", args_json.to_string()),
     }
 }
@@ -728,6 +962,60 @@ fn edit_permission(
     (ask, key)
 }
 
+/// Whether `tool` (`bash`, `write_file` or `edit_file`) may go ahead on `target` (the command,
+/// or the path): asks the user when `hand_holding` says to, and remembers "allow for the
+/// session". `Ok(false)`: denied.
+#[allow(clippy::too_many_arguments)]
+async fn permitted(
+    tool: &str,
+    target: &str,
+    cwd: &Path,
+    hand_holding: HandHolding,
+    allowed_for_session: &mut HashSet<String>,
+    events: &async_channel::Sender<AgentEvent>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<bool> {
+    let (need_ask, title, session_key) = match tool {
+        "bash" => {
+            let need_ask = match hand_holding {
+                HandHolding::FullAccess => false,
+                HandHolding::Auto => {
+                    !is_safe_command(target) && !allowed_for_session.contains(target)
+                }
+                HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
+                    !allowed_for_session.contains(target)
+                }
+            };
+            (need_ask, "Run command", target.to_string())
+        }
+        _ => {
+            let (need_ask, key) =
+                edit_permission(tool, hand_holding, target, cwd, allowed_for_session);
+            let title = if tool == "write_file" {
+                "Write file"
+            } else {
+                "Edit file"
+            };
+            (need_ask, title, key)
+        }
+    };
+    if !need_ask {
+        return Ok(true);
+    }
+    Ok(
+        match ask_permission(title, target, events, commands, kept, shutdown).await? {
+            Decision::Allow => true,
+            Decision::AllowForSession => {
+                allowed_for_session.insert(session_key);
+                true
+            }
+            Decision::Deny => false,
+        },
+    )
+}
+
 async fn execute_tool(
     name: &str,
     args_json: &str,
@@ -735,11 +1023,14 @@ async fn execute_tool(
     read_only: bool,
     hand_holding: HandHolding,
     allowed_for_session: &mut HashSet<String>,
+    options: &DirectOptions,
+    script: bool,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<(String, bool, Option<(u32, u32)>)> {
+    let exec = options.executor.as_ref();
     match name {
         "bash" => {
             if read_only {
@@ -759,29 +1050,31 @@ async fn execute_tool(
             if command.is_empty() {
                 return Ok(("Error: empty command".into(), false, None));
             }
-            let need_ask = match hand_holding {
-                HandHolding::FullAccess => false,
-                HandHolding::Auto => {
-                    !is_safe_command(command) && !allowed_for_session.contains(command)
-                }
-                HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
-                    !allowed_for_session.contains(command)
-                }
-            };
-            if need_ask {
-                match ask_permission("Run command", command, events, commands, kept, shutdown)
-                    .await?
-                {
-                    Decision::Allow => {}
-                    Decision::AllowForSession => {
-                        allowed_for_session.insert(command.to_string());
-                    }
-                    Decision::Deny => {
-                        return Ok(("Permission denied by user".into(), false, None));
-                    }
-                }
+            if !permitted(
+                "bash",
+                command,
+                cwd,
+                hand_holding,
+                allowed_for_session,
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok(("Permission denied by user".into(), false, None));
             }
-            let (out, ok) = run_bash_command(command, cwd, commands, kept, shutdown).await?;
+            let (out, ok) = run_bash_command(
+                exec,
+                command,
+                cwd,
+                options.command_timeout,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?;
             Ok((out, ok, None))
         }
         "read_file" => {
@@ -801,7 +1094,19 @@ async fn execute_tool(
                 .get("end_line")
                 .and_then(|e| e.as_u64())
                 .map(|e| e as usize);
-            let (out, ok) = run_read_file(path_str, start, end, cwd).await?;
+            let (out, ok) = run_read_file(
+                exec,
+                path_str,
+                start,
+                end,
+                cwd,
+                &mut Waiting {
+                    commands,
+                    kept: &mut *kept,
+                    shutdown: &mut *shutdown,
+                },
+            )
+            .await?;
             Ok((out, ok, None))
         }
         "write_file" => {
@@ -824,27 +1129,33 @@ async fn execute_tool(
             if path_str.is_empty() {
                 return Ok(("Error: path parameter is required".into(), false, None));
             }
-            let (need_ask, session_key) = edit_permission(
+            if !permitted(
                 "write_file",
-                hand_holding,
                 path_str,
                 cwd,
+                hand_holding,
                 allowed_for_session,
-            );
-            if need_ask {
-                match ask_permission("Write file", path_str, events, commands, kept, shutdown)
-                    .await?
-                {
-                    Decision::Allow => {}
-                    Decision::AllowForSession => {
-                        allowed_for_session.insert(session_key);
-                    }
-                    Decision::Deny => {
-                        return Ok(("Permission denied by user".into(), false, None));
-                    }
-                }
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok(("Permission denied by user".into(), false, None));
             }
-            run_write_file(path_str, content, cwd).await
+            run_write_file(
+                exec,
+                path_str,
+                content,
+                cwd,
+                &mut Waiting {
+                    commands,
+                    kept: &mut *kept,
+                    shutdown: &mut *shutdown,
+                },
+            )
+            .await
         }
         "edit_file" => {
             if read_only {
@@ -874,27 +1185,106 @@ async fn execute_tool(
                     None,
                 ));
             }
-            let (need_ask, session_key) = edit_permission(
+            if !permitted(
                 "edit_file",
-                hand_holding,
                 path_str,
                 cwd,
+                hand_holding,
                 allowed_for_session,
-            );
-            if need_ask {
-                match ask_permission("Edit file", path_str, events, commands, kept, shutdown)
-                    .await?
-                {
-                    Decision::Allow => {}
-                    Decision::AllowForSession => {
-                        allowed_for_session.insert(session_key);
-                    }
-                    Decision::Deny => {
-                        return Ok(("Permission denied by user".into(), false, None));
-                    }
-                }
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok(("Permission denied by user".into(), false, None));
             }
-            run_edit_file(path_str, old_str, new_str, cwd).await
+            run_edit_file(
+                exec,
+                path_str,
+                old_str,
+                new_str,
+                cwd,
+                &mut Waiting {
+                    commands,
+                    kept: &mut *kept,
+                    shutdown: &mut *shutdown,
+                },
+            )
+            .await
+        }
+        // The fifth tool, when it's on (see `script`): a program whose calls run on the same
+        // executor. Its approvals are asked here while it waits; a Stop drops it like it does a
+        // command, and the calls it has in flight with it.
+        "script" if script => {
+            if read_only {
+                return Ok((
+                    "Permission denied: scripts are disabled in read-only mode".into(),
+                    false,
+                    None,
+                ));
+            }
+            let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+            let code = parsed["code"].as_str().unwrap_or_default();
+            if code.trim().is_empty() {
+                return Ok(("Error: code parameter is required".into(), false, None));
+            }
+            let (to_session, mut from_script) = tokio::sync::mpsc::unbounded_channel();
+            let tools = Arc::new(script::ScriptTools::new(
+                options.executor.clone(),
+                cwd.to_path_buf(),
+                options.command_timeout,
+                hand_holding != HandHolding::FullAccess,
+                options.deadline,
+                to_session,
+            ));
+            let mut limits = trek_script::ScriptLimits {
+                log_dir: options.script_log_dir.clone(),
+                ..Default::default()
+            };
+            // Within the session's time limit too: the program stops with it.
+            if let Some(deadline) = options.deadline {
+                limits.wall_clock = limits
+                    .wall_clock
+                    .min(deadline.saturating_duration_since(Instant::now()));
+            }
+            let run = trek_script::run_script(code, tools, limits);
+            tokio::pin!(run);
+            let result = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    Some(said) = from_script.recv() => {
+                        let ask = match said {
+                            script::ToSession::Approval(ask) => ask,
+                            // The executor is gone: the program ends here (`run` dropped), and
+                            // the turn with it, as it would for one of the model's own calls.
+                            script::ToSession::Gone(reason) => {
+                                return Err(ExecutorGone(reason).into());
+                            }
+                        };
+                        let ok = permitted(
+                            ask.tool,
+                            &ask.target,
+                            cwd,
+                            hand_holding,
+                            allowed_for_session,
+                            events,
+                            commands,
+                            kept,
+                            shutdown,
+                        )
+                        .await?;
+                        let _ = ask.reply.send(ok);
+                    }
+                    cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
+                }
+            };
+            if let Some(o) = &options.observer {
+                o.script_result(&result);
+            }
+            let ok = result.error.is_none() && !result.timed_out;
+            Ok((result.to_model_text(), ok, None))
         }
         unknown => Ok((
             format!(
@@ -906,84 +1296,50 @@ async fn execute_tool(
     }
 }
 
+/// `run` to its end, unless a Stop (or shutdown) comes first: then it's dropped (a command and
+/// what it started end with it) and this is the error. A message, a model or an access level
+/// sent meanwhile waits in `kept`.
+async fn until_stopped<T>(
+    run: impl std::future::Future<Output = T>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<T> {
+    tokio::pin!(run);
+    loop {
+        tokio::select! {
+            res = &mut run => return Ok(res),
+            cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
+        }
+    }
+}
+
+/// Most of a command's output the model is told, in bytes.
+const MAX_OUT: usize = 50_000;
+
 async fn run_bash_command(
+    exec: &dyn ToolExecutor,
     command: &str,
     cwd: &Path,
+    timeout: Option<Duration>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<(String, bool)> {
-    #[cfg(unix)]
-    let mut shell = trek_core::procs::async_command("sh");
-    #[cfg(unix)]
-    shell.arg("-c");
-    #[cfg(windows)]
-    let mut shell = trek_core::procs::async_command("cmd.exe");
-    #[cfg(windows)]
-    shell.arg("/c");
-    shell
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    // In a group of its own, so a Stop ends what the command started too, not just the shell.
-    // A command that finishes may leave something running on purpose (a server it started in
-    // the background), so nothing is ended then.
-    #[cfg(unix)]
-    shell.process_group(0);
-    let mut child = match shell.spawn() {
-        Ok(c) => c,
-        Err(e) => return Ok((format!("Failed to execute command: {e}"), false)),
-    };
-
-    let mut stdout = child.stdout.take().expect("stdout");
-    let mut stderr = child.stderr.take().expect("stderr");
-    let mut stdout_buf = Vec::new();
-    let mut stderr_buf = Vec::new();
-
-    let finished = {
-        let read_out = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut stdout_buf);
-        let read_err = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut stderr_buf);
-        let run = async {
-            tokio::try_join!(read_out, read_err)?;
-            child.wait().await
+    let ran =
+        match until_stopped(exec.exec(command, cwd, timeout), commands, kept, shutdown).await? {
+            Ok(ran) => ran,
+            Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => return Err(e),
+            Err(e) => return Ok((format!("Failed to execute command: {e:#}"), false)),
         };
-        tokio::pin!(run);
-        // A message, a model or an access level sent meanwhile waits for the command to end;
-        // only a Stop (or shutdown) cuts it short.
-        loop {
-            tokio::select! {
-                res = &mut run => break Ok(res),
-                cmd = commands.recv() => {
-                    if let Err(e) = keep_command(cmd, kept, shutdown) {
-                        break Err(e);
-                    }
-                }
-            }
-        }
-    };
-    let status = match finished {
-        Ok(res) => res?,
-        Err(e) => {
-            #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                // SAFETY: a negative pid asks kill(2) to signal that process group, the child's
-                // own (it isn't reaped yet, so the id is still its).
-                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            }
-            let _ = child.kill().await;
-            return Err(e);
-        }
-    };
-    let mut out = String::from_utf8_lossy(&stdout_buf).to_string();
-    let err = String::from_utf8_lossy(&stderr_buf);
-    if !err.is_empty() {
+    let ok = ran.success();
+    let mut out = ran.stdout;
+    if !ran.stderr.is_empty() {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&err);
+        out.push_str(&ran.stderr);
     }
-    const MAX_OUT: usize = 50_000;
     if out.len() > MAX_OUT {
         let mut cut = MAX_OUT;
         while !out.is_char_boundary(cut) {
@@ -992,29 +1348,76 @@ async fn run_bash_command(
         out.truncate(cut);
         out.push_str("\n... [output truncated]");
     }
+    if ran.timed_out {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&match timeout {
+            Some(limit) => format!(
+                "[Command timed out after {} seconds and was stopped]",
+                limit.as_secs()
+            ),
+            None => "[Command timed out and was stopped]".to_string(),
+        });
+    }
     if out.trim().is_empty() {
         out = "(Command finished with no output)".to_string();
     }
-    Ok((out, status.success()))
+    Ok((out, ok))
+}
+
+/// A tool's way to hear a Stop while it waits on the executor (see `until_stopped`): a read or
+/// write the sandbox never answers mustn't hold the turn.
+struct Waiting<'a> {
+    commands: &'a async_channel::Receiver<Command>,
+    kept: &'a mut VecDeque<Command>,
+    shutdown: &'a mut bool,
+}
+
+impl Waiting<'_> {
+    async fn on<T>(&mut self, run: impl std::future::Future<Output = T>) -> Result<T> {
+        until_stopped(run, self.commands, self.kept, self.shutdown).await
+    }
+}
+
+/// `path_str` as the executor gets it: relative paths are in `cwd`.
+fn tool_path(path_str: &str, cwd: &Path) -> PathBuf {
+    if Path::new(path_str).is_absolute() {
+        PathBuf::from(path_str)
+    } else {
+        cwd.join(path_str)
+    }
+}
+
+/// A file's text through `exec`: `Err` is what to tell the model (the file isn't there or isn't
+/// text), and the outer `Err` an executor that's gone.
+async fn read_text(
+    exec: &dyn ToolExecutor,
+    path: &Path,
+    path_str: &str,
+    waiting: &mut Waiting<'_>,
+) -> Result<std::result::Result<String, String>> {
+    match waiting.on(exec.read(path)).await? {
+        Ok(Some(bytes)) => Ok(String::from_utf8(bytes)
+            .map_err(|_| format!("Error reading {path_str}: stream did not contain valid UTF-8"))),
+        Ok(None) => Ok(Err(format!("File not found: {path_str}"))),
+        Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => Err(e),
+        Err(e) => Ok(Err(format!("Error reading {path_str}: {e:#}"))),
+    }
 }
 
 async fn run_read_file(
+    exec: &dyn ToolExecutor,
     path_str: &str,
     start_line: Option<usize>,
     end_line: Option<usize>,
     cwd: &Path,
+    waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool)> {
-    let path = if Path::new(path_str).is_absolute() {
-        PathBuf::from(path_str)
-    } else {
-        cwd.join(path_str)
-    };
-    if !path.exists() {
-        return Ok((format!("File not found: {path_str}"), false));
-    }
-    let content = match tokio::fs::read_to_string(&path).await {
+    let path = tool_path(path_str, cwd);
+    let content = match read_text(exec, &path, path_str, waiting).await? {
         Ok(c) => c,
-        Err(e) => return Ok((format!("Error reading {path_str}: {e}"), false)),
+        Err(message) => return Ok((message, false)),
     };
     let lines: Vec<&str> = content.lines().collect();
     if lines.is_empty() {
@@ -1050,46 +1453,37 @@ async fn run_read_file(
 }
 
 async fn run_write_file(
+    exec: &dyn ToolExecutor,
     path_str: &str,
     content: &str,
     cwd: &Path,
+    waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool, Option<(u32, u32)>)> {
-    let path = if Path::new(path_str).is_absolute() {
-        PathBuf::from(path_str)
-    } else {
-        cwd.join(path_str)
-    };
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
+    let path = tool_path(path_str, cwd);
     let added = content.lines().count() as u32;
-    match tokio::fs::write(&path, content).await {
-        Ok(_) => Ok((
+    match waiting.on(exec.write(&path, content.as_bytes())).await? {
+        Ok(()) => Ok((
             format!("Successfully wrote {added} lines to {path_str}"),
             true,
             Some((added, 0)),
         )),
-        Err(e) => Ok((format!("Error writing {path_str}: {e}"), false, None)),
+        Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => Err(e),
+        Err(e) => Ok((format!("Error writing {path_str}: {e:#}"), false, None)),
     }
 }
 
 async fn run_edit_file(
+    exec: &dyn ToolExecutor,
     path_str: &str,
     old_str: &str,
     new_str: &str,
     cwd: &Path,
+    waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool, Option<(u32, u32)>)> {
-    let path = if Path::new(path_str).is_absolute() {
-        PathBuf::from(path_str)
-    } else {
-        cwd.join(path_str)
-    };
-    if !path.exists() {
-        return Ok((format!("File not found: {path_str}"), false, None));
-    }
-    let content = match tokio::fs::read_to_string(&path).await {
+    let path = tool_path(path_str, cwd);
+    let content = match read_text(exec, &path, path_str, waiting).await? {
         Ok(c) => c,
-        Err(e) => return Ok((format!("Error reading {path_str}: {e}"), false, None)),
+        Err(message) => return Ok((message, false, None)),
     };
     let count = content.matches(old_str).count();
     if count == 0 {
@@ -1111,8 +1505,8 @@ async fn run_edit_file(
         ));
     }
     let updated = content.replacen(old_str, new_str, 1);
-    match tokio::fs::write(&path, &updated).await {
-        Ok(_) => {
+    match waiting.on(exec.write(&path, updated.as_bytes())).await? {
+        Ok(()) => {
             let removed = old_str.lines().count() as u32;
             let added = new_str.lines().count() as u32;
             Ok((
@@ -1121,8 +1515,9 @@ async fn run_edit_file(
                 Some((added, removed)),
             ))
         }
+        Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => Err(e),
         Err(e) => Ok((
-            format!("Error writing edits to {path_str}: {e}"),
+            format!("Error writing edits to {path_str}: {e:#}"),
             false,
             None,
         )),
@@ -1352,10 +1747,10 @@ async fn send_request(
     }
 }
 
-/// `direct_tools` in the shape the Messages API takes them.
-fn anthropic_tools() -> Vec<Value> {
-    direct_tools()
-        .into_iter()
+/// `tools` (`tool_defs`) in the shape the Messages API takes them.
+fn anthropic_tools(tools: &[Value]) -> Vec<Value> {
+    tools
+        .iter()
         .map(|t| {
             let f = &t["function"];
             json!({ "name": f["name"], "description": f["description"], "input_schema": f["parameters"] })
@@ -1363,14 +1758,20 @@ fn anthropic_tools() -> Vec<Value> {
         .collect()
 }
 
-fn anthropic_body(model: &str, effort: Effort, system: &str, history: &[Value]) -> Value {
+fn anthropic_body(
+    model: &str,
+    effort: Effort,
+    system: &str,
+    history: &[Value],
+    tools: &[Value],
+) -> Value {
     let mut body = json!({
         "model": model,
         "max_tokens": 64000,
         "stream": true,
         "system": system,
         "messages": history,
-        "tools": anthropic_tools(),
+        "tools": anthropic_tools(tools),
     });
     if model.starts_with("claude-haiku-4") {
         if effort >= Effort::Low {
@@ -1404,12 +1805,13 @@ async fn anthropic_turn(
     effort: Effort,
     system: &str,
     history: &[Value],
+    tools: &[Value],
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<TurnResponse> {
-    let body = anthropic_body(model, effort, system, history);
+    let body = anthropic_body(model, effort, system, history, tools);
     let mut req = client
         .post(url)
         .header("x-api-key", key)
@@ -1486,6 +1888,7 @@ async fn anthropic_turn(
     if !terminal {
         bail!("The connection closed before the answer finished");
     }
+    let mut reported = None;
     if !usage.is_empty() {
         let cost = trek_core::pricing::request(
             model,
@@ -1494,6 +1897,7 @@ async fn anthropic_turn(
             long_writes,
             false,
         );
+        reported = Some((usage, cost));
         events
             .send(AgentEvent::Usage {
                 model: Some(model.to_string()),
@@ -1526,6 +1930,7 @@ async fn anthropic_turn(
         content: Some(json!({ "role": "assistant", "content": blocks })),
         reasoning_details: vec![],
         tool_calls,
+        usage: reported,
     })
 }
 
@@ -1594,6 +1999,7 @@ async fn openai_turn(
     effort: Effort,
     system: &str,
     history: &[Value],
+    tools: &[Value],
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
@@ -1604,7 +2010,7 @@ async fn openai_turn(
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "tools": direct_tools(),
+        "tools": tools,
         "stream": true
     });
     if include_usage {
@@ -1762,11 +2168,13 @@ async fn openai_turn(
     if !terminal {
         bail!("The connection closed before the answer finished");
     }
+    let mut request_usage = None;
     if let Some((tokens, reported)) = usage {
         let cost = match reported {
             Some(usd) => Some(UsageCost::reported(usd)),
             None => trek_core::pricing::request(model, agent, &tokens, 0, false),
         };
+        request_usage = Some((tokens, cost));
         events
             .send(AgentEvent::Usage {
                 model: Some(model.to_string()),
@@ -1797,6 +2205,7 @@ async fn openai_turn(
         content: None,
         tool_calls,
         reasoning_details,
+        usage: request_usage,
     })
 }
 
@@ -2083,6 +2492,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         };
         let (_commands, commands_rx) = async_channel::unbounded();
         let (events_tx, _events) = async_channel::unbounded();
@@ -2183,6 +2593,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2204,6 +2615,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2241,6 +2653,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2280,6 +2693,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2301,6 +2715,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2333,6 +2748,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2367,6 +2783,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2415,6 +2832,8 @@ mod tests {
             false,
             HandHolding::Auto,
             &mut allowed,
+            &DirectOptions::default(),
+            false,
             &tx_events,
             &rx_cmd,
             &mut kept,
@@ -2440,6 +2859,8 @@ mod tests {
             false,
             HandHolding::Auto,
             &mut allowed,
+            &DirectOptions::default(),
+            false,
             &tx_events,
             &rx_cmd,
             &mut kept,
@@ -2466,6 +2887,8 @@ mod tests {
             false,
             HandHolding::Auto,
             &mut allowed,
+            &DirectOptions::default(),
+            false,
             &tx_events,
             &rx_cmd,
             &mut kept,
@@ -2535,7 +2958,13 @@ mod tests {
 
     #[test]
     fn anthropic_requests_carry_the_tools() {
-        let body = anthropic_body("claude-sonnet-4-5", Effort::Medium, "sys", &[]);
+        let body = anthropic_body(
+            "claude-sonnet-4-5",
+            Effort::Medium,
+            "sys",
+            &[],
+            &direct_tools(),
+        );
         let names: Vec<&str> = body["tools"]
             .as_array()
             .unwrap()
@@ -2576,6 +3005,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -2685,6 +3115,23 @@ mod tests {
             hand_holding: HandHolding,
             responses: Vec<(u16, String)>,
         ) -> TestSession {
+            Self::start_with(
+                provider,
+                hand_holding,
+                responses,
+                DirectOptions::default(),
+                false,
+            )
+            .await
+        }
+
+        async fn start_with(
+            provider: &'static str,
+            hand_holding: HandHolding,
+            responses: Vec<(u16, String)>,
+            options: DirectOptions,
+            script: bool,
+        ) -> TestSession {
             let (url, bodies) = script_server(responses).await;
             let cwd = std::env::temp_dir().join(format!("trek_test_direct_session_{}", next_id()));
             std::fs::create_dir_all(&cwd).unwrap();
@@ -2704,6 +3151,7 @@ mod tests {
                 mcp_servers: vec![],
                 instructions: None,
                 read_dirs: vec![],
+                script,
             };
             let (commands, commands_rx) = async_channel::unbounded();
             let (events_tx, events) = async_channel::unbounded();
@@ -2714,6 +3162,7 @@ mod tests {
                     provider,
                     &url,
                     Some("key".into()),
+                    options,
                     commands_rx,
                     events_tx,
                 )
@@ -3091,18 +3540,39 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let lines: Vec<String> = (1..=100).map(|n| format!("line {n}")).collect();
         std::fs::write(dir.join("a.txt"), lines.join("\n")).unwrap();
-        let (out, ok) = run_read_file("a.txt", Some(50), Some(10), &dir)
-            .await
-            .unwrap();
+        let (out, ok) = run_read_file(
+            &LocalExecutor,
+            "a.txt",
+            Some(50),
+            Some(10),
+            &dir,
+            &mut waiting(),
+        )
+        .await
+        .unwrap();
         assert!(!ok);
         assert!(out.contains("before start line 50"), "{out}");
-        let (_, ok) = run_read_file("a.txt", Some(5), Some(0), &dir)
-            .await
-            .unwrap();
+        let (_, ok) = run_read_file(
+            &LocalExecutor,
+            "a.txt",
+            Some(5),
+            Some(0),
+            &dir,
+            &mut waiting(),
+        )
+        .await
+        .unwrap();
         assert!(!ok);
-        let (out, ok) = run_read_file("a.txt", Some(10), Some(10), &dir)
-            .await
-            .unwrap();
+        let (out, ok) = run_read_file(
+            &LocalExecutor,
+            "a.txt",
+            Some(10),
+            Some(10),
+            &dir,
+            &mut waiting(),
+        )
+        .await
+        .unwrap();
         assert!(
             ok && out.contains("line 10") && !out.contains("line 11"),
             "{out}"
@@ -3117,8 +3587,10 @@ mod tests {
         let (mut kept, mut shutdown) = (VecDeque::new(), false);
         // One ASCII byte, then three-byte characters: byte 50000 is inside one.
         let (out, ok) = run_bash_command(
+            &LocalExecutor,
             "printf a; yes '✓' | head -n 20000 | tr -d '\\n'",
             Path::new("."),
+            None,
             &commands,
             &mut kept,
             &mut shutdown,
@@ -3220,6 +3692,8 @@ mod tests {
             false,
             HandHolding::AutoAcceptEdits,
             &mut allowed,
+            &DirectOptions::default(),
+            false,
             &events,
             &commands,
             &mut kept,
@@ -3258,6 +3732,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -3354,6 +3829,7 @@ mod tests {
             Effort::High,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -3397,6 +3873,7 @@ mod tests {
             Effort::High,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -3438,6 +3915,7 @@ mod tests {
             Effort::Off,
             "sys",
             &[],
+            &direct_tools(),
             &events,
             &commands,
             &mut kept,
@@ -3446,5 +3924,616 @@ mod tests {
         .await
         .unwrap_err();
         assert!(e.to_string().contains("no such model"), "{e:#}");
+    }
+
+    /// Files in a map and commands written down: proves every tool goes through the executor.
+    #[derive(Default)]
+    struct MemoryExecutor {
+        files: std::sync::Mutex<HashMap<PathBuf, Vec<u8>>>,
+        ran: std::sync::Mutex<Vec<(String, PathBuf, Option<Duration>)>>,
+    }
+
+    impl ToolExecutor for MemoryExecutor {
+        fn exec<'a>(
+            &'a self,
+            command: &'a str,
+            cwd: &'a Path,
+            timeout: Option<Duration>,
+        ) -> futures::future::BoxFuture<'a, Result<executor::ExecOutput>> {
+            Box::pin(async move {
+                self.ran
+                    .lock()
+                    .unwrap()
+                    .push((command.into(), cwd.into(), timeout));
+                match command {
+                    "gone" => Err(ExecutorGone("peer closed".into()).into()),
+                    "broken" => Err(anyhow::anyhow!("no shell here")),
+                    "slow" => Ok(executor::ExecOutput {
+                        stdout: "partial".into(),
+                        timed_out: true,
+                        ..Default::default()
+                    }),
+                    _ => Ok(executor::ExecOutput {
+                        stdout: format!("ran {command}"),
+                        stderr: "note".into(),
+                        exit_code: Some(0),
+                        timed_out: false,
+                    }),
+                }
+            })
+        }
+
+        fn read<'a>(
+            &'a self,
+            path: &'a Path,
+        ) -> futures::future::BoxFuture<'a, Result<Option<Vec<u8>>>> {
+            Box::pin(async move { Ok(self.files.lock().unwrap().get(path).cloned()) })
+        }
+
+        fn write<'a>(
+            &'a self,
+            path: &'a Path,
+            bytes: &'a [u8],
+        ) -> futures::future::BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.files
+                    .lock()
+                    .unwrap()
+                    .insert(path.into(), bytes.to_vec());
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn every_tool_goes_through_the_executor() {
+        let memory = Arc::new(MemoryExecutor::default());
+        let options = DirectOptions {
+            executor: memory.clone(),
+            command_timeout: Some(Duration::from_secs(7)),
+            ..Default::default()
+        };
+        // A folder that doesn't exist here: the sandbox's.
+        let cwd = Path::new("/sandbox/app");
+        let (events, _rx) = async_channel::unbounded();
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        let mut tool = async |name: &str, args: Value| {
+            execute_tool(
+                name,
+                &args.to_string(),
+                cwd,
+                false,
+                HandHolding::FullAccess,
+                &mut allowed,
+                &options,
+                false,
+                &events,
+                &commands,
+                &mut kept,
+                &mut shutdown,
+            )
+            .await
+        };
+
+        let (out, ok, lines) = tool("read_file", json!({ "path": "a.txt" })).await.unwrap();
+        assert_eq!((out.as_str(), ok), ("File not found: a.txt", false));
+        assert_eq!(lines, None);
+        let (_, ok, lines) = tool(
+            "write_file",
+            json!({ "path": "a.txt", "content": "one\ntwo\n" }),
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        assert_eq!(lines, Some((2, 0)));
+        let (out, ok, _) = tool("read_file", json!({ "path": "/sandbox/app/a.txt" }))
+            .await
+            .unwrap();
+        assert!(ok && out.contains("   2 | two"), "{out}");
+        let (_, ok, lines) = tool(
+            "edit_file",
+            json!({ "path": "a.txt", "old_str": "two", "new_str": "2\n3" }),
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        assert_eq!(lines, Some((2, 1)));
+        let (out, ok, _) = tool("bash", json!({ "command": "make" })).await.unwrap();
+        assert_eq!((out.as_str(), ok), ("ran make\nnote", true));
+        let (out, ok, _) = tool("bash", json!({ "command": "slow" })).await.unwrap();
+        assert_eq!(
+            (out.as_str(), ok),
+            (
+                "partial\n[Command timed out after 7 seconds and was stopped]",
+                false
+            )
+        );
+        let (out, ok, _) = tool("bash", json!({ "command": "broken" })).await.unwrap();
+        assert_eq!(
+            (out.as_str(), ok),
+            ("Failed to execute command: no shell here", false)
+        );
+        // An executor that's gone ends the turn instead of telling the model.
+        let e = tool("bash", json!({ "command": "gone" }))
+            .await
+            .unwrap_err();
+        assert!(e.downcast_ref::<ExecutorGone>().is_some());
+        // The script tool isn't offered without a host.
+        let (out, ok, _) = tool("script", json!({ "code": "1" })).await.unwrap();
+        assert!(!ok && out.starts_with("Unknown tool: script"), "{out}");
+
+        assert_eq!(
+            memory.files.lock().unwrap()[Path::new("/sandbox/app/a.txt")],
+            b"one\n2\n3\n"
+        );
+        let ran = memory.ran.lock().unwrap();
+        assert_eq!(ran[0].0, "make");
+        assert_eq!(ran[0].1, cwd);
+        assert_eq!(ran[0].2, Some(Duration::from_secs(7)));
+    }
+
+    /// Everything an `Observer` is told, one line each.
+    #[derive(Default)]
+    struct Log(std::sync::Mutex<Vec<String>>);
+
+    impl Log {
+        fn push(&self, line: String) {
+            self.0.lock().unwrap().push(line);
+        }
+
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Observer for Log {
+        fn request_start(&self, n: u32) {
+            self.push(format!("start {n}"));
+        }
+        fn request_end(
+            &self,
+            n: u32,
+            usage: Option<&TokenUsage>,
+            cost: Option<UsageCost>,
+            _elapsed: Duration,
+            error: Option<&str>,
+        ) {
+            let usage = usage.map(|u| (u.input, u.cache_read, u.output));
+            let cost = cost.map(|c| (c.usd, c.reported));
+            self.push(format!("end {n} {usage:?} {cost:?} {error:?}"));
+        }
+        fn text(&self, text: &str) {
+            self.push(format!("text {text}"));
+        }
+        fn tool_call(&self, name: &str, args: &Value) {
+            self.push(format!("call {name} {args}"));
+        }
+        fn tool_result(&self, name: &str, output: &str, ok: bool) {
+            self.push(format!("result {name} {ok} {}", output.trim()));
+        }
+        fn script_result(&self, r: &trek_script::ScriptResult) {
+            self.push(format!(
+                "script {} {:?} {}",
+                r.nested_calls, r.calls_by_tool, r.timed_out
+            ));
+        }
+        fn stopped(&self, why: &Stop) {
+            self.push(format!("stopped {why:?}"));
+        }
+    }
+
+    /// `response` with a usage chunk (prompt 100, 40 of it cached, output 5) before its end, and
+    /// OpenRouter's `cost` when given. Its tests run a real shell, so unix only, as they are.
+    #[cfg(unix)]
+    fn with_usage((status, body): (u16, String), cost: Option<f64>) -> (u16, String) {
+        let mut usage = json!({ "prompt_tokens": 100, "completion_tokens": 5, "prompt_tokens_details": { "cached_tokens": 40 } });
+        if let Some(cost) = cost {
+            usage["cost"] = json!(cost);
+        }
+        let chunk = format!("data: {}\n\n", json!({ "choices": [], "usage": usage }));
+        (
+            status,
+            body.replace("data: [DONE]", &format!("{chunk}data: [DONE]")),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_observer_sees_each_request_and_tool_in_order() {
+        let log = Arc::new(Log::default());
+        let s = TestSession::start_with(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                with_usage(
+                    openai_tool_call("call_1", "bash", json!({ "command": "echo hi" })),
+                    Some(0.0012),
+                ),
+                with_usage(openai_text("all done"), None),
+            ],
+            DirectOptions {
+                observer: Some(log.clone()),
+                ..Default::default()
+            },
+            false,
+        )
+        .await;
+        s.prompt("go").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(
+            log.lines(),
+            [
+                "start 1",
+                "end 1 Some((60, 40, 5)) Some((0.0012, true)) None",
+                "call bash {\"command\":\"echo hi\"}",
+                "result bash true hi",
+                "start 2",
+                "end 2 Some((60, 40, 5)) None None",
+                "text all done",
+                "stopped EndTurn",
+            ]
+        );
+        assert_eq!(s.body(0)["tools"].as_array().unwrap().len(), 4);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_turn_cap_and_the_deadline_end_an_answer() {
+        let log = Arc::new(Log::default());
+        let s = TestSession::start_with(
+            "ollama",
+            HandHolding::FullAccess,
+            (0..2)
+                .map(|i| {
+                    openai_tool_call(
+                        &format!("call_{i}"),
+                        "read_file",
+                        json!({ "path": "notes.txt" }),
+                    )
+                })
+                .collect(),
+            DirectOptions {
+                observer: Some(log.clone()),
+                max_turns: 2,
+                ..Default::default()
+            },
+            false,
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello").unwrap();
+        s.prompt("keep reading").await;
+        let notice = s
+            .until(|e| match e {
+                AgentEvent::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .await;
+        assert!(notice.contains("2 tool-call rounds"), "{notice}");
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 2);
+        assert_eq!(log.lines().last().unwrap(), "stopped MaxTurns");
+        s.finish().await;
+
+        // A deadline already past: no request at all.
+        let log = Arc::new(Log::default());
+        let s = TestSession::start_with(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![],
+            DirectOptions {
+                observer: Some(log.clone()),
+                deadline: Some(Instant::now()),
+                ..Default::default()
+            },
+            false,
+        )
+        .await;
+        s.prompt("anything").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(log.lines(), ["stopped TimeLimit"]);
+        s.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_runs_its_calls_through_the_executor() {
+        let log = Arc::new(Log::default());
+        let code = r#"
+await write("out/a.txt", "one\ntwo\n");
+const text = await read("out/a.txt", {start: 2});
+const {stdout, exit_code} = await bash("wc -l < out/a.txt");
+print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
+"#;
+        let s = TestSession::start_with(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call("call_1", "script", json!({ "code": code })),
+                openai_text("done"),
+            ],
+            DirectOptions {
+                observer: Some(log.clone()),
+                system_prompt: Some("You are a benchmark agent.".into()),
+                ..Default::default()
+            },
+            true,
+        )
+        .await;
+        s.prompt("go").await;
+        let (out, ok) = s.tool_finished().await;
+        assert!(ok, "{out}");
+        assert_eq!(out.trim(), "line 2: two; lines: 2; exit 0");
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(
+            std::fs::read_to_string(s.cwd.join("out/a.txt")).unwrap(),
+            "one\ntwo\n"
+        );
+        let lines = log.lines();
+        assert!(
+            lines.contains(&r#"script 3 {"bash": 1, "read": 1, "write": 1} false"#.to_string()),
+            "{lines:#?}"
+        );
+        // The four tools stay, and the script comes after them.
+        let tools = s.body(0)["tools"].as_array().unwrap().clone();
+        assert_eq!(tools.len(), 5);
+        assert_eq!(tools[4]["function"]["name"], "script");
+        // The system prompt given replaces Trek's.
+        assert_eq!(
+            s.body(0)["messages"][0]["content"],
+            "You are a benchmark agent."
+        );
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_scripts_writes_ask_like_the_models_own() {
+        let s = TestSession::start_with(
+            "ollama",
+            HandHolding::Supervised,
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "script",
+                    json!({ "code": "await write('x.txt', '1'); print('wrote')" }),
+                ),
+                openai_text("done"),
+            ],
+            DirectOptions::default(),
+            true,
+        )
+        .await;
+        s.prompt("go").await;
+        let (request_id, title) = s
+            .until(|e| match e {
+                AgentEvent::PermissionRequest {
+                    request_id, title, ..
+                } => Some((request_id.clone(), title.clone())),
+                _ => None,
+            })
+            .await;
+        assert_eq!(title, "Write file");
+        s.send(Command::Respond {
+            request_id,
+            decision: Decision::Deny,
+        })
+        .await;
+        let (out, ok) = s.tool_finished().await;
+        assert!(!ok, "{out}");
+        assert!(out.contains("Permission denied by user"), "{out}");
+        assert!(!out.contains("wrote"), "{out}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(!s.cwd.join("x.txt").exists());
+        // On, the script is offered beside the four.
+        assert_eq!(s.body(0)["tools"].as_array().unwrap().len(), 5);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_scripts_commands_ask_like_the_models_own() {
+        let s = TestSession::start_with(
+            "ollama",
+            HandHolding::Supervised,
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "script",
+                    json!({ "code": "await bash('  touch ran.txt  '); print('ran')" }),
+                ),
+                openai_text("done"),
+            ],
+            DirectOptions::default(),
+            true,
+        )
+        .await;
+        s.prompt("go").await;
+        let (request_id, title, detail) = s
+            .until(|e| match e {
+                AgentEvent::PermissionRequest {
+                    request_id,
+                    title,
+                    detail,
+                    ..
+                } => Some((request_id.clone(), title.clone(), detail.clone())),
+                _ => None,
+            })
+            .await;
+        assert_eq!(title, "Run command");
+        // Trimmed, as the model's own command is, so a session allowance would match.
+        assert_eq!(detail, "touch ran.txt");
+        s.send(Command::Respond {
+            request_id,
+            decision: Decision::Deny,
+        })
+        .await;
+        let (out, ok) = s.tool_finished().await;
+        assert!(!ok && out.contains("Permission denied by user"), "{out}");
+        assert!(!s.cwd.join("ran.txt").exists());
+        s.finish().await;
+    }
+
+    #[test]
+    fn a_script_shows_its_description() {
+        let args = json!({ "code": "\n  const x = 1;\nprint(x)", "description": "Count notes" });
+        assert_eq!(
+            tool_display("script", &args.to_string()),
+            ("Run script", "Count notes".to_string())
+        );
+        let args = json!({ "code": "\n  const x = 1;\nprint(x)" });
+        assert_eq!(
+            tool_display("script", &args.to_string()),
+            ("Run script", "const x = 1;".to_string())
+        );
+    }
+
+    /// A `Waiting` no Stop ever reaches, for calling the file tools directly.
+    fn waiting() -> Waiting<'static> {
+        let (tx, rx) = async_channel::unbounded::<Command>();
+        std::mem::forget(tx);
+        Waiting {
+            commands: Box::leak(Box::new(rx)),
+            kept: Box::leak(Box::new(VecDeque::new())),
+            shutdown: Box::leak(Box::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_ends_a_read_the_sandbox_never_answers() {
+        let (out, mut requests) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (_to_exec, replies) = tokio::io::duplex(1 << 16);
+        let options = DirectOptions {
+            executor: Arc::new(executor::StdioExecutor::new(
+                out,
+                replies,
+                Duration::from_secs(600),
+            )),
+            ..Default::default()
+        };
+        let (events, _rx) = async_channel::unbounded();
+        let (tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tx.send(Command::Interrupt).await.unwrap();
+            // Kept open: a closed channel would read as a shutdown.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let started = Instant::now();
+        let e = execute_tool(
+            "read_file",
+            &json!({ "path": "a.txt" }).to_string(),
+            Path::new("/app"),
+            false,
+            HandHolding::FullAccess,
+            &mut allowed,
+            &options,
+            false,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("Interrupted"), "{e:#}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // The peer is told it needn't answer.
+        let read: Value = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        let cancel: Value = serde_json::from_str(&requests.recv().await.unwrap()).unwrap();
+        assert_eq!(read["type"], "read");
+        assert_eq!(cancel, json!({ "type": "cancel", "id": read["id"] }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_stops_at_the_sessions_deadline() {
+        let log = Arc::new(Log::default());
+        let options = DirectOptions {
+            deadline: Some(Instant::now() + Duration::from_millis(1500)),
+            observer: Some(log.clone()),
+            ..Default::default()
+        };
+        let (events, _rx) = async_channel::unbounded();
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        let code = "for (let i = 0; i < 100; i++) { await bash('sleep 0.2'); } print('all done')";
+        let started = Instant::now();
+        let (out, ok, _) = execute_tool(
+            "script",
+            &json!({ "code": code }).to_string(),
+            &std::env::temp_dir(),
+            false,
+            HandHolding::FullAccess,
+            &mut allowed,
+            &options,
+            true,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "{out}");
+        assert!(!ok && !out.contains("all done"), "{out}");
+        let lines = log.lines();
+        let script = lines.iter().find(|l| l.starts_with("script ")).unwrap();
+        // Well short of a hundred calls.
+        let calls: u32 = script.split(' ').nth(1).unwrap().parse().unwrap();
+        assert!(calls < 20, "{script}");
+    }
+
+    #[tokio::test]
+    async fn a_gone_sandbox_ends_a_script_and_its_turn() {
+        let memory = Arc::new(MemoryExecutor::default());
+        let options = DirectOptions {
+            executor: memory.clone(),
+            ..Default::default()
+        };
+        let (events, _rx) = async_channel::unbounded();
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown, mut allowed) = (VecDeque::new(), false, HashSet::new());
+        // A program that would swallow every failure and go on.
+        let code = "for (let i = 0; i < 500; i++) { try { await bash('gone'); } catch (e) {} }";
+        let e = execute_tool(
+            "script",
+            &json!({ "code": code }).to_string(),
+            Path::new("/sandbox/app"),
+            false,
+            HandHolding::FullAccess,
+            &mut allowed,
+            &options,
+            true,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.downcast_ref::<ExecutorGone>().is_some(), "{e:#}");
+        assert_eq!(memory.ran.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_base_url_replaces_the_endpoint() {
+        let openrouter = direct_provider("openrouter").unwrap();
+        let anthropic = direct_provider("anthropic").unwrap();
+        assert_eq!(endpoint(openrouter, None), "https://openrouter.ai/api/v1");
+        assert_eq!(
+            endpoint(openrouter, Some("http://localhost:4200/v1/")),
+            "http://localhost:4200/v1"
+        );
+        assert_eq!(endpoint(anthropic, None), ANTHROPIC_MESSAGES_URL);
+        for base in [
+            "https://proxy.example",
+            "https://proxy.example/v1",
+            "https://proxy.example/v1/messages",
+        ] {
+            assert_eq!(
+                endpoint(anthropic, Some(base)),
+                "https://proxy.example/v1/messages"
+            );
+        }
     }
 }

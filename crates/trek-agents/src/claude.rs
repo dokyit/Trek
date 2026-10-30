@@ -2575,6 +2575,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            script: false,
         }
     }
 
@@ -2819,6 +2820,7 @@ mod tests {
         let guides = std::env::temp_dir();
         let dirs = cli_args(&SessionConfig {
             read_dirs: vec![guides.clone(), "/no/such/dir".into()],
+            script: false,
             ..config()
         });
         assert!(
@@ -2863,6 +2865,7 @@ mod tests {
         let s = settings(&SessionConfig {
             read_only: true,
             read_dirs: vec![guides.clone()],
+            script: false,
             ..config()
         })
         .unwrap();
