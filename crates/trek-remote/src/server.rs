@@ -1131,6 +1131,7 @@ const CLIENT_TYPES: &[&str] = &[
     "machine_info",
     "clone_project",
     "put_files",
+    "card_action",
     "update_phone",
 ];
 
@@ -1537,6 +1538,7 @@ async fn call<H: RemoteHost>(
                 .map(|()| ack(None)),
             Err(why) => Err(HostError::bad_request(why)),
         },
+        ClientMessage::CardAction(req) => host.card_action(req).await.map(|()| ack(None)),
         ClientMessage::UpdatePhone(req) => host.update_phone(req).await.map(|()| ack(None)),
         other => Err(HostError::bad_request(format!(
             "Unexpected \"{}\"",

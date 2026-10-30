@@ -833,6 +833,10 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                 text: format!("{} “{title}”", link.label()),
             },
             tr::ItemBody::Changes { .. } => continue,
+            // Another machine's card stays its own: its buttons and its `gh` run there.
+            tr::ItemBody::Card { card } => Item::Notice {
+                text: card.summary(),
+            },
             tr::ItemBody::Approval {
                 request_id,
                 title,

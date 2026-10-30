@@ -4722,7 +4722,7 @@ fn spin_arc(at: Point<Pixels>, radius: f32, clock: f32, color: Hsla, window: &mu
 
 /// A card in `state` with made-up contents, for design review (`shots`' `pr-demo`).
 /// Nothing here is fetched: it's drawn as given.
-#[cfg(feature = "shots")]
+#[cfg(any(test, feature = "shots"))]
 pub fn demo(state: &str) -> Card {
     let now = now_ms();
     let base = Card {

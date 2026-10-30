@@ -236,6 +236,8 @@ nonisolated extension ClientMessage {
             return o
         case .noteFile(let path, let offset, let length):
             return ["type": "note_file", "path": path, "offset": offset, "length": length]
+        case .cardAction(let threadId, let key, let action):
+            return ["type": "card_action", "thread_id": threadId, "key": key, "action": action.rawValue]
         default:
             return [:]
         }
@@ -331,6 +333,13 @@ extension AppModel {
             request(.backgroundOutput(threadId: tid, taskId: task)) { reply in
                 if case .backgroundOutput(_, let out) = reply { c.resume(returning: out) } else { c.resume(returning: nil) }
             }
+        }
+    }
+
+    /// A card's button, as the Mac's own: the card's next update shows how it goes.
+    func cardAction(_ tid: String, key: String, _ action: CardAction) {
+        request(.cardAction(threadId: tid, key: key, action: action)) { [weak self] reply in
+            if case .error(_, _, let text) = reply { self?.show(text, error: true) }
         }
     }
 

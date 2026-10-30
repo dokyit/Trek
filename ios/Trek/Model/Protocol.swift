@@ -428,6 +428,9 @@ nonisolated enum ItemBody: Hashable {
     case threadLink(ThreadLink)
     /// The files a turn changed, after its `turnEnd`.
     case changes(TurnChanges)
+    /// A live card for work the agent pushed out (a pull request, a workflow run, a release),
+    /// sent again under the same id as it moves on.
+    case card(RemoteCard)
     case unknown(String)
 }
 
@@ -504,6 +507,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         var threadId: String? = nil
         var agent: AgentRef? = nil
         var open: Bool? = nil
+        var card: RemoteCard? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -543,6 +547,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
             let files = r.files ?? []
             body = .changes(TurnChanges(files: files, added: r.added ?? files.reduce(0) { $0 + $1.added },
                                         removed: r.removed ?? files.reduce(0) { $0 + $1.removed }))
+        case "card": body = r.card.map(ItemBody.card) ?? .unknown(r.kind)
         default: body = .unknown(r.kind)
         }
     }
@@ -570,6 +575,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
             r.kind = "thread_link"; r.link = l.link; r.threadId = l.threadId; r.title = l.title; r.agent = l.agent
             r.state = l.state?.rawValue; r.open = l.open
         case .changes(let c): r.kind = "changes"; r.files = c.files; r.added = c.added; r.removed = c.removed
+        case .card(let c): r.kind = "card"; r.card = c
         case .unknown(let kind): r.kind = kind
         }
         try r.encode(to: encoder)
@@ -837,6 +843,8 @@ nonisolated enum ClientMessage {
     case addNoteImage(noteId: String, data: String, name: String?)
     /// `length` bytes from `offset` of a file kept with the notes (`attachments/…`), as it is.
     case noteFile(path: String, offset: Int64, length: Int)
+    /// Press one of a card's buttons (Merge, Resolve conflicts, Re-run).
+    case cardAction(threadId: String, key: String, action: CardAction)
     /// Build this app on the Mac and install it here (`update_phone`), at `version` when it's one
     /// the Mac found but hasn't installed itself.
     case updatePhone(version: String?)
@@ -940,7 +948,8 @@ nonisolated enum ClientMessage {
         case .updatePhone(let version):
             o = ["type": "update_phone"]
             if let version { o["version"] = version }
-        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile:
+        case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile,
+             .cardAction:
             o = parityJSON
         }
         if let id { o["id"] = id }

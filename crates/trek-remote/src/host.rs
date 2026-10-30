@@ -19,7 +19,8 @@ use crate::protocol::{
     Transcript, TranscriptPage, TurnActionDone, TurnActionRequest, Usage, WorktreeRemoveRequest,
 };
 use crate::protocol::{
-    CloneProjectRequest, FileUpload, MachineInfo, PhoneUpdate, ServerMessage, UpdatePhoneRequest,
+    CardActionRequest, CloneProjectRequest, FileUpload, MachineInfo, PhoneUpdate, ServerMessage,
+    UpdatePhoneRequest,
 };
 
 pub type HostResult<T> = Result<T, HostError>;
@@ -377,6 +378,12 @@ pub trait RemoteHost: Send + Sync + 'static {
         let _ = (project_id, files);
         unsupported("receive files")
     }
+    /// A card's button (Merge, Resolve conflicts, Re-run), as the Mac's own does: `not_found`
+    /// for a card that isn't there, `conflict` for one that doesn't offer it any more.
+    fn card_action(&self, req: CardActionRequest) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = req;
+        unsupported("act on cards")
+    }
 
     /// Build Trek for the iPhone and install it (`phone_update.rs`, feature `update_phone`):
     /// return once it has started (a run already going counts), and report how it goes through
@@ -610,6 +617,11 @@ pub enum HostRequest {
     PutFiles {
         project_id: String,
         files: Vec<FileUpload>,
+        reply: Reply<()>,
+    },
+    /// See [`RemoteHost::card_action`].
+    CardAction {
+        req: CardActionRequest,
         reply: Reply<()>,
     },
     /// See [`RemoteHost::update_phone`].
@@ -918,6 +930,11 @@ impl RemoteHost for ChannelHost {
             reply,
         })
         .await
+    }
+
+    async fn card_action(&self, req: CardActionRequest) -> HostResult<()> {
+        self.call(|reply| HostRequest::CardAction { req, reply })
+            .await
     }
 
     async fn update_phone(&self, req: UpdatePhoneRequest) -> HostResult<()> {

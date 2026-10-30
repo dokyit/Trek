@@ -59,6 +59,9 @@
 //!   (allow / allow for session / deny); `Questions` and `Plan` → `Command::Answer` for the
 //!   request. An already-answered request → `HostError::conflict`; unknown → `HostError::not_found`.
 //! - **`interrupt`**: `Command::Interrupt` on the thread's session.
+//! - **Cards**: a PR, run or release card goes as [`ItemBody::Card`] (a [`RemoteCard`]), again
+//!   under the same item id whenever it changes; **`card_action`** (feature `card_actions`)
+//!   presses its Merge, Resolve conflicts or Re-run as the Mac's own buttons do.
 //! - **`mark_seen`**: clear the thread's unseen flag, as opening it on the desktop does.
 //! - **Push** through [`RemoteHandle::push`]: `HostEvent::Thread` whenever a thread's row changes
 //!   (state, title, needs, activity, diff stat), `ThreadRemoved` on delete/archive, `Item` for every
