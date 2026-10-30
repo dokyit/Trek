@@ -24,6 +24,17 @@ pub use direct::{
     cache_direct_models, cached_direct_models, direct_provider_models,
     load_all_cached_direct_models,
 };
+/// The Direct harness's agent loop with its options exposed: a key given rather than read from
+/// the keychain, another endpoint, the tools run elsewhere (`ToolExecutor`), a `script` tool,
+/// and an `Observer` of each request and tool call. `trek-bench` drives it; Trek's own Direct
+/// sessions run it with the defaults.
+pub mod direct_harness {
+    pub use crate::direct::executor::{
+        ExecOutput, ExecutorGone, LocalExecutor, StdioExecutor, ToolExecutor,
+    };
+    pub use crate::direct::script::{ScriptHost, ScriptOutcome, UnbuiltScript};
+    pub use crate::direct::{DirectOptions, Observer, Stop, endpoint, run_with};
+}
 pub use limits::{Limit, LimitScope};
 pub use opencode::share_history as share_opencode_history;
 pub use status::{
