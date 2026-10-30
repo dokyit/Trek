@@ -47,7 +47,9 @@ enum CardInk {
     static let chipBorder = Color.card(fg.0, 0.085, fg.1, 0.12)
 }
 
-extension Color {
+// Nonisolated, as the theme's colours are: SwiftUI resolves a dynamic colour on its render
+// thread while something animates (a spinner), and a main-actor closure traps there.
+nonisolated extension Color {
     /// `light` at `la` on Paper, `dark` at `da` on Night.
     static func card(_ light: UInt32, _ la: Double, _ dark: UInt32, _ da: Double) -> Color {
         Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: dark).withAlphaComponent(da) : UIColor(hex: light).withAlphaComponent(la) })

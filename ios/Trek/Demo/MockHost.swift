@@ -1160,6 +1160,8 @@ extension MockHost {
         // As a real Mac numbers them (from when it first served the thread, in µs): a launch
         // holding another state isn't taken for the copy the phone kept from the last one.
         seq[id] = now * 1000
+        // And what the phone kept from an earlier launch goes whole (its cards may be others).
+        rewritten[id] = now * 1000
         items[id] = []
         let ask = ItemBody.user(text: "Open a PR for the session refresh fix, watch its checks, merge it when it's green, then cut a nightly.",
                                 images: 0)
