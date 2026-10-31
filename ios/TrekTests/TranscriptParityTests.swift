@@ -231,6 +231,26 @@ struct AnswerMediaTests {
     }
 }
 
+struct RestateCheckTests {
+    private func user(_ id: String, _ text: String) -> Block {
+        Block(id: id, itemID: id, kind: .user(text: text, images: 0, at: nil, aside: false), version: 1, count: 1)
+    }
+    private func end(_ id: String) -> Block { Block(id: id, itemID: id, kind: .turnEnd(secs: 3, at: nil), version: 1, count: 1) }
+    private let restate = "\n\n<trek-restate>\nRestate it.\n</trek-restate>"
+    private let consult = "\n\n<trek-consult style=\"advise\" then=\"implement\" with=\"codex/gpt-5.6-sol/high\">\n…\n</trek-consult>"
+
+    @Test func onlyATurnAskedToRestateAsks() {
+        #expect(RestateCheck.goAhead([user("i1", "Do it"), end("i2")], endingAt: "i2") == nil)
+        #expect(RestateCheck.goAhead([user("i1", "Do it" + restate), end("i2")], endingAt: "i2") == RestateCheck.goAhead)
+    }
+
+    @Test func theGoAheadCarriesTheConsult() {
+        // Asked with a consult, corrected once: the consult goes ahead with the yes.
+        let blocks = [user("i1", "Cache it" + restate + consult), end("i2"), user("i3", "No, on disk" + restate), end("i4")]
+        #expect(RestateCheck.goAhead(blocks, endingAt: "i4") == RestateCheck.goAhead + consult)
+    }
+}
+
 struct ComposerChipsTests {
     private func thread(branch: String?, changed: Int, ahead: Int, state: RunState = .idle) -> ThreadSummary {
         var t = ThreadSummary(id: "t", title: "T", project: nil, agent: AgentRef(key: "claude-code", name: "Claude Code"), model: nil,

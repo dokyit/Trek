@@ -228,6 +228,10 @@ enum RowAction {
     case retry(end: String, model: ModelOption?)
     case fork(item: String)
     case rewind(user: String, edit: Bool)
+    /// The restatement was right: send the go-ahead (with what the asking message held back).
+    case goAhead(String)
+    /// It wasn't: the keyboard comes up to say what was meant.
+    case correct
 }
 
 /// An action that changes the conversation and the files, waiting for the user to confirm it.
@@ -361,6 +365,8 @@ private struct TranscriptList: View, Equatable {
         let ends = Set(Block.turnEnds(blocks, open: working))
         let lastTurn = blocks.last { ends.contains($0.id) }?.id
         let lastUser = blocks.last(where: \.isPrompt)?.id
+        // The latest turn restated what it was asked: under it, "Is that what you meant?".
+        let goAhead = working ? nil : lastTurn.flatMap { RestateCheck.goAhead(blocks, endingAt: $0) }
         var rows: [TranscriptRow] = []
         rows.reserveCapacity(blocks.count + 3)
         rows.append(.header(store))
@@ -371,7 +377,7 @@ private struct TranscriptList: View, Equatable {
         }
         for block in blocks {
             let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
-            let row = BlockRow(block: block, threadID: store.id, projectName: projectName,
+            var row = BlockRow(block: block, threadID: store.id, projectName: projectName,
                                expanded: open,
                                folded: folded[block.id] ?? [],
                                endsTurn: ends.contains(block.id),
@@ -380,6 +386,7 @@ private struct TranscriptList: View, Equatable {
                                toggle: { groupOpen[block.id] = !open },
                                fold: { folded[block.id] = $0 },
                                act: perform)
+            if block.id == lastTurn, block.isTurnEnd { row.goAhead = goAhead }
             // A long answer goes in as parts, a few paragraphs each: laid out a part at a time as
             // the reader comes to it, not several screens at once. Not while it's being written.
             if case .assistant(let text, false) = block.kind, let parts = AnswerPart.split(text, key: block.id, version: block.version) {
@@ -413,6 +420,11 @@ private struct TranscriptList: View, Equatable {
             confirming = Confirmation(action: .retry, item: end, model: m)
         case .rewind(let user, let edit):
             confirming = Confirmation(action: .rewind, item: user, edit: edit)
+        case .goAhead(let text):
+            guard model.link(for: store.id)?.connection == .connected else { return model.show(AppModel.notConnected, error: true) }
+            model.send(text, to: store.id, mode: nil)
+        case .correct:
+            composer.focusRequest += 1
         case .fork(let item):
             model.turnAction(store.id, item: item, .fork)
         }
@@ -667,12 +679,14 @@ struct BlockRow: View, Equatable {
     var act: (RowAction) -> Void
     /// One stretch of a long answer (it's drawn, and measured, a part at a time).
     var part: AnswerPart? = nil
+    /// The latest turn restated its request: "Is that what you meant?", and this go-ahead.
+    var goAhead: String? = nil
 
     nonisolated static func == (a: BlockRow, b: BlockRow) -> Bool {
         MainActor.assumeIsolated {
             a.block == b.block && a.part == b.part && a.expanded == b.expanded && a.folded == b.folded && a.endsTurn == b.endsTurn
                 && a.latest == b.latest
-                && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels
+                && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels && a.goAhead == b.goAhead
         }
     }
 
@@ -716,8 +730,13 @@ struct BlockRow: View, Equatable {
         case .resolved(let item):
             ResolvedRequestRow(item: item)
         case .turnEnd(let secs, let at):
-            TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels,
-                        verified: block.extras.verified, act: act)
+            VStack(alignment: .leading, spacing: 2) {
+                TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels,
+                            verified: block.extras.verified, act: act)
+                if let goAhead {
+                    RestateCheckRow(yes: { act(.goAhead(goAhead)) }, no: { act(.correct) })
+                }
+            }
         case .notice(let text):
             Label(text, systemImage: "info.circle").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .error(let text):

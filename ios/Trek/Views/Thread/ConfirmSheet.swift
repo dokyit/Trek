@@ -48,7 +48,10 @@ struct ConfirmSheet: View {
             }
             .padding(.top, 4)
         }
-        .padding(20)
+        .padding(.horizontal, 20)
+        .padding(.top, 28)
+        // From the top of the sheet: the files coming in grow it downwards, nothing above moves.
+        .frame(maxHeight: .infinity, alignment: .top)
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .task { await load() }
