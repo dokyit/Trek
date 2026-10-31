@@ -15,6 +15,7 @@ Measured 2026-10-31 on Trek 0.4.28 with Claude Code 2.1.316 (Opus 5.5) and Codex
 | Notes | `Workspace::session_notes` → `agent_notes` (crates/trek-app/src/workspace.rs) | `--append-system-prompt`, every launch | wrapped in `<trek-project-notes>` around the first message | same as Codex | system prompt |
 | MCP servers | `Workspace::mcp_servers` + `session_mcp` (trek-app), served by `trek-mcp <family>` | `--mcp-config` | `mcp_servers` in `thread/start`'s config | ACP `mcpServers` | none (Direct models get no Trek tools) |
 | Trek's skills folder | `trek_core::skills::shipped_root()` | `--add-dir` | not passed | not passed | not passed |
+| Tool-search line | `trek_agents::tool_search_note`, added by `message_notes` | not added | after the notes, naming the Trek servers handed over | not added | not added |
 
 The notes, in order (each goes in only when its setting is on, every one is on by default):
 
@@ -23,6 +24,10 @@ The notes, in order (each goes in only when its setting is on, every one is on b
 3. `trek_core::media::AGENT_INSTRUCTIONS`: the video watcher (Tools › Video, and only when trek-mcp is in the build).
 4. `trek_core::verification::instructions`: the project's verification skill, when it has one.
 5. `trek_core::changes::RECAP`: the Done / Still to do / Found recap (General › Ask for a recap), not for advising sub-agents or side chats.
+6. Codex only: one line naming the Trek servers the session was handed, since Codex shows the model
+   neither their tool names nor their instructions (see "Codex, live"): "Trek's tools (the browser,
+   the user's iPhone, the iOS Simulator, watching video, sub-agents and threads) are MCP servers you
+   reach with a tool search: look there before saying you can't."
 
 MCP servers by default: trek-simulator, trek-video, trek-browser, trek-phone, trek-orchestrate (57
 tools). Everything on adds trek-computer (Tools › Computer use, background mode by default): 67
@@ -64,6 +69,8 @@ it passes with `--add-dir` isn't a `.claude/skills` folder, so Claude Code only 
 | With a verification skill | 1,210 | 1,060 | 4,565 → 3,956 |
 | Every optional note off | 591 | 481 | |
 | `<trek-project-notes>` wrapper (Codex, OpenCode, ACP) | +14 | +14 | |
+| Codex's tool-search line, default servers / with computer use | | +44 / +47 | about 200 |
+| **Codex's first-message notes, default** | 1,116 | **1,010** | 3,745 |
 
 ## MCP servers (o200k tokens)
 
@@ -89,7 +96,7 @@ Estimates in o200k tokens, then what the vendor reported live.
 | Agent | What Trek's additions reach the model as | Default before → after | Everything on before → after | Live, default before → after | Live, everything on before → after |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | notes + server instructions + deferred tool names | 2,679 → 2,357 | 3,001 → 2,657 | **+4,081 → +3,595** | **+4,545 → +4,030** |
-| Codex | notes in the first message only | 1,116 → 966 | 1,116 → 966 | **+1,116 → +966** | **+1,116 → +966** |
+| Codex | notes and the tool-search line in the first message | 1,116 → 1,010 | 1,116 → 1,013 | **+1,116 → +1,010** | **+1,116 → +1,010** (line listed the default servers) |
 | OpenCode, ACP agents | notes in the first message + every tool schema (+ instructions, if the agent passes them on) | 8,217 → 7,952 (9,182 → 8,745) | 9,496 → 9,231 (10,679 → 10,220) | not measured | not measured |
 | Direct models | notes in the system prompt (no Trek tools) | 1,102 → 952, on top of the harness's own 451 | same | not measured | not measured |
 
@@ -121,13 +128,13 @@ request, all of Trek's ~3.6k is billed as cache reads.
 
 ### Codex, live
 
-| Run | Before | After |
-| --- | ---: | ---: |
-| Bare `codex exec "say hi"` | 18,081 | 18,081 |
-| + default MCP servers | 18,081 (+0) | not rerun |
-| + notes | 19,197 (+1,116) | 19,047 (+966) |
-| Trek's default | 19,197 (+1,116) | 19,047 (+966) |
-| Everything on | 19,197 (+1,116) | 19,047 (+966) |
+| Run | Before | After the trims | With the tool-search line |
+| --- | ---: | ---: | ---: |
+| Bare `codex exec "say hi"` | 18,081 | 18,081 | 18,081 |
+| + default MCP servers | 18,081 (+0) | not rerun | not rerun |
+| + notes | 19,197 (+1,116) | 19,047 (+966) | |
+| Trek's default | 19,197 (+1,116) | 19,047 (+966) | 19,091 (+1,010) |
+| Everything on | 19,197 (+1,116) | 19,047 (+966) | 19,091 (+1,010) |
 
 The notes cost exactly their o200k count. MCP servers cost nothing up front: Codex 0.166 defers
 every MCP tool behind its tool search and sends neither the schemas, the tool names nor the server
@@ -137,6 +144,21 @@ identical one-shot runs read anywhere from 0 to 19,072 of 19,197 tokens from cac
 session the notes are part of the first message, so each later request carries them in its prefix.
 Three of the twelve "after" runs reported 18,501 instead of 19,047 for the same input (also without
 any MCP server); the cause is Codex's, unexplained.
+
+Does Codex find Trek's tools? Asked with Trek's default servers and notes, without and then with the
+tool-search line (one run each, `codex exec --json --ignore-user-config -m gpt-6-astra`):
+
+| Request | Without the line | With it |
+| --- | --- | --- |
+| "Open https://example.com in Trek's browser and tell me the page title." | calls `trek-browser` `browser_open` | calls `trek-browser` `browser_open` |
+| "Which of Trek's tools can you use here? Give their exact names." | searches, lists all 57 | searches, lists all 57 |
+| "What's on my iPhone's screen right now?" | calls `trek-phone` `phone_screenshot` | calls `trek-phone` `phone_screenshot` |
+| "Boot an iOS simulator and take a screenshot of it." | tries `xcrun simctl` in the shell first, then `trek-simulator` `sim_list` | goes straight to `trek-simulator` `sim_list` |
+
+(`codex exec` refuses MCP calls that need approval under its "never" policy, so each call stopped
+there; inside Trek, approvals come to Trek.) So gpt-6-astra searches its tools on its own even
+without the line. With the line it went straight to Trek's tool instead of the shell. The line
+costs 44 tokens and is for models that search less readily.
 
 ## What was trimmed
 
@@ -167,7 +189,8 @@ Nothing was removed that an agent needs to do something; the parsers and tools b
 - `crates/trek-app/src/workspace/prompt_budget.rs` builds the notes with `agent_notes`, the function
   `session_notes` uses, for default settings and with a verification skill, and asserts their size
   (3,850 and 4,350 chars, about 10% over today's), that the wrapper stays small, and that each piece
-  goes in once.
+  goes in once. It also builds Codex's first-message notes with `trek_agents::message_notes`: the
+  tool-search line is held to 220 chars and Codex's notes with everything on to 4,650.
 - `crates/trek-mcp/src/main.rs`, `prompt_budget`: each family's server instructions and tool schemas,
   as `initialize` and `tools/list` return them, against a per-family budget, and all of them
   together (40,500 chars).

@@ -644,6 +644,52 @@ pub fn instructions_prompt(instructions: &str, text: &str) -> String {
     )
 }
 
+/// Trek's own MCP servers, by the name Trek gives each, and what each is for in
+/// `tool_search_note`'s words.
+const TREK_TOOLS: &[(&str, &str)] = &[
+    ("trek-browser", "the browser"),
+    ("trek-computer", "computer use"),
+    ("trek-phone", "the user's iPhone"),
+    ("trek-simulator", "the iOS Simulator"),
+    (trek_core::media::VIDEO_SERVER, "watching video"),
+    (trek_core::orchestrate::SERVER, "sub-agents and threads"),
+];
+
+/// Whether `agent` keeps MCP tools out of the model's sight until it runs a tool search: Codex
+/// sends neither their names nor the servers' instructions (docs/PROMPT_BUDGET.md), so it's told
+/// Trek's are there (`tool_search_note`).
+pub fn defers_mcp_tools(agent: &AgentId) -> bool {
+    matches!(agent, AgentId::Codex)
+}
+
+/// One line saying which of Trek's tools `servers` hand over and that a tool search reaches
+/// them; `None` when they hand over none of Trek's.
+pub fn tool_search_note(servers: &[McpServer]) -> Option<String> {
+    let found: Vec<&str> = TREK_TOOLS
+        .iter()
+        .filter(|(name, _)| servers.iter().any(|s| s.name == *name))
+        .map(|(_, what)| *what)
+        .collect();
+    (!found.is_empty()).then(|| {
+        format!(
+            "Trek's tools ({}) are MCP servers you reach with a tool search: look there before saying you can't.",
+            found.join(", ")
+        )
+    })
+}
+
+/// The notes `agent` gets with its first message: `notes`, and for an agent that hides MCP tools
+/// until it searches, the line saying Trek's are there.
+pub fn message_notes(agent: &AgentId, notes: &str, servers: &[McpServer]) -> String {
+    match defers_mcp_tools(agent)
+        .then(|| tool_search_note(servers))
+        .flatten()
+    {
+        Some(line) => format!("{}\n\n{line}", notes.trim()),
+        None => notes.to_string(),
+    }
+}
+
 /// `commands`, with the first message rewritten by `f`.
 fn first_prompt(
     commands: async_channel::Receiver<Command>,
@@ -681,7 +727,7 @@ pub fn start(config: SessionConfig) -> SessionHandle {
     // the rest).
     let cmd_rx = match &config.instructions {
         Some(notes) if !notes_in_system_prompt(&config.agent) => {
-            let notes = notes.clone();
+            let notes = message_notes(&config.agent, notes, &config.mcp_servers);
             first_prompt(cmd_rx, move |text| instructions_prompt(&notes, text))
         }
         _ => cmd_rx,
@@ -2059,6 +2105,34 @@ mod tests {
         assert!(notes_in_system_prompt(&AgentId::Direct("local".into())));
         assert!(!notes_in_system_prompt(&AgentId::Codex));
         assert!(!notes_in_system_prompt(&AgentId::OpenCode));
+    }
+
+    #[test]
+    fn codex_is_told_trek_s_tools_are_behind_its_tool_search() {
+        let server = |name: &str| McpServer::stdio(name, "trek-mcp", vec![], vec![]);
+        let servers = vec![
+            server("trek-browser"),
+            server("my-own"),
+            server(trek_core::orchestrate::SERVER),
+        ];
+        let line = tool_search_note(&servers).unwrap();
+        assert_eq!(
+            line,
+            "Trek's tools (the browser, sub-agents and threads) are MCP servers you reach with a \
+             tool search: look there before saying you can't."
+        );
+        // Only the servers handed over are named, and none of Trek's means no line.
+        assert!(!line.contains("iPhone"));
+        assert_eq!(tool_search_note(&[server("my-own")]), None);
+        // Codex gets it after the notes; Claude Code and ACP agents see the tools without it.
+        assert_eq!(
+            message_notes(&AgentId::Codex, "Notes.\n", &servers),
+            format!("Notes.\n\n{line}")
+        );
+        for agent in [AgentId::ClaudeCode, AgentId::OpenCode] {
+            assert_eq!(message_notes(&agent, "Notes.", &servers), "Notes.");
+        }
+        assert_eq!(message_notes(&AgentId::Codex, "Notes.", &[]), "Notes.");
     }
 
     #[test]

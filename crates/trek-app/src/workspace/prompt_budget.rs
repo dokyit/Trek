@@ -9,12 +9,18 @@
 
 use super::agent_notes;
 use std::path::Path;
+use trek_core::AgentId;
 use trek_core::settings::{Settings, Verification};
 
 /// The notes with Trek's default settings, in a project without a verification skill.
 const DEFAULT_NOTES_CHARS: usize = 3_850;
 /// With a verification skill too: the most any session is told (every note is on by default).
 const ALL_NOTES_CHARS: usize = 4_350;
+/// The line Codex gets naming Trek's tools (`trek_agents::tool_search_note`), with every tool on:
+/// about 50 o200k tokens.
+const TOOL_SEARCH_LINE_CHARS: usize = 220;
+/// Codex's first-message notes with every tool on and a verification skill: the most it's told.
+const CODEX_NOTES_CHARS: usize = 4_650;
 
 /// The project notes for this repo's own verification skill, as Trek words them.
 fn project_notes() -> String {
@@ -32,6 +38,24 @@ fn project_notes() -> String {
         project,
         project,
     )
+}
+
+/// Trek's servers as a session is handed them (`Workspace::session_mcp`): by default, and with
+/// computer use on too.
+fn servers(computer: bool) -> Vec<trek_agents::McpServer> {
+    let names = [
+        "trek-simulator",
+        trek_core::media::VIDEO_SERVER,
+        "trek-browser",
+        "trek-phone",
+        trek_agents::mock::ORCHESTRATE_SERVER,
+    ];
+    computer
+        .then_some(super::orchestrate::COMPUTER_SERVER)
+        .into_iter()
+        .chain(names)
+        .map(|n| trek_agents::McpServer::stdio(n, "trek-mcp", vec![], vec![]))
+        .collect()
 }
 
 /// What each kind of agent is given, by name: Claude Code and Direct models take the notes as
@@ -55,6 +79,20 @@ fn variants() -> Vec<(&'static str, String)> {
             trek_agents::instructions_prompt(&none, ""),
         ),
         ("all-message", trek_agents::instructions_prompt(&all, "")),
+        (
+            "codex-default-message",
+            trek_agents::instructions_prompt(
+                &trek_agents::message_notes(&AgentId::Codex, &none, &servers(false)),
+                "",
+            ),
+        ),
+        (
+            "codex-all-message",
+            trek_agents::instructions_prompt(
+                &trek_agents::message_notes(&AgentId::Codex, &all, &servers(true)),
+                "",
+            ),
+        ),
     ]
 }
 
@@ -90,6 +128,24 @@ fn prompt_budget_notes_stay_within_budget() {
     );
     // The wrapper for agents that take the notes in a message stays a few words.
     assert!(size("all-message") - size("all") < 60);
+    let line = trek_agents::tool_search_note(&servers(true)).unwrap();
+    assert!(
+        line.chars().count() <= TOOL_SEARCH_LINE_CHARS,
+        "Codex's line on Trek's tools grew to {} chars (budget {TOOL_SEARCH_LINE_CHARS}); see the \
+         top of prompt_budget.rs before raising it",
+        line.chars().count()
+    );
+    assert!(
+        size("codex-all-message") <= CODEX_NOTES_CHARS,
+        "Codex's notes grew to {} chars (budget {CODEX_NOTES_CHARS}); see the top of \
+         prompt_budget.rs before raising it",
+        size("codex-all-message")
+    );
+    // Codex gets the line once, on top of the same notes.
+    assert_eq!(
+        size("codex-all-message"),
+        size("all-message") + 2 + line.chars().count()
+    );
 }
 
 /// Each piece goes in once: a note that repeated another (or the same piece twice) would cost
