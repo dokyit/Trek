@@ -966,7 +966,12 @@ impl Render for WindowTitle {
         );
         let theme = cx.theme().clone();
         let thread = ws.current_thread().cloned();
+        // A study session's folder is Study, wherever the data folder puts it.
+        let study = trek_core::study::dir();
         let project_name = |p: &std::path::Path| {
+            if p == study {
+                return "Study".to_string();
+            }
             p.file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default()

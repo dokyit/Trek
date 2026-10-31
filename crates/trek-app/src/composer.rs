@@ -280,7 +280,7 @@ impl Composer {
             TextareaState::new(window, cx)
                 .auto_grow(2, 12)
                 .submit_on_enter(!cmd_enter)
-                .placeholder(placeholder(None, false).to_string())
+                .placeholder(placeholder(None, Prompt::Plain).to_string())
         });
         let pickers = Pickers::new(window, cx);
         let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
@@ -336,16 +336,21 @@ impl Composer {
                 }
                 // Another thread or draft on screen: what was typed stays with the one it was typed for.
                 this.follow_route(window, cx);
-                // Mid-turn the prompt says where a message goes; on Study, what to learn.
+                // Mid-turn the prompt says where a message goes; on Study, what to learn or
+                // practise; in a study session, that thinking out loud is welcome.
                 let placeholder = {
                     let ws = ws.read(cx);
                     let running = ws
                         .thread_id_in(&this.scope)
                         .is_some_and(|id| ws.turn_running(id));
-                    placeholder(
-                        running.then_some(ws.settings.general.follow_up),
-                        ws.is_study_in(&this.scope),
-                    )
+                    let prompt = if ws.is_study_in(&this.scope) {
+                        Prompt::Study(ws.study.kind)
+                    } else if ws.is_study_session_in(&this.scope) {
+                        Prompt::Session
+                    } else {
+                        Prompt::Plain
+                    };
+                    placeholder(running.then_some(ws.settings.general.follow_up), prompt)
                 };
                 if this.placeholder != placeholder {
                     this.input.update(cx, |s, cx| {
@@ -412,7 +417,7 @@ impl Composer {
             voice_tasks: Vec::new(),
             voice_focus: cx.focus_handle(),
             draft_key: String::new(),
-            placeholder: placeholder(None, false),
+            placeholder: placeholder(None, Prompt::Plain),
             drafts: Default::default(),
             _subscriptions: subscriptions,
         };
@@ -1906,7 +1911,7 @@ impl Composer {
     }
 
     /// Attach files by inserting @-references into the prompt.
-    fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: true,
@@ -3563,6 +3568,8 @@ impl Render for Composer {
         let is_draft = ws.is_draft_in(&self.scope);
         // Study's composer starts a session: no project, worktree or plan mode to choose.
         let study = ws.is_study_in(&self.scope);
+        // A study session: the learner thinks out loud here; no branch, changes or plan mode.
+        let session = ws.is_study_session_in(&self.scope);
         let main = self.scope == Scope::Main;
         let follow_up = ws.settings.general.follow_up;
         let own_turn = thread
@@ -3824,8 +3831,8 @@ impl Render for Composer {
             .border_1()
             .border_color(if hh == HandHolding::FullAccess { palette::amber(cx).opacity(0.3) } else { look::hairline(cx) })
             .shadow(look::card_shadow(cx))
-            // Context row (threads): checkout, branch, activity.
-            .when(!is_draft, |el| {
+            // Context row (threads): checkout, branch, activity (a study session has no branch to speak of).
+            .when(!is_draft && (!session || preparing || updating.is_some()), |el| {
                 el.child(
                     h_flex()
                         .h(px(40.))
@@ -3834,7 +3841,7 @@ impl Render for Composer {
                         .gap(px(8.))
                         .text_size(px(look::LABEL))
                         .text_color(theme.muted_foreground)
-                        .child(self.env_chips(false, cx))
+                        .when(!session, |el| el.child(self.env_chips(false, cx)))
                         .when(preparing, |el| {
                             el.child(h_flex().gap(px(6.)).child(gpui_kit::component::spinner::Spinner::new().xsmall().color(theme.muted_foreground)).child("Creating the worktree…"))
                         })
@@ -3855,7 +3862,7 @@ impl Render for Composer {
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
-            .child(div().px(px(if self.voice.active() { look::PAD } else { look::PAD - look::INPUT_INSET })).pt(px(if is_draft || !self.outbox.paths.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
+            .child(div().px(px(if self.voice.active() { look::PAD } else { look::PAD - look::INPUT_INSET })).pt(px(if is_draft || session || !self.outbox.paths.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
                 // An accepted `/` command or skill: plain blue text, no pill.
                 div().text_color(crate::palette::token(cx)).child(token.token().label().clone())
             }).on_paste({
@@ -3899,7 +3906,7 @@ impl Render for Composer {
                     })
                     .child(access_pill)
                     // The same pill on a new thread and in one under way (⇧⇥ either way).
-                    .when(!study, |el| el.child(
+                    .when(!study && !session, |el| el.child(
                         Pill::new("plan-pill")
                             .chip()
                             .selected(plan)
@@ -4061,7 +4068,7 @@ impl Render for Composer {
                 .child(div().flex_1())
                 // The terminal docks under the chat in the main window (⌃` too); lit while it's
                 // out. Study has no dock under it.
-                .when(main && !study, |el| {
+                .when(main && !study && !session, |el| {
                     let open = self.workspace.read(cx).settings.layout.terminal_open;
                     let tip = crate::keys::shared(if open {
                         "Hide the terminal (⌃`)" // keys::shared
@@ -4187,12 +4194,29 @@ impl Render for Composer {
     }
 }
 
+/// Whose prompt the composer is: an ordinary one, the Study screen's (starting a session of a
+/// kind), or a study session's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Prompt {
+    Plain,
+    Study(trek_core::study::Kind),
+    Session,
+}
+
 /// The prompt's placeholder: what to type, or mid-turn (`running`: the default way a message
-/// goes), where a message sent now goes; on `study`, what to learn and what can come with it.
-fn placeholder(running: Option<FollowUp>, study: bool) -> std::borrow::Cow<'static, str> {
+/// goes), where a message sent now goes. On Study, what to learn or practise (the row under the
+/// card adds material and voice); in a session, that the learner's thinking is what helps.
+fn placeholder(running: Option<FollowUp>, prompt: Prompt) -> std::borrow::Cow<'static, str> {
+    use trek_core::study::Kind;
     match running {
-        None if study => {
-            "What do you want to learn? Add notes, PDFs or problems, or press the mic".into()
+        None if prompt == Prompt::Study(Kind::Learn) => {
+            "What do you want to learn? Say it in your own words".into()
+        }
+        None if prompt == Prompt::Study(Kind::Practice) => {
+            "What do you want to practise? A topic, a map, or your own problems".into()
+        }
+        None if prompt == Prompt::Session => {
+            "Think out loud, ask a question, or say you're stuck".into()
         }
         None => "Ask or build · / commands · @ files".into(),
         Some(FollowUp::Steer) => {

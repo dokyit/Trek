@@ -1884,7 +1884,10 @@ impl ThreadView {
                 // Videos attached to it (`@path`) play under it.
                 let videos = trek_core::media::mentioned_videos(said, at.cwd.as_deref());
                 let text = SharedString::from(said.to_string());
-                let long = text.len() > 700 || text.lines().count() > 10;
+                // A study session's first message shows what the learner asked for and what came
+                // with it, not the instructions Trek wrote the tutor.
+                let intro = trek_core::study::intro(said);
+                let long = intro.is_none() && (text.len() > 700 || text.lines().count() > 10);
                 let has_text = !text.trim().is_empty();
                 let copy_text = text.clone();
                 let rewinding = asking
@@ -2061,11 +2064,16 @@ impl ThreadView {
                                         .bg(theme.secondary)
                                         .text_size(text_size)
                                         .line_height(relative(1.5))
-                                        .child(
-                                            div()
-                                                .when(long && !open, |el| el.line_clamp(10))
-                                                .child(text),
-                                        )
+                                        .map(|el| match &intro {
+                                            Some(intro) => {
+                                                el.child(crate::study::intro_bubble(intro, cx))
+                                            }
+                                            None => el.child(
+                                                div()
+                                                    .when(long && !open, |el| el.line_clamp(10))
+                                                    .child(text),
+                                            ),
+                                        })
                                         .when(long, |el| {
                                             el.child(
                                                 div()

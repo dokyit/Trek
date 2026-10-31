@@ -210,6 +210,16 @@ pub fn mentioned_videos(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
 /// Every file a message names as `@path`, on disk: absolute, `~/`, or relative to `cwd`. In
 /// order, each once. (A study session copies them into its sources.)
 pub fn mentioned_files(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    mentioned_paths(text, cwd, Path::is_file)
+}
+
+/// Every folder a message names as `@path` (the + menu's picker takes folders too), on disk. In
+/// order, each once. (A study session reads them where they are.)
+pub fn mentioned_dirs(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    mentioned_paths(text, cwd, Path::is_dir)
+}
+
+fn mentioned_paths(text: &str, cwd: Option<&Path>, keep: fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for raw in mention_words(text) {
         let raw = raw.trim_end_matches([',', '.', ';', ':', ')', '!', '?']);
@@ -222,7 +232,7 @@ pub fn mentioned_files(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
         } else {
             continue;
         };
-        if path.is_file() && !out.contains(&path) {
+        if keep(&path) && !out.contains(&path) {
             out.push(path);
         }
     }

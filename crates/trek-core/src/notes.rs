@@ -450,7 +450,7 @@ pub fn attachment_names(body: &str) -> Vec<String> {
     names
 }
 
-fn title_of(body: &str) -> String {
+pub fn title_of(body: &str) -> String {
     body.lines()
         .map(plain)
         .find(|l| !l.is_empty())

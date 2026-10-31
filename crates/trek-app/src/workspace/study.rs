@@ -23,6 +23,14 @@ impl Workspace {
         *scope == Scope::Main && self.route == Route::Study
     }
 
+    /// The thread in `scope` is a study session: it works in the study folder. Its composer is
+    /// for thinking out loud, not for a project's branch, changes or plan mode.
+    pub fn is_study_session_in(&self, scope: &Scope) -> bool {
+        self.thread_in(scope)
+            .and_then(|t| t.cwd.as_deref())
+            .is_some_and(|cwd| cwd == study::dir())
+    }
+
     /// Learn or Practice, for the next session the Study screen's composer starts.
     pub fn set_study_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
         if self.study.kind != kind {
@@ -98,31 +106,40 @@ impl Workspace {
                 );
             }
         };
-        // The topic, for the title and the sources' folder: the text without the files it names.
+        // The topic, for the title and the sources' folder: the text without the files, folders
+        // and pages it names.
         let mentioned = trek_core::media::mentioned_files(&text, Some(&dir));
+        let folders = trek_core::media::mentioned_dirs(&text, Some(&dir));
+        let links = study::links_in(&text);
         let mut attached: Vec<PathBuf> = mentioned;
         attached.extend(images.iter().cloned());
         attached.extend(picked);
         let topic = {
-            let words = without_mentions(&text);
+            let words = study::words_of(&text);
             if words.is_empty() {
                 attached
                     .iter()
+                    .chain(&folders)
                     .filter_map(|p| p.file_name())
                     .map(|n| n.to_string_lossy().to_string())
+                    .chain(links.iter().cloned())
                     .collect::<Vec<_>>()
                     .join(", ")
             } else {
                 words
             }
         };
-        let sources = study::add_sources(&dir, &topic, &attached);
+        let with = study::Material {
+            files: study::add_sources(&dir, &topic, &attached),
+            folders,
+            links,
+        };
         let asked = if text.is_empty() {
             topic.clone()
         } else {
             text.clone()
         };
-        let first = study::prompt(kind, &guide, &dir, &asked, map.as_deref(), &sources);
+        let first = study::prompt(kind, &guide, &dir, &asked, map.as_deref(), &with);
         let title = study::title(kind, &topic);
         let prefs = self.study_prefs();
         let folder = dir.clone();
@@ -182,41 +199,5 @@ impl Workspace {
         p.worktree = false;
         p.plan = false;
         p
-    }
-}
-
-/// `text` without the files it names as `@path` or `@"a path"`, one space between what's left.
-fn without_mentions(text: &str) -> String {
-    let mut out: Vec<&str> = vec![];
-    let mut quoted = false;
-    for word in text.split_whitespace() {
-        if quoted {
-            quoted = !word.ends_with('"');
-            continue;
-        }
-        if let Some(rest) = word.strip_prefix("@\"") {
-            quoted = !rest.ends_with('"') || rest.len() < 2;
-            continue;
-        }
-        if word.starts_with('@') && word.len() > 1 {
-            continue;
-        }
-        out.push(word);
-    }
-    out.join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_topic_is_the_text_without_the_files_it_names() {
-        assert_eq!(
-            without_mentions("attention, from @/tmp/notes.pdf and @\"/tmp/my sheet.md\" please"),
-            "attention, from and please"
-        );
-        assert_eq!(without_mentions("@/tmp/notes.pdf"), "");
-        assert_eq!(without_mentions("mail me@home"), "mail me@home");
     }
 }
