@@ -348,6 +348,7 @@ fn send(id: &str, text: &str) -> impl FnOnce(tr::Reply<Option<tr::Open>>) -> tr:
         text: text.to_string(),
         mode: None,
         images: vec![],
+        consult: None,
     };
     move |reply| tr::HostRequest::Send { req, reply }
 }
@@ -410,6 +411,7 @@ fn a_phone_reads_sends_and_answers() {
                 text: "ask permission first".into(),
                 mode: None,
                 images: vec![],
+                consult: None,
             },
             reply,
         })
@@ -638,6 +640,7 @@ fn a_phone_pins_settles_renames_and_sends_photos() {
                 text: "look at this".into(),
                 mode: None,
                 images: vec![image],
+                consult: None,
             },
             reply,
         })
@@ -667,6 +670,7 @@ fn a_phone_pins_settles_renames_and_sends_photos() {
                     text: text.into(),
                     mode: None,
                     images: vec![image],
+                    consult: None,
                 },
                 reply,
             })
@@ -696,6 +700,7 @@ fn a_phone_pins_settles_renames_and_sends_photos() {
                 text: "x".into(),
                 mode: None,
                 images: vec![junk],
+                consult: None,
             },
             reply,
         });
@@ -729,6 +734,7 @@ fn a_photo_that_cannot_be_kept_leaves_the_macs_follow_up_setting_alone() {
                 text: "x".into(),
                 mode: Some(mode),
                 images: vec![junk],
+                consult: None,
             },
             reply,
         });
@@ -3566,6 +3572,7 @@ fn a_message_s_images_go_to_the_phone_scaled_down() {
                 text: "look".into(),
                 mode: None,
                 images: vec![upload],
+                consult: None,
             },
             reply,
         })
@@ -4587,5 +4594,374 @@ fn put_files_writes_inside_the_project_and_never_through_a_symlink() {
                 "the link itself stays"
             );
         }
+    });
+}
+
+fn media_req(
+    id: &str,
+    path: &str,
+    max_px: Option<u32>,
+    offset: u64,
+) -> impl FnOnce(tr::Reply<tr::Media>) -> tr::HostRequest {
+    let req = tr::MediaRequest {
+        thread_id: id.to_string(),
+        path: path.to_string(),
+        max_px,
+        offset,
+        length: None,
+    };
+    move |reply| tr::HostRequest::Media { req, reply }
+}
+
+#[test]
+fn a_thread_s_files_go_to_the_phone_and_no_others() {
+    use trek_core::store::{Item, ToolStatus};
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let project = trek.project.clone();
+        std::fs::create_dir_all(project.join("out")).unwrap();
+        image::RgbaImage::from_pixel(300, 100, image::Rgba([200, 40, 40, 255]))
+            .save(project.join("out/shot.png"))
+            .unwrap();
+        let clip: Vec<u8> = (0..1_500_000u32).map(|n| (n % 251) as u8).collect();
+        std::fs::write(project.join("clip.mov"), &clip).unwrap();
+        std::fs::write(project.parent().unwrap().join("secret.txt"), b"no").unwrap();
+        // What `watch_video` leaves: a manifest with a frame beside it.
+        let scratch = project.join("watched");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("f0.jpg"), b"frame").unwrap();
+        let manifest = scratch.join(trek_core::media::MANIFEST);
+        std::fs::write(
+            &manifest,
+            serde_json::json!({
+                "source": "clip.mov",
+                "video": project.join("clip.mov"),
+                "duration": 12.5,
+                "frames": [{"t": 0.0, "file": "f0.jpg"}, {"t": 1.0, "file": "gone.jpg"}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            live.items.push(Item::User {
+                text: "what happens in @clip.mov".into(),
+                images: vec![],
+                at: None,
+                resume: None,
+                aside: false,
+            });
+            live.items.push(Item::Tool {
+                id: "watch-1".into(),
+                title: "mcp__trek-video__watch_video".into(),
+                detail: "clip.mov".into(),
+                output: format!("Watched clip.mov.\nManifest: {}", manifest.display()),
+                status: ToolStatus::Done,
+            });
+            live.items.push(Item::Assistant {
+                text: "Here it is: ![shot](out/shot.png), and [the clip](clip.mov).".into(),
+            });
+            live.revision += 1;
+        });
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let t = ask_later(&trek, cx, transcript_req(&id, None, None))
+            .await
+            .unwrap();
+        let videos = t
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                tr::ItemBody::User { videos, .. } if !videos.is_empty() => Some(videos.clone()),
+                _ => None,
+            })
+            .expect("the message's video");
+        assert!(
+            videos.len() == 1 && videos[0].ends_with("/clip.mov"),
+            "{videos:?}"
+        );
+        let watch = t
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                tr::ItemBody::Tool { watch: Some(w), .. } => Some(w.clone()),
+                _ => None,
+            })
+            .expect("what it watched");
+        assert_eq!(watch.duration, Some(12.5));
+        assert_eq!(watch.frames.len(), 1, "a frame that's gone is left out");
+        assert!(
+            watch
+                .video
+                .as_deref()
+                .is_some_and(|v| v.ends_with("/clip.mov"))
+        );
+
+        // The answer's image, scaled down whole.
+        let shot = ask_later(&trek, cx, media_req(&id, "out/shot.png", Some(120), 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            (shot.mime.as_str(), shot.width, shot.height, shot.offset),
+            ("image/jpeg", Some(120), Some(40), 0)
+        );
+        assert_eq!(shot.total, shot.bytes().unwrap().len() as u64);
+        assert_eq!(shot.path, "out/shot.png", "as asked");
+        // The message's video, in pieces, byte for byte.
+        let first = ask_later(&trek, cx, media_req(&id, &videos[0], None, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            (first.mime.as_str(), first.total, first.width),
+            ("video/quicktime", clip.len() as u64, None)
+        );
+        let mut got = first.bytes().unwrap();
+        assert_eq!(got.len() as u64, tr::MAX_NOTE_FILE_CHUNK);
+        let rest = ask_later(
+            &trek,
+            cx,
+            media_req(&id, "clip.mov", None, got.len() as u64),
+        )
+        .await
+        .unwrap();
+        got.extend(rest.bytes().unwrap());
+        assert_eq!(got, clip);
+        // A frame the model saw.
+        let frame = ask_later(&trek, cx, media_req(&id, &watch.frames[0].path, None, 0))
+            .await
+            .unwrap();
+        assert_eq!(frame.bytes().unwrap(), b"frame");
+
+        // Nothing else, however it's asked for.
+        let secret = project.parent().unwrap().join("secret.txt");
+        for path in [
+            "/etc/hosts",
+            "../secret.txt",
+            secret.to_str().unwrap(),
+            "out",
+            "out/missing.png",
+            &manifest.display().to_string(),
+        ] {
+            let refused = ask_later(&trek, cx, media_req(&id, path, None, 0))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (refused.code, refused.message.as_str()),
+                (
+                    tr::ErrorCode::NotFound,
+                    "That file isn't part of this thread"
+                ),
+                "{path}"
+            );
+        }
+        let elsewhere = ask_later(&trek, cx, media_req("no-such-thread", "clip.mov", None, 0))
+            .await
+            .unwrap_err();
+        assert_eq!(elsewhere.code, tr::ErrorCode::NotFound);
+    });
+}
+
+#[test]
+fn the_limit_bar_the_context_card_and_the_confirm_card_from_the_phone() {
+    use trek_core::store::Item;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+
+        // Not paused: the limit bar's buttons have nothing to act on.
+        for action in [
+            tr::ThreadAction::ResumeAtReset,
+            tr::ThreadAction::CancelResume,
+            tr::ThreadAction::TryAgain,
+            tr::ThreadAction::SnoozeUntilReset,
+        ] {
+            let refused = ask(&trek, cx, thread_action(&id, action)).unwrap_err();
+            assert_eq!(refused.code, tr::ErrorCode::Conflict);
+        }
+        let r = row(&trek, cx, &id);
+        assert!(r.pause.is_none() && !r.shares_folder);
+
+        // The context card: no report yet, then the Mac's bar, whole.
+        let card = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+            let thread_id = id.clone();
+            ask(trek, cx, |reply| tr::HostRequest::ContextCard {
+                thread_id,
+                reply,
+            })
+        };
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().context = None);
+        assert_eq!(card(&trek, cx).unwrap_err().code, tr::ErrorCode::NotFound);
+        trek.update(cx, |ws, _| {
+            ws.live.get_mut(&id).unwrap().context = Some((50_000, 200_000))
+        });
+        let c = card(&trek, cx).unwrap();
+        assert_eq!((c.used, c.window), (50_000, 200_000));
+        assert_eq!(
+            c.parts.iter().map(|p| p.tokens).sum::<u64>(),
+            c.window,
+            "the segments fill the window"
+        );
+        let kinds: Vec<&str> = c.parts.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(kinds[kinds.len() - 2..], ["free", "reserved"]);
+        assert_eq!(c.parts.last().unwrap().tokens, c.reserved);
+        assert!(c.parts.iter().all(|p| !p.label.is_empty()));
+        assert_eq!(c.compact, tr::CompactState::Ready);
+
+        // The confirm card: no git here, so nothing to restore, in the Mac's words.
+        let items = trek.items(cx, &id);
+        let message = items
+            .iter()
+            .position(|i| matches!(i, Item::User { .. }))
+            .unwrap();
+        let end = items
+            .iter()
+            .position(|i| matches!(i, Item::TurnEnd { .. }))
+            .unwrap();
+        let preview = |item: usize, action: tr::TurnAction| {
+            let req = tr::TurnPreviewRequest {
+                thread_id: id.clone(),
+                item_id: format!("i{item}"),
+                action,
+            };
+            move |reply| tr::HostRequest::TurnPreview { req, reply }
+        };
+        let rewind = ask_later(&trek, cx, preview(message, tr::TurnAction::Rewind))
+            .await
+            .unwrap();
+        assert_eq!(rewind.item_id, format!("i{message}"));
+        assert_eq!(rewind.files, None);
+        assert!(
+            rewind
+                .unavailable
+                .as_deref()
+                .is_some_and(|w| w.contains("isn't a git repository")),
+            "{rewind:?}"
+        );
+        let undo = ask_later(&trek, cx, preview(end, tr::TurnAction::Undo))
+            .await
+            .unwrap();
+        assert_eq!((undo.files, undo.recap), (None, rewind.recap));
+        for (item, action, code) in [
+            (end, tr::TurnAction::Rewind, tr::ErrorCode::BadRequest),
+            (message, tr::TurnAction::Undo, tr::ErrorCode::BadRequest),
+            (end, tr::TurnAction::Fork, tr::ErrorCode::BadRequest),
+            (
+                items.len() + 5,
+                tr::TurnAction::Retry,
+                tr::ErrorCode::NotFound,
+            ),
+        ] {
+            let refused = ask_later(&trek, cx, preview(item, action))
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, code, "{action:?} on i{item}");
+        }
+
+        // Compact now sends the agent's own `/compact`.
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::Compact)).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(
+            trek.items(cx, &id)
+                .iter()
+                .any(|i| matches!(i, Item::User { text, .. } if text == "/compact"))
+        );
+
+        // Paused at a limit: the bar's state rides in the row, and its buttons work.
+        trek.send(cx, "mock:limit 5s");
+        let thread = id.clone();
+        trek.wait(cx, "the limit to pause the thread", move |ws| {
+            ws.pause(&thread).is_some() && !ws.turn_running(&thread)
+        })
+        .await;
+        let pause = row(&trek, cx, &id).pause.expect("the limit bar");
+        assert!(pause.resets_at.is_some() && !pause.resume && !pause.wrapped);
+        assert_eq!(card(&trek, cx).unwrap().compact, tr::CompactState::Busy);
+        let refused = ask(&trek, cx, thread_action(&id, tr::ThreadAction::Compact)).unwrap_err();
+        assert_eq!(refused.code, tr::ErrorCode::Conflict);
+        ask(
+            &trek,
+            cx,
+            thread_action(&id, tr::ThreadAction::ResumeAtReset),
+        )
+        .unwrap();
+        assert!(row(&trek, cx, &id).pause.unwrap().resume);
+        ask(
+            &trek,
+            cx,
+            thread_action(&id, tr::ThreadAction::CancelResume),
+        )
+        .unwrap();
+        assert!(!row(&trek, cx, &id).pause.unwrap().resume);
+        ask(
+            &trek,
+            cx,
+            thread_action(&id, tr::ThreadAction::SnoozeUntilReset),
+        )
+        .unwrap();
+        assert_eq!(row(&trek, cx, &id).snoozed_until, pause.resets_at);
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::TryAgain)).unwrap();
+        assert!(trek.read(cx, |ws, _| ws.pause(&id).is_none()));
+    });
+}
+
+#[test]
+fn a_message_goes_with_consultants_as_the_composer_sends_it() {
+    use trek_core::store::Item;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let consult = |with: Vec<String>| {
+            let req = tr::SendRequest {
+                thread_id: id.clone(),
+                text: "Which cache is better?".into(),
+                mode: None,
+                images: vec![],
+                consult: Some(tr::ConsultRequest {
+                    with,
+                    style: tr::ConsultStyle::Advise,
+                    then: tr::ConsultThen::Report,
+                    judge: None,
+                }),
+            };
+            move |reply| tr::HostRequest::Send { req, reply }
+        };
+        for bad in [
+            vec![],
+            vec!["nonsense".into()],
+            vec!["codex/no-such-model/high".into()],
+        ] {
+            let refused = ask(&trek, cx, consult(bad.clone())).unwrap_err();
+            assert_eq!(refused.code, tr::ErrorCode::BadRequest, "{bad:?}");
+        }
+        let mock = common::mock();
+        let (available, model) = trek.read(cx, |ws, _| {
+            (
+                ws.consult_unavailable(&mock).is_none(),
+                ws.models_for(&mock).first().map(|m| m.id.clone()),
+            )
+        });
+        assert!(available, "the mock agent consults");
+        let model = model.expect("the mock agent's models");
+        let key = format!("{}/{model}/high", mock.key());
+        ask(&trek, cx, consult(vec![key])).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let sent = trek
+            .items(cx, &id)
+            .into_iter()
+            .rev()
+            .find_map(|i| match i {
+                Item::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert!(sent.contains("Which cache is better?"), "{sent}");
+        assert!(
+            sent.contains(&format!("agent \"{}\", model \"{model}\"", mock.key())),
+            "{sent}"
+        );
     });
 }

@@ -26,6 +26,12 @@ final class ComposerState {
     var mode: SendMode = .steer
     /// Bumped to bring the keyboard up (after "Edit" put a message back in the composer).
     var focusRequest = 0
+    /// Bumped to open the model picker (the limit bar's Switch agent…).
+    var pickModelRequest = 0
+    /// Consultants picked for the next message (the consult pill).
+    var consult: ConsultRequest?
+    /// Bumped to open the consult sheet.
+    var consultRequest = 0
     /// What followed `/new` in the message just sent: the new thread's prompt, if the Mac asks
     /// for the sheet.
     @ObservationIgnored var newPrompt = ""
@@ -222,6 +228,10 @@ enum RowAction {
     case retry(end: String, model: ModelOption?)
     case fork(item: String)
     case rewind(user: String, edit: Bool)
+    /// The restatement was right: send the go-ahead (with what the asking message held back).
+    case goAhead(String)
+    /// It wasn't: the keyboard comes up to say what was meant.
+    case correct
 }
 
 /// An action that changes the conversation and the files, waiting for the user to confirm it.
@@ -329,7 +339,12 @@ private struct TranscriptList: View, Equatable {
             }
             .animation(.snappy(duration: 0.2), value: awayFromBottom)
         }
-        .confirmationDialog(confirming?.title ?? "", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+        // A Mac that says which files restoring puts back: the Mac's confirmation, with them.
+        .sheet(item: Binding(get: { previewing ? confirming : nil }, set: { if $0 == nil { confirming = nil } })) { c in
+            ConfirmSheet(title: c.title, message: c.message, verb: c.verb, threadID: store.id, itemID: c.item, action: c.action,
+                         agentName: store.summary?.agent.name ?? "The agent") { restore in run(c, restoreFiles: restore) }
+        }
+        .confirmationDialog(confirming?.title ?? "", isPresented: Binding(get: { confirming != nil && !previewing }, set: { if !$0 { confirming = nil } }),
                             titleVisibility: .visible, presenting: confirming) { c in
             Button("\(c.verb) and restore files", role: .destructive) { run(c, restoreFiles: true) }
             Button("\(c.verb), keep files") { run(c, restoreFiles: false) }
@@ -339,6 +354,9 @@ private struct TranscriptList: View, Equatable {
         }
     }
 
+    /// The Mac lists the files an undo, retry or rewind puts back (`turn_preview`).
+    private var previewing: Bool { model.serves(.turnPreview, on: store.id) }
+
     /// The list's rows: what's above the transcript, its blocks, and what's under it.
     private var rows: [TranscriptRow] {
         let blocks = store.blocks
@@ -346,7 +364,9 @@ private struct TranscriptList: View, Equatable {
         let lastGroup = blocks.last(where: \.isGroup)?.id
         let ends = Set(Block.turnEnds(blocks, open: working))
         let lastTurn = blocks.last { ends.contains($0.id) }?.id
-        let lastUser = blocks.last(where: \.isUser)?.id
+        let lastUser = blocks.last(where: \.isPrompt)?.id
+        // The latest turn restated what it was asked: under it, "Is that what you meant?".
+        let goAhead = working ? nil : lastTurn.flatMap { RestateCheck.goAhead(blocks, endingAt: $0) }
         var rows: [TranscriptRow] = []
         rows.reserveCapacity(blocks.count + 3)
         rows.append(.header(store))
@@ -357,7 +377,7 @@ private struct TranscriptList: View, Equatable {
         }
         for block in blocks {
             let open = groupOpen[block.id] ?? ((block.id == lastGroup && working) || Launch.expandAll)
-            let row = BlockRow(block: block, threadID: store.id, projectName: projectName,
+            var row = BlockRow(block: block, threadID: store.id, projectName: projectName,
                                expanded: open,
                                folded: folded[block.id] ?? [],
                                endsTurn: ends.contains(block.id),
@@ -366,6 +386,7 @@ private struct TranscriptList: View, Equatable {
                                toggle: { groupOpen[block.id] = !open },
                                fold: { folded[block.id] = $0 },
                                act: perform)
+            if block.id == lastTurn, block.isTurnEnd { row.goAhead = goAhead }
             // A long answer goes in as parts, a few paragraphs each: laid out a part at a time as
             // the reader comes to it, not several screens at once. Not while it's being written.
             if case .assistant(let text, false) = block.kind, let parts = AnswerPart.split(text, key: block.id, version: block.version) {
@@ -399,6 +420,11 @@ private struct TranscriptList: View, Equatable {
             confirming = Confirmation(action: .retry, item: end, model: m)
         case .rewind(let user, let edit):
             confirming = Confirmation(action: .rewind, item: user, edit: edit)
+        case .goAhead(let text):
+            guard model.link(for: store.id)?.connection == .connected else { return model.show(AppModel.notConnected, error: true) }
+            model.send(text, to: store.id, mode: nil)
+        case .correct:
+            composer.focusRequest += 1
         case .fork(let item):
             model.turnAction(store.id, item: item, .fork)
         }
@@ -653,12 +679,14 @@ struct BlockRow: View, Equatable {
     var act: (RowAction) -> Void
     /// One stretch of a long answer (it's drawn, and measured, a part at a time).
     var part: AnswerPart? = nil
+    /// The latest turn restated its request: "Is that what you meant?", and this go-ahead.
+    var goAhead: String? = nil
 
     nonisolated static func == (a: BlockRow, b: BlockRow) -> Bool {
         MainActor.assumeIsolated {
             a.block == b.block && a.part == b.part && a.expanded == b.expanded && a.folded == b.folded && a.endsTurn == b.endsTurn
                 && a.latest == b.latest
-                && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels
+                && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels && a.goAhead == b.goAhead
         }
     }
 
@@ -677,9 +705,21 @@ struct BlockRow: View, Equatable {
     private var content: some View {
         switch block.kind {
         case .user(let text, let images, let at, let aside):
-            VStack(alignment: .trailing, spacing: 4) {
-                UserBubble(text: text, images: images, threadID: threadID, itemID: block.itemID)
-                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, aside: aside, act: act)
+            if WakeNote.isWake(text) {
+                // Trek waking the agent with what its sub-agents came back with: a note, folded.
+                WakeRow(text: text)
+            } else {
+                // As written: what Trek added for the agent (a consult, a restatement) is a line
+                // under the bubble.
+                let parts = MessageParts.of(text)
+                VStack(alignment: .trailing, spacing: 4) {
+                    UserBubble(text: parts.said, images: images, threadID: threadID, itemID: block.itemID)
+                    if !block.extras.videos.isEmpty {
+                        AttachedVideos(paths: block.extras.videos, threadID: threadID)
+                    }
+                    MessageNotes(parts: parts, threadID: threadID)
+                    MessageActions(item: block.itemID, text: parts.said, at: at, latest: latest, busy: busy, aside: aside, act: act)
+                }
             }
         case .assistant(let text, let streaming):
             MarkdownText(text: part?.text ?? text, live: streaming)
@@ -690,7 +730,13 @@ struct BlockRow: View, Equatable {
         case .resolved(let item):
             ResolvedRequestRow(item: item)
         case .turnEnd(let secs, let at):
-            TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels, act: act)
+            VStack(alignment: .leading, spacing: 2) {
+                TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels,
+                            verified: block.extras.verified, act: act)
+                if let goAhead {
+                    RestateCheckRow(yes: { act(.goAhead(goAhead)) }, no: { act(.correct) })
+                }
+            }
         case .notice(let text):
             Label(text, systemImage: "info.circle").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .error(let text):
@@ -718,8 +764,7 @@ struct BlockRow: View, Equatable {
             .font(.ui(.subheadline))
             .foregroundStyle(Trek.approval)
         case .handoff(let from, let to):
-            Label("Handed over from \(from) to \(to)", systemImage: "arrow.left.arrow.right")
-                .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+            HandoffRow(from: from, to: to, fromAgent: block.extras.fromAgent, toAgent: block.extras.toAgent)
         case .threadLink(let link):
             ThreadLinkRow(link: link)
         case .changes(let changes):
@@ -809,13 +854,25 @@ private struct ComposerArea: View {
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                // Paused at the agent's usage limit: the Mac's limit bar.
+                if let thread, let pause = thread.pause, thread.runState != .working {
+                    LimitBar(thread: thread, pause: pause) { composer.pickModelRequest += 1 }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 if !commands.isEmpty {
                     CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
                         composer.draft = "/\(cmd.name) "
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if let thread {
-                    ThreadSettingsBar(thread: thread)
+                    if thread.sharesFolder == true { FolderSharedLine() }
+                    if let consult = composer.consult {
+                        ConsultLine(consult: consult, threadID: threadID, clear: { composer.consult = nil },
+                                    edit: { composer.consultRequest += 1 })
+                            .transition(.opacity)
+                    }
+                    ThreadSettingsBar(thread: thread, pickRequest: composer.pickModelRequest,
+                                      consult: $c.consult, consultRequest: composer.consultRequest)
                 }
                 Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos,
                          placeholder: "Message \(thread?.agent.name ?? "the agent")",
@@ -826,6 +883,17 @@ private struct ComposerArea: View {
         .padding(.horizontal, 14)
         .padding(.bottom, 6)
         .padding(.top, 8)
+        // The transcript scrolls under the chips and the composer: it fades out under them
+        // rather than showing between the chips' glass.
+        .background {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [Trek.background.opacity(0), Trek.background], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 30)
+                Trek.background
+            }
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
+        }
         .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
         .animation(.smooth(duration: 0.3), value: thread?.needsThread)
         .animation(.smooth(duration: 0.3), value: thread?.queued)
@@ -867,7 +935,9 @@ private struct ComposerArea: View {
         }
         newPromptSent(prompt)
         model.send(text.isEmpty ? "Here's a photo." : text, to: threadID,
-                   mode: store.summary?.runState == .working ? composer.mode : nil, images: uploads)
+                   mode: store.summary?.runState == .working ? composer.mode : nil, images: uploads,
+                   consult: model.serves(.consult, on: threadID) ? composer.consult : nil)
+        composer.consult = nil
         composer.cleared(after: composer.draft)
     }
 }

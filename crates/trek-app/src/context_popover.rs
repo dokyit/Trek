@@ -426,6 +426,18 @@ enum Kind {
 }
 
 impl Kind {
+    /// Its name on the wire (`context_card`).
+    fn key(self) -> &'static str {
+        match self {
+            Kind::System => "system",
+            Kind::Mcp => "mcp",
+            Kind::Skills => "skills",
+            Kind::Messages => "messages",
+            Kind::Free => "free",
+            Kind::Reserved => "reserved",
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Kind::System => "System",
@@ -503,6 +515,25 @@ struct Limits {
     weekly: Option<LimitRow>,
     /// The thread is paused at a limit right now.
     paused: Option<String>,
+}
+
+/// The card's numbers and segments, as [`Card::shown`] hands them to a phone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub used: u64,
+    pub window: u64,
+    pub reserved: u64,
+    pub parts: Vec<ShownPart>,
+}
+
+/// A segment of the bar: `system` · `mcp` · `skills` · `messages` · `free` · `reserved`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShownPart {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub tokens: u64,
+    pub detail: Vec<(String, Option<String>)>,
+    pub note: Option<String>,
 }
 
 /// Everything the card shows, gathered once per render.
@@ -693,6 +724,27 @@ impl Card {
 
     fn part(&self, kind: Kind) -> Option<&Part> {
         self.parts.iter().find(|p| p.kind == kind)
+    }
+
+    /// What the card shows, for a phone (`remote::context_card`): the window, and the bar's
+    /// segments in order, each with its legend label and what its flyout says.
+    pub fn shown(&self) -> Shown {
+        Shown {
+            used: self.used,
+            window: self.window,
+            reserved: self.reserved,
+            parts: self
+                .parts
+                .iter()
+                .map(|p| ShownPart {
+                    kind: p.kind.key(),
+                    label: p.kind.label(),
+                    tokens: p.tokens,
+                    detail: p.detail.clone(),
+                    note: p.note.clone(),
+                })
+                .collect(),
+        }
     }
 
     pub fn render(

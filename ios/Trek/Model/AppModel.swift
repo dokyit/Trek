@@ -535,7 +535,8 @@ final class AppModel {
         case .usage(let re, _), .basecamp(let re, _), .notes(let re, _), .note(let re, _), .gitStatus(let re, _),
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
              .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
-             .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _):
+             .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _), .media(let re, _), .contextCard(let re, _),
+             .turnPreview(let re, _):
             link.reply(re, message)
         case .unlisted(let t):
             setUnlisted(qualify(t, on: link))
@@ -598,7 +599,8 @@ final class AppModel {
              .interrupt(let tid), .markSeen(let tid), .worktreeMerge(let tid),
              .commands(let tid), .turnAction(let tid, _, _, _, _), .queueAction(let tid, _, _, _, _),
              .attachment(let tid, _, _, _), .backgroundOutput(let tid, _), .stopBackground(let tid, _),
-             .cardAction(let tid, _, _):
+             .cardAction(let tid, _, _), .media(let tid, _, _, _, _), .contextCard(let tid), .turnPreview(let tid, _, _),
+             .sendConsult(let tid, _, _, _, _):
             return t(tid)
         case .setPrefs(let tid, _, _, _, _, _):
             return t(tid)
@@ -652,6 +654,12 @@ final class AppModel {
         case .backgroundOutput(let tid, let task): return .backgroundOutput(threadId: b(tid), taskId: task)
         case .stopBackground(let tid, let task): return .stopBackground(threadId: b(tid), taskId: task)
         case .cardAction(let tid, let key, let action): return .cardAction(threadId: b(tid), key: key, action: action)
+        case .media(let tid, let path, let px, let offset, let length):
+            return .media(threadId: b(tid), path: path, maxPx: px, offset: offset, length: length)
+        case .contextCard(let tid): return .contextCard(threadId: b(tid))
+        case .turnPreview(let tid, let iid, let a): return .turnPreview(threadId: b(tid), itemId: iid, action: a)
+        case .sendConsult(let tid, let text, let mode, let images, let consult):
+            return .sendConsult(threadId: b(tid), text: text, mode: mode, images: images, consult: consult)
         case .turnAction(let tid, let iid, let a, let mo, let rf):
             return .turnAction(threadId: b(tid), itemId: iid, action: a, model: mo, restoreFiles: rf)
         case .noteAsset(let nid, let path, let px): return .noteAsset(noteId: b(nid), path: path, maxPx: px)
@@ -804,9 +812,11 @@ final class AppModel {
         if let link = link(for: tid) { link.backend.send(.markSeen(threadId: link.bare(tid)), id: nil) }
     }
 
-    func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = []) {
-        let link = route(.send(threadId: tid, text: text, mode: mode, images: images))
-        act(.send(threadId: tid, text: text, mode: mode, images: images)) { [weak self, weak link] reply in
+    func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = [], consult: ConsultRequest? = nil) {
+        let message: ClientMessage = consult.map { .sendConsult(threadId: tid, text: text, mode: mode, images: images, consult: $0) }
+            ?? .send(threadId: tid, text: text, mode: mode, images: images)
+        let link = route(message)
+        act(message) { [weak self, weak link] reply in
             // `/new`: the host leaves its own screen be and asks the phone to open its sheet.
             guard let self, let link else { return }
             if case .ack(_, _, let open?, _) = reply, open.screen == "new_thread" {

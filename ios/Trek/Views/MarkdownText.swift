@@ -59,19 +59,16 @@ struct MarkdownText: View, Equatable {
             MathBlock(tex: tex, source: source, size: size)
         case .code(let lang, let code) where Markdown.isArtifact(lang):
             LivePageCard(title: Markdown.artifactTitle(code), html: code, size: size)
-        case .code(_, let code):
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .scaledFont(size * 0.8, design: .monospaced)
-                    .foregroundStyle(Trek.foreground)
-                    .padding(12)
-            }
-            .background(Trek.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+        case .code(let lang, let code):
+            CodeBlockView(lang: lang, code: code, size: size)
         case .table(let header, let align, let rows):
             MarkdownTable(header: header, align: align, rows: rows, size: size)
         case .viz(let block):
             VizBlockView(block: block, live: live, size: size)
+        case .images(let pictures):
+            AnswerImages(pictures: pictures, size: size)
+        case .video(let link):
+            AnswerVideo(link: link, size: size)
         }
     }
 
@@ -118,13 +115,17 @@ nonisolated enum Markdown {
         case viz(VizBlock)
         /// Display maths (`$$…$$`, `\[…\]`): its TeX, and its source as written.
         case math(tex: String, source: String)
+        /// A line of nothing but pictures (`![shot](docs/shot.png)`): drawn, as the Mac does.
+        case images([MediaLink])
+        /// A line that's one link to a video file (`[demo](clip.mp4)`): a player, as the Mac's.
+        case video(MediaLink)
 
         /// The inline Markdown in it, for `RichText` (code isn't).
         var inlines: [String] {
             switch self {
             case .heading(_, let s), .paragraph(let s), .quote(let s): [s]
             case .bullet(let items), .numbered(let items): items
-            case .code, .viz, .math: []
+            case .code, .viz, .math, .images, .video: []
             case .table(let header, _, let rows): header + rows.flatMap { $0 }
             }
         }
@@ -204,6 +205,10 @@ nonisolated enum Markdown {
                         case .formula(let tex, let source): out.append(.math(tex: tex, source: source))
                         }
                     }
+                } else if para.count == 1, let pictures = MediaLink.images(text) {
+                    out.append(.images(pictures))
+                } else if para.count == 1, let video = MediaLink.video(text) {
+                    out.append(.video(video))
                 } else {
                     out.append(.paragraph(text))
                 }

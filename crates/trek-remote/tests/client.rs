@@ -741,6 +741,7 @@ async fn messages_over_the_limit_are_not_sent() {
         text: "x".repeat(client::MAX_OUTBOUND),
         mode: None,
         images: vec![],
+        consult: None,
     };
     assert!(matches!(
         client.request(ClientMessage::Send(huge)).await,

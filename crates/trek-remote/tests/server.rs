@@ -2194,6 +2194,7 @@ async fn channel_host_round_trip() {
         text: "hi".into(),
         mode: None,
         images: vec![],
+        consult: None,
     })
     .await
     .unwrap();
@@ -2576,4 +2577,128 @@ async fn a_mac_that_cant_update_the_iphone_app_says_so() {
         (Some("error"), Some("9"), Some("bad_request"))
     );
     assert_eq!(reply["message"], "This Mac can't update the iPhone app");
+}
+
+#[tokio::test]
+async fn a_thread_s_files_context_card_and_confirm_card_go_over_the_wire() {
+    let mut config = ServerConfig::new(host_info());
+    config.bind = "127.0.0.1:0".parse().unwrap();
+    config.features = vec![
+        feature::MEDIA.into(),
+        feature::CONTEXT_CARD.into(),
+        feature::TURN_PREVIEW.into(),
+    ];
+    let (host, requests) = ChannelHost::new();
+    let handle = RemoteServer::start(config, Arc::new(host)).await.unwrap();
+    tokio::spawn(async move {
+        while let Ok(req) = requests.recv().await {
+            match req {
+                HostRequest::Snapshot { reply } => drop(reply.send(Ok(Snapshot::default()))),
+                HostRequest::Media { req, reply } if req.path == "/etc/hosts" => drop(reply.send(
+                    Err(HostError::not_found("That file isn't part of this thread")),
+                )),
+                HostRequest::Media { req, reply } => drop(reply.send(Ok(Media {
+                    thread_id: req.thread_id,
+                    path: req.path,
+                    mime: "video/mp4".into(),
+                    offset: req.offset,
+                    total: 3,
+                    bytes_b64: "AAAA".into(),
+                    width: None,
+                    height: None,
+                }))),
+                HostRequest::ContextCard { thread_id, reply } => {
+                    drop(reply.send(Ok(ContextCard {
+                        thread_id,
+                        used: 10,
+                        window: 100,
+                        reserved: 5,
+                        parts: vec![],
+                        compact: CompactState::Busy,
+                    })))
+                }
+                HostRequest::TurnPreview { req, reply } => drop(reply.send(Ok(TurnPreview {
+                    thread_id: req.thread_id,
+                    item_id: req.item_id,
+                    recap: true,
+                    files: Some(vec![]),
+                    unavailable: None,
+                }))),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    });
+    let (mut c, _) = pair(&handle, "phone").await;
+    send(
+        &mut c,
+        json!({"type": "media", "id": "1", "thread_id": "t", "path": "clip.mp4"}),
+    )
+    .await;
+    let media = recv(&mut c).await;
+    assert_eq!(
+        (
+            media["type"].as_str(),
+            media["re"].as_str(),
+            media["total"].as_u64()
+        ),
+        (Some("media"), Some("1"), Some(3))
+    );
+    send(
+        &mut c,
+        json!({"type": "media", "id": "2", "thread_id": "t", "path": "/etc/hosts"}),
+    )
+    .await;
+    let refused = recv(&mut c).await;
+    assert_eq!(
+        (refused["type"].as_str(), refused["code"].as_str()),
+        (Some("error"), Some("not_found"))
+    );
+    send(
+        &mut c,
+        json!({"type": "context_card", "id": "3", "thread_id": "t"}),
+    )
+    .await;
+    let card = recv(&mut c).await;
+    assert_eq!(
+        (card["type"].as_str(), card["compact"].as_str()),
+        (Some("context_card"), Some("busy"))
+    );
+    send(
+        &mut c,
+        json!({"type": "turn_preview", "id": "4", "thread_id": "t", "item_id": "i3", "action": "undo"}),
+    )
+    .await;
+    let preview = recv(&mut c).await;
+    assert_eq!(
+        (preview["type"].as_str(), preview["recap"].as_bool()),
+        (Some("turn_preview"), Some(true))
+    );
+    assert_eq!(preview["files"], json!([]));
+}
+
+#[tokio::test]
+async fn a_mac_without_them_says_so() {
+    let (handle, _) = start().await;
+    let (mut c, _) = pair(&handle, "dev-1").await;
+    for (id, msg) in [
+        (
+            "1",
+            json!({"type": "media", "id": "1", "thread_id": "t", "path": "a.png"}),
+        ),
+        (
+            "2",
+            json!({"type": "context_card", "id": "2", "thread_id": "t"}),
+        ),
+        (
+            "3",
+            json!({"type": "turn_preview", "id": "3", "thread_id": "t", "item_id": "i1", "action": "rewind"}),
+        ),
+    ] {
+        send(&mut c, msg).await;
+        let reply = recv(&mut c).await;
+        assert_eq!(
+            (reply["re"].as_str(), reply["code"].as_str()),
+            (Some(id), Some("bad_request"))
+        );
+    }
 }

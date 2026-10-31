@@ -32,7 +32,7 @@ struct SubAgentsCard: View {
                     .padding(.vertical, 4)
                 }
             }
-            .background(Trek.surface.opacity(0.7), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Trek.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
         }
     }

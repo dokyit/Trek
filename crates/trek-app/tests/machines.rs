@@ -354,6 +354,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 text: "fix it".into(),
                 images: 1,
                 aside: false,
+                videos: vec![],
             },
         ),
         item(
@@ -367,6 +368,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 output: "ok".into(),
                 added: None,
                 removed: None,
+                watch: None,
             },
         ),
         item(
@@ -784,6 +786,7 @@ fn scripted_machine(asked: Arc<Mutex<Asked>>) -> PairLink {
                             text: "build it there".into(),
                             images: 0,
                             aside: false,
+                            videos: vec![],
                         },
                     };
                     let _ = reply.send(Ok(tr::Transcript {

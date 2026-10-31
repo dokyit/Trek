@@ -36,12 +36,17 @@ nonisolated struct Block: Identifiable, Equatable {
     /// The highest seq among its items, and how many there are: changes whenever an item does.
     let version: Int64
     let count: Int
+    /// What a newer Mac adds to a single item (a turn's verification, a handoff's agents, a
+    /// message's videos).
+    var extras = ItemExtras()
 
     static func == (a: Block, b: Block) -> Bool { a.id == b.id && a.version == b.version && a.count == b.count }
 
     var isGroup: Bool { if case .group = kind { true } else { false } }
     var isTurnEnd: Bool { if case .turnEnd = kind { true } else { false } }
     var isUser: Bool { if case .user = kind { true } else { false } }
+    /// A message the user sent (not a wake-up note Trek sent the agent).
+    var isPrompt: Bool { if case .user(let text, _, _, _) = kind { !WakeNote.isWake(text) } else { false } }
 
     /// The block for a single item that isn't thinking or a tool call (nil for one not shown).
     static func single(_ item: TItem) -> Block? {
@@ -62,7 +67,7 @@ nonisolated struct Block: Identifiable, Equatable {
         case .card(let c): kind = .card(c)
         case .reasoning, .tool, .unknown: return nil
         }
-        return Block(id: item.id, itemID: item.id, kind: kind, version: item.seq, count: 1)
+        return Block(id: item.id, itemID: item.id, kind: kind, version: item.seq, count: 1, extras: item.extras)
     }
 
     static func group(_ run: ArraySlice<TItem>) -> Block {

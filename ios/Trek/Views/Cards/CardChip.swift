@@ -78,7 +78,7 @@ struct CardChip: View {
               case .card(let card) = blocks[i].kind else { return nil }
         if let until = card.chipUntil, now >= until { return nil }
         if card.phase == .failed || card.phase == .closed,
-           blocks[(i + 1)...].contains(where: { if case .user(_, _, _, let aside) = $0.kind { !aside } else { false } }) {
+           blocks[(i + 1)...].contains(where: { if case .user(let text, _, _, let aside) = $0.kind { !aside && !WakeNote.isWake(text) } else { false } }) {
             return nil
         }
         return (blocks[i].itemID, card)
@@ -94,10 +94,41 @@ struct CardChipRow: View {
     /// Ticks the chip away once a finished card has lingered.
     @State private var now = RemoteCard.nowMs()
 
+    /// Create PR was pressed and the turn it started hasn't made the PR (or ended) yet.
+    @State private var creating = false
+
     var body: some View {
         let found = CardChip.card(in: store.blocks, now: now)
+        let opens = CreatePR.offered(store.summary, blocks: store.blocks)
         Group {
-            if let card = found?.card {
+            if creating, found == nil {
+                HStack {
+                    Spacer(minLength: 0)
+                    CardChip(card: CreatePR.placeholder)
+                }
+                .transition(.opacity)
+            } else if found == nil, opens {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button {
+                        guard model.link(for: store.id)?.connection == .connected else {
+                            return model.show(AppModel.notConnected, error: true)
+                        }
+                        creating = true
+                        model.send(CreatePR.message, to: store.id, mode: nil)
+                    } label: {
+                        Text("Create PR")
+                            .font(.ui(size: 13, weight: .medium, relativeTo: .footnote))
+                            .foregroundStyle(CardInk.onButton)
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 32)
+                            .background(CardInk.button, in: Capsule())
+                    }
+                    .buttonStyle(CardPress())
+                    .accessibilityHint("Asks \(store.summary?.agent.name ?? "the agent") to open a pull request")
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .trailing)))
+            } else if let card = found?.card {
                 HStack {
                     Spacer(minLength: 0)
                     Button { showing = true } label: { CardChip(card: card) }
@@ -118,8 +149,30 @@ struct CardChipRow: View {
             }
         }
         .animation(.snappy(duration: 0.2), value: found?.card.phase)
+        .animation(.snappy(duration: 0.2), value: opens)
         .onChange(of: store.blocks.count) { now = RemoteCard.nowMs() }
+        // "Creating PR" holds until the PR's card comes in, or the turn ends without one.
+        .onChange(of: store.summary?.runState) { old, new in
+            if creating, old == .working, new != .working { creating = false }
+        }
+        .onChange(of: found?.id) { if found != nil { creating = false } }
     }
+}
+
+/// The Mac's "Create PR" chip (`composer.rs` `chip_row`): offered while the thread's branch has
+/// work on it that isn't the default branch's, no PR card is out, and the agent is idle. It sends
+/// the agent "Create PR", as the Mac does.
+nonisolated enum CreatePR {
+    static let message = "Create PR"
+
+    static func offered(_ t: ThreadSummary?, blocks: [Block]) -> Bool {
+        guard let t, t.runState != .working, let branch = t.branch, let git = t.git else { return false }
+        guard branch != (git.defaultBranch ?? "main"), git.changed > 0 || git.ahead > 0 else { return false }
+        return !blocks.contains { if case .card(let c) = $0.kind { c.kind == .pr } else { false } }
+    }
+
+    /// What the chip shows while the PR is being made: the card chip's "Creating PR".
+    static var placeholder: RemoteCard { RemoteCard() }
 }
 
 /// The newest card, live, in a sheet over the thread.

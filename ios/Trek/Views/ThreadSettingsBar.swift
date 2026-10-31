@@ -5,6 +5,13 @@ import SwiftUI
 /// asking, and plan mode. Full access, when the Mac allows it at all, asks for Face ID first.
 struct ThreadSettingsBar: View {
     var thread: ThreadSummary
+    /// Bumped by the composer to open the model picker (the limit bar's Switch agent…).
+    var pickRequest = 0
+    /// Consultants for the next message (the consult pill), where the Mac takes them.
+    var consult: Binding<ConsultRequest?>? = nil
+    /// Bumped to open the consult sheet (the line over the composer was tapped).
+    var consultRequest = 0
+    @State private var consulting = false
     @Environment(AppModel.self) private var model
     @State private var confirmingFull = false
 
@@ -22,29 +29,23 @@ struct ThreadSettingsBar: View {
     }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                modelChip
-                accessChip
-                planChip
-            }
-            .padding(.horizontal, 2)
+        // All three in the width, never cut off at the screen's edge: the words go from the
+        // plan chip, then the access chip, before the row has to scroll.
+        ViewThatFits(in: .horizontal) {
+            row(words: 4)
+            row(words: 3)
+            row(words: 2)
+            row(words: 1)
+            row(words: 0)
+            ScrollView(.horizontal, showsIndicators: false) { row(words: 0) }
+                .scrollClipDisabled()
         }
-        .scrollClipDisabled()
         .onAppear { if Launch.sheet == "model" { picking = true } }
-    }
-
-    /// Logo, model and effort, like the Mac's composer pill; opens the model picker.
-    private var modelChip: some View {
-        Button {
-            picking = true
-        } label: {
-            chip {
-                ModelChipLabel(agentKey: thread.agent.key, agentLogo: thread.agent.logo, model: modelName, effort: thread.effort)
-            }
+        .onChange(of: pickRequest) { picking = true }
+        .onChange(of: consultRequest) { consulting = true }
+        .sheet(isPresented: $consulting) {
+            if let consult { ConsultSheet(threadID: thread.id, consult: consult) }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Model: \(modelName)\(thread.effort.map { ", effort \(Effort.label($0))" } ?? "")")
         .sheet(isPresented: $picking) {
             ModelPickerSheet(
                 agents: model.link(for: thread.id)?.agents ?? [],
@@ -65,9 +66,37 @@ struct ThreadSettingsBar: View {
                 },
                 pickEffort: { model.setPrefs(thread.id, effort: $0) })
         }
+
     }
 
-    private var accessChip: some View {
+    /// The chips; `words`: 4 all labelled, 3 the plan chip an icon, 2 the access chip's label
+    /// shortened too ("Accept edits"), 1 the model's effort left out too, 0 the access chip an
+    /// icon (the effort back).
+    private func row(words: Int) -> some View {
+        HStack(spacing: 6) {
+            modelChip(effort: words != 1)
+            accessChip(label: words >= 3 ? access.label : words >= 1 ? access.shortLabel : nil)
+            planChip(labelled: words >= 4)
+            if consult != nil, model.serves(.consult, on: thread.id) { consultChip }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 2)
+    }
+
+    /// Logo, model and effort, like the Mac's composer pill; opens the model picker.
+    private func modelChip(effort: Bool) -> some View {
+        Button {
+            picking = true
+        } label: {
+            chip {
+                ModelChipLabel(agentKey: thread.agent.key, agentLogo: thread.agent.logo, model: modelName, effort: effort ? thread.effort : nil)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Model: \(modelName)\(thread.effort.map { ", effort \(Effort.label($0))" } ?? "")")
+    }
+
+    private func accessChip(label: String?) -> some View {
         Menu {
             ForEach(Access.allCases) { level in
                 Button {
@@ -85,7 +114,7 @@ struct ThreadSettingsBar: View {
         } label: {
             chip {
                 Image(systemName: access.icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(access.tint ?? Trek.muted)
-                Text(access.label)
+                if let label { Text(label).fixedSize() }
                 Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold)).foregroundStyle(Trek.muted)
             }
         }
@@ -100,13 +129,26 @@ struct ThreadSettingsBar: View {
         }
     }
 
-    private var planChip: some View {
+    /// The Mac's consult pill: other models to ask before the agent acts.
+    private var consultChip: some View {
+        let on = consult?.wrappedValue != nil
+        return Button { consulting = true } label: {
+            chip(selected: on) {
+                Image(systemName: "person.2.wave.2").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(on ? Trek.ember : Trek.muted)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(on ? "Consulting other models" : "Consult other models")
+    }
+
+    private func planChip(labelled: Bool) -> some View {
         Button {
             model.setPrefs(thread.id, plan: !plan)
         } label: {
             chip(selected: plan) {
                 Image(systemName: "checklist").font(.system(size: 12, weight: .semibold)).foregroundStyle(plan ? Trek.plan : Trek.muted)
-                Text("Plan")
+                if labelled { Text("Plan").fixedSize() }
             }
         }
         .buttonStyle(.plain)
@@ -119,7 +161,7 @@ struct ThreadSettingsBar: View {
         HStack(spacing: 5) { content() }
             .font(.ui(.footnote).weight(.medium))
             .foregroundStyle(Trek.foreground)
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 10)
             .frame(height: 30)
             .glassEffect(selected ? .regular.tint(Trek.foreground.opacity(0.12)).interactive() : .regular.interactive(), in: Capsule())
     }

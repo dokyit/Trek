@@ -771,6 +771,7 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                 text,
                 images,
                 aside,
+                ..
             } => {
                 let text = match images {
                     0 => text.clone(),
@@ -815,7 +816,7 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                     tr::ToolStatus::Denied => ToolStatus::Denied,
                 },
             },
-            tr::ItemBody::TurnEnd { took_secs } => Item::TurnEnd {
+            tr::ItemBody::TurnEnd { took_secs, .. } => Item::TurnEnd {
                 at: it.at.unwrap_or_else(now_ms),
                 took_secs: *took_secs,
             },
@@ -826,7 +827,7 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                 resets_at: *resets_at,
                 scope: Default::default(),
             },
-            tr::ItemBody::Handoff { from, to } => Item::Notice {
+            tr::ItemBody::Handoff { from, to, .. } => Item::Notice {
                 text: format!("Handed over from {from} to {to}"),
             },
             tr::ItemBody::ThreadLink { link, title, .. } => Item::Notice {
@@ -1645,6 +1646,7 @@ impl Workspace {
                     text,
                     mode,
                     images,
+                    consult: None,
                 })
             },
             cx,

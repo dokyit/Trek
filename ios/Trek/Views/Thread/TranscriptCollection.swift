@@ -438,7 +438,12 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: TranscriptCell.reuse, for: indexPath) as! TranscriptCell
         let row = rows[indexPath.item]
-        let content = row.padding(.horizontal, 20).id(row.id)
+        // The row says when it grows or shrinks by itself (the working footer's sub-agents card
+        // coming in, a card's state moving on): measured again, so it never draws over the rows
+        // around it or under the composer.
+        let content = row.padding(.horizontal, 20)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { [weak cell] h in cell?.contentHeight(h) }
+            .id(row.id)
         let view = environment.map { AnyView($0.apply(content)) } ?? AnyView(content)
         cell.configure(view, id: row.id, parent: self)
         return cell
@@ -649,6 +654,15 @@ final class TranscriptCell: UICollectionViewCell {
         hc.didMove(toParent: parent)
         host = hc
         container = box
+    }
+
+    /// The row's content laid out at `height`: when that isn't the height the cell was given (it
+    /// grew or shrank by itself), it's measured again.
+    func contentHeight(_ height: CGFloat) {
+        guard host != nil, abs(height - bounds.height) > 0.5 else { return }
+        if let size, abs(size.height - ceil(height)) <= 0.5 { return }
+        size = nil
+        invalidateIntrinsicContentSize()
     }
 
     override func preferredLayoutAttributesFitting(_ attributes: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {

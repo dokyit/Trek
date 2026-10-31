@@ -45,6 +45,8 @@ struct TurnActions: View {
     var busy: Bool
     /// Other models to retry with.
     var models: [ModelOption]
+    /// The turn ran the project's verification CLI: the Mac's "Verified" badge.
+    var verified: Verification? = nil
     var act: (RowAction) -> Void
 
     var body: some View {
@@ -56,6 +58,10 @@ struct TurnActions: View {
                     .foregroundStyle(Trek.muted.opacity(0.85))
                     .fixedSize()
                     .accessibilityLabel("Finished\(at.map { " at \(When.clock($0))" } ?? "")\(secs.map { ", worked for \(When.duration($0))" } ?? "")")
+            }
+            if let verified {
+                VerifiedBadge(verification: verified, compact: latest)
+                    .padding(.leading, 8)
             }
             Rectangle().fill(Trek.border).frame(height: 0.5).padding(.horizontal, 10)
             if latest {
