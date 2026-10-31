@@ -22,12 +22,9 @@ use serde_json::{Value, json};
 use crate::rpc::{self, ToolDef, ToolResult, arg_str, text};
 use crate::util::{self, fmt_num};
 
-const INSTRUCTIONS: &str = "Trek's video watcher. You can't watch video yourself: call `watch_video` with a local \
-file or an https URL (YouTube and X links too when yt-dlp is installed) and it returns the video's details, frames \
-as images in time order with their timestamps, and a transcript of the audio with timestamps. By default it takes one \
-frame a second, at most 40 frames (sampled evenly across a longer video: it says so); to look closer at part of a \
-long video, pass `start` and `end` in seconds, and raise `fps` for fast action. The user sees the same frames under a \
-player in Trek.";
+const INSTRUCTIONS: &str = "Call `watch_video` whenever you're asked about a video. For a closer look at part of a \
+long one, pass `start` and `end` in seconds; raise `fps` for fast action. The user sees the same frames under a player \
+in Trek.";
 
 /// The most frames one call returns.
 pub const MAX_FRAMES: usize = 40;

@@ -607,7 +607,7 @@ fn prune_run_logs(dir: &std::path::Path) {
 }
 
 fn udid_prop() -> Value {
-    json!({"type": "string", "description": "Simulator UDID from sim_list (default: the booted simulator)"})
+    json!({"type": "string", "description": "From sim_list (default: the booted simulator)"})
 }
 
 impl rpc::ToolSet for Simulator {

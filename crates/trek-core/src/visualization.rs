@@ -55,7 +55,7 @@ flow `nodes`[{id,label,detail?,group?}], `edges`[{from,to,label?}]; \
 layers `layers`[{label,detail?,items?:[string]}], top first; \
 mockup `nodes` tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame with `device` phone|browser|window|tablet; leaves with `text`: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar; image (value wide|square|tall), progress (value 0-100), divider. \
 Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never put HTML, CSS, URLs, paths or scripts in it. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
-Common mistakes (coerced only if unambiguous): scalar→array; text arrays join; number strings (units ok)↔numbers; singular keys→plural; close type/key aliases (`data`, `links`, `source`/`target`, `name`/`x`/`y`); `color`/`colour`/colour names→`tone`; version/type/title/summary inferred; date endpoints get ordinal `ticks`; heatmap `values` flipped; comments, trailing commas, an inner fence dropped. `ticks`:\"minutes\" means `unit`:\"minutes\". \
+A unit goes in `unit`, never in `ticks`. \
 TeX math renders typeset: `$…$` or `\\(…\\)` inline, `$$…$$` or `\\[…\\]` on its own line.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3105,7 +3105,7 @@ mod tests {
     #[test]
     fn instructions_stay_compact_and_cover_every_type() {
         assert!(
-            AGENT_INSTRUCTIONS.chars().count() < 2_000,
+            AGENT_INSTRUCTIONS.chars().count() < 1_750,
             "{} chars",
             AGENT_INSTRUCTIONS.chars().count()
         );

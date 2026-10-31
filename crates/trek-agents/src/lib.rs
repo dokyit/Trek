@@ -637,7 +637,7 @@ pub fn notes_in_system_prompt(agent: &AgentId) -> bool {
 }
 
 /// A session's first message, with what Trek tells the agent about the project.
-pub(crate) fn instructions_prompt(instructions: &str, text: &str) -> String {
+pub fn instructions_prompt(instructions: &str, text: &str) -> String {
     format!(
         "<trek-project-notes>\n{}\n</trek-project-notes>\n\n{text}",
         instructions.trim()

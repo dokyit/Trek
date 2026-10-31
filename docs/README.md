@@ -18,6 +18,7 @@ Start with the [README](../README.md) for what Trek is and how to install it.
 | [Mobile](MOBILE.md) | The iPhone companion: architecture, pairing, TLS pinning, security model, wire protocol |
 | [Other machines](MULTI-MACHINE.md) | Starting and following a thread on another computer |
 | [Performance](PERF.md) | How Trek is measured, the numbers, and what changed |
+| [Prompt budget](PROMPT_BUDGET.md) | What Trek adds to every request of a vendor agent, measured, and the tests that bound it |
 | [Next wave](NEXT-WAVE.md) | Work planned next: voice, media, a video watcher, generative UI |
 
 ## Maintainers
