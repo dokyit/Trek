@@ -508,61 +508,133 @@ pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
 
 /// Claude Code writes a line per content block of a response, each repeating the response's
 /// usage (the last one has the final output count): each response counts once, as its last
-/// line has it.
+/// line has it. The session's sub-agents (the Agent tool's, a workflow's) write theirs to files
+/// of their own beside it (`<session>/subagents/`); Claude Code counts those toward the session,
+/// and so does this. Each response is priced as billed: by its day, with its hour-long
+/// cache writes at their own rate and fast mode's premium.
 pub(super) fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
-    let Ok(file) = std::fs::File::open(path) else {
-        return vec![];
-    };
     let mut out: Vec<UsageEntry> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut files = vec![path.to_path_buf()];
+    let mut subs = vec![];
+    sub_agent_files(&path.with_extension("").join("subagents"), 0, &mut subs);
+    subs.sort();
+    files.extend(subs);
+    for file in files {
+        let Ok(file) = std::fs::File::open(file) else {
+            continue;
+        };
+        for line in super::jsonl_lines(BufReader::new(file)) {
+            // Most lines aren't responses; skip them without parsing.
+            if !line.contains("\"usage\"") || !line.contains("\"assistant\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if v["type"] != "assistant" {
+                continue;
+            }
+            let Some(at) = v["timestamp"]
+                .as_str()
+                .and_then(ms_from_rfc3339)
+                .filter(|at| (from..to).contains(at))
+            else {
+                continue;
+            };
+            let m = &v["message"];
+            let u = &m["usage"];
+            let n = |k: &str| u[k].as_u64().unwrap_or(0);
+            let tokens = TokenUsage {
+                input: n("input_tokens"),
+                output: n("output_tokens"),
+                cache_read: n("cache_read_input_tokens"),
+                cache_write: n("cache_creation_input_tokens"),
+            };
+            // API errors are written as "<synthetic>" responses that used nothing.
+            let model = m["model"]
+                .as_str()
+                .filter(|m| !m.starts_with('<'))
+                .map(String::from);
+            if tokens.is_empty() {
+                continue;
+            }
+            let long_writes = u["cache_creation"]["ephemeral_1h_input_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            let cost = model.as_deref().and_then(|model| {
+                crate::pricing::request_at(
+                    model,
+                    &crate::types::AgentId::ClaudeCode,
+                    &tokens,
+                    long_writes,
+                    u["speed"] == "fast",
+                    at,
+                )
+            });
+            let entry = (at, model, tokens, cost.map(|c| c.usd));
+            match m["id"].as_str().map(String::from) {
+                Some(id) => match seen.get(&id) {
+                    Some(&i) => out[i] = entry,
+                    None => {
+                        seen.insert(id, out.len());
+                        out.push(entry);
+                    }
+                },
+                None => out.push(entry),
+            }
+        }
+    }
+    out.sort_by_key(|e| e.0);
+    out
+}
+
+/// The transcripts under a session's `subagents` folder: the Agent tool's beside each other, a
+/// workflow's in a folder of their own (`workflows/<run>/`).
+fn sub_agent_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if depth < 3 {
+                sub_agent_files(&p, depth + 1, out);
+            }
+        } else if p.extension().is_some_and(|e| e == "jsonl") {
+            out.push(p);
+        }
+    }
+}
+
+/// Up to when a forked session is a copy of the one it was forked from, while that one is still
+/// beside it: the time of the last line it copied. Claude Code copies the conversation so far
+/// into the fork, each line marked `forkedFrom` and keeping its time; what comes after is the
+/// fork's own. Counted in the original already, the copies would count twice.
+pub fn copied_until(path: &Path) -> Option<i64> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut until: Option<i64> = None;
+    let mut original_here: Option<bool> = None;
     for line in super::jsonl_lines(BufReader::new(file)) {
-        // Most lines aren't responses; skip them without parsing.
-        if !line.contains("\"usage\"") || !line.contains("\"assistant\"") {
+        if !line.contains("\"forkedFrom\"") {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if v["type"] != "assistant" {
-            continue;
-        }
-        let Some(at) = v["timestamp"]
-            .as_str()
-            .and_then(ms_from_rfc3339)
-            .filter(|at| (from..to).contains(at))
-        else {
+        let Some(original) = v["forkedFrom"]["sessionId"].as_str() else {
             continue;
         };
-        let m = &v["message"];
-        let u = &m["usage"];
-        let n = |k: &str| u[k].as_u64().unwrap_or(0);
-        let tokens = TokenUsage {
-            input: n("input_tokens"),
-            output: n("output_tokens"),
-            cache_read: n("cache_read_input_tokens"),
-            cache_write: n("cache_creation_input_tokens"),
-        };
-        // API errors are written as "<synthetic>" responses that used nothing.
-        let model = m["model"]
-            .as_str()
-            .filter(|m| !m.starts_with('<'))
-            .map(String::from);
-        if tokens.is_empty() {
-            continue;
+        let here = *original_here
+            .get_or_insert_with(|| path.with_file_name(format!("{original}.jsonl")).is_file());
+        if !here {
+            return None;
         }
-        let entry = (at, model, tokens);
-        match m["id"].as_str().map(String::from) {
-            Some(id) => match seen.get(&id) {
-                Some(&i) => out[i] = entry,
-                None => {
-                    seen.insert(id, out.len());
-                    out.push(entry);
-                }
-            },
-            None => out.push(entry),
+        if let Some(at) = v["timestamp"].as_str().and_then(ms_from_rfc3339) {
+            until = Some(until.map_or(at, |u| u.max(at)));
         }
     }
-    out
+    until
 }
 
 /// Full transcript, streamed line by line.
@@ -1575,7 +1647,7 @@ mod tests {
         let got = usage_in(&path, from, from + 86_400_000);
         assert_eq!(got.len(), 2);
         assert_eq!(
-            got[0],
+            (got[0].0, got[0].1.clone(), got[0].2),
             (
                 ms_from_rfc3339("2026-10-03T15:15:30.037Z").unwrap(),
                 Some("claude-haiku-4-5-20251001".into()),
@@ -1588,5 +1660,10 @@ mod tests {
             )
         );
         assert_eq!(got[1].1.as_deref(), Some("claude-opus-5-5"));
+        // Priced as the response was billed (no hour-long writes here: five-minute ones).
+        let haiku = crate::pricing::price("claude-haiku-4-5", &crate::types::AgentId::ClaudeCode)
+            .unwrap()
+            .0;
+        assert_eq!(got[0].3, Some(haiku.request(&got[0].2, 0, false)));
     }
 }

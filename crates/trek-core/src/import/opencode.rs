@@ -437,7 +437,8 @@ fn first_prompt(conn: &Connection, tables: Tables, id: &str) -> Option<String> {
 pub fn usage(id: &str, from: i64, to: i64) -> Vec<UsageEntry> {
     usage_priced(id, from, to)
         .into_iter()
-        .map(|(at, model, tokens, _)| (at, model, tokens))
+        // OpenCode's own figure is nothing for what a subscription covers: priced from the tables.
+        .map(|(at, model, tokens, _)| (at, model, tokens, None))
         .collect()
 }
 

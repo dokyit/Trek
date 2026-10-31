@@ -1802,7 +1802,7 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
         percent: 31,
     });
     t.cost = Some(Cost {
-        label: "≈ $1.84 at API prices".into(),
+        label: "≈ $1.84 at API prices · included in plan".into(),
         billing: Some(Billing::Plan),
         plan: Some("Claude Max".into()),
         detail: Some("Included in your Claude Max plan".into()),

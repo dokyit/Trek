@@ -432,7 +432,7 @@ impl Basecamp {
             ("Threads", recap.threads.to_string(), None),
             ("Turns", recap.turns.to_string(), None),
             ("Tokens", fmt_tokens(recap.tokens.total()), None),
-            ("Cost", cost(spend), None),
+            ("API cost", cost(spend), None),
             (
                 "Failures",
                 recap.failed.to_string(),
@@ -655,7 +655,8 @@ impl Basecamp {
             .border_color(line)
             .child(div().flex_1().min_w(px(NAME_MIN_WIDTH)).child(name))
             .children(
-                ["Threads", "Turns", "Tokens", "Cost", "Failures"].map(|h| number(h.to_string())),
+                ["Threads", "Turns", "Tokens", "API cost", "Failures"]
+                    .map(|h| number(h.to_string())),
             );
         let body = rows.iter().enumerate().map(|(i, r)| {
             let badge = match (&r.agent, &r.project) {

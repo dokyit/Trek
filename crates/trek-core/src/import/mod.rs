@@ -385,8 +385,10 @@ pub fn load_transcript(source: ThreadSource, native_id: &str) -> anyhow::Result<
 }
 
 /// Tokens a model used, as an agent's own history records them: when (unix ms), which model,
-/// how many.
-pub type UsageEntry = (i64, Option<String>, crate::types::TokenUsage);
+/// how many, and what that request cost at API prices when the history says enough to price it
+/// as billed (Claude Code's hour-long cache writes, Codex's long prompts); `None` leaves it to the
+/// standard rates.
+pub type UsageEntry = (i64, Option<String>, crate::types::TokenUsage, Option<f64>);
 
 /// Token usage an imported thread's history records between `from` and `to` (unix ms). Reads
 /// the agent's files: run it off the main thread.
@@ -431,6 +433,15 @@ pub fn load_usage_from(
         (ThreadSource::ClaudeCode, Some(f)) => claude::usage_in(f, from, to),
         (ThreadSource::Codex, Some(f)) => codex::usage_in(f, from, to),
         _ => load_usage(source, native_id, from, to),
+    }
+}
+
+/// Up to when the history in `file` is a copy of another session's (a Claude Code fork's copied
+/// conversation): what's after it is its own.
+pub fn copied_until(source: ThreadSource, file: &std::path::Path) -> Option<i64> {
+    match source {
+        ThreadSource::ClaudeCode => claude::copied_until(file),
+        _ => None,
     }
 }
 

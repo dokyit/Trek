@@ -154,9 +154,13 @@ fn history_key(source: ThreadSource, native: &str) -> String {
     format!("{}:{native}", source.key())
 }
 
+/// How histories are read: a history kept from an older reading is read again. 2: Claude Code's
+/// sub-agent files count, a fork's copied lines don't, and each request carries its own cost.
+const HISTORY_FORMAT: u32 = 2;
+
 /// What says a history changed: its file's modification time and size (and where it is, so
 /// it's found again without a search), or, for one in a database (OpenCode's), the thread's
-/// last activity as the import saw it.
+/// last activity as the import saw it; and how it was read (`HISTORY_FORMAT`).
 fn history_stamp(path: Option<&Path>, t: &Thread) -> String {
     match path.and_then(|p| std::fs::metadata(p).ok().map(|m| (p, m))) {
         Some((p, m)) => {
@@ -165,9 +169,9 @@ fn history_stamp(path: Option<&Path>, t: &Thread) -> String {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_millis());
-            format!("f{at}:{}|{}", m.len(), p.display())
+            format!("f{at}:{}:v{HISTORY_FORMAT}|{}", m.len(), p.display())
         }
-        None => format!("u{}", t.updated_at),
+        None => format!("u{}:v{HISTORY_FORMAT}", t.updated_at),
     }
 }
 
@@ -196,8 +200,8 @@ struct Kept {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     a: Option<Vec<(u8, i64, u32)>>,
     m: Vec<String>,
-    /// `[at, model (index into m, -1 for none), input, output, cache read, cache write]`.
-    u: Vec<(i64, i32, u64, u64, u64, u64)>,
+    /// `[at, model (index into m, -1 for none), input, output, cache read, cache write, cost]`.
+    u: Vec<(i64, i32, u64, u64, u64, u64, Option<f64>)>,
 }
 
 impl History {
@@ -206,7 +210,7 @@ impl History {
         let u =
             self.usage
                 .iter()
-                .map(|(at, model, t)| {
+                .map(|(at, model, t, cost)| {
                     let i = model.as_ref().map_or(-1, |model| {
                         match m.iter().position(|x| x == model) {
                             Some(i) => i as i32,
@@ -216,7 +220,15 @@ impl History {
                             }
                         }
                     });
-                    (*at, i, t.input, t.output, t.cache_read, t.cache_write)
+                    (
+                        *at,
+                        i,
+                        t.input,
+                        t.output,
+                        t.cache_read,
+                        t.cache_write,
+                        *cost,
+                    )
                 })
                 .collect();
         let a = self.activity.as_ref().map(|a| {
@@ -246,7 +258,7 @@ impl History {
         });
         let usage =
             k.u.into_iter()
-                .map(|(at, i, input, output, cache_read, cache_write)| {
+                .map(|(at, i, input, output, cache_read, cache_write, cost)| {
                     (
                         at,
                         usize::try_from(i).ok().and_then(|i| k.m.get(i).cloned()),
@@ -256,6 +268,7 @@ impl History {
                             cache_read,
                             cache_write,
                         },
+                        cost,
                     )
                 })
                 .collect();
@@ -311,12 +324,91 @@ fn history(
             })
             .collect()
     });
-    let found = History {
+    let mut found = History {
         activity,
         usage: import::load_usage_from(source, native, path.as_deref(), i64::MIN, i64::MAX),
     };
+    // A fork holds a copy of its original's conversation so far, which counts there.
+    if let Some(until) = path
+        .as_deref()
+        .and_then(|p| import::copied_until(source, p))
+    {
+        found.usage.retain(|u| u.0 > until);
+        if let Some(a) = found.activity.as_mut() {
+            a.retain(|a| a.at() > until);
+        }
+    }
     let data = found.encode();
     (found, Some((key, stamp, data)))
+}
+
+/// A report of an imported thread's history as the store's are: its agent's (the one it was
+/// imported from), on its model (else the thread's), priced as the history said if it could.
+fn history_row(t: &Thread, (at, model, tokens, cost): &import::UsageEntry) -> UsageRow {
+    UsageRow {
+        thread_id: t.id.clone(),
+        at: *at,
+        agent: t.source.agent().unwrap_or_else(|| t.agent.clone()),
+        model: model.clone().or_else(|| t.model.clone()),
+        tokens: *tokens,
+        cost: cost.map(crate::types::UsageCost::priced),
+    }
+}
+
+/// What an imported thread used before Trek took it on, as its agent's own history has it: all
+/// of it until Trek recorded a report of its own (its first turn here), as Basecamp counts it.
+/// Empty for Trek's own threads. With `read` false only what the store kept of the history is
+/// used (for the main thread: reading a long history takes a while); `read` reads the files when
+/// they changed since and keeps what was read.
+pub fn history_usage(store: &Store, t: &Thread, read: bool) -> Vec<UsageRow> {
+    let Some(native) = t
+        .native_id
+        .as_deref()
+        .filter(|_| t.source != ThreadSource::Trek)
+    else {
+        return vec![];
+    };
+    let key = history_key(t.source, native);
+    let kept = store
+        .histories_kept(std::slice::from_ref(&key))
+        .unwrap_or_default()
+        .remove(&key);
+    let usage = if read {
+        // Read as Basecamp reads it (with its prompts and turns while Trek keeps no transcript of
+        // it), so what's kept serves both.
+        let stored = store
+            .with_transcripts(std::slice::from_ref(&t.id))
+            .unwrap_or_default()
+            .contains(&t.id);
+        let (found, fresh) = history(t, t.source, native, !stored, kept.as_ref());
+        if let Some(fresh) = fresh
+            && let Err(e) = store.keep_histories(&[fresh])
+        {
+            tracing::warn!("cost: keep history: {e:#}");
+        }
+        found.usage
+    } else {
+        match kept {
+            Some((stamp, data)) => {
+                let path = stamped_path(&stamp).filter(|p| p.is_file());
+                if history_stamp(path.as_deref(), t) != stamp {
+                    return vec![];
+                }
+                History::decode(&data).map(|h| h.usage).unwrap_or_default()
+            }
+            None => return vec![],
+        }
+    };
+    let until = store
+        .first_usage(std::slice::from_ref(&t.id))
+        .ok()
+        .and_then(|f| f.get(&t.id).copied())
+        .unwrap_or(i64::MAX);
+    usage
+        .iter()
+        .filter(|u| u.0 < until)
+        .map(|u| history_row(t, u))
+        .collect()
 }
 
 /// What decides whether a thread's numbers need reading again: its last activity and state,
@@ -479,14 +571,7 @@ impl Gathered {
                 out.push(was);
                 continue;
             }
-            let row = |(at, model, tokens): &import::UsageEntry| UsageRow {
-                thread_id: t.id.clone(),
-                at: *at,
-                agent: t.source.agent().unwrap_or_else(|| t.agent.clone()),
-                model: model.clone().or_else(|| t.model.clone()),
-                tokens: *tokens,
-                cost: None,
-            };
+            let row = |u: &import::UsageEntry| history_row(&t, u);
             let (activity, usage) = match histories.remove(&t.id) {
                 // Not continued here: its history is all there is.
                 Some(h) if !stored.contains(&t.id) => (
@@ -763,8 +848,11 @@ impl Recap {
                     Activity::TurnEnd { at, took_secs }
                     | Activity::TurnStopped { at, took_secs, .. } => {
                         turns += 1;
-                        recap.agent_secs += took_secs as u64;
                         let began = at - took_secs as i64 * 1000;
+                        // Only the time it ran in the window: a turn that began before midnight
+                        // (or Monday) worked part of its time the day (or week) before.
+                        recap.agent_secs +=
+                            ((at.min(window.end) - began.max(window.start)).max(0) / 1000) as u64;
                         spread(&mut buckets, &window, began, at);
                         // Reports land as the turn ends (or during it, in agents' own histories).
                         let model = busiest_model(&usage, began - 1_000, at + 5_000)
@@ -1467,6 +1555,8 @@ mod tests {
         }];
         let r = Recap::compute(Range::Today.window(&now(&tz, "2026-10-03 13:00")), 0, &[t]);
         assert_eq!(r.buckets[0].agent_secs, 10 * 60);
+        // And so does the day's total: the ten minutes before midnight were yesterday's.
+        assert_eq!(r.agent_secs, 10 * 60);
     }
 
     #[test]
@@ -2627,6 +2717,7 @@ mod tests {
                     output: 7,
                     ..Default::default()
                 },
+                None,
             )],
         };
         s.keep_histories(&[(key.clone(), stamp.clone(), doctored.encode())])

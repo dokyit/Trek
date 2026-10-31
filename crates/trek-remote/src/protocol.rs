@@ -1119,8 +1119,8 @@ pub struct ContextUse {
 /// What a thread's tokens cost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cost {
-    /// "$1.24" (billed per token), "≈ $1.24 at API prices" (a plan covers it), "12.3K tokens ·
-    /// price unknown", "202K tokens · free".
+    /// "$1.24" (billed per token), "≈ $1.24 at API prices · included in plan" (a plan covers
+    /// it), "12.3K tokens · price unknown", "202K tokens · free".
     pub label: String,
     /// How its session is billed, once its agent has said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
