@@ -18,6 +18,11 @@
 //! Measured on macOS 27 with TextEdit and Chrome (the caret lands where clicked, a web button
 //! counts the click, keys reach a web field); the record layout and fields follow cua-driver
 //! (MIT, github.com/trycua/cua), which found them.
+//!
+//! The target's process serial number comes from Launch Services (`lsappinfo`: its ASN is the
+//! same number), never `GetProcessForPID`: that Process Manager call checks the caller in as an
+//! app, and Launch Services files a child of Trek's under Trek's own record, as a regular app, so
+//! every agent session that clicked or typed put a second Trek in the Dock until it ended.
 
 use std::ffi::{CStr, c_void};
 use std::sync::OnceLock;
@@ -50,14 +55,15 @@ type SetIntegerField = unsafe extern "C" fn(*mut c_void, u32, i64);
 /// A `CGPoint` passed by value is two doubles, in the same registers as two `f64` arguments.
 type SetWindowLocation = unsafe extern "C" fn(*mut c_void, f64, f64);
 type PostEventRecordTo = unsafe extern "C" fn(*const c_void, *const u8) -> i32;
-type ProcessForPid = unsafe extern "C" fn(i32, *mut c_void) -> i32;
+/// `_SLPSSetFrontProcessWithOptions(psn, window, mode)`.
+type SetFrontProcess = unsafe extern "C" fn(*const c_void, u32, u32) -> i32;
 
 struct Calls {
     post: Option<PostToPid>,
     set_field: Option<SetIntegerField>,
     set_window_location: Option<SetWindowLocation>,
     post_record: Option<PostEventRecordTo>,
-    process_for_pid: Option<ProcessForPid>,
+    set_front: Option<SetFrontProcess>,
 }
 
 fn calls() -> &'static Calls {
@@ -77,8 +83,8 @@ fn calls() -> &'static Calls {
                     .map(|p| std::mem::transmute::<*mut c_void, SetWindowLocation>(p)),
                 post_record: find(c"SLPSPostEventRecordTo")
                     .map(|p| std::mem::transmute::<*mut c_void, PostEventRecordTo>(p)),
-                process_for_pid: find(c"GetProcessForPID")
-                    .map(|p| std::mem::transmute::<*mut c_void, ProcessForPid>(p)),
+                set_front: find(c"_SLPSSetFrontProcessWithOptions")
+                    .map(|p| std::mem::transmute::<*mut c_void, SetFrontProcess>(p)),
             }
         }
     })
@@ -130,15 +136,12 @@ fn post(pid: i32, event: &CGEvent) {
 /// window; then give the app a moment to act on it. Best effort: without the private call, or
 /// when the window server won't take the records, events are still posted.
 fn make_key(pid: i32, wid: u32) {
-    let c = calls();
-    let (Some(post_record), Some(process_for_pid)) = (c.post_record, c.process_for_pid) else {
+    let Some(post_record) = calls().post_record else {
         return;
     };
-    let mut psn = [0u8; 8];
-    // SAFETY: `psn` is the 8-byte ProcessSerialNumber the call fills in.
-    if unsafe { process_for_pid(pid, psn.as_mut_ptr().cast()) } != 0 {
+    let Some(psn) = psn(pid) else {
         return;
-    }
+    };
     let mut focus = record(wid);
     focus[0x08] = 0x0d;
     focus[0x8a] = 0x01;
@@ -153,6 +156,53 @@ fn make_key(pid: i32, wid: u32) {
         unsafe { post_record(psn.as_ptr().cast(), key.as_ptr()) };
     }
     std::thread::sleep(Duration::from_millis(50));
+}
+
+/// Put the user's window `w` back in front, its app active and the window key, as a click on it
+/// would (`kCPSUserGenerated`): for when an app the agent opened came forward over it.
+pub fn bring_forward(w: &WindowInfo) -> Result<(), String> {
+    let Some(set_front) = calls().set_front else {
+        return Err("This macOS has no way to put a window back in front.".into());
+    };
+    let (pid, wid) = (w.pid as i32, u32::try_from(w.id).unwrap_or(0));
+    let psn = psn(pid).ok_or_else(|| format!("{} isn't running any more.", w.owner))?;
+    const USER_GENERATED: u32 = 0x200;
+    // SAFETY: the PSN just filled in, and a window number of that process.
+    let err = unsafe { set_front(psn.as_ptr().cast(), wid, USER_GENERATED) };
+    if err != 0 {
+        return Err(format!("The window server refused ({err})."));
+    }
+    make_key(pid, wid);
+    Ok(())
+}
+
+/// Process `pid`'s serial number, as the 8 bytes of a `ProcessSerialNumber`, from its Launch
+/// Services ASN (`lsappinfo find pid=…` says `ASN:0x0-0x1acaac9-"TextEdit":`).
+fn psn(pid: i32) -> Option<[u8; 8]> {
+    let out = crate::util::run_ok(
+        "/usr/bin/lsappinfo",
+        &["find", &format!("pid={pid}")],
+        None,
+        Duration::from_secs(5),
+    )
+    .ok()?;
+    parse_asn(&out)
+}
+
+fn parse_asn(out: &str) -> Option<[u8; 8]> {
+    let rest = &out[out.find("ASN:")? + 4..];
+    let (high, rest) = rest.split_once('-')?;
+    let low: String = rest
+        .strip_prefix("0x")?
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+    let high = u32::from_str_radix(high.strip_prefix("0x")?, 16).ok()?;
+    let low = u32::from_str_radix(&low, 16).ok()?;
+    let mut psn = [0u8; 8];
+    psn[..4].copy_from_slice(&high.to_le_bytes());
+    psn[4..].copy_from_slice(&low.to_le_bytes());
+    Some(psn)
 }
 
 /// An empty event record for window `wid`.
@@ -389,4 +439,15 @@ fn type_text(pid: i32, text: &str) -> Result<(), String> {
         sleep_ms(8);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_process_serial_number_from_lsappinfo() {
+        let psn = super::parse_asn("ASN:0x0-0x1acaac9-\"TextEdit\":\n").unwrap();
+        assert_eq!(psn, [0, 0, 0, 0, 0xc9, 0xaa, 0xac, 0x01]);
+        assert_eq!(super::parse_asn(""), None);
+        assert_eq!(super::parse_asn("ASN:garbage"), None);
+    }
 }
