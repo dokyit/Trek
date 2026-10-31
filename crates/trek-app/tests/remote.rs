@@ -3679,6 +3679,60 @@ fn background_tasks_show_their_output_and_stop_from_the_phone() {
     });
 }
 
+/// A thread whose turn is over while a command it started still runs: its row says so at once,
+/// the Stop pressed on the phone shows within a tick, and the row lets go once the task ends.
+#[test]
+fn a_command_running_after_the_turn_rides_on_the_row_until_it_ends() {
+    use trek_app::remote::tests::ROWS_PUSHED;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let id = trek.send(cx, "mock:server");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let pushed = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+            ROWS_PUSHED.with(|r| r.borrow_mut().clear());
+            trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+            ROWS_PUSHED.with(|r| r.borrow().iter().rfind(|r| r.id == id).cloned())
+        };
+        let row = pushed(&trek, cx).expect("the row went to the phone");
+        // Its turn is over, and nothing waits on a report: not "Waiting", but still running.
+        assert_eq!(row.run_state, tr::RunState::Idle);
+        assert_eq!(row.busy_in_background, Some(false));
+        assert_eq!(row.background, vec!["npm run dev".to_string()]);
+        let task = row
+            .background_tasks
+            .first()
+            .expect("the task in full")
+            .clone();
+        assert_eq!(task.title, "npm run dev");
+        assert!(
+            task.since
+                .is_some_and(|s| (s - trek_core::store::now_ms()).abs() < 60_000),
+            "when it started: {task:?}"
+        );
+        assert!(task.stoppable && !task.stopping);
+
+        // Stop, from the phone: the next tick says it's stopping, without waiting for the
+        // every-few-seconds refresh.
+        let (thread_id, task_id) = (id.clone(), task.id.clone());
+        trek.update(cx, move |ws, cx| {
+            ws.stop_background(&thread_id, &task_id, cx)
+        });
+        let stopping = pushed(&trek, cx).expect("the row again, at once");
+        assert!(stopping.background_tasks[0].stopping, "{stopping:?}");
+
+        trek.wait(cx, "the server to stop", |ws| {
+            ws.live
+                .values()
+                .all(|l| l.background_work().next().is_none())
+        })
+        .await;
+        let after = pushed(&trek, cx).expect("the row once it ended");
+        assert!(after.background.is_empty() && after.background_tasks.is_empty());
+        assert_eq!(after.busy_in_background, Some(false));
+    });
+}
+
 #[test]
 fn project_icons_go_to_the_phone_by_hash() {
     run(async |cx| {

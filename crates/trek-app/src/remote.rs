@@ -2402,12 +2402,15 @@ impl Workspace {
             return;
         }
         let now = now_ms();
-        // Thread rows, when something of them can have changed (or it's been a while).
+        // Thread rows, when something of them can have changed (or it's been a while). A
+        // background task being stopped changes no transcript: it counts here, so the phone's
+        // strip says "Stopping…" at once.
         let key = (
             self.threads_gen,
-            self.live
-                .values()
-                .fold(0u64, |sum, l| sum.wrapping_add(l.revision)),
+            self.live.values().fold(0u64, |sum, l| {
+                sum.wrapping_add(l.revision)
+                    .wrapping_add((l.background.iter().filter(|b| b.stopping).count() as u64) << 48)
+            }),
             now / ROWS_AT_LEAST_MS,
         );
         let rows: Option<Vec<tr::ThreadSummary>> = (remote.rows_key != Some(key)).then(|| {
@@ -2482,6 +2485,8 @@ impl Workspace {
             for row in rows {
                 if remote.sent.get(&row.id) != Some(&row) {
                     remote.sent.insert(row.id.clone(), row.clone());
+                    #[cfg(any(test, feature = "test-support"))]
+                    tests::ROWS_PUSHED.with(|r| r.borrow_mut().push(row.clone()));
                     remote.handle.push(tr::HostEvent::Thread(row));
                 }
             }
@@ -3278,6 +3283,8 @@ pub mod tests {
         pub static TURN_FILES: RefCell<HashMap<(String, usize), Vec<trek_remote::ChangedFile>>> = RefCell::default();
         /// Snapshots `push_remote_changes` has pushed to phones.
         pub static SNAPSHOTS_PUSHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Rows `push_remote_changes` has pushed to phones, in order.
+        pub static ROWS_PUSHED: RefCell<Vec<trek_remote::ThreadSummary>> = RefCell::default();
     }
 
     #[test]

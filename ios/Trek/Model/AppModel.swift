@@ -1217,8 +1217,15 @@ final class AppModel {
             .sorted { ($0.workingSince ?? $0.updatedAt) > ($1.workingSince ?? $1.updatedAt) }
     }
 
+    /// Done with their turns, with a command or a server of theirs still running: the newest
+    /// started first.
+    var inBackground: [ThreadSummary] {
+        threads.filter { ($0.section == .inbox || $0.section == .settled || $0.section == .working) && $0.onlyRunsInBackground }
+            .sorted { ($0.backgroundWork.compactMap(\.since).max() ?? $0.updatedAt) > ($1.backgroundWork.compactMap(\.since).max() ?? $1.updatedAt) }
+    }
+
     var recent: [ThreadSummary] {
-        threads.filter { ($0.section == .inbox && !$0.waitsOnYou && !$0.atWork) || $0.section == .settled }
+        threads.filter { (($0.section == .inbox && !$0.waitsOnYou && !$0.atWork) || $0.section == .settled) && !$0.onlyRunsInBackground }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 

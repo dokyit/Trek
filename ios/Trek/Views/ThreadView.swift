@@ -842,6 +842,12 @@ private struct ComposerArea: View {
             }
             // What stays under the requests, measured for the room it leaves them.
             VStack(spacing: 10) {
+                // What the agent left running in the background, turn or no turn: the Mac's strip
+                // above its composer.
+                if let thread, thread.runsInBackground {
+                    BackgroundStrip(thread: thread)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 // The newest card's chip, as the Mac's composer has it; it waits while a request
                 // is pinned here.
                 if needsKid == nil, store.pending.isEmpty {
@@ -897,6 +903,7 @@ private struct ComposerArea: View {
         .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
         .animation(.smooth(duration: 0.3), value: thread?.needsThread)
         .animation(.smooth(duration: 0.3), value: thread?.queued)
+        .animation(.smooth(duration: 0.3), value: thread?.runsInBackground)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .onChange(of: composer.draft) {
             // The keyboard put back the message just sent: it stays gone.

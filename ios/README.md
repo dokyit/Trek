@@ -38,7 +38,8 @@ plan, a failed build, threads that keep working, and replies to whatever you sen
 same protocol messages a Mac does, so everything in the app works without one.
 
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
-`t-ratelimit`, `t-settings`), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
+`t-ratelimit`, `t-settings`; `t-background` is done with its turn while its dev server still runs,
+with `-TrekSheet background-output` its output open from the strip), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
 `-TrekOpen`: the model picker), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
 `-TrekDemoOldMac YES` (the demo Mac is one from before rows carried `busy_in_background` and left
 out a chat folder's branch: `t-chat`, `t-waiting`; `t-quiz` asks five questions at once),

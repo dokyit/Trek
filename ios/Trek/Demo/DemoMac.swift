@@ -75,6 +75,14 @@ enum DemoMac {
                                                 line: "Test Suite 'OfflineBannerTests' passed", since: now - 4 * 60_000,
                                                 readable: true, stoppable: true)]
             t.git = GitSummary(changed: 2, ahead: 0, behind: 3, defaultBranch: "main")
+        case "t-background":
+            // Done with its turn an hour ago; the dev server it started still runs.
+            t.context = ContextUse(used: 48_000, window: 200_000, percent: 24)
+            t.cost = plan
+            t.background = [devCommand]
+            t.backgroundTasks = [BackgroundTask(id: "bg-dev", kind: .shell, title: devCommand,
+                                                line: "GET /api/health 200 in 4ms", since: now - 61 * 60_000 + 38_000,
+                                                readable: true, stoppable: true)]
         case "t-profile":
             t.subAgents = [SubAgent(agent: claude, model: "Sonnet 5.5", title: "Benchmark the scroll path", state: .needsYou,
                                     since: now - 240_000, threadId: "t-profile-bench")]
@@ -101,6 +109,9 @@ enum DemoMac {
         // What the Mac's sidebar says "Waiting" for; a Mac from before rows said so leaves it out.
         t.busyInBackground = oldMac ? nil : t.id == "t-waiting" || (t.runState == .idle && t.needs == nil && !t.runningSubAgents.isEmpty)
     }
+
+    /// The command `t-background` left running: a dev server, started from its folder.
+    static let devCommand = "cd \"/Users/sam/Developer/Fieldnotes/web\" && npm run dev -- --port 5173"
 
     /// `-TrekDemoOldMac YES`: the demo Mac is one from before rows said whether a thread waits in
     /// the background, and before it left out a chat folder's branch.

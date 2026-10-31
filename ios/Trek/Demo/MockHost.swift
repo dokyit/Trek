@@ -954,6 +954,21 @@ final class MockHost: Backend {
         add(id, .assistant(text: "I've started two sub-agents on the largest crates and will report when they're done.", streaming: false))
         add(id, .turnEnd(tookSecs: 40))
 
+        // Its turn ended an hour ago, but the dev server it started still runs: the Mac's sky dot
+        // on the row and its strip above the composer.
+        id = "t-background"
+        threads.insert(t(id, "Start the web app and check the proxy", "p-field", "claude-code", "claude-opus-5-5", .idle,
+                         section: .inbox, branch: "main", ago: 60, add: 24, del: 2), at: 5)
+        seq[id] = 0
+        items[id] = []
+        add(id, .user(text: "Start the web app with the API proxy on and check /api/health answers through it.", images: 0), at: now - 61 * m)
+        add(id, tool(.edit, "Edit", "web/vite.config.ts", add: 24, del: 2))
+        add(id, tool(.command, "Run", DemoMac.devCommand,
+                     out: "Command running in background with ID: bash_1. Output is being written to: /tmp/bash_1.log"))
+        add(id, tool(.command, "Run", "curl -s localhost:5173/api/health", out: "{\"ok\":true}"))
+        add(id, .assistant(text: "The dev server is up on http://localhost:5173 with the proxy on: `/api/health` answers `{\"ok\":true}` through it. It keeps running in the background while you try the app.", streaming: false))
+        add(id, .turnEnd(tookSecs: 52))
+
         // What the Mac's transcript draws besides plain messages and answers: a consult, a
         // restatement, sub-agents' reports, code, a thought in Markdown, a verified turn.
         id = "t-parity"

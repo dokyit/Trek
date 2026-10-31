@@ -329,7 +329,13 @@ Thread details, each optional and left out when there's nothing to say (older Ma
 - `sub_agents`: what the sidebar card's pill and tooltip count: Trek's sub-agents (with their
   `model`) and the agent's own (no `model`), `state` `running` · `needs_you` · `done` · `failed` ·
   `stopped`, `since` when it started (ms, to the second). `background`: the rest of what the agent
-  runs in the background, by title.
+  runs in the background, by title, and `background_tasks` the same in full (since when, its last
+  line, Stop; see `background` below). Both ride on the row whether a turn runs or not: a thread
+  whose turn is over while a command or a dev server it started still runs is idle, with
+  `busy_in_background: false` (nothing waits on a report), and these non-empty. That's the Mac's
+  still sky dot on its sidebar row and its strip above the composer; the phone draws the same dot,
+  a "Running" line under the title, and the strip. A row goes out again as soon as a task starts,
+  ends or is asked to stop; its last line and clock refresh every few seconds.
 - `shares_folder: true`: another thread (not one of its own sub-agents or siblings) has a turn
   under way in the same checkout while this one does: the composer's "Another thread is also
   editing this folder". Left out when not.
@@ -1089,7 +1095,8 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | Question card (`question_card`) | same | RequestCards QuestionCard, `AnswerField.swift` | A secret answer is masked as it's typed (an eye to check it) and in the transcript after. |
 | Plan card (`plan_card`) | same | RequestCards PlanCard | |
 | Working bar and live group (`working_bar.rs`, `activity.rs`) | reduced | WorkingLine, WorkingFooter | One "doing now" line. |
-| Background strip (`background_strip.rs`) | reduced | `Thread/BackgroundTaskView.swift` | Behind the "at work" chip. |
+| Background strip (`background_strip.rs`) | same | `Thread/BackgroundStrip.swift`, `Thread/BackgroundTaskView.swift` | Above the composer, turn or no turn: the command, "Running" and for how long, its last line, Stop; tapped, its output. The "at work" chip lists them too. |
+| Sidebar row's background dot (`sidebar.rs` `live_line`) | same | `ThreadsView.swift` ThreadRow, BackgroundLine | The sky dot by the time and "Running <command> <time>" under the title; kept out under its project. Grouped by status: "In the background". |
 | Context ring and popover (`context_popover.rs`) | same | `Thread/ThreadStatus.swift`, `Thread/ContextBreakdown.swift` | `context_card`: the segmented bar and its rows, Compact now (`thread_action compact`). Usage windows are in the Usage sheet. |
 | Limit bar: Resume at reset, Try again, Snooze, Switch agent (`composer.rs`) | same | `Thread/ComposerNotes.swift` LimitBar | The row's `pause`; `limit_actions`. Switch agent opens the model picker. |
 | Queued follow-ups (composer) | same | `Thread/QueuedStrip.swift` | |

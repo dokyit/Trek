@@ -934,6 +934,48 @@ fn thread_details_ride_on_the_row_and_older_rows_still_read() {
     assert_eq!(t.busy_in_background, None, "an older Mac's row");
 }
 
+/// A thread done with its turn while a command it started runs on: the row says what runs, since
+/// when, and that nothing waits on a report (the phone's sky dot and strip, not "Waiting"). A row
+/// from a Mac before `background_tasks` reads with titles only, and one with nothing running
+/// sends none of it.
+#[test]
+fn a_row_carries_what_runs_after_its_turn() {
+    let row = r#"{"id":"t","title":"Start the web app","project":{"id":"p","name":"web","hue":10,"monogram":"WE"},
+        "agent":{"key":"claude-code","name":"Claude Code"},"model":null,"model_label":null,"run_state":"idle","needs":null,"section":"inbox","unseen":false,"pinned":false,
+        "branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":1791020400000,"additions":24,"deletions":2,
+        "background":["npm run dev"],
+        "background_tasks":[{"id":"b1","kind":"shell","title":"npm run dev","line":"ready on :5173","since":1791016740000,"readable":true,"stoppable":true}],
+        "busy_in_background":false}"#;
+    let t: ThreadSummary = serde_json::from_str(row).unwrap();
+    assert_eq!(serde_json::to_value(&t).unwrap(), value(row));
+    assert_eq!(t.run_state, RunState::Idle);
+    assert_eq!(t.busy_in_background, Some(false));
+    assert_eq!(t.background_tasks[0].since, Some(1_791_016_740_000));
+    assert!(!t.background_tasks[0].stopping, "absent is false");
+
+    // An older Mac: titles only.
+    let old: ThreadSummary = serde_json::from_str(
+        r#"{"id":"t","title":"x","project":{"id":"p","name":"web","hue":10,"monogram":"WE"},"agent":{"key":"claude-code","name":"Claude Code"},"run_state":"idle",
+            "section":"inbox","updated_at":0,"background":["npm run dev"]}"#,
+    )
+    .unwrap();
+    assert_eq!(old.background, vec!["npm run dev".to_string()]);
+    assert!(old.background_tasks.is_empty() && old.busy_in_background.is_none());
+
+    // A task from a newer Mac, of a kind this build doesn't know, still reads.
+    let newer: BackgroundTask =
+        serde_json::from_str(r#"{"id":"b2","kind":"browser","title":"Chrome","later_field":1}"#)
+            .unwrap();
+    assert_eq!(newer.kind, BackgroundKind::Other);
+
+    let quiet = serde_json::to_value(ThreadSummary {
+        id: "t".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(quiet.get("background_tasks").is_none() && quiet.get("background").is_none());
+}
+
 #[test]
 fn links_between_threads() {
     let item = item_round_trip(
