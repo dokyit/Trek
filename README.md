@@ -256,6 +256,7 @@ macOS needs full Xcode (GPUI compiles Metal shaders); Windows needs Visual Studi
 git clone https://github.com/dokyit/Trek && cd Trek
 cargo run -p trek-app        # debug build
 cargo test --workspace       # what CI runs
+git config core.hooksPath script/hooks   # pre-push: rustfmt, the word table, the prompt budgets
 ```
 
 On Xcode 26+, a missing Metal compiler is one command away: `xcodebuild -downloadComponent MetalToolchain`. App bundles, the mock agent and environment variables: [CONTRIBUTING.md](CONTRIBUTING.md).

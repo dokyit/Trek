@@ -1,0 +1,32 @@
+#!/bin/sh
+# Pre-push: the checks CI fails fastest on, in well under a minute when the build is warm, so a push
+# doesn't bounce on them. Install once per clone:
+#
+#     git config core.hooksPath script/hooks
+#
+# Skip for one push with `git push --no-verify`. TREK_PRE_PUSH_FULL=1 adds what CI's Clippy job
+# and its test builds enforce (bug lints, warnings as errors): a few minutes when cold. Windows-only
+# cfg mistakes (dead code behind `cfg(target_os = "macos")`) can't be caught on a Mac: CI's
+# Windows jobs still own those.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+say() { printf '• %s\n' "$*"; }
+
+say "rustfmt"
+cargo fmt --all -- --check
+
+say "no Mac wording outside the word table (trek-words)"
+cargo test -q -p trek-words >/dev/null
+
+say "prompt budgets (what Trek adds to every request)"
+cargo test -q -p trek-app --lib -- prompt_budget >/dev/null
+cargo test -q -p trek-mcp --bin trek-mcp -- prompt_budget >/dev/null
+
+if [ -n "${TREK_PRE_PUSH_FULL:-}" ]; then
+  say "clippy, as CI runs it (bug lints only)"
+  cargo clippy -q -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+  cargo clippy -q --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+  say "warnings as errors, as CI's test builds have them"
+  cargo check -q --workspace --all-targets --locked --config .github/ci-profile.toml
+fi
+say "ready to push"
