@@ -177,8 +177,8 @@ fn chunk(file: &Path, req: tr::NoteFileRequest) -> tr::HostResult<tr::NoteFileCh
     })
 }
 
-/// What a file kept with the notes is, from its extension.
-fn mime(file: &Path) -> &'static str {
+/// What a file kept with the notes (or one a thread names, `media`) is, from its extension.
+pub(super) fn mime(file: &Path) -> &'static str {
     match file
         .extension()
         .and_then(|e| e.to_str())
@@ -195,6 +195,9 @@ fn mime(file: &Path) -> &'static str {
         Some("gif") => "image/gif",
         Some("heic") => "image/heic",
         Some("webp") => "image/webp",
+        Some("heif") => "image/heif",
+        Some("tif" | "tiff") => "image/tiff",
+        Some("bmp") => "image/bmp",
         Some("txt" | "md") => "text/plain",
         Some("csv") => "text/csv",
         Some("json") => "application/json",

@@ -3,7 +3,7 @@
 //! changes pending review (`review`) and the input (`input`, with its `context` chips).
 
 pub(crate) mod cards;
-mod commands;
+pub(crate) mod commands;
 pub mod context;
 mod input;
 mod pane;

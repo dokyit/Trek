@@ -22,6 +22,7 @@ use crate::protocol::{
     CardActionRequest, CloneProjectRequest, FileUpload, MachineInfo, PhoneUpdate, ServerMessage,
     UpdatePhoneRequest,
 };
+use crate::protocol::{ContextCard, Media, MediaRequest, TurnPreview, TurnPreviewRequest};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -393,6 +394,33 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("update the iPhone app")
     }
 
+    // Showing a thread as the Mac does (`thread_parity.rs`).
+
+    /// A file the thread's items name (feature `media`): `not_found` for any other ("That file
+    /// isn't part of this thread"), whatever the path.
+    fn media(&self, req: MediaRequest) -> impl Future<Output = HostResult<Media>> + Send {
+        let _ = req;
+        unsupported("send a thread's files")
+    }
+    /// The context ring's card (feature `context_card`): `not_found` while the thread has no
+    /// context report.
+    fn context_card(
+        &self,
+        thread_id: &str,
+    ) -> impl Future<Output = HostResult<ContextCard>> + Send {
+        let _ = thread_id;
+        unsupported("show the context card")
+    }
+    /// What the confirmation before an undo, retry or rewind says (feature `turn_preview`):
+    /// `conflict` while a turn runs.
+    fn turn_preview(
+        &self,
+        req: TurnPreviewRequest,
+    ) -> impl Future<Output = HostResult<TurnPreview>> + Send {
+        let _ = req;
+        unsupported("preview a turn's undo")
+    }
+
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -628,6 +656,21 @@ pub enum HostRequest {
     UpdatePhone {
         req: UpdatePhoneRequest,
         reply: Reply<()>,
+    },
+    /// See [`RemoteHost::media`].
+    Media {
+        req: MediaRequest,
+        reply: Reply<Media>,
+    },
+    /// See [`RemoteHost::context_card`].
+    ContextCard {
+        thread_id: String,
+        reply: Reply<ContextCard>,
+    },
+    /// See [`RemoteHost::turn_preview`].
+    TurnPreview {
+        req: TurnPreviewRequest,
+        reply: Reply<TurnPreview>,
     },
 }
 
@@ -939,6 +982,21 @@ impl RemoteHost for ChannelHost {
 
     async fn update_phone(&self, req: UpdatePhoneRequest) -> HostResult<()> {
         self.call(|reply| HostRequest::UpdatePhone { req, reply })
+            .await
+    }
+
+    async fn media(&self, req: MediaRequest) -> HostResult<Media> {
+        self.call(|reply| HostRequest::Media { req, reply }).await
+    }
+
+    async fn context_card(&self, thread_id: &str) -> HostResult<ContextCard> {
+        let thread_id = thread_id.to_string();
+        self.call(|reply| HostRequest::ContextCard { thread_id, reply })
+            .await
+    }
+
+    async fn turn_preview(&self, req: TurnPreviewRequest) -> HostResult<TurnPreview> {
+        self.call(|reply| HostRequest::TurnPreview { req, reply })
             .await
     }
 }

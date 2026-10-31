@@ -194,7 +194,13 @@ impl Shared {
             .and_then(|t| t.working_since)
             .map(|since| ((now_ms() - since) / 1000) as u32)
             .unwrap_or(0);
-        self.add(thread_id, ItemBody::TurnEnd { took_secs: took });
+        self.add(
+            thread_id,
+            ItemBody::TurnEnd {
+                took_secs: took,
+                verified: None,
+            },
+        );
         self.update(thread_id, |t| {
             t.run_state = RunState::Idle;
             t.activity = None;
@@ -279,6 +285,7 @@ impl Shared {
                     output,
                     added,
                     removed,
+                    watch: None,
                 },
                 ItemBody::Assistant { text, .. } => ItemBody::Assistant {
                     text,
@@ -340,6 +347,7 @@ impl DemoHost {
             output: truncate_output(&out).to_string(),
             added: if done { diff.map(|d| d.0) } else { None },
             removed: if done { diff.map(|d| d.1) } else { None },
+            watch: None,
         };
         let verb = match tool {
             ToolKind::Command => "Running",
@@ -476,6 +484,7 @@ impl DemoHost {
                         text: prompt.into(),
                         images: 0,
                         aside: false,
+                        videos: vec![],
                     },
                 );
             }
@@ -671,6 +680,7 @@ impl RemoteHost for DemoHost {
                             text: req.text.clone(),
                             images: 0,
                             aside: false,
+                            videos: vec![],
                         },
                     );
                     let reply = match cmd {
@@ -694,6 +704,7 @@ impl RemoteHost for DemoHost {
                 text: req.text.clone(),
                 images: 0,
                 aside: false,
+                videos: vec![],
             },
         );
         self.update(&req.thread_id, |t| t.unseen = false);
@@ -783,6 +794,7 @@ impl RemoteHost for DemoHost {
                 text: req.text.clone(),
                 images: 0,
                 aside: false,
+                videos: vec![],
             },
         );
         tokio::spawn(self.clone().echo_turn(id.clone(), req.text));
@@ -912,6 +924,7 @@ impl RemoteHost for DemoHost {
                     text: text.clone(),
                     images: 0,
                     aside: false,
+                    videos: vec![],
                 },
             );
             tokio::spawn(self.clone().echo_turn(req.thread_id, text));
@@ -1034,6 +1047,7 @@ impl RemoteHost for DemoHost {
                             text: feedback,
                             images: 0,
                             aside: false,
+                            videos: vec![],
                         },
                     );
                 }
@@ -1151,6 +1165,17 @@ impl RemoteHost for DemoHost {
                 self.push(HostEvent::ThreadRemoved(thread.id));
                 return Ok(());
             }
+            ThreadAction::ResumeAtReset
+            | ThreadAction::CancelResume
+            | ThreadAction::TryAgain
+            | ThreadAction::SnoozeUntilReset
+                if thread.pause.is_none() =>
+            {
+                return Err(HostError::conflict("It isn't paused at a usage limit"));
+            }
+            ThreadAction::Compact if thread.run_state == RunState::Working => {
+                return Err(HostError::conflict("Stop the running turn to compact."));
+            }
             _ => {}
         }
         self.update(&req.thread_id, |t| match &req.action {
@@ -1183,7 +1208,18 @@ impl RemoteHost for DemoHost {
                 t.section = Section::Inbox;
             }
             ThreadAction::MarkUnread => t.unseen = true,
-            ThreadAction::RegenerateTitle | ThreadAction::Delete { .. } => {}
+            ThreadAction::ResumeAtReset | ThreadAction::CancelResume => {
+                if let Some(p) = t.pause.as_mut() {
+                    p.resume = matches!(req.action, ThreadAction::ResumeAtReset);
+                }
+            }
+            ThreadAction::TryAgain => t.pause = None,
+            ThreadAction::SnoozeUntilReset => {
+                t.snoozed_until = t.pause.as_ref().and_then(|p| p.resets_at);
+                t.section = Section::Snoozed;
+            }
+            ThreadAction::RegenerateTitle | ThreadAction::Delete { .. } | ThreadAction::Compact => {
+            }
         });
         Ok(())
     }
@@ -1548,6 +1584,114 @@ impl RemoteHost for DemoHost {
         Ok(self.lock().settings.clone())
     }
 
+    async fn context_card(&self, thread_id: &str) -> HostResult<ContextCard> {
+        let thread = self
+            .thread(thread_id)
+            .ok_or_else(|| HostError::not_found(format!("No thread {thread_id}")))?;
+        let Some(ctx) = thread.context else {
+            return Err(HostError::not_found(
+                "The thread hasn't said how full its context is yet",
+            ));
+        };
+        // The Mac's split, roughly: a fixed prompt and servers, the rest the conversation.
+        let reserved = (ctx.window / 20).min(ctx.window - ctx.used);
+        let system = (ctx.used / 6).min(14_000);
+        let mcp = (ctx.used / 10).min(6_000);
+        let messages = ctx.used - system - mcp;
+        let part =
+            |kind: &str, label: &str, tokens: u64, detail: &str, note: Option<&str>| ContextPart {
+                kind: kind.into(),
+                label: label.into(),
+                tokens,
+                detail: vec![ContextDetail {
+                    label: detail.into(),
+                    value: None,
+                }],
+                note: note.map(str::to_string),
+            };
+        Ok(ContextCard {
+            thread_id: thread_id.into(),
+            used: ctx.used,
+            window: ctx.window,
+            reserved,
+            parts: vec![
+                part(
+                    "system",
+                    "System",
+                    system,
+                    "The agent's own prompt and its tools' definitions",
+                    Some("Estimated: what the agent counts that isn't a message, skill or server."),
+                ),
+                part(
+                    "mcp",
+                    "MCP",
+                    mcp,
+                    "trek-browser, trek-orchestrate",
+                    Some("Estimated, about 3000 tokens a server."),
+                ),
+                part(
+                    "messages",
+                    "Messages",
+                    messages,
+                    "42 messages and tool results",
+                    Some("Estimated from their text (4 characters a token)."),
+                ),
+                part(
+                    "free",
+                    "Free",
+                    ctx.window - ctx.used - reserved,
+                    "Room for the conversation, before the agent has to compact.",
+                    None,
+                ),
+                part(
+                    "reserved",
+                    "Reserved",
+                    reserved,
+                    "Kept free so compacting has room to run",
+                    Some("Estimated: no agent reports its reserve."),
+                ),
+            ],
+            compact: if thread.run_state == RunState::Working || thread.pause.is_some() {
+                CompactState::Busy
+            } else {
+                CompactState::Ready
+            },
+        })
+    }
+
+    async fn turn_preview(&self, req: TurnPreviewRequest) -> HostResult<TurnPreview> {
+        let thread = self
+            .thread(&req.thread_id)
+            .ok_or_else(|| HostError::not_found(format!("No thread {}", req.thread_id)))?;
+        if thread.run_state == RunState::Working {
+            return Err(HostError::conflict("Stop the running turn to undo"));
+        }
+        self.find_item(&req.thread_id, |i| i.id == req.item_id)
+            .ok_or_else(|| HostError::not_found("No such item"))?;
+        Ok(TurnPreview {
+            thread_id: req.thread_id,
+            item_id: req.item_id,
+            recap: false,
+            files: Some(vec![
+                PreviewFile {
+                    path: "README.md".into(),
+                    change: PreviewChange::Revert,
+                },
+                PreviewFile {
+                    path: "docs/quick-start.md".into(),
+                    change: PreviewChange::Delete,
+                },
+            ]),
+            unavailable: None,
+        })
+    }
+
+    async fn media(&self, req: MediaRequest) -> HostResult<Media> {
+        let _ = req;
+        // The demo's threads name no files on disk.
+        Err(HostError::not_found("That file isn't part of this thread"))
+    }
+
     async fn set_settings(&self, change: SettingsChange) -> HostResult<MacSettings> {
         let mut st = self.lock();
         let s = &mut st.settings;
@@ -1705,6 +1849,7 @@ fn tool(
         output: output.into(),
         added: diff.map(|d| d.0),
         removed: diff.map(|d| d.1),
+        watch: None,
     }
 }
 
@@ -1713,6 +1858,7 @@ fn user(text: &str) -> ItemBody {
         text: text.into(),
         images: 0,
         aside: false,
+        videos: vec![],
     }
 }
 
@@ -1997,12 +2143,23 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
         thread: t,
         items: vec![
             user("The README quick start is out of date, rewrite it for pnpm"),
-            ItemBody::Handoff { from: "Claude Opus 5.5".into(), to: "Codex GPT-6".into() },
+            ItemBody::Handoff {
+                from: "Claude Opus 5.5".into(),
+                to: "Codex GPT-6".into(),
+                from_agent: Some(AgentRef::new("claude-code", "Claude Code", Some("claude-code"))),
+                to_agent: Some(AgentRef::new("codex", "Codex", Some("codex"))),
+            },
             tool("Read", "README.md", ToolStatus::Done, "", None),
             tool("Fetch", "https://pnpm.io/installation", ToolStatus::Done, "", None),
             tool("Write", "README.md", ToolStatus::Done, "", Some((31, 54))),
             assistant("Rewrote **Quick start**:\n\n- `pnpm install` instead of `npm ci`\n- Node 22 as the minimum\n- a `pnpm dev` section with the env vars it needs\n\nI also removed the Docker section; it pointed at an image we no longer publish."),
-            ItemBody::TurnEnd { took_secs: 95 },
+            ItemBody::TurnEnd {
+                took_secs: 95,
+                verified: Some(TurnVerified {
+                    passed: true,
+                    commands: vec!["verify-app check".into()],
+                }),
+            },
             ItemBody::Changes {
                 files: vec![
                     ChangedFile { path: "README.md".into(), status: FileStatus::Modified, from: None, added: 31, removed: 54, binary: false },
@@ -2099,6 +2256,7 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
         )));
         items.push(ItemBody::TurnEnd {
             took_secs: 20 + n % 40,
+            verified: None,
         });
     }
     seeds.push(Seed { thread: t, items });
@@ -2529,6 +2687,9 @@ async fn main() -> std::io::Result<()> {
         feature::SNOOZE,
         feature::MARK_UNREAD,
         feature::DELETE,
+        feature::LIMIT_ACTIONS,
+        feature::CONTEXT_CARD,
+        feature::TURN_PREVIEW,
     ]
     .map(String::from)
     .to_vec();

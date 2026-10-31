@@ -53,11 +53,7 @@ impl Workspace {
                 }
                 self.regenerate_title(id, true, cx);
             }
-            _ => {
-                return Err(tr::HostError::bad_request(
-                    "This Mac can't do that to a thread",
-                ));
-            }
+            action => return self.remote_thread_parity_action(id, action, cx),
         }
         Ok(())
     }

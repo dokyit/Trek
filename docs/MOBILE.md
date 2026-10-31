@@ -254,8 +254,16 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `basecamp_v2` | `basecamp` carries `totals`, `chart`, `projects`, `models` and `review[].needs_you` |
 | `note_images` | `note_asset` and `add_note_image`: a note's pictures, and adding one |
 | `note_files` | `note_file`: any other file kept with the notes (a PDF, a video), as it is, in pieces |
+| `card_actions` | `card_action`: a `card`'s Merge, Resolve conflicts and Re-run |
+| `update_phone` | `update_phone`, `phone_update` pushes and the snapshot's `release` |
+| `media` | `media`: the files a thread's items name (an answer's images and links, a message's videos, what `watch_video` saw) |
+| `limit_actions` | `thread_action` `resume_at_reset`, `cancel_resume`, `try_again`, `snooze_until_reset` (rows carry `pause`) |
+| `context_card` | `context_card`, and `thread_action` `compact` |
+| `turn_preview` | `turn_preview`: the confirmation's file list before an undo, retry or rewind |
+| `consult` | `send.consult`: a message sent with consultants |
 
-`use_reset` to `icon` are described under "Keeping up with the Mac" below, `basecamp_v2` under
+`use_reset` to `icon`, and `card_actions` to `consult`, are described under "Keeping up with the
+Mac" below, `basecamp_v2` under
 Basecamp, `note_images` and `note_files` under Notes.
 
 Names are added as features are (`trek_remote::feature`, `MacFeature` on the phone); a phone
@@ -322,6 +330,14 @@ Thread details, each optional and left out when there's nothing to say (older Ma
   `model`) and the agent's own (no `model`), `state` `running` · `needs_you` · `done` · `failed` ·
   `stopped`, `since` when it started (ms, to the second). `background`: the rest of what the agent
   runs in the background, by title.
+- `shares_folder: true`: another thread (not one of its own sub-agents or siblings) has a turn
+  under way in the same checkout while this one does: the composer's "Another thread is also
+  editing this folder". Left out when not.
+- `pause`: the thread is paused at a usage limit, as the limit bar over its composer shows it:
+  `{"resets_at":1791030000000,"resume":false,"wrapped":false}`. `resets_at` (ms, `null` when
+  unknown), `resume` (it carries on by itself at the reset: "Resume at reset" was chosen), `wrapped`
+  (the agent wrapped up ahead of the limit: "Wrapped up before the limit"). Left out when it isn't
+  paused. Its buttons are `limit_actions`, below.
 - `busy_in_background`: its turn is over but it still waits on what it started (its sub-agents,
   its agent's own in the background, their reports on the way), so the Mac's sidebar keeps it at
   work, "Waiting". The Mac always sends it, `false` too; a row without it is from an older Mac,
@@ -444,6 +460,22 @@ higher seq), `at` (ms or null) and `kind`:
   moved on by itself). `question.state`: `pending` · `answered` · `resolved`, with `answers` once
   answered. `plan.state`: `pending` · `approved` · `rejected` · `resolved`.
 - `user.images`: the number of attached images (phase 2 sends thumbnails).
+- `user.videos`: the videos the message attaches (`@clip.mov`, as the Mac's composer sends a
+  file), absolute paths on the Mac that exist; the Mac plays them under the message. Fetched with
+  `media`. Left out when none.
+- `turn_end.verified`: the turn ran the project's verification CLI (the turn being the items after
+  the previous turn's end): the Mac's "Verified" (`passed: true`) or "Verification failed" badge,
+  with the `commands` that ran it, newest last, at most 5, each cut to about 200 characters.
+  `{"kind":"turn_end","took_secs":95,"verified":{"passed":true,"commands":["verify-trek check"]}}`.
+  Left out when the project has no verification skill or the turn didn't run it.
+- `handoff.from_agent` / `to_agent`: the two agents as rows name them (`key`, `name`, `logo`,
+  `icon`); `from`/`to` stay their names as the handoff said them.
+- `tool.watch`: a finished `watch_video` call (whatever its prefix: `mcp__trek-video__watch_video`,
+  `trek-video_watch_video`, `watch_video`) whose answer names its manifest: what it watched, as
+  the Mac shows it under the row.
+  `"watch":{"source":"clip.mov","video":"/Users/me/web/clip.mov","duration":12.5,"frames":[{"t":0.0,"path":"/…/videos/x/f0.jpg"}]}`.
+  `video` (`null` once it's gone) and each frame's `path` are files on the Mac, fetched with
+  `media`; frames that are gone are left out.
 - `thread_link`: a row that opens another thread, as the Mac's lineage rows (`trek_core::lineage`).
   `link`: `started` (this thread's agent started it, `start_thread`) · `continued_in` (this
   thread's work went on there, `handoff`) · `started_by` · `continued_from` (where this thread
@@ -844,6 +876,92 @@ snapshot: "release":{"version":"0.4.28","note":"Phone: an Update now button"}
 {"type":"phone_update","state":"failed","message":"Your Mac couldn't reach the iPhone: plug it in or join the same Wi-Fi"}
 ```
 
+**`media`**: a file one of the thread's items names, as the Mac's transcript shows it: an image
+or file an answer links (`![…](target)`, `[…](target)`), a video a message attaches
+(`user.videos`), or what `watch_video` saw (`tool.watch`'s `video` and frames). `path` is absolute
+or relative to the thread's folder, as the link writes it (`file://` and `%20` as the Mac reads
+links). Any other file is refused, however it's spelled (`..`, a symlink, `/etc/hosts`): `not_found`
+"That file isn't part of this thread". An image (png, jpeg, gif, webp, heic, tiff, bmp, by
+extension or bytes) asked for with `max_px` comes back whole in one reply as a JPEG that fits in
+`max_px` a side (64 to 2048) and ~3 MB, with `width`/`height`, `offset` 0 and `total` the bytes
+sent; one the Mac can't decode (HEIC) comes as it is, in pieces. Anything else comes in raw
+pieces, as `note_file`: `length` from `offset` (1 MiB at most, and when missing), `total` the
+file's size, `mime` from the extension (`video/mp4`, `video/quicktime`, `image/png`, …); the phone
+asks for the next piece at `offset + length` until it has `total`. A read: it never waits behind an
+action.
+
+```json
+{"type":"media","id":"1","thread_id":"t","path":"out/shot.png","max_px":1024}
+{"type":"media","re":"1","thread_id":"t","path":"out/shot.png","mime":"image/jpeg","offset":0,"total":48213,"bytes_b64":"/9j/…","width":1024,"height":640}
+{"type":"media","id":"2","thread_id":"t","path":"/Users/me/web/clip.mov","offset":1048576}
+{"type":"media","re":"2","thread_id":"t","path":"/Users/me/web/clip.mov","mime":"video/quicktime","offset":1048576,"total":5242880,"bytes_b64":"AAAA…"}
+```
+
+**`limit_actions`**: the limit bar over a paused thread's composer (the row's `pause`), as
+`thread_action` kinds: `resume_at_reset` (it carries on by itself once the limit resets; the row's
+`pause.resume` turns `true`), `cancel_resume` (calls that off; what was queued for the reset goes
+back to the Mac's composer), `try_again` (the pause ends and what was queued goes now), and
+`snooze_until_reset` (out of the inbox until `resets_at`; `conflict` when that isn't known).
+Acked; `conflict` "It isn't paused at a usage limit" for a thread that isn't. "Switch agent…" is
+the phone's own agent picker (`set_prefs {agent}`).
+
+```json
+{"type":"thread_action","id":"6","thread_id":"t","action":{"kind":"resume_at_reset"}}   → ack
+```
+
+**`context_card`**: the card the composer's context ring opens, as the Mac would draw it now.
+`parts` are the bar's segments in the Mac's order, with its legend labels and what each segment's
+flyout says (`detail` rows, a label and its value where there is one, and a muted `note`):
+`system`, `mcp`, `skills`, `messages` (each only when it has tokens), then `free` and `reserved`,
+so they add up to `window`; `reserved` is also on its own (kept free so compacting has room; not
+part of `used`). `compact` says what Compact now can do: `ready`, `running` (a `/compact` is the
+turn running), `busy` (a turn runs, or the thread is paused at a limit), `none` (no message yet).
+`not_found` while the thread hasn't reported its context. A read.
+
+`thread_action {"kind":"compact"}` (same feature) is Compact now: it sends the agent's own
+`/compact` (the transcript shows it, as on the Mac). `conflict` while a turn runs ("Stop the
+running turn to compact."), while it's paused at a limit, or before any message.
+
+```json
+{"type":"context_card","id":"3","thread_id":"t"}
+{"type":"context_card","re":"3","thread_id":"t","used":120000,"window":200000,"reserved":10000,
+ "parts":[{"kind":"system","label":"System","tokens":14000,"detail":[{"label":"The agent's own prompt and its tools' definitions","value":null}],"note":"Estimated: what the agent counts that isn't a message, skill or server."},
+          {"kind":"mcp","label":"MCP","tokens":9000,"detail":[{"label":"trek-browser, trek-orchestrate","value":"6K"},{"label":"Instructions","value":"3K"}],"note":"Estimated, about 3000 tokens a server."},
+          {"kind":"messages","label":"Messages","tokens":97000,"detail":[{"label":"42 messages and tool results","value":null}],"note":"Estimated from their text (4 characters a token)."},
+          {"kind":"free","label":"Free","tokens":70000,"detail":[{"label":"Room for the conversation, before the agent has to compact.","value":null}],"note":null},
+          {"kind":"reserved","label":"Reserved","tokens":10000,"detail":[{"label":"Kept free so compacting has room to run","value":null}],"note":"Estimated: no agent reports its reserve."}],
+ "compact":"ready"}
+{"type":"thread_action","id":"4","thread_id":"t","action":{"kind":"compact"}}   → ack
+```
+
+**`turn_preview`**: what the Mac's confirmation before an `undo`, `retry` or `rewind` says, for the
+same `item_id` `turn_action` would take (a turn's end, or for `rewind` one of the user's
+messages): `recap` (the agent can't take its own session back there, so it carries on in a new one
+with a recap), and what "Also restore files" would do, file by file, worked out off the Mac's main
+thread: `files` with `change` `revert` · `delete` · `bring_back` · `nested` (left as is) · `kept`
+(left as is: newer, not in checkpoints); `[]` when the files are as they were. With no checkpoint
+to restore to, `files` is `null` and `unavailable` says why in the Mac's words ("This folder isn't
+a git repository, so Trek keeps no file checkpoints for it."), as it does when checking failed.
+`conflict` while a turn runs; `bad_request` for an item the action doesn't take (and for `fork`,
+which asks nothing); `not_found` for an unknown thread or item. A read.
+
+```json
+{"type":"turn_preview","id":"5","thread_id":"t","item_id":"i412","action":"undo"}
+{"type":"turn_preview","re":"5","thread_id":"t","item_id":"i412","recap":false,"files":[{"path":"README.md","change":"revert"},{"path":"src/new.rs","change":"delete"}],"unavailable":null}
+```
+
+**`consult`**: `send` may carry the consultants picked in the phone's composer; the Mac sends the
+message wrapped as its own composer does (the transcript shows the consult line as for a
+Mac-composed message). `with` names them by key, `agent/model/effort` (`codex/gpt-5.6-sol/high`);
+`style` `advise` (the default) · `discuss` · `arena`; `then` `implement` (the default) · `report`;
+`judge` an arena's judge by key (missing: Trek picks one of another model). A key that doesn't
+parse, an agent that isn't set up on the Mac, a model it doesn't have, an empty `with`, an arena
+the Mac would refuse, or a thread whose agent can't consult: `bad_request` with why.
+
+```json
+{"type":"send","id":"9","thread_id":"t","text":"Which cache is better?","consult":{"with":["codex/gpt-5.6-sol/high","claude-code/claude-opus-5-5/max"],"style":"arena","then":"report"}}   → ack
+```
+
 **Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
 question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
 doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the
@@ -874,7 +992,8 @@ pub trait RemoteHost: Send + Sync + 'static {
     // Defaults answer "This Mac can't …" (bad_request):
     fn set_prefs, thread_action, usage, basecamp, notes, note, create_note, save_note, delete_note,
        git_status, git_diff, git_commit, git_push, git_branches, git_switch, worktree_merge,
-       worktree_remove, commands, settings, set_settings, turn_action
+       worktree_remove, commands, settings, set_settings, turn_action, …, media, context_card,
+       turn_preview
     // Defaults built on `transcript`:
     fn transcript_for(&self, thread_id, after_seq, limit)   // what `subscribe` calls
     fn transcript_before(&self, thread_id, before, limit)   // a page, cut from the whole transcript
@@ -924,7 +1043,7 @@ SwiftUI, iOS 26 (Liquid Glass), bundle id `dev.trek.TrekMobile`, no third-party 
 ### Transcript components: Mac and phone
 
 What the Mac's transcript and composer draw, and what the phone draws for the same thing
-(inventory of 2026-10-30, after the live cards). *same*: the phone draws it as the Mac does, in
+(inventory of 2026-10-30, after the live cards; updated 2026-10-31 for the transcript parity). *same*: the phone draws it as the Mac does, in
 its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw text.
 
 | Component (Mac source) | Phone | Phone source | Note |
@@ -933,56 +1052,63 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | CI run card: jobs, elapsed, passed/failed, Re-run, View log (`pr_card.rs` Kind::Run) | same | `Views/Cards/RunCard.swift` | Jobs as rows (spinner, tick, cross, time) where the Mac draws lanes; the clocks tick on the phone. |
 | Release card: version, channel, platforms, building, publishing, published, notes, failed (`pr_card.rs` Kind::Release) | same | `Views/Cards/ReleaseCard.swift` | "Assets" are the platforms the jobs build ("Mac and Windows downloads are up"), as on the Mac. |
 | Composer status chip for the newest card (`composer.rs` chip_row, `pr_card::status_chip`) | same | `Views/Cards/CardChip.swift` | Lingers 4 s after a good finish; a failure stays until the next message. Tap shows the card in a sheet. |
-| Composer chip: "Create PR" | missing | n/a | The phone has no button that asks the agent to open a PR ("Creating PR" does show while one is made). |
+| Composer chip: "Create PR" | same | `Cards/CardChip.swift` CreatePR | Offered on a branch with work and no PR card while idle; sends "Create PR" as the Mac does, "Creating PR" until the card comes. |
 | Composer chip: last turn's changes "N files +a −r" | reduced | `Thread/GitSheet.swift` | The toolbar shows the working tree's count, not the last turn's. |
 | User message bubble, long text (Row::User) | same | `Transcript.swift` UserBubble | "Show all" opens the whole message in a sheet. |
 | User message images (Row::User) | same | `Thread/MessageImages.swift` | |
 | User message actions: time, edit, rewind, fork, copy | same | `Thread/MessageActions.swift` | |
-| Consult line under a message (`orch::split_consult`) | missing | n/a | The raw `<trek-consult …>` block shows in the bubble. |
-| "Asked to restate it first" line (`restate::split_restate`) | missing | n/a | The raw `<trek-restate>` block shows in the bubble. |
-| Videos attached to a message (`video::AttachedVideos`) | missing | n/a | |
-| Wake row: folded "↳ summary" of sub-agent results (Row::Wake) | reduced | UserBubble | A whole "[Trek] …" user bubble, with edit/rewind/fork offered. |
+| Consult line under a message (`orch::split_consult`) | same | `Model/MessageParts.swift`, `Thread/MessageNotes.swift` | Parsed on the phone: the bubble shows what was written, the line "Consulting Sol · High · advice, then implement" with the logos. The editor side bar's context and Ask mode come off as chips. |
+| "Asked to restate it first" line (`restate::split_restate`) | same | `Model/MessageParts.swift`, `Thread/MessageNotes.swift` | |
+| Videos attached to a message (`video::AttachedVideos`) | same | `Thread/MediaViews.swift` AttachedVideos | `user.videos`; poster, then plays here, fetched with `media` (a Mac without it: "on your Mac"). |
+| Wake row: folded "↳ summary" of sub-agent results (Row::Wake) | same | `Thread/MessageNotes.swift` WakeRow | Folded to the Mac's summary; tap for what came back. No edit, rewind or fork on it. |
 | Assistant answer, long-answer parts (Row::Assistant) | same | `MarkdownText.swift` | |
-| Code blocks (`md.rs`) | reduced | MarkdownText | No language label, no copy button. |
+| Code blocks (`md.rs`) | same | `CodeBlockView.swift` | Language over the code, Copy. |
 | Tables (`md.rs`) | same | MarkdownText | Scroll sideways. |
 | Math, inline and display (`math`) | same | `Views/Math` | |
 | `trek-viz` visualizations, all 11 kinds (`visualization/`) | same | `Views/Viz` | |
 | `trek-html` interactive artifacts (`artifact/`) | same | `LivePage.swift` | |
-| Local images in answers, `![](path)` (`md.rs` LocalImage) | missing | n/a | |
-| Videos linked in answers (`video::AnswerVideos`) | missing | n/a | |
+| Local images in answers, `![](path)` (`md.rs` LocalImage) | same | `Thread/MediaViews.swift` AnswerImages | A line of pictures; from the Mac (`media`, scaled) or the web; tap for full screen. |
+| Videos linked in answers (`video::AnswerVideos`) | same | `Thread/MediaViews.swift` AnswerVideo | A link to a video on a line of its own: a file on the Mac comes in pieces (`media`), an https one plays from the web. |
 | File and path chips in answers (`md::link_path`) | reduced | `InlineMarkdown.swift` | Drawn, but a tap doesn't open the file. |
-| Reasoning, "Thought" (Row::Reasoning) | reduced | Transcript ToolRow | Plain text inside the group, not markdown. |
+| Reasoning, "Thought" (Row::Reasoning) | same | Transcript ToolRow | Markdown, in the group. |
 | Tool group summary (Row::ToolGroup) | same | Transcript ToolGroupView | |
-| Tool row: chips, status, output (Row::Tool) | reduced | Transcript ToolRow | Output is the last 4 KiB; status as a tint. |
-| `watch_video` row with player and frames (`video::WatchedVideo`) | missing | n/a | A plain tool row. |
+| Tool row: chips, status, output (Row::Tool) | reduced | Transcript ToolRow | File chips with lines, and the Mac's status mark at the end (spinner, tick, red cross); output is the last 4 KiB. |
+| `watch_video` row with player and frames (`video::WatchedVideo`) | same | `Thread/MediaViews.swift` WatchedVideoView | `tool.watch`: the video card and the frames the model saw, each opening full screen. |
 | Sub-agent row: live state, answer as markdown (Row::SubAgent) | reduced | ToolRow, `Thread/SubAgentsCard.swift` | In the transcript an "Agent" step with 4 KiB of raw output; live state in the footer card. |
 | Notice row (Row::Notice) | same | ThreadView `.notice` | Markdown marks show raw. |
 | Error row (Row::Error) | same | ThreadView `.error` | |
 | Limit row (Row::Limit) | same | ThreadView `.limit` | |
-| Handoff row (Row::Handoff) | reduced | ThreadView `.handoff` | Words only, no agent glyphs. |
+| Handoff row (Row::Handoff) | same | `Thread/TurnBadges.swift` HandoffRow | `from_agent`/`to_agent` glyphs. |
 | Thread links (Row::Lineage) | same | `Thread/ThreadLinkRow.swift` | |
 | Turn footer: copy, time, undo, retry, fork (Row::TurnEnd) | same | MessageActions TurnActions | |
-| "Verified" badge on the turn footer | missing | n/a | Not sent. |
-| Restate check: "Is that what you meant?" | missing | n/a | |
+| "Verified" badge on the turn footer | same | `Thread/TurnBadges.swift` VerifiedBadge | `turn_end.verified`; a tap says what ran. Just the seal on the latest turn, where the actions are out. |
+| Restate check: "Is that what you meant?" | same | `Thread/RestateCheck.swift` | Go ahead sends the Mac's go-ahead (with the held-back consult); Not quite brings the keyboard up. |
 | Changes card (`changes_card.rs`) | same | `Thread/ChangesCard.swift`, DiffSheet | |
-| Rewind/undo/retry confirmation with its files (`confirm_card`) | reduced | ThreadView confirmationDialog | No list of files. |
+| Rewind/undo/retry confirmation with its files (`confirm_card`) | same | `Thread/ConfirmSheet.swift` | `turn_preview`: "Also restore files" with each file and what happens to it, and the recap note. An older Mac: the two-button dialog. |
 | Approval card (`live_footer`) | same | `RequestCards.swift` | |
-| Question card (`question_card`) | reduced | RequestCards QuestionCard | A secret answer isn't masked. |
+| Question card (`question_card`) | same | RequestCards QuestionCard, `AnswerField.swift` | A secret answer is masked as it's typed (an eye to check it) and in the transcript after. |
 | Plan card (`plan_card`) | same | RequestCards PlanCard | |
 | Working bar and live group (`working_bar.rs`, `activity.rs`) | reduced | WorkingLine, WorkingFooter | One "doing now" line. |
 | Background strip (`background_strip.rs`) | reduced | `Thread/BackgroundTaskView.swift` | Behind the "at work" chip. |
-| Context ring and popover (`context_popover.rs`) | reduced | `Thread/ThreadStatus.swift` | No breakdown, usage windows or Compact. |
-| Limit bar: Resume at reset, Try again, Snooze, Switch agent (`composer.rs`) | missing | n/a | Only the queued messages carry over. |
+| Context ring and popover (`context_popover.rs`) | same | `Thread/ThreadStatus.swift`, `Thread/ContextBreakdown.swift` | `context_card`: the segmented bar and its rows, Compact now (`thread_action compact`). Usage windows are in the Usage sheet. |
+| Limit bar: Resume at reset, Try again, Snooze, Switch agent (`composer.rs`) | same | `Thread/ComposerNotes.swift` LimitBar | The row's `pause`; `limit_actions`. Switch agent opens the model picker. |
 | Queued follow-ups (composer) | same | `Thread/QueuedStrip.swift` | |
 | Slash command picker (`composer/pickers.rs`) | same | `Thread/CommandPicker.swift` | |
 | Model, effort and access chips (`composer.rs`) | same | `ThreadSettingsBar.swift` | |
-| Consult pill (`composer.rs`) | missing | n/a | `/consult` typed works. |
-| Composer status lines ("Another thread is also editing this folder", …) | missing | n/a | |
+| Consult pill (`composer.rs`) | same | `Thread/ConsultPicker.swift` | In the settings row; who, how (advise, discuss, arena), then implement or report; sent with `send.consult`. |
+| Composer status lines ("Another thread is also editing this folder", …) | reduced | `Thread/ComposerNotes.swift` FolderSharedLine | The row's `shares_folder`. No "Use a worktree next time"; cost and cache are in the strip under the title. |
 
 The cards were designed for the phone first, in Figma (file `WxoskpLua3zzkzKxiymR1A`, page
 "Phone · cards": every state in light and dark, and the chip), and the demo Mac plays them
 (`Demo/DemoCards.swift`; the thread "Ship the session refresh fix", `-TrekDemoCard <state>` to
 hold one state).
+
+The demo Mac plays the rest of the transcript in two threads (`Demo/DemoTranscript.swift`,
+`MockHostTranscript.swift`): "Cache the session lookups" (`t-parity`: a consult, a restatement
+and its check, sub-agents reporting back, a thought in Markdown, code, a verified turn, a picture
+and a video in an answer, a video attached to a message, a watched video's frames, Create PR and
+the folder-shared line) and "Port the docs search to Rust" (`t-limit`: a handoff, then the limit
+bar). It sends pictures but no videos, so their cards say they couldn't be loaded.
 
 ### Voice input
 

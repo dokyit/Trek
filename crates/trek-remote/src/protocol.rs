@@ -10,10 +10,12 @@ mod cards;
 mod machines;
 mod parity;
 mod phone_update;
+mod thread_parity;
 pub use cards::*;
 pub use machines::*;
 pub use parity::*;
 pub use phone_update::*;
+pub use thread_parity::*;
 
 /// The protocol version this crate speaks (`hello`/`pair` carry the phone's, `welcome`/`paired`
 /// the Mac's).
@@ -225,6 +227,16 @@ pub enum ClientMessage {
     /// `update_phone` in `features`). Answered with `ack` once it starts, then `phone_update`
     /// pushes.
     UpdatePhone(UpdatePhoneRequest),
+    // Showing a thread as the Mac does (`thread_parity.rs`; the Mac lists each in `features`).
+    /// A file one of the thread's items names (answered with `media`; feature `media`).
+    Media(MediaRequest),
+    /// The context ring's card (answered with `context_card`; feature `context_card`).
+    ContextCard {
+        thread_id: String,
+    },
+    /// What the confirmation before an undo, retry or rewind says (answered with `turn_preview`;
+    /// feature `turn_preview`).
+    TurnPreview(TurnPreviewRequest),
 }
 
 impl ClientMessage {
@@ -278,6 +290,9 @@ impl ClientMessage {
             Self::PutFiles(_) => "put_files",
             Self::CardAction(_) => "card_action",
             Self::UpdatePhone(_) => "update_phone",
+            Self::Media(_) => "media",
+            Self::ContextCard { .. } => "context_card",
+            Self::TurnPreview(_) => "turn_preview",
         }
     }
 }
@@ -304,6 +319,9 @@ impl ClientMessage {
                 | Self::NoteAsset(_)
                 | Self::NoteFile(_)
                 | Self::MachineInfo
+                | Self::Media(_)
+                | Self::ContextCard { .. }
+                | Self::TurnPreview(_)
         )
     }
 }
@@ -366,6 +384,9 @@ pub struct SendRequest {
     /// Photos attached to the message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageUpload>,
+    /// Send it with consultants, as the Mac's composer does (feature `consult`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consult: Option<ConsultRequest>,
 }
 
 /// A photo sent from the phone: JPEG or PNG, base64. The Mac saves it with its snapshots and
@@ -463,6 +484,19 @@ pub enum ThreadAction {
     },
     /// A new title, written as the Mac's "Regenerate title" writes it.
     RegenerateTitle,
+    // The limit bar over a paused thread's composer (feature `limit_actions`); `conflict` for a
+    // thread that isn't paused.
+    /// "Resume at reset": it carries on by itself once the limit resets.
+    ResumeAtReset,
+    /// Call the scheduled resume off (what was queued for it comes back to the Mac's composer).
+    CancelResume,
+    /// "Try again": the pause ends and what was queued for the reset goes now.
+    TryAgain,
+    /// Snooze the thread until the limit resets.
+    SnoozeUntilReset,
+    /// The context card's Compact now: the agent's own `/compact` (feature `context_card`);
+    /// `conflict` while a turn runs or the thread is paused.
+    Compact,
 }
 
 /// The Mac's snooze menu.
@@ -532,6 +566,18 @@ pub mod feature {
     /// `update_phone` with `phone_update` pushes, and the snapshot's `release`: the Mac builds and
     /// installs Trek on the iPhone when the phone asks (`phone_update.rs`).
     pub const UPDATE_PHONE: &str = "update_phone";
+    /// `media`: the files a thread's items name (an answer's images and links, a message's
+    /// videos, what `watch_video` saw), fetched by path.
+    pub const MEDIA: &str = "media";
+    /// `thread_action` `resume_at_reset`, `cancel_resume`, `try_again` and
+    /// `snooze_until_reset`: the limit bar's buttons (rows carry `pause`).
+    pub const LIMIT_ACTIONS: &str = "limit_actions";
+    /// `context_card`, and `thread_action` `compact`: the context ring's card and Compact now.
+    pub const CONTEXT_CARD: &str = "context_card";
+    /// `turn_preview`: the confirmation's file list before an undo, retry or rewind.
+    pub const TURN_PREVIEW: &str = "turn_preview";
+    /// `send.consult`: sending with consultants, as the Mac's composer does.
+    pub const CONSULT: &str = "consult";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -552,6 +598,11 @@ pub mod feature {
         NOTE_FILES,
         CARD_ACTIONS,
         UPDATE_PHONE,
+        MEDIA,
+        LIMIT_ACTIONS,
+        CONTEXT_CARD,
+        TURN_PREVIEW,
+        CONSULT,
     ];
 }
 
@@ -904,6 +955,12 @@ pub enum ServerMessage {
     CloneProgress { folder: String, line: String },
     /// How an iPhone update is going (`update_phone`), to every phone. Older phones ignore it.
     PhoneUpdate(PhoneUpdate),
+    /// The reply to `media`.
+    Media(Media),
+    /// The reply to `context_card`.
+    ContextCard(ContextCard),
+    /// The reply to `turn_preview`.
+    TurnPreview(TurnPreview),
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.
@@ -1103,6 +1160,13 @@ pub struct ThreadSummary {
     /// rows it works out from `sub_agents` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub busy_in_background: Option<bool>,
+    /// Another thread is at work in the same folder (the composer's "Another thread is also
+    /// editing this folder").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shares_folder: bool,
+    /// Paused at a usage limit: the limit bar's state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<LimitPause>,
 }
 
 /// A context window's use.
@@ -1425,6 +1489,9 @@ pub enum ItemBody {
         /// to rewind to or fork from.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         aside: bool,
+        /// The videos it attaches (`@path`), on the Mac, absolute: played with `media`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        videos: Vec<String>,
     },
     Assistant {
         text: String,
@@ -1448,6 +1515,9 @@ pub enum ItemBody {
         added: Option<u32>,
         #[serde(default)]
         removed: Option<u32>,
+        /// For a finished `watch_video` call: what it watched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<WatchedVideo>,
     },
     Approval {
         request_id: String,
@@ -1470,6 +1540,10 @@ pub enum ItemBody {
     },
     TurnEnd {
         took_secs: u32,
+        /// The turn ran the project's verification CLI: the Mac's "Verified" / "Verification
+        /// failed" badge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verified: Option<TurnVerified>,
     },
     Notice {
         text: String,
@@ -1485,6 +1559,11 @@ pub enum ItemBody {
     Handoff {
         from: String,
         to: String,
+        /// The two agents, as rows name them (`from`/`to` are their names as the handoff said).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_agent: Option<AgentRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_agent: Option<AgentRef>,
     },
     /// A link to another thread (an agent started it or handed its work over to it, or it
     /// started or handed over to this one): a row that opens that thread. Older phones leave it

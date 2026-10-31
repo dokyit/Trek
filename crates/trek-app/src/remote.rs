@@ -43,6 +43,7 @@ mod git;
 mod icons;
 pub mod link;
 mod machines;
+mod media;
 mod notes;
 pub mod phone_update;
 mod queue;
@@ -50,6 +51,7 @@ pub mod search;
 mod settings;
 mod sub_agents;
 mod thread_actions;
+mod thread_parity;
 mod usage;
 
 /// How often changes go out to phones.
@@ -1133,6 +1135,15 @@ impl Workspace {
                         .map_err(tr::HostError::other),
                 );
             }
+            // A thread as the Mac's thread view shows it (`thread_parity.rs`, `media.rs`).
+            tr::HostRequest::Media { req, reply } => self.remote_media(req, reply, cx),
+            tr::HostRequest::ContextCard { thread_id, reply } => {
+                let id = thread_id.clone();
+                self.when_loaded(thread_id, reply, cx, move |ws, _| {
+                    ws.remote_context_card(&id)
+                });
+            }
+            tr::HostRequest::TurnPreview { req, reply } => self.remote_turn_preview(req, reply, cx),
         }
     }
 
@@ -1149,6 +1160,12 @@ impl Workspace {
         let text = match self.phone_command(&t, &req.text)? {
             commands::Phone::Open(open) => return Ok(Some(open)),
             commands::Phone::Send(text) => text,
+        };
+        // Consultants picked in the phone's composer: the message goes as the Mac's composer
+        // sends it with them.
+        let text = match &req.consult {
+            Some(consult) => self.consulted(&t.id, &t.agent, &text, consult)?,
+            None => text,
         };
         let images = save_uploads(&req.images)?;
         // An explicit choice from the phone wins over the setting, for this message only.
@@ -1795,6 +1812,14 @@ impl Workspace {
             background_tasks: self.remote_background(t),
             // As the sidebar's card says "Waiting" (`waiting_threads`).
             busy_in_background: Some(self.waiting(&t.id)),
+            // The composer's "Another thread is also editing this folder".
+            shares_folder: self.sharing_folder(&t.id),
+            // The limit bar over its composer.
+            pause: t.paused.as_ref().map(|p| tr::LimitPause {
+                resets_at: p.resets_at,
+                resume: p.resume,
+                wrapped: p.wrapped,
+            }),
         };
         self.remote_sub_agent_needs(t, &mut row);
         row
@@ -1960,6 +1985,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Vec<tr::HostEvent> {
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+        let probe = self.thread(id).and_then(|t| self.verify_probe(t));
         let Some(live) = self.live.get_mut(id) else {
             return vec![];
         };
@@ -2022,7 +2048,7 @@ impl Workspace {
                     continue;
                 }
             }
-            let body = item_body(self, live, cwd.as_deref(), ix);
+            let body = item_body(self, live, cwd.as_deref(), probe.as_ref(), ix);
             let h = hash(&body);
             if w.items[ix].hash == Some(h) {
                 continue;
@@ -2157,12 +2183,13 @@ impl Workspace {
             return out;
         }
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+        let probe = self.thread(id).and_then(|t| self.verify_probe(t));
         let Some(live) = self.live.get(id) else {
             return out;
         };
         let old = w.from.min(live.items.len()).min(w.items.len());
         for ix in start..old {
-            let body = item_body(self, live, cwd.as_deref(), ix);
+            let body = item_body(self, live, cwd.as_deref(), probe.as_ref(), ix);
             w.items[ix].hash = Some(hash(&body));
             out.items.insert(ix, body);
         }
@@ -2228,13 +2255,13 @@ impl Workspace {
         let mut items = vec![];
         if let Some(live) = self.live.get(id) {
             let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+            let probe = self.thread(id).and_then(|t| self.verify_probe(t));
             for ix in first..len.min(live.items.len()) {
                 let at = item_time(&live.items[ix]);
                 if newer(w.items[ix].seq) {
-                    let body = converted
-                        .items
-                        .remove(&ix)
-                        .unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
+                    let body = converted.items.remove(&ix).unwrap_or_else(|| {
+                        item_body(self, live, cwd.as_deref(), probe.as_ref(), ix)
+                    });
                     items.push(tr::Item {
                         id: format!("i{ix}"),
                         seq: w.items[ix].seq,
@@ -2313,6 +2340,7 @@ impl Workspace {
         let mut items = vec![];
         if let Some(live) = self.live.get(id) {
             let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+            let probe = self.thread(id).and_then(|t| self.verify_probe(t));
             // A thread no phone follows (it wasn't subscribed to) pages with no seqs.
             let seq = |ix: usize| {
                 w.as_ref()
@@ -2324,7 +2352,7 @@ impl Workspace {
                 let body = converted
                     .items
                     .remove(&ix)
-                    .unwrap_or_else(|| item_body(self, live, cwd.as_deref(), ix));
+                    .unwrap_or_else(|| item_body(self, live, cwd.as_deref(), probe.as_ref(), ix));
                 items.push(tr::Item {
                     id: format!("i{ix}"),
                     seq: seq(ix),
@@ -2658,6 +2686,7 @@ fn item_body(
     ws: &Workspace,
     live: &LiveThread,
     cwd: Option<&std::path::Path>,
+    probe: Option<&trek_core::verification::Probe>,
     ix: usize,
 ) -> tr::ItemBody {
     match &live.items[ix] {
@@ -2670,6 +2699,15 @@ fn item_body(
             text: clip_text(text),
             images: images.len() as u32,
             aside: *aside,
+            // What the Mac plays under the message (`video::AttachedVideos`).
+            videos: if text.contains('@') {
+                trek_core::media::mentioned_videos(text, cwd)
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect()
+            } else {
+                vec![]
+            },
         },
         Item::Assistant { text } => tr::ItemBody::Assistant {
             text: clip_text(text),
@@ -2720,10 +2758,16 @@ fn item_body(
                 output: tr::truncate_output(output).to_string(),
                 added: lines.map(|l| l.0),
                 removed: lines.map(|l| l.1),
+                // What a finished `watch_video` call saw, as the Mac shows it under the row.
+                watch: (trek_core::media::is_watch_call(title) && *status == ToolStatus::Done)
+                    .then(|| media::watch_of(output))
+                    .flatten()
+                    .map(|w| media::remote_watch(&w)),
             }
         }
         Item::TurnEnd { took_secs, .. } => tr::ItemBody::TurnEnd {
             took_secs: *took_secs,
+            verified: thread_parity::verified(&live.items, ix, probe),
         },
         Item::Notice { text } => tr::ItemBody::Notice {
             text: clip_text(text),
@@ -2750,6 +2794,8 @@ fn item_body(
             to: to_name
                 .clone()
                 .unwrap_or_else(|| AgentId::from_key(to).display_name()),
+            from_agent: Some(agent_ref(&AgentId::from_key(from))),
+            to_agent: Some(agent_ref(&AgentId::from_key(to))),
         },
     }
 }

@@ -504,6 +504,7 @@ fn every_item_state_round_trips() {
                 output: "o".into(),
                 added: None,
                 removed: Some(1),
+                watch: None,
             });
         }
     }
@@ -511,6 +512,7 @@ fn every_item_state_round_trips() {
         text: "u".into(),
         images: 2,
         aside: false,
+        videos: vec![],
     });
     bodies.push(ItemBody::Assistant {
         text: "a".into(),
@@ -630,6 +632,7 @@ fn spec_actions() {
             text: "Also add a regression test".into(),
             mode: Some(SendMode::Steer),
             images: vec![],
+            consult: None,
         })
     );
     let queued: ClientEnvelope =
@@ -1380,7 +1383,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -1607,4 +1610,192 @@ fn a_release_says_what_changed_in_its_first_line() {
     let long = first(&format!("- {}", "word ".repeat(60))).unwrap();
     assert_eq!(long.chars().count(), 160);
     assert!(long.ends_with('…'));
+}
+
+#[test]
+fn a_thread_as_the_mac_shows_it_on_items_and_rows() {
+    // A turn's verdict, a handoff's agents, a message's videos and what `watch_video` saw.
+    for line in [
+        r#"{"id":"i9","seq":10,"at":1791020400000,"kind":"turn_end","took_secs":95,"verified":{"passed":true,"commands":["verify-trek check"]}}"#,
+        r#"{"id":"i9","seq":10,"at":1791020400000,"kind":"turn_end","took_secs":95,"verified":{"passed":false,"commands":["verify-trek check","verify-trek check --feature compose"]}}"#,
+        r#"{"id":"i5","seq":14,"at":null,"kind":"handoff","from":"Claude Opus 5.5","to":"Codex GPT-6","from_agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"to_agent":{"key":"codex","name":"Codex","logo":"codex"}}"#,
+        r#"{"id":"i1","seq":1,"at":null,"kind":"user","text":"what happens in @clip.mov","images":0,"videos":["/Users/me/web/clip.mov"]}"#,
+        r#"{"id":"i3","seq":3,"at":null,"kind":"tool","call_id":"c1","tool":"other","title":"mcp__trek-video__watch_video","detail":"clip.mov","status":"done","output":"Manifest: /x/manifest.json","added":null,"removed":null,
+            "watch":{"source":"/Users/me/web/clip.mov","video":"/Users/me/web/clip.mov","duration":12.5,"frames":[{"t":0.0,"path":"/x/f0.jpg"},{"t":1.5,"path":"/x/f1.jpg"}]}}"#,
+        r#"{"id":"i4","seq":4,"at":null,"kind":"tool","call_id":"c2","tool":"other","title":"watch_video","detail":"https://youtu.be/x","status":"done","output":"","added":null,"removed":null,
+            "watch":{"source":"https://youtu.be/x","video":null,"duration":null,"frames":[]}}"#,
+    ] {
+        item_round_trip(line);
+    }
+    // An older Mac's items still read, with nothing new in them; and nothing new is sent when
+    // there's nothing to say.
+    let old = item_round_trip(r#"{"id":"i9","seq":10,"at":null,"kind":"turn_end","took_secs":3}"#);
+    assert_eq!(
+        old.body,
+        ItemBody::TurnEnd {
+            took_secs: 3,
+            verified: None
+        }
+    );
+    let old = item_round_trip(
+        r#"{"id":"i5","seq":14,"at":null,"kind":"handoff","from":"Claude Opus 5.5","to":"Codex GPT-6"}"#,
+    );
+    assert!(matches!(
+        old.body,
+        ItemBody::Handoff {
+            from_agent: None,
+            to_agent: None,
+            ..
+        }
+    ));
+    let old = item_round_trip(
+        r#"{"id":"i3","seq":3,"at":null,"kind":"tool","call_id":"c1","tool":"read","title":"Read","detail":"a.rs","status":"done","output":"","added":null,"removed":null}"#,
+    );
+    assert!(matches!(old.body, ItemBody::Tool { watch: None, .. }));
+    let old =
+        item_round_trip(r#"{"id":"i2","seq":3,"at":null,"kind":"user","text":"hi","images":0}"#);
+    assert!(matches!(old.body, ItemBody::User { ref videos, .. } if videos.is_empty()));
+
+    // Rows: another thread in the folder, and the limit bar.
+    let row = r#"{"id":"t","title":"x","project":{"id":"p","name":"web","hue":10,"monogram":"WE"},
+        "agent":{"key":"claude-code","name":"Claude Code"},"run_state":"idle","section":"inbox",
+        "shares_folder":true,"pause":{"resets_at":1791030000000,"resume":true,"wrapped":false}}"#;
+    let t: ThreadSummary = serde_json::from_str(row).unwrap();
+    assert!(t.shares_folder);
+    assert_eq!(
+        t.pause,
+        Some(LimitPause {
+            resets_at: Some(1791030000000),
+            resume: true,
+            wrapped: false
+        })
+    );
+    let unknown: ThreadSummary = serde_json::from_str(
+        r#"{"id":"t","title":"x","project":{"id":"p","name":"web","hue":10,"monogram":"WE"},
+        "agent":{"key":"claude-code","name":"Claude Code"},"run_state":"idle","section":"inbox","pause":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        unknown.pause,
+        Some(LimitPause::default()),
+        "a reset not known"
+    );
+    assert_eq!(
+        serde_json::to_value(LimitPause::default()).unwrap(),
+        json!({"resets_at": null, "resume": false, "wrapped": false})
+    );
+    let plain = serde_json::to_value(ThreadSummary {
+        id: "t".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    for key in ["shares_folder", "pause"] {
+        assert!(plain.get(key).is_none(), "{key} should be skipped");
+    }
+}
+
+#[test]
+fn a_thread_s_files_the_limit_bar_the_context_card_and_the_confirm_card() {
+    let requests = [
+        r#"{"type":"media","id":"1","thread_id":"t","path":"out/shot.png","max_px":1024,"offset":0}"#,
+        r#"{"type":"media","id":"2","thread_id":"t","path":"/Users/me/web/clip.mov","offset":1048576,"length":1048576}"#,
+        r#"{"type":"context_card","id":"3","thread_id":"t"}"#,
+        r#"{"type":"turn_preview","id":"4","thread_id":"t","item_id":"i12","action":"undo"}"#,
+        r#"{"type":"turn_preview","id":"5","thread_id":"t","item_id":"i8","action":"rewind"}"#,
+        r#"{"type":"thread_action","id":"6","thread_id":"t","action":{"kind":"resume_at_reset"}}"#,
+        r#"{"type":"thread_action","id":"7","thread_id":"t","action":{"kind":"cancel_resume"}}"#,
+        r#"{"type":"thread_action","id":"8","thread_id":"t","action":{"kind":"try_again"}}"#,
+        r#"{"type":"thread_action","id":"9","thread_id":"t","action":{"kind":"snooze_until_reset"}}"#,
+        r#"{"type":"thread_action","id":"10","thread_id":"t","action":{"kind":"compact"}}"#,
+        r#"{"type":"send","id":"11","thread_id":"t","text":"Which cache is better?","mode":null,"consult":{"with":["codex/gpt-5.6-sol/high","claude-code/claude-opus-5-5/max"],"style":"arena","then":"report","judge":"codex/gpt-6/high"}}"#,
+    ];
+    for line in requests {
+        let env = client_round_trip(line);
+        assert_eq!(env.msg.kind(), value(line)["type"].as_str().unwrap());
+    }
+    let reads: Vec<bool> = requests
+        .iter()
+        .map(|l| {
+            serde_json::from_str::<ClientEnvelope>(l)
+                .unwrap()
+                .msg
+                .is_query()
+        })
+        .collect();
+    assert_eq!(
+        reads,
+        [
+            true, true, true, true, true, false, false, false, false, false, false
+        ],
+        "only reads may overtake"
+    );
+    // A bare `media` reads from the start; a bare `consult` advises, then implements.
+    let bare: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"media","thread_id":"t","path":"a.png"}"#).unwrap();
+    assert_eq!(
+        bare.msg,
+        ClientMessage::Media(MediaRequest {
+            thread_id: "t".into(),
+            path: "a.png".into(),
+            max_px: None,
+            offset: 0,
+            length: None,
+        })
+    );
+    let sent: ClientEnvelope = serde_json::from_str(
+        r#"{"type":"send","thread_id":"t","text":"hi","consult":{"with":["codex/gpt-6/high"]}}"#,
+    )
+    .unwrap();
+    let ClientMessage::Send(SendRequest {
+        consult: Some(consult),
+        ..
+    }) = sent.msg
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (consult.style, consult.then, consult.judge),
+        (ConsultStyle::Advise, ConsultThen::Implement, None)
+    );
+    let plain: ClientEnvelope =
+        serde_json::from_str(r#"{"type":"send","thread_id":"t","text":"hi"}"#).unwrap();
+    assert!(matches!(
+        plain.msg,
+        ClientMessage::Send(SendRequest { consult: None, .. })
+    ));
+
+    let replies = [
+        r#"{"type":"media","re":"1","thread_id":"t","path":"out/shot.png","mime":"image/jpeg","offset":0,"total":48213,"bytes_b64":"/9j/","width":1024,"height":640}"#,
+        r#"{"type":"media","re":"2","thread_id":"t","path":"/Users/me/web/clip.mov","mime":"video/quicktime","offset":1048576,"total":5242880,"bytes_b64":"AAAA"}"#,
+        r#"{"type":"context_card","re":"3","thread_id":"t","used":120000,"window":200000,"reserved":10000,
+            "parts":[{"kind":"system","label":"System","tokens":14000,"detail":[{"label":"The agent's own prompt and its tools' definitions","value":null}],"note":"Estimated: what the agent counts that isn't a message, skill or server."},
+                     {"kind":"mcp","label":"MCP","tokens":9000,"detail":[{"label":"trek-browser, trek-orchestrate","value":"6K"},{"label":"Instructions","value":"3K"}],"note":"Estimated, about 3000 tokens a server."},
+                     {"kind":"messages","label":"Messages","tokens":97000,"detail":[{"label":"42 messages and tool results","value":null}],"note":null},
+                     {"kind":"free","label":"Free","tokens":70000,"detail":[],"note":null},
+                     {"kind":"reserved","label":"Reserved","tokens":10000,"detail":[],"note":"Estimated: no agent reports its reserve."}],
+            "compact":"ready"}"#,
+        r#"{"type":"turn_preview","re":"4","thread_id":"t","item_id":"i12","recap":false,"files":[{"path":"README.md","change":"revert"},{"path":"new.rs","change":"delete"},{"path":"old.rs","change":"bring_back"},{"path":"vendor/x","change":"nested"},{"path":"big.bin","change":"kept"}],"unavailable":null}"#,
+        r#"{"type":"turn_preview","re":"5","thread_id":"t","item_id":"i8","recap":true,"files":null,"unavailable":"This folder isn't a git repository, so Trek keeps no file checkpoints for it."}"#,
+    ];
+    for line in replies {
+        server_round_trip(line);
+    }
+    for state in ["ready", "running", "busy", "none"] {
+        let s: CompactState = serde_json::from_value(json!(state)).unwrap();
+        assert_eq!(serde_json::to_value(s).unwrap(), json!(state));
+    }
+    let media: ServerEnvelope = serde_json::from_str(replies[1]).unwrap();
+    let ServerMessage::Media(m) = media.msg else {
+        panic!()
+    };
+    assert_eq!(m.bytes().unwrap(), [0, 0, 0]);
+    for f in [
+        feature::MEDIA,
+        feature::LIMIT_ACTIONS,
+        feature::CONTEXT_CARD,
+        feature::TURN_PREVIEW,
+        feature::CONSULT,
+    ] {
+        assert!(feature::ALL.contains(&f));
+    }
 }

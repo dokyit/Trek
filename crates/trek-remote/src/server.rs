@@ -1133,6 +1133,9 @@ const CLIENT_TYPES: &[&str] = &[
     "put_files",
     "card_action",
     "update_phone",
+    "media",
+    "context_card",
+    "turn_preview",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -1540,6 +1543,14 @@ async fn call<H: RemoteHost>(
         },
         ClientMessage::CardAction(req) => host.card_action(req).await.map(|()| ack(None)),
         ClientMessage::UpdatePhone(req) => host.update_phone(req).await.map(|()| ack(None)),
+        ClientMessage::Media(req) => host.media(req).await.map(ServerMessage::Media),
+        ClientMessage::ContextCard { thread_id } => host
+            .context_card(&thread_id)
+            .await
+            .map(ServerMessage::ContextCard),
+        ClientMessage::TurnPreview(req) => {
+            host.turn_preview(req).await.map(ServerMessage::TurnPreview)
+        }
         other => Err(HostError::bad_request(format!(
             "Unexpected \"{}\"",
             other.kind()
