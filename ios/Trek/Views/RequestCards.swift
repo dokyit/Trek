@@ -263,7 +263,7 @@ struct QuestionCard: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    TextField(q.secret ? "Type a secret answer" : "Or type an answer", text: Binding(get: { other[qi] ?? "" }, set: { other[qi] = $0 }))
+                    AnswerField(secret: q.secret, text: Binding(get: { other[qi] ?? "" }, set: { other[qi] = $0 }))
                         .font(.ui(.subheadline))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)

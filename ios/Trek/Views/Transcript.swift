@@ -59,18 +59,18 @@ struct ToolGroupView: View {
             Button {
                 withAnimation(.snappy(duration: 0.22)) { toggle() }
             } label: {
-                HStack(spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
                         .frame(width: 14)
                     if running {
                         Text(summary).shimmering()
+                    } else if failedCount > 0 {
+                        // One run of text, so a summary that wraps carries its failures along.
+                        Text("\(summary) \(Text("· \(failedCount) failed").foregroundStyle(Trek.failed))")
                     } else {
                         Text(summary)
-                    }
-                    if failedCount > 0 {
-                        Text("· \(failedCount) failed").foregroundStyle(Trek.failed)
                     }
                     Spacer(minLength: 0)
                 }
@@ -172,6 +172,7 @@ struct ToolRow: View {
                         .foregroundStyle(tint)
                     content
                     Spacer(minLength: 0)
+                    statusMark
                 }
                 .padding(.vertical, 5)
                 .contentShape(Rectangle())
@@ -183,8 +184,16 @@ struct ToolRow: View {
                     .padding(.leading, 41)
                     .transition(.opacity)
             }
+            // A finished `watch_video` call has the video and its frames under it, as on the Mac.
+            if let watch = item.extras.watch, let threadID, case .tool(let c) = item.body, c.status == .done {
+                WatchedVideoView(watch: watch, threadID: threadID)
+                    .padding(.leading, 41)
+                    .padding(.bottom, 4)
+            }
         }
     }
+
+    @Environment(\.liveThreadID) private var threadID
 
     private var hasMore: Bool {
         switch item.body {
@@ -209,13 +218,26 @@ struct ToolRow: View {
     private var icon: some View {
         switch item.body {
         case .reasoning: Image(systemName: "text.bubble")
-        case .tool(let c):
-            if c.status == .running {
-                ProgressView().controlSize(.mini).tint(Trek.working)
-            } else {
-                Image(systemName: Self.symbol(c.tool))
-            }
+        case .tool(let c): Image(systemName: Self.symbol(c.tool))
         default: Image(systemName: "circle")
+        }
+    }
+
+    /// How the call went, at the row's end, as the Mac marks it: a spinner while it runs, a tick
+    /// once done, a red cross when it failed or was denied.
+    @ViewBuilder
+    private var statusMark: some View {
+        if case .tool(let c) = item.body {
+            Group {
+                switch c.status {
+                case .running: ProgressView().controlSize(.mini).tint(Trek.working)
+                case .done: Image(systemName: "checkmark").foregroundStyle(Trek.muted.opacity(0.7))
+                case .failed, .denied: Image(systemName: "xmark.circle").foregroundStyle(Trek.failed)
+                }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .frame(width: 18, height: 18)
+            .accessibilityLabel(c.status == .running ? "Running" : c.status == .done ? "Done" : c.status == .denied ? "Denied" : "Failed")
         }
     }
 
@@ -270,7 +292,11 @@ struct ToolRow: View {
     private var detailView: some View {
         switch item.body {
         case .reasoning(let text):
-            Text(text).font(.ui(.subheadline)).italic().foregroundStyle(Trek.muted)
+            // Markdown, as the Mac draws a thought: lists, code and emphasis as written.
+            MarkdownText(text: text, size: 15)
+                .equatable()
+                .foregroundStyle(Trek.muted)
+                .textSelection(.enabled)
         case .tool(let c):
             VStack(alignment: .leading, spacing: 6) {
                 if c.detail.count > 38 || c.tool == .command {
@@ -336,7 +362,9 @@ struct ResolvedRequestRow: View {
             }
             return "\(verb) · `\(a.detail.replacingOccurrences(of: "`", with: "'"))`"
         case .question(let q):
-            let answers = (q.answers ?? []).map(\.answer).joined(separator: ", ")
+            // A secret answer stays masked in the transcript too.
+            let secret = Set(q.questions.filter(\.secret).map(\.question))
+            let answers = (q.answers ?? []).map { secret.contains($0.question) ? "••••••" : $0.answer }.joined(separator: ", ")
             return answers.isEmpty ? "Question settled" : "Answered: \(answers)"
         case .plan(let p):
             return p.state == .approved ? "Plan approved" : p.state == .rejected ? "Sent the plan back" : "Plan settled"

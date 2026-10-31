@@ -40,6 +40,17 @@ nonisolated enum MacFeature: String, CaseIterable {
     /// `update_phone`: the Mac builds and installs this app when asked, saying how it goes
     /// (`phone_update`), and its snapshot names the newest Trek it knows of (`release`).
     case updatePhone = "update_phone"
+    /// `media`: files a thread names (images and videos in answers, videos attached to messages,
+    /// a `watch_video` call's video and frames).
+    case media
+    /// The limit bar's Resume at reset, Cancel, Try again and Snooze until reset.
+    case limitActions = "limit_actions"
+    /// The context ring's card (what fills the window) and Compact now.
+    case contextCard = "context_card"
+    /// Which files an undo, retry or rewind would put back, for its confirmation.
+    case turnPreview = "turn_preview"
+    /// Sending with consultants (the composer's consult pill).
+    case consult
 }
 
 /// The Mac's snooze menu.

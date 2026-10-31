@@ -47,30 +47,33 @@ final class NoteFiles {
     /// Fetched without a tap (a PDF's first page, a video's poster) up to this size.
     static let autoLimit: Int64 = 24 << 20
 
-    /// `path` under `link`'s name: two machines' `attachments/x.pdf` stay two files.
-    func scoped(_ path: String, on link: HostLink?) -> String {
-        "\(link?.id ?? "")/\(NoteFileStore.normalized(path))"
+    /// `path` under `link`'s name: two machines' `attachments/x.pdf` stay two files. A file a
+    /// thread names (`thread`, `media`) is that thread's: a relative path means its folder.
+    func scoped(_ path: String, on link: HostLink?, thread: String? = nil) -> String {
+        "\(link?.id ?? "")/\(thread.map { "thread:\($0)/" } ?? "")\(NoteFileStore.normalized(path))"
     }
 
     /// The file, if it's here already: no Mac needed.
-    func cached(_ path: String, on link: HostLink? = nil) -> URL? { store.cached(scoped(path, on: link)) }
+    func cached(_ path: String, on link: HostLink? = nil, thread: String? = nil) -> URL? {
+        store.cached(scoped(path, on: link, thread: thread))
+    }
 
     /// The file `path` (`attachments/…`): from the cache, else from `link`'s Mac a piece at a
     /// time (the selected one's without `link`). With `upTo`, a file the Mac says is bigger
     /// stops after its first piece (kept, so a tap carries on from there).
-    func fetch(_ path: String, model: AppModel, on link: HostLink? = nil, upTo limit: Int64? = nil) async -> Outcome {
+    func fetch(_ path: String, model: AppModel, on link: HostLink? = nil, upTo limit: Int64? = nil, thread: String? = nil) async -> Outcome {
         let link = link ?? model.selected
-        let key = scoped(path, on: link)
+        let key = scoped(path, on: link, thread: thread)
         if let url = store.cached(key) { return .file(url) }
         if let task = running[key] {
             let got = await task.value
             // A fetch that stopped at the size limit doesn't answer one that has none.
-            if case .large = got, limit == nil { return await fetch(path, model: model, on: link, upTo: nil) }
+            if case .large = got, limit == nil { return await fetch(path, model: model, on: link, upTo: nil, thread: thread) }
             return got
         }
-        guard link?.serves(.noteFiles) == true else { return .onMac }
+        guard link?.serves(thread == nil ? .noteFiles : .media) == true else { return .onMac }
         let task = Task<Outcome, Never> {
-            let got = await self.download(key, wire: NoteFileStore.normalized(path), model: model, on: link, limit: limit)
+            let got = await self.download(key, wire: NoteFileStore.normalized(path), model: model, on: link, limit: limit, thread: thread)
             // Done before anyone waiting on it hears, so a fetch after it starts afresh.
             self.running[key] = nil
             self.progress[key] = nil
@@ -81,12 +84,12 @@ final class NoteFiles {
     }
 
     /// `path` is already host-scoped (`scoped`); `wire` is the link the Mac knows.
-    private func download(_ path: String, wire: String, model: AppModel, on link: HostLink?, limit: Int64?) async -> Outcome {
+    private func download(_ path: String, wire: String, model: AppModel, on link: HostLink?, limit: Int64?, thread: String?) async -> Outcome {
         var parts: ChunkAssembler
         do { parts = try store.assembler(for: path) } catch { return .failed(error.localizedDescription) }
         var restarted = false
         while true {
-            let reply = await piece(wire, offset: parts.next, model: model, on: link)
+            let reply = await piece(wire, offset: parts.next, model: model, on: link, thread: thread)
             let chunk: NoteFileChunk
             switch reply {
             case .success(let c): chunk = c
@@ -120,11 +123,14 @@ final class NoteFiles {
     }
 
     /// One piece, from `offset`.
-    private func piece(_ path: String, offset: Int64, model: AppModel, on link: HostLink?) async -> Result<NoteFileChunk, PieceError> {
+    private func piece(_ path: String, offset: Int64, model: AppModel, on link: HostLink?, thread: String?) async -> Result<NoteFileChunk, PieceError> {
         await withCheckedContinuation { c in
-            model.request(.noteFile(path: path, offset: offset, length: ClientMessage.noteFileChunk), on: link) { reply in
+            let ask: ClientMessage = thread.map { .media(threadId: $0, path: path, maxPx: nil, offset: offset, length: ClientMessage.noteFileChunk) }
+                ?? .noteFile(path: path, offset: offset, length: ClientMessage.noteFileChunk)
+            model.request(ask, on: link) { reply in
                 switch reply {
                 case .noteFileChunk(_, let chunk): c.resume(returning: .success(chunk))
+                case .media(_, let chunk): c.resume(returning: .success(chunk.asNoteChunk))
                 case .error(_, let code, let message): c.resume(returning: .failure(PieceError(code: code, message: message)))
                 default: c.resume(returning: .failure(PieceError(code: .unknown, message: "The Mac sent something else")))
                 }

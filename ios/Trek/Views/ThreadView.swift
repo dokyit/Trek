@@ -26,6 +26,10 @@ final class ComposerState {
     var mode: SendMode = .steer
     /// Bumped to bring the keyboard up (after "Edit" put a message back in the composer).
     var focusRequest = 0
+    /// Bumped to open the model picker (the limit bar's Switch agent…).
+    var pickModelRequest = 0
+    /// Consultants picked for the next message (the consult pill).
+    var consult: ConsultRequest?
     /// What followed `/new` in the message just sent: the new thread's prompt, if the Mac asks
     /// for the sheet.
     @ObservationIgnored var newPrompt = ""
@@ -329,7 +333,12 @@ private struct TranscriptList: View, Equatable {
             }
             .animation(.snappy(duration: 0.2), value: awayFromBottom)
         }
-        .confirmationDialog(confirming?.title ?? "", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+        // A Mac that says which files restoring puts back: the Mac's confirmation, with them.
+        .sheet(item: Binding(get: { previewing ? confirming : nil }, set: { if $0 == nil { confirming = nil } })) { c in
+            ConfirmSheet(title: c.title, message: c.message, verb: c.verb, threadID: store.id, itemID: c.item, action: c.action,
+                         agentName: store.summary?.agent.name ?? "The agent") { restore in run(c, restoreFiles: restore) }
+        }
+        .confirmationDialog(confirming?.title ?? "", isPresented: Binding(get: { confirming != nil && !previewing }, set: { if !$0 { confirming = nil } }),
                             titleVisibility: .visible, presenting: confirming) { c in
             Button("\(c.verb) and restore files", role: .destructive) { run(c, restoreFiles: true) }
             Button("\(c.verb), keep files") { run(c, restoreFiles: false) }
@@ -339,6 +348,9 @@ private struct TranscriptList: View, Equatable {
         }
     }
 
+    /// The Mac lists the files an undo, retry or rewind puts back (`turn_preview`).
+    private var previewing: Bool { model.serves(.turnPreview, on: store.id) }
+
     /// The list's rows: what's above the transcript, its blocks, and what's under it.
     private var rows: [TranscriptRow] {
         let blocks = store.blocks
@@ -346,7 +358,7 @@ private struct TranscriptList: View, Equatable {
         let lastGroup = blocks.last(where: \.isGroup)?.id
         let ends = Set(Block.turnEnds(blocks, open: working))
         let lastTurn = blocks.last { ends.contains($0.id) }?.id
-        let lastUser = blocks.last(where: \.isUser)?.id
+        let lastUser = blocks.last(where: \.isPrompt)?.id
         var rows: [TranscriptRow] = []
         rows.reserveCapacity(blocks.count + 3)
         rows.append(.header(store))
@@ -677,9 +689,21 @@ struct BlockRow: View, Equatable {
     private var content: some View {
         switch block.kind {
         case .user(let text, let images, let at, let aside):
-            VStack(alignment: .trailing, spacing: 4) {
-                UserBubble(text: text, images: images, threadID: threadID, itemID: block.itemID)
-                MessageActions(item: block.itemID, text: text, at: at, latest: latest, busy: busy, aside: aside, act: act)
+            if WakeNote.isWake(text) {
+                // Trek waking the agent with what its sub-agents came back with: a note, folded.
+                WakeRow(text: text)
+            } else {
+                // As written: what Trek added for the agent (a consult, a restatement) is a line
+                // under the bubble.
+                let parts = MessageParts.of(text)
+                VStack(alignment: .trailing, spacing: 4) {
+                    UserBubble(text: parts.said, images: images, threadID: threadID, itemID: block.itemID)
+                    if !block.extras.videos.isEmpty {
+                        AttachedVideos(paths: block.extras.videos, threadID: threadID)
+                    }
+                    MessageNotes(parts: parts, threadID: threadID)
+                    MessageActions(item: block.itemID, text: parts.said, at: at, latest: latest, busy: busy, aside: aside, act: act)
+                }
             }
         case .assistant(let text, let streaming):
             MarkdownText(text: part?.text ?? text, live: streaming)
@@ -690,7 +714,8 @@ struct BlockRow: View, Equatable {
         case .resolved(let item):
             ResolvedRequestRow(item: item)
         case .turnEnd(let secs, let at):
-            TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels, act: act)
+            TurnActions(end: block.itemID, secs: secs, at: at, latest: latest, busy: busy, models: retryModels,
+                        verified: block.extras.verified, act: act)
         case .notice(let text):
             Label(text, systemImage: "info.circle").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
         case .error(let text):
@@ -718,8 +743,7 @@ struct BlockRow: View, Equatable {
             .font(.ui(.subheadline))
             .foregroundStyle(Trek.approval)
         case .handoff(let from, let to):
-            Label("Handed over from \(from) to \(to)", systemImage: "arrow.left.arrow.right")
-                .font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+            HandoffRow(from: from, to: to, fromAgent: block.extras.fromAgent, toAgent: block.extras.toAgent)
         case .threadLink(let link):
             ThreadLinkRow(link: link)
         case .changes(let changes):
@@ -809,13 +833,19 @@ private struct ComposerArea: View {
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                // Paused at the agent's usage limit: the Mac's limit bar.
+                if let thread, let pause = thread.pause, thread.runState != .working {
+                    LimitBar(thread: thread, pause: pause) { composer.pickModelRequest += 1 }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 if !commands.isEmpty {
                     CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
                         composer.draft = "/\(cmd.name) "
                     }
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if let thread {
-                    ThreadSettingsBar(thread: thread)
+                    if thread.sharesFolder == true { FolderSharedLine() }
+                    ThreadSettingsBar(thread: thread, pickRequest: composer.pickModelRequest)
                 }
                 Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos,
                          placeholder: "Message \(thread?.agent.name ?? "the agent")",
@@ -826,6 +856,17 @@ private struct ComposerArea: View {
         .padding(.horizontal, 14)
         .padding(.bottom, 6)
         .padding(.top, 8)
+        // The transcript scrolls under the chips and the composer: it fades out under them
+        // rather than showing between the chips' glass.
+        .background {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [Trek.background.opacity(0), Trek.background.opacity(0.92)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 30)
+                Trek.background.opacity(0.92)
+            }
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
+        }
         .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
         .animation(.smooth(duration: 0.3), value: thread?.needsThread)
         .animation(.smooth(duration: 0.3), value: thread?.queued)

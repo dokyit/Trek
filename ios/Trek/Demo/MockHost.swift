@@ -338,6 +338,10 @@ final class MockHost: Backend {
             search(query, limit: limit ?? 50, id: id)
         case .updatePhone(let version):
             updatePhone(version: version, id: id)
+        case .media, .contextCard, .turnPreview:
+            takeTranscriptParity(message, id: id)
+        case .sendConsult(let tid, let text, let mode, let images, let consult):
+            take(.send(threadId: tid, text: DemoMac.withConsult(text, consult), mode: mode, images: images), id: id)
         }
     }
 
@@ -359,7 +363,7 @@ final class MockHost: Backend {
         deliver(.phoneUpdate(PhoneUpdate(state: .installed, version: version)), after: 33)
     }
 
-    private func thread(_ tid: String) -> ThreadSummary? { threads.first { $0.id == tid } }
+    func thread(_ tid: String) -> ThreadSummary? { threads.first { $0.id == tid } }
 
     private func gitThread(_ target: GitTarget) -> ThreadSummary? {
         if case .thread(let tid) = target { thread(tid) } else { nil }
@@ -583,7 +587,7 @@ final class MockHost: Backend {
 
     // MARK: Plumbing
 
-    private static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+    static var now: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
     private static var nowMs: Int64 { now }
 
     private static func requestId(_ item: TItem) -> String? {
@@ -950,6 +954,35 @@ final class MockHost: Backend {
         add(id, .assistant(text: "I've started two sub-agents on the largest crates and will report when they're done.", streaming: false))
         add(id, .turnEnd(tookSecs: 40))
 
+        // What the Mac's transcript draws besides plain messages and answers: a consult, a
+        // restatement, sub-agents' reports, code, a thought in Markdown, a verified turn.
+        id = "t-parity"
+        threads.insert(t(id, "Cache the session lookups", "p-trek", "claude-code", "claude-opus-5-5", .idle, section: .inbox,
+                         branch: "perf/session-cache", worktree: true, ago: 3, add: 64, del: 12), at: 5)
+        seq[id] = 0
+        items[id] = []
+        for (body, at, extras) in DemoMac.parityThread(endingAt: now) {
+            add(id, body, at: at)
+            if let extras, let last = items[id]?.indices.last { items[id]?[last].extras = extras }
+        }
+        // Newer than any copy a phone kept of an older demo's: drawn whole.
+        rewritten[id] = seq[id]
+
+        // Stopped at its agent's usage limit, with a message waiting for the reset.
+        id = "t-limit"
+        var limited = t(id, "Port the docs search to Rust", "p-atlas", "claude-code", "claude-opus-5-5", .idle, section: .inbox,
+                        branch: "feat/search-rs", ago: 4)
+        limited.pause = LimitPause(resetsAt: now + 134 * m, resume: false, wrapped: false)
+        limited.queued = [QueuedMessage(text: "Then wire it into the docs build.", reset: true)]
+        threads.insert(limited, at: 5)
+        seq[id] = 0
+        items[id] = []
+        for (body, at, extras) in DemoMac.limitThread(endingAt: now) {
+            add(id, body, at: at)
+            if let extras, let last = items[id]?.indices.last { items[id]?[last].extras = extras }
+        }
+        rewritten[id] = seq[id]
+
         // `-TrekBigThread 3000`: a thread as long as a real day's work, to measure with.
         let big = DemoMac.bigThreadSize
         if big > 0 {
@@ -1126,7 +1159,7 @@ extension MockHost {
                 deliver(.threadRemoved(gone), after: 0.3)
             }
         default:
-            return false
+            return takeLimitAction(tid, action, id: id)
         }
         return true
     }

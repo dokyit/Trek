@@ -54,6 +54,16 @@ enum DemoMac {
             t.context = ContextUse(used: 61_200, window: 200_000, percent: 31)
             t.cost = plan
             t.git = GitSummary(changed: 2, ahead: 1, behind: 0, defaultBranch: "main")
+        case "t-parity":
+            // Work on a branch with no PR yet: the composer offers Create PR.
+            t.context = ContextUse(used: 132_000, window: 200_000, percent: 66)
+            t.cost = plan
+            t.git = GitSummary(changed: 2, ahead: 3, behind: 0, defaultBranch: "main")
+            // Another thread works in the same folder: the composer says so.
+            t.sharesFolder = true
+        case "t-limit":
+            t.context = ContextUse(used: 88_000, window: 200_000, percent: 44)
+            t.cost = plan
         case "t-ratelimit":
             t.context = ContextUse(used: 22_400, window: 272_000, percent: 8)
             t.cost = metered

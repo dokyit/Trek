@@ -31,7 +31,7 @@ struct ThreadStatusStrip: View {
                         .buttonStyle(.plain)
                         .glassEffect(.regular.interactive(), in: Capsule())
                         .popover(isPresented: $showingCost) {
-                            ContextCostDetail(context: thread.context, cost: thread.cost)
+                            ContextCostDetail(context: thread.context, cost: thread.cost, threadID: thread.id)
                                 .presentationCompactAdaptation(.popover)
                         }
                         .accessibilityLabel(ContextCostLabel.spoken(thread.context, thread.cost))
@@ -148,6 +148,9 @@ struct ContextCostLabel: View {
 struct ContextCostDetail: View {
     var context: ContextUse?
     var cost: Cost?
+    /// The thread, for what fills its context and Compact now (a Mac that serves `context_card`).
+    var threadID: String? = nil
+    @Environment(AppModel.self) private var model
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -159,6 +162,9 @@ struct ContextCostDetail: View {
                         Text("\(Tokens.short(context.used)) of \(Tokens.short(context.window)) tokens")
                             .font(.ui(.subheadline)).monospacedDigit().foregroundStyle(Trek.muted)
                     }
+                }
+                if let threadID, model.serves(.contextCard, on: threadID) {
+                    ContextBreakdown(threadID: threadID)
                 }
             }
             if context != nil, cost != nil {

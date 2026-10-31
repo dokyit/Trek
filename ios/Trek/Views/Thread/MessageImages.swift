@@ -85,6 +85,8 @@ enum ViewerImage: Hashable {
     case message(threadID: String, itemID: String, index: Int)
     case note(noteID: String, path: String)
     case web(URL)
+    /// A picture on the Mac a thread names (an answer's `![](path)`, a watched video's frame).
+    case media(threadID: String, path: String)
 
     /// Its thumbnail, if it's been drawn already: shown blurred while the full image comes.
     var thumbnail: UIImage? {
@@ -92,6 +94,9 @@ enum ViewerImage: Hashable {
         case .message(let t, let i, let n): Attachments.cache.object(forKey: "\(t)/\(i)/\(n)@480" as NSString)
         case .note(let n, let p): Attachments.cache.object(forKey: "note:\(n)/\(p)@\(NoteImageView.thumbPx)" as NSString)
         case .web(let url): Attachments.cache.object(forKey: url.absoluteString as NSString)
+        case .media(let t, let p):
+            Attachments.cache.object(forKey: "media:\(t)/\(p)@\(AnswerImage.thumbPx)" as NSString)
+                ?? Attachments.cache.object(forKey: "media:\(t)/\(p)@\(WatchedVideoView.framePx)" as NSString)
         }
     }
 
@@ -100,6 +105,7 @@ enum ViewerImage: Hashable {
         switch self {
         case .message(let t, let i, let n): return await model.attachment(t, item: i, index: n, maxPx: maxPx)
         case .note(let n, let p): return await model.noteAsset(n, path: p, maxPx: maxPx)
+        case .media(let t, let p): return await model.mediaImage(t, path: p, maxPx: maxPx)
         case .web(let url):
             let key = url.absoluteString as NSString
             if let image = Attachments.cache.object(forKey: key) { return image }

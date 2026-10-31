@@ -74,6 +74,14 @@ nonisolated enum Access: String, LenientEnum, CaseIterable, Identifiable {
     case supervised, autoAcceptEdits = "auto-accept-edits", auto, fullAccess = "full-access"
     static var fallback: Access { .autoAcceptEdits }
     var id: String { rawValue }
+    /// The label where a chip has little room.
+    var shortLabel: String {
+        switch self {
+        case .autoAcceptEdits: "Accept edits"
+        default: label
+        }
+    }
+
     var label: String {
         switch self {
         case .supervised: "Supervised"
@@ -128,6 +136,11 @@ nonisolated enum ThreadAction: Hashable {
     case wake, markUnread, regenerateTitle
     /// Unconfirmed, the Mac answers `conflict` with what its confirmation says.
     case delete(confirmed: Bool)
+    /// The limit bar's (`limit_actions`): send what waits once the limit resets, or not; try
+    /// again now; snooze until the reset.
+    case resumeAtReset, cancelResume, tryAgain, snoozeUntilReset
+    /// The context card's Compact now (`context_card`): the agent's own `/compact`.
+    case compact
     var json: [String: Any] {
         switch self {
         case .pin: ["kind": "pin"]
@@ -147,6 +160,11 @@ nonisolated enum ThreadAction: Hashable {
         case .markUnread: ["kind": "mark_unread"]
         case .regenerateTitle: ["kind": "regenerate_title"]
         case .delete(let confirmed): confirmed ? ["kind": "delete", "confirmed": true] : ["kind": "delete"]
+        case .resumeAtReset: ["kind": "resume_at_reset"]
+        case .cancelResume: ["kind": "cancel_resume"]
+        case .tryAgain: ["kind": "try_again"]
+        case .snoozeUntilReset: ["kind": "snooze_until_reset"]
+        case .compact: ["kind": "compact"]
         }
     }
 }
@@ -251,6 +269,10 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     /// Its turn is over but it still waits on work it started: the Mac's sidebar keeps it at work
     /// ("Waiting"). Nil from older Macs (`waitsInBackground` works it out then).
     var busyInBackground: Bool? = nil
+    /// Another thread is also editing this folder (the Mac's composer says so). Nil from older Macs.
+    var sharesFolder: Bool? = nil
+    /// Paused at a usage limit: when it resets, whether it resumes then by itself.
+    var pause: LimitPause? = nil
 }
 
 nonisolated struct ContextUse: Codable, Hashable {
@@ -467,12 +489,16 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
     var seq: Int64
     var at: Int64?
     var body: ItemBody
+    /// What newer Macs add to some kinds (a turn's verification, a handoff's agents, a message's
+    /// videos, a `watch_video` call's frames); empty from older ones.
+    var extras = ItemExtras()
 
-    init(id: String, seq: Int64, at: Int64? = nil, body: ItemBody) {
+    init(id: String, seq: Int64, at: Int64? = nil, body: ItemBody, extras: ItemExtras = ItemExtras()) {
         self.id = id
         self.seq = seq
         self.at = at
         self.body = body
+        self.extras = extras
     }
 
     /// Every field any item kind can carry; the `kind` picks which ones matter.
@@ -508,6 +534,11 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         var agent: AgentRef? = nil
         var open: Bool? = nil
         var card: RemoteCard? = nil
+        var verified: Verification? = nil
+        var fromAgent: AgentRef? = nil
+        var toAgent: AgentRef? = nil
+        var videos: [String]? = nil
+        var watch: WatchedMedia? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -515,6 +546,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         id = r.id
         seq = r.seq
         at = r.at
+        extras = ItemExtras(verified: r.verified, fromAgent: r.fromAgent, toAgent: r.toAgent, videos: r.videos ?? [], watch: r.watch)
         let text = r.text ?? ""
         switch r.kind {
         case "user": body = .user(text: text, images: r.images ?? 0, aside: r.aside ?? false)
@@ -556,6 +588,11 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
     /// back: for the transcript cache on disk, and for the demo Mac.
     func encode(to encoder: Encoder) throws {
         var r = Raw(id: id, seq: seq, at: at, kind: "")
+        r.verified = extras.verified
+        r.fromAgent = extras.fromAgent
+        r.toAgent = extras.toAgent
+        r.videos = extras.videos.isEmpty ? nil : extras.videos
+        r.watch = extras.watch
         switch body {
         case .user(let text, let images, let aside): r.kind = "user"; r.text = text; r.images = images; r.aside = aside ? true : nil
         case .assistant(let text, let streaming): r.kind = "assistant"; r.text = text; r.streaming = streaming
@@ -652,6 +689,10 @@ nonisolated enum ServerMessage {
     case noteAsset(re: String?, NoteAsset)
     case noteImage(re: String?, NoteImage)
     case noteFileChunk(re: String?, NoteFileChunk)
+    /// A file a thread names (`media`): an image whole, scaled down, or a piece of a video.
+    case media(re: String?, MediaChunk)
+    case contextCard(re: String?, ContextCard)
+    case turnPreview(re: String?, TurnPreview)
     /// How an iPhone update the Mac runs is going (to every phone, asked or not).
     case phoneUpdate(PhoneUpdate)
     case unknown(String)
@@ -745,6 +786,9 @@ nonisolated enum ServerMessage {
         case "note_image": return .noteImage(re: r.re, try decoder.decode(NoteImage.self, from: data))
         case "note_file_chunk": return .noteFileChunk(re: r.re, try decoder.decode(NoteFileChunk.self, from: data))
         case "phone_update": return .phoneUpdate(try decoder.decode(PhoneUpdate.self, from: data))
+        case "media": return .media(re: r.re, try decoder.decode(MediaChunk.self, from: data))
+        case "context_card": return .contextCard(re: r.re, try decoder.decode(ContextCard.self, from: data))
+        case "turn_preview": return .turnPreview(re: r.re, try decoder.decode(TurnPreview.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -848,6 +892,15 @@ nonisolated enum ClientMessage {
     /// Build this app on the Mac and install it here (`update_phone`), at `version` when it's one
     /// the Mac found but hasn't installed itself.
     case updatePhone(version: String?)
+    /// A file the thread names (`media`): an image fitting `maxPx`, or `length` bytes of a video
+    /// from `offset`.
+    case media(threadId: String, path: String, maxPx: Int?, offset: Int64, length: Int?)
+    /// What fills the thread's context window (`context_card`).
+    case contextCard(threadId: String)
+    /// Which files undoing, retrying or rewinding would put back (`turn_preview`).
+    case turnPreview(threadId: String, itemId: String, action: TurnAction)
+    /// `send` with consultants (`consult`).
+    case sendConsult(threadId: String, text: String, mode: SendMode?, images: [ImageUpload], consult: ConsultRequest)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     /// The build (the number of commits it was built from, `install-device.sh`).
@@ -951,6 +1004,8 @@ nonisolated enum ClientMessage {
         case .useReset, .queueAction, .attachment, .backgroundOutput, .stopBackground, .icon, .noteAsset, .addNoteImage, .noteFile,
              .cardAction:
             o = parityJSON
+        case .media, .contextCard, .turnPreview, .sendConsult:
+            o = transcriptParityJSON
         }
         if let id { o["id"] = id }
         return o
