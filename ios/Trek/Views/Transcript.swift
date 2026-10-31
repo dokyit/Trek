@@ -416,8 +416,10 @@ struct WorkingLine: View {
                         .shimmering()
                         .lineLimit(1)
                         .fixedSize()
-                        .contentTransition(.opacity)
-                        .animation(motion ? .easeInOut(duration: 0.35) : nil, value: TrailWord.line(threadID, since: since, now: ctx.date))
+                        // The new word in place at once: cross-faded, the old one (often longer)
+                        // lay over the clock beside it while it went.
+                        .id(TrailWord.line(threadID, since: since, now: ctx.date))
+                        .transition(.identity)
                     if let since {
                         Text(When.duration(Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000)))
                             .monospacedDigit()
