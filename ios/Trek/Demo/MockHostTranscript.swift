@@ -106,6 +106,8 @@ extension DemoMac {
                         detail: [ContextDetail(label: "15 skills", value: "1.2k")], note: "Estimated, about 80 tokens a skill."),
             ContextPart(kind: "messages", label: "Messages", tokens: messages,
                         detail: [ContextDetail(label: "42 messages and tool results")], note: nil),
+            ContextPart(kind: "free", label: "Free", tokens: max(0, c.window - c.used - min(reserved, c.window - c.used))),
+            ContextPart(kind: "reserved", label: "Reserved for compacting", tokens: min(reserved, c.window - c.used)),
         ], compact: working || paused ? "busy" : "ready")
     }
 

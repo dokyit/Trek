@@ -16,7 +16,7 @@ struct ContextBreakdown: View {
             if let card {
                 bar(card)
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(card.parts) { part in
+                    ForEach(card.filled) { part in
                         HStack(spacing: 8) {
                             RoundedRectangle(cornerRadius: 2).fill(Self.color(part.kind)).frame(width: 8, height: 8)
                             Text(part.label).foregroundStyle(Trek.foreground.opacity(0.9))
@@ -26,12 +26,11 @@ struct ContextBreakdown: View {
                         .font(.ui(.footnote))
                         .accessibilityElement(children: .combine)
                     }
-                    let free = max(0, card.window - card.used - card.reserved)
                     HStack(spacing: 8) {
                         RoundedRectangle(cornerRadius: 2).strokeBorder(Trek.border, lineWidth: 1).frame(width: 8, height: 8)
-                        Text("Free until auto-compact").foregroundStyle(Trek.foreground.opacity(0.9))
+                        Text(card.parts.first { $0.kind == "free" }?.label ?? "Free until auto-compact").foregroundStyle(Trek.foreground.opacity(0.9))
                         Spacer(minLength: 8)
-                        Text(Tokens.short(free)).monospacedDigit().foregroundStyle(Trek.muted)
+                        Text(Tokens.short(card.free)).monospacedDigit().foregroundStyle(Trek.muted)
                     }
                     .font(.ui(.footnote))
                 }
@@ -53,14 +52,14 @@ struct ContextBreakdown: View {
         GeometryReader { geo in
             let window = CGFloat(max(1, card.window))
             HStack(spacing: 1.5) {
-                ForEach(card.parts) { part in
+                ForEach(card.filled) { part in
                     Rectangle().fill(Self.color(part.kind))
                         .frame(width: max(2, geo.size.width * CGFloat(part.tokens) / window))
                 }
                 Rectangle().fill(Trek.foreground.opacity(0.08))
-                if card.reserved > 0 {
+                if card.held > 0 {
                     Rectangle().fill(Trek.foreground.opacity(0.18))
-                        .frame(width: max(2, geo.size.width * CGFloat(card.reserved) / window))
+                        .frame(width: max(2, geo.size.width * CGFloat(card.held) / window))
                 }
             }
         }
@@ -119,4 +118,14 @@ struct ContextBreakdown: View {
         default: Color(hex: 0x6BC4A6)
         }
     }
+}
+
+extension ContextCard {
+    /// What fills the window: the parts before what's free and what the agent keeps back (a Mac
+    /// lists those two last, so the parts add up to the window).
+    var filled: [ContextPart] { parts.filter { $0.kind != "free" && $0.kind != "reserved" } }
+    /// Free until auto-compact.
+    var free: Int64 { parts.first { $0.kind == "free" }?.tokens ?? max(0, window - used - reserved) }
+    /// Kept back so compacting has room.
+    var held: Int64 { parts.first { $0.kind == "reserved" }?.tokens ?? reserved }
 }

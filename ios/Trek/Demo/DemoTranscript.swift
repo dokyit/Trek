@@ -64,7 +64,7 @@ extension DemoMac {
 
         Logging out evicts the entry. Requests that read a session went from 3.1 ms to 0.4 ms at p50.
         """
-        let shot = "The settings page after the change, as the app draws it:\n\n![Settings, after](docs/screens/settings-after.png)\n\nThe recording of the flow is in [the demo](docs/screens/flow.mp4) if you want the whole of it."
+        let shot = "The settings page after the change, as the app draws it:\n\n![Settings, after](docs/screens/settings-after.png)\n\nAnd the whole flow, recorded:\n\n[flow.mp4](docs/screens/flow.mp4)"
         let verified = ItemExtras(verified: Verification(passed: true, commands: ["./.agents/skills/verify-trek/scripts/trek-dev check"]))
         let watched = ItemExtras(watch: WatchedMedia(source: "docs/screens/flow.mp4", video: "/Users/demo/trek/docs/screens/flow.mp4", duration: 14,
                                                      frames: (0..<6).map { WatchedFrame(t: Double($0) * 2.5, path: "/tmp/watch/frame-\($0).jpg") }))

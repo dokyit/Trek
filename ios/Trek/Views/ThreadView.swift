@@ -30,6 +30,8 @@ final class ComposerState {
     var pickModelRequest = 0
     /// Consultants picked for the next message (the consult pill).
     var consult: ConsultRequest?
+    /// Bumped to open the consult sheet.
+    var consultRequest = 0
     /// What followed `/new` in the message just sent: the new thread's prompt, if the Mac asks
     /// for the sheet.
     @ObservationIgnored var newPrompt = ""
@@ -845,7 +847,13 @@ private struct ComposerArea: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if let thread {
                     if thread.sharesFolder == true { FolderSharedLine() }
-                    ThreadSettingsBar(thread: thread, pickRequest: composer.pickModelRequest)
+                    if let consult = composer.consult {
+                        ConsultLine(consult: consult, threadID: threadID, clear: { composer.consult = nil },
+                                    edit: { composer.consultRequest += 1 })
+                            .transition(.opacity)
+                    }
+                    ThreadSettingsBar(thread: thread, pickRequest: composer.pickModelRequest,
+                                      consult: $c.consult, consultRequest: composer.consultRequest)
                 }
                 Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos,
                          placeholder: "Message \(thread?.agent.name ?? "the agent")",
@@ -860,9 +868,9 @@ private struct ComposerArea: View {
         // rather than showing between the chips' glass.
         .background {
             VStack(spacing: 0) {
-                LinearGradient(colors: [Trek.background.opacity(0), Trek.background.opacity(0.92)], startPoint: .top, endPoint: .bottom)
+                LinearGradient(colors: [Trek.background.opacity(0), Trek.background], startPoint: .top, endPoint: .bottom)
                     .frame(height: 30)
-                Trek.background.opacity(0.92)
+                Trek.background
             }
             .ignoresSafeArea(edges: .bottom)
             .allowsHitTesting(false)
@@ -908,7 +916,9 @@ private struct ComposerArea: View {
         }
         newPromptSent(prompt)
         model.send(text.isEmpty ? "Here's a photo." : text, to: threadID,
-                   mode: store.summary?.runState == .working ? composer.mode : nil, images: uploads)
+                   mode: store.summary?.runState == .working ? composer.mode : nil, images: uploads,
+                   consult: model.serves(.consult, on: threadID) ? composer.consult : nil)
+        composer.consult = nil
         composer.cleared(after: composer.draft)
     }
 }

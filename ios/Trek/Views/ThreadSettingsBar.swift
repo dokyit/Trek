@@ -7,6 +7,11 @@ struct ThreadSettingsBar: View {
     var thread: ThreadSummary
     /// Bumped by the composer to open the model picker (the limit bar's Switch agent…).
     var pickRequest = 0
+    /// Consultants for the next message (the consult pill), where the Mac takes them.
+    var consult: Binding<ConsultRequest?>? = nil
+    /// Bumped to open the consult sheet (the line over the composer was tapped).
+    var consultRequest = 0
+    @State private var consulting = false
     @Environment(AppModel.self) private var model
     @State private var confirmingFull = false
 
@@ -36,6 +41,10 @@ struct ThreadSettingsBar: View {
         }
         .onAppear { if Launch.sheet == "model" { picking = true } }
         .onChange(of: pickRequest) { picking = true }
+        .onChange(of: consultRequest) { consulting = true }
+        .sheet(isPresented: $consulting) {
+            if let consult { ConsultSheet(threadID: thread.id, consult: consult) }
+        }
         .sheet(isPresented: $picking) {
             ModelPickerSheet(
                 agents: model.link(for: thread.id)?.agents ?? [],
@@ -66,6 +75,7 @@ struct ThreadSettingsBar: View {
             modelChip
             accessChip(label: words >= 2 ? access.label : words == 1 ? access.shortLabel : nil)
             planChip(labelled: words >= 3)
+            if consult != nil, model.serves(.consult, on: thread.id) { consultChip }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 2)
@@ -115,6 +125,19 @@ struct ThreadSettingsBar: View {
             case .failure(let e): if let m = e.message { model.show(m, error: true) }
             }
         }
+    }
+
+    /// The Mac's consult pill: other models to ask before the agent acts.
+    private var consultChip: some View {
+        let on = consult?.wrappedValue != nil
+        return Button { consulting = true } label: {
+            chip(selected: on) {
+                Image(systemName: "person.2.wave.2").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(on ? Trek.ember : Trek.muted)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(on ? "Consulting other models" : "Consult other models")
     }
 
     private func planChip(labelled: Bool) -> some View {
