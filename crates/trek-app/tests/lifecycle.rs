@@ -80,8 +80,9 @@ fn snoozes_end_in_the_morning_and_wake_back_into_the_inbox() {
             .unwrap()
             .with_timezone(&chrono::Local);
         assert_eq!(wake.format("%H:%M").to_string(), "09:00");
+        // A night the clocks go back has an hour more in it.
         assert!(
-            until > now_ms() && until - now_ms() <= 28 * 3_600_000,
+            until > now_ms() && until - now_ms() <= 29 * 3_600_000,
             "the coming morning, at most a day and a night away"
         );
         assert_eq!(section_of(&trek, cx, &id), Some(Section::Snoozed));
