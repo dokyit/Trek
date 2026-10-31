@@ -93,7 +93,7 @@ fn the_estimate_follows_usage_and_survives_a_relaunch() {
         });
         assert_eq!(
             label(&trek, cx, &id).as_deref(),
-            Some("≈ $0.11 at API prices")
+            Some("≈ $0.11 at API prices · included in plan")
         );
         // Streaming text changes nothing; the next usage report does.
         trek.update(cx, |ws, cx| {
@@ -101,7 +101,7 @@ fn the_estimate_follows_usage_and_survives_a_relaunch() {
         });
         assert_eq!(
             label(&trek, cx, &id).as_deref(),
-            Some("≈ $0.11 at API prices")
+            Some("≈ $0.11 at API prices · included in plan")
         );
         let tokens = TokenUsage {
             input: 1_000,
@@ -122,7 +122,7 @@ fn the_estimate_follows_usage_and_survives_a_relaunch() {
         });
         assert_eq!(
             label(&trek, cx, &id).as_deref(),
-            Some("≈ $1.11 at API prices")
+            Some("≈ $1.11 at API prices · included in plan")
         );
         // A consult under it adds its share.
         let child = trek.update(cx, |ws, cx| {
@@ -160,7 +160,7 @@ fn the_estimate_follows_usage_and_survives_a_relaunch() {
         });
         assert_eq!(
             label(&trek, cx, &id).as_deref(),
-            Some("≈ $1.14 at API prices"),
+            Some("≈ $1.14 at API prices · included in plan"),
             "+ 100,000 × $0.20 + 10,000 × $1.20 per million"
         );
         let b = trek
@@ -207,7 +207,7 @@ fn the_estimate_follows_usage_and_survives_a_relaunch() {
         trek.render(cx);
         assert_eq!(
             label(&trek, cx, &id).as_deref(),
-            Some("≈ $1.14 at API prices")
+            Some("≈ $1.14 at API prices · included in plan")
         );
         assert!(trek.visible(cx, "cost-estimate"));
         let _ = std::fs::remove_dir_all(dir);

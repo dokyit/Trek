@@ -741,7 +741,38 @@ pub fn request(
     cache_write_1h: u64,
     fast: bool,
 ) -> Option<UsageCost> {
-    let (p, fast_id) = price(model, agent)?;
+    request_on(
+        model,
+        agent,
+        tokens,
+        cache_write_1h,
+        fast,
+        Utc::now().date_naive(),
+    )
+}
+
+/// `request`, for a request made at `at_ms`: at the prices of its day (an agent's history,
+/// priced as it's read).
+pub fn request_at(
+    model: &str,
+    agent: &AgentId,
+    tokens: &TokenUsage,
+    cache_write_1h: u64,
+    fast: bool,
+    at_ms: i64,
+) -> Option<UsageCost> {
+    request_on(model, agent, tokens, cache_write_1h, fast, day_of(at_ms))
+}
+
+fn request_on(
+    model: &str,
+    agent: &AgentId,
+    tokens: &TokenUsage,
+    cache_write_1h: u64,
+    fast: bool,
+    day: NaiveDate,
+) -> Option<UsageCost> {
+    let (p, fast_id) = price_on(model, agent, day)?;
     Some(UsageCost::priced(p.request(
         tokens,
         cache_write_1h,

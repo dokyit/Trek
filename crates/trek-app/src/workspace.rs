@@ -3322,7 +3322,10 @@ impl Workspace {
                         .map(|c| c.item_id)
                         .collect();
                     let spend_data = if need_spend {
-                        let own = store.usage_of(&[tid.clone()]).unwrap_or_default();
+                        let mut own = store.usage_of(&[tid.clone()]).unwrap_or_default();
+                        if let Ok(Some(t)) = store.thread(&tid) {
+                            own.splice(0..0, trek_core::basecamp::history_usage(&store, &t, true));
+                        }
                         let subs = store.descendants(&tid).unwrap_or_default();
                         let theirs = store.usage_of(&subs).unwrap_or_default();
                         Some((own, subs, theirs))
@@ -9987,9 +9990,16 @@ fn viewing<W: PartialEq + Copy>(
 }
 
 impl Workspace {
-    /// What `id` and the sub-agents under it spent, from the store.
+    /// What `id` and the sub-agents under it spent, from the store (an imported thread's
+    /// history before Trek took it on as far as the store kept it: `load_for_view` reads it).
     fn load_spend(&self, id: &str) -> crate::cost::ThreadSpend {
-        let own = self.store.usage_of(&[id.to_string()]).unwrap_or_default();
+        let mut own = self.store.usage_of(&[id.to_string()]).unwrap_or_default();
+        if let Some(t) = self.thread(id) {
+            own.splice(
+                0..0,
+                trek_core::basecamp::history_usage(&self.store, t, false),
+            );
+        }
         let subs = self.store.descendants(id).unwrap_or_default();
         let theirs = self.store.usage_of(&subs).unwrap_or_default();
         let sub_threads = theirs
@@ -10128,26 +10138,21 @@ fn cost_reply(billing: Option<&Billing>, spend: &crate::cost::ThreadSpend) -> St
 }
 
 pub fn fmt_tokens(n: u64) -> String {
-    match n {
-        0..=999 => n.to_string(),
-        1_000..=999_999 => format!("{:.0}K", n as f64 / 1_000.),
-        1_000_000..=999_999_999 => {
-            let m = n as f64 / 1_000_000.;
-            if m.fract() < 0.05 {
-                format!("{m:.0}M")
-            } else {
-                format!("{m:.1}M")
-            }
-        }
-        _ => {
-            let b = n as f64 / 1_000_000_000.;
-            if b.fract() < 0.05 {
-                format!("{b:.0}B")
-            } else {
-                format!("{b:.1}B")
-            }
-        }
+    if n < 1_000 {
+        return n.to_string();
     }
+    // Rounded first, then named: 999.6K is "1M", not "1000K", and 1.96M is "2M", not "2.0M".
+    let k = (n as f64 / 1_000.).round();
+    if k < 1_000. {
+        return format!("{k:.0}K");
+    }
+    let tenths = |div: f64| (n as f64 / div * 10.).round() / 10.;
+    let (x, unit) = match tenths(1e6) {
+        m if m < 1_000. => (m, "M"),
+        _ => (tenths(1e9), "B"),
+    };
+    let s = format!("{x:.1}");
+    format!("{}{unit}", s.strip_suffix(".0").unwrap_or(&s))
 }
 
 /// The bundled `trek-mcp` server: next to the app binary, else a dev build.

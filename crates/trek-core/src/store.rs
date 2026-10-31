@@ -1075,12 +1075,14 @@ impl Store {
         Ok(open)
     }
 
-    /// Agent session ids of Trek's own threads, archived ones included, and the sessions threads
-    /// left behind when a rewind or a fork moved them to another (`retire_session`).
+    /// Agent session ids of Trek's own threads, archived ones included, of imported threads that
+    /// went on here with another agent (a Codex thread continued in Claude Code runs a Claude
+    /// session, which Claude Code's history then lists as one of its own), and the sessions
+    /// threads left behind when a rewind or a fork moved them to another (`retire_session`).
     pub fn trek_native_ids(&self) -> Result<HashSet<String>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT native_id FROM threads WHERE source = 'trek' AND native_id IS NOT NULL UNION SELECT native_id FROM retired_sessions",
+                "SELECT native_id FROM threads WHERE native_id IS NOT NULL AND (source = 'trek' OR (source IN ('claude-code', 'codex', 'opencode') AND agent <> source)) UNION SELECT native_id FROM retired_sessions",
             )?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect()
@@ -2574,6 +2576,28 @@ mod tests {
         );
         s.delete_thread(&t.id).unwrap();
         assert!(s.checkpoints(&t.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_session_an_imported_thread_went_on_with_in_another_agent_is_trek_s() {
+        let s = Store::in_memory().unwrap();
+        let thread = |source: ThreadSource, agent: AgentId, native: &str| {
+            let mut t = s
+                .create_thread(None, agent, None, Effort::High, HandHolding::Auto)
+                .unwrap();
+            t.source = source;
+            t.native_id = Some(native.into());
+            s.save_thread(&t).unwrap();
+        };
+        // Imported from Codex, continued here in Claude Code: its session is a Claude one, which
+        // Claude Code's history lists too. Imported and still on its own agent: not Trek's.
+        thread(ThreadSource::Codex, AgentId::ClaudeCode, "claude-session");
+        thread(ThreadSource::ClaudeCode, AgentId::ClaudeCode, "own-session");
+        thread(ThreadSource::Codex, AgentId::Codex, "codex-session");
+        assert_eq!(
+            s.trek_native_ids().unwrap(),
+            HashSet::from(["claude-session".to_string()])
+        );
     }
 
     #[test]

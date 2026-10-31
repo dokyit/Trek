@@ -443,7 +443,11 @@ pub(super) fn usage_in(path: &Path, from: i64, to: i64) -> Vec<UsageEntry> {
         if let Some(at) = at.filter(|at| (from..to).contains(at))
             && !used.is_empty()
         {
-            out.push((at, model.clone(), used));
+            // One request: its prompt's size sets its tier.
+            let cost = model.as_deref().and_then(|m| {
+                crate::pricing::request_at(m, &crate::types::AgentId::Codex, &used, 0, false, at)
+            });
+            out.push((at, model.clone(), used, cost.map(|c| c.usd)));
         }
     }
     out
@@ -1337,7 +1341,7 @@ mod tests {
         let got = usage_in(&path, from, from + 86_400_000);
         assert_eq!(
             got.iter()
-                .map(|(_, m, t)| (m.as_deref().unwrap(), *t))
+                .map(|(_, m, t, _)| (m.as_deref().unwrap(), *t))
                 .collect::<Vec<_>>(),
             [
                 (

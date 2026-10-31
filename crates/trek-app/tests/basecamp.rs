@@ -1,6 +1,6 @@
 //! Basecamp: opening and leaving it, the empty range, what needs the user, the totals, the chart
-//! (its bars per range) and the tables by project and model, and the token usage a turn records
-//! for it.
+//! (its bars per range) and the tables by project and model, the token usage a turn records for
+//! it, and every figure checked by hand against a seeded store.
 
 mod common;
 
@@ -1061,4 +1061,610 @@ fn reopened_basecamp_shows_what_it_had_at_once_while_it_catches_up() {
         assert_eq!(recap(&trek, cx).prompts, 2);
         assert_eq!(basecamp.read_with(cx, |b, _| b.passes), passes + 1);
     });
+}
+
+/// A local time in `tz` ("2026-10-28 10:00"), in unix ms.
+fn local(tz: &FixedOffset, s: &str) -> i64 {
+    let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+    tz.from_local_datetime(&naive).unwrap().timestamp_millis()
+}
+
+/// A Claude Code session file as Claude Code writes them, with its sub-agents' files beside it:
+/// the first an Agent tool's, the rest a workflow's (`subagents/workflows/<run>/`).
+fn claude_session(native: &str, lines: &[serde_json::Value], subs: &[serde_json::Value]) {
+    let dir = trek_core::paths::home()
+        .join(".claude/projects")
+        .join("-basecamp-accuracy");
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = |lines: &[serde_json::Value]| {
+        lines
+            .iter()
+            .map(|l| l.to_string() + "\n")
+            .collect::<String>()
+    };
+    std::fs::write(dir.join(format!("{native}.jsonl")), body(lines)).unwrap();
+    if let Some((first, rest)) = subs.split_first() {
+        let sub = dir.join(native).join("subagents");
+        let workflow = sub.join("workflows").join("wf_1");
+        std::fs::create_dir_all(&workflow).unwrap();
+        std::fs::write(
+            sub.join("agent-a1.jsonl"),
+            body(std::slice::from_ref(first)),
+        )
+        .unwrap();
+        std::fs::write(workflow.join("agent-w1.jsonl"), body(rest)).unwrap();
+    }
+}
+
+fn claude_user(native: &str, text: &str, at: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "user", "timestamp": at, "sessionId": native, "isSidechain": false,
+        "uuid": format!("u-{at}"), "message": { "role": "user", "content": text } })
+}
+
+/// A response's line; `usage` is `[input, output, cache read, cache write, of which an hour]`.
+fn claude_reply(
+    native: &str,
+    id: &str,
+    model: &str,
+    usage: [u64; 5],
+    at: &str,
+    done: bool,
+) -> serde_json::Value {
+    let [input, output, read, write, hour] = usage;
+    serde_json::json!({ "type": "assistant", "timestamp": at, "sessionId": native, "isSidechain": false,
+        "uuid": format!("a-{id}-{at}"),
+        "message": { "id": id, "role": "assistant", "model": model,
+            "content": [{ "type": "text", "text": "Done." }],
+            "stop_reason": if done { serde_json::Value::from("end_turn") } else { serde_json::Value::Null },
+            "usage": { "input_tokens": input, "output_tokens": output, "cache_read_input_tokens": read,
+                "cache_creation_input_tokens": write,
+                "cache_creation": { "ephemeral_5m_input_tokens": write - hour, "ephemeral_1h_input_tokens": hour } } } })
+}
+
+fn forked(mut line: serde_json::Value, from: &str) -> serde_json::Value {
+    line["forkedFrom"] = serde_json::json!({ "sessionId": from, "messageUuid": "a-m1" });
+    line
+}
+
+fn tokens(input: u64, output: u64, cache_read: u64, cache_write: u64) -> TokenUsage {
+    TokenUsage {
+        input,
+        output,
+        cache_read,
+        cache_write,
+    }
+}
+
+/// Every figure Basecamp shows, worked out by hand from a store seeded with a week of work in a
+/// time zone behind UTC: turns across midnight and across the week's start, a sub-agent, a
+/// thread still running, a failed turn, threads the user archived, imported Claude Code
+/// sessions (one with a sub-agent of its own and hour-long cache writes, a fork of it, one
+/// archived, one the import set aside), and a thread whose agent reported no tokens.
+#[test]
+fn every_figure_basecamp_shows_adds_up_from_the_store() {
+    use trek_core::basecamp::Gathered;
+    use trek_core::types::UsageCost;
+    let tz = FixedOffset::west_opt(5 * 3600).unwrap();
+    let at = |s: &str| local(&tz, s);
+    // Wednesday afternoon; the week began on Monday the 26th.
+    let now = chrono::DateTime::from_timestamp_millis(at("2026-10-28 15:00"))
+        .unwrap()
+        .with_timezone(&tz);
+    let store = Store::in_memory().unwrap();
+    let (alpha, beta) = (new_project("alpha"), new_project("beta"));
+    let claude = AgentId::ClaudeCode;
+    let opus = "claude-opus-5-5";
+    let sonnet = "claude-sonnet-5-5";
+    let new = |dir: Option<&std::path::PathBuf>, agent: AgentId, model: Option<&str>| {
+        store
+            .create_thread(
+                dir.map(|d| d.as_path()),
+                agent,
+                model.map(String::from),
+                Effort::High,
+                HandHolding::Auto,
+            )
+            .unwrap()
+    };
+    let user = |text: &str, at: i64| Item::User {
+        text: text.into(),
+        images: vec![],
+        at: Some(at),
+        resume: None,
+        aside: false,
+    };
+    let reply = || Item::Assistant {
+        text: "Done.".into(),
+    };
+    let end = |at: i64, took_secs: u32| Item::TurnEnd { at, took_secs };
+    let set = |id: &str, f: &dyn Fn(&mut trek_core::store::Thread)| {
+        store.update_thread(id, |t| f(t)).unwrap();
+    };
+
+    // 1. Alpha, Opus: a turn from 23:30 last night to 00:30, one this morning, one still running.
+    let t1 = new(Some(&alpha), claude.clone(), Some(opus));
+    store_items(
+        &store,
+        &t1.id,
+        vec![
+            user("Plan the parser", at("2026-10-27 23:30")),
+            reply(),
+            end(at("2026-10-28 00:30"), 3_600),
+            user("Write it", at("2026-10-28 10:00")),
+            reply(),
+            end(at("2026-10-28 10:10"), 600),
+            user("Now the tests", at("2026-10-28 14:00")),
+        ],
+    );
+    store
+        .record_usage(
+            &t1.id,
+            at("2026-10-28 00:30"),
+            &claude,
+            Some(opus),
+            &tokens(1_000, 2_000, 50_000, 4_000),
+            Some(UsageCost::reported(1.0)),
+        )
+        .unwrap();
+    store
+        .record_usage(
+            &t1.id,
+            at("2026-10-28 10:10"),
+            &claude,
+            Some(opus),
+            &tokens(500, 1_500, 20_000, 0),
+            None,
+        )
+        .unwrap();
+    set(&t1.id, &|t| {
+        t.run_state = RunState::Working;
+        t.updated_at = at("2026-10-28 14:00");
+    });
+    // 2. Its sub-agent on Sonnet: its turn and tokens count, it isn't a thread, its brief no prompt.
+    let t2 = new(Some(&alpha), claude.clone(), Some(sonnet));
+    store_items(
+        &store,
+        &t2.id,
+        vec![
+            user("Read the grammar", at("2026-10-28 10:02")),
+            reply(),
+            end(at("2026-10-28 10:05"), 180),
+        ],
+    );
+    store
+        .record_usage(
+            &t2.id,
+            at("2026-10-28 10:05"),
+            &claude,
+            Some(sonnet),
+            &tokens(100, 200, 0, 0),
+            None,
+        )
+        .unwrap();
+    set(&t2.id, &|t| {
+        t.parent_id = Some(t1.id.clone());
+        t.updated_at = at("2026-10-28 10:05");
+    });
+    // 3. Beta, Codex: a turn from Sunday 23:50 to Monday 00:20, one last week, one failed today.
+    let codex = AgentId::Codex;
+    let t3 = new(Some(&beta), codex.clone(), Some("gpt-6-astra"));
+    store_items(
+        &store,
+        &t3.id,
+        vec![
+            user("Audit the API", at("2026-10-20 09:00")),
+            reply(),
+            end(at("2026-10-20 09:05"), 300),
+            user("And the client", at("2026-10-25 23:50")),
+            reply(),
+            end(at("2026-10-26 00:20"), 1_800),
+            user("Fix what you found", at("2026-10-28 10:58")),
+        ],
+    );
+    store
+        .record_stop(&t3.id, at("2026-10-28 11:00"), 120, true)
+        .unwrap();
+    for (when, used) in [
+        ("2026-10-20 09:05", tokens(5_000, 0, 0, 0)),
+        ("2026-10-26 00:20", tokens(10_000, 1_000, 90_000, 0)),
+    ] {
+        store
+            .record_usage(&t3.id, at(when), &codex, Some("gpt-6-astra"), &used, None)
+            .unwrap();
+    }
+    set(&t3.id, &|t| {
+        t.run_state = RunState::Failed;
+        t.updated_at = at("2026-10-28 11:00");
+    });
+    // 4. Alpha, archived by the user after this morning's turn: the work still counts.
+    let t4 = new(Some(&alpha), claude.clone(), Some(opus));
+    store_items(
+        &store,
+        &t4.id,
+        vec![
+            user("Tidy the README", at("2026-10-28 08:50")),
+            reply(),
+            end(at("2026-10-28 09:00"), 120),
+        ],
+    );
+    store
+        .record_usage(
+            &t4.id,
+            at("2026-10-28 09:00"),
+            &claude,
+            Some(opus),
+            &tokens(0, 10_000, 0, 0),
+            Some(UsageCost::reported(0.25)),
+        )
+        .unwrap();
+    set(&t4.id, &|t| {
+        t.archived_at = Some(at("2026-10-28 09:30"));
+        t.updated_at = at("2026-10-28 09:00");
+    });
+    // 5. Alpha, imported from Claude Code (13:00 UTC is 08:00 here): a response written as two
+    // lines, its cache written for an hour, and two sub-agents of its own on Sonnet (one in a
+    // workflow).
+    let imported = |dir: Option<&std::path::PathBuf>, native: &str, last: i64| {
+        let t = new(dir, claude.clone(), None);
+        set(&t.id, &|t| {
+            t.source = trek_core::ThreadSource::ClaudeCode;
+            t.native_id = Some(native.to_string());
+            t.updated_at = last;
+        });
+        t
+    };
+    let n5 = uuid::Uuid::new_v4().to_string();
+    claude_session(
+        &n5,
+        &[
+            claude_user(&n5, "Plan the release", "2026-10-28T13:00:00.000Z"),
+            claude_reply(
+                &n5,
+                "m1",
+                opus,
+                [10, 5, 1_000, 2_000, 2_000],
+                "2026-10-28T13:00:59.000Z",
+                false,
+            ),
+            claude_reply(
+                &n5,
+                "m1",
+                opus,
+                [10, 100, 1_000, 2_000, 2_000],
+                "2026-10-28T13:01:00.000Z",
+                true,
+            ),
+        ],
+        &[
+            claude_reply(
+                &n5,
+                "s1",
+                sonnet,
+                [5, 50, 500, 0, 0],
+                "2026-10-28T13:00:30.000Z",
+                true,
+            ),
+            claude_reply(
+                &n5,
+                "w1",
+                sonnet,
+                [1, 9, 0, 0, 0],
+                "2026-10-28T13:00:40.000Z",
+                true,
+            ),
+        ],
+    );
+    let t5 = imported(Some(&alpha), &n5, at("2026-10-28 08:01"));
+    // 6. A fork of it, continued at noon: the copied conversation is the original's.
+    let n6 = uuid::Uuid::new_v4().to_string();
+    claude_session(
+        &n6,
+        &[
+            forked(
+                claude_user(&n6, "Plan the release", "2026-10-28T13:00:00.000Z"),
+                &n5,
+            ),
+            forked(
+                claude_reply(
+                    &n6,
+                    "m1",
+                    opus,
+                    [10, 100, 1_000, 2_000, 2_000],
+                    "2026-10-28T13:01:00.000Z",
+                    true,
+                ),
+                &n5,
+            ),
+            claude_user(&n6, "Try it another way", "2026-10-28T17:00:00.000Z"),
+            claude_reply(
+                &n6,
+                "m2",
+                opus,
+                [1, 10, 100, 0, 0],
+                "2026-10-28T17:01:00.000Z",
+                true,
+            ),
+        ],
+        &[],
+    );
+    let t6 = imported(None, &n6, at("2026-10-28 12:01"));
+    // 7. Beta, imported and then archived by the user: counted.
+    let n7 = uuid::Uuid::new_v4().to_string();
+    claude_session(
+        &n7,
+        &[
+            claude_user(&n7, "Check the docs", "2026-10-28T15:00:00.000Z"),
+            claude_reply(
+                &n7,
+                "m7",
+                opus,
+                [20, 200, 0, 0, 0],
+                "2026-10-28T15:02:00.000Z",
+                true,
+            ),
+        ],
+        &[],
+    );
+    let t7 = imported(Some(&beta), &n7, at("2026-10-28 10:02"));
+    set(&t7.id, &|t| t.archived_at = Some(at("2026-10-28 10:30")));
+    // 8. A session the import set aside (a run in a temp folder): not counted.
+    let n8 = uuid::Uuid::new_v4().to_string();
+    claude_session(
+        &n8,
+        &[
+            claude_user(&n8, "x", "2026-10-28T15:00:00.000Z"),
+            claude_reply(
+                &n8,
+                "m8",
+                opus,
+                [0, 999_999, 0, 0, 0],
+                "2026-10-28T15:01:00.000Z",
+                true,
+            ),
+        ],
+        &[],
+    );
+    let t8 = imported(None, &n8, at("2026-10-28 10:01"));
+    set(&t8.id, &|t| {
+        t.archived_at = Some(at("2026-10-28 10:01"));
+        t.import_hidden = Some("temp-dir".into());
+    });
+    // 9. No project, an agent that reported no tokens: half an hour of work.
+    let t9 = new(None, AgentId::OpenCode, None);
+    store_items(
+        &store,
+        &t9.id,
+        vec![
+            user("Rename the module", at("2026-10-28 13:00")),
+            reply(),
+            end(at("2026-10-28 13:30"), 1_800),
+        ],
+    );
+    set(&t9.id, &|t| t.updated_at = at("2026-10-28 13:30"));
+
+    let g = Gathered::gather(&store, None).unwrap();
+    // Read again with nothing changed, it comes to the same.
+    let again = Gathered::gather(&store, Some(g.clone())).unwrap();
+    assert_eq!(again.read, 0);
+    let shown = |range: Range| {
+        let s = trek_app::basecamp::summary(&g, range, &now);
+        assert_eq!(
+            trek_app::basecamp::summary(&again, range, &now),
+            s,
+            "{range:?} read again"
+        );
+        s
+    };
+    // The totals as drawn: threads, turns, tokens, cost, failures, agent time.
+    let totals = |s: &Summary| {
+        (
+            s.recap.threads.to_string(),
+            s.recap.turns.to_string(),
+            trek_app::workspace::fmt_tokens(s.recap.tokens.total()),
+            trek_app::basecamp::cost(&s.spend),
+            s.recap.failed.to_string(),
+            trek_app::basecamp::agent_time(s.recap.agent_secs),
+        )
+    };
+    let usd = |s: &Summary| s.spend.usd();
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    // What each report costs at API prices (per million: Opus 5.5 $4 in, $20 out, $0.20 cache
+    // reads, $5 five-minute and $8 hour-long writes; Sonnet 5.5 $2, $10, $0.20; GPT-6 Astra
+    // $10, $50, $1 cached). Claude Code's own figures stand as recorded.
+    let t1_morning = (500. * 4. + 1_500. * 20. + 20_000. * 0.2) / 1e6;
+    let t2_turn = (100. * 2. + 200. * 10.) / 1e6;
+    let t5_reply = (10. * 4. + 100. * 20. + 1_000. * 0.2 + 2_000. * 8.) / 1e6;
+    let t5_sub = (5. * 2. + 50. * 10. + 500. * 0.2 + 2. + 9. * 10.) / 1e6;
+    let t6_reply = (4. + 10. * 20. + 100. * 0.2) / 1e6;
+    let t7_reply = (20. * 4. + 200. * 20.) / 1e6;
+    let t3_monday = (10_000. * 10. + 1_000. * 50. + 90_000.) / 1e6;
+    let t3_last_week = 5_000. * 10. / 1e6;
+
+    // Today. Threads: 1, 3, 4, 5, 6, 7, 9 (the sub-agent isn't one, the set-aside session isn't
+    // counted). Turns: two of 1's (00:30 and 10:10), the sub-agent's, 3's failed one, 4's, 5's,
+    // the fork's own, 7's and 9's. Agent time: 1's night turn from midnight only (30 of its 60
+    // minutes), the rest whole: 1800 + 600 + 180 + 120 + 120 + 60 + 60 + 120 + 1800 = 4860 s.
+    // Tokens: 57,000 + 22,000 + 300 + 10,000 + 3,675 (5's reply and its sub-agents') + 111 (the
+    // fork's own) + 220.
+    let today = shown(Range::Today);
+    assert_eq!(
+        totals(&today),
+        (
+            "7".into(),
+            "9".into(),
+            "93K".into(),
+            "$1.31".into(),
+            "1".into(),
+            "1h 21m".into()
+        )
+    );
+    assert_eq!(today.recap.tokens.total(), 93_306);
+    assert_eq!(today.recap.agent_secs, 4_860);
+    let today_usd = 1.0 + t1_morning + t2_turn + 0.25 + t5_reply + t5_sub + t6_reply + t7_reply;
+    assert!(
+        close(usd(&today), today_usd),
+        "{} vs {today_usd}",
+        usd(&today)
+    );
+    assert_eq!(today.spend.unpriced(), 0, "every report has a price");
+    // Prompts: 1's two today (the night one was yesterday's), 3's, 4's, 5's, the fork's own, 7's, 9's.
+    assert_eq!(today.recap.prompts, 8);
+    // The chart: the turns in the hour they ended, adding up to the total.
+    assert_eq!((today.chart.step, today.chart.bars.len()), (Step::Hour, 24));
+    let by_hour: Vec<(usize, usize)> = today
+        .chart
+        .bars
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.turns > 0)
+        .map(|(i, b)| (i, b.turns))
+        .collect();
+    assert_eq!(
+        by_hour,
+        [(0, 1), (8, 1), (9, 1), (10, 3), (11, 1), (12, 1), (13, 1)]
+    );
+    assert_eq!(
+        today.chart.bars[10].line(),
+        "10 AM–11 AM · 3 turns · 23K tokens"
+    );
+    // By project: alpha (1 with its sub-agent, 4, 5), beta (3, 7), no project (the fork, 9).
+    let rows =
+        |rows: &[trek_app::basecamp::Row]| -> Vec<(String, usize, usize, String, String, usize)> {
+            rows.iter()
+                .map(|r| {
+                    (
+                        // Projects are named for their folders ("alpha-3").
+                        match r.project {
+                            Some(_) => r.label.rsplit_once('-').map_or(&*r.label, |(n, _)| n),
+                            None => &r.label,
+                        }
+                        .to_string(),
+                        r.threads,
+                        r.turns,
+                        trek_app::workspace::fmt_tokens(r.tokens),
+                        trek_app::basecamp::cost(&r.spend),
+                        r.failed,
+                    )
+                })
+                .collect()
+        };
+    let row = |l: &str, th: usize, tu: usize, tok: &str, c: &str, f: usize| {
+        (l.to_string(), th, tu, tok.to_string(), c.to_string(), f)
+    };
+    assert_eq!(
+        rows(&today.projects),
+        [
+            row("alpha", 3, 5, "93K", "$1.31", 0),
+            row("beta", 2, 2, "220", "< $0.01", 1),
+            row("No project", 2, 2, "111", "< $0.01", 0),
+        ]
+    );
+    // By model: Opus (1, 4, 5, the fork, 7), Sonnet (the sub-agent's turn; 5's sub-agent's
+    // tokens, so 5 counts under it too), then the two that reported no tokens.
+    assert_eq!(
+        rows(&today.models),
+        [
+            row("Claude Opus 5.5", 5, 6, "92K", "$1.31", 0),
+            row("Claude Sonnet 5.5", 1, 1, "865", "< $0.01", 0),
+            row("GPT-6 Astra", 1, 1, "0", "—", 1),
+            row("OpenCode", 1, 1, "0", "—", 0),
+        ]
+    );
+    // Every column adds up to the totals (threads aside in the model table, where a thread that
+    // used two models counts under each).
+    for table in [&today.projects, &today.models] {
+        let tokens: u64 = table.iter().map(|r| r.tokens).sum();
+        let turns: usize = table.iter().map(|r| r.turns).sum();
+        let failed: usize = table.iter().map(|r| r.failed).sum();
+        assert_eq!(
+            (tokens, turns, failed),
+            (
+                today.recap.tokens.total(),
+                today.recap.turns,
+                today.recap.failed
+            )
+        );
+    }
+
+    // This week adds Monday's 00:20 turn (20 of its 30 minutes ran this week) and its tokens,
+    // and all of 1's night turn: 4,860 + 1,800 + 1,200 = 7,860 s.
+    let week = shown(Range::Week);
+    assert_eq!(
+        totals(&week),
+        (
+            "7".into(),
+            "10".into(),
+            "194K".into(),
+            "$1.55".into(),
+            "1".into(),
+            "2h 11m".into()
+        )
+    );
+    assert_eq!(week.recap.agent_secs, 7_860);
+    assert!(close(usd(&week), today_usd + t3_monday));
+    let by_day: Vec<usize> = week.chart.bars.iter().map(|b| b.turns).collect();
+    assert_eq!(by_day, [1, 0, 9, 0, 0, 0, 0], "Monday to Sunday");
+
+    // All time runs from last Tuesday's first prompt, a day a bar: all of Monday's turn, and the
+    // one last week.
+    let all = shown(Range::All);
+    assert_eq!(
+        totals(&all),
+        (
+            "7".into(),
+            "11".into(),
+            "199K".into(),
+            "$1.60".into(),
+            "1".into(),
+            "2h 26m".into()
+        )
+    );
+    assert_eq!(all.recap.agent_secs, 8_760);
+    assert!(close(usd(&all), today_usd + t3_monday + t3_last_week));
+    assert_eq!(all.recap.window.start, at("2026-10-20 00:00"));
+    assert_eq!((all.chart.step, all.chart.bars.len()), (Step::Day, 9));
+    assert_eq!(
+        all.chart.bars.iter().map(|b| b.turns).collect::<Vec<_>>(),
+        [1, 0, 0, 0, 0, 0, 1, 0, 9]
+    );
+    assert_eq!(all.chart.bars[0].label, "Tue, Oct 20");
+
+    // The imported thread's own cost, as its header shows it: its history, sub-agent included,
+    // hour-long cache writes at their rate.
+    let t5 = store.thread(&t5.id).unwrap().unwrap();
+    let history = trek_core::basecamp::history_usage(&store, &t5, true);
+    assert_eq!(history.len(), 3);
+    assert!(close(
+        trek_core::store::UsageRow::spend(&history).usd(),
+        t5_reply + t5_sub
+    ));
+    // Kept by the read: the main thread's quick look finds the same.
+    assert_eq!(
+        trek_core::basecamp::history_usage(&store, &t5, false),
+        history
+    );
+    let _ = (t6, t8);
+}
+
+#[test]
+fn token_counts_are_rounded_before_they_are_named() {
+    let fmt = trek_app::workspace::fmt_tokens;
+    let cases = [
+        (999, "999"),
+        (1_000, "1K"),
+        (93_296, "93K"),
+        (999_499, "999K"),
+        // Not "1000K", nor "2.0M" for 1.96 million.
+        (999_600, "1M"),
+        (1_000_000, "1M"),
+        (1_250_000, "1.3M"),
+        (1_960_000, "2M"),
+        (2_959_600, "3M"),
+        (12_340_000, "12.3M"),
+        (999_960_000, "1B"),
+        (3_260_018_742, "3.3B"),
+    ];
+    for (n, shown) in cases {
+        assert_eq!(fmt(n), shown, "{n}");
+    }
 }

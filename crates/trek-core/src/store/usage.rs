@@ -235,7 +235,7 @@ impl Store {
     pub fn threads_since(&self, from: i64) -> Result<Vec<Thread>> {
         self.reading(|c| {
             let mut st = c.prepare(&format!(
-                "SELECT {} FROM threads WHERE updated_at >= ?1 AND import_hidden IS NULL AND (archived_at IS NULL OR source = 'trek') ORDER BY updated_at DESC",
+                "SELECT {} FROM threads WHERE updated_at >= ?1 AND import_hidden IS NULL ORDER BY updated_at DESC",
                 Self::THREAD_COLS
             ))?;
             let rows = st.query_map([from], Self::row_to_thread)?;

@@ -93,8 +93,9 @@ pub fn billing_note(billing: Option<&Billing>) -> Option<String> {
     }
 }
 
-/// The status strip's text: "≈ $1.24 at API prices" (a plan covers it, or how it's billed isn't
-/// known), "$1.24" (billed per token; "$1.00 + ≈ $0.30 from consults" when sub-agents, which
+/// The status strip's text: "≈ $1.24 at API prices · included in plan" (a plan covers it: the
+/// figure is what it would have cost, not a charge), "≈ $1.24 at API prices" (how it's billed
+/// isn't known), "$1.24" (billed per token; "$1.00 + ≈ $0.30 from consults" when sub-agents, which
 /// may run on a plan, spent some of it), "12.3K tokens · price unknown" (nothing has a price),
 /// "202K tokens · free" (the models are free), or nothing (no tokens yet, or a model on this
 /// Mac).
@@ -120,6 +121,7 @@ pub fn label(billing: Option<&Billing>, s: &ThreadSpend) -> Option<String> {
             if s.consults { "consults" } else { "sub-agents" }
         ),
         Some(Billing::Metered) => usd(s.usd()),
+        Some(Billing::Plan(_)) => format!("≈ {} at API prices · included in plan", usd(s.usd())),
         _ => format!("≈ {} at API prices", usd(s.usd())),
     })
 }
@@ -510,7 +512,8 @@ mod tests {
         let max = Billing::Plan(Some("Claude Max".into()));
         assert_eq!(
             label(Some(&max), &s).as_deref(),
-            Some("≈ $1.23 at API prices")
+            Some("≈ $1.23 at API prices · included in plan"),
+            "what it would have cost, which the plan covers"
         );
         assert_eq!(label(None, &s).as_deref(), Some("≈ $1.23 at API prices"));
         assert_eq!(label(Some(&Billing::Metered), &s).as_deref(), Some("$1.23"));
@@ -549,7 +552,7 @@ mod tests {
         );
         assert_eq!(
             label(Some(&max), &consulted).as_deref(),
-            Some("≈ $1.53 at API prices")
+            Some("≈ $1.53 at API prices · included in plan")
         );
         // No price for any of it: tokens, honestly.
         let unknown = ThreadSpend {

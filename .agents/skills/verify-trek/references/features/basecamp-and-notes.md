@@ -4,6 +4,8 @@
 
 Basecamp summarizes today, this week, or all work and highlights items ready for review. Notes is a persistent Markdown scratchpad with editing history, links, pictures, videos and files.
 
+What Basecamp's figures count (`trek_core::basecamp`, checked by hand in `tests/basecamp.rs` `every_figure_basecamp_shows_adds_up_from_the_store`): days are local calendar days, weeks run from Monday, all time from the day of the first prompt, turn or report. **Threads**: the user's threads (not sub-agents or editor chats) with a prompt, a finished turn or a token report in the range, archived ones included; sessions an import set aside are not. **Turns**: turns that ended (or failed or were stopped) in the range, sub-agents' included; a running turn counts once it ends. **Agent time**: the part of those turns that ran inside the range (a turn from 23:30 to 00:30 gives today 30 minutes). **Tokens**: input, output, cache reads and cache writes as the agents reported them; an imported Claude Code session counts its sub-agents' files and not a fork's copy of its original. **API cost**: those tokens at API prices (the agent's own figure where it gave one), not what a plan charges. **Needs review**: unread, finished threads in the Inbox or Pinned (a thread paused at its limit shows with its reset time).
+
 ## Reach it as a user
 
 Choose **Basecamp** or **Notes** at the top of the sidebar (⌘⇧H and ⌘⇧J). In Basecamp choose Today, Week, or All and mark items read. Type directly in Notes.

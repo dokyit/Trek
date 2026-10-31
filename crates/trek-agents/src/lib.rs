@@ -2590,7 +2590,7 @@ mod live_usage {
         let total = |t: &[TokenUsage]| t.iter().map(|t| t.total()).sum::<u64>();
         assert_eq!(
             total(&used.iter().map(|(_, t)| *t).collect::<Vec<_>>()),
-            total(&steps.iter().map(|(_, _, t)| *t).collect::<Vec<_>>())
+            total(&steps.iter().map(|(_, _, t, _)| *t).collect::<Vec<_>>())
         );
     }
 
