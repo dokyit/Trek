@@ -26,7 +26,7 @@ if [ -n "${TREK_PRE_PUSH_FULL:-}" ]; then
   say "clippy, as CI runs it (bug lints only)"
   cargo clippy -q -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
   cargo clippy -q --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
-  say "warnings as errors, as CI's test builds have them"
-  cargo check -q --workspace --all-targets --locked --config .github/ci-profile.toml
+  say "warnings as errors, as CI's test builds have them (RUSTFLAGS=-D warnings)"
+  RUSTFLAGS="-D warnings" cargo check -q --workspace --all-targets --locked
 fi
 say "ready to push"
