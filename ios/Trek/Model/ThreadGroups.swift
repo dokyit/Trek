@@ -27,6 +27,8 @@ struct ProjectGroup: Identifiable, Equatable {
     var name: String { project?.name ?? "No project" }
     var needs: Int { active.count { $0.waitsOnYou } }
     var working: Int { active.count(where: \.atWork) }
+    /// Done with their turns, a command of theirs still running (the sky dot).
+    var inBackground: Int { active.count(where: \.onlyRunsInBackground) }
     var unread: Int { quiet.count { $0.unseen } }
     var count: Int { active.count + quiet.count }
     var newest: Int64 { (active + quiet).map(\.updatedAt).max() ?? 0 }
@@ -48,8 +50,31 @@ extension ThreadSummary {
     /// and header).
     var atWork: Bool { runState == .working || waitsInBackground }
 
-    /// A row the Mac draws as a card: it waits on the user, works, or has sub-agents out.
-    var isActive: Bool { waitsOnYou || runState == .working || !runningSubAgents.isEmpty || waitsInBackground }
+    /// What its agent left running in the background (a command, a dev server, a watcher), turn
+    /// or no turn: the Mac's strip above the composer, and the still sky dot on its sidebar row.
+    /// From a Mac that sends only their titles, tasks that can't be opened or stopped from here.
+    var backgroundWork: [BackgroundTask] {
+        if let tasks = backgroundTasks, !tasks.isEmpty { return tasks }
+        return (background ?? []).enumerated().map { n, title in
+            BackgroundTask(id: "\(Self.titleOnly)\(n)", kind: .shell, title: title)
+        }
+    }
+
+    /// Something of its own still runs in the background.
+    var runsInBackground: Bool { !(backgroundTasks ?? []).isEmpty || !(background ?? []).isEmpty }
+
+    /// Its turn is over and nothing waits on the user, but a command or a server it started runs on.
+    var onlyRunsInBackground: Bool { runsInBackground && !atWork && !waitsOnYou }
+
+    /// The id of a task known only by its title (an older Mac's row).
+    static let titleOnly = "title:"
+
+    /// A row the Mac draws as a card: it waits on the user, works, or has sub-agents out. Here a
+    /// thread with work running in the background is kept out with them too, under its project,
+    /// so "Show more" never hides that something still runs (a folded project's header counts it).
+    var isActive: Bool {
+        waitsOnYou || runState == .working || !runningSubAgents.isEmpty || waitsInBackground || runsInBackground
+    }
 }
 
 extension AppModel {
@@ -94,11 +119,12 @@ extension AppModel {
         .sorted(by: order)
     }
 
-    /// Waiting on the user first, then working (longest at it first), then the rest.
-    private static func activeOrder(_ a: ThreadSummary, _ b: ThreadSummary) -> Bool {
+    /// Waiting on the user first, then working, then running in the background, then the rest.
+    static func activeOrder(_ a: ThreadSummary, _ b: ThreadSummary) -> Bool {
         if a.waitsOnYou != b.waitsOnYou { return a.waitsOnYou }
         let aw = a.atWork, bw = b.atWork
         if aw != bw { return aw }
+        if a.runsInBackground != b.runsInBackground { return a.runsInBackground }
         return a.updatedAt > b.updatedAt
     }
 }

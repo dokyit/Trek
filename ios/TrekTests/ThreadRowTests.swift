@@ -42,6 +42,55 @@ struct BusyInBackgroundTests {
     }
 }
 
+/// A command the agent left running, as the Mac's row carries it.
+private let devServer: [String: Any] = [
+    "id": "b1", "kind": "shell", "title": "cd \"/Users/sam/web\" && npm run dev", "line": "ready on :5173",
+    "since": 1_791_020_000_000, "readable": true, "stoppable": true,
+]
+
+@MainActor
+struct RunningInBackgroundTests {
+    @Test func aCommandStillRunningAfterTheTurnShows() throws {
+        // The user's case: the turn is over, nothing waits on a report, a command still runs.
+        let t = try row(["busy_in_background": false, "background": [devServer["title"]!], "background_tasks": [devServer]])
+        #expect(t.runsInBackground && t.onlyRunsInBackground)
+        #expect(!t.atWork, "not \"Waiting\": the Working pill stays for turns")
+        #expect(t.isActive, "kept out under its project, folded or not")
+        #expect(t.backgroundWork.map(\.id) == ["b1"])
+        #expect(t.backgroundWork.first?.since == 1_791_020_000_000)
+    }
+
+    @Test func anOlderMacsTitlesStillShow() throws {
+        let t = try row(["background": ["pnpm dev", "cargo watch"]])
+        #expect(t.runsInBackground)
+        #expect(t.backgroundWork.map(\.title) == ["pnpm dev", "cargo watch"])
+        #expect(t.backgroundWork.allSatisfy { $0.id.hasPrefix(ThreadSummary.titleOnly) && $0.stoppable == nil })
+    }
+
+    @Test func nothingRunningIsNothing() throws {
+        let t = try row(["busy_in_background": false])
+        #expect(!t.runsInBackground && !t.onlyRunsInBackground && !t.isActive)
+        #expect(t.backgroundWork.isEmpty)
+    }
+
+    @Test func aWorkingTurnKeepsItsPlace() throws {
+        let t = try row(["run_state": "working", "background_tasks": [devServer]])
+        #expect(t.runsInBackground && !t.onlyRunsInBackground && t.atWork)
+    }
+
+    @Test func itSortsAfterWorkAndBeforeTheQuiet() throws {
+        let working = try row(["id": "w", "run_state": "working", "updated_at": 1])
+        let running = try row(["id": "r", "background_tasks": [devServer], "updated_at": 2])
+        let quiet = try row(["id": "q", "updated_at": 3])
+        let sorted = [quiet, running, working].sorted(by: AppModel.activeOrder)
+        #expect(sorted.map(\.id) == ["w", "r", "q"])
+    }
+
+    @Test func oneLineOfACommand() {
+        #expect(BackgroundLine.oneLine("npm   run dev\n# second line") == "npm run dev")
+    }
+}
+
 struct ComposerEchoTests {
     @Test func sendingEmptiesTheComposer() {
         let c = ComposerState()

@@ -1077,6 +1077,53 @@ impl RemoteHost for DemoHost {
         Ok(())
     }
 
+    async fn background_output(
+        &self,
+        thread_id: &str,
+        task_id: &str,
+    ) -> HostResult<BackgroundOutput> {
+        let running = self
+            .thread(thread_id)
+            .is_some_and(|t| t.background_tasks.iter().any(|b| b.id == task_id));
+        if !running {
+            return Err(HostError::not_found("That task isn't running any more"));
+        }
+        let reads = {
+            let mut st = self.lock();
+            st.next_id += 1;
+            st.next_id as usize
+        };
+        Ok(BackgroundOutput {
+            thread_id: thread_id.into(),
+            task_id: task_id.into(),
+            output: Some(dev_output(reads)),
+        })
+    }
+
+    /// Stop, as the strip's button does: "Stopping…" a moment, then gone, row and all.
+    async fn stop_background(&self, thread_id: &str, task_id: &str) -> HostResult<()> {
+        let running = self
+            .thread(thread_id)
+            .is_some_and(|t| t.background_tasks.iter().any(|b| b.id == task_id));
+        if !running {
+            return Err(HostError::not_found("That task isn't running any more"));
+        }
+        self.update(thread_id, |t| {
+            if let Some(b) = t.background_tasks.iter_mut().find(|b| b.id == task_id) {
+                b.stopping = true;
+            }
+        });
+        let (host, thread_id, task_id) = (self.clone(), thread_id.to_string(), task_id.to_string());
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(1200)).await;
+            host.update(&thread_id, |t| {
+                t.background_tasks.retain(|b| b.id != task_id);
+                t.background = t.background_tasks.iter().map(|b| b.title.clone()).collect();
+            });
+        });
+        Ok(())
+    }
+
     async fn mark_seen(&self, thread_id: &str) -> HostResult<()> {
         if self.thread(thread_id).is_none() {
             return Err(HostError::not_found(format!("No thread {thread_id}")));
@@ -2261,7 +2308,92 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
     }
     seeds.push(Seed { thread: t, items });
 
+    // Its turn ended an hour ago, but the dev server it started still runs: the Mac's sky dot on
+    // its sidebar row and its strip above the composer.
+    let mut t = summary(
+        "t-devserver",
+        "Start the web app and check the proxy",
+        &web,
+        claude,
+        opus,
+        RunState::Idle,
+        Section::Inbox,
+        60,
+    );
+    t.additions = 24;
+    t.deletions = 2;
+    t.busy_in_background = Some(false);
+    t.background = vec![DEV_COMMAND.into()];
+    t.background_tasks = vec![BackgroundTask {
+        id: "bg-dev".into(),
+        kind: BackgroundKind::Shell,
+        title: DEV_COMMAND.into(),
+        line: Some("GET /api/health 200 in 4ms".into()),
+        since: Some(now_ms() - 61 * 60_000),
+        readable: true,
+        stoppable: true,
+        stopping: false,
+    }];
+    seeds.push(Seed {
+        thread: t,
+        items: vec![
+            user("Start the web app with the API proxy on and check /api/health answers through it."),
+            tool(
+                "Edit",
+                "web/vite.config.ts",
+                ToolStatus::Done,
+                "Applied 1 edit",
+                Some((24, 2)),
+            ),
+            tool(
+                "Run",
+                DEV_COMMAND,
+                ToolStatus::Done,
+                "Command running in background with ID: bg-dev.",
+                None,
+            ),
+            tool(
+                "Run",
+                "curl -s localhost:5173/api/health",
+                ToolStatus::Done,
+                "{\"ok\":true}",
+                None,
+            ),
+            assistant(
+                "The dev server is up on http://localhost:5173 with the proxy on: `/api/health` answers `{\"ok\":true}` through it. It keeps running in the background while you try the app.",
+            ),
+            ItemBody::TurnEnd {
+                took_secs: 52,
+                verified: None,
+            },
+        ],
+    });
+
     (vec![api, web, infra], seeds)
+}
+
+/// The command `t-devserver` left running.
+const DEV_COMMAND: &str = "cd \"/Users/sam/Developer/lumen/web\" && npm run dev -- --port 5173";
+
+/// What the dev server has printed, a little more each time it's read.
+fn dev_output(reads: usize) -> String {
+    let mut lines = vec![
+        "> lumen-web@0.9.0 dev".to_string(),
+        "> vite --port 5173".into(),
+        String::new(),
+        "  VITE v7.1.4  ready in 284 ms".into(),
+        String::new(),
+        "  ➜  Local:   http://localhost:5173/".into(),
+        "  ➜  Proxy:   /api → http://localhost:8080".into(),
+    ];
+    for n in 0..reads.min(40) {
+        lines.push(if n % 2 == 0 {
+            format!("GET /api/health 200 in {}ms", 3 + n % 3)
+        } else {
+            "[vite] hmr update /src/routes/Home.tsx".into()
+        });
+    }
+    lines.join("\n")
 }
 
 fn note_title(body: &str) -> String {
@@ -2690,6 +2822,7 @@ async fn main() -> std::io::Result<()> {
         feature::LIMIT_ACTIONS,
         feature::CONTEXT_CARD,
         feature::TURN_PREVIEW,
+        feature::BACKGROUND,
     ]
     .map(String::from)
     .to_vec();

@@ -108,6 +108,19 @@ extension DemoMac {
             Test Case '-[OfflineBannerTests testFlushesInOrder]' passed (0.019 seconds).
             Test Suite 'OfflineBannerTests' passed at 2026-10-12 14:02:11.270.
             """
+        case "bg-dev":
+            var lines = [
+                "> fieldnotes-web@0.9.0 dev",
+                "> vite --port 5173",
+                "",
+                "  VITE v7.1.4  ready in 284 ms",
+                "",
+                "  ➜  Local:   http://localhost:5173/",
+                "  ➜  Proxy:   /api → http://localhost:8080",
+                "[vite] page reload src/App.tsx",
+            ]
+            for n in 0..<min(tick, 8) { lines.append(n % 2 == 0 ? "GET /api/health 200 in \(3 + n % 3)ms" : "[vite] hmr update /src/routes/Home.tsx") }
+            return lines.joined(separator: "\n")
         default:
             var lines = [
                 "[Running 'cargo test -p trek-core']",

@@ -269,6 +269,7 @@ struct ThreadsView: View {
         section("Pinned", filtered(model.pinned))
         section("Needs you", filtered(model.needsYou), tint: Trek.approval)
         section("Working", filtered(model.working), tint: Trek.working)
+        section("In the background", filtered(model.inBackground), tint: Trek.sky)
         section("Snoozed", filtered(model.snoozed))
         section("Recent", filtered(model.recent))
     }
@@ -376,7 +377,7 @@ struct ThreadsView: View {
         pickedMachine = nil
         withAnimation(.snappy) {
             collapsed.remove("project:\(t.project?.id ?? "")")
-            for title in ["Pinned", "Needs you", "Working", "Snoozed", "Recent"] { collapsed.remove(title) }
+            for title in ["Pinned", "Needs you", "Working", "In the background", "Snoozed", "Recent"] { collapsed.remove(title) }
             if t.section == .settled { settledOpen = true }
         }
         DispatchQueue.main.async {
@@ -445,6 +446,14 @@ private struct ProjectHeader: View {
                         Text("\(group.working)")
                     }
                     .foregroundStyle(Trek.working)
+                }
+                if folded, group.inBackground > 0 {
+                    HStack(spacing: 4) {
+                        Circle().fill(Trek.sky).frame(width: 6, height: 6)
+                        Text("\(group.inBackground)")
+                    }
+                    .foregroundStyle(Trek.sky)
+                    .accessibilityLabel("\(group.inBackground) running in the background")
                 }
                 if group.unread > 0 {
                     Text("\(group.unread) new").foregroundStyle(Trek.done)
@@ -551,9 +560,9 @@ struct ThreadRow: View {
                 HStack(spacing: 6) {
                     if showsProject, let p = thread.project {
                         ProjectBadge(project: p, size: 16)
-                        // At work, the model and what it's doing need the room: the badge says
-                        // which project.
-                        if thread.runState != .working {
+                        // At work, the model and what it's doing need the room (and what still
+                        // runs in the background): the badge says which project.
+                        if thread.runState != .working, !thread.onlyRunsInBackground {
                             Text(p.name).foregroundStyle(Trek.muted).lineLimit(1).layoutPriority(-1)
                         }
                     }
@@ -563,7 +572,7 @@ struct ThreadRow: View {
                     Spacer(minLength: 0)
                     if !thread.runningSubAgents.isEmpty {
                         SubAgentsPill(agents: thread.runningSubAgents)
-                    } else if thread.additions + thread.deletions > 0, thread.needs == nil {
+                    } else if thread.additions + thread.deletions > 0, thread.needs == nil, !thread.onlyRunsInBackground {
                         DiffStat(additions: thread.additions, deletions: thread.deletions, font: .ui(.caption).monospacedDigit())
                             .opacity(recedes ? 0.6 : 0.9)
                     }
@@ -578,25 +587,49 @@ struct ThreadRow: View {
     private var trailing: some View {
         if thread.runState == .working, thread.needs == nil {
             // Working, and for how long, as the Mac's sidebar card says it.
-            WorkingPill(since: thread.workingSince)
+            HStack(spacing: 8) {
+                backgroundDot
+                WorkingPill(since: thread.workingSince)
+            }
         } else if let look = StatusLook.of(thread) {
-            StatusPill(look: look)
+            HStack(spacing: 8) {
+                backgroundDot
+                StatusPill(look: look)
+            }
         } else if thread.waitsInBackground {
             // Its turn is over, but what it started is still at it (the Mac's "Waiting").
-            StatusPill(look: StatusLook(label: "Waiting", color: Trek.working.opacity(0.8), symbol: nil, pulses: true))
+            HStack(spacing: 8) {
+                backgroundDot
+                StatusPill(look: StatusLook(label: "Waiting", color: Trek.working.opacity(0.8), symbol: nil, pulses: true))
+            }
         } else if thread.unseen {
             // Done and not read yet: an emerald dot by the time, as in the Mac's sidebar.
             HStack(spacing: 6) {
                 Circle().fill(Trek.done).frame(width: 7, height: 7)
+                backgroundDot
                 Text(When.short(thread.updatedAt)).font(.ui(.footnote).weight(.medium).monospacedDigit())
                     .foregroundStyle(Trek.muted)
             }
             .fixedSize()
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel("Done, unread, \(When.short(thread.updatedAt))")
         } else {
-            Text(When.short(thread.updatedAt))
-                .font(.ui(.subheadline).monospacedDigit())
-                .foregroundStyle(Trek.muted.opacity(0.8))
+            HStack(spacing: 6) {
+                backgroundDot
+                Text(When.short(thread.updatedAt))
+                    .font(.ui(.subheadline).monospacedDigit())
+                    .foregroundStyle(Trek.muted.opacity(0.8))
+            }
+            .fixedSize()
+        }
+    }
+
+    /// The Mac's still sky dot: what its agent left running in the background still runs.
+    @ViewBuilder
+    private var backgroundDot: some View {
+        if thread.runsInBackground {
+            Circle().fill(Trek.sky).frame(width: 7, height: 7)
+                .accessibilityLabel("Running in the background")
         }
     }
 
@@ -607,7 +640,8 @@ struct ThreadRow: View {
             if let host {
                 MachineTag(name: host, kind: hostKind, compact: true)
             }
-            if !showsProject || thread.runState == .working {
+            // The command still running needs the room more than the model does.
+            if (!showsProject || thread.runState == .working), !thread.onlyRunsInBackground {
                 Text(thread.modelLabel ?? thread.agent.name)
                     .foregroundStyle(thread.runState == .working ? Trek.foreground.opacity(0.8) : Trek.muted)
                     .fixedSize()
@@ -619,7 +653,7 @@ struct ThreadRow: View {
 
     private var hasDetail: Bool {
         thread.needs != nil || (thread.section == .snoozed && thread.snoozedUntil != nil)
-            || (thread.runState == .working && thread.activity != nil) || thread.branch != nil
+            || (thread.runState == .working && thread.activity != nil) || thread.runsInBackground || thread.branch != nil
     }
 
     @ViewBuilder
@@ -632,6 +666,8 @@ struct ThreadRow: View {
             RichText(markdown: activity, size: 15, style: .subheadline, autoPaths: true)
                 .foregroundStyle(Trek.muted)
                 .environment(\.projectHue, thread.project?.hue)
+        } else if thread.runsInBackground {
+            BackgroundLine(tasks: thread.backgroundWork)
         } else if let branch = thread.branch {
             Label {
                 Text(branch)
@@ -665,6 +701,44 @@ struct WorkingPill: View {
         .foregroundStyle(Trek.working)
         .fixedSize()
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Under a thread's title while a command or server it started still runs: "Running", what it
+/// runs (the first, and how many more), and for how long, as the Mac's strip says it.
+struct BackgroundLine: View {
+    var tasks: [BackgroundTask]
+
+    var body: some View {
+        if let first = tasks.first {
+            HStack(spacing: 5) {
+                Text("Running").foregroundStyle(Trek.foreground.opacity(0.8)).fixedSize()
+                Text(BackgroundLine.oneLine(first.title))
+                    .font(.code(.footnote))
+                    .foregroundStyle(Trek.muted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(-1)
+                if tasks.count > 1 {
+                    Text("+\(tasks.count - 1)").foregroundStyle(Trek.muted).fixedSize()
+                }
+                if let since = tasks.compactMap(\.since).min() {
+                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                        Text(When.duration(max(0, Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000))))
+                            .monospacedDigit()
+                            .foregroundStyle(Trek.muted)
+                    }
+                    .fixedSize()
+                }
+            }
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// A command's first line, its runs of spaces closed up.
+    static func oneLine(_ title: String) -> String {
+        let first = title.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? title
+        return first.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
     }
 }
 
