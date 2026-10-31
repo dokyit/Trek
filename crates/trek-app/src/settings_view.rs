@@ -2047,7 +2047,7 @@ impl SettingsView {
         if !crate::words::is_windows() {
             computer_use.push(Self::row(
                 "Work in the background",
-                "Agents click and type in a window of their own behind yours, so you keep the pointer and keyboard. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
+                "Agents click and type in a window of their own behind yours, so you keep the pointer and keyboard. If they need the app you're using, they wait and ask you instead of taking it over, and they use an app that's already open rather than open a second copy. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
                 self.switch("computer-background", s.tools.computer_background, |s, v| s.tools.computer_background = v),
                 cx,
             ));

@@ -2743,14 +2743,19 @@ impl Session {
         }
     }
 
-    /// `mock:background <id> [WxH] [app]`: steps of computer use in window `id`, each a tool row
-    /// and a report to Trek (`trek_ipc::COMPUTER_ACTIVITY`) as `trek-mcp computer` sends in the
-    /// background. Nothing is clicked or typed for real.
+    /// `mock:background <id> [WxH] [app] [waiting]`: steps of computer use in window `id`, each a
+    /// tool row and a report to Trek (`trek_ipc::COMPUTER_ACTIVITY`) as `trek-mcp computer` sends
+    /// in the background; `waiting` first waits a while for the user to leave the app, as it does
+    /// when they're using it. Nothing is clicked or typed for real.
     async fn background_use(&mut self, text: &str) -> Step {
-        let args: Vec<&str> = after_keyword(text, &["mock:background"])
+        let mut args: Vec<&str> = after_keyword(text, &["mock:background"])
             .unwrap_or_default()
             .split_whitespace()
             .collect();
+        let waits = args.last() == Some(&"waiting");
+        if waits {
+            args.pop();
+        }
         let Some(id) = args.first().and_then(|a| a.parse::<i64>().ok()) else {
             return self
                 .say("Which window? `mock:background <window id> [WxH] [app]`.")
@@ -2770,6 +2775,21 @@ impl Session {
             .await?;
         let window = serde_json::json!({"id": id, "pid": 0, "app": app, "title": "", "x": 0.0, "y": 0.0, "width": w, "height": h});
         let at = |x: f64, y: f64| Some(serde_json::json!({"x": w * x, "y": h * y}));
+        if waits {
+            let call = self.id("tool");
+            self.tool_start(&call, "mcp__trek-computer__open_app", &app)
+                .await?;
+            let detail = format!("Waiting: you're using {app}");
+            let report = serde_json::json!({"action": "waiting", "detail": detail, "window": window, "point": null, "from": null});
+            let _told = self.ipc(trek_ipc::COMPUTER_ACTIVITY, report).await?;
+            self.emit(AgentEvent::ToolFinished {
+                id: call,
+                output: format!("{app} is the app the user is using right now; ask them whether to work in it, wait, or open a second window."),
+                ok: false,
+            })
+            .await?;
+            self.pause(Duration::from_millis(6000)).await?;
+        }
         let steps = [
             ("screenshot", "Looking", None),
             ("click", "Clicking", at(0.3, 0.25)),
