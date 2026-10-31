@@ -32,6 +32,7 @@ struct ThreadSettingsBar: View {
         // All three in the width, never cut off at the screen's edge: the words go from the
         // plan chip, then the access chip, before the row has to scroll.
         ViewThatFits(in: .horizontal) {
+            row(words: 4)
             row(words: 3)
             row(words: 2)
             row(words: 1)
@@ -68,13 +69,14 @@ struct ThreadSettingsBar: View {
 
     }
 
-    /// The chips; `words`: 3 all labelled, 2 the plan chip an icon, 1 the access chip's label
-    /// shortened too ("Accept edits"), 0 both icons.
+    /// The chips; `words`: 4 all labelled, 3 the plan chip an icon, 2 the access chip's label
+    /// shortened too ("Accept edits"), 1 the model's effort left out too, 0 the access chip an
+    /// icon (the effort back).
     private func row(words: Int) -> some View {
-        HStack(spacing: 8) {
-            modelChip
-            accessChip(label: words >= 2 ? access.label : words == 1 ? access.shortLabel : nil)
-            planChip(labelled: words >= 3)
+        HStack(spacing: 6) {
+            modelChip(effort: words != 1)
+            accessChip(label: words >= 3 ? access.label : words >= 1 ? access.shortLabel : nil)
+            planChip(labelled: words >= 4)
             if consult != nil, model.serves(.consult, on: thread.id) { consultChip }
             Spacer(minLength: 0)
         }
@@ -82,12 +84,12 @@ struct ThreadSettingsBar: View {
     }
 
     /// Logo, model and effort, like the Mac's composer pill; opens the model picker.
-    private var modelChip: some View {
+    private func modelChip(effort: Bool) -> some View {
         Button {
             picking = true
         } label: {
             chip {
-                ModelChipLabel(agentKey: thread.agent.key, agentLogo: thread.agent.logo, model: modelName, effort: thread.effort)
+                ModelChipLabel(agentKey: thread.agent.key, agentLogo: thread.agent.logo, model: modelName, effort: effort ? thread.effort : nil)
             }
         }
         .buttonStyle(.plain)
@@ -159,7 +161,7 @@ struct ThreadSettingsBar: View {
         HStack(spacing: 5) { content() }
             .font(.ui(.footnote).weight(.medium))
             .foregroundStyle(Trek.foreground)
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 10)
             .frame(height: 30)
             .glassEffect(selected ? .regular.tint(Trek.foreground.opacity(0.12)).interactive() : .regular.interactive(), in: Capsule())
     }

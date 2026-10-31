@@ -54,9 +54,16 @@ private struct CardChrome<Content: View>: View {
 /// The Mac's primary button: ember, its label in the theme's ink for it.
 private struct PrimaryLabel: View {
     var title: String
+    /// What it says where the whole title doesn't fit (never cut off with an ellipsis).
+    var short: String? = nil
 
     var body: some View {
-        Text(title).fontWeight(.semibold).lineLimit(1).foregroundStyle(Trek.onEmber).frame(maxWidth: .infinity)
+        ViewThatFits(in: .horizontal) {
+            Text(title).fontWeight(.semibold).lineLimit(1).fixedSize()
+            Text(short ?? title).fontWeight(.semibold).lineLimit(1).minimumScaleFactor(0.8)
+        }
+        .foregroundStyle(Trek.onEmber)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -353,7 +360,7 @@ struct PlanCard: View {
                 Button {
                     answer(.plan(approve: true, feedback: nil))
                 } label: {
-                    PrimaryLabel(title: "Approve and start")
+                    PrimaryLabel(title: "Approve and start", short: "Approve")
                 }
                 .buttonStyle(.glassProminent)
                 .tint(Trek.ember)
