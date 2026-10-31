@@ -329,15 +329,18 @@ pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
         if !file.is_file() {
             continue;
         }
-        if file.starts_with(&root) {
+        // Already in the study folder (a source, or an earlier map ticked to build on): used
+        // where it is.
+        if file.starts_with(dir) {
             if !out.contains(file) {
                 out.push(file.clone());
             }
             continue;
         }
-        let Some(name) = file.file_name() else {
+        let Some(name) = copy_name(file) else {
             continue;
         };
+        let name = name.as_os_str();
         if std::fs::create_dir_all(&into).is_err() {
             continue;
         }
@@ -346,11 +349,12 @@ pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
         let mut n = 1;
         while dest.exists() && size(&dest) != size(file) {
             n += 1;
-            let stem = file
+            let named = Path::new(name);
+            let stem = named
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let ext = file
+            let ext = named
                 .extension()
                 .map(|e| format!(".{}", e.to_string_lossy()))
                 .unwrap_or_default();
@@ -362,9 +366,11 @@ pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
             }
         }
     }
-    // Committed as Trek's doing, so what the session changes is only the session's.
+    // Committed as Trek's doing, so what the session changes is only the session's. Only what's
+    // in sources/: a map ticked to build on keeps whatever an earlier session left uncommitted.
     let rel: Vec<String> = out
         .iter()
+        .filter(|p| p.starts_with(&root))
         .filter_map(|p| p.strip_prefix(dir).ok())
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .collect();
@@ -375,16 +381,49 @@ pub fn add_sources(dir: &Path, topic: &str, files: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// What a learner's material is named as in `sources/`: its own name, or for a Trek note (a file
+/// named by an id) its title, so the tutor and the learner both see what it is.
+fn copy_name(file: &Path) -> Option<PathBuf> {
+    let name = file.file_name()?;
+    if file.parent() == Some(crate::notes::notes_dir().as_path()) {
+        let body = std::fs::read_to_string(file).ok()?;
+        let slug = crate::skills::slug(&crate::notes::title_of(&body));
+        if !slug.is_empty() {
+            return Some(PathBuf::from(format!("{slug}.md")));
+        }
+    }
+    Some(PathBuf::from(name))
+}
+
+/// What a session starts with besides the learner's words: files (copied into, or already in,
+/// the study folder), folders read where they are, and web pages.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Material {
+    pub files: Vec<PathBuf>,
+    pub folders: Vec<PathBuf>,
+    pub links: Vec<String>,
+}
+
+impl Material {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.folders.is_empty() && self.links.is_empty()
+    }
+}
+
+const FILES_HEAD: &str = "Sources I've added for this session (read them before you start):";
+const FOLDERS_HEAD: &str = "Folders to read where they are:";
+const LINKS_HEAD: &str = "Pages to read:";
+
 /// The first message of a session: which kind it is, the guide to follow, what the learner
-/// asked for (`topic`, in their words), and the sources they attached (`sources`, in the study
-/// folder). `map`: the topic's map, when the session continues one.
+/// asked for (`topic`, in their words), and the material they gave it (`with`: files in the study
+/// folder, folders, pages). `map`: the topic's map, when the session continues one.
 pub fn prompt(
     kind: Kind,
     guide: &Path,
     dir: &Path,
     topic: &str,
     map: Option<&Path>,
-    sources: &[PathBuf],
+    with: &Material,
 ) -> String {
     let what = match kind {
         Kind::Learn => "learn",
@@ -406,13 +445,133 @@ pub fn prompt(
         }
         (Kind::Practice, None) => out.push_str(&format!("What I want to practise: {topic}")),
     }
-    if !sources.is_empty() {
-        out.push_str("\n\nSources I've added for this session (read them before you start):");
-        for s in sources {
-            out.push_str(&format!("\n- {}", s.display()));
+    let mut list = |head: &str, items: Vec<String>| {
+        if !items.is_empty() {
+            out.push_str(&format!("\n\n{head}"));
+            for i in items {
+                out.push_str(&format!("\n- {i}"));
+            }
+        }
+    };
+    let shown = |paths: &[PathBuf]| paths.iter().map(|p| p.display().to_string()).collect();
+    list(FILES_HEAD, shown(&with.files));
+    list(FOLDERS_HEAD, shown(&with.folders));
+    list(LINKS_HEAD, with.links.clone());
+    out
+}
+
+/// A session's first message as the learner sees it in the thread: what they asked for and what
+/// came with it, without the instructions to the tutor (`prompt` read back).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Intro {
+    pub kind: Kind,
+    /// What they asked, in their words, without the files and pages it names.
+    pub topic: String,
+    /// The map it carries on with.
+    pub map: Option<PathBuf>,
+    pub with: Material,
+}
+
+/// `text` read as a session's first message, if it is one.
+pub fn intro(text: &str) -> Option<Intro> {
+    let (kind, rest) = if let Some(r) = text.strip_prefix("Study session (learn).") {
+        (Kind::Learn, r)
+    } else if let Some(r) = text.strip_prefix("Study session (practice).") {
+        (Kind::Practice, r)
+    } else {
+        return None;
+    };
+    // The guide's paragraph, then what was asked, up to the first list.
+    let (_, body) = rest.split_once("\n\n")?;
+    let first_list = [FILES_HEAD, FOLDERS_HEAD, LINKS_HEAD]
+        .iter()
+        .filter_map(|h| body.find(&format!("\n\n{h}")))
+        .min()
+        .unwrap_or(body.len());
+    let (ask, lists) = body.split_at(first_list);
+    let (map, asked) = if let Some(a) = ask
+        .strip_prefix("What I want to learn: ")
+        .or_else(|| ask.strip_prefix("What I want to practise: "))
+    {
+        (None, a)
+    } else {
+        let a = ask
+            .strip_prefix("Continue the topic in ")
+            .or_else(|| ask.strip_prefix("Practise the claims in "))?;
+        let (map, asked) = a.split_once(".md: ")?;
+        (Some(PathBuf::from(format!("{map}.md"))), asked)
+    };
+    let items = |head: &str| -> Vec<String> {
+        let Some(at) = lists.find(&format!("\n\n{head}")) else {
+            return vec![];
+        };
+        lists[at + 2..]
+            .lines()
+            .skip(1)
+            .map_while(|l| l.strip_prefix("- "))
+            .map(str::to_string)
+            .collect()
+    };
+    Some(Intro {
+        kind,
+        topic: words_of(asked),
+        map,
+        with: Material {
+            files: items(FILES_HEAD).into_iter().map(PathBuf::from).collect(),
+            folders: items(FOLDERS_HEAD).into_iter().map(PathBuf::from).collect(),
+            links: items(LINKS_HEAD),
+        },
+    })
+}
+
+/// The web pages `text` names (`http://` or `https://`), in order, each once.
+pub fn links_in(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for word in text.split_whitespace() {
+        let word = word
+            .trim_start_matches(['<', '(', '"', '\''])
+            .trim_end_matches(['>', ')', '"', '\'', '.', ',', ';', ':', '!', '?']);
+        let is_link = ["https://", "http://"]
+            .iter()
+            .any(|s| word.len() > s.len() && word.starts_with(s));
+        if is_link && !out.iter().any(|l| l == word) {
+            out.push(word.to_string());
         }
     }
     out
+}
+
+/// `text` without the files it names as `@path` or `@"a path"` or the pages it links, one space
+/// between what's left: the topic, in the learner's words.
+pub fn words_of(text: &str) -> String {
+    let mut out: Vec<&str> = vec![];
+    let mut quoted = false;
+    for word in text.split_whitespace() {
+        if quoted {
+            quoted = !word.ends_with('"');
+            continue;
+        }
+        if let Some(rest) = word.strip_prefix("@\"") {
+            quoted = !rest.ends_with('"') || rest.len() < 2;
+            continue;
+        }
+        if (word.starts_with('@') && word.len() > 1) || !links_in(word).is_empty() {
+            continue;
+        }
+        out.push(word);
+    }
+    out.join(" ")
+}
+
+/// The study guide's card (its one `trek-html` block) with `data`, a JavaScript object literal,
+/// in place of the example's `DATA`: a card as a tutor following `guide` writes it.
+pub fn card_with(guide: &str, data: &str) -> Option<String> {
+    let open = format!("```{}\n", crate::artifact::FENCE);
+    let start = guide.find(&open)? + open.len();
+    let html = &guide[start..start + guide[start..].find("\n```")?];
+    let at = html.find("const DATA = ")? + "const DATA = ".len();
+    let end = at + html[at..].find("\n};")? + 2;
+    Some(format!("{}{data}{}", &html[..at], &html[end..]))
 }
 
 /// A session thread's title: "Learn · Transformers".
@@ -520,7 +679,7 @@ mod tests {
             Path::new("/s"),
             "attention",
             Some(Path::new("/s/map/llms.md")),
-            &[],
+            &Material::default(),
         );
         assert!(p.starts_with("Study session (practice)."));
         assert!(p.contains("/g/study/SKILL.md") && p.contains("/s/map/llms.md"));
@@ -536,12 +695,136 @@ mod tests {
             Path::new("/s"),
             "attention",
             None,
-            &[PathBuf::from("/s/sources/attention/notes.pdf")],
+            &Material {
+                files: vec![PathBuf::from("/s/sources/attention/notes.pdf")],
+                ..Material::default()
+            },
         );
         assert!(p.ends_with(
             "What I want to learn: attention\n\nSources I've added for this session (read them \
              before you start):\n- /s/sources/attention/notes.pdf"
         ));
+    }
+
+    #[test]
+    fn the_first_message_reads_back_as_what_the_learner_asked_for() {
+        let with = Material {
+            files: vec![
+                PathBuf::from("/s/sources/attention/notes.pdf"),
+                PathBuf::from("/s/map/llms.md"),
+            ],
+            folders: vec![PathBuf::from("/Users/me/course")],
+            links: vec!["https://arxiv.org/abs/1706.03762".into()],
+        };
+        let asked = "attention @/Users/me/notes.pdf from https://arxiv.org/abs/1706.03762, \
+                     with: maths\n\nand pictures";
+        let p = prompt(
+            Kind::Learn,
+            Path::new("/g/study/SKILL.md"),
+            Path::new("/s"),
+            asked,
+            None,
+            &with,
+        );
+        assert!(p.contains("\n\nFolders to read where they are:\n- /Users/me/course"));
+        assert!(p.ends_with("\n\nPages to read:\n- https://arxiv.org/abs/1706.03762"));
+        let i = intro(&p).expect("a session's first message");
+        assert_eq!(i.kind, Kind::Learn);
+        assert_eq!(i.topic, "attention from with: maths and pictures");
+        assert_eq!((i.map, i.with), (None, with));
+        // Carrying on with a map, nothing attached.
+        let p = prompt(
+            Kind::Practice,
+            Path::new("/g/study/SKILL.md"),
+            Path::new("/s"),
+            "Gradient descent",
+            Some(Path::new("/s/map/gradient-descent.md")),
+            &Material::default(),
+        );
+        let i = intro(&p).unwrap();
+        assert_eq!(
+            (i.kind, i.topic.as_str(), i.map),
+            (
+                Kind::Practice,
+                "Gradient descent",
+                Some(PathBuf::from("/s/map/gradient-descent.md"))
+            )
+        );
+        assert!(i.with.is_empty());
+        assert_eq!(intro("Study the code in src/"), None);
+        assert_eq!(intro("Study session (learn). no paragraphs"), None);
+    }
+
+    #[test]
+    fn the_guide_has_one_card_that_sends_what_the_tutor_reads() {
+        let (_, guide) = crate::skills::SHIPPED
+            .iter()
+            .find(|(n, _)| *n == crate::skills::STUDY)
+            .unwrap();
+        let open = format!("```{}\n", crate::artifact::FENCE);
+        assert_eq!(guide.matches(&open).count(), 1, "one card");
+        let data = r#"{ kind: "check", step: "Step 2 of 5 · Scaling", prompt: "Why?", options: [], targets: ["c4"] }"#;
+        let card = card_with(guide, data).expect("a card");
+        assert!(card.starts_with("<!doctype html>") && card.ends_with("</html>"));
+        assert!(card.contains(&format!("const DATA = {data};")), "{card}");
+        assert_eq!(card.matches("const DATA").count(), 1);
+        // It answers through Trek, says where the learner is, takes the keyboard, and keeps still
+        // when the system asks for less motion.
+        for needed in [
+            "window.trek.send(text)",
+            "(\\d+)\\s*of\\s*(\\d+)",
+            "addEventListener(\"keydown\"",
+            "prefers-reduced-motion",
+            "Confidence: ",
+            "Working: ",
+        ] {
+            assert!(card.contains(needed), "{needed}");
+        }
+        // Inside Trek's own card: no box drawn around it again.
+        assert!(!card.contains(".card{border"));
+        assert!(card.len() < 16_000, "{} bytes", card.len());
+    }
+
+    #[test]
+    fn the_topic_is_the_text_without_the_files_and_pages_it_names() {
+        assert_eq!(
+            words_of("attention, from @/tmp/notes.pdf and @\"/tmp/my sheet.md\" please"),
+            "attention, from and please"
+        );
+        assert_eq!(words_of("@/tmp/notes.pdf"), "");
+        assert_eq!(words_of("mail me@home"), "mail me@home");
+        assert_eq!(words_of("see (https://a.b/c). ok"), "see ok");
+        assert_eq!(
+            links_in("see (https://a.b/c). and http://x.y, https://a.b/c and https://"),
+            vec!["https://a.b/c".to_string(), "http://x.y".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_map_ticked_stays_put_and_a_note_is_copied_under_its_title() {
+        let dir = std::env::temp_dir().join(format!("trek-study-{}", uuid::Uuid::new_v4()));
+        ensure(&dir).unwrap();
+        let map = map_dir(&dir).join("llms.md");
+        std::fs::write(&map, "# LLMs\n").unwrap();
+        let notes = crate::notes::notes_dir();
+        std::fs::create_dir_all(&notes).unwrap();
+        let note = notes.join(format!("{}.md", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&note, "# Lecture 4: attention\n\nQ, K, V").unwrap();
+        let got = add_sources(&dir, "attention", &[map.clone(), note.clone()]);
+        let copy = sources_dir(&dir)
+            .join("attention")
+            .join("lecture-4-attention.md");
+        assert_eq!(got, vec![map.clone(), copy.clone()]);
+        assert!(copy.is_file());
+        // The map an earlier session changed isn't committed by Trek: only the copy is.
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "?? map/\n");
+        let _ = std::fs::remove_file(note);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

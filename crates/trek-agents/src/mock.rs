@@ -244,6 +244,8 @@ const WINDOW: u64 = 200_000;
 #[derive(Debug, Clone, PartialEq)]
 enum Script {
     Answer,
+    /// A tutor's turn in a study session (Trek's study guide), with the guide's own card.
+    Study(Tutor),
     Tools,
     Agents(Option<Duration>),
     /// A sub-agent of its own that the turn waits on, working for a while.
@@ -375,6 +377,11 @@ impl Script {
         }
         if text.contains(trek_core::skills::MAINTAIN_VERIFICATION) {
             return Script::MaintainVerification;
+        }
+        // A study session's first message, or a card's answer in one: a tutor's turn, before the
+        // words in it (the guide's path and the learner's topic are full of them).
+        if let Some(tutor) = Tutor::of(text) {
+            return Script::Study(tutor);
         }
         // The agent's own command (Trek sends it through as the user typed it).
         if text.trim() == "/compact" {
@@ -546,6 +553,7 @@ fn after_keyword<'a>(text: &'a str, keys: &[&str]) -> Option<&'a str> {
 pub fn title(request: &str) -> String {
     match Script::parse(request, false) {
         Script::Answer => "How the app starts",
+        Script::Study(_) => "Study the transformer",
         Script::Tools => "Add a verbose flag",
         Script::Agents(_) => "Scout the routes and error handling",
         Script::Task(_) => "Survey the test suite",
@@ -594,6 +602,110 @@ pub fn title(request: &str) -> String {
     }
     .into()
 }
+
+/// A tutor's turn, as Trek's study guide has it: a session opens with a probe question (or, for
+/// practice, a problem); an answer from a card gets a line on it, the plan as a flow, and the
+/// first step's prediction. Its cards are the guide's own (`study::card_with`), so what the mock
+/// shows is what a real tutor would.
+#[derive(Debug, Clone, PartialEq)]
+enum Tutor {
+    /// The session's first message. `guide`: where it says the guide is, read as a tutor would.
+    Start {
+        practice: bool,
+        guide: Option<std::path::PathBuf>,
+    },
+    /// What a card sent (its first line starts with the card's label).
+    Answer,
+}
+
+impl Tutor {
+    fn of(text: &str) -> Option<Tutor> {
+        if let Some(rest) = text.strip_prefix("Study session (") {
+            let guide = rest
+                .split_once("study guide at ")
+                .and_then(|(_, r)| r.split_once(" — "))
+                .map(|(path, _)| std::path::PathBuf::from(path));
+            return Some(Tutor::Start {
+                practice: rest.starts_with("practice)"),
+                guide,
+            });
+        }
+        let head = text.lines().next().unwrap_or("");
+        let labelled = ["Question", "Predict", "Check", "Problem"]
+            .iter()
+            .any(|l| head == *l || head.starts_with(&format!("{l} ")));
+        (labelled && text.contains("\nWorking: ")).then_some(Tutor::Answer)
+    }
+
+    fn reply(&self) -> String {
+        let shipped = trek_core::skills::SHIPPED
+            .iter()
+            .find(|(n, _)| *n == trek_core::skills::STUDY)
+            .map_or("", |(_, md)| *md)
+            .to_string();
+        let guide = match self {
+            Tutor::Start { guide: Some(p), .. } => std::fs::read_to_string(p).unwrap_or(shipped),
+            _ => shipped,
+        };
+        let card = |data: &str| {
+            trek_core::study::card_with(&guide, data)
+                .map(|html| format!("\n\n```trek-html\n{html}\n```"))
+                .unwrap_or_default()
+        };
+        match self {
+            Tutor::Start {
+                practice: false, ..
+            } => format!(
+                "Before we plan anything, let's find the edge of what you already know. A few quick \
+                 questions: answer from what you'd say now, and \"I don't know\" is a useful answer \
+                 here.{}",
+                card(STUDY_PROBE)
+            ),
+            Tutor::Start { practice: true, .. } => format!(
+                "One problem at a time, and none of them will say which idea it needs. Send your \
+                 working as you go; ask for a hint whenever you're stuck.{}",
+                card(STUDY_PROBLEM)
+            ),
+            Tutor::Answer => format!(
+                "That's it: softmax makes every weight positive and each row sum to 1, so a query's \
+                 output is a weighted average of the values.\n\nHere's the shortest path from what \
+                 you hold to a full attention layer. Tell me if you'd change it; otherwise we start \
+                 with step 1.\n\n```trek-viz\n{STUDY_PLAN}\n```\n\n1. **Dot products as \
+                 similarity**: why $q \\cdot k$ scores how well a key matches.\n2. **Scaling by \
+                 $\\sqrt{{d}}$**: keeping the softmax out of its flat ends.\n3. **Weighted sum of \
+                 values**: what the weights are for.\n4. **Several heads**: the same move on \
+                 slices.\n\nStep 1, before I explain anything:{}",
+                card(STUDY_PREDICT)
+            ),
+        }
+    }
+}
+
+const STUDY_PROBE: &str = r#"{
+  kind: "question",
+  step: "",
+  prompt: "Softmax is applied to each row of the score matrix. What does that guarantee about one query's attention weights?",
+  options: ["They are all positive and sum to 1", "They are orthogonal to each other", "They have unit length", "They are the same for every query"],
+  targets: []
+}"#;
+
+const STUDY_PROBLEM: &str = r#"{
+  kind: "problem",
+  step: "",
+  prompt: "A query scores $2$, $0$ and $-1$ against three keys. Without a calculator, roughly what share of its attention goes to the first key, and why?",
+  options: [],
+  targets: ["c2"]
+}"#;
+
+const STUDY_PREDICT: &str = r#"{
+  kind: "predict",
+  step: "Step 1 of 4 · Dot products as similarity",
+  prompt: "Two keys point the same way as a query, but one is twice as long. Which gets the higher score, and what does that suggest about using $q \\cdot k$ as similarity?",
+  options: [],
+  targets: []
+}"#;
+
+const STUDY_PLAN: &str = r#"{"version":1,"title":"Your path to self-attention","summary":"Four steps from what you already hold to a full attention layer.","type":"flow","nodes":[{"id":"known","label":"Softmax over a row","detail":"you have this","group":"known","tone":"positive"},{"id":"s1","label":"Dot products as similarity","detail":"step 1"},{"id":"s2","label":"Scaling by √d","detail":"step 2"},{"id":"s3","label":"Weighted sum of values","detail":"step 3"},{"id":"s4","label":"Several heads","detail":"step 4","tone":"accent"}],"edges":[{"from":"s1","to":"s2"},{"from":"s2","to":"s3"},{"from":"known","to":"s3"},{"from":"s3","to":"s4"}]}"#;
 
 /// The longest duration a prompt can ask for.
 const MAX_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
@@ -1204,6 +1316,7 @@ impl Session {
             }
             Script::InlineEdit { path, lines } => self.inline_edit(&path, lines).await?,
             Script::Compact => self.compact().await?,
+            Script::Study(tutor) => self.say_in_pieces(&tutor.reply(), 600, 14).await?,
             Script::Recall => {
                 let mut said = remembered(&self.native_id);
                 said.pop();
@@ -3692,6 +3805,29 @@ mod tests {
             Script::parse("mock:page", false),
             Script::Page { stream: false }
         );
+        // A study session's first message, whatever its topic says, and a card's answer.
+        assert_eq!(
+            Script::parse(
+                "Study session (practice). Follow Trek's study guide at /d/skills/study/SKILL.md — \
+                 read it first.\n\nWhat I want to practise: the plan for errors",
+                false
+            ),
+            Script::Study(Tutor::Start {
+                practice: true,
+                guide: Some("/d/skills/study/SKILL.md".into())
+            })
+        );
+        assert_eq!(
+            Script::parse(
+                "Question\nAnswer: A. They are all positive and sum to 1\nConfidence: Sure (95%)\nWorking: (none)",
+                false
+            ),
+            Script::Study(Tutor::Answer)
+        );
+        assert_eq!(Script::parse("Question: which plan?", false), Script::Plan);
+        let reply = Tutor::Answer.reply();
+        assert!(reply.contains("```trek-viz\n") && reply.contains("Step 1 of 4"));
+        assert_eq!(reply.matches("```trek-html\n").count(), 1);
         assert_eq!(
             Script::parse("mock:page stream", false),
             Script::Page { stream: true }
