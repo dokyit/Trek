@@ -78,6 +78,12 @@ pub const ENV_SOCKET: &str = "TREK_IPC_SOCKET";
 pub const ENV_TOKEN: &str = "TREK_IPC_TOKEN";
 /// Which session is asking (Trek maps it to the thread the session belongs to).
 pub const ENV_SESSION: &str = "TREK_IPC_SESSION";
+/// Which of the tools `trek-mcp orchestrate` offers: [`TRANSCRIPT_ONLY`] for the transcript
+/// tools alone (sub-agent tools are off in Trek's settings), anything else (or nothing) for all.
+pub const ENV_TOOLS: &str = "TREK_MCP_TOOLS";
+pub const TRANSCRIPT_ONLY: &str = "transcript";
+/// The tools every agent Trek runs gets, whatever its settings: its thread's transcript.
+pub const TRANSCRIPT_TOOLS: [&str; 2] = ["transcript_search", "transcript_read"];
 
 pub const VERSION: u64 = 1;
 
@@ -388,11 +394,11 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "handoff",
-            "Hand this work over to a fresh thread when this conversation's context is running out (or the rest is better done by another agent or model). Write a brief that is complete on its own, since the new thread sees nothing else: the goal, what's done and how you checked it, decisions made and why, the files that matter, what's left, and the next step. Trek starts the new thread in this thread's folder with the brief as its first message, links the two, and shows the user the new one. After a successful handoff, end your turn: don't carry on with the work here.",
+            "Hand this work over to a fresh thread when this conversation's context is running out (or the rest is better done by another agent or model). Write a short brief: the goal, where things stand and how you checked, decisions made and why, the files that matter, and the next step. The new thread also gets this thread's id and transcript to search, so point to exact errors, outputs and code there rather than copying them. Trek starts the new thread in this thread's folder with the brief as its first message, links the two, and shows the user the new one. After a successful handoff, end your turn: don't carry on with the work here.",
             json!({
                 "type": "object",
                 "properties": {
-                    "brief": { "type": "string", "description": "Everything the next agent needs: goal, state, decisions, files, next steps." },
+                    "brief": { "type": "string", "description": "Goal, state, decisions, files, next step." },
                     "title": { "type": "string", "description": "A few words naming the new thread. Defaults to this thread's title." },
                     "agent": { "type": "string", "description": "Agent key from list_models, to continue with another agent. Defaults to this thread's agent." },
                     "model": { "type": "string", "description": "Model id or name from list_models. Defaults to this thread's model." },
@@ -436,11 +442,39 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
                 "required": ["id", "prompt"]
             }),
         ),
+        (
+            "transcript_search",
+            "Search this thread's whole transcript (messages, tool calls, full results, word for word) for lines matching query. Returns the latest matches with line numbers.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Words all on one line (any case), or a regex with regex true." },
+                    "regex": { "type": "boolean" },
+                    "context": { "type": "integer", "description": "Lines around each match (default 2)." },
+                    "max": { "type": "integer", "description": "Most matches (default 20)." },
+                    "thread": { "type": "string", "description": "Another thread's id in this project." }
+                },
+                "required": ["query"]
+            }),
+        ),
+        (
+            "transcript_read",
+            "Read transcript lines by number (at most 400).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "start": { "type": "integer" },
+                    "end": { "type": "integer" },
+                    "thread": { "type": "string", "description": "Another thread's id in this project." }
+                },
+                "required": ["start"]
+            }),
+        ),
     ]
 }
 
 /// The tools' names, as `tools` lists them.
-pub const TOOL_NAMES: [&str; 11] = [
+pub const TOOL_NAMES: [&str; 13] = [
     "list_models",
     "delegate_task",
     "task_status",
@@ -452,6 +486,8 @@ pub const TOOL_NAMES: [&str; 11] = [
     "thread_status",
     "read_thread",
     "send_to_thread",
+    "transcript_search",
+    "transcript_read",
 ];
 
 #[cfg(test)]
@@ -584,6 +620,18 @@ mod tests {
             schema("read_thread")["properties"]["wait"]["type"],
             "boolean"
         );
+        assert_eq!(schema("transcript_search")["required"], json!(["query"]));
+        assert_eq!(schema("transcript_read")["required"], json!(["start"]));
+        assert!(TRANSCRIPT_TOOLS.iter().all(|t| TOOL_NAMES.contains(t)));
+        // Every agent gets these two: their descriptions stay short.
+        for name in TRANSCRIPT_TOOLS {
+            let (_, description, schema) = tools.iter().find(|t| t.0 == name).unwrap();
+            assert!(
+                description.len() + schema.to_string().len() < 1_000,
+                "{name}: {}",
+                description.len() + schema.to_string().len()
+            );
+        }
     }
 
     #[cfg(windows)]

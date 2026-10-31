@@ -63,6 +63,8 @@
 //! |                              | (`read_thread`)                                               |
 //! | `mock:handoff` [brief]       | hands its work to a fresh thread (Trek's `handoff`) with a    |
 //! |                              | brief ending in what follows the keyword, and ends its turn   |
+//! | `mock:transcript` words      | searches the thread's transcript (Trek's `transcript_search`) |
+//! |                              | for the words after the keyword and says what it found        |
 //! | `mock:server` [dur]          | leaves a dev server running in the background (for `dur`, or  |
 //! |                              | until stopped), printing a line now and then (to a file too,  |
 //! |                              | which its call names, as Claude Code's shells do)             |
@@ -287,6 +289,8 @@ enum Script {
         lines: (u32, u32),
     },
     Recall,
+    /// Search the thread's transcript through Trek (`transcript_search`) and say what it found.
+    Transcript(String),
     /// Say what Trek told the session (`SessionConfig::instructions`).
     Told,
     /// List the MCP servers the session was given (`SessionConfig::mcp_servers`).
@@ -502,6 +506,9 @@ impl Script {
                 "agents" | "subagents" | "sub-agents" => Script::Agents(duration_after(i)),
                 "tools" => Script::Tools,
                 "recall" => Script::Recall,
+                "transcript" if w.starts_with("mock:") => {
+                    Script::Transcript(raw[i + 1..].join(" "))
+                }
                 "told" if w.starts_with("mock:") => Script::Told,
                 "mcp" if w.starts_with("mock:") => Script::Mcp,
                 "background" if w.starts_with("mock:") => Script::Background,
@@ -569,6 +576,7 @@ pub fn title(request: &str) -> String {
         Script::InlineEdit { .. } => "Edit the selection",
         Script::Compact => "Compacted the conversation",
         Script::Recall => "What was said",
+        Script::Transcript(_) => "Search the transcript",
         Script::Told => "What Trek said",
         Script::Mcp => "List the MCP servers",
         Script::Background => "Check the page in the background",
@@ -655,6 +663,8 @@ struct Session {
     model: String,
     /// The way to Trek's orchestration tools, when Trek gave the session them.
     orchestrate: Option<trek_ipc::Client>,
+    /// The way to the thread's transcript tools: the same server, there whatever the settings.
+    transcript: Option<trek_ipc::Client>,
     /// What Trek told it about the project (`SessionConfig::instructions`).
     instructions: Option<String>,
     /// The MCP servers it was given, one line each (`mock:mcp` lists them).
@@ -910,7 +920,18 @@ pub async fn run(
         native_id: native_id.clone(),
         mark: String::new(),
         model: config.model.clone().unwrap_or_else(|| "mock-swift".into()),
+        // With the sub-agent tools off, the server carries only the transcript's.
         orchestrate: config
+            .mcp_servers
+            .iter()
+            .find(|m| m.name == ORCHESTRATE_SERVER)
+            .filter(|m| {
+                !m.env()
+                    .iter()
+                    .any(|(k, v)| k == trek_ipc::ENV_TOOLS && v == trek_ipc::TRANSCRIPT_ONLY)
+            })
+            .and_then(|m| trek_ipc::Client::from_pairs(m.env())),
+        transcript: config
             .mcp_servers
             .iter()
             .find(|m| m.name == ORCHESTRATE_SERVER)
@@ -1047,7 +1068,12 @@ impl Session {
         self.remember(text);
         // The turn is in the history now: cutting the session back to its mark keeps it whole.
         self.emit(AgentEvent::Mark(self.mark.clone())).await?;
-        let text = split_recap(text).1.to_string();
+        let text = split_recap(text).1;
+        // A handoff's brief is the request, not Trek's frame around it (which mentions an
+        // "error" to search the old transcript for).
+        let text = trek_core::lineage::handoff_brief(text)
+            .unwrap_or(text)
+            .to_string();
         let text = text.as_str();
         self.context += 1_200 + text.len() as u64 / 3;
         self.emit(AgentEvent::Context {
@@ -1204,6 +1230,23 @@ impl Session {
             }
             Script::InlineEdit { path, lines } => self.inline_edit(&path, lines).await?,
             Script::Compact => self.compact().await?,
+            Script::Transcript(query) => {
+                let answer = self
+                    .orchestrate_call(
+                        "transcript_search",
+                        &query,
+                        serde_json::json!({ "query": query, "context": 0 }),
+                    )
+                    .await?;
+                let text = match answer {
+                    Ok(serde_json::Value::String(found)) => {
+                        format!("The transcript says:\n\n{found}")
+                    }
+                    Ok(other) => format!("The transcript says:\n\n{other}"),
+                    Err(e) => format!("The transcript search failed: {e}"),
+                };
+                self.say(&text).await?;
+            }
             Script::Recall => {
                 let mut said = remembered(&self.native_id);
                 said.pop();
@@ -1767,7 +1810,12 @@ impl Session {
         method: &str,
         params: serde_json::Value,
     ) -> Step<std::result::Result<serde_json::Value, String>> {
-        let Some(client) = self.orchestrate.clone() else {
+        let client = if trek_ipc::TRANSCRIPT_TOOLS.contains(&method) {
+            self.transcript.clone()
+        } else {
+            self.orchestrate.clone()
+        };
+        let Some(client) = client else {
             return Ok(Err("Trek's sub-agent tools aren't in this session.".into()));
         };
         let (handle_tx, handle_rx) = std::sync::mpsc::channel();
@@ -4099,6 +4147,7 @@ mod tests {
                 instructions: None,
                 read_dirs: vec![],
                 script: false,
+                transcript: None,
             };
             Live::of(config)
         }
@@ -4183,6 +4232,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         }
     }
 

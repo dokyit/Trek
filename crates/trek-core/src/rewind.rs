@@ -4,6 +4,7 @@
 
 use crate::store::{INTERRUPTED_BY_QUIT, Item, ResumePoint};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// How a thread's next session picks up a conversation that was cut back or copied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,60 +89,223 @@ pub fn ends_turn(item: &Item) -> bool {
     }
 }
 
-/// Longest a single message runs in a recap.
-const RECAP_MESSAGE: usize = 2_000;
-/// Longest a recap runs; the oldest messages are left out past it.
-const RECAP_MAX: usize = 24_000;
+/// Longest the first message runs in a recap.
+const RECAP_FIRST: usize = 1_500;
+/// Longest any other message runs in a recap.
+const RECAP_MESSAGE: usize = 800;
+/// How many of the latest exchanges a recap shows.
+const RECAP_TURNS: usize = 3;
+/// Longest a recap runs: past it, fewer of the latest exchanges are shown (the oldest go first).
+const RECAP_MAX: usize = 9_000;
 
-/// What was said so far, compactly, for a session that starts afresh in a conversation already
-/// under way: the user's messages and the agent's answers (long ones shortened), and one line per
-/// thing the agent did. Notices and errors are left out.
-pub fn recap(items: &[Item]) -> String {
-    let mut entries: Vec<String> = vec![];
-    for item in items {
-        match item {
-            Item::User { text, images, .. } => {
-                let mut e = format!("User: {}", clip(text.trim(), RECAP_MESSAGE));
-                if !images.is_empty() {
-                    e.push_str(&format!(
-                        " [{} image{} attached]",
-                        images.len(),
-                        if images.len() == 1 { "" } else { "s" }
-                    ));
+/// A short orientation for a session that starts afresh in a conversation already under way:
+/// where the whole transcript is and how to search it (`log`: its path and line count), what was
+/// asked first, the last few exchanges (long messages shortened, tool calls one line per turn),
+/// and where things stand (how the last turn ended, a question left open, the files changed).
+/// Everything else stays in the transcript, word for word, for the agent to search.
+pub fn recap(items: &[Item], log: Option<(&Path, u64)>) -> String {
+    // Turns, by the message that starts each.
+    let starts: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i, Item::User { aside: false, .. }))
+        .map(|(i, _)| i)
+        .collect();
+    if starts.is_empty() {
+        return String::new();
+    }
+    let turn = |t: usize| {
+        let end = starts.get(t + 1).copied().unwrap_or(items.len());
+        &items[starts[t]..end]
+    };
+    let retrieval = log.map(|(path, lines)| crate::session_log::retrieval(path, lines, None));
+    let first = user_line(&items[starts[0]], RECAP_FIRST);
+    let tail = standing(items);
+    // The latest exchanges, as many of `RECAP_TURNS` as fit (the first message is shown apart
+    // when it isn't one of them).
+    let mut from = starts.len().saturating_sub(RECAP_TURNS);
+    let mut turns: Vec<String> = (from..starts.len()).map(|t| exchange(turn(t))).collect();
+    let fixed = retrieval
+        .iter()
+        .chain(&tail)
+        .map(|p| p.len() + 2)
+        .sum::<usize>()
+        + first.len()
+        + 200;
+    while turns.len() > 1 && fixed + turns.iter().map(|p| p.len() + 2).sum::<usize>() > RECAP_MAX {
+        turns.remove(0);
+        from += 1;
+    }
+    let mut out: Vec<String> = retrieval.into_iter().collect();
+    if from > 0 {
+        out.push("What was asked first:".to_string());
+        out.push(first);
+        let left_out = &items[starts[1].min(starts[from])..starts[from]];
+        let messages = from - 1;
+        let tools = left_out
+            .iter()
+            .filter(|i| matches!(i, Item::Tool { .. }))
+            .count();
+        if messages > 0 {
+            out.push(format!(
+                "({messages} later message{} and {tools} tool call{} before the latest exchanges are left out here{}.)",
+                if messages == 1 { "" } else { "s" },
+                if tools == 1 { "" } else { "s" },
+                if log.is_some() {
+                    ": they're in the transcript"
+                } else {
+                    ""
                 }
-                entries.push(e);
-            }
-            Item::Assistant { text } if !text.trim().is_empty() => {
-                entries.push(format!("Assistant: {}", clip(text.trim(), RECAP_MESSAGE)))
-            }
+            ));
+        }
+    }
+    if starts.len() > 1 {
+        out.push("The latest exchanges, oldest first:".to_string());
+    }
+    out.into_iter()
+        .chain(turns)
+        .chain(tail)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// "User: …", with how many images came with it.
+fn user_line(item: &Item, max: usize) -> String {
+    let Item::User { text, images, .. } = item else {
+        return String::new();
+    };
+    let mut e = format!("User: {}", clip(text.trim(), max));
+    if !images.is_empty() {
+        e.push_str(&format!(
+            " [{} image{} attached]",
+            images.len(),
+            if images.len() == 1 { "" } else { "s" }
+        ));
+    }
+    e
+}
+
+/// One turn for a recap: its message (and any answers the user typed in it), one line for the
+/// tools the agent used, and the agent's last words.
+fn exchange(turn: &[Item]) -> String {
+    let mut parts = vec![user_line(&turn[0], RECAP_MESSAGE)];
+    let mut tools: Vec<String> = vec![];
+    let mut calls = 0;
+    for item in &turn[1..] {
+        match item {
+            Item::User { .. } => parts.push(user_line(item, RECAP_MESSAGE / 4)),
             Item::Tool { title, detail, .. } => {
+                calls += 1;
                 let line = format!(
-                    "(The assistant used a tool: {title} {})",
-                    clip(detail.lines().next().unwrap_or_default(), 160)
+                    "{title} {}",
+                    clip(detail.lines().next().unwrap_or_default().trim(), 100)
                 );
-                // Runs of tool calls stay one line each, without blank lines between them.
-                match entries.last_mut() {
-                    Some(last) if last.starts_with("(The assistant used a tool") => {
-                        last.push('\n');
-                        last.push_str(&line);
-                    }
-                    _ => entries.push(line),
+                let line = line.trim().to_string();
+                if !tools.contains(&line) {
+                    tools.push(line);
                 }
             }
             _ => {}
         }
     }
-    let mut total = 0;
-    let keep = entries.iter().rev().take_while(|e| {
-        total += e.len() + 2;
-        total <= RECAP_MAX
-    });
-    let kept = keep.count().max(1).min(entries.len());
-    let mut out = entries[entries.len() - kept..].join("\n\n");
-    if kept < entries.len() {
-        out = format!("(Earlier messages left out.)\n\n{out}");
+    if calls > 0 {
+        const LISTED: usize = 6;
+        let more = tools.len().saturating_sub(LISTED);
+        tools.truncate(LISTED);
+        let mut line = format!(
+            "(The assistant used {calls} tool call{}: {}",
+            if calls == 1 { "" } else { "s" },
+            tools.join("; ")
+        );
+        if more > 0 {
+            line.push_str(&format!("; and {more} more"));
+        }
+        line.push(')');
+        parts.push(line);
     }
-    out
+    let last_said = turn.iter().rev().find_map(|i| match i {
+        Item::Assistant { text } if !text.trim().is_empty() => Some(text.trim()),
+        _ => None,
+    });
+    if let Some(said) = last_said {
+        parts.push(format!("Assistant: {}", clip(said, RECAP_MESSAGE)));
+    }
+    parts.join("\n\n")
+}
+
+/// Where the conversation stands at its end: how the last turn ended when it didn't finish, a
+/// question the agent asked that's still open, an agent change, the files changed.
+fn standing(items: &[Item]) -> Vec<String> {
+    let mut notes = vec![];
+    match items.iter().rev().find(|i| ends_turn(i)) {
+        Some(Item::Error { text }) => {
+            notes.push(format!("The last turn failed: {}", clip(text.trim(), 300)))
+        }
+        Some(Item::Limit { .. }) => notes.push("The last turn stopped at a usage limit.".into()),
+        Some(Item::Notice { .. }) => {
+            notes.push("The last turn was interrupted before it finished.".into())
+        }
+        _ => {}
+    }
+    let last_said = items
+        .iter()
+        .rposition(|i| matches!(i, Item::Assistant { text } if !text.trim().is_empty()));
+    let last_asked = items.iter().rposition(|i| matches!(i, Item::User { .. }));
+    if let Some(said) = last_said
+        && last_asked.is_none_or(|a| a < said)
+        && let Item::Assistant { text } = &items[said]
+        && text.trim_end().ends_with('?')
+    {
+        notes.push(
+            "Open: the assistant's last message asked the user something, still unanswered.".into(),
+        );
+    }
+    if let Some(Item::Handoff {
+        from,
+        from_name,
+        to,
+        to_name,
+        ..
+    }) = items
+        .iter()
+        .rev()
+        .find(|i| matches!(i, Item::Handoff { .. }))
+    {
+        notes.push(format!(
+            "The conversation moved from {} to {} along the way.",
+            from_name.as_deref().unwrap_or(from),
+            to_name.as_deref().unwrap_or(to)
+        ));
+    }
+    let mut files: Vec<&str> = vec![];
+    for item in items {
+        if let Item::Tool { title, detail, .. } = item {
+            let t = title.to_ascii_lowercase();
+            let path = detail.lines().next().unwrap_or_default().trim();
+            let edits = ["edit", "write", "patch"].iter().any(|w| t.contains(w));
+            if edits
+                && !path.is_empty()
+                && !path.contains(' ')
+                && path.len() < 200
+                && !files.contains(&path)
+            {
+                files.push(path);
+            }
+        }
+    }
+    if !files.is_empty() {
+        const LISTED: usize = 15;
+        let more = files.len().saturating_sub(LISTED);
+        let mut line = format!(
+            "Files changed so far: {}",
+            files[..files.len().min(LISTED)].join(", ")
+        );
+        if more > 0 {
+            line.push_str(&format!(" and {more} more"));
+        }
+        notes.push(line);
+    }
+    notes
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -396,31 +560,58 @@ mod tests {
             user("thanks"),
         ];
         assert_eq!(
-            recap(&items),
-            "User: fix the parser [1 image attached]\n\n(The assistant used a tool: Edit src/parser.rs)\n(The assistant used a tool: Edit src/lib.rs)\n\nAssistant: Fixed it.\n\nUser: thanks"
+            recap(&items, None),
+            "The latest exchanges, oldest first:\n\nUser: fix the parser [1 image attached]\n\n(The assistant used 2 tool calls: Edit src/parser.rs; Edit src/lib.rs)\n\nAssistant: Fixed it.\n\nUser: thanks\n\nThe last turn failed: boom\n\nFiles changed so far: src/parser.rs, src/lib.rs"
         );
+        assert_eq!(recap(&[said("woke up")], None), "", "nothing was asked");
     }
 
     #[test]
-    fn long_recaps_keep_the_latest_messages() {
+    fn recaps_are_short_orientations_that_point_at_the_transcript() {
         let long = "x".repeat(5_000);
-        let items: Vec<Item> = (0..30)
-            .map(|i| {
-                if i % 2 == 0 {
-                    user(&format!("{i} {long}"))
-                } else {
-                    said(&format!("{i} {long}"))
-                }
-            })
-            .collect();
-        let r = recap(&items);
-        assert!(r.len() <= RECAP_MAX + 100, "{}", r.len());
-        assert!(r.starts_with("(Earlier messages left out.)"));
+        let mut items: Vec<Item> = vec![];
+        for i in 0..30 {
+            items.push(user(&format!("{i} {long}")));
+            items.push(Item::Tool {
+                id: format!("t{i}"),
+                title: "Bash".into(),
+                detail: format!("cargo test {i}"),
+                output: "error[E0308]: mismatched types".into(),
+                status: ToolStatus::Done,
+            });
+            items.push(said(&format!("{i} {long}")));
+            items.push(end());
+        }
+        items.push(said("Shall I push it?"));
+        let path = Path::new("/data/transcripts/t.log");
+        let r = recap(&items, Some((path, 4_321)));
+        assert!(r.len() <= RECAP_MAX, "{}", r.len());
         assert!(
-            r.ends_with("29 ") || r.contains("Assistant: 29 "),
-            "the latest message is in"
+            r.starts_with("The whole conversation so far is in the transcript at \"/data/transcripts/t.log\" (4321 lines)"),
+            "{r}"
         );
-        assert!(!r.contains("User: 0 "));
+        assert!(r.contains("transcript_search"));
+        assert!(
+            r.contains("What was asked first:\n\nUser: 0 "),
+            "the task stays"
+        );
+        assert!(r.contains("(26 later messages and 26 tool calls before the latest exchanges are left out here: they're in the transcript.)"), "{r}");
+        assert!(
+            r.contains("User: 29 ") && r.contains("Assistant: Shall I push it?"),
+            "the latest exchange is in, with the agent's last words in it"
+        );
+        assert!(r.contains("Assistant: 28 ") && !r.contains("Assistant: 29 "));
+        assert!(!r.contains("User: 15 "));
         assert!(r.contains(" …"), "each message is shortened");
+        assert!(!r.contains("E0308"), "tool output stays in the transcript");
+        assert!(r.contains("(The assistant used 1 tool call: Bash cargo test 29)"));
+        assert!(
+            r.ends_with(
+                "Open: the assistant's last message asked the user something, still unanswered."
+            ),
+            "{r}"
+        );
+        // Each message the mock agent remembers stays its own paragraph.
+        assert!(r.split("\n\n").filter(|p| p.starts_with("User: ")).count() == 4);
     }
 }

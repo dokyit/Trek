@@ -10,6 +10,7 @@ mod node_setup;
 mod orchestrate;
 pub mod phone_use;
 mod tabs;
+mod transcript_log;
 #[cfg(any(test, feature = "test-support"))]
 pub use tabs::MAX_TABS;
 mod ide;
@@ -3775,6 +3776,7 @@ impl Workspace {
                             efforts: vec![],
                             tier: 0,
                             fast: None,
+                            context: None,
                         })
                         .collect();
                 }
@@ -4698,11 +4700,15 @@ impl Workspace {
             .get(id)
             .map(|l| (l.plan, l.fast, l.ask))
             .unwrap_or_default();
-        // After a rewind or a fork the session picks up from part of one, or from a recap.
+        // After a rewind or a fork the session picks up from part of one, or from a recap: a short
+        // orientation pointing at the transcript log, brought up to date first.
+        let log = self.transcript_log(id, cx);
         let recap = || {
             self.live
                 .get(id)
-                .map(|l| trek_core::rewind::recap(&l.items))
+                .map(|l| {
+                    trek_core::rewind::recap(&l.items, log.as_ref().map(|(p, n)| (p.as_path(), *n)))
+                })
                 .filter(|r| !r.is_empty())
         };
         let (resume, resume_at, fork, recap) = match thread.reopen.clone() {
@@ -4758,6 +4764,7 @@ impl Workspace {
             instructions,
             read_dirs: vec![trek_core::skills::shipped_root()],
             script: false,
+            transcript: log.map(|(path, _)| path),
         });
         self.attach(id, handle, cx);
         self.adopt_ipc_session(id, ipc);
@@ -4838,10 +4845,13 @@ impl Workspace {
         // Only where the watcher is handed over (`mcp_servers`): a build without trek-mcp has none.
         let video = (self.settings.tools.video && trek_mcp_binary().is_some())
             .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
+        // Every session has its thread's transcript to search (`transcript_log`).
+        let transcript = Some(trek_core::session_log::AGENT_NOTE.to_string());
         let notes: Vec<String> =
             std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string())
                 .chain(artifacts)
                 .chain(video)
+                .chain(transcript)
                 .chain(self.project_notes(project, cwd))
                 .chain(recap)
                 .collect();
@@ -4904,6 +4914,7 @@ impl Workspace {
             instructions,
             read_dirs: vec![trek_core::skills::shipped_root()],
             script: false,
+            transcript: None,
         });
         // Replacing the old one drops its command channel, which ends that process.
         self.warm = Some((key, handle, cx.background_executor().now()));

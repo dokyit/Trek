@@ -118,11 +118,19 @@ pub fn is_thread_tool(title: &str) -> bool {
 }
 
 /// The first message of a thread that takes over another's work: the brief its agent wrote,
-/// framed so the new agent knows where it stands. (Not the other thread's title: that's often
-/// the user's first message cut short, which the new agent could take for its task.)
-pub fn handoff_prompt(brief: &str) -> String {
+/// framed so the new agent knows where it stands, and where that thread's whole transcript is
+/// (`from`: its id, the log's path and line count) for anything exact the brief left out. (Not
+/// the other thread's title: that's often the user's first message cut short, which the new
+/// agent could take for its task.)
+pub fn handoff_prompt(brief: &str, from: Option<(&str, &std::path::Path, u64)>) -> String {
+    let transcript = match from {
+        Some((id, path, lines)) => {
+            format!(" {}", crate::session_log::retrieval(path, lines, Some(id)))
+        }
+        None => " Nothing else of that conversation comes with it.".to_string(),
+    };
     format!(
-        "You're taking over from another thread in Trek whose context was getting full. Its agent left you this brief and nothing else of that conversation. Check the state it describes before changing anything, then carry on with the next steps.\n\n<brief>\n{}\n</brief>",
+        "You're taking over from another thread in Trek whose context was getting full. Its agent left you this brief. Check the state it describes before changing anything, then carry on with the next steps.{transcript}\n\n<brief>\n{}\n</brief>",
         brief.trim()
     )
 }
@@ -131,6 +139,14 @@ pub fn handoff_prompt(brief: &str) -> String {
 /// that started a thread (or the sub-agent's parent).
 pub fn depth(id: &str, started_by: impl Fn(&str) -> Option<String>) -> usize {
     crate::orchestrate::depth(id, started_by)
+}
+
+/// The brief inside a [`handoff_prompt`], when `text` is one: what the new thread is asked,
+/// without Trek's frame around it.
+pub fn handoff_brief(text: &str) -> Option<&str> {
+    let text = text.strip_prefix("You're taking over from another thread in Trek")?;
+    let (_, rest) = text.split_once("\n\n<brief>\n")?;
+    rest.strip_suffix("\n</brief>")
 }
 
 #[cfg(test)]
@@ -179,11 +195,23 @@ mod tests {
 
     #[test]
     fn a_handoff_s_prompt_carries_the_brief() {
-        let p = handoff_prompt("  Goal: fix it.\nNext: tests.  ");
+        let p = handoff_prompt("  Goal: fix it.\nNext: tests.  ", None);
         assert!(
             p.starts_with("You're taking over")
                 && p.ends_with("<brief>\nGoal: fix it.\nNext: tests.\n</brief>"),
             "{p}"
         );
+        let p = handoff_prompt(
+            "Goal: fix it.",
+            Some(("t-1", std::path::Path::new("/d/transcripts/t-1.log"), 88)),
+        );
+        assert!(
+            p.contains("That thread's whole conversation is in its transcript at \"/d/transcripts/t-1.log\" (88 lines)")
+                && p.contains("transcript_search with thread \"t-1\"")
+                && p.ends_with("<brief>\nGoal: fix it.\n</brief>"),
+            "{p}"
+        );
+        assert_eq!(handoff_brief(&p), Some("Goal: fix it."));
+        assert_eq!(handoff_brief("Goal: fix it."), None);
     }
 }

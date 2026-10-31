@@ -14,12 +14,16 @@ use std::sync::{Arc, Mutex};
 
 pub struct Orchestrate {
     client: Option<trek_ipc::Client>,
+    /// Only the transcript tools: Trek's sub-agent tools are off (`trek_ipc::ENV_TOOLS`).
+    transcript_only: bool,
 }
 
 impl Orchestrate {
     pub fn from_env() -> Self {
         Self {
             client: trek_ipc::Client::from_env(),
+            transcript_only: std::env::var(trek_ipc::ENV_TOOLS)
+                .is_ok_and(|v| v == trek_ipc::TRANSCRIPT_ONLY),
         }
     }
 }
@@ -30,12 +34,16 @@ impl ToolSet for Orchestrate {
     }
 
     fn instructions(&self) -> &'static str {
-        "Trek runs other agents and models for this thread. Use list_models to see what's available. Pick by what you need back: delegate_task starts a sub-agent for a scoped task whose answer comes back to you (advise: read-only review; implement: may change files); follow it with task_status / task_result / cancel_task. start_thread starts a separate thread of the user's own, in their sidebar, for work they'll follow by itself (optionally in another project or a new git worktree); follow it with list_threads / thread_status / read_thread and steer it with send_to_thread. handoff moves this work to a fresh thread when your context is running out: write a complete brief, then end your turn. Sub-agents and new threads see only the prompt or brief you give them."
+        if self.transcript_only {
+            return TRANSCRIPT_INSTRUCTIONS;
+        }
+        "Trek runs other agents and models for this thread. Use list_models to see what's available. Pick by what you need back: delegate_task starts a sub-agent for a scoped task whose answer comes back to you (advise: read-only review; implement: may change files); follow it with task_status / task_result / cancel_task. start_thread starts a separate thread of the user's own, in their sidebar, for work they'll follow by itself (optionally in another project or a new git worktree); follow it with list_threads / thread_status / read_thread and steer it with send_to_thread. handoff moves this work to a fresh thread when your context is running out: write a short brief (the new thread can search this one's transcript), then end your turn. Sub-agents and new threads see only the prompt or brief you give them. transcript_search and transcript_read find this thread's exact earlier content (or the one it continues) after a compaction, recap or handoff."
     }
 
     fn tools(&self) -> Vec<ToolDef> {
         trek_ipc::tools()
             .into_iter()
+            .filter(|(name, ..)| !self.transcript_only || trek_ipc::TRANSCRIPT_TOOLS.contains(name))
             .map(|(name, description, input_schema)| ToolDef {
                 name,
                 description,
@@ -48,6 +56,9 @@ impl ToolSet for Orchestrate {
         call(self.client.as_ref(), name, args, None)
     }
 }
+
+/// What the server says when it has only the transcript tools.
+const TRANSCRIPT_INSTRUCTIONS: &str = "transcript_search and transcript_read search and read this thread's whole transcript, word for word: after a compaction, a recap or a handoff, use them for exact earlier content rather than guessing.";
 
 /// Run one tool call against Trek. `keep` receives a handle on the connection as soon as it's
 /// open, so a cancel can shut it down.
@@ -184,7 +195,10 @@ mod tests {
 
     #[test]
     fn lists_the_shared_tools() {
-        let tools = Orchestrate { client: None };
+        let tools = Orchestrate {
+            client: None,
+            transcript_only: false,
+        };
         let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
         assert_eq!(names, trek_ipc::TOOL_NAMES);
         for word in [
@@ -193,12 +207,21 @@ mod tests {
             "handoff",
             "read_thread",
             "send_to_thread",
+            "transcript_search",
         ] {
             assert!(
                 tools.instructions().contains(word),
                 "the instructions say when to use {word}"
             );
         }
+        // With the sub-agent tools off, only the transcript's.
+        let only = Orchestrate {
+            client: None,
+            transcript_only: true,
+        };
+        let names: Vec<&str> = only.tools().iter().map(|t| t.name).collect();
+        assert_eq!(names, trek_ipc::TRANSCRIPT_TOOLS);
+        assert!(!only.instructions().contains("delegate_task"));
         assert!(
             tools
                 .tools()
@@ -209,7 +232,10 @@ mod tests {
 
     #[test]
     fn without_trek_calls_say_why() {
-        let mut tools = Orchestrate { client: None };
+        let mut tools = Orchestrate {
+            client: None,
+            transcript_only: false,
+        };
         let err = tools.call("list_models", &json!({})).unwrap_err();
         assert!(err.contains("only in agents that Trek started"), "{err}");
     }
@@ -262,6 +288,7 @@ mod tests {
                 token: "t".into(),
                 session: "s".into(),
             }),
+            transcript_only: false,
         };
         let out = tools.call("task_status", &json!({"id": "abc"})).unwrap();
         let text = out[0]["text"].as_str().unwrap();

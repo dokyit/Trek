@@ -189,7 +189,10 @@ impl Workspace {
         // The mock talks to Trek itself; a real agent needs the server binary.
         let mock = matches!(agent, AgentId::Direct(p) if p == catalog::MOCK_PROVIDER);
         let bin = super::trek_mcp_binary();
-        let orchestrate = self.settings.tools.orchestration && (mock || bin.is_some());
+        // The server carries the transcript tools every session gets, and the sub-agent tools
+        // when they're on.
+        let transcript = mock || bin.is_some();
+        let orchestrate = self.settings.tools.orchestration && transcript;
         let browser = self.browser_tools() && (mock || bin.is_some());
         let phone = self.phone_tools() && bin.is_some();
         let behind = servers.iter().position(|s| {
@@ -201,7 +204,7 @@ impl Workspace {
         let Some(ipc) = self
             .ipc
             .as_ref()
-            .filter(|_| orchestrate || browser || phone || behind.is_some())
+            .filter(|_| transcript || browser || phone || behind.is_some())
         else {
             return (servers, None);
         };
@@ -223,7 +226,14 @@ impl Workspace {
                 ipc.env(&key),
             ));
         }
-        if orchestrate {
+        if transcript {
+            let mut env = ipc.env(&key);
+            if !orchestrate {
+                env.push((
+                    trek_ipc::ENV_TOOLS.to_string(),
+                    trek_ipc::TRANSCRIPT_ONLY.to_string(),
+                ));
+            }
             servers.push(McpServer {
                 tool_timeout_secs: Some(TOOL_TIMEOUT_SECS),
                 ..McpServer::stdio(
@@ -231,7 +241,7 @@ impl Workspace {
                     bin.map(|b| b.display().to_string())
                         .unwrap_or_else(|| "trek-mcp".into()),
                     vec!["orchestrate".into()],
-                    ipc.env(&key),
+                    env,
                 )
             });
         }
@@ -300,6 +310,10 @@ impl Workspace {
         // And iPhone use, for the iPhone tool.
         if trek_ipc::phone::is_method(&call.method) {
             return self.phone_call(call, cx);
+        }
+        // The thread's transcript, which every agent may read whatever the settings say.
+        if trek_ipc::TRANSCRIPT_TOOLS.contains(&call.method.as_str()) {
+            return self.transcript_call(call, cx);
         }
         let result = if self.thread(&call.thread).is_none() {
             Err("This thread isn't in Trek any more.".to_string())

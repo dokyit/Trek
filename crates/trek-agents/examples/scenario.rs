@@ -64,6 +64,7 @@ impl Session {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         });
         Session { h, seen: vec![] }
     }

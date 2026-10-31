@@ -502,6 +502,15 @@ fn agents_that_cant_rewind_their_session_get_a_recap() {
             trek.read(cx, |ws, _| ws.thread(&id).unwrap().reopen.clone()),
             None
         );
+        // The transcript log kept everything, the turn taken back included, and says so.
+        let log =
+            std::fs::read_to_string(trek_core::paths::transcripts_dir().join(format!("{id}.log")))
+                .unwrap();
+        let (before, after) = log.split_once("were taken back").expect(&log);
+        assert!(
+            before.contains("\ncherry\n") && after.contains("\nrecall\n"),
+            "{log}"
+        );
     });
 }
 

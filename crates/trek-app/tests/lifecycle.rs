@@ -574,6 +574,7 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
                 instructions: None,
                 read_dirs: vec![],
                 script: false,
+                transcript: None,
             };
             let key = (
                 mock(),

@@ -43,6 +43,9 @@ pub struct DirectOptions {
     /// The whole system prompt, in place of Trek's (`SessionConfig::instructions` still follow).
     pub system_prompt: Option<String>,
     pub observer: Option<Arc<dyn Observer>>,
+    /// The model's context window in tokens, in place of what its provider's model list said
+    /// (`ModelInfo::context`) or `catalog::context_window`'s guess.
+    pub context_window: Option<u64>,
 }
 
 impl Default for DirectOptions {
@@ -58,6 +61,7 @@ impl Default for DirectOptions {
             deadline: None,
             system_prompt: None,
             observer: None,
+            context_window: None,
         }
     }
 }
@@ -252,6 +256,208 @@ fn direct_tools() -> Vec<Value> {
     ]
 }
 
+/// The thread's transcript, for a session that has earlier context to look back on: one that
+/// started from a recap, or went on in a fresh context (`Trail::orientation`). They read the
+/// log Trek keeps (`trek_core::session_log`).
+fn transcript_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": "transcript_search",
+                "description": "Search this thread's whole transcript (earlier messages, tool calls, full results) for lines matching query. Returns the latest matches with line numbers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Words all on one line (any case), or a regex with regex true." },
+                        "regex": { "type": "boolean" },
+                        "context": { "type": "integer", "description": "Lines around each match (default 2)." }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "transcript_read",
+                "description": "Read transcript lines by number.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "start": { "type": "integer" },
+                        "end": { "type": "integer" }
+                    },
+                    "required": ["start"]
+                }
+            }
+        }),
+    ]
+}
+
+/// A transcript tool's call, run on the log at `path`: its output, and whether it worked.
+async fn transcript_tool(name: &str, args_json: &str, path: &Path) -> (String, bool) {
+    let args: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+    let path = path.to_path_buf();
+    let name = name.to_string();
+    let ran = tokio::task::spawn_blocking(move || match name.as_str() {
+        "transcript_search" => trek_core::session_log::Query::from_args(&args)
+            .and_then(|q| trek_core::session_log::search(&path, &q)),
+        _ => {
+            let n = |k: &str| args[k].as_u64().map(|v| v as usize);
+            trek_core::session_log::read(&path, n("start").unwrap_or(1), n("end"))
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
+    match ran {
+        Ok(out) => (out, true),
+        Err(e) => (e, false),
+    }
+}
+
+/// Past this share of the model's context window, the next request starts a fresh context.
+const CONTINUE_AT: f64 = 0.85;
+
+/// What a fresh context's first user message says when it starts mid-answer.
+const CONTINUE_MESSAGE: &str = "Your context was full, so it was started fresh: the system prompt says where things stand. Carry on with the current request from there.";
+
+/// Roughly how many tokens `v` takes: a quarter of its characters, an image's data counted as a
+/// picture's worth (about 1,500 tokens) rather than as text.
+fn estimate_tokens(v: &Value) -> u64 {
+    fn chars(v: &Value) -> usize {
+        match v {
+            Value::String(s)
+                if s.len() > 6_000 && (s.starts_with("data:image") || !s.contains(' ')) =>
+            {
+                6_000
+            }
+            Value::String(s) => s.len(),
+            Value::Array(a) => a.iter().map(chars).sum(),
+            Value::Object(o) => o.iter().map(|(k, v)| k.len() + chars(v)).sum(),
+            other => other.to_string().len(),
+        }
+    }
+    (chars(v) / 4) as u64
+}
+
+/// What a session has been doing, to tell a fresh context where things stand.
+#[derive(Debug, Default)]
+struct Trail {
+    /// The session's first message (past any recap) and the one being answered.
+    first: Option<String>,
+    prompt: String,
+    /// The latest tool calls in this answer: the call, whether it worked, its output.
+    steps: VecDeque<(String, bool, String)>,
+    /// The model's latest words.
+    said: String,
+    /// How many times the session started a fresh context.
+    fresh: u32,
+}
+
+impl Trail {
+    const STEPS: usize = 10;
+
+    fn prompt(&mut self, text: &str) {
+        let text = text.rsplit("</recap>").next().unwrap_or(text).trim();
+        if self.first.is_none() {
+            self.first = Some(text.to_string());
+        }
+        self.prompt = text.to_string();
+        self.steps.clear();
+    }
+
+    fn step(&mut self, name: &str, args: &str, ok: bool, output: &str) {
+        let (_, detail) = tool_display(name, args);
+        self.steps.push_back((
+            format!(
+                "{name} {}",
+                clip_chars(detail.lines().next().unwrap_or_default(), 160)
+            ),
+            ok,
+            output.to_string(),
+        ));
+        while self.steps.len() > Self::STEPS {
+            self.steps.pop_front();
+        }
+    }
+
+    /// The orientation a fresh context gets in its system prompt: where the transcript is (and
+    /// how to search it), the session's first message, the current request, what was done in it
+    /// lately and the model's last words.
+    fn orientation(&self, transcript: Option<&Path>) -> String {
+        let mut out = format!(
+            "<fresh-context>\nYour context window filled up, so this session went on in a fresh one{}. ",
+            if self.fresh > 1 {
+                format!(" ({} times now)", self.fresh)
+            } else {
+                String::new()
+            }
+        );
+        match transcript {
+            Some(path) => {
+                let lines = std::fs::read(path)
+                    .map(|b| b.iter().filter(|c| **c == b'\n').count() as u64)
+                    .unwrap_or(0);
+                out.push_str(&trek_core::session_log::retrieval(path, lines, None));
+            }
+            None => out.push_str(
+                "Nothing from before is kept where you can search it: work from this, the files and your tools.",
+            ),
+        }
+        let first = self.first.as_deref().unwrap_or_default();
+        if !first.is_empty() && first != self.prompt {
+            out.push_str(&format!(
+                "\n\nThe session's first message:\n{}",
+                clip_chars(first, 1_500)
+            ));
+        }
+        out.push_str(&format!(
+            "\n\nThe request you're answering:\n{}",
+            clip_chars(&self.prompt, 1_500)
+        ));
+        if !self.steps.is_empty() {
+            // Cut short without a word, an output reads as all there was: a model once took a
+            // file's first line for the file and re-read everything.
+            out.push_str(
+                "\n\nYour latest tool calls in it, oldest first, with the start of each output only (one ending in … went on: what isn't shown may still be in it):",
+            );
+            let n = self.steps.len();
+            for (i, (call, ok, output)) in self.steps.iter().enumerate() {
+                let shown = if i + 2 >= n {
+                    clip_chars(output.trim(), 1_200)
+                } else {
+                    clip_chars(output.trim().lines().next().unwrap_or_default(), 160)
+                };
+                out.push_str(&format!(
+                    "\n- {call} ({}): {shown}",
+                    if *ok { "ok" } else { "failed" }
+                ));
+            }
+        }
+        if !self.said.trim().is_empty() {
+            out.push_str(&format!(
+                "\n\nYour last words:\n{}",
+                clip_chars(self.said.trim(), 1_000)
+            ));
+        }
+        out.push_str("\n</fresh-context>");
+        out
+    }
+}
+
+/// `s` cut to about `max` bytes (at a character boundary), with " …" when it was cut.
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} …", &s[..end])
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AccumulatedToolCall {
     pub id: String,
@@ -357,7 +563,13 @@ async fn session(
         }
     };
     let past_deadline = || options.deadline.is_some_and(|d| Instant::now() >= d);
-    let tools = tool_defs(config.script);
+    let mut tools = tool_defs(config.script);
+    // A session with earlier context to look back on searches the thread's transcript.
+    let mut searchable = false;
+    if config.recap.is_some() && config.transcript.is_some() {
+        tools.extend(transcript_tools());
+        searchable = true;
+    }
     let mut requests = 0u32;
     let mut model = config.model.clone().context("Pick a model first")?;
     let mut effort = config.effort;
@@ -378,7 +590,7 @@ async fn session(
         }))
         .await?;
 
-    let system = match &options.system_prompt {
+    let base_system = match &options.system_prompt {
         Some(own) => {
             let mut p = own.clone();
             if let Some(extra) = &config.instructions {
@@ -394,9 +606,25 @@ async fn session(
             config.instructions.as_deref(),
         ),
     };
+    let mut system = base_system.clone();
     let mut history: Vec<Value> = Vec::new();
     let mut kept = VecDeque::new();
     let mut shutdown = false;
+    // How full the context is: tokens in it at the last usage report, and `history`'s length
+    // then (what came after is estimated).
+    let mut used: Option<(u64, usize)> = None;
+    let window_of = |model: &str| {
+        options
+            .context_window
+            .or_else(|| {
+                cached_direct_models(provider.id)
+                    .into_iter()
+                    .find(|m| m.id == model)
+                    .and_then(|m| m.context)
+            })
+            .unwrap_or_else(|| trek_core::catalog::context_window(model))
+    };
+    let mut trail = Trail::default();
 
     loop {
         let cmd = match kept.pop_front() {
@@ -419,8 +647,9 @@ async fn session(
                     }
                     // Where this message starts in `history`: a failed first request takes it back
                     // out, so the next message doesn't carry one that was never answered.
-                    let turn_start = history.len();
+                    let mut turn_start = history.len();
                     history.push(message);
+                    trail.prompt(&text);
 
                     // Multi-turn agent loop for tool calls
                     let mut turn_count = 0;
@@ -430,6 +659,57 @@ async fn session(
                         if past_deadline() {
                             why = Some(Stop::TimeLimit);
                             break;
+                        }
+                        // Near the context window's end: go on in a fresh context, oriented by the
+                        // trail, with the transcript to search for anything exact.
+                        let window = window_of(&model);
+                        let estimate = match used {
+                            Some((tokens, at)) if at <= history.len() => {
+                                tokens + estimate_tokens(&Value::Array(history[at..].to_vec()))
+                            }
+                            _ => {
+                                estimate_tokens(&json!([system, tools]))
+                                    + estimate_tokens(&Value::Array(history.clone()))
+                            }
+                        };
+                        // Only when going on afresh frees room: a fresh context still holds the
+                        // system prompt, the tools and an orientation (about 2,000 tokens).
+                        let fresh_floor = estimate_tokens(&json!([base_system, tools])) + 2_000;
+                        if history.len() > 1
+                            && estimate as f64 > CONTINUE_AT * window as f64
+                            && fresh_floor < window / 2
+                        {
+                            trail.fresh += 1;
+                            system = format!(
+                                "{base_system}\n\n{}",
+                                trail.orientation(config.transcript.as_deref())
+                            );
+                            // At the start of an answer the message itself carries on; mid-answer,
+                            // a line saying to.
+                            let carried = (history.len() == turn_start + 1)
+                                .then(|| history.pop())
+                                .flatten();
+                            history.clear();
+                            history.push(carried.unwrap_or_else(
+                                || json!({ "role": "user", "content": CONTINUE_MESSAGE }),
+                            ));
+                            turn_start = 0;
+                            if !searchable && config.transcript.is_some() {
+                                tools.extend(transcript_tools());
+                                searchable = true;
+                            }
+                            used = None;
+                            events
+                                .send(AgentEvent::Notice(format!(
+                                    "The context was {}% full, so this answer goes on in a fresh one{}.",
+                                    (estimate * 100 / window.max(1)).min(100),
+                                    if config.transcript.is_some() {
+                                        ": the earlier conversation stays searchable in the transcript"
+                                    } else {
+                                        ""
+                                    }
+                                )))
+                                .await?;
                         }
                         turn_count += 1;
                         requests += 1;
@@ -497,6 +777,12 @@ async fn session(
                         match result {
                             Ok(resp) => {
                                 let anthropic = resp.content.is_some();
+                                let in_context = resp.usage.as_ref().map(|(t, _)| {
+                                    t.input + t.cache_read + t.cache_write + t.output
+                                });
+                                if !resp.text.trim().is_empty() {
+                                    trail.said = resp.text.clone();
+                                }
                                 match resp.content {
                                     Some(content) => history.push(content),
                                     None if resp.tool_calls.is_empty() => history
@@ -528,6 +814,15 @@ async fn session(
                                         history.push(message);
                                     }
                                 }
+                                if let Some(tokens) = in_context {
+                                    used = Some((tokens, history.len()));
+                                    events
+                                        .send(AgentEvent::Context {
+                                            used: tokens,
+                                            window: window_of(&model),
+                                        })
+                                        .await?;
+                                }
                                 if resp.tool_calls.is_empty() {
                                     why = Some(Stop::EndTurn);
                                     break;
@@ -555,21 +850,36 @@ async fn session(
                                         observe(&|o| o.tool_call(&call.name, &args));
                                     }
 
-                                    let ran = execute_tool(
-                                        &call.name,
-                                        &call.arguments,
-                                        &config.cwd,
-                                        config.read_only,
-                                        hand_holding,
-                                        &mut allowed_for_session,
-                                        &options,
-                                        config.script,
-                                        &events,
-                                        &commands,
-                                        &mut kept,
-                                        &mut shutdown,
-                                    )
-                                    .await;
+                                    let ran = match config.transcript.as_deref() {
+                                        // Reading the thread's own transcript asks nothing.
+                                        Some(path)
+                                            if searchable
+                                                && (call.name == "transcript_search"
+                                                    || call.name == "transcript_read") =>
+                                        {
+                                            let (out, ok) =
+                                                transcript_tool(&call.name, &call.arguments, path)
+                                                    .await;
+                                            Ok((out, ok, None))
+                                        }
+                                        _ => {
+                                            execute_tool(
+                                                &call.name,
+                                                &call.arguments,
+                                                &config.cwd,
+                                                config.read_only,
+                                                hand_holding,
+                                                &mut allowed_for_session,
+                                                &options,
+                                                config.script,
+                                                &events,
+                                                &commands,
+                                                &mut kept,
+                                                &mut shutdown,
+                                            )
+                                            .await
+                                        }
+                                    };
                                     let (output, ok, lines, stop) = match ran {
                                         Ok((output, ok, lines)) => (output, ok, lines, None),
                                         // A Stop (or shutdown) while the tool ran or waited for
@@ -577,6 +887,7 @@ async fn session(
                                         Err(e) => (format!("{e:#}"), false, None, Some(e)),
                                     };
                                     observe(&|o| o.tool_result(&call.name, &output, ok));
+                                    trail.step(&call.name, &call.arguments, ok, &output);
 
                                     if let Some((added, removed)) = lines {
                                         events
@@ -882,6 +1193,18 @@ fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
             let line = described.or_else(first_line).unwrap_or(args_json);
             ("Run script", line.to_string())
         }
+        "transcript_search" => (
+            trek_core::session_log::SEARCH_TITLE,
+            parsed["query"].as_str().unwrap_or(args_json).to_string(),
+        ),
+        "transcript_read" => (
+            trek_core::session_log::READ_TITLE,
+            match (parsed["start"].as_u64(), parsed["end"].as_u64()) {
+                (Some(a), Some(b)) => format!("lines {a}-{b}"),
+                (Some(a), None) => format!("from line {a}"),
+                _ => args_json.to_string(),
+            },
+        ),
         _ => ("Tool", args_json.to_string()),
     }
 }
@@ -1765,13 +2088,32 @@ fn anthropic_body(
     history: &[Value],
     tools: &[Value],
 ) -> Value {
+    // Prompt caching: the tools and system prompt (the first breakpoint covers both: tools come
+    // first), and the conversation up to its last message, so each request in a run of tool
+    // calls reads the one before it from the cache.
+    let mut tools = anthropic_tools(tools);
+    if let Some(last) = tools.last_mut() {
+        last["cache_control"] = json!({ "type": "ephemeral" });
+    }
+    let mut messages = history.to_vec();
+    if let Some(last) = messages.last_mut() {
+        if let Some(text) = last["content"].as_str() {
+            last["content"] = json!([{ "type": "text", "text": text }]);
+        }
+        if let Some(block) = last["content"]
+            .as_array_mut()
+            .and_then(|blocks| blocks.last_mut())
+        {
+            block["cache_control"] = json!({ "type": "ephemeral" });
+        }
+    }
     let mut body = json!({
         "model": model,
         "max_tokens": 64000,
         "stream": true,
-        "system": system,
-        "messages": history,
-        "tools": anthropic_tools(tools),
+        "system": [{ "type": "text", "text": system, "cache_control": { "type": "ephemeral" } }],
+        "messages": messages,
+        "tools": tools,
     });
     if model.starts_with("claude-haiku-4") {
         if effort >= Effort::Low {
@@ -2244,6 +2586,7 @@ pub async fn direct_provider_models(
                     efforts: vec![],
                     tier: 0,
                     fast: None,
+                    context: None,
                 })
             })
             .collect();
@@ -2295,6 +2638,12 @@ pub(crate) fn parse_direct_models(v: &Value) -> Vec<ModelInfo> {
                 efforts: vec![],
                 tier: models.len().min(255) as u8,
                 fast: None,
+                // OpenRouter and most OpenAI-style lists, Anthropic's, Gemini's.
+                context: ["context_length", "max_input_tokens", "inputTokenLimit"]
+                    .iter()
+                    .find_map(|k| m[*k].as_u64())
+                    .or_else(|| m["top_provider"]["context_length"].as_u64())
+                    .filter(|n| *n > 0),
             });
         }
     }
@@ -2493,6 +2842,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let (_commands, commands_rx) = async_channel::unbounded();
         let (events_tx, _events) = async_channel::unbounded();
@@ -2979,6 +3329,41 @@ mod tests {
         assert!(
             body["tools"][0].get("function").is_none() && body["tools"][0].get("type").is_none()
         );
+        // Cached: the tools and system prompt, and the conversation so far.
+        assert_eq!(body["system"][0]["text"], "sys");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["tools"][3]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0].get("cache_control").is_none());
+        let history = [
+            json!({ "role": "user", "content": "hi" }),
+            json!({ "role": "assistant", "content": [{ "type": "text", "text": "yes" }] }),
+            json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t", "content": "ok" }, { "type": "text", "text": "and" }] }),
+        ];
+        let body = anthropic_body("claude-sonnet-4-5", Effort::Medium, "sys", &history, &[]);
+        assert_eq!(
+            body["messages"][0]["content"], "hi",
+            "only the last message"
+        );
+        assert_eq!(
+            body["messages"][2]["content"][1]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(
+            body["messages"][2]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        let body = anthropic_body(
+            "claude-sonnet-4-5",
+            Effort::Medium,
+            "sys",
+            &history[..1],
+            &[],
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{ "type": "text", "text": "hi", "cache_control": { "type": "ephemeral" } }])
+        );
     }
 
     #[tokio::test]
@@ -3132,10 +3517,24 @@ mod tests {
             options: DirectOptions,
             script: bool,
         ) -> TestSession {
+            Self::start_configured(provider, hand_holding, responses, options, |c| {
+                c.script = script
+            })
+            .await
+        }
+
+        /// `start_with`, the session's config changed by `tweak` first.
+        async fn start_configured(
+            provider: &'static str,
+            hand_holding: HandHolding,
+            responses: Vec<(u16, String)>,
+            options: DirectOptions,
+            tweak: impl FnOnce(&mut SessionConfig),
+        ) -> TestSession {
             let (url, bodies) = script_server(responses).await;
             let cwd = std::env::temp_dir().join(format!("trek_test_direct_session_{}", next_id()));
             std::fs::create_dir_all(&cwd).unwrap();
-            let config = SessionConfig {
+            let mut config = SessionConfig {
                 agent: AgentId::Direct(provider.into()),
                 cwd: cwd.clone(),
                 model: Some("m".into()),
@@ -3151,8 +3550,10 @@ mod tests {
                 mcp_servers: vec![],
                 instructions: None,
                 read_dirs: vec![],
-                script,
+                script: false,
+                transcript: None,
             };
+            tweak(&mut config);
             let (commands, commands_rx) = async_channel::unbounded();
             let (events_tx, events) = async_channel::unbounded();
             let provider = direct_provider(provider).unwrap();
@@ -4136,6 +4537,227 @@ mod tests {
             status,
             body.replace("data: [DONE]", &format!("{chunk}data: [DONE]")),
         )
+    }
+
+    /// `response`, reporting `prompt` tokens in and 5 out.
+    fn using(prompt: u64, (status, body): (u16, String)) -> (u16, String) {
+        let usage = json!({ "prompt_tokens": prompt, "completion_tokens": 5 });
+        let chunk = format!("data: {}\n\n", json!({ "choices": [], "usage": usage }));
+        (
+            status,
+            body.replace("data: [DONE]", &format!("{chunk}data: [DONE]")),
+        )
+    }
+
+    fn tool_names(body: &Value) -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| {
+                t["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// A transcript log like the one Trek keeps, in a folder of its own.
+    fn transcript_file(text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("trek_test_direct_log_{}", next_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("thread.log");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_full_context_goes_on_fresh_with_the_transcript_to_search() {
+        let log = transcript_file(
+            "### #1 L1 turn 1 2026-10-31 10:00:00 tool Run command (failed)\nargs: cargo build\nresult:\nerror[E0599]: no method named `frobnicate` found for struct `Parser`\n\n",
+        );
+        let s = TestSession::start_configured(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                using(
+                    18_000,
+                    openai_tool_call("call_1", "bash", json!({ "command": "echo hi" })),
+                ),
+                using(
+                    3_000,
+                    openai_tool_call("call_2", "transcript_search", json!({ "query": "E0599" })),
+                ),
+                using(3_200, openai_text("Found it: frobnicate.")),
+            ],
+            DirectOptions {
+                context_window: Some(20_000),
+                ..Default::default()
+            },
+            |c| c.transcript = Some(log.clone()),
+        )
+        .await;
+        s.prompt("fix the build").await;
+        let first = s
+            .until(|e| match e {
+                AgentEvent::Context { used, window } => Some((*used, *window)),
+                _ => None,
+            })
+            .await;
+        assert_eq!(
+            first,
+            (18_005, 20_000),
+            "the provider's count against the window"
+        );
+        let notice = s
+            .until(|e| match e {
+                AgentEvent::Notice(n) => Some(n.clone()),
+                _ => None,
+            })
+            .await;
+        assert!(
+            notice.contains("% full, so this answer goes on in a fresh one: the earlier conversation stays searchable"),
+            "{notice}"
+        );
+        assert_eq!(s.turn_complete().await, None);
+
+        // The first request: the plain prompt, the four tools.
+        assert_eq!(
+            tool_names(&s.body(0)),
+            ["bash", "read_file", "write_file", "edit_file"]
+        );
+        // The second starts afresh: system prompt and orientation, then a line to carry on.
+        let fresh = s.body(1);
+        let messages = fresh["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(
+            system.starts_with("You are Trek"),
+            "the system prompt stays"
+        );
+        assert!(
+            system.contains("<fresh-context>")
+                && system.contains(&format!("\"{}\" (5 lines)", log.display()))
+                && system.contains("transcript_search")
+                && system.contains("The request you're answering:\nfix the build")
+                && system.contains("- bash echo hi (ok): hi"),
+            "{system}"
+        );
+        assert_eq!(messages[1]["content"], CONTINUE_MESSAGE);
+        assert_eq!(
+            tool_names(&fresh),
+            [
+                "bash",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "transcript_search",
+                "transcript_read"
+            ]
+        );
+        // The search reads the log.
+        let found = s.body(2)["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        let found = found["content"].as_str().unwrap();
+        assert!(
+            found.contains("1 matching line") && found.contains("no method named `frobnicate`"),
+            "{found}"
+        );
+        s.finish().await;
+        let _ = std::fs::remove_dir_all(log.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_message_that_would_overfill_the_context_starts_a_fresh_one() {
+        let s = TestSession::start_configured(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                using(18_000, openai_text("Done with the first.")),
+                using(500, openai_text("On it.")),
+            ],
+            DirectOptions {
+                context_window: Some(20_000),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        s.prompt("first").await;
+        assert_eq!(s.turn_complete().await, None);
+        s.prompt("second").await;
+        assert_eq!(s.turn_complete().await, None);
+        let fresh = s.body(1);
+        let messages = fresh["messages"].as_array().unwrap();
+        assert_eq!(
+            user_texts(messages),
+            ["second"],
+            "the message itself carries on"
+        );
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(
+            system.contains("The session's first message:\nfirst")
+                && system.contains("The request you're answering:\nsecond")
+                && system.contains("Your last words:\nDone with the first.")
+                && system.contains("Nothing from before is kept where you can search it"),
+            "{system}"
+        );
+        assert_eq!(tool_names(&fresh).len(), 4, "no transcript to search");
+        s.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_session_from_a_recap_can_search_the_transcript_from_the_start() {
+        let log = transcript_file("### #1 L1 turn 1 user\nhello\n\n");
+        let s = TestSession::start_configured(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![openai_text("Hi again.")],
+            DirectOptions::default(),
+            |c| {
+                c.transcript = Some(log.clone());
+                c.recap = Some("User: hello".into());
+            },
+        )
+        .await;
+        s.prompt("again").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(tool_names(&s.body(0)).len(), 6);
+        s.finish().await;
+        let _ = std::fs::remove_dir_all(log.parent().unwrap());
+    }
+
+    #[test]
+    fn context_estimates_count_text_and_images_apart() {
+        assert_eq!(estimate_tokens(&json!("x".repeat(400))), 100);
+        let image = json!({ "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", "A".repeat(2_000_000)) } });
+        assert!(
+            estimate_tokens(&image) < 2_000,
+            "a picture's worth, not its bytes"
+        );
+        assert_eq!(
+            trek_core::catalog::context_window("deepseek/deepseek-v4-flash"),
+            128_000
+        );
+        assert_eq!(
+            trek_core::catalog::context_window("claude-opus-5-5"),
+            200_000
+        );
+        let models = parse_direct_models(&json!({ "data": [
+            { "id": "deepseek/deepseek-v4-flash", "context_length": 1_048_576 },
+            { "id": "claude-x", "max_input_tokens": 200_000 },
+            { "id": "plain" },
+        ] }));
+        let windows: Vec<Option<u64>> = models.iter().map(|m| m.context).collect();
+        assert_eq!(windows, [Some(1_048_576), Some(200_000), None]);
     }
 
     #[cfg(unix)]

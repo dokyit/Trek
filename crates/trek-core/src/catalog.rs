@@ -15,6 +15,10 @@ pub struct ModelInfo {
     /// Service tier that means "fast" for this model (Codex), or `"settings"` for Claude's fastMode.
     #[serde(default)]
     pub fast: Option<String>,
+    /// The model's context window in tokens, when its provider's model list says
+    /// (`context_window` has fallbacks for the rest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
 }
 
 impl ModelInfo {
@@ -25,7 +29,38 @@ impl ModelInfo {
             efforts: efforts.to_vec(),
             tier,
             fast: None,
+            context: None,
         }
+    }
+}
+
+/// The context window Trek assumes for a model whose provider didn't say, by its id (with any
+/// `vendor/` prefix, as OpenRouter names models): conservative, so a Direct session starts a
+/// fresh context before the provider refuses the request.
+pub fn context_window(model: &str) -> u64 {
+    let id = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let has = |p: &str| id.contains(p);
+    if has("claude") {
+        200_000
+    } else if has("gpt-5") || has("gpt-6") || has("gpt-4.1") || has("o3") || has("o4") {
+        400_000
+    } else if has("gemini") {
+        1_000_000
+    } else if has("deepseek") {
+        128_000
+    } else if has("grok-4") {
+        256_000
+    } else if has("kimi") || has("qwen3") || has("glm") || has("minimax") {
+        128_000
+    } else if has("llama") || has("mistral") || has("gemma") {
+        32_000
+    } else {
+        // An unknown model, a local one above all, may well have a small window.
+        32_000
     }
 }
 

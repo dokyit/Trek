@@ -83,6 +83,10 @@ pub struct SessionConfig {
     /// Offer the `script` tool (`trek-script`: a program that calls the other tools). Direct
     /// sessions only; off in Trek for now (`trek-bench --script on` turns it on).
     pub script: bool,
+    /// The thread's transcript log (`trek_core::session_log`), which Trek keeps as items come
+    /// in. A Direct session searches it with its own `transcript_search` and `transcript_read`
+    /// once it has started a fresh context (`direct::continue_fresh`) or from a recap.
+    pub transcript: Option<PathBuf>,
 }
 
 /// An MCP server Trek adds to a session.
@@ -617,7 +621,7 @@ pub fn session_tail(agent: &AgentId, session: &str) -> Option<String> {
 /// The first message of a session that starts afresh in a conversation already under way.
 pub(crate) fn recap_prompt(recap: &str, text: &str) -> String {
     format!(
-        "This conversation began in an earlier session that you can't see. Here is a recap of it, oldest first, so you can carry on where it left off:\n\n<recap>\n{recap}\n</recap>\n\n{text}"
+        "This conversation began in an earlier session that you can't see. Here is a short orientation to it, so you can carry on where it left off (where it names a transcript, the exact earlier content is there):\n\n<recap>\n{recap}\n</recap>\n\n{text}"
     )
 }
 
@@ -2211,6 +2215,7 @@ mod live_usage {
             read_dirs: vec![],
             script: false,
             read_only: false,
+            transcript: None,
         });
         trek_core::runtime().block_on(async {
             session
@@ -2333,6 +2338,7 @@ mod live_usage {
             read_dirs: vec![],
             script: false,
             read_only: false,
+            transcript: None,
         });
         let prompt = "Use the Bash tool with run_in_background=true to run: echo started-bg; sleep 8; echo done-bg. Then immediately reply with just the word: started. When it completes, reply with just: finished.";
         let seen = trek_core::runtime().block_on(async {
@@ -2416,6 +2422,7 @@ mod live_usage {
             read_dirs: vec![],
             script: false,
             read_only: false,
+            transcript: None,
         });
         let prompt = "Use the Agent tool with run_in_background=true and subagent_type general-purpose, description \"Wait a while\", prompt: \"Run the Bash command `sleep 45` and then reply with just: waited.\" Then immediately reply with just the word: started.";
         let seen = trek_core::runtime().block_on(async {

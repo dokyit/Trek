@@ -26,6 +26,7 @@ fn main() {
         instructions: None,
         read_dirs: vec![],
         script: false,
+        transcript: None,
     });
     trek_core::runtime().block_on(async {
         let images: Vec<std::path::PathBuf> = std::env::args().skip(2).map(Into::into).collect();

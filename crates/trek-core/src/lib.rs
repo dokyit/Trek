@@ -31,6 +31,7 @@ pub mod procs;
 pub mod registry;
 pub mod restate;
 pub mod rewind;
+pub mod session_log;
 pub mod settings;
 pub mod skills;
 pub mod store;

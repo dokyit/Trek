@@ -133,6 +133,12 @@ pub fn database_file() -> PathBuf {
     data_dir().join("trek.sqlite")
 }
 
+/// Where each thread's transcript is kept as a plain-text log (`session_log`), beside the
+/// database.
+pub fn transcripts_dir() -> PathBuf {
+    data_dir().join("transcripts")
+}
+
 pub fn updates_dir() -> PathBuf {
     let dir = data_dir().join("updates");
     let _ = std::fs::create_dir_all(&dir);
