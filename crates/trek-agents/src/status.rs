@@ -317,6 +317,7 @@ fn claude_models(models: &Value) -> Vec<ModelInfo> {
             efforts,
             tier: claude_tier(id),
             fast: (m["supportsFastMode"] == true).then(|| "settings".to_string()),
+            context: None,
         });
     }
     out

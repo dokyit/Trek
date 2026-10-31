@@ -209,7 +209,7 @@ mod prompt_budget {
         ("computer-background", 1_000, 5_400),
         ("simulator", 680, 5_100),
         ("video", 240, 1_250),
-        ("orchestrate", 840, 10_000),
+        ("orchestrate", 1_050, 10_000),
         ("browser", 950, 7_300),
         ("phone", 1_230, 6_650),
     ];

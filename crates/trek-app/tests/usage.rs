@@ -348,6 +348,7 @@ fn report(agent: &AgentId, with_usage: bool) -> AgentStatus {
         efforts: vec![],
         tier: 0,
         fast: None,
+        context: None,
     }];
     st
 }

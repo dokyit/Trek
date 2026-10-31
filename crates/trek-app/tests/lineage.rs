@@ -296,6 +296,21 @@ fn a_handoff_moves_the_work_and_the_user_to_a_fresh_thread() {
                 && brief.contains("Next: Run the tests.\n</brief>"),
             "{brief}"
         );
+        // And where the old thread's whole transcript is, to search for anything exact.
+        let log = trek_core::paths::transcripts_dir().join(format!("{id}.log"));
+        assert!(
+            brief.contains(&format!(
+                "That thread's whole conversation is in its transcript at \"{}\"",
+                log.display()
+            )) && brief.contains(&format!("transcript_search with thread \"{id}\"")),
+            "{brief}"
+        );
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("mock:handoff Run the tests."),
+            "the log has the old thread's messages"
+        );
         trek.wait_done(cx, &new, RunState::Idle).await;
         // The old thread's agent is told to stop there, and it did.
         assert!(
@@ -890,5 +905,117 @@ fn threads_wake_their_starter_as_asked_and_again_after_each_message() {
             .await;
         cx.run_until_parked();
         assert_eq!(trek.read(cx, |ws, _| wakes_in(ws, &id)), before, "capped");
+    });
+}
+
+/// A transcript call from `thread`'s agent, as `trek-mcp orchestrate` passes it on; its answer.
+async fn transcript_call(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    thread: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let (reply, answer) = async_channel::unbounded();
+    trek.update(cx, |ws, cx| {
+        ws.handle_call(
+            trek_app::ipc::Call {
+                thread: thread.to_string(),
+                method: method.into(),
+                params,
+                reply,
+            },
+            cx,
+        )
+    });
+    match answer.recv().await {
+        Ok(trek_app::ipc::Reply::Done(result)) => result,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn every_agent_can_search_its_thread_s_transcript_word_for_word() {
+    run(async |cx| {
+        // With the sub-agent tools off, the transcript's are still there.
+        let trek = common::open_with(cx, |s| s.tools.orchestration = false);
+        let id = trek.send(
+            cx,
+            "Why does the build fail with E0599-frobnicate in src/parser.rs?",
+        );
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.send(cx, "mock:transcript frobnicate parser.rs");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let said = trek.answers(cx, &id);
+        assert!(
+            said.contains("The transcript says:")
+                && said.contains("Why does the build fail with E0599-frobnicate in src/parser.rs?")
+                && said.contains("matching line"),
+            "{said}"
+        );
+        // The log is plain text, one entry per item, each under a numbered header.
+        let log = trek_core::paths::transcripts_dir().join(format!("{id}.log"));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("### #1 L1 turn 1 "), "{text}");
+        assert!(
+            text.contains(" assistant\n") && text.contains(" turn end (took "),
+            "{text}"
+        );
+        // Lines by number, as the search gave them.
+        let read = transcript_call(
+            &trek,
+            cx,
+            &id,
+            "transcript_read",
+            json!({ "start": 1, "end": 2 }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            read.as_str()
+                .unwrap()
+                .contains("2\tWhy does the build fail with E0599-frobnicate"),
+            "{read}"
+        );
+        // Another project's thread is out of reach; a made-up one doesn't exist.
+        let other = common::new_project("elsewhere");
+        let theirs = trek.read(cx, |ws, _| {
+            ws.store
+                .create_thread(
+                    Some(&other),
+                    mock(),
+                    None,
+                    trek_core::Effort::Medium,
+                    HandHolding::Supervised,
+                )
+                .unwrap()
+                .id
+        });
+        let refused = transcript_call(
+            &trek,
+            cx,
+            &id,
+            "transcript_search",
+            json!({ "query": "x", "thread": theirs }),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("another project"), "{refused}");
+        let missing = transcript_call(
+            &trek,
+            cx,
+            &id,
+            "transcript_search",
+            json!({ "query": "x", "thread": "no-such-thread" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(missing.contains("no thread"), "{missing}");
+        // The notes every session gets say so.
+        let notes = trek.read(cx, |ws, _| {
+            ws.session_notes(None, std::path::Path::new("/"), false)
+                .unwrap()
+        });
+        assert!(notes.contains(trek_core::session_log::AGENT_NOTE));
     });
 }

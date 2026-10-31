@@ -2576,6 +2576,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         }
     }
 

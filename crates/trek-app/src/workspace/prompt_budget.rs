@@ -12,15 +12,16 @@ use std::path::Path;
 use trek_core::AgentId;
 use trek_core::settings::{Settings, Verification};
 
-/// The notes with Trek's default settings, in a project without a verification skill.
-const DEFAULT_NOTES_CHARS: usize = 3_850;
+/// The notes with Trek's default settings, in a project without a verification skill. Raised by
+/// 250 on 2026-10-31 for the transcript note (`session_log::AGENT_NOTE`, about 45 o200k tokens).
+const DEFAULT_NOTES_CHARS: usize = 4_100;
 /// With a verification skill too: the most any session is told (every note is on by default).
-const ALL_NOTES_CHARS: usize = 4_350;
+const ALL_NOTES_CHARS: usize = 4_600;
 /// The line Codex gets naming Trek's tools (`trek_agents::tool_search_note`), with every tool on:
 /// about 50 o200k tokens.
 const TOOL_SEARCH_LINE_CHARS: usize = 220;
 /// Codex's first-message notes with every tool on and a verification skill: the most it's told.
-const CODEX_NOTES_CHARS: usize = 4_650;
+const CODEX_NOTES_CHARS: usize = 4_900;
 
 /// The project notes for this repo's own verification skill, as Trek words them.
 fn project_notes() -> String {

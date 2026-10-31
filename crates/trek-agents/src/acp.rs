@@ -1109,6 +1109,7 @@ fn controls(result: &Value) -> Controls {
                         },
                         tier: i.min(255) as u8,
                         fast: None,
+                        context: None,
                     })
                 })
                 .collect();
@@ -1129,6 +1130,7 @@ fn controls(result: &Value) -> Controls {
                     efforts: shared_efforts.clone(),
                     tier: i.min(255) as u8,
                     fast: None,
+                    context: None,
                 })
                 .collect();
             let switch = o["id"]
@@ -2339,6 +2341,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let h = crate::start(config);
         trek_core::runtime().block_on(async {
@@ -2467,6 +2470,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let h = crate::start(config);
         trek_core::runtime().block_on(async {
@@ -2512,6 +2516,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let h = crate::start(config);
         let seen = trek_core::runtime().block_on(async {
@@ -2585,6 +2590,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let h = crate::start(config);
         let efforts =
@@ -2708,6 +2714,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let h = crate::start(config);
         let seen = trek_core::runtime().block_on(async {
@@ -3957,6 +3964,7 @@ mod tests {
             efforts: vec![],
             tier: 0,
             fast: None,
+            context: None,
         };
         let info = AcpInfo {
             models: vec![model("a")],
@@ -4174,6 +4182,7 @@ fn parse_copilot_models(help: &str) -> Vec<ModelInfo> {
         efforts: vec![],
         tier: 0,
         fast: None,
+        context: None,
     }];
     for line in help.lines() {
         if line.trim_start().starts_with("`model`:") {
@@ -4192,6 +4201,7 @@ fn parse_copilot_models(help: &str) -> Vec<ModelInfo> {
                     efforts: vec![],
                     tier: 1,
                     fast: None,
+                    context: None,
                 }),
                 None if line.trim().is_empty() || line.trim_start().starts_with('-') => {}
                 None => break,

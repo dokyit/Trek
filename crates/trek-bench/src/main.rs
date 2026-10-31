@@ -45,6 +45,8 @@ usage: trek-bench --prompt-file P --cwd DIR --model MODEL [options]
   --time-limit-s S         no new request or tool call after this (default 3600)
   --command-timeout-s S    one bash command's limit (default 600)
   --api-key-file F         the key (else the provider's env var, else TREK_BENCH_API_KEY)
+  --context-window N       the model's context in tokens, in place of what Trek knows of it
+                           (a small one makes the run go on in a fresh context sooner)
   --out FILE               also write the done object here
   --instructions-file F    extra system instructions, after the system prompt
   --system-prompt-file F   the whole system prompt, in place of Trek's
@@ -72,6 +74,7 @@ struct Args {
     instructions_file: Option<PathBuf>,
     system_prompt_file: Option<PathBuf>,
     script_log_dir: Option<PathBuf>,
+    context_window: Option<u64>,
 }
 
 fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args> {
@@ -93,6 +96,7 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args> {
         instructions_file: None,
         system_prompt_file: None,
         script_log_dir: None,
+        context_window: None,
     };
     // At most a week: the deadlines worked out from these stay far from overflowing.
     let secs = |v: String, flag: &str| -> Result<Duration> {
@@ -152,6 +156,13 @@ fn parse_args(mut argv: impl Iterator<Item = String>) -> Result<Args> {
             "--instructions-file" => a.instructions_file = Some(value.into()),
             "--system-prompt-file" => a.system_prompt_file = Some(value.into()),
             "--script-log-dir" => a.script_log_dir = Some(value.into()),
+            "--context-window" => {
+                let n: u64 = value.parse().context("--context-window takes a number")?;
+                if n == 0 {
+                    bail!("--context-window must be at least 1");
+                }
+                a.context_window = Some(n);
+            }
             _ => bail!("unknown option {flag}\n\n{USAGE}"),
         }
     }
@@ -427,6 +438,7 @@ async fn bench(
         instructions,
         read_dirs: vec![],
         script: args.script,
+        transcript: None,
     };
     let options = DirectOptions {
         api_key: Some(key),
@@ -439,6 +451,7 @@ async fn bench(
         deadline: Some(deadline),
         system_prompt,
         observer: Some(observer),
+        context_window: args.context_window,
     };
 
     let (commands, commands_rx) = async_channel::unbounded();
@@ -651,8 +664,11 @@ mod tests {
             "1.5",
             "--effort",
             "low",
+            "--context-window",
+            "10000",
         ])
         .unwrap();
+        assert_eq!(a.context_window, Some(10_000));
         assert_eq!(a.wire, Some(Wire::OpenAiChat));
         assert_eq!((a.stdio, a.script, a.max_turns), (true, true, 5));
         assert_eq!(a.time_limit, Duration::from_millis(1500));

@@ -2230,6 +2230,7 @@ pub(crate) async fn fetch_models(
                 efforts,
                 tier: out.len().min(255) as u8,
                 fast,
+                context: None,
             });
         }
         cursor = result["nextCursor"].as_str().map(String::from);
@@ -2271,6 +2272,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         Session::new(
             thread.into(),
@@ -2560,6 +2562,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         }
     }
 
@@ -2888,6 +2891,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let opened = json!({"model":"gpt-5.6-luna","collaborationMode":{"mode":"plan","settings":{"model":"gpt-5.6-luna"}}});
         let mut s = Session::new("t".into(), &config, &opened, 2);
@@ -3639,6 +3643,7 @@ mod tests {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         };
         let opened = json!({"model":"gpt-5.6-luna"});
         let mut s = Session::new("t".into(), &config, &opened, 2);
@@ -4331,6 +4336,7 @@ mod live {
             instructions: None,
             read_dirs: vec![],
             script: false,
+            transcript: None,
         });
         let events = trek_core::runtime().block_on(async {
             let prompt = |text: &str| Command::Prompt {

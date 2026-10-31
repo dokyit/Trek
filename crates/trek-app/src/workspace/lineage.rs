@@ -476,7 +476,12 @@ impl Workspace {
         {
             l.quiet_turn = true;
         }
-        self.send_to(&id, lineage::handoff_prompt(brief), vec![], cx);
+        // The new thread can search this one's transcript for anything exact the brief left out.
+        let log = self.transcript_log(caller, cx);
+        let from = log
+            .as_ref()
+            .map(|(path, lines)| (caller, path.as_path(), *lines));
+        self.send_to(&id, lineage::handoff_prompt(brief, from), vec![], cx);
         // The user looking at the old thread follows the work to the new one; anywhere else, a
         // toast says where it went.
         if self.in_main(caller) {

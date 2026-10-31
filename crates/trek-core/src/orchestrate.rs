@@ -356,6 +356,8 @@ pub fn tool_label(title: &str) -> Option<&'static str> {
         ("thread_status", "Checked on a thread"),
         ("read_thread", "Read a thread's answer"),
         ("send_to_thread", "Sent a thread a message"),
+        ("transcript_search", "Searched the transcript"),
+        ("transcript_read", "Read the transcript"),
     ]
     .into_iter()
     .find(|(tool, _)| is_ours(title, tool))

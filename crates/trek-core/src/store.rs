@@ -421,6 +421,9 @@ pub struct Store {
     reader: Option<Arc<Mutex<Connection>>>,
     /// The database's schema version, when a newer Trek wrote it (see `newer_schema`).
     newer_schema: Option<u32>,
+    /// Each thread's transcript as a plain-text log beside the database (`session_log`), kept in
+    /// step by `save_transcript`. `None` in memory.
+    logs: Option<Arc<Mutex<crate::session_log::Logs>>>,
 }
 
 const SCHEMA: &str = r#"
@@ -629,6 +632,10 @@ impl Store {
         )?;
         let _ = reader.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA cache_size = -64000; PRAGMA mmap_size = 268435456;");
         store.reader = Some(Arc::new(Mutex::new(reader)));
+        let dir = path
+            .parent()
+            .map_or_else(crate::paths::transcripts_dir, |p| p.join("transcripts"));
+        store.logs = Some(Arc::new(Mutex::new(crate::session_log::Logs::new(dir))));
         Ok(store)
     }
 
@@ -637,7 +644,15 @@ impl Store {
     }
 
     pub fn in_memory() -> Result<Store> {
-        Store::with_connection(Connection::open_in_memory()?)
+        let mut store = Store::with_connection(Connection::open_in_memory()?)?;
+        // Tests keep transcript logs in their throwaway folder, as Trek does beside its
+        // database; a store in memory for want of a database file keeps none.
+        if crate::paths::isolated() {
+            store.logs = Some(Arc::new(Mutex::new(crate::session_log::Logs::new(
+                crate::paths::transcripts_dir(),
+            ))));
+        }
+        Ok(store)
     }
 
     fn with_connection(mut conn: Connection) -> Result<Store> {
@@ -670,6 +685,7 @@ impl Store {
             indexer: Arc::default(),
             reader: None,
             newer_schema,
+            logs: None,
         })
     }
 
@@ -1380,6 +1396,12 @@ impl Store {
             tx.execute("DELETE FROM threads WHERE id = ?1", [gone])?;
         }
         tx.commit()?;
+        if let Some(logs) = &self.logs {
+            let mut logs = lock(logs);
+            for gone in &ids {
+                logs.forget(gone);
+            }
+        }
         Ok(())
     }
 
@@ -1545,7 +1567,50 @@ impl Store {
     /// Delete a thread's whole transcript.
     pub fn clear_items(&self, thread_id: &str) -> Result<usize> {
         self.may_remove_items()?;
-        self.with(|c| c.execute("DELETE FROM items WHERE thread_id = ?1", [thread_id]))
+        let n = self.with(|c| c.execute("DELETE FROM items WHERE thread_id = ?1", [thread_id]))?;
+        if let Some(logs) = &self.logs {
+            lock(logs).forget(thread_id);
+        }
+        Ok(n)
+    }
+
+    // ---- transcript logs (`session_log`) ----
+
+    /// Where `thread_id`'s transcript log is, and how many lines it has. `None` in memory.
+    pub fn transcript_log(&self, thread_id: &str) -> Option<(PathBuf, u64)> {
+        let logs = self.logs.as_ref()?;
+        let mut logs = lock(logs);
+        let lines = logs.lines(thread_id);
+        Some((logs.path(thread_id), lines))
+    }
+
+    /// Bring `thread_id`'s transcript log up to date with `transcript` (a live one, saved first
+    /// so nothing is pending), or with its stored rows when `None`. `flush`: nothing is in
+    /// progress, so a last message or a running tool call is written as it stands. Returns the
+    /// log's path and line count; `None` in memory.
+    pub fn sync_log(
+        &self,
+        thread_id: &str,
+        transcript: Option<&Transcript>,
+        flush: bool,
+    ) -> Result<Option<(PathBuf, u64)>> {
+        let Some(logs) = &self.logs else {
+            return Ok(None);
+        };
+        let stored;
+        let rows: Vec<crate::session_log::Row> = match transcript {
+            Some(t) => t.ids().iter().map(String::as_str).zip(t.iter()).collect(),
+            None => {
+                stored = self.items_with_ids(thread_id)?;
+                stored
+                    .iter()
+                    .map(|(id, item)| (id.as_str(), item))
+                    .collect()
+            }
+        };
+        let mut logs = lock(logs);
+        let path = logs.record(thread_id, &rows, Default::default(), flush)?;
+        Ok(Some((path, logs.lines(thread_id))))
     }
 
     // ---- checkpoints ----
@@ -1742,11 +1807,30 @@ impl Store {
                 update_row(&tx, id, item)?;
             }
             if defer {
-                search::append_unindexed(&tx, thread_id, changes.appended)?;
+                search::append_unindexed(&tx, thread_id, changes.appended.iter().copied())?;
             } else {
-                append_rows(&tx, thread_id, changes.appended)?;
+                append_rows(&tx, thread_id, changes.appended.iter().copied())?;
             }
             tx.commit()?;
+        }
+        if let Some(logs) = &self.logs {
+            let appended: Vec<&str> = changes.appended.iter().map(|(id, _)| *id).collect();
+            let changed: Vec<&str> = changes.changed.iter().map(|(id, _)| *id).collect();
+            let rows: Vec<crate::session_log::Row> = transcript
+                .ids()
+                .iter()
+                .map(String::as_str)
+                .zip(transcript.iter())
+                .collect();
+            let delta = crate::session_log::Delta {
+                appended: &appended,
+                changed: &changed,
+                removed: changes.removed,
+            };
+            // The log follows the store; a log that can't be written doesn't fail the save.
+            if let Err(e) = lock(logs).record(thread_id, &rows, delta, false) {
+                tracing::warn!("transcript log for {thread_id}: {e}");
+            }
         }
         transcript.mark_saved();
         Ok(defer)

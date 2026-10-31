@@ -266,6 +266,7 @@ fn a_models_own_efforts_replace_the_shared_ones() {
                 efforts: shared.clone(),
                 tier: 0,
                 fast: None,
+                context: None,
             };
             ws.acp_info.insert(
                 "opencode".into(),
