@@ -4678,7 +4678,11 @@ fn a_thread_s_files_go_to_the_phone_and_no_others() {
             })
             .expect("the message's video");
         assert!(
-            videos.len() == 1 && videos[0].ends_with("/clip.mov"),
+            videos.len() == 1
+                && std::path::Path::new(&videos[0])
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    == Some("clip.mov"),
             "{videos:?}"
         );
         let watch = t
@@ -4691,12 +4695,12 @@ fn a_thread_s_files_go_to_the_phone_and_no_others() {
             .expect("what it watched");
         assert_eq!(watch.duration, Some(12.5));
         assert_eq!(watch.frames.len(), 1, "a frame that's gone is left out");
-        assert!(
-            watch
-                .video
-                .as_deref()
-                .is_some_and(|v| v.ends_with("/clip.mov"))
-        );
+        assert!(watch.video.as_deref().is_some_and(|v| {
+            std::path::Path::new(&v)
+                .file_name()
+                .and_then(|n| n.to_str())
+                == Some("clip.mov")
+        }));
 
         // The answer's image, scaled down whole.
         let shot = ask_later(&trek, cx, media_req(&id, "out/shot.png", Some(120), 0))
