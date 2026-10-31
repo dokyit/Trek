@@ -35,14 +35,13 @@ you mean forward first)."
 
 /// Background use (macOS): the agent works in one window of its own, behind the user's.
 const BACKGROUND_INSTRUCTIONS: &str = "macOS computer use in the background: you work in one app window of your own while the \
-user keeps working in theirs. Your clicks, keys and scrolls go to that window only: the user's pointer doesn't move and \
-their front app keeps the keyboard, so never ask them to stay away from the mouse. Pick the window first: open_app opens \
-an app behind the user's windows and works in its window, or call list_windows and pass a window_id to screenshot. A \
-screenshot shows just that window, even when other windows cover it; all x/y arguments to click, move_mouse, drag and \
-scroll are pixel coordinates in its most recent screenshot (origin at the window's top-left). Take a new screenshot after \
-acting to verify the result. The user can watch you in a small picture-in-picture window. Trek's own windows are off \
-limits. A few apps (games, some canvas apps) ignore input that isn't from the real mouse; if one doesn't respond, say so \
-rather than retrying for long: the user can switch computer use to work in front in Trek's settings.";
+user keeps working in theirs. Your clicks, keys and scrolls reach only that window (the user's pointer and keyboard stay \
+theirs, so never ask them to keep off the mouse). Pick the window first: open_app opens an app behind the user's windows \
+and works in its window, or pass a window_id from list_windows to screenshot. A screenshot shows just that window, even \
+when others cover it; x/y for click, move_mouse, drag and scroll are pixels in its latest screenshot (origin top-left). \
+Take a new screenshot after acting. The user can watch in a small picture-in-picture window. Trek's own windows are off \
+limits. A few apps (games, some canvas apps) ignore input that isn't from the real mouse: if one doesn't respond, say so \
+rather than retrying for long; the user can switch computer use to work in front in Trek's settings.";
 
 /// What a screen coordinate is: macOS moves the mouse in points, Windows (per-monitor DPI aware)
 /// in pixels.
@@ -179,6 +178,17 @@ impl Default for Computer {
             mode,
             target: None,
             report,
+        }
+    }
+}
+
+impl Computer {
+    /// Computer use as a session given it in the background sees it (`prompt_budget`).
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn in_background() -> Self {
+        Self {
+            mode: Mode::Background,
+            ..Self::default()
         }
     }
 }

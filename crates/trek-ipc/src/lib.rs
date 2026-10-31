@@ -324,12 +324,12 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
     vec![
         (
             "list_models",
-            "List the agents, models and reasoning efforts Trek can run right now, for delegate_task: every provider the user has set up in Trek, not only yours. Also says how deep this thread is among sub-agents and how many it may run at once.",
+            "The agents, models and reasoning efforts Trek can run now, for delegate_task: every provider the user set up in Trek, not only yours. Also how deep this thread is among sub-agents and how many it may run at once.",
             json!({ "type": "object", "properties": {} }),
         ),
         (
             "delegate_task",
-            "Start a sub-agent: a child thread in Trek that does one task with the agent, model and effort you choose (any that list_models offers, from any provider), in this thread's folder. It sees only the prompt you give it, not this conversation, so make the prompt self-contained: the goal, the files that matter, what you already know and what you want back. mode \"advise\" (the default) runs it read-only, to review, research or recommend; it can't change files. mode \"implement\" lets it change files, with this thread's access level. wait=true blocks until it finishes and returns its final answer (after timeout_seconds it returns its id with status \"running\" instead). wait=false returns its id at once; when it finishes Trek sends you its result in a message, so end your turn rather than polling, or collect it in this turn with task_result wait=true. Each call starts a new sub-agent: for another round with the same model, call delegate_task again with the brief, the findings so far and any open objections. The user sees every sub-agent inline with its model and status, and can open it.",
+            "Start a sub-agent: a child thread in Trek that does one task with the agent, model and effort you choose (any that list_models offers, from any provider), in this thread's folder. It sees only your prompt, not this conversation: give it the goal, the files that matter, what you know and what you want back. mode \"advise\" (the default) runs it read-only, to review, research or recommend; \"implement\" lets it change files, with this thread's access level. wait=true returns its final answer (after timeout_seconds, its id with status \"running\" instead); wait=false returns its id at once and Trek sends you its result in a message when it finishes, so end your turn rather than polling, or collect it with task_result wait=true. Each call starts a new sub-agent: for another round, call delegate_task again with the brief, the findings so far and any open objections.",
             json!({
                 "type": "object",
                 "properties": {
@@ -352,7 +352,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "task_result",
-            "A sub-agent's final answer in full (very long answers are cut short). wait=true blocks until it finishes (after timeout_seconds it returns its status \"running\" instead): start several with delegate_task wait=false, then collect each with task_result wait=true, and they run side by side meanwhile. An answer read here isn't sent to you again in a message.",
+            "A sub-agent's final answer in full (very long answers are cut short). wait=true blocks until it finishes (after timeout_seconds it returns its status \"running\" instead): start several with delegate_task wait=false, then collect each with task_result wait=true while they run side by side. An answer read here isn't sent to you again.",
             json!({
                 "type": "object",
                 "properties": {
@@ -370,7 +370,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "start_thread",
-            "Start a new thread of the user's own in Trek: it shows in their sidebar like one they started, runs on its own, and is theirs to read, steer and finish. Use it for separate work the user will want to follow by itself (another feature, a long investigation, work in another project), not for a quick answer you need back (use delegate_task for that). It sees only the prompt you give it, so make it self-contained. It runs with this thread's access level at most. Returns its id. With notify (the default) Trek sends you a message when it finishes, fails or needs the user's approval, so end your turn rather than polling; thread_status / read_thread follow it meanwhile, and send_to_thread sends it more. The user is told when it finishes too.",
+            "Start a new thread of the user's own in Trek: it shows in their sidebar, runs on its own, and is theirs to read, steer and finish. Use it for separate work the user will follow by itself (another feature, a long investigation, work in another project), not for an answer you need back (that's delegate_task). It sees only your prompt, so make it self-contained; it runs with this thread's access level at most. Returns its id. With notify (the default) Trek sends you a message when it finishes, fails or needs the user's approval, so end your turn rather than polling; thread_status / read_thread follow it meanwhile, and send_to_thread sends it more.",
             json!({
                 "type": "object",
                 "properties": {
@@ -388,7 +388,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "handoff",
-            "Hand this work over to a fresh thread when this conversation's context is running out (or the rest is better done by another agent or model). Write a brief that is complete on its own, since the new thread sees nothing else: the goal, what's done and how you checked it, decisions made and why, the files that matter, what's left, and the next step. Trek starts the new thread in this thread's folder with the brief as its first message, links the two, and shows the user the new one. After a successful handoff, end your turn: don't carry on with the work here.",
+            "Hand this work over to a fresh thread when this conversation's context is running out (or another agent or model should do the rest). The new thread sees only your brief, so make it complete: the goal, what's done and how you checked it, decisions and why, the files that matter, what's left and the next step. Trek starts it in this thread's folder with the brief as its first message, links the two and shows the user the new one. After a successful handoff, end your turn: don't carry on with the work here.",
             json!({
                 "type": "object",
                 "properties": {

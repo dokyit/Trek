@@ -46,7 +46,7 @@ pub const OPEN_ON_PHONE: &str = "Open this on my iPhone";
 
 /// Told to every session while interactive artifacts are on, after the `trek-viz` note. Terse:
 /// every session carries it (`instructions_stay_compact`).
-pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block holding a complete, self-contained HTML document with a <title>, then state its takeaway in prose; prefer `trek-viz` for simple charts. Trek runs it in a sandboxed web view inline in the answer, as tall as its content (160-720 px, scrolling past that) and as wide as the answer. Inline your CSS and JS; scripts, styles, images and fonts may load over https from CDNs such as cdn.jsdelivr.net or unpkg.com, but nothing over http or from local files, and it can't navigate away (links open in the user's browser). Style it with Trek's CSS variables --trek-bg, --trek-fg, --trek-muted, --trek-accent, --trek-border, --trek-surface, --trek-font, --trek-mono and --trek-radius, and leave the page background transparent so it sits in Night and Paper alike. Keep it under 200 KB. A button may call trek.send(text), sent as the user's next message here, or trek.copy(text). For a map, pull request or database migration card, follow Trek's built-in skill map-card, pull-request-card or database-migration-card.";
+pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block holding a complete, self-contained HTML document with a <title>, then state its takeaway in prose; prefer `trek-viz` for simple charts. Trek runs it inline in a sandboxed web view, as wide as the answer and as tall as its content (160-720 px; it scrolls past that). Inline your CSS and JS; scripts, styles, images and fonts may load over https from CDNs such as cdn.jsdelivr.net or unpkg.com, never over http or from local files; links open in the user's browser. Style it with Trek's CSS variables --trek-bg, --trek-fg, --trek-muted, --trek-accent, --trek-border, --trek-surface, --trek-font, --trek-mono and --trek-radius, on a transparent page background (Trek has light and dark themes). Keep it under 200 KB. A button may call trek.send(text), sent as the user's next message here, or trek.copy(text). For a map, pull request or database migration card, follow Trek's built-in skill map-card, pull-request-card or database-migration-card.";
 
 /// The Content-Security-Policy the document is served with. Scripts, styles, images, fonts,
 /// media and `fetch` over https only (CDNs); inline code and `eval` (it's the agent's own
@@ -1282,7 +1282,7 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
     #[test]
     fn instructions_stay_compact() {
         assert!(
-            AGENT_INSTRUCTIONS.chars().count() < 1_200,
+            AGENT_INSTRUCTIONS.chars().count() < 1_150,
             "{} chars",
             AGENT_INSTRUCTIONS.chars().count()
         );

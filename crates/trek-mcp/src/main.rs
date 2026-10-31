@@ -190,3 +190,83 @@ fn serve(mut tools: Box<dyn rpc::ToolSet>) {
     }
     eprintln!("trek-mcp: stdin closed, exiting");
 }
+
+/// What each tool family adds to every request of an agent given it: its server instructions
+/// (Claude Code puts them in its system prompt) and its tool schemas (sent in full by agents that
+/// don't defer MCP tools, such as OpenCode). docs/PROMPT_BUDGET.md has the measured tokens.
+///
+/// To raise a budget deliberately: re-measure (the doc says how), update its table, and set the
+/// constant to the new size plus about 10% headroom. Every character goes out with every request
+/// of every thread, so first look for words to cut: say a thing once, in the tool's description or
+/// in the instructions, not both.
+#[cfg(all(test, target_os = "macos"))]
+mod prompt_budget {
+    use crate::rpc::ToolSet;
+
+    /// (family, instructions' chars, tool schemas' chars as MCP JSON) at most.
+    const BUDGETS: &[(&str, usize, usize)] = &[
+        ("computer", 650, 4_600),
+        ("computer-background", 1_000, 5_400),
+        ("simulator", 680, 5_100),
+        ("video", 240, 1_250),
+        ("orchestrate", 840, 10_000),
+        ("browser", 950, 7_300),
+        ("phone", 1_230, 6_650),
+    ];
+    /// Everything on (computer use in the background and every default family) together.
+    const ALL_CHARS: usize = 40_500;
+
+    fn families() -> Vec<(&'static str, Box<dyn ToolSet>)> {
+        vec![
+            ("computer", Box::new(crate::computer::Computer::default())),
+            (
+                "computer-background",
+                Box::new(crate::computer::Computer::in_background()),
+            ),
+            (
+                "simulator",
+                Box::new(crate::simulator::Simulator::default()),
+            ),
+            ("video", Box::new(crate::video::Video::default())),
+            (
+                "orchestrate",
+                Box::new(crate::orchestrate::Orchestrate::from_env()),
+            ),
+            ("browser", Box::new(crate::browser::Browser::from_env())),
+            ("phone", Box::new(crate::phone::Phone::from_env())),
+        ]
+    }
+
+    #[test]
+    fn prompt_budget_tool_families_stay_within_budget() {
+        let mut all = 0;
+        for (name, set) in families() {
+            let (_, max_instructions, max_tools) =
+                BUDGETS.iter().find(|(n, ..)| *n == name).copied().unwrap();
+            let instructions = set.instructions().chars().count();
+            let tools: usize = set
+                .tools()
+                .iter()
+                .map(|t| t.to_json().to_string().chars().count())
+                .sum();
+            println!("{name}: instructions {instructions}, tools {tools}");
+            assert!(
+                instructions <= max_instructions,
+                "trek-mcp {name}'s instructions grew to {instructions} chars (budget \
+                 {max_instructions}); see prompt_budget in main.rs before raising it"
+            );
+            assert!(
+                tools <= max_tools,
+                "trek-mcp {name}'s tool schemas grew to {tools} chars (budget {max_tools}); see \
+                 prompt_budget in main.rs before raising it"
+            );
+            if name != "computer" {
+                all += instructions + tools;
+            }
+        }
+        assert!(
+            all <= ALL_CHARS,
+            "trek-mcp's families grew to {all} chars together (budget {ALL_CHARS})"
+        );
+    }
+}

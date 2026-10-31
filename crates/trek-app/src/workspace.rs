@@ -13,6 +13,8 @@ mod tabs;
 #[cfg(any(test, feature = "test-support"))]
 pub use tabs::MAX_TABS;
 mod ide;
+#[cfg(test)]
+mod prompt_budget;
 pub mod relocate;
 mod review;
 mod study;
@@ -4828,24 +4830,12 @@ impl Workspace {
         cwd: &std::path::Path,
         recaps: bool,
     ) -> Option<String> {
-        let recap = (recaps && self.settings.general.ask_recap)
-            .then(|| trek_core::changes::RECAP.to_string());
-        let artifacts = self
-            .settings
-            .general
-            .interactive_artifacts
-            .then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
-        // Only where the watcher is handed over (`mcp_servers`): a build without trek-mcp has none.
-        let video = (self.settings.tools.video && trek_mcp_binary().is_some())
-            .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
-        let notes: Vec<String> =
-            std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string())
-                .chain(artifacts)
-                .chain(video)
-                .chain(self.project_notes(project, cwd))
-                .chain(recap)
-                .collect();
-        (!notes.is_empty()).then(|| notes.join("\n\n"))
+        agent_notes(
+            &self.settings,
+            trek_mcp_binary().is_some(),
+            self.project_notes(project, cwd),
+            recaps,
+        )
     }
 
     /// Start the agent before the first message is sent (called when the user begins typing), so
@@ -10174,6 +10164,34 @@ fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<
     .filter(|(on, _)| *on)
     .map(|(_, family)| family)
     .collect()
+}
+
+/// `Workspace::session_notes` from its parts: the settings, whether Trek has its tool server
+/// (`trek_mcp_binary`: the video notes go only where the watcher is handed over), the project's
+/// notes (`project_notes`) and whether the session `recaps`. Every agent hears these on every
+/// request (see docs/PROMPT_BUDGET.md), so they stay short.
+pub(crate) fn agent_notes(
+    settings: &Settings,
+    tool_server: bool,
+    project: Option<String>,
+    recaps: bool,
+) -> Option<String> {
+    let recap =
+        (recaps && settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
+    let artifacts = settings
+        .general
+        .interactive_artifacts
+        .then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
+    let video = (settings.tools.video && tool_server)
+        .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
+    let notes: Vec<String> =
+        std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string())
+            .chain(artifacts)
+            .chain(video)
+            .chain(project)
+            .chain(recap)
+            .collect();
+    (!notes.is_empty()).then(|| notes.join("\n\n"))
 }
 
 /// Trek's video watcher (`trek-mcp video`): it keeps what it watches in Trek's cache, and a call
