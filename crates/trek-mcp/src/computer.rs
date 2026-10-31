@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::desktop::{self, Button, Desktop, Input, WindowInfo};
+use crate::desktop::{self, AppBundle, Button, Desktop, Input, RunningApp, WindowInfo};
 use crate::keys;
 use crate::rpc::{
     self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, point_schema, text,
@@ -36,12 +36,13 @@ you mean forward first)."
 /// Background use (macOS): the agent works in one window of its own, behind the user's.
 const BACKGROUND_INSTRUCTIONS: &str = "macOS computer use in the background: you work in one app window of your own while the \
 user keeps working in theirs. Your clicks, keys and scrolls reach only that window (the user's pointer and keyboard stay \
-theirs, so never ask them to keep off the mouse). Pick the window first: open_app opens an app behind the user's windows \
-and works in its window, or pass a window_id from list_windows to screenshot. A screenshot shows just that window, even \
-when others cover it; x/y for click, move_mouse, drag and scroll are pixels in its latest screenshot (origin top-left). \
-Take a new screenshot after acting. The user can watch in a small picture-in-picture window. Trek's own windows are off \
-limits. A few apps (games, some canvas apps) ignore input that isn't from the real mouse: if one doesn't respond, say so \
-rather than retrying for long; the user can switch computer use to work in front in Trek's settings.";
+theirs, so never ask them to keep off the mouse). Pick the window first: open_app, or screenshot with a window_id from \
+list_windows. A screenshot shows just that window, even when others cover it; x/y for click, move_mouse, drag and scroll \
+are pixels in its latest screenshot (origin top-left). Take a new screenshot after acting. Trek's own windows are off \
+limits. Work only in apps the user isn't using: one in front that they typed or pointed in within 30 seconds is theirs, \
+and acting there waits for them. While they're away (idle, or the screen locked) any app will do. Some apps (games, \
+canvases) ignore input not from the real mouse: if one doesn't respond, say so rather than retrying; the user can switch \
+computer use to work in front in Trek's settings.";
 
 /// What a screen coordinate is: macOS moves the mouse in points, Windows (per-monitor DPI aware)
 /// in pixels.
@@ -148,6 +149,8 @@ pub struct Computer {
     target: Option<Target>,
     /// Tells Trek what it's doing in the background, for its picture-in-picture window.
     report: Option<Reporter>,
+    /// When input was last posted behind, and how idle the user was just before (`user_idle`).
+    posted: Option<(std::time::Instant, Option<Duration>)>,
 }
 
 /// The window background use works in. An app with no window yet has `id` 0: keys reach it,
@@ -178,6 +181,7 @@ impl Default for Computer {
             mode,
             target: None,
             report,
+            posted: None,
         }
     }
 }
@@ -691,6 +695,7 @@ impl Computer {
         if (m.logical_w - w.w).abs() > 1.0 || (m.logical_h - w.h).abs() > 1.0 {
             return Err(RESIZED.into());
         }
+        self.keep_out_of_users_app(&w)?;
         Ok((w, m))
     }
 
@@ -739,11 +744,23 @@ impl Computer {
                 if let Some(t) = &mut self.target {
                     t.shot = Some(m);
                 }
-                self.tell(activity("screenshot", "Looking".into(), &w, None, None));
+                let theirs = self.users_window().is_some_and(|f| f.pid == w.pid);
+                let (doing, note) = if theirs {
+                    (
+                        waiting(&w.owner),
+                        format!(
+                            " {} is the app the user is using right now: clicks and keys there wait until they switch to another app (ask them, or open_app with new_window: true).",
+                            w.owner
+                        ),
+                    )
+                } else {
+                    ("Looking".to_string(), String::new())
+                };
+                self.tell(activity("screenshot", doing, &w, None, None));
                 let info = format!(
                     "Screenshot of {}'s window{title} (window_id {}), worked in the background: {}x{} px. The window is {}x{} points. \
 Scale: 1 screenshot px = {} points. Pass pixel coordinates in this screenshot (origin at the window's top-left) to click, \
-move_mouse, drag and scroll: they go to this window alone, behind the user's, without moving their pointer.{}",
+move_mouse, drag and scroll: they go to this window alone, behind the user's, without moving their pointer.{}{note}",
                     w.owner,
                     w.id,
                     shot.width,
@@ -798,7 +815,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         };
         let (w, m) = self.pointing()?;
         let (px, py) = m.to_points(x, y)?;
-        self.desktop.behind(
+        self.post(
             &w,
             &Input::Click {
                 x: px,
@@ -834,7 +851,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
         let (w, m) = self.pointing()?;
         let (px, py) = m.to_points(x, y)?;
-        self.desktop.behind(&w, &Input::Move(px, py))?;
+        self.post(&w, &Input::Move(px, py))?;
         self.tell(activity(
             "move",
             "Pointing".into(),
@@ -856,7 +873,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let (w, m) = self.pointing()?;
         let a = m.to_points(fx, fy)?;
         let b = m.to_points(tx, ty)?;
-        self.desktop.behind(&w, &Input::Drag { from: a, to: b })?;
+        self.post(&w, &Input::Drag { from: a, to: b })?;
         self.tell(activity("drag", "Dragging".into(), &w, Some(b), Some(a)));
         Ok(vec![text(format!(
             "Dragged from ({}, {}) to ({}, {}) in {}'s window, in the background.",
@@ -877,7 +894,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         }
         let (w, m) = self.pointing()?;
         let (px, py) = m.to_points(x, y)?;
-        self.desktop.behind(
+        self.post(
             &w,
             &Input::Scroll {
                 x: px,
@@ -909,11 +926,13 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
 
     /// The window (or windowless app) keys go to.
     fn keyed(&mut self) -> Result<WindowInfo, String> {
-        match &self.target {
+        let w = match &self.target {
             None => Err(NO_WINDOW.into()),
             Some(t) if t.window.id == 0 => Ok(t.window.clone()),
             Some(_) => self.working_window(),
-        }
+        }?;
+        self.keep_out_of_users_app(&w)?;
+        Ok(w)
     }
 
     fn bg_type(&mut self, args: &Value) -> ToolResult {
@@ -922,7 +941,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             return Err("text is empty".into());
         }
         let w = self.keyed()?;
-        self.desktop.behind(&w, &Input::Type(s.to_string()))?;
+        self.post(&w, &Input::Type(s.to_string()))?;
         self.tell(activity("type", typing(s), &w, None, None));
         Ok(vec![text(format!(
             "Typed {} characters into {}, in the background.",
@@ -935,7 +954,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let combo = arg_str(args, "combo")?;
         let parsed = keys::parse(combo)?;
         let w = self.keyed()?;
-        self.desktop.behind(&w, &Input::Key(parsed))?;
+        self.post(&w, &Input::Key(parsed))?;
         self.tell(activity("key", format!("Pressing {combo}"), &w, None, None));
         Ok(vec![text(format!(
             "Pressed {combo} in {}, in the background.",
@@ -943,94 +962,471 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         ))])
     }
 
-    /// Open the app behind the user's windows and work in its window: a new one if one appears,
-    /// else its frontmost.
+    /// The window the user is at right now, when they are: the front window (not Trek's), with
+    /// input from their keyboard, pointer or trackpad in the last `IN_USE`, the screen unlocked.
+    /// `None` when they're away, or the platform can't tell.
+    fn users_window(&self) -> Option<WindowInfo> {
+        if self.desktop.screen_locked() || self.user_idle()? >= IN_USE {
+            return None;
+        }
+        self.desktop
+            .key_window()
+            .ok()
+            .flatten()
+            .filter(|w| !is_trek(w))
+    }
+
+    /// How long since the user's own last input. The system's count can include the events this
+    /// agent posts (measured on macOS 27: a key sent behind sometimes resets it), so a last event
+    /// that falls when ours did counts as ours, and the user's idle time is what it was then
+    /// plus the time since.
+    fn user_idle(&self) -> Option<Duration> {
+        let raw = self.desktop.user_idle()?;
+        match self.posted {
+            Some((at, before)) => {
+                let since = at.elapsed();
+                let ours = raw + Duration::from_millis(50) >= since
+                    && raw <= since + Duration::from_millis(500);
+                if ours {
+                    before.map(|b| b + since)
+                } else {
+                    Some(raw)
+                }
+            }
+            None => Some(raw),
+        }
+    }
+
+    /// Deliver `input` behind, noting when (and how idle the user was just before) for
+    /// `user_idle`.
+    fn post(&mut self, w: &WindowInfo, input: &Input) -> Result<(), String> {
+        let before = self.user_idle();
+        self.desktop.behind(w, input)?;
+        self.posted = Some((std::time::Instant::now(), before));
+        Ok(())
+    }
+
+    /// Refuses to drive `w` while it belongs to the app the user is using right now: their
+    /// typing and the agent's would land in the same app. Tells Trek it's waiting.
+    fn keep_out_of_users_app(&self, w: &WindowInfo) -> Result<(), String> {
+        let Some(front) = self.users_window().filter(|f| f.pid == w.pid) else {
+            return Ok(());
+        };
+        let shown = if w.id == 0 { &front } else { w };
+        self.tell(activity("waiting", waiting(&w.owner), shown, None, None));
+        Err(in_use(&w.owner))
+    }
+
+    /// Keeps `w` behind `front`, the window that was in front before `w` opened: apps often bring
+    /// a new window forward themselves, the moment it appears or a little after. Up to three
+    /// times it's put back. What happened, for the reply: `None` when nothing needed doing.
+    fn keep_behind(&self, w: &WindowInfo, front: Option<&WindowInfo>) -> Option<String> {
+        let front = front.filter(|f| f.id != w.id)?;
+        let deadline = std::time::Instant::now() + SETTLE;
+        let mut put_back = 0;
+        loop {
+            let order = self.desktop.windows().unwrap_or_default();
+            let at = |id: i64| order.iter().position(|x| x.id == id);
+            let (Some(theirs), Some(ours)) = (at(front.id), at(w.id)) else {
+                return None;
+            };
+            if ours < theirs {
+                if put_back == 3 {
+                    return Some(format!(
+                        " Note: {}'s window came to the front when it opened and stays there, in front of the user's {} window rather than behind it. Tell the user it's in their way.",
+                        w.owner, front.owner
+                    ));
+                }
+                if let Err(e) = self.desktop.bring_forward(front) {
+                    return Some(format!(
+                        " Note: {}'s window came to the front when it opened, in front of the user's {} window, and couldn't be put back ({e}). Tell the user it's in their way.",
+                        w.owner, front.owner
+                    ));
+                }
+                put_back += 1;
+                continue;
+            }
+            if std::time::Instant::now() >= deadline {
+                return (put_back > 0).then(|| {
+                    format!(
+                        " {} brought its window forward; it was put back behind the user's {} window.",
+                        w.owner, front.owner
+                    )
+                });
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    /// Waits up to `wait` for a window of process `pid` that isn't one of `before`. `pid` 0: any
+    /// window of an app called `name`.
+    fn new_window_of(
+        &self,
+        pid: i64,
+        name: &str,
+        before: &[i64],
+        wait: Duration,
+    ) -> Option<WindowInfo> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let found = self
+                .desktop
+                .windows()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|w| !is_trek(w) && !before.contains(&w.id))
+                .find(|w| {
+                    if pid > 0 {
+                        w.pid == pid
+                    } else {
+                        is_app(&w.owner, name)
+                    }
+                });
+            if found.is_some() || std::time::Instant::now() >= deadline {
+                return found;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// Work in `w` from now on.
+    fn work_in(&mut self, w: WindowInfo) {
+        self.tell(activity(
+            "open_app",
+            format!("Opening {}", w.owner),
+            &w,
+            None,
+            None,
+        ));
+        self.target = Some(Target {
+            window: w,
+            shot: None,
+        });
+    }
+
+    /// An app that's open with no window: keys reach it, nothing else does.
+    fn work_in_windowless(&mut self, owner: &str, pid: i64) {
+        self.target = Some(Target {
+            window: WindowInfo {
+                owner: owner.to_string(),
+                title: String::new(),
+                pid,
+                id: 0,
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+            shot: None,
+        });
+    }
+
+    /// Open the app behind the user's windows and work in a window of it. Never a second
+    /// instance: a running app's own window is used (or it's asked for one); only an app that
+    /// isn't running is launched, from the copy `pick` chooses, by its path.
     fn bg_open_app(&mut self, args: &Value) -> ToolResult {
         let name = arg_str(args, "name")?.trim();
         if name.is_empty() {
             return Err("name is empty".into());
         }
-        if is_trek_app(name) {
+        if is_trek_app(name) || name.trim_end_matches('/').ends_with("/Trek.app") {
             return Err(OWN_WINDOW_BEHIND.into());
         }
-        let before: Vec<i64> = self
-            .desktop
-            .windows()
-            .unwrap_or_default()
-            .iter()
-            .map(|w| w.id)
-            .collect();
-        self.desktop
-            .open_app_behind(name)
-            .map_err(|e| format!("Could not open {name:?}: {e}"))?;
-        let started = std::time::Instant::now();
-        let deadline = started + WINDOW_WAIT;
-        let found = loop {
-            let theirs: Vec<WindowInfo> = self
-                .desktop
-                .windows()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|w| is_app(&w.owner, name) && !is_trek(w))
-                .collect();
-            let new = theirs.iter().find(|w| !before.contains(&w.id)).cloned();
-            // A window it already had will do, once a new one has had a moment to appear.
-            let waited = started.elapsed() >= Duration::from_millis(1500);
-            match new.or_else(|| theirs.first().cloned().filter(|_| waited)) {
-                Some(w) => break Some(w),
-                None if std::time::Instant::now() >= deadline => break theirs.first().cloned(),
-                None => std::thread::sleep(Duration::from_millis(200)),
-            }
-        };
-        match found {
-            Some(w) => {
-                let title = if w.title.is_empty() {
-                    String::new()
-                } else {
-                    format!(" “{}”", w.title)
-                };
-                let reply = format!(
-                    "Opened {name} behind the user's windows. Working in its window{title} (window_id {}): take a screenshot to see it.",
-                    w.id
-                );
-                self.tell(activity(
-                    "open_app",
-                    format!("Opening {}", w.owner),
-                    &w,
-                    None,
-                    None,
-                ));
-                self.target = Some(Target {
-                    window: w,
-                    shot: None,
-                });
-                Ok(vec![text(reply)])
-            }
-            None => match self.desktop.app_pid(name) {
-                Some(pid) => {
-                    self.target = Some(Target {
-                        window: WindowInfo {
-                            owner: name.to_string(),
-                            title: String::new(),
-                            pid,
-                            id: 0,
-                            x: 0.0,
-                            y: 0.0,
-                            w: 0.0,
-                            h: 0.0,
-                        },
-                        shot: None,
-                    });
-                    Ok(vec![text(format!(
-                        "{name} is open but shows no window. Keys go to it now (cmd+n opens a new window in most apps); then call list_windows and screenshot with the new window's window_id."
-                    ))])
-                }
-                None => Err(format!(
-                    "Opened {name}, but no window of it has appeared yet. Call list_windows in a moment, then screenshot with its window_id."
-                )),
-            },
+        let new_window = args
+            .get("new_window")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let windows = self.desktop.windows().unwrap_or_default();
+        let running = self.desktop.running_apps();
+        match pick(name, &running, &windows, || {
+            self.desktop.installed_apps(name)
+        }) {
+            Pick::Running(app) => self.open_running(app, new_window, &windows, &running),
+            Pick::Launch(copy) => self.launch(name, copy, &windows),
+            Pick::Missing => Err(format!(
+                "No app called {name:?} is running or installed. list_windows shows what's open; pass an app's name as the Dock shows it, its bundle id or its path."
+            )),
         }
     }
+
+    /// `open_app` for an app that's already running: its window, or one more of it.
+    fn open_running(
+        &mut self,
+        app: RunningApp,
+        new_window: bool,
+        windows: &[WindowInfo],
+        running: &[RunningApp],
+    ) -> ToolResult {
+        let theirs: Vec<WindowInfo> = windows
+            .iter()
+            .filter(|w| w.pid == app.pid && !is_trek(w))
+            .cloned()
+            .collect();
+        let from = app
+            .path
+            .as_deref()
+            .map(|p| format!(", {p}"))
+            .unwrap_or_default();
+        let was = format!("{} was already running (pid {}{from})", app.name, app.pid);
+        let users = self.users_window();
+        if !new_window && let Some(front) = users.as_ref().filter(|f| f.pid == app.pid) {
+            self.tell(activity("waiting", waiting(&app.name), front, None, None));
+            return Err(format!("{} {was}.", in_use(&app.name)));
+        }
+        if !new_window && let Some(w) = theirs.first().cloned() {
+            let reply = format!(
+                "{was}, so nothing was launched. Working in its window{} (window_id {}), behind the user's: take a screenshot to see it.",
+                titled(&w),
+                w.id
+            );
+            self.work_in(w);
+            return Ok(vec![text(reply)]);
+        }
+        // Ask the running app for a window: a reopen when it has none (as a click on its Dock
+        // icon does), else its own New Window (cmd+n), sent to it alone.
+        let front = self.desktop.key_window().ok().flatten();
+        let before: Vec<i64> = theirs.iter().map(|w| w.id).collect();
+        let asked = if theirs.is_empty() {
+            self.desktop
+                .reopen_behind(&app)
+                .map(|()| "asked it for a window")
+        } else {
+            let keys = WindowInfo {
+                owner: app.name.clone(),
+                title: String::new(),
+                pid: app.pid,
+                id: 0,
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            };
+            let cmd_n = keys::parse("cmd+n")?;
+            self.post(&keys, &Input::Key(cmd_n))
+                .map(|()| "pressed cmd+n in it for one more window")
+        }
+        .map_err(|e| format!("{was}, but asking it for a window failed: {e}"))?;
+        // Never a second instance: say so if the system started one anyway.
+        let others = |apps: &[RunningApp]| -> Vec<i64> {
+            apps.iter()
+                .filter(|a| a.pid != app.pid && same_app(a, &app))
+                .map(|a| a.pid)
+                .collect()
+        };
+        let (had, has) = (others(running), others(&self.desktop.running_apps()));
+        let second = has
+            .iter()
+            .find(|p| !had.contains(p))
+            .map(|p| {
+                format!(
+                    " Warning: macOS started a second copy of {} (pid {p}); tell the user.",
+                    app.name
+                )
+            })
+            .unwrap_or_default();
+        match self.new_window_of(app.pid, &app.name, &before, WINDOW_WAIT) {
+            Some(w) => {
+                let order = self.keep_behind(&w, front.as_ref()).unwrap_or_default();
+                let reply = format!(
+                    "{was}, so nothing was launched: {asked}. Working in its new window{} (window_id {}): take a screenshot to see it.{order}{second}",
+                    titled(&w),
+                    w.id
+                );
+                self.work_in(w);
+                Ok(vec![text(reply)])
+            }
+            None => {
+                self.work_in_windowless(&app.name, app.pid);
+                Ok(vec![text(format!(
+                    "{was}, so nothing was launched: {asked}, but no new window has appeared. Keys go to it now (cmd+n opens a window in most apps); then call list_windows and screenshot with the window's window_id.{second}"
+                ))])
+            }
+        }
+    }
+
+    /// `open_app` for an app that isn't running: launch the chosen copy, behind.
+    fn launch(&mut self, name: &str, copy: AppBundle, windows: &[WindowInfo]) -> ToolResult {
+        let front = self.desktop.key_window().ok().flatten();
+        let before: Vec<i64> = windows.iter().map(|w| w.id).collect();
+        self.desktop
+            .launch_behind(&copy)
+            .map_err(|e| format!("Could not launch {}: {e}", copy.path))?;
+        let id = copy
+            .bundle_id
+            .as_deref()
+            .map(|b| format!(", {b}"))
+            .unwrap_or_default();
+        let launched = format!(
+            "{name} wasn't running: launched {}{id} behind the user's windows",
+            copy.path
+        );
+        let started = self
+            .desktop
+            .running_apps()
+            .into_iter()
+            .find(|a| a.path.as_deref() == Some(copy.path.as_str()));
+        let pid = started.as_ref().map_or(0, |a| a.pid);
+        // Launched behind, some apps open no window until asked (TextEdit skips its Open panel):
+        // ask the new process once, as a click on its icon would.
+        let mut found = self.new_window_of(pid, name, &before, WINDOW_WAIT / 2);
+        if found.is_none()
+            && let Some(app) = &started
+            && self.desktop.reopen_behind(app).is_ok()
+        {
+            found = self.new_window_of(pid, name, &before, WINDOW_WAIT / 2);
+        }
+        match found {
+            Some(w) => {
+                let order = self.keep_behind(&w, front.as_ref()).unwrap_or_default();
+                let reply = format!(
+                    "{launched}. Working in its window{} (window_id {}): take a screenshot to see it.{order}",
+                    titled(&w),
+                    w.id
+                );
+                self.work_in(w);
+                Ok(vec![text(reply)])
+            }
+            None if pid > 0 => {
+                self.work_in_windowless(name, pid);
+                Ok(vec![text(format!(
+                    "{launched}. It shows no window yet: keys go to it now (cmd+n opens a window in most apps); then call list_windows and screenshot with the window's window_id."
+                ))])
+            }
+            None => Err(format!(
+                "{launched}, but no window of it has appeared yet. Call list_windows in a moment, then screenshot with its window_id."
+            )),
+        }
+    }
+}
+
+/// How long the user counts as using the app in front after their last key, click or pointer
+/// movement.
+const IN_USE: Duration = Duration::from_secs(30);
+
+/// How long an app that was opened is watched for bringing its window forward.
+const SETTLE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 1500 });
+
+/// Said when the agent would drive the app the user is using.
+fn in_use(app: &str) -> String {
+    format!(
+        "{app} is the app the user is using right now; ask them whether to work in it (they switch to another app, then you go on), wait, or open a second window (open_app with new_window: true). Nothing was done."
+    )
+}
+
+/// What Trek shows while the agent waits for the user's app.
+fn waiting(app: &str) -> String {
+    format!("Waiting: you're using {app}")
+}
+
+/// ` “Title”`, or nothing for an untitled window.
+fn titled(w: &WindowInfo) -> String {
+    if w.title.is_empty() {
+        String::new()
+    } else {
+        format!(" “{}”", w.title)
+    }
+}
+
+/// The app `open_app` works in.
+#[derive(Debug, PartialEq)]
+enum Pick {
+    /// Running: its own windows are used, it isn't launched again.
+    Running(RunningApp),
+    /// Not running: this copy is launched.
+    Launch(AppBundle),
+    Missing,
+}
+
+/// Whether running app `a` is the one `name` (a name, bundle id or path) means, exactly.
+fn names(a: &RunningApp, name: &str) -> bool {
+    let name = name.trim().trim_end_matches('/');
+    if name.contains('/') {
+        return a.path.as_deref().map(|p| p.trim_end_matches('/')) == Some(name);
+    }
+    let stem = name.strip_suffix(".app").unwrap_or(name);
+    a.name.eq_ignore_ascii_case(stem)
+        || a.bundle_id
+            .as_deref()
+            .is_some_and(|b| b.eq_ignore_ascii_case(name))
+        || a.path.as_deref().is_some_and(|p| {
+            let file = p
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or_default();
+            file.strip_suffix(".app")
+                .unwrap_or(file)
+                .eq_ignore_ascii_case(stem)
+        })
+}
+
+/// Two running processes of one app (by bundle id, else by name).
+fn same_app(a: &RunningApp, b: &RunningApp) -> bool {
+    match (&a.bundle_id, &b.bundle_id) {
+        (Some(x), Some(y)) => x == y,
+        _ => a.name == b.name,
+    }
+}
+
+/// How good a place a copy of an app is to launch it from: /Applications first, then the
+/// system's, the user's own Applications folder, anywhere else; build output, caches and the
+/// Trash last (a debug build there shares the name and bundle id of the real app).
+fn rank(path: &str) -> u8 {
+    const BUILDS: [&str; 9] = [
+        "/DerivedData/",
+        "/.build/",
+        "/build/",
+        "/target/",
+        "/.Trash/",
+        "/Caches/",
+        "/tmp/",
+        "/private/",
+        "/Volumes/",
+    ];
+    if BUILDS.iter().any(|b| path.contains(b)) {
+        4
+    } else if path.starts_with("/Applications/") {
+        0
+    } else if path.starts_with("/System/") {
+        1
+    } else if path.starts_with("/Users/") && path.contains("/Applications/") {
+        2
+    } else {
+        3
+    }
+}
+
+/// Which app `open_app` means by `name`: one that's running first (two copies running: the one
+/// with a window in front), and only when none is, the best-placed copy on disk (`installed`,
+/// asked for only then).
+fn pick(
+    name: &str,
+    running: &[RunningApp],
+    windows: &[WindowInfo],
+    installed: impl FnOnce() -> Vec<AppBundle>,
+) -> Pick {
+    let mut apps: Vec<&RunningApp> = running
+        .iter()
+        .filter(|a| !is_trek_app(&a.name) && names(a, name))
+        .collect();
+    if apps.is_empty() {
+        apps = running
+            .iter()
+            .filter(|a| !is_trek_app(&a.name) && is_app(&a.name, name))
+            .collect();
+    }
+    let front = windows
+        .iter()
+        .find_map(|w| apps.iter().find(|a| a.pid == w.pid));
+    if let Some(app) = front.or(apps.first()) {
+        return Pick::Running((*app).clone());
+    }
+    let mut copies = installed();
+    copies.sort_by(|a, b| (rank(&a.path), &a.path).cmp(&(rank(&b.path), &b.path)));
+    copies
+        .into_iter()
+        .next()
+        .map_or(Pick::Missing, Pick::Launch)
 }
 
 impl rpc::ToolSet for Computer {
@@ -1166,13 +1562,24 @@ for finding your way.",
                 name: "open_app",
                 description: pick(
                     OPEN_APP_DESCRIPTION,
-                    "Open a macOS app by name, e.g. \"Safari\", \"Notes\", \"TextEdit\", behind the user's windows (it isn't brought forward), and work in its window: a new one when one appears, else its frontmost. Take a screenshot next.",
+                    "Work in a macOS app, by name, e.g. \"Safari\", \"Notes\", \"TextEdit\", behind the user's windows. Running already: its frontmost window is used and nothing is launched. Not running: it's launched behind (never brought forward). Refused while it's the app the user is using. Take a screenshot next.",
                 ),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"name": {"type": "string", "description": "Application name or path"}},
-                    "required": ["name"],
-                }),
+                input_schema: if behind {
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Application name, bundle id or path"},
+                            "new_window": {"type": "boolean", "default": false, "description": "Ask the running app for one more window to work in (it opens a window, not another copy of the app), e.g. when the user is using its main one"},
+                        },
+                        "required": ["name"],
+                    })
+                } else {
+                    json!({
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "description": "Application name or path"}},
+                        "required": ["name"],
+                    })
+                },
             },
             ToolDef {
                 name: "list_windows",
@@ -1249,6 +1656,7 @@ mod tests {
             mode: Mode::Front,
             target: None,
             report: None,
+            posted: None,
         }
     }
 
@@ -2125,31 +2533,23 @@ mod tests {
 
     #[test]
     fn open_app_in_the_background_works_in_the_window_that_appears() {
-        let fake = behind_the_users();
-        fake.opens.borrow_mut().push(WindowInfo {
-            owner: "TextEdit".into(),
-            title: "Untitled".into(),
-            pid: 50,
-            id: 11,
-            x: 0.0,
-            y: 0.0,
-            w: 600.0,
-            h: 400.0,
-        });
+        let fake = Recording {
+            installed: vec![copy(
+                "/System/Applications/TextEdit.app",
+                "com.apple.TextEdit",
+            )],
+            ..behind_the_users()
+        };
+        fake.opens.borrow_mut().push(textedit_window(50, 11));
         let mut c = behind(&fake);
-        let opened = c
-            .call("open_app", &json!({"name": "/Applications/TextEdit.app"}))
-            .unwrap();
+        let opened = reply(c.call("open_app", &json!({"name": "TextEdit"})));
         assert!(
-            opened[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("window “Untitled” (window_id 11)"),
-            "{opened:?}"
+            opened.contains("window “Untitled” (window_id 11)"),
+            "{opened}"
         );
         assert_eq!(
             fake.events(),
-            vec![Event::OpenAppBehind("/Applications/TextEdit.app".into())]
+            vec![Event::Launch("/System/Applications/TextEdit.app".into())]
         );
         c.call("type_text", &json!({"text": "x"})).unwrap();
         assert_eq!(
@@ -2159,18 +2559,36 @@ mod tests {
                 input: Input::Type("x".into())
             })
         );
-        // An app with no window: keys go to it, pointing doesn't.
+        // Launched behind, it shows a window only when asked: it's asked, once.
         let fake = Recording {
-            pids: vec![("Mail".into(), 77)],
+            installed: vec![copy(
+                "/System/Applications/TextEdit.app",
+                "com.apple.TextEdit",
+            )],
+            shy: true,
             ..behind_the_users()
         };
+        fake.opens.borrow_mut().push(textedit_window(50, 11));
+        let mut c = behind(&fake);
+        assert!(reply(c.call("open_app", &json!({"name": "TextEdit"}))).contains("(window_id 11)"));
+        assert_eq!(
+            fake.events(),
+            vec![
+                Event::Launch("/System/Applications/TextEdit.app".into()),
+                Event::Reopen(50)
+            ]
+        );
+        // An app with no window, that shows none when asked: keys go to it, pointing doesn't.
+        let fake = behind_the_users();
+        fake.running
+            .borrow_mut()
+            .push(running("Mail", "com.apple.mail", 77));
         let mut c = behind(&fake);
         assert!(
-            c.call("open_app", &json!({"name": "Mail"})).unwrap()[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("shows no window")
+            reply(c.call("open_app", &json!({"name": "Mail"})))
+                .contains("no new window has appeared")
         );
+        assert_eq!(fake.events(), vec![Event::Reopen(77)]);
         c.call("key", &json!({"combo": "cmd+n"})).unwrap();
         assert_eq!(
             fake.events().last(),
@@ -2189,7 +2607,7 @@ mod tests {
         assert!(
             c.call("open_app", &json!({"name": "Nope"}))
                 .unwrap_err()
-                .contains("no window of it has appeared")
+                .contains("is running or installed")
         );
         assert!(
             is_app("Google Chrome", "chrome")
@@ -2197,6 +2615,343 @@ mod tests {
                 && !is_app("Safari", "")
                 && !is_app("Notes", "no")
         );
+    }
+
+    fn reply(r: ToolResult) -> String {
+        match r {
+            Ok(parts) => parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(e) => panic!("refused: {e}"),
+        }
+    }
+
+    fn copy(path: &str, id: &str) -> AppBundle {
+        AppBundle {
+            path: path.into(),
+            bundle_id: Some(id.into()),
+        }
+    }
+
+    fn running(name: &str, id: &str, pid: i64) -> RunningApp {
+        RunningApp {
+            name: name.into(),
+            bundle_id: Some(id.into()),
+            path: Some(format!("/Applications/{name}.app")),
+            pid,
+        }
+    }
+
+    fn textedit_window(pid: i64, id: i64) -> WindowInfo {
+        WindowInfo {
+            owner: "TextEdit".into(),
+            title: "Untitled".into(),
+            pid,
+            id,
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 400.0,
+        }
+    }
+
+    #[test]
+    fn which_app_open_app_works_in() {
+        let none = || -> Vec<AppBundle> { panic!("a running app isn't looked for on disk") };
+        let textedit = running("TextEdit", "com.apple.TextEdit", 50);
+        // Running: that one, by name, bundle id, path or a loose name; nothing on disk is asked.
+        for name in [
+            "TextEdit",
+            "textedit.app",
+            "com.apple.TextEdit",
+            "/Applications/TextEdit.app",
+        ] {
+            assert_eq!(
+                pick(name, std::slice::from_ref(&textedit), &[], none),
+                Pick::Running(textedit.clone()),
+                "{name}"
+            );
+        }
+        let chrome = running("Google Chrome", "com.google.Chrome", 60);
+        assert_eq!(
+            pick("chrome", std::slice::from_ref(&chrome), &[], none),
+            Pick::Running(chrome)
+        );
+        // Two running copies (a debug build beside the real one): the one with a window in front.
+        let debug = RunningApp {
+            path: Some(
+                "/Users/me/Library/Developer/Xcode/DerivedData/T/Build/Touchline 27.app".into(),
+            ),
+            pid: 71,
+            ..running("Touchline 27", "local.touchline", 0)
+        };
+        let real = running("Touchline 27", "local.touchline", 70);
+        let mut w = textedit_window(70, 5);
+        w.owner = "Touchline 27".into();
+        assert_eq!(
+            pick("Touchline 27", &[debug.clone(), real.clone()], &[w], none),
+            Pick::Running(real)
+        );
+        assert_eq!(
+            pick("Touchline 27", std::slice::from_ref(&debug), &[], none),
+            Pick::Running(debug),
+            "a running copy is used, wherever it's from"
+        );
+        // Not running: the best-placed copy on disk, never a build's.
+        let copies = || {
+            vec![
+                copy(
+                    "/Users/me/Library/Developer/Xcode/DerivedData/T/Build/Products/Debug/TextEdit.app",
+                    "com.apple.TextEdit",
+                ),
+                copy("/Users/me/Applications/TextEdit.app", "com.apple.TextEdit"),
+                copy("/System/Applications/TextEdit.app", "com.apple.TextEdit"),
+            ]
+        };
+        assert_eq!(
+            pick("TextEdit", &[], &[], copies),
+            Pick::Launch(copy(
+                "/System/Applications/TextEdit.app",
+                "com.apple.TextEdit"
+            ))
+        );
+        assert_eq!(pick("TextEdit", &[], &[], Vec::new), Pick::Missing);
+        // Trek is never the app.
+        let trek = running("Trek", "dev.trek.Trek", 9);
+        assert_eq!(pick("Trek", &[trek], &[], Vec::new), Pick::Missing);
+        assert!(
+            rank("/Applications/Safari.app") < rank("/System/Applications/Notes.app")
+                && rank("/System/Applications/Notes.app") < rank("/Users/me/Applications/X.app")
+                && rank("/Users/me/Applications/X.app") < rank("/Users/me/Code/X.app")
+                && rank("/Users/me/Code/X.app") < rank("/Users/me/Code/.build/X.app")
+        );
+    }
+
+    #[test]
+    fn a_running_app_is_never_launched_again() {
+        // Running with a window: that window, and no launch, reopen or keys.
+        let fake = behind_the_users();
+        fake.running
+            .borrow_mut()
+            .push(running("Safari", "com.apple.Safari", 42));
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "Safari"})));
+        assert!(
+            said.contains("Safari was already running (pid 42, /Applications/Safari.app), so nothing was launched")
+                && said.contains("window “Docs” (window_id 7)"),
+            "{said}"
+        );
+        assert_eq!(fake.events(), vec![]);
+        c.call("screenshot", &json!({})).unwrap();
+        c.call("click", &json!({"x": 10, "y": 10})).unwrap();
+        // Running with no window: it's asked for one (a reopen, not a launch).
+        let fake = behind_the_users();
+        fake.running
+            .borrow_mut()
+            .push(running("TextEdit", "com.apple.TextEdit", 50));
+        fake.opens.borrow_mut().push(textedit_window(50, 11));
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert!(
+            said.contains("nothing was launched: asked it for a window")
+                && said.contains("(window_id 11)"),
+            "{said}"
+        );
+        assert_eq!(fake.events(), vec![Event::Reopen(50)]);
+    }
+
+    #[test]
+    fn an_app_that_comes_forward_is_put_back_behind() {
+        let fake = Recording {
+            installed: vec![copy(
+                "/System/Applications/TextEdit.app",
+                "com.apple.TextEdit",
+            )],
+            jumps_forward: true,
+            ..behind_the_users()
+        };
+        fake.opens.borrow_mut().push(textedit_window(50, 11));
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        // Notes (window 1) was in front: it's brought back.
+        assert_eq!(
+            fake.events(),
+            vec![
+                Event::Launch("/System/Applications/TextEdit.app".into()),
+                Event::BringForward(1)
+            ]
+        );
+        assert!(
+            said.contains("TextEdit brought its window forward; it was put back behind the user's Notes window."),
+            "{said}"
+        );
+        // One that won't go back: said so, not passed off as behind.
+        let fake = Recording {
+            installed: vec![copy(
+                "/System/Applications/TextEdit.app",
+                "com.apple.TextEdit",
+            )],
+            jumps_forward: true,
+            stubborn: true,
+            ..behind_the_users()
+        };
+        fake.opens.borrow_mut().push(textedit_window(50, 11));
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert!(
+            said.contains("Note: TextEdit's window came to the front when it opened and stays there, in front of the user's Notes window rather than behind it."),
+            "{said}"
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|e| matches!(e, Event::BringForward(1)))
+                .count(),
+            3
+        );
+    }
+
+    /// TextEdit in front, being typed in; Safari behind it.
+    fn using_textedit(idle_secs: u64) -> Recording {
+        let mut fake = behind_the_users();
+        let mut windows = fake.windows.clone().unwrap();
+        windows.insert(0, textedit_window(50, 11));
+        fake.windows = Ok(windows);
+        fake.idle = Some(Duration::from_secs(idle_secs));
+        fake.running.borrow_mut().extend([
+            running("TextEdit", "com.apple.TextEdit", 50),
+            running("Safari", "com.apple.Safari", 42),
+        ]);
+        fake
+    }
+
+    #[test]
+    fn the_app_the_user_is_using_is_left_to_them() {
+        // In front and typed in 5 s ago: refused, and Trek is told it's waiting.
+        let fake = using_textedit(5);
+        let mut c = behind(&fake);
+        assert_eq!(
+            c.call("open_app", &json!({"name": "TextEdit"})),
+            Err(format!(
+                "{} TextEdit was already running (pid 50, /Applications/TextEdit.app).",
+                in_use("TextEdit")
+            ))
+        );
+        assert_eq!(fake.events(), vec![]);
+        assert!(c.target.is_none());
+        // Another app is fine meanwhile.
+        assert!(reply(c.call("open_app", &json!({"name": "Safari"}))).contains("window_id 7"));
+        // Picked by its window_id: looking is fine, acting waits.
+        let said = reply(c.call("screenshot", &json!({"window_id": 11})));
+        assert!(
+            said.contains("TextEdit is the app the user is using right now"),
+            "{said}"
+        );
+        assert_eq!(
+            c.call("click", &json!({"x": 5, "y": 5})),
+            Err(in_use("TextEdit"))
+        );
+        assert_eq!(
+            c.call("type_text", &json!({"text": "hi"})),
+            Err(in_use("TextEdit"))
+        );
+        assert!(
+            !fake
+                .events()
+                .iter()
+                .any(|e| matches!(e, Event::Behind { .. })),
+            "nothing reached the user's app"
+        );
+        // Away for minutes, or the screen locked: it's fine.
+        for fake in [
+            using_textedit(300),
+            Recording {
+                locked: true,
+                ..using_textedit(1)
+            },
+        ] {
+            let mut c = behind(&fake);
+            let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+            assert!(
+                said.contains("Working in its window “Untitled” (window_id 11)"),
+                "{said}"
+            );
+            c.call("type_text", &json!({"text": "hi"})).unwrap();
+        }
+        // Or a window of its own: one more window of the running app (cmd+n to it, no new
+        // process), and the user's window brought back to the front.
+        let fake = Recording {
+            jumps_forward: true,
+            ..using_textedit(5)
+        };
+        fake.opens.borrow_mut().push(textedit_window(50, 12));
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit", "new_window": true})));
+        assert!(
+            said.contains("nothing was launched: pressed cmd+n in it for one more window")
+                && said.contains("(window_id 12)")
+                && said.contains("it was put back behind the user's TextEdit window"),
+            "{said}"
+        );
+        assert_eq!(
+            fake.events(),
+            vec![
+                Event::Behind {
+                    window: 0,
+                    input: Input::Key(keys::parse("cmd+n").unwrap())
+                },
+                Event::BringForward(11)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_agents_own_input_isnt_taken_for_the_users() {
+        // The user is away, TextEdit in front; macOS counts the agent's keys as input.
+        let fake = Recording {
+            posts_count: true,
+            ..using_textedit(300)
+        };
+        let mut c = behind(&fake);
+        reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        for _ in 0..3 {
+            c.call("type_text", &json!({"text": "hi"})).unwrap();
+        }
+        assert!(c.user_idle().unwrap() >= Duration::from_secs(300));
+        // Input that came after the agent's is the user's.
+        let mut c = behind(&using_textedit(300));
+        c.posted = Some((
+            std::time::Instant::now() - Duration::from_secs(10),
+            Some(Duration::from_secs(300)),
+        ));
+        assert_eq!(
+            c.user_idle(),
+            Some(Duration::from_secs(300)),
+            "nothing since: as the system says"
+        );
+        let mut fake = using_textedit(2);
+        fake.idle = Some(Duration::from_secs(2));
+        let mut c = behind(&fake);
+        c.posted = Some((
+            std::time::Instant::now() - Duration::from_secs(10),
+            Some(Duration::from_secs(300)),
+        ));
+        assert_eq!(c.user_idle(), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn what_the_agent_is_told_when_the_user_is_using_the_app() {
+        assert_eq!(
+            in_use("Touchline 27"),
+            "Touchline 27 is the app the user is using right now; ask them whether to work in it (they switch to another app, then you go on), wait, or open a second window (open_app with new_window: true). Nothing was done."
+        );
+        assert_eq!(
+            waiting("Touchline 27"),
+            "Waiting: you're using Touchline 27"
+        );
+        assert!(BACKGROUND_INSTRUCTIONS.contains("Work only in apps the user isn't using"));
     }
 
     #[test]

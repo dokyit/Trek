@@ -83,6 +83,32 @@ pub struct Session {
     ended: Option<Instant>,
 }
 
+impl Session {
+    /// The agent needs the app the user is in, and waits rather than take it over.
+    pub fn waiting(&self) -> bool {
+        self.step.action == "waiting"
+    }
+
+    /// The app and window it drives: "Safari · Docs", or just "Safari" for an untitled one.
+    pub fn driving(&self) -> String {
+        if self.window.title.is_empty() {
+            self.window.app.clone()
+        } else {
+            format!("{} · {}", self.window.app, self.window.title)
+        }
+    }
+
+    /// What the thread says about it: "Safari in the background", or while it waits for the user
+    /// to leave the app, "Waiting: you're using Safari".
+    pub fn chip(&self) -> String {
+        if self.waiting() {
+            self.step.detail.clone()
+        } else {
+            format!("{} in the background", self.window.app)
+        }
+    }
+}
+
 /// A report from `trek-mcp computer`, as it sends it (see `trek_ipc::COMPUTER_ACTIVITY`).
 pub fn parse(params: &Value) -> Option<(Watched, Step)> {
     let w = params.get("window")?;
@@ -576,6 +602,13 @@ impl Render for Pip {
             .and_then(|ws| ws.read(cx).thread(&s.thread).map(|t| t.title.clone()))
             .unwrap_or_default();
         let model = self.model.clone();
+        let waiting = s.waiting();
+        let live = if waiting {
+            crate::palette::amber(cx)
+        } else {
+            live
+        };
+        let driving = s.driving();
         let dot = div().flex_none().size(px(7.)).rounded_full().bg(live);
         let icon_button = |id: &'static str, icon: Lucide, tip: SharedString| {
             div()
@@ -701,10 +734,11 @@ impl Render for Pip {
                 .child(format!("Watching {app}…"))
                 .into_any_element(),
         };
-        let title = if s.window.title.is_empty() {
-            app.clone()
+        // "Working in Safari · Docs", or "Waiting · you're using Safari".
+        let title = if waiting {
+            format!("you're using {app}")
         } else {
-            format!("{app} · {}", s.window.title)
+            driving
         };
         let (m1, m2, m3) = (model.clone(), model.clone(), model.clone());
         let open = model.clone();
@@ -730,7 +764,7 @@ impl Render for Pip {
                                     .flex_none()
                                     .text_size(px(12.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Background use"),
+                                    .child(if waiting { "Waiting" } else { "Working in" }),
                             )
                             .child(
                                 div()
@@ -823,8 +857,37 @@ impl Render for Pip {
 
 #[cfg(test)]
 mod tests {
-    use super::{Watched, fit, parse};
+    use super::{Session, Watched, fit, parse};
     use serde_json::json;
+
+    #[test]
+    fn the_thread_and_picture_say_what_its_driving_or_waiting_for() {
+        let session = |report: serde_json::Value| {
+            let (window, step) = parse(&report).unwrap();
+            Session {
+                thread: "t".into(),
+                window,
+                step,
+                pointer: None,
+                ended: None,
+            }
+        };
+        let working = session(json!({
+            "action": "click", "detail": "Clicking",
+            "window": {"id": 7, "app": "Touchline 27", "title": "Home"},
+        }));
+        assert!(!working.waiting());
+        assert_eq!(working.driving(), "Touchline 27 · Home");
+        assert_eq!(working.chip(), "Touchline 27 in the background");
+        // As `trek-mcp computer` reports waiting for the app the user is in.
+        let waiting = session(json!({
+            "action": "waiting", "detail": "Waiting: you're using Touchline 27",
+            "window": {"id": 7, "app": "Touchline 27", "title": ""},
+        }));
+        assert!(waiting.waiting());
+        assert_eq!(waiting.driving(), "Touchline 27");
+        assert_eq!(waiting.chip(), "Waiting: you're using Touchline 27");
+    }
 
     #[test]
     fn reports_are_read_as_trek_mcp_sends_them() {

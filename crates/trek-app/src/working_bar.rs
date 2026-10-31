@@ -107,7 +107,8 @@ struct Header {
     /// It waits on sub-agents rather than working itself (its turn is over, or blocked in a call
     /// for their answers): their logos, and "Waiting on Sol".
     waiting: Option<(Vec<AgentId>, String)>,
-    /// It's using the computer in the background: in which app, and whether its picture shows.
+    /// It's using the computer in the background: what its chip says ("Safari in the
+    /// background", "Waiting: you're using Safari"), and whether its picture shows.
     behind: Option<(String, bool)>,
 }
 
@@ -401,7 +402,7 @@ impl WorkingBar {
             waiting,
             behind: {
                 let b = ws.background_use.read(cx);
-                b.session(id).map(|s| (s.window.app.clone(), b.showing()))
+                b.session(id).map(|s| (s.chip(), b.showing()))
             },
         });
         let current =
@@ -1173,9 +1174,9 @@ impl Render for WorkingBar {
             )
             .pb(px(GROUP_PAD))
         });
-        let header =
-            shown.header.as_ref().map(|h| {
-                let who = match &h.waiting {
+        let header = shown.header.as_ref().map(|h| {
+            let who =
+                match &h.waiting {
                     // Their logos, stacked, and who they are; no shimmer: nothing to see here but time.
                     Some((logos, label)) => h_flex()
                         .min_w_0()
@@ -1234,47 +1235,47 @@ impl Render for WorkingBar {
                         })
                         .into_any_element(),
                 };
-                // Working or waiting on its sub-agents, the hiker walks the whole trail on the bar's
-                // own clock: it paces while it waits (`mascot::PACE`), strolls while it works — and a
-                // change between them moves its pace, never its place.
-                let lap = if h.waiting.is_some() {
-                    crate::mascot::PACE
-                } else {
-                    crate::mascot::LAP
-                };
-                let walk = self.step_walk(still, lap);
-                let trail = crate::mascot::trail(walk.phase, walk.gait, still, cx);
-                h_flex()
-                    .id("working-bar")
-                    .test_support()
-                    .w_full()
-                    .h(px(HEIGHT))
-                    .flex_none()
-                    .justify_center()
-                    .px_6()
-                    .pb(px(6.))
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .max_w(shown.width)
-                            .px(px(4.))
-                            .gap(px(14.))
-                            .items_end()
-                            .child(
-                                h_flex()
-                                    .flex_none()
-                                    // Fixed width so the trail doesn't jump as the clock grows.
-                                    .w(px(300.))
-                                    .pb(px(4.))
-                                    .text_size(px(13.))
-                                    .child(who),
-                            )
-                            .child(div().flex_1().min_w_0().child(trail))
-                            .children(h.behind.clone().map(|(app, showing)| {
-                                behind_chip(&app, showing, &self.workspace, cx)
-                            })),
-                    )
-            });
+            // Working or waiting on its sub-agents, the hiker walks the whole trail on the bar's
+            // own clock: it paces while it waits (`mascot::PACE`), strolls while it works — and a
+            // change between them moves its pace, never its place.
+            let lap = if h.waiting.is_some() {
+                crate::mascot::PACE
+            } else {
+                crate::mascot::LAP
+            };
+            let walk = self.step_walk(still, lap);
+            let trail = crate::mascot::trail(walk.phase, walk.gait, still, cx);
+            h_flex()
+                .id("working-bar")
+                .test_support()
+                .w_full()
+                .h(px(HEIGHT))
+                .flex_none()
+                .justify_center()
+                .px_6()
+                .pb(px(6.))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .max_w(shown.width)
+                        .px(px(4.))
+                        .gap(px(14.))
+                        .items_end()
+                        .child(
+                            h_flex()
+                                .flex_none()
+                                // Fixed width so the trail doesn't jump as the clock grows.
+                                .w(px(300.))
+                                .pb(px(4.))
+                                .text_size(px(13.))
+                                .child(who),
+                        )
+                        .child(div().flex_1().min_w_0().child(trail))
+                        .children(h.behind.clone().map(|(label, showing)| {
+                            behind_chip(&label, showing, &self.workspace, cx)
+                        })),
+                )
+        });
         v_flex()
             .w_full()
             .h(px(self.bottom_height()))
@@ -1287,8 +1288,9 @@ impl Render for WorkingBar {
 }
 
 /// "● Safari in the background · Show": the agent is using the computer behind the user's
-/// windows; the button brings its picture-in-picture window back (or puts it away).
-fn behind_chip(app: &str, showing: bool, workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
+/// windows (or "Waiting: you're using Safari" while it waits for the app the user is in); the
+/// button brings its picture-in-picture window back (or puts it away).
+fn behind_chip(label: &str, showing: bool, workspace: &Entity<Workspace>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let b = workspace.read(cx).background_use.clone();
     h_flex()
@@ -1306,14 +1308,13 @@ fn behind_chip(app: &str, showing: bool, workspace: &Entity<Workspace>, cx: &App
                 .flex_none()
                 .size(px(6.))
                 .rounded_full()
-                .bg(crate::palette::emerald(cx)),
+                .bg(if label.starts_with("Waiting") {
+                    crate::palette::amber(cx)
+                } else {
+                    crate::palette::emerald(cx)
+                }),
         )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .child(format!("{app} in the background")),
-        )
+        .child(div().min_w_0().truncate().child(label.to_string()))
         .child(
             div()
                 .id("background-use-toggle")

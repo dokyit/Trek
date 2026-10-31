@@ -1,5 +1,5 @@
 //! macOS: screenshots via `screencapture`, mouse/keyboard via CoreGraphics CGEvents, windows via
-//! CGWindowList, apps via `open -a`.
+//! CGWindowList, apps via `lsappinfo` and `open`.
 
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use core_graphics::window::{
     kCGWindowListOptionIncludingWindow, kCGWindowListOptionOnScreenOnly,
 };
 
-use super::{Button, Capture, Desktop, Display, Input, Rect, WindowInfo};
+use super::{AppBundle, Button, Capture, Desktop, Display, Input, Rect, RunningApp, WindowInfo};
 use crate::keys::{self, KeyCombo};
 use crate::util::{self, TempFile};
 
@@ -32,6 +32,8 @@ unsafe extern "C" {
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+    fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
 }
 
 const SCREEN_RECORDING_ERROR: &str = "Screen Recording permission is missing, so trek-mcp cannot capture the screen. \
@@ -398,57 +400,202 @@ impl Desktop for Mac {
         super::skylight::deliver(w, input)
     }
 
-    /// `open -g`: launched, or opened if it's running, and left behind the user's front app.
-    fn open_app_behind(&self, name: &str) -> Result<(), String> {
+    /// `lsappinfo list`: the apps with a Dock icon or a menu bar item, not background daemons.
+    fn running_apps(&self) -> Vec<RunningApp> {
+        util::run_ok(
+            "/usr/bin/lsappinfo",
+            &["list"],
+            None,
+            Duration::from_secs(5),
+        )
+        .map(|out| parse_lsappinfo_list(&out))
+        .unwrap_or_default()
+    }
+
+    /// A path as given; else the usual folders, then Spotlight, by name or bundle id.
+    fn installed_apps(&self, name: &str) -> Vec<AppBundle> {
+        let name = name.trim().trim_end_matches('/');
+        let mut paths: Vec<String> = vec![];
+        if name.contains('/') {
+            paths.push(name.to_string());
+        } else if !name.contains('"') && !name.is_empty() {
+            let file = format!("{}.app", name.strip_suffix(".app").unwrap_or(name));
+            let home = std::env::var("HOME").unwrap_or_default();
+            for dir in [
+                "/Applications",
+                "/Applications/Utilities",
+                "/System/Applications",
+                "/System/Applications/Utilities",
+                "/System/Library/CoreServices",
+                &format!("{home}/Applications"),
+            ] {
+                paths.push(format!("{dir}/{file}"));
+            }
+            let stem = file.trim_end_matches(".app");
+            let query = if looks_like_bundle_id(name) {
+                format!("kMDItemCFBundleIdentifier == \"{name}\"")
+            } else {
+                format!(
+                    "kMDItemContentType == \"com.apple.application-bundle\" && (kMDItemFSName == \"{file}\"c || kMDItemDisplayName == \"{stem}\"c)"
+                )
+            };
+            if let Ok(out) =
+                util::run_ok("/usr/bin/mdfind", &[&query], None, Duration::from_secs(5))
+            {
+                paths.extend(out.lines().map(str::to_string));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        paths
+            .into_iter()
+            .filter(|p| p.ends_with(".app") && seen.insert(p.clone()))
+            .filter(|p| std::path::Path::new(p).join("Contents").is_dir())
+            .map(|path| AppBundle {
+                bundle_id: bundle_id(&path),
+                path,
+            })
+            .collect()
+    }
+
+    /// `open -g -a <path>`: that copy, left behind the user's front app.
+    fn launch_behind(&self, app: &AppBundle) -> Result<(), String> {
+        eprintln!(
+            "trek-mcp computer: launching {} ({}) behind the user's windows",
+            app.path,
+            app.bundle_id.as_deref().unwrap_or("no bundle id")
+        );
         util::run_ok(
             "/usr/bin/open",
-            &["-g", "-a", name],
+            &["-g", "-a", &app.path],
             None,
             Duration::from_secs(30),
         )
         .map(|_| ())
     }
 
-    fn app_pid(&self, name: &str) -> Option<i64> {
-        let out = util::run_ok(
-            "/usr/bin/lsappinfo",
-            &["info", "-only", "pid", name],
+    /// `open -g` on the running copy's own bundle: Launch Services hands that process a reopen
+    /// (it makes a window if it has none) instead of starting another.
+    fn reopen_behind(&self, app: &RunningApp) -> Result<(), String> {
+        let path = app
+            .path
+            .as_deref()
+            .ok_or_else(|| format!("{} has no bundle to reopen it by.", app.name))?;
+        eprintln!(
+            "trek-mcp computer: asking the running {} (pid {}, {path}) for a window",
+            app.name, app.pid
+        );
+        util::run_ok(
+            "/usr/bin/open",
+            &["-g", "-a", path],
             None,
-            Duration::from_secs(5),
+            Duration::from_secs(30),
         )
-        .ok()?;
-        parse_lsappinfo_pid(&out)
+        .map(|_| ())
+    }
+
+    /// Since the last key, click or pointer movement, by the HID system's count. Events posted
+    /// to one app, as background use posts them, sometimes reset it too: `computer` tells its
+    /// own apart by when it posted them.
+    fn user_idle(&self) -> Option<Duration> {
+        // kCGEventSourceStateHIDSystemState, kCGAnyInputEventType.
+        let secs = unsafe { CGEventSourceSecondsSinceLastEventType(1, u32::MAX) };
+        (secs.is_finite() && secs >= 0.0).then(|| Duration::from_secs_f64(secs))
+    }
+
+    fn screen_locked(&self) -> bool {
+        // SAFETY: a copy of the session's dictionary, released by the wrapper; null outside a
+        // login session.
+        let dict = unsafe { CGSessionCopyCurrentDictionary() };
+        if dict.is_null() {
+            return true;
+        }
+        let dict: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_create_rule(dict) };
+        dict.find(CFString::from_static_string("CGSSessionScreenIsLocked"))
+            .and_then(|v| v.downcast::<core_foundation::boolean::CFBoolean>())
+            .is_some_and(bool::from)
+    }
+
+    fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
+        super::skylight::bring_forward(w)
     }
 }
 
-/// The pid in `lsappinfo info -only pid` output: `"pid"=1234` on older macOS, a multi-line dump
-/// with `pid = 1234 ...` on newer ones.
-fn parse_lsappinfo_pid(out: &str) -> Option<i64> {
-    let mut rest = out;
-    while let Some(i) = rest.find("pid") {
-        let (before, after) = (&rest[..i], &rest[i + 3..]);
-        rest = after;
-        if before
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_alphanumeric())
+/// A bundle id rather than an app's name: `com.apple.TextEdit`.
+fn looks_like_bundle_id(name: &str) -> bool {
+    name.contains('.')
+        && !name.ends_with(".app")
+        && !name.contains(char::is_whitespace)
+        && name.split('.').count() >= 2
+}
+
+/// The bundle id in an app's Info.plist.
+fn bundle_id(path: &str) -> Option<String> {
+    let url = core_foundation::url::CFURL::from_path(path, true)?;
+    let bundle = core_foundation::bundle::CFBundle::new(url)?;
+    bundle
+        .info_dictionary()
+        .find(CFString::from_static_string("CFBundleIdentifier"))
+        .and_then(|v| v.downcast::<CFString>())
+        .map(|s| s.to_string())
+}
+
+/// The apps in `lsappinfo list` output that the user can see (type Foreground or UIElement).
+fn parse_lsappinfo_list(out: &str) -> Vec<RunningApp> {
+    let quoted = |s: &str| -> Option<String> {
+        let s = s.trim();
+        let s = s.strip_prefix('"')?;
+        Some(s[..s.find('"')?].to_string())
+    };
+    let mut apps = vec![];
+    let mut cur: Option<(RunningApp, bool)> = None;
+    let done = |cur: Option<(RunningApp, bool)>, apps: &mut Vec<RunningApp>| {
+        if let Some((app, seen)) = cur
+            && seen
+            && app.pid > 0
         {
+            apps.push(app);
+        }
+    };
+    for line in out.lines() {
+        let t = line.trim_start();
+        // `123) "TextEdit" ASN:0x0-0x1a9aa99: (in front)`
+        if let Some((n, rest)) = t.split_once(") \"")
+            && n.chars().all(|c| c.is_ascii_digit())
+            && !n.is_empty()
+        {
+            done(cur.take(), &mut apps);
+            let name = rest.split_once("\" ASN:").map(|(n, _)| n).unwrap_or(rest);
+            cur = Some((
+                RunningApp {
+                    name: name.to_string(),
+                    bundle_id: None,
+                    path: None,
+                    pid: 0,
+                },
+                false,
+            ));
             continue;
         }
-        let after = after.strip_prefix('"').unwrap_or(after).trim_start();
-        let Some(value) = after.strip_prefix('=') else {
+        let Some((app, seen)) = cur.as_mut() else {
             continue;
         };
-        let digits: String = value
-            .trim_start()
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        if let Ok(pid) = digits.parse() {
-            return Some(pid);
+        if let Some(v) = t.strip_prefix("bundleID=") {
+            app.bundle_id = quoted(v);
+        } else if let Some(v) = t.strip_prefix("bundle path=") {
+            app.path = quoted(v);
+        } else if let Some(v) = t.strip_prefix("pid = ") {
+            app.pid = v
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0);
+            *seen = t.contains("type=\"Foreground\"") || t.contains("type=\"UIElement\"");
         }
     }
-    None
+    done(cur.take(), &mut apps);
+    apps
 }
 
 // ---- CoreGraphics helpers ----
@@ -595,16 +742,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lsappinfo_pid_formats() {
-        assert_eq!(parse_lsappinfo_pid("\"pid\"=1234\n"), Some(1234));
-        let dump = "[ NULL ]  [ NULL ]  \n    bundleID=[ NULL ] \n    bundle path=[ NULL ] \n    pid = 698 !cgsConnection !signalled type=[ NULL ]  flavor=[ NULL ]  Version=[ NULL ]  Arch=!!none \n";
-        assert_eq!(parse_lsappinfo_pid(dump), Some(698));
+    fn the_running_apps_are_read_from_lsappinfo() {
+        // As macOS 27 prints it: a regular app, a background helper, one with no bundle id.
+        let out = r#" 3) "universalaccessd" ASN:0x0-0xc00c:
+    bundleID=[ NULL ]
+    bundle path="/usr/sbin/universalaccessd"
+    pid = 683 token=[sess=100021 pid=683 uid:501,501,501 g:20,20 pV:1664] !signalled type="BackgroundOnly" flavor=3 Version=[ NULL ]  fileType="????" creator="????" Arch=ARM64
+123) "Touchline 27" ASN:0x0-0x1a9aa99: (in front)
+    bundleID="local.tobias.Touchline27"
+    bundle path="/Users/tobias/Applications/Touchline 27.app"
+    executable path="/Users/tobias/Applications/Touchline 27.app/Contents/MacOS/FM26MacEditor"
+    pid = 42521 token=[sess=100021 pid=42521 uid:501,501,501 g:20,20 pV:2790489] type="Foreground" flavor=3 Version="4" fileType="APPL" creator="????" Arch=ARM64
+    coalition: 57984  { 42521 42523 42580 42582 }
+124) "Raycast" ASN:0x0-0x1a9ea9d:
+    bundleID=[ NULL ]
+    bundle path="/Applications/Raycast.app"
+    pid = 900 token=[sess=100021 pid=900 uid:501] type="UIElement" flavor=3
+"#;
         assert_eq!(
-            parse_lsappinfo_pid("    pid = 419 token=[sess=100020 pid=419 uid:0]"),
-            Some(419)
+            parse_lsappinfo_list(out),
+            vec![
+                RunningApp {
+                    name: "Touchline 27".into(),
+                    bundle_id: Some("local.tobias.Touchline27".into()),
+                    path: Some("/Users/tobias/Applications/Touchline 27.app".into()),
+                    pid: 42521,
+                },
+                RunningApp {
+                    name: "Raycast".into(),
+                    bundle_id: None,
+                    path: Some("/Applications/Raycast.app".into()),
+                    pid: 900,
+                },
+            ]
         );
-        assert_eq!(parse_lsappinfo_pid(""), None);
-        assert_eq!(parse_lsappinfo_pid("Arch=!!none"), None);
+        assert!(parse_lsappinfo_list("").is_empty());
+        assert!(
+            looks_like_bundle_id("com.apple.TextEdit") && !looks_like_bundle_id("TextEdit.app")
+        );
+        assert!(!looks_like_bundle_id("Touchline 27") && !looks_like_bundle_id("Notes"));
     }
 
     #[test]

@@ -83,6 +83,23 @@ pub enum Input {
     Key(Combo),
 }
 
+/// An app that's running, as the system lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningApp {
+    pub name: String,
+    pub bundle_id: Option<String>,
+    /// Where its bundle is (`/Applications/TextEdit.app`).
+    pub path: Option<String>,
+    pub pid: i64,
+}
+
+/// An app on disk that could be launched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppBundle {
+    pub path: String,
+    pub bundle_id: Option<String>,
+}
+
 /// Said by a platform that can't work behind the user's windows.
 pub const NOT_BEHIND: &str = "Background use isn't available here: computer use works in front, with the real pointer and keyboard.";
 
@@ -151,13 +168,38 @@ pub trait Desktop {
     fn behind(&self, _w: &WindowInfo, _input: &Input) -> Result<(), String> {
         Err(NOT_BEHIND.into())
     }
-    /// Launch an app, or open it if it's running, without bringing it forward.
-    fn open_app_behind(&self, _name: &str) -> Result<(), String> {
+    /// Apps running now that the user could see (they have, or may have, windows).
+    fn running_apps(&self) -> Vec<RunningApp> {
+        vec![]
+    }
+    /// Copies of an app on disk, by name (`TextEdit`), bundle id (`com.apple.TextEdit`) or path,
+    /// in no particular order: `computer` ranks them.
+    fn installed_apps(&self, _name: &str) -> Vec<AppBundle> {
+        vec![]
+    }
+    /// Launch the copy at `app.path`, without bringing it forward. Never by bare name: a name
+    /// can resolve to another copy (a debug build, an old one) and start a second instance.
+    fn launch_behind(&self, _app: &AppBundle) -> Result<(), String> {
         Err(NOT_BEHIND.into())
     }
-    /// The process id of a running app, by name, when it has no window to find it by.
-    fn app_pid(&self, _name: &str) -> Option<i64> {
+    /// Ask a running app for a window ("reopen", as a click on its Dock icon does), without
+    /// bringing it forward or starting another process.
+    fn reopen_behind(&self, _app: &RunningApp) -> Result<(), String> {
+        Err(NOT_BEHIND.into())
+    }
+    /// How long since the user last pressed a key, moved the pointer or clicked; `None` when the
+    /// platform can't say.
+    fn user_idle(&self) -> Option<std::time::Duration> {
         None
+    }
+    /// The screen is locked (or the login window is up).
+    fn screen_locked(&self) -> bool {
+        false
+    }
+    /// Put window `w` back in front, its app active: after another app's window came forward
+    /// over it uninvited. Whether it's in front afterwards is for the caller to check.
+    fn bring_forward(&self, _w: &WindowInfo) -> Result<(), String> {
+        Err(NOT_BEHIND.into())
     }
 }
 
@@ -205,7 +247,12 @@ pub mod fake {
             window: i64,
             input: Input,
         },
-        OpenAppBehind(String),
+        /// `launch_behind`, by the bundle's path.
+        Launch(String),
+        /// `reopen_behind`, by the running app's pid.
+        Reopen(i64),
+        /// `bring_forward`, by window id.
+        BringForward(i64),
     }
 
     #[derive(Clone)]
@@ -221,10 +268,27 @@ pub mod fake {
         pub key_window: Option<Result<Option<WindowInfo>, String>>,
         /// It can work behind the user's windows (macOS).
         pub behind: bool,
-        /// Windows that open when an app is opened behind (`open_app_behind`).
+        /// Windows that appear when an app is launched or reopened behind (none before that).
         pub opens: Rc<RefCell<Vec<WindowInfo>>>,
-        /// Running apps with no window, by name, and their process ids.
-        pub pids: Vec<(String, i64)>,
+        /// `opens` have appeared.
+        pub opened: Rc<RefCell<bool>>,
+        /// Apps running now; a launch adds one, with the pid of the first of `opens`.
+        pub running: Rc<RefCell<Vec<RunningApp>>>,
+        /// Copies of apps on disk.
+        pub installed: Vec<AppBundle>,
+        /// Since the user's last input.
+        pub idle: Option<std::time::Duration>,
+        /// Input posted behind counts as input, as macOS's count sometimes takes it: `user_idle`
+        /// is the time since the last post.
+        pub posts_count: bool,
+        pub last_post: Rc<RefCell<Option<std::time::Instant>>>,
+        pub locked: bool,
+        /// The windows that appear come in front of everything, until `bring_forward`.
+        pub jumps_forward: bool,
+        /// …and `bring_forward` doesn't move them back.
+        pub stubborn: bool,
+        /// A launched app shows its windows only once it's reopened (TextEdit, launched behind).
+        pub shy: bool,
     }
 
     impl Recording {
@@ -243,7 +307,16 @@ pub mod fake {
                 key_window: None,
                 behind: true,
                 opens: Rc::default(),
-                pids: vec![],
+                opened: Rc::default(),
+                running: Rc::default(),
+                installed: vec![],
+                idle: None,
+                posts_count: false,
+                last_post: Rc::default(),
+                locked: false,
+                jumps_forward: false,
+                stubborn: false,
+                shy: false,
             }
         }
 
@@ -316,9 +389,25 @@ pub mod fake {
         fn works_behind(&self) -> bool {
             self.behind
         }
+        /// The windows, with those that appeared behind the first (or in front of them all, for
+        /// an app that `jumps_forward` until a window is brought forward again).
         fn windows(&self) -> Result<Vec<WindowInfo>, String> {
             let mut all = self.windows.clone()?;
-            all.extend(self.opens.borrow().iter().cloned());
+            if !*self.opened.borrow() {
+                return Ok(all);
+            }
+            let opened = self.opens.borrow().clone();
+            let put_back = !self.stubborn
+                && self
+                    .events()
+                    .iter()
+                    .any(|e| matches!(e, Event::BringForward(_)));
+            let at = if self.jumps_forward && !put_back {
+                0
+            } else {
+                all.len().min(1)
+            };
+            all.splice(at..at, opened);
             Ok(all)
         }
         /// The window's size fitted to `max_side` (or the region's), with no pixels; at twice
@@ -346,23 +435,54 @@ pub mod fake {
                 note: "",
             })
         }
+        /// Keys sent to an app (no window: its New Window shortcut, say) make `opens` appear.
         fn behind(&self, w: &WindowInfo, input: &Input) -> Result<(), String> {
             if !self.behind {
                 return Err(NOT_BEHIND.into());
             }
+            if w.id == 0 && matches!(input, Input::Key(_)) {
+                *self.opened.borrow_mut() = true;
+            }
+            *self.last_post.borrow_mut() = Some(std::time::Instant::now());
             self.record(Event::Behind {
                 window: w.id,
                 input: input.clone(),
             })
         }
-        fn open_app_behind(&self, name: &str) -> Result<(), String> {
-            self.record(Event::OpenAppBehind(name.into()))
+        fn running_apps(&self) -> Vec<RunningApp> {
+            self.running.borrow().clone()
         }
-        fn app_pid(&self, name: &str) -> Option<i64> {
-            self.pids
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(name))
-                .map(|(_, p)| *p)
+        fn installed_apps(&self, _name: &str) -> Vec<AppBundle> {
+            self.installed.clone()
+        }
+        fn launch_behind(&self, app: &AppBundle) -> Result<(), String> {
+            self.record(Event::Launch(app.path.clone()))?;
+            *self.opened.borrow_mut() = !self.shy;
+            let pid = self.opens.borrow().first().map_or(500, |w| w.pid);
+            let name = app.path.rsplit('/').next().unwrap_or_default();
+            self.running.borrow_mut().push(RunningApp {
+                name: name.trim_end_matches(".app").to_string(),
+                bundle_id: app.bundle_id.clone(),
+                path: Some(app.path.clone()),
+                pid,
+            });
+            Ok(())
+        }
+        fn reopen_behind(&self, app: &RunningApp) -> Result<(), String> {
+            *self.opened.borrow_mut() = true;
+            self.record(Event::Reopen(app.pid))
+        }
+        fn user_idle(&self) -> Option<std::time::Duration> {
+            match *self.last_post.borrow() {
+                Some(at) if self.posts_count => Some(at.elapsed()),
+                _ => self.idle,
+            }
+        }
+        fn screen_locked(&self) -> bool {
+            self.locked
+        }
+        fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
+            self.record(Event::BringForward(w.id))
         }
     }
 }
