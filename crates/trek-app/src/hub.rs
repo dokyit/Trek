@@ -282,12 +282,16 @@ fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
             .map(|n| n.to_string_lossy().to_string())
     });
     let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
+    // A study session works in the study folder, which is no project: no actions to run there
+    // and no Git to show (the folder is a repository only so turns can be rewound).
+    let study = ws.is_study_session_in(scope);
     // A worktree thread's actions run on its own copy of the code, where its changes are.
     let run_dir = worktree
         .as_ref()
         .filter(|w| !crate::system::lately::worktree_missing(w))
         .map(|w| w.path.clone())
-        .or_else(|| root.clone());
+        .or_else(|| root.clone())
+        .filter(|_| !study);
     let actions = root
         .as_ref()
         .map(|r| ws.project_prefs(r).actions)
@@ -299,7 +303,7 @@ fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
     });
     let remote = remote_on.is_some();
     let machine = remote_on.unwrap_or_else(this_computer);
-    let git_cwd = ws.cwd_in(scope).filter(|_| !remote && !chat);
+    let git_cwd = ws.cwd_in(scope).filter(|_| !remote && !chat && !study);
     let git = git_cwd
         .as_ref()
         .and_then(|c| ws.git_info.get(c))
@@ -307,9 +311,12 @@ fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
         .cloned();
     let switch_blocked = git_cwd.as_deref().and_then(|c| ws.switch_blocked(c));
     let live = thread.as_ref().and_then(|t| ws.live.get(&t.id));
-    let pr = live.and_then(crate::pr_card::latest_pull_request);
+    let pr = live
+        .and_then(crate::pr_card::latest_pull_request)
+        .filter(|_| !study);
     // The thread's own lines when it has them; else what the working tree has changed.
     let changes = match &thread {
+        _ if study => None,
         Some(t) if t.additions > 0 || t.deletions > 0 => {
             Some(format!("+{} −{}", t.additions, t.deletions))
         }

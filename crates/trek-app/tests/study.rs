@@ -288,5 +288,14 @@ fn a_session_takes_maps_notes_folders_and_pages_and_shows_what_was_asked() {
         // composer is for thinking out loud, without a branch or plan mode.
         assert!(trek.visible(cx, "study-intro"));
         assert!(!trek.visible(cx, "plan-pill") && !trek.visible(cx, "branch-chip"));
+        // Nor does the side panel treat it as a project: where it is and its context stay, the
+        // Git group and project actions don't show, though the study folder is a repository.
+        trek.update(cx, |ws, cx| ws.refresh_git_at(dir.clone(), cx));
+        cx.run_until_parked();
+        trek.render(cx);
+        assert!(trek.visible(cx, "hub-card") && trek.visible(cx, "hub-where"));
+        for id in ["hub-branch", "hub-pull", "hub-changes", "hub-run"] {
+            assert!(!trek.visible(cx, id), "{id} in a study session");
+        }
     });
 }
