@@ -23,6 +23,9 @@ pub struct Look {
     pub window: Option<u32>,
     pub width: f64,
     pub height: f64,
+    /// Whether Accessibility gave its window: when it doesn't (a busy Mac, for a moment), no
+    /// texts says nothing.
+    pub read: bool,
     /// The messages it shows ("Timed Out", "Lock your iPhone…"): none while mirroring.
     pub texts: Vec<String>,
     pub buttons: Vec<String>,
@@ -46,9 +49,22 @@ impl Look {
             window: v["window"].as_u64().map(|n| n as u32),
             width: v["width"].as_f64().unwrap_or(0.),
             height: v["height"].as_f64().unwrap_or(0.),
+            read: v["read"].as_bool().unwrap_or(true),
             texts: strings("texts"),
             buttons: strings("buttons"),
         }
+    }
+
+    /// The iPhone it's connecting to, as it names it ("Connecting to", "iPhone 16 Pro Max").
+    pub fn device(&self) -> Option<String> {
+        let at = self
+            .texts
+            .iter()
+            .position(|t| t.trim() == "Connecting to")?;
+        self.texts
+            .get(at + 1)
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
     }
 
     /// What it shows, as one line.
@@ -75,11 +91,20 @@ pub enum State {
     MacLocked,
     /// The iPhone is unlocked and in use, so it won't connect.
     PhoneInUse,
-    /// Anything else it says (connecting, first-run setup, the phone out of reach), word for word.
+    /// "Connecting to iPhone 16 Pro Max".
+    Connecting,
+    /// It gave up connecting ("timed out connecting", Connect offered): the iPhone wasn't locked,
+    /// or wasn't near enough.
+    TimedOut,
+    /// Anything else it says (first-run setup, the phone out of reach), word for word.
     Says(String),
+    /// Its window was there but Accessibility didn't give it this time.
+    Unread,
 }
 
 impl State {
+    /// What the window shows. Nothing to read is taken for the phone's screen, but iPhone
+    /// Mirroring also shows nothing for a moment between its screens: `Settle` waits that out.
     pub fn of(look: &Look) -> State {
         if !look.installed {
             return State::Missing;
@@ -90,6 +115,9 @@ impl State {
         if !look.trusted {
             return State::NotAllowed;
         }
+        if !look.read {
+            return State::Unread;
+        }
         if look.texts.is_empty() {
             return State::Live;
         }
@@ -99,52 +127,75 @@ impl State {
             State::MacLocked
         } else if has("Lock your iPhone") || has("iPhone use") || has("no longer in use") {
             State::PhoneInUse
+        } else if has("Connecting to") {
+            State::Connecting
+        } else if has("timed out") {
+            State::TimedOut
         } else {
             State::Says(says)
         }
     }
 
-    /// Whether it may still connect by itself, so it's worth waiting a little.
-    pub fn settling(&self) -> bool {
-        matches!(self, State::Closed | State::Says(_))
+    /// Whether it shows that it's set up with an iPhone: one on this Mac's own Apple Account,
+    /// the only kind it mirrors.
+    pub fn set_up(&self) -> bool {
+        matches!(
+            self,
+            State::Live
+                | State::MacLocked
+                | State::PhoneInUse
+                | State::Connecting
+                | State::TimedOut
+        )
     }
 
-    /// A few words for the panel's status chip.
-    pub fn chip(&self) -> &'static str {
-        match self {
-            State::Missing => "iPhone Mirroring isn't on this Mac", // words: ok, the iPhone tool is macOS only
-            State::NotAllowed => "Allow Accessibility for Trek",
-            State::Closed => "iPhone Mirroring (opens when needed)",
-            State::Live => "iPhone Mirroring",
-            State::MacLocked => "Unlock iPhone Mirroring",
-            State::PhoneInUse => "Lock the iPhone for Mirroring",
-            State::Says(_) => "iPhone Mirroring isn't connected",
-        }
-    }
-
-    /// What the user has to do, said to them in the panel; empty when there's nothing to add to
-    /// its standing steps (lock the iPhone, set Mirroring up once).
-    pub fn note(&self) -> String {
-        match self {
-            State::Missing => "iPhone Mirroring comes with macOS 15 or later.".into(),
-            State::NotAllowed => "Allow Trek in System Settings › Privacy & Security › Accessibility, so it can work iPhone Mirroring's window.".into(),
-            State::MacLocked => "iPhone Mirroring is waiting for Touch ID or your Mac password in its window.".into(),
-            State::Says(s) => format!("iPhone Mirroring says: \"{s}\""),
-            State::Closed | State::Live | State::PhoneInUse => String::new(),
-        }
-    }
-
-    /// What the user has to do, for an agent to pass on; empty while live.
+    /// What the user has to do, for an agent to pass on, the action first; empty while live.
     pub fn advice(&self) -> String {
         match self {
-            State::Missing => "Taps and keys need iPhone Mirroring, which comes with macOS 15 or later.".into(),
-            State::NotAllowed => "Trek needs Accessibility to work iPhone Mirroring's window: System Settings › Privacy & Security › Accessibility › Trek.".into(),
+            State::Missing => "Taps and keys can't reach this iPhone: they need iPhone Mirroring, which comes with macOS 15 or later.".into(),
+            State::NotAllowed => "Ask the user to allow Trek in System Settings › Privacy & Security › Accessibility: Trek works iPhone Mirroring's window through it.".into(),
             State::Closed => "Trek opens iPhone Mirroring behind the user's windows when it needs it; the iPhone has to be locked and nearby.".into(),
             State::Live => String::new(),
-            State::MacLocked => "iPhone Mirroring is waiting for Touch ID or the Mac's password: ask the user to unlock it in its window. To skip this next time, they can choose Authenticate Automatically in iPhone Mirroring › Settings.".into(),
-            State::PhoneInUse => "iPhone Mirroring connects only while the iPhone is locked: ask the user to lock it (side button) and leave it nearby, then try again. While it's unlocked, Trek shows its screen over USB but can't tap.".into(),
-            State::Says(s) => format!("iPhone Mirroring isn't showing the iPhone; it says: \"{s}\". It needs the iPhone locked and nearby, and its one-time setup done on the Mac."),
+            State::MacLocked => "Ask the user to unlock iPhone Mirroring with Touch ID or the Mac's password, in its window. To skip this next time: iPhone Mirroring › Settings › Authenticate Automatically.".into(),
+            State::PhoneInUse | State::TimedOut => "Ask the user to lock the iPhone (side button) and leave it nearby, then try again: taps go through iPhone Mirroring, which connects only while the iPhone is locked. Screenshots still come over USB while it's unlocked.".into(),
+            State::Connecting => "iPhone Mirroring is still connecting: try again in a few seconds.".into(),
+            State::Says(s) => format!("Ask the user to check iPhone Mirroring; it says: \"{s}\"."),
+            State::Unread => "iPhone Mirroring's window couldn't be read just now: try again in a moment.".into(),
         }
+    }
+}
+
+impl State {
+    /// Timing out with the iPhone locked: iPhone Mirroring can't find it on the network.
+    pub fn unreachable_advice() -> &'static str {
+        "iPhone Mirroring can't reach the iPhone although it's locked: ask the user to check that Wi-Fi and Bluetooth are on for both the iPhone and the Mac, on the same network, with the iPhone nearby, then try again."
+    }
+}
+
+/// iPhone Mirroring's state as it settles: nothing to read is taken for the phone's screen only
+/// once it lasts, since the window is also blank for a moment between its own screens (seen on
+/// macOS 27.2: Timed Out, blank for ~1 s, then Connecting to…).
+#[derive(Debug, Clone, Default)]
+pub struct Settle {
+    blank: Option<std::time::Instant>,
+}
+
+/// How long a blank window must last to count as the phone's screen.
+pub const BLANK_SETTLES: std::time::Duration = std::time::Duration::from_millis(1500);
+
+impl Settle {
+    /// `seen` as read just now; Live only when it has been for `BLANK_SETTLES`, else `None`
+    /// (keep what was known before).
+    pub fn see(&mut self, seen: State, now: std::time::Instant) -> Option<State> {
+        if seen == State::Unread {
+            return None;
+        }
+        if seen != State::Live {
+            self.blank = None;
+            return Some(seen);
+        }
+        let since = *self.blank.get_or_insert(now);
+        (now.duration_since(since) >= BLANK_SETTLES).then_some(State::Live)
     }
 }
 
@@ -302,7 +353,11 @@ mod tests {
         assert_eq!(in_use.window, Some(3655));
         assert_eq!(in_use.buttons, ["Connect"]);
         assert_eq!(State::of(&in_use), State::PhoneInUse);
-        assert!(State::PhoneInUse.advice().contains("lock it"));
+        assert!(
+            State::PhoneInUse
+                .advice()
+                .starts_with("Ask the user to lock the iPhone")
+        );
         let locked = look(&[
             "iPhone Mirroring Is Locked",
             "Touch ID or enter the Mac login for “Toby Dokyi” to continue.",
@@ -315,13 +370,66 @@ mod tests {
         );
         assert_eq!(State::of(&look(&[])), State::Live);
         assert_eq!(State::Live.advice(), "");
-        let other = State::of(&look(&["Connecting to iPhone…"]));
-        assert_eq!(other, State::Says("Connecting to iPhone…".into()));
-        assert!(other.settling());
+        // Seen on macOS 27.2 with the phone on the cable, pressing Connect.
+        let connecting = look(&["Connecting to", "iPhone 16 Pro Max", "iPhone 16 Pro Max"]);
+        assert_eq!(State::of(&connecting), State::Connecting);
+        assert_eq!(connecting.device().as_deref(), Some("iPhone 16 Pro Max"));
+        assert_eq!(in_use.device(), None);
+        let timed_out = look(&["Timed Out", "iPhone Mirroring timed out connecting."]);
+        assert_eq!(State::of(&timed_out), State::TimedOut);
+        assert!(
+            State::TimedOut
+                .advice()
+                .starts_with("Ask the user to lock the iPhone")
+        );
+        for s in [
+            State::Live,
+            State::TimedOut,
+            State::Connecting,
+            State::MacLocked,
+        ] {
+            assert!(s.set_up(), "{s:?}");
+        }
+        for s in [
+            State::Closed,
+            State::Missing,
+            State::NotAllowed,
+            State::Says("Continue".into()),
+        ] {
+            assert!(!s.set_up(), "{s:?}");
+        }
+        let other = State::of(&look(&["Welcome to iPhone Mirroring"]));
+        assert_eq!(other, State::Says("Welcome to iPhone Mirroring".into()));
+    }
+
+    #[test]
+    fn a_blank_moment_between_screens_is_not_taken_for_live() {
+        let t0 = std::time::Instant::now();
+        let ms = |n| t0 + std::time::Duration::from_millis(n);
+        let mut settle = Settle::default();
+        assert_eq!(settle.see(State::TimedOut, t0), Some(State::TimedOut));
+        // Blank for a second after Connect is pressed, then "Connecting to…".
+        assert_eq!(settle.see(State::Live, ms(500)), None);
+        assert_eq!(settle.see(State::Live, ms(1200)), None);
+        assert_eq!(
+            settle.see(State::Connecting, ms(1800)),
+            Some(State::Connecting)
+        );
+        // Blank and staying blank: the phone's screen.
+        assert_eq!(settle.see(State::Live, ms(5000)), None);
+        assert_eq!(settle.see(State::Live, ms(6600)), Some(State::Live));
+        assert_eq!(settle.see(State::Live, ms(7000)), Some(State::Live));
     }
 
     #[test]
     fn nothing_to_read_is_never_taken_for_live() {
+        // Seen live on a busy Mac: the window on screen showed Timed Out, but Accessibility gave
+        // no window for that read.
+        let mut unread = look(&[]);
+        unread.read = false;
+        assert_eq!(State::of(&unread), State::Unread);
+        let mut settle = Settle::default();
+        assert_eq!(settle.see(State::Unread, std::time::Instant::now()), None);
         let mut l = look(&[]);
         l.trusted = false;
         assert_eq!(State::of(&l), State::NotAllowed);

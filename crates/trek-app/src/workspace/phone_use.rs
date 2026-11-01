@@ -35,6 +35,29 @@ impl PhoneCall {
     }
 }
 
+#[cfg(feature = "shots")]
+impl PhoneCall {
+    /// A call from the shots harness (`control phone call <method> <json>`), as an agent of a
+    /// thread on full access would make it; answered on the returned channel.
+    pub fn probe(
+        method: &str,
+        params: serde_json::Value,
+    ) -> (Self, async_channel::Receiver<Reply>) {
+        let (tx, rx) = async_channel::bounded(1);
+        let call = PhoneCall {
+            thread: "shots-probe".into(),
+            title: "Probe".into(),
+            method: method.into(),
+            params,
+            access: trek_core::HandHolding::FullAccess,
+            turn: None,
+            follow: true,
+            reply: Some(tx),
+        };
+        (call, rx)
+    }
+}
+
 impl Drop for PhoneCall {
     fn drop(&mut self) {
         if let Some(tx) = self.reply.take() {

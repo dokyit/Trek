@@ -1244,6 +1244,55 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // The iPhone tool with a made-up phone (an isolated run never touches the real one): opens the
+    // tool, then `phone::PhonePanel::demo` puts it in `arg`'s situation.
+    #[cfg(target_os = "macos")]
+    if verb == "phone" {
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+            let view = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .map(|r| r.read(cx).view().clone());
+            let Some(trek) = view.and_then(|v| v.downcast::<crate::root::TrekWindow>().ok()) else {
+                anyhow::bail!("phone: no Trek window");
+            };
+            let panel = trek.read(cx).right_panel.clone();
+            // `call <method> <json>`: an agent's tool call, its answer written to
+            // `$TREK_SHOT_DIR/phone-reply.json` (with `real`, on the user's real phone).
+            if let Some(rest) = arg.strip_prefix("call ") {
+                let (method, params) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let params: serde_json::Value = serde_json::from_str(params)?;
+                let (call, rx) = crate::workspace::phone_use::PhoneCall::probe(method, params);
+                let out = std::env::var_os("TREK_SHOT_DIR")
+                    .map(PathBuf::from)
+                    .ok_or_else(|| anyhow::anyhow!("phone call: no TREK_SHOT_DIR"))?
+                    .join("phone-reply.json");
+                let _ = std::fs::remove_file(&out);
+                std::thread::spawn(move || {
+                    let reply = match rx.recv_blocking() {
+                        Ok(crate::ipc::Reply::Done(Ok(v))) => serde_json::json!({ "ok": v }),
+                        Ok(crate::ipc::Reply::Done(Err(e))) => serde_json::json!({ "error": e }),
+                        _ => serde_json::json!({ "error": "no answer" }),
+                    };
+                    let _ = std::fs::write(&out, reply.to_string());
+                });
+                panel.update(cx, |p, cx| p.phone_call(call, window, cx));
+                return Ok(());
+            }
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Phone, window, cx));
+            let phone = panel
+                .read(cx)
+                .phone()
+                .ok_or_else(|| anyhow::anyhow!("phone: the iPhone tool didn't open"))?;
+            phone.update(cx, |p, cx| p.demo(arg, cx))
+        })??;
+        cx.refresh_windows();
+        return Ok(());
+    }
     if verb == "tools" {
         let main = ws
             .read(cx)

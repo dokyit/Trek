@@ -422,6 +422,9 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
   var latest: CVPixelBuffer?
   var frames = 0
   var lastFrame: Date?
+  /// The newest frame is black: the screen is off (the iPhone locked or asleep). The cable sends
+  /// a frame only when the picture changes, so this is what's left after locking.
+  var dark = false
   var streaming = false
   /// Frames come from iPhone Mirroring's window instead (`mirrorframes`).
   var mirrored = false
@@ -501,13 +504,33 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     onChange?()
   }
 
+  /// Whether a BGRA frame is black, from a grid of 64 points.
+  static func isDark(_ b: CVPixelBuffer) -> Bool {
+    guard CVPixelBufferGetPixelFormatType(b) == kCVPixelFormatType_32BGRA,
+      CVPixelBufferLockBaseAddress(b, .readOnly) == kCVReturnSuccess
+    else { return false }
+    defer { CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(b) else { return false }
+    let (w, h, row) = (CVPixelBufferGetWidth(b), CVPixelBufferGetHeight(b), CVPixelBufferGetBytesPerRow(b))
+    let p = base.assumingMemoryBound(to: UInt8.self)
+    for i in 1...8 {
+      for j in 1...8 {
+        let o = (h * j / 9) * row + (w * i / 9) * 4
+        if max(p[o], p[o + 1], p[o + 2]) > 24 { return false }
+      }
+    }
+    return true
+  }
+
   func captureOutput(_ o: AVCaptureOutput, didOutput sb: CMSampleBuffer, from c: AVCaptureConnection) {
     guard let buffer = CMSampleBufferGetImageBuffer(sb) else { return }
     let first = latest == nil
     latest = buffer
     frames += 1
     lastFrame = Date()
-    if first { DispatchQueue.main.async { self.onChange?() } }
+    let wasDark = dark
+    dark = Self.isDark(buffer)
+    if first || dark != wasDark { DispatchQueue.main.async { self.onChange?() } }
     guard streaming, !mirrored, Date().timeIntervalSince(lastSent) >= 1.0 / fps else { return }
     lastSent = Date()
     if let jpeg = encode(buffer, maxEdge: nil, maxWidth: Args.maxWidth, png: false) {
@@ -715,7 +738,11 @@ final class Mirror {
     }
     var texts: [String] = []
     var buttons: [(String, AXUIElement)] = []
-    if let ax = axWindow(app.processIdentifier) { contents(ax, texts: &texts, buttons: &buttons) }
+    // Whether Accessibility gave the window at all: without it, nothing read is no news (a busy
+    // Mac sometimes answers with no windows for a moment).
+    let ax = axWindow(app.processIdentifier)
+    if let ax { contents(ax, texts: &texts, buttons: &buttons) }
+    out["read"] = ax != nil
     out["texts"] = texts
     out["buttons"] = buttons.map(\.0)
     return out
@@ -973,7 +1000,7 @@ func status() {
   let bt = hid.current()
   message([
     "event": "status", "camera": screen.camera, "screen": screen.device?.localizedName ?? "",
-    "width": w, "height": h, "frames": screen.frames, "frame_age": age,
+    "width": w, "height": h, "frames": screen.frames, "frame_age": age, "dark": screen.dark,
     "bluetooth": bt.state, "hosts": bt.hosts, "linked": bt.linked, "elsewhere": bt.elsewhere,
   ])
 }
