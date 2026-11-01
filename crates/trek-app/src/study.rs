@@ -1,17 +1,25 @@
-//! Study: learning anything with an agent as a one-to-one tutor. The screen's starter is the main
-//! window's composer (so notes, PDFs, photos, folders, links, `@` files and the mic all reach the
-//! tutor; sending on this route calls `Workspace::start_study_with`), with Learn | Practice above
-//! it and what can come with the session under it: files and folders, a note, the voice, and what
-//! the study folder already holds (sources and earlier maps) to tick. Under that: the learner's
-//! concept maps (`trek_core::study::topics`), each to carry on with or practise, and their past
-//! sessions. Until there are any, how a session of the chosen kind goes.
+//! Study: learning anything with an agent as a one-to-one tutor. A launcher with one job, start
+//! or carry on studying, laid out as one bounded column:
+//!
+//! - the title and the study folder;
+//! - the composer, the page's hero (the main window's: notes, PDFs, photos, folders, links, `@`
+//!   files and the mic all reach the tutor; sending on this route calls
+//!   `Workspace::start_study_with`), with Learn | Practice in its own header row;
+//! - what can come with the session: Files or folders, A note, Talk, then the study folder's
+//!   sources as file cards to tick;
+//! - Continue: the latest session, one card with a button;
+//! - the learner's concept maps (`trek_core::study::topics`) as a grid, and earlier sessions.
+//!
+//! With little in it the column sits a little above the middle of the page, so it reads as a
+//! composed launcher rather than a form left at the top of an empty page; once it's longer than
+//! the page it simply scrolls.
 //!
 //! The folder is read off the main thread when the screen opens and whenever threads change while
 //! it's open (a session's turn may have added to a map); frames only draw what was read.
 //!
-//! Motion is kept to state changes the learner caused, seen a few times a visit: the kind's line
-//! fades in when the kind changes, and a tick fades in on a chip that's chosen. Nothing moves on
-//! hover or when the page opens, and nothing at all when the system asks for less motion.
+//! Motion is kept to state the learner caused: a tick fades in on a file or map chosen for the
+//! session. Nothing moves on hover or when the page opens, and nothing when the system asks for
+//! less motion.
 
 use crate::composer::Composer;
 use crate::ui;
@@ -27,14 +35,19 @@ use trek_core::study::{self, Intro, Kind, Session, Source, Topic};
 
 use crate::assets::Lucide as L;
 
-/// Past sessions shown before the list stops.
-const SESSION_ROWS: usize = 8;
-/// Chips from the study folder shown before "N more".
-const LIBRARY_CHIPS: usize = 8;
+/// The column's width: the composer and everything under it (plus the composer's own 24 px
+/// padding each side).
+const COLUMN: f32 = 760.;
+/// Earlier sessions listed under Continue before the list stops.
+const SESSION_ROWS: usize = 6;
+/// File cards shown before "N more".
+const FILE_CARDS: usize = 6;
 /// Notes offered in the Note menu, the most recently changed first.
 const NOTE_ROWS: usize = 12;
-/// How long the kind's line takes to fade in, and a chip's tick: feedback, so short.
-const FADE: Duration = Duration::from_millis(180);
+/// Characters of a file's name a card shows; longer names lose their middle, so the end (often
+/// the part that tells files apart: a date, a number, the extension) shows.
+const NAME_CHARS: usize = 34;
+/// A chosen file's tick fades in: feedback, so short.
 const TICK: Duration = Duration::from_millis(140);
 
 /// A Trek note the learner can give a session: its file and its title.
@@ -51,8 +64,8 @@ pub struct StudyView {
     sessions: Vec<Session>,
     sources: Vec<Source>,
     notes: Vec<NoteRef>,
-    /// Every chip from the study folder shows, not just the first `LIBRARY_CHIPS`.
-    library_open: bool,
+    /// Every file card shows, not just the first `FILE_CARDS`.
+    files_open: bool,
     /// The folder has been read at least once.
     loaded: bool,
     /// On screen (the main window's route).
@@ -63,6 +76,17 @@ pub struct StudyView {
     composer_changed: bool,
     _read: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A session whose thread is still there, as the page shows it.
+struct Shown {
+    thread: String,
+    kind: Kind,
+    /// The thread's title without its kind ("Learn · Transformers" → "Transformers").
+    title: String,
+    updated_at: i64,
+    /// The map it built, when one matches its topic.
+    map: Option<usize>,
 }
 
 impl StudyView {
@@ -86,7 +110,7 @@ impl StudyView {
             sessions: vec![],
             sources: vec![],
             notes: vec![],
-            library_open: false,
+            files_open: false,
             loaded: false,
             open: false,
             read_at: None,
@@ -164,6 +188,37 @@ impl StudyView {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
 
+    /// Past sessions whose threads are still there, the newest first, each with the map it
+    /// built if one matches.
+    fn shown_sessions(&self, cx: &App) -> Vec<Shown> {
+        let ws = self.workspace.read(cx);
+        self.sessions
+            .iter()
+            .filter_map(|s| {
+                let t = ws.thread(&s.thread)?;
+                let title = ["Learn · ", "Practice · "]
+                    .iter()
+                    .find_map(|p| t.title.strip_prefix(p))
+                    .unwrap_or(&t.title)
+                    .to_string();
+                let slug = study::topic_slug(&s.topic);
+                let map = self.topics.iter().position(|m| {
+                    m.title.eq_ignore_ascii_case(s.topic.trim())
+                        || m.path
+                            .file_stem()
+                            .is_some_and(|f| f.to_string_lossy() == slug)
+                });
+                Some(Shown {
+                    thread: s.thread.clone(),
+                    kind: s.kind,
+                    title,
+                    updated_at: t.updated_at,
+                    map,
+                })
+            })
+            .collect()
+    }
+
     /// The page's title, and the study folder.
     fn header(&self) -> AnyElement {
         h_flex()
@@ -174,7 +229,7 @@ impl StudyView {
                     .flex_none()
                     .text_size(px(22.))
                     .font_semibold()
-                    .line_height(px(30.))
+                    .line_height(px(32.))
                     .child("Study"),
             )
             .child(div().flex_1())
@@ -194,43 +249,15 @@ impl StudyView {
             .into_any_element()
     }
 
-    /// Learn | Practice, and in a line what the chosen one does. A pick hands the keys back to
-    /// the composer, so the next thing typed goes in.
-    fn choice(&self, kind: Kind, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let ws = self.workspace.clone();
-        let composer = self.composer.clone();
-        let line = div()
-            .min_w_0()
-            .text_size(px(13.))
-            .text_color(theme.muted_foreground)
-            .child(kind_line(kind));
-        h_flex()
-            .w_full()
-            .gap(px(12.))
-            .flex_wrap()
-            .child(ui::segmented(
-                "study-kind",
-                vec![(Kind::Learn, "Learn"), (Kind::Practice, "Practice")],
-                kind,
-                move |k, window, cx| {
-                    ws.update(cx, |ws, cx| ws.set_study_kind(k, cx));
-                    composer.update(cx, |c, cx| c.focus(window, cx));
-                },
-                cx,
-            ))
-            .child(fade_in(line, ("study-kind-line", kind as usize), FADE, cx))
-            .into_any_element()
-    }
-
-    /// What can come with the session: files or folders (the + menu's picker), a Trek note, and
-    /// the voice; then the notes chosen, each a chip to take back off.
+    /// What can come with the session: files or folders (the + menu's picker), a Trek note and
+    /// the voice; under them the study folder's files and the notes chosen, as cards to tick.
     fn context(&self, picked: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
         let composer = self.composer.clone();
         let files = action_chip("study-add-files", L::Paperclip, "Files or folders", cx)
             .tooltip(|window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(
-                    "Notes, PDFs, photos, problem sheets, or a whole folder. Links can go straight into the text.",
+                    "Notes, PDFs, photos, problem sheets or a whole folder. Links can go in the text.",
                 )
                 .build(window, cx)
             })
@@ -238,22 +265,22 @@ impl StudyView {
         let note = (!self.notes.is_empty()).then(|| {
             let notes = self.notes.clone();
             let me = cx.entity();
+            let muted = theme.muted_foreground;
             // A menu needs a Button under it; drawn as the chips beside it are (a child, not
             // `.icon()` and `.label()`: the kit sizes those to the button).
-            let muted = cx.theme().muted_foreground;
             Button::new("study-add-note")
                 .ghost()
-                .h(px(28.))
-                .px(px(10.))
-                .rounded(px(14.))
+                .h(px(32.))
+                .px(px(12.))
+                .rounded(px(16.))
                 .border_1()
-                .border_color(cx.theme().foreground.opacity(0.08))
+                .border_color(theme.foreground.opacity(0.08))
                 .child(
                     h_flex()
-                        .gap(px(6.))
-                        .text_size(px(12.5))
+                        .gap(px(8.))
+                        .text_size(px(13.))
                         .text_color(muted)
-                        .child(Icon::new(L::NotebookPen).size(px(13.)).text_color(muted))
+                        .child(Icon::new(L::NotebookPen).size(px(14.)).text_color(muted))
                         .child("A note"),
                 )
                 .tooltip("Give the tutor one of your Trek notes")
@@ -278,7 +305,7 @@ impl StudyView {
             action_chip("study-talk", L::Mic, "Talk", cx)
                 .tooltip(|window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(
-                        "Say what you want to learn: your words go into the box above",
+                        "Say it instead: your words go into the box above",
                     )
                     .build(window, cx)
                 })
@@ -289,98 +316,73 @@ impl StudyView {
                     })
                 })
         });
-        let chosen_notes: Vec<AnyElement> = self
-            .notes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| picked.contains(&n.path))
-            .map(|(i, n)| {
-                let path = n.path.clone();
-                pick_chip(
+
+        // The cards: notes chosen first (they're only here once chosen), then the folder's files.
+        let mut cards: Vec<AnyElement> = vec![];
+        for (i, n) in self.notes.iter().enumerate() {
+            if !picked.contains(&n.path) {
+                continue;
+            }
+            let path = n.path.clone();
+            cards.push(
+                file_card(
                     SharedString::from(format!("study-note-{i}")),
                     L::StickyNote,
-                    n.title.clone(),
+                    middle(&n.title, NAME_CHARS),
+                    "Trek note".into(),
                     true,
                     cx,
                 )
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.toggle(path.clone(), window, cx)),
                 )
-                .into_any_element()
-            })
-            .collect();
-        h_flex()
-            .id("study-context")
-            .test_support()
-            .w_full()
-            .gap(px(6.))
-            .flex_wrap()
-            .items_center()
-            .child(files)
-            .children(note)
-            .children(talk)
-            .children(chosen_notes)
-            .into_any_element()
-    }
-
-    /// What the study folder already holds, to tick for this session: earlier maps to build on,
-    /// then the sources, newest first.
-    fn library(&self, picked: &[PathBuf], cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.topics.is_empty() && self.sources.is_empty() {
-            return None;
-        }
-        let theme = cx.theme().clone();
-        let mut chips: Vec<AnyElement> = vec![];
-        for (i, t) in self.topics.iter().enumerate() {
-            let path = t.path.clone();
-            let on = picked.contains(&path);
-            chips.push(
-                pick_chip(
-                    SharedString::from(format!("study-use-map-{i}")),
-                    L::Map,
-                    t.title.clone(),
-                    on,
-                    cx,
-                )
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.toggle(path.clone(), window, cx)),
-                )
                 .into_any_element(),
             );
         }
+        let notes_shown = cards.len();
         for (i, s) in self.sources.iter().enumerate() {
             let path = s.path.clone();
-            let on = picked.contains(&path);
-            chips.push(
-                pick_chip(
+            let name = s
+                .path
+                .file_name()
+                .map_or_else(|| s.label.clone(), |n| n.to_string_lossy().to_string());
+            // What it is and how big; its folder under sources/ is the tooltip (topic folders'
+            // names are as long as the topics).
+            let mut meta = vec![size_label(s.size)];
+            if let Some(ext) = s.path.extension() {
+                meta.insert(0, ext.to_string_lossy().to_uppercase());
+            }
+            cards.push(
+                file_card(
                     SharedString::from(format!("study-source-{i}")),
                     file_icon(&s.path),
-                    s.label.clone(),
-                    on,
+                    middle(&name, NAME_CHARS),
+                    meta.join(" · "),
+                    picked.contains(&s.path),
                     cx,
                 )
+                .tooltip({
+                    let label = s.label.clone();
+                    move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                    }
+                })
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.toggle(path.clone(), window, cx)),
                 )
                 .into_any_element(),
             );
         }
-        let total = chips.len();
-        // A chip that's ticked stays in view even past the fold.
-        let shown: Vec<AnyElement> = if self.library_open || total <= LIBRARY_CHIPS {
-            chips
+        let total = cards.len();
+        let limit = FILE_CARDS.max(notes_shown);
+        let shown: Vec<AnyElement> = if self.files_open || total <= limit {
+            cards
         } else {
-            chips.into_iter().take(LIBRARY_CHIPS).collect()
+            cards.into_iter().take(limit).collect()
         };
         let more = total - shown.len();
-        let ticked = self
-            .topics
-            .iter()
-            .map(|t| &t.path)
-            .chain(self.sources.iter().map(|s| &s.path))
-            .filter(|p| picked.contains(p))
-            .count();
-        Some(
+        let included = picked.len();
+        let grid = (!shown.is_empty()).then(|| {
             v_flex()
                 .id("study-library")
                 .test_support()
@@ -388,92 +390,173 @@ impl StudyView {
                 .gap(px(8.))
                 .child(
                     h_flex()
-                        .gap(px(4.))
+                        .gap(px(6.))
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
                         .child("From your study folder")
-                        .when(ticked > 0, |el| {
+                        .when(included > 0, |el| {
                             el.child("·").child(
                                 div()
                                     .text_color(theme.foreground)
-                                    .child(format!("{ticked} for this session")),
+                                    .child(format!("{included} included")),
+                            )
+                        })
+                        .child(div().flex_1())
+                        .when(more > 0 || (self.files_open && total > limit), |el| {
+                            el.child(
+                                div()
+                                    .id("study-library-more")
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(theme.foreground))
+                                    .child(if more > 0 {
+                                        format!("{more} more")
+                                    } else {
+                                        "Fewer".to_string()
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.files_open = !this.files_open;
+                                        cx.notify();
+                                    })),
                             )
                         }),
                 )
                 .child(
-                    h_flex()
+                    div()
                         .w_full()
-                        .gap(px(6.))
-                        .flex_wrap()
-                        .items_center()
-                        .children(shown)
-                        .when(
-                            more > 0 || (self.library_open && total > LIBRARY_CHIPS),
-                            |el| {
-                                el.child(
-                                    div()
-                                        .id("study-library-more")
-                                        .test_support()
-                                        .h(px(26.))
-                                        .px(px(6.))
-                                        .flex()
-                                        .items_center()
-                                        .text_size(px(12.))
-                                        .text_color(theme.muted_foreground)
-                                        .cursor_pointer()
-                                        .hover(|s| s.text_color(theme.foreground))
-                                        .child(if more > 0 {
-                                            format!("{more} more")
-                                        } else {
-                                            "Fewer".to_string()
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.library_open = !this.library_open;
-                                            cx.notify();
-                                        })),
-                                )
-                            },
-                        ),
+                        .grid()
+                        .grid_cols(2)
+                        .gap(px(8.))
+                        .children(shown),
                 )
-                .into_any_element(),
-        )
-    }
-
-    /// The concept maps, a row each: open it, learn more of it, or practise it.
-    fn maps(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let body = if self.topics.is_empty() {
-            div()
-                .py(px(6.))
-                .text_size(px(13.))
-                .line_height(px(19.))
-                .text_color(theme.muted_foreground)
-                .child(if self.loaded {
-                    "Each topic you study gets a map: the ideas you've got and how they connect. \
-                     Later sessions build on it."
-                } else {
-                    "Loading…"
-                })
-                .into_any_element()
-        } else {
-            let rows = self
-                .topics
-                .iter()
-                .enumerate()
-                .map(|(i, t)| self.map_row(i, t, cx))
-                .collect();
-            ui::group(rows, cx)
-        };
+        });
         v_flex()
-            .id("study-maps")
-            .test_support()
-            .child(section_title("Your maps", Some(self.topics.len()), cx))
-            .child(body)
+            .w_full()
+            .gap(px(16.))
+            .child(
+                h_flex()
+                    .id("study-context")
+                    .test_support()
+                    .w_full()
+                    .gap(px(8.))
+                    .flex_wrap()
+                    .items_center()
+                    .child(files)
+                    .children(note)
+                    .children(talk),
+            )
+            .children(grid)
             .into_any_element()
     }
 
-    fn map_row(&self, i: usize, t: &Topic, cx: &mut Context<Self>) -> AnyElement {
+    /// The latest session, to carry on with: what it was, when, what its map holds, and one
+    /// button.
+    fn continue_card(&self, s: &Shown, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let mut meta = vec![
+            s.kind.label().to_string(),
+            crate::time::relative(s.updated_at),
+        ];
+        if let Some(t) = s.map.and_then(|i| self.topics.get(i)) {
+            meta.push(format!("{} on your map", plural(t.claims, "idea", "ideas")));
+        }
+        let open = {
+            let id = s.thread.clone();
+            move |this: &mut Self, cx: &mut Context<Self>| {
+                let id = id.clone();
+                this.workspace
+                    .update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
+            }
+        };
+        let open2 = open.clone();
+        h_flex()
+            .id(SharedString::from(format!("study-session-{}", s.thread)))
+            .test_support()
+            .w_full()
+            .p(px(16.))
+            .gap(px(16.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.foreground.opacity(0.08))
+            .cursor_pointer()
+            .hover(|st| st.bg(theme.list_hover))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(40.))
+                    .rounded(px(10.))
+                    .bg(theme.foreground.opacity(0.06))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(kind_icon(s.kind))
+                            .size(px(18.))
+                            .text_color(theme.foreground),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(15.))
+                            .font_medium()
+                            .child(s.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child(meta.join(" · ")),
+                    ),
+            )
+            .child(
+                Button::new("study-continue")
+                    .outline()
+                    .px(px(16.))
+                    .label("Continue")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        open(this, cx)
+                    })),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| open2(this, cx)))
+            .into_any_element()
+    }
+
+    /// The concept maps, two to a row: open one, learn more of it, practise it, or tick it for
+    /// the next session to build on.
+    fn maps(&self, picked: &[PathBuf], cx: &mut Context<Self>) -> AnyElement {
+        let cards: Vec<AnyElement> = self
+            .topics
+            .iter()
+            .enumerate()
+            .map(|(i, t)| self.map_card(i, t, picked.contains(&t.path), cx))
+            .collect();
+        v_flex()
+            .id("study-maps")
+            .test_support()
+            .w_full()
+            .child(section_title("Your maps", Some(self.topics.len()), cx))
+            .child(
+                div()
+                    .w_full()
+                    .grid()
+                    .grid_cols(2)
+                    .gap(px(8.))
+                    .children(cards),
+            )
+            .into_any_element()
+    }
+
+    fn map_card(&self, i: usize, t: &Topic, on: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let ember = crate::palette::ember(cx);
         let mut facts = vec![
             plural(t.claims, "idea", "ideas"),
             plural(t.links, "link", "links"),
@@ -481,35 +564,38 @@ impl StudyView {
         if t.practiced > 0 {
             facts.push(format!("{} practised", t.practiced));
         }
-        if t.updated_at > 0 {
-            facts.push(format!("studied {}", crate::time::relative(t.updated_at)));
-        }
+        let when = (t.updated_at > 0).then(|| crate::time::relative(t.updated_at));
         let path = t.path.clone();
+        let tick_path = t.path.clone();
         let (go_on, practise) = (t.clone(), t.clone());
-        h_flex()
+        v_flex()
             .id(SharedString::from(format!("study-map-{i}")))
             .test_support()
-            .w_full()
-            .min_h(px(52.))
-            .px(px(8.))
-            .gap(px(12.))
+            .min_w_0()
+            .p(px(12.))
+            .gap(px(8.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(if on {
+                ember.opacity(0.55)
+            } else {
+                theme.foreground.opacity(0.08)
+            })
+            .when(on, |el| el.bg(ember.opacity(0.06)))
             .cursor_pointer()
             .hover(|s| s.bg(theme.list_hover))
-            .tooltip(|window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new("Open the map").build(window, cx)
-            })
             .child(
-                Icon::new(L::Map)
-                    .size(px(15.))
-                    .text_color(theme.muted_foreground),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.))
+                h_flex()
+                    .gap(px(8.))
+                    .child(
+                        Icon::new(L::Map)
+                            .size(px(14.))
+                            .text_color(theme.muted_foreground),
+                    )
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .truncate()
                             .text_size(px(13.))
                             .font_medium()
@@ -517,23 +603,49 @@ impl StudyView {
                     )
                     .child(
                         div()
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
-                            .child(facts.join(" · ")),
+                            .id(SharedString::from(format!("study-use-map-{i}")))
+                            .test_support()
+                            .flex_none()
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Build the next session on this map",
+                                )
+                                .build(window, cx)
+                            })
+                            .child(tick_box(
+                                SharedString::from(format!("study-use-map-{i}")),
+                                on,
+                                cx,
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.toggle(tick_path.clone(), window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(theme.muted_foreground)
+                    .child(
+                        facts
+                            .into_iter()
+                            .chain(when)
+                            .collect::<Vec<_>>()
+                            .join(" · "),
                     ),
             )
             .child(
                 h_flex()
-                    .flex_none()
-                    .gap(px(2.))
+                    .gap(px(4.))
+                    .ml(px(-6.))
                     .child(
                         Button::new(SharedString::from(format!("study-map-learn-{i}")))
                             .ghost()
                             .xsmall()
                             .icon(Icon::new(L::BookOpen))
                             .label("Learn more")
-                            .tooltip("A new session that carries on with this map")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.start_on(Kind::Learn, &go_on, cx)
@@ -545,13 +657,15 @@ impl StudyView {
                             .xsmall()
                             .icon(Icon::new(L::Repeat))
                             .label("Practice")
-                            .tooltip("Problems on what this map holds, that adapt as you go")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.start_on(Kind::Practice, &practise, cx)
                             })),
                     ),
             )
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Open the map").build(window, cx)
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 let path: PathBuf = path.clone();
                 this.workspace
@@ -560,162 +674,105 @@ impl StudyView {
             .into_any_element()
     }
 
-    /// Past sessions whose threads are still there, the newest first.
-    fn sessions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Sessions before the latest, a row each between hairlines.
+    fn earlier(&self, rest: &[Shown], cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = cx.theme().clone();
-        let rows: Vec<AnyElement> = {
-            let ws = self.workspace.read(cx);
-            self.sessions
-                .iter()
-                .filter_map(|s| {
-                    ws.thread(&s.thread)
-                        .map(|t| (s, t.title.clone(), t.updated_at))
-                })
-                .take(SESSION_ROWS)
-                .map(|(s, title, at)| {
-                    let id = s.thread.clone();
-                    h_flex()
-                        .id(SharedString::from(format!("study-session-{}", s.thread)))
-                        .test_support()
-                        .h(px(34.))
-                        .gap(px(12.))
-                        .px(px(8.))
-                        .text_size(px(13.))
-                        .cursor_pointer()
-                        .hover(|st| st.bg(theme.list_hover))
-                        .child(
-                            Icon::new(kind_icon(s.kind))
-                                .size(px(14.))
-                                .text_color(theme.muted_foreground),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(title))
-                        .child(
-                            div()
-                                .flex_none()
-                                .min_w(px(52.))
-                                .text_right()
-                                .text_size(px(12.))
-                                .text_color(theme.muted_foreground)
-                                .child(crate::time::relative(at)),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let id = id.clone();
-                            this.workspace
-                                .update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
-                        }))
-                        .into_any_element()
-                })
-                .collect()
-        };
+        let rows: Vec<AnyElement> = rest
+            .iter()
+            .take(SESSION_ROWS)
+            .map(|s| {
+                let id = s.thread.clone();
+                h_flex()
+                    .id(SharedString::from(format!("study-session-{}", s.thread)))
+                    .test_support()
+                    .h(px(40.))
+                    .gap(px(12.))
+                    .px(px(8.))
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme.list_hover))
+                    .child(
+                        Icon::new(kind_icon(s.kind))
+                            .size(px(14.))
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(s.title.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "{} · {}",
+                                s.kind.label(),
+                                crate::time::relative(s.updated_at)
+                            )),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.workspace
+                            .update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx))
+                    }))
+                    .into_any_element()
+            })
+            .collect();
         (!rows.is_empty()).then(|| {
             v_flex()
-                .child(section_title("Sessions", Some(rows.len()), cx))
+                .w_full()
+                .child(section_title("Earlier sessions", Some(rest.len()), cx))
                 .child(ui::group(rows, cx))
                 .into_any_element()
         })
     }
 
-    /// Before the first session: how one of the chosen kind goes, in order.
-    fn how(&self, kind: Kind, cx: &mut Context<Self>) -> AnyElement {
+    /// Before the first session: the one sentence that says what the page will hold.
+    fn first_time(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let steps: &[(L, &str, &str)] = match kind {
-            Kind::Learn => &[
-                (
-                    L::Target,
-                    "Find your edge",
-                    "a few quick questions show what you already know",
-                ),
-                (
-                    L::Route,
-                    "Plan the path",
-                    "the fewest steps to your goal, for you to approve",
-                ),
-                (
-                    L::Footprints,
-                    "One step at a time",
-                    "predict, learn, then check it landed",
-                ),
-                (
-                    L::Map,
-                    "Keep it on your map",
-                    "what you've got, for the next session to build on",
-                ),
-            ],
-            Kind::Practice => &[
-                (
-                    L::Repeat,
-                    "One problem at a time",
-                    "harder or easier as your working shows",
-                ),
-                (
-                    L::MessageCircleQuestionMark,
-                    "Nudges, not answers",
-                    "ask for a hint whenever you're stuck",
-                ),
-                (
-                    L::Map,
-                    "Logged on your map",
-                    "what's solid and what to practise next",
-                ),
-            ],
-        };
-        let rows: Vec<AnyElement> = steps
-            .iter()
-            .map(|(icon, title, line)| {
-                h_flex()
-                    .min_h(px(34.))
-                    .py(px(6.))
-                    .px(px(8.))
-                    .gap(px(12.))
-                    .text_size(px(13.))
-                    .child(
-                        Icon::new(*icon)
-                            .size(px(14.))
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(div().min_w_0().flex_1().child(
-                        StyledText::new(format!("{title}  {line}")).with_highlights([(
-                            title.len()..title.len() + 2 + line.len(),
-                            HighlightStyle {
-                                color: Some(theme.muted_foreground),
-                                ..Default::default()
-                            },
-                        )]),
-                    ))
-                    .into_any_element()
-            })
-            .collect();
-        let list = v_flex()
+        h_flex()
             .id("study-how")
             .test_support()
-            .child(section_title(
-                match kind {
-                    Kind::Learn => "How a session goes",
-                    Kind::Practice => "How practice goes",
-                },
-                None,
-                cx,
-            ))
-            .child(ui::group(rows, cx));
-        fade_in(list, ("study-how", kind as usize), FADE, cx)
+            .w_full()
+            .px(px(16.))
+            .py(px(12.))
+            .gap(px(12.))
+            .rounded(px(10.))
+            .bg(theme.foreground.opacity(0.03))
+            .text_size(px(13.))
+            .text_color(theme.muted_foreground)
+            .child(
+                Icon::new(L::Map)
+                    .size(px(14.))
+                    .text_color(theme.muted_foreground),
+            )
+            .child("Each session leaves a map of what you learned; the next one builds on it.")
+            .into_any_element()
     }
 }
 
 impl Render for StudyView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::rendered("Study");
-        let (kind, picked) = {
-            let ws = self.workspace.read(cx);
-            (ws.study.kind, ws.study.picked.clone())
-        };
-        let sessions = self.sessions(cx);
-        let library = self.library(&picked, cx);
-        let first_time = self.loaded && self.topics.is_empty() && sessions.is_none();
-        // The composer card is as wide as a draft's (the transcript column); it pads itself by
-        // 24 px each side, so the page's sections sit inside that padding.
-        let column = self.workspace.read(cx).column();
+        let picked = self.workspace.read(cx).study.picked.clone();
+        let mut sessions = self.shown_sessions(cx);
+        let latest = (!sessions.is_empty()).then(|| sessions.remove(0));
+        let first_time = self.loaded && self.topics.is_empty() && latest.is_none();
+        let context = self.context(&picked, cx);
+        let resume = latest.as_ref().map(|s| {
+            v_flex()
+                .w_full()
+                .child(section_title("Continue", None, cx))
+                .child(self.continue_card(s, cx))
+                .into_any_element()
+        });
+        let maps = (!self.topics.is_empty()).then(|| self.maps(&picked, cx));
+        let earlier = self.earlier(&sessions, cx);
+        let how = first_time.then(|| self.first_time(cx));
         let composer = Composer::element(&self.composer, &mut self.composer_changed, cx);
+        // Bias the column above the middle: more room under it than over it, so with little in
+        // it the composer sits in the page's upper third.
+        let tall = window.viewport_size().height;
+        let below = (tall * 0.18).clamp(px(48.), px(240.));
         let inset = |el: AnyElement| div().w_full().px(px(24.)).child(el);
         div()
             .id("study")
@@ -725,43 +782,33 @@ impl Render for StudyView {
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(column + px(48.))
-                    .mx_auto()
+                    .min_h_full()
+                    .justify_center()
                     .px(px(16.))
-                    .pt(px(28.))
-                    .pb(px(48.))
-                    .gap(px(32.))
+                    .pt(px(40.))
+                    .pb(below)
                     .child(
                         v_flex()
                             .w_full()
-                            .gap(px(20.))
-                            .child(inset(self.header()))
+                            .max_w(px(COLUMN + 48.))
+                            .mx_auto()
+                            .gap(px(40.))
                             .child(
                                 v_flex()
                                     .id("study-start")
                                     .test_support()
                                     .w_full()
-                                    .gap(px(12.))
-                                    .child(inset(self.choice(kind, cx)))
+                                    .gap(px(16.))
+                                    .child(inset(self.header()))
                                     .child(composer)
-                                    .child(inset(self.context(&picked, cx)))
-                                    .children(library.map(|l| inset(l).pt(px(4.)))),
-                            ),
-                    )
-                    .child(inset(self.maps(cx)))
-                    .children(sessions.map(inset))
-                    .when(first_time, |el| el.child(inset(self.how(kind, cx)))),
+                                    .child(inset(context)),
+                            )
+                            .children(resume.map(inset))
+                            .children(maps.map(inset))
+                            .children(earlier.map(inset))
+                            .children(how.map(inset)),
+                    ),
             )
-    }
-}
-
-/// What the chosen kind does, in a line.
-fn kind_line(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Learn => {
-            "Finds what you already know, plans the shortest path, teaches step by step."
-        }
-        Kind::Practice => "Problems that adapt to your working, with nudges rather than answers.",
     }
 }
 
@@ -772,34 +819,46 @@ fn kind_icon(kind: Kind) -> L {
     }
 }
 
-/// The icon for a file by its kind: a picture, or a document.
+/// The icon for a file by its kind: a picture, an archive, or a document.
 fn file_icon(path: &Path) -> L {
-    let image = path
+    let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
-        .is_some_and(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "heic" | "webp"));
-    if image { L::Image } else { L::FileText }
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "heic" | "webp" => L::Image,
+        "zip" | "gz" | "tgz" | "tar" | "rar" | "7z" => L::Package,
+        "md" | "txt" | "pdf" | "doc" | "docx" | "rtf" | "tex" => L::FileText,
+        _ => L::File,
+    }
 }
 
-/// `el` fading in over `over` when it first shows under `id` (a new id: a new fade); as it is
-/// when the system asks for less motion.
-fn fade_in(
-    el: impl IntoElement + 'static,
-    id: impl Into<ElementId>,
-    over: Duration,
-    cx: &App,
-) -> AnyElement {
-    if cx.reduce_motion() {
-        return el.into_any_element();
+/// `name` in at most `max` characters: the start and the end, with the middle let go.
+fn middle(name: &str, max: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max {
+        return name.to_string();
     }
-    div()
-        .child(el)
-        .with_animation(
-            id,
-            Animation::new(over).with_easing(ease_out_quint()),
-            |d, t| d.opacity(t),
-        )
-        .into_any_element()
+    let tail = (max - 1) * 2 / 5;
+    let head = max - 1 - tail;
+    let start: String = chars[..head].iter().collect();
+    let end: String = chars[chars.len() - tail..].iter().collect();
+    format!("{}…{}", start.trim_end(), end.trim_start())
+}
+
+/// "820 B", "14 KB", "2.3 MB".
+fn size_label(bytes: u64) -> String {
+    const K: f64 = 1024.;
+    let b = bytes as f64;
+    if b < K {
+        format!("{bytes} B")
+    } else if b < K * K {
+        format!("{:.0} KB", b / K)
+    } else if b < K * K * K {
+        format!("{:.1} MB", b / (K * K))
+    } else {
+        format!("{:.1} GB", b / (K * K * K))
+    }
 }
 
 /// A chip the page lays out, findable by its id in tests and the shots harness.
@@ -811,13 +870,13 @@ fn action_chip(id: &'static str, icon: L, label: &'static str, cx: &App) -> Chip
     h_flex()
         .id(id)
         .test_support()
-        .h(px(28.))
-        .px(px(10.))
-        .gap(px(6.))
+        .h(px(32.))
+        .px(px(12.))
+        .gap(px(8.))
         .rounded_full()
         .border_1()
         .border_color(theme.foreground.opacity(0.08))
-        .text_size(px(12.5))
+        .text_size(px(13.))
         .text_color(theme.muted_foreground)
         .cursor_pointer()
         .hover(|s| {
@@ -827,65 +886,90 @@ fn action_chip(id: &'static str, icon: L, label: &'static str, cx: &App) -> Chip
         .active(|s| s.bg(theme.foreground.opacity(0.08)))
         .child(
             Icon::new(icon)
-                .size(px(13.))
+                .size(px(14.))
                 .text_color(theme.muted_foreground),
         )
         .child(label)
 }
 
-/// A chip to tick for the session: its kind's icon, or a tick that fades in once it's chosen.
-fn pick_chip(
-    id: SharedString,
-    icon: L,
-    label: impl Into<SharedString>,
-    on: bool,
-    cx: &App,
-) -> Chip {
+/// The square that says a file or map goes with the next session; its tick fades in.
+fn tick_box(id: SharedString, on: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let ember = crate::palette::ember(cx);
-    let mark = if on {
-        let tick = Icon::new(L::Check).size(px(12.)).text_color(ember);
-        if cx.reduce_motion() {
-            tick.into_any_element()
+    div()
+        .size(px(16.))
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if on {
+            ember
         } else {
-            tick.with_animation(
-                SharedString::from(format!("{id}-tick")),
-                Animation::new(TICK).with_easing(ease_out_quint()),
-                move |i, t| i.text_color(ember.opacity(t)),
-            )
-            .into_any_element()
-        }
-    } else {
-        Icon::new(icon)
-            .size(px(12.))
-            .text_color(theme.muted_foreground)
-            .into_any_element()
-    };
+            theme.foreground.opacity(0.25)
+        })
+        .when(on, |el| el.bg(ember))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(on, |el| {
+            let tick = Icon::new(L::Check)
+                .size(px(11.))
+                .text_color(theme.background);
+            el.child(if cx.reduce_motion() {
+                tick.into_any_element()
+            } else {
+                let bg = theme.background;
+                tick.with_animation(
+                    SharedString::from(format!("{id}-tick")),
+                    Animation::new(TICK).with_easing(ease_out_quint()),
+                    move |i, t| i.text_color(bg.opacity(t)),
+                )
+                .into_any_element()
+            })
+        })
+        .into_any_element()
+}
+
+/// A file the session can take: its kind's icon, its name (middle let go), what it is, and the
+/// tick that includes it.
+fn file_card(id: SharedString, icon: L, name: String, meta: String, on: bool, cx: &App) -> Chip {
+    let theme = cx.theme();
+    let ember = crate::palette::ember(cx);
     h_flex()
-        .id(id)
+        .id(id.clone())
         .test_support()
-        .h(px(26.))
-        .max_w(px(260.))
-        .px(px(9.))
-        .gap(px(6.))
-        .rounded_full()
+        .min_w_0()
+        .h(px(56.))
+        .px(px(12.))
+        .gap(px(12.))
+        .rounded(px(10.))
         .border_1()
         .border_color(if on {
             ember.opacity(0.55)
         } else {
             theme.foreground.opacity(0.08)
         })
-        .when(on, |el| el.bg(ember.opacity(0.08)))
-        .text_size(px(12.))
-        .text_color(if on {
-            theme.foreground
-        } else {
-            theme.muted_foreground
-        })
+        .when(on, |el| el.bg(ember.opacity(0.06)))
         .cursor_pointer()
-        .hover(|s| s.border_color(theme.foreground.opacity(0.22)))
-        .child(div().flex_none().child(mark))
-        .child(div().min_w_0().truncate().child(label.into()))
+        .hover(|s| s.bg(theme.list_hover))
+        .child(
+            Icon::new(icon)
+                .size(px(16.))
+                .text_color(theme.muted_foreground),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.))
+                .child(div().truncate().text_size(px(13.)).child(name))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child(meta),
+                ),
+        )
+        .child(tick_box(id, on, cx))
 }
 
 /// A study session's first message in its thread: the kind, what was asked, and what came with
@@ -918,7 +1002,7 @@ pub fn intro_bubble(intro: &Intro, cx: &App) -> AnyElement {
         let (icon, label) = if f.starts_with(&map_dir) {
             (L::Map, map_title(f))
         } else {
-            (file_icon(f), name(f))
+            (file_icon(f), middle(&name(f), 32))
         };
         chips.push(chip(icon, label));
     }
@@ -985,7 +1069,7 @@ fn section_title(title: &'static str, count: Option<usize>, cx: &App) -> AnyElem
         .gap(px(6.))
         .text_size(px(13.))
         .child(div().font_medium().child(title))
-        .when_some(count.filter(|n| *n > 0), |el, n| {
+        .when_some(count.filter(|n| *n > 1), |el, n| {
             el.child(
                 div()
                     .text_color(cx.theme().muted_foreground)

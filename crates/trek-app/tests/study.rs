@@ -73,6 +73,18 @@ fn study_opens_from_the_sidebar_and_its_composer_starts_a_session_in_the_study_f
                 .contains("## The map format")
         );
         assert_eq!(trek.composer_text(cx), "");
+
+        // Back on Study, the session is the one to continue, and Continue opens it.
+        trek.update(cx, |ws, cx| ws.navigate(Route::Study, cx));
+        cx.run_until_parked();
+        trek.render(cx);
+        assert!(trek.visible(cx, "study-continue") && !trek.visible(cx, "study-how"));
+        assert!(trek.visible(
+            cx,
+            gpui_kit::SharedString::from(format!("study-session-{id}"))
+        ));
+        trek.click(cx, "study-continue");
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(id));
     });
 }
 
@@ -200,13 +212,14 @@ fn the_starter_offers_material_and_explains_a_session_until_there_is_one() {
         trek.update(cx, |ws, cx| ws.navigate(Route::Study, cx));
         cx.run_until_parked();
         trek.render(cx);
-        // Files or folders under the composer; nothing in the study folder yet to tick.
+        // Files or folders under the composer; nothing in the study folder yet to tick, no maps
+        // and nothing to continue: one quiet line says what the page will hold.
         assert!(trek.visible(cx, "study-context") && trek.visible(cx, "study-add-files"));
-        assert!(!trek.visible(cx, "study-library"));
-        // A first visit says how a session goes; the maps say what they'll hold.
-        assert!(trek.visible(cx, "study-how") && trek.visible(cx, "study-maps"));
+        assert!(!trek.visible(cx, "study-library") && !trek.visible(cx, "study-maps"));
+        assert!(!trek.visible(cx, "study-continue"));
+        assert!(trek.visible(cx, "study-how"));
 
-        // Once there's a map it's listed, can be ticked to build on, and the how-to goes.
+        // Once there's a map it's listed, can be ticked to build on, and the line goes.
         let dir = study::dir();
         study::ensure(&dir).unwrap();
         let map = study::map_dir(&dir).join("softmax.md");
@@ -215,7 +228,7 @@ fn the_starter_offers_material_and_explains_a_session_until_there_is_one() {
         trek.update(cx, |ws, cx| ws.navigate(Route::Study, cx));
         cx.run_until_parked();
         trek.render(cx);
-        assert!(trek.visible(cx, "study-map-0") && trek.visible(cx, "study-library"));
+        assert!(trek.visible(cx, "study-map-0") && trek.visible(cx, "study-maps"));
         assert!(!trek.visible(cx, "study-how"));
         trek.click(cx, "study-use-map-0");
         assert_eq!(
