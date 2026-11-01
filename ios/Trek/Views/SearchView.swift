@@ -68,6 +68,7 @@ struct SearchView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .fadesUnderBottomBars()
             .background(Trek.background)
             .overlay {
                 if results.isEmpty, !searching {

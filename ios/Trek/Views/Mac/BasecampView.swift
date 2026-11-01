@@ -63,7 +63,7 @@ struct BasecampView: View {
                 .id(range)
                 .transition(.opacity)
             }
-            .scrollEdgeEffectStyle(.hard, for: .bottom)
+            .fadesUnderBottomBars()
             .background(RidgeBackdrop(height: 300))
             .navigationTitle("Basecamp")
             .navigationSubtitle(link?.serves(.basecampV2) == true ? "" : recap?.greeting ?? "")

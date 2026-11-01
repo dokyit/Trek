@@ -43,6 +43,7 @@ struct NotesView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .fadesUnderBottomBars()
             .background(RidgeBackdrop(height: 300))
             .overlay {
                 if shown.isEmpty {

@@ -42,7 +42,7 @@ struct UsageView: View {
                 }
             }
         }
-        .scrollEdgeEffectStyle(.hard, for: .bottom)
+        .fadesUnderBottomBars()
         .background(Trek.background)
         .navigationTitle("Usage")
         .navigationSubtitle(asking && !providers.isEmpty ? "Asking your agents…" : "")
