@@ -248,9 +248,11 @@ pub struct Source {
     pub path: PathBuf,
     /// Its path under `sources/`, as shown: `transformers/notes.pdf`.
     pub label: String,
+    /// Its size in bytes.
+    pub size: u64,
 }
 
-/// Sources listed before the list stops: the screen shows chips, not a file manager.
+/// Sources listed before the list stops: the screen shows a few cards, not a file manager.
 const SOURCE_ROWS: usize = 24;
 
 /// Every file under `sources/` (two levels deep: the folder, and a topic's folder in it), the
@@ -289,7 +291,8 @@ pub fn sources(dir: &Path) -> Vec<Source> {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            out.push((at, Source { path, label }));
+            let size = meta.len();
+            out.push((at, Source { path, label, size }));
         }
         dirs
     };

@@ -2188,6 +2188,40 @@ impl Composer {
         )
     }
 
+    /// On Study, the card's header: Learn | Practice, the kind of session it starts. What each
+    /// does is its tooltip (and the placeholder says it once more); a pick gives the keys back.
+    fn study_kind_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        use trek_core::study::Kind;
+        let ws = self.workspace.clone();
+        let me = cx.entity().downgrade();
+        let kind = ws.read(cx).study.kind;
+        h_flex()
+            .px(px(look::PAD))
+            .pt(px(look::PAD - 1.))
+            .child(
+                div()
+                    .id("study-kind-tip")
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            "Learn finds what you already know and teaches the rest step by step. \
+                             Practice sets problems that adapt to your working.",
+                        )
+                        .build(window, cx)
+                    })
+                    .child(ui::segmented(
+                        "study-kind",
+                        vec![(Kind::Learn, "Learn"), (Kind::Practice, "Practice")],
+                        kind,
+                        move |k, window, cx| {
+                            ws.update(cx, |ws, cx| ws.set_study_kind(k, cx));
+                            let _ = me.update(cx, |c, cx| c.focus(window, cx));
+                        },
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
     /// "+" menu: files and photos, snapshots, the three pickers, and restating first.
     fn plus_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let me = cx.entity();
@@ -3859,6 +3893,7 @@ impl Render for Composer {
                         .child(div().flex_1())
                 )
             })
+            .when(study, |el| el.child(self.study_kind_row(cx)))
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
@@ -4189,7 +4224,8 @@ impl Render for Composer {
                     .children(chips)
                     .children(limit_bar)
                     .child(card)
-                    .children(status),
+                    // On Study the agent shows in the model pill; the strip would float alone.
+                    .when(!study, |el| el.children(status)),
             )
     }
 }
@@ -4210,10 +4246,10 @@ fn placeholder(running: Option<FollowUp>, prompt: Prompt) -> std::borrow::Cow<'s
     use trek_core::study::Kind;
     match running {
         None if prompt == Prompt::Study(Kind::Learn) => {
-            "What do you want to learn? Say it in your own words".into()
+            "What do you want to learn? It starts from what you already know".into()
         }
         None if prompt == Prompt::Study(Kind::Practice) => {
-            "What do you want to practise? A topic, a map, or your own problems".into()
+            "What do you want to practise? Problems adapt to your working".into()
         }
         None if prompt == Prompt::Session => {
             "Think out loud, ask a question, or say you're stuck".into()
