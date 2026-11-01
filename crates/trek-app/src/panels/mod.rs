@@ -379,6 +379,15 @@ impl RightPanel {
         })
     }
 
+    /// The iPhone tool, if it's open (the shots harness's `phone`).
+    #[cfg(all(target_os = "macos", feature = "shots"))]
+    pub fn phone(&self) -> Option<Entity<phone::PhonePanel>> {
+        self.tabs.iter().find_map(|t| match &t.view {
+            View::Phone(p) => Some(p.clone()),
+            _ => None,
+        })
+    }
+
     /// The Terminal tab in front, while the panel is open (the shots harness's `terminal`).
     #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn shown_terminal(&self) -> Option<Entity<terminal::TerminalPanel>> {

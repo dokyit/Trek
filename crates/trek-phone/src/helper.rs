@@ -45,6 +45,8 @@ pub struct Status {
     pub frames: u64,
     /// Seconds since the newest frame (negative: none yet).
     pub frame_age: f64,
+    /// The newest frame is black: the screen is off, so the iPhone is locked or asleep.
+    pub dark: bool,
     /// "starting", "advertising", "connected", "off", "not allowed", …
     pub bluetooth: String,
     /// Phones that took Trek as a keyboard and mouse (they read its report map) and listen.
@@ -170,6 +172,7 @@ fn parse_message(payload: &[u8]) -> Message {
             height: n("height") as u32,
             frames: n("frames"),
             frame_age: v["frame_age"].as_f64().unwrap_or(-1.),
+            dark: v["dark"].as_bool().unwrap_or(false),
             bluetooth: s("bluetooth"),
             hosts: n("hosts") as u32,
             linked: n("linked") as u32,
@@ -480,10 +483,11 @@ mod tests {
 
     #[test]
     fn messages_become_events() {
-        let status = br#"{"event":"status","camera":"granted","screen":"Phone","width":1320,"height":2868,"frames":9,"frame_age":0.1,"bluetooth":"connected","hosts":1}"#;
+        let status = br#"{"event":"status","camera":"granted","screen":"Phone","width":1320,"height":2868,"frames":9,"frame_age":0.1,"dark":true,"bluetooth":"connected","hosts":1}"#;
         match parse_message(status) {
             Message::Event(Event::Status(s)) => {
                 assert_eq!(s.screen, "Phone");
+                assert!(s.dark);
                 assert_eq!((s.width, s.height), (1320, 2868));
                 assert!(s.input_ready());
                 assert!(!s.linked_only());

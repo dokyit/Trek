@@ -33,7 +33,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
     vec![
         (
             "phone_status",
-            "Whether the iPhone is connected and ready: its name and iOS version, whether its screen is coming over USB (it isn't while the phone is locked), whether it took Trek's Bluetooth keyboard and mouse, how taps and keys reach it now (Bluetooth or iPhone Mirroring, and what the user must do if neither works), AssistiveTouch, and which agent holds it.",
+            "What Trek's iPhone tool shows, in the same words: the phone (name, iOS, USB or Wi-Fi), Screen (live over USB, live in iPhone Mirroring, or locked), Taps (ready through Bluetooth or iPhone Mirroring, or the one thing the user must do first, under To do), AssistiveTouch on the Bluetooth route, and which agent holds it.",
             none.clone(),
         ),
         (
