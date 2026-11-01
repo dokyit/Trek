@@ -23,7 +23,9 @@ use crate::workspace::phone_use::PhoneCall;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Value, json};
@@ -36,6 +38,7 @@ use std::time::{Duration, Instant};
 use trek_agents::Decision;
 use trek_core::HandHolding;
 use trek_ipc::phone::{self as tools, Sensitive};
+use trek_phone::diagnose::{self, Blocker};
 use trek_phone::helper::{self, Event, Link, MirrorCmd, Mirrored, Status};
 use trek_phone::hid::{self, Step};
 use trek_phone::lease::{Lease, TOOK_OVER};
@@ -58,8 +61,10 @@ const TAP_SLOP: f32 = 6.;
 /// How often iPhone Mirroring's window is read while Bluetooth can't tap.
 const MIRROR_LOOK: Duration = Duration::from_secs(3);
 /// How long iPhone Mirroring gets to show the phone once opened or told to connect.
-/// (It gives up on its own after ~12 s; Trek connects once more after opening it.)
-const MIRROR_CONNECT: Duration = Duration::from_secs(30);
+/// (It gives up on its own after ~12 s; Trek presses Connect up to `mirror::PRESSES` times.)
+const MIRROR_CONNECT: Duration = Duration::from_secs(75);
+/// How often a lasting iPhone Mirroring time-out is diagnosed again (the user may have fixed it).
+const DIAGNOSE_AGAIN: Duration = Duration::from_secs(60);
 
 /// How long after the user tapped the picture (and the tap couldn't reach the phone) the strip
 /// keeps saying what to do about it.
@@ -142,6 +147,11 @@ pub struct PhonePanel {
     /// When the user last tapped the picture without the tap reaching the phone.
     wanted_taps: Option<Instant>,
     explain_open: bool,
+    /// What's in the way of iPhone Mirroring (`diagnose`), and when that was found; `None` once
+    /// it should be looked at again (it just timed out, or the user asked to check again).
+    blocker: Option<Blocker>,
+    diagnosed: Option<Instant>,
+    diagnosing: bool,
     /// A made-up phone for design review (`control phone <state>`): nothing real is touched.
     demo: bool,
     notice: Option<SharedString>,
@@ -236,6 +246,9 @@ impl PhonePanel {
                 .map(|s| s.trim().to_string()),
             wanted_taps: None,
             explain_open: false,
+            blocker: None,
+            diagnosed: None,
+            diagnosing: false,
             // An isolated capture run never reaches for the user's real phone.
             demo: cfg!(feature = "shots") && std::env::var_os("TREK_SHOT_DIR").is_some(),
             notice: None,
@@ -257,6 +270,7 @@ impl PhonePanel {
             wants_taps: self.busy()
                 || self.lease.holder(Instant::now()).is_some()
                 || self.wanted_taps.is_some_and(|t| t.elapsed() < WANT_TAPS),
+            blocker: self.blocker.clone(),
         }
     }
 
@@ -338,6 +352,7 @@ impl PhonePanel {
         {
             self.look_mirror(window, cx);
         }
+        self.diagnose_mirror(window, cx);
         // The "do this now" line goes when the user's tap is a minute old.
         if self
             .wanted_taps
@@ -398,9 +413,46 @@ impl PhonePanel {
             self.mirror_frames = live;
         }
         if self.mirror.as_ref() != Some(&state) {
+            if state == MirrorState::TimedOut {
+                self.diagnosed = None;
+            }
             self.mirror = Some(state);
             cx.notify();
         }
+    }
+
+    /// iPhone Mirroring timed out with the phone locked: find out why (on the Mac's side, a few
+    /// seconds off the UI thread), once per time-out and again each minute while it lasts.
+    fn diagnose_mirror(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let facts = self.facts();
+        if self.diagnosing
+            || self.demo
+            || facts.route() != Route::Mirroring
+            || facts.mirror != Some(MirrorState::TimedOut)
+            || !facts.locked()
+            || self.diagnosed.is_some_and(|t| t.elapsed() < DIAGNOSE_AGAIN)
+        {
+            return;
+        }
+        self.diagnosing = true;
+        let udid = self.phone.as_ref().map(|p| p.udid.clone());
+        let bluetooth = match self.status.bluetooth.as_str() {
+            "off" => Some(false),
+            "" | "starting" | "not allowed" | "unsupported" | "unavailable" => None,
+            _ => Some(true),
+        };
+        self.background(
+            window,
+            cx,
+            move || diagnose::run(udid.as_deref(), Some(true), bluetooth),
+            |this, d, _, cx| {
+                this.diagnosing = false;
+                this.diagnosed = Some(Instant::now());
+                tracing::info!("iPhone Mirroring can't reach the phone: {:?}", d.checks);
+                this.blocker = Some(d.blocker);
+                cx.notify();
+            },
+        );
     }
 
     /// Run blocking work off the UI thread, then apply its result.
@@ -699,6 +751,17 @@ impl PhonePanel {
         cx.notify();
     }
 
+    /// "Check again" on a timed-out iPhone Mirroring: connect once more, and look at what's in
+    /// the way again when that times out too.
+    fn check_again(&mut self, cx: &mut Context<Self>) {
+        self.diagnosed = None;
+        if let Some(link) = &self.link {
+            drop(link.mirror(&MirrorCmd::Press("Connect".into())));
+        }
+        self.mirror_looked = None;
+        cx.notify();
+    }
+
     // MARK: agents
 
     /// An agent's tool call: run after those before it.
@@ -828,8 +891,14 @@ impl PhonePanel {
         self.wanted_taps = None;
         self.explain_open = false;
         self.notice = None;
+        self.blocker = None;
         match state {
             "usb" => {}
+            // Locked and timing out, diagnosed: the phone isn't answering iPhone Mirroring.
+            "unreachable" => {
+                self.status.dark = true;
+                self.blocker = Some(Blocker::PhoneNotOffering);
+            }
             "lock" => self.wanted_taps = Some(Instant::now()),
             "how" => self.explain_open = true,
             "locked" => {
@@ -857,7 +926,7 @@ impl PhonePanel {
                 self.status = Status::default();
             }
             other => anyhow::bail!(
-                "phone: unknown state {other:?} (usb|lock|locked|mirroring|pair|bluetooth|none|how)"
+                "phone: unknown state {other:?} (usb|lock|locked|unreachable|mirroring|pair|bluetooth|none|how)"
             ),
         }
         cx.notify();
@@ -995,6 +1064,8 @@ impl PhonePanel {
                             .child(div().text_color(theme.muted_foreground).child(body))
                     }))
             });
+        let recheck = strip.recheck;
+        let checking = self.diagnosing;
         let action = strip.action.clone().map(|line| {
             h_flex()
                 .gap(px(6.))
@@ -1005,6 +1076,20 @@ impl PhonePanel {
                         .text_color(crate::palette::amber(cx)),
                 )
                 .child(div().flex_1().min_w_0().child(line))
+                .when(recheck, |row| {
+                    row.child(
+                        Button::new("phone-check-again")
+                            .xsmall()
+                            .ghost()
+                            .label(if checking {
+                                "Checking…"
+                            } else {
+                                "Check again"
+                            })
+                            .disabled(checking)
+                            .on_click(cx.listener(|this, _, _, cx| this.check_again(cx))),
+                    )
+                })
         });
         v_flex()
             .id("phone-strip")
@@ -1792,9 +1877,12 @@ impl Run<'_> {
         self.mirror_act(link, cmd, Duration::from_secs(5)).await
     }
 
-    /// iPhone Mirroring showing the phone: opened behind the user's windows, or told to connect
-    /// (once more if it times out), and taken for the phone's screen only once a blank window
-    /// has lasted; never tried while the iPhone is unlocked and in use, which only times it out.
+    /// iPhone Mirroring showing the phone: opened behind the user's windows, or told to connect,
+    /// and taken for the phone's screen only once a blank window has lasted; never tried while
+    /// the iPhone is unlocked and in use, which only times it out. After a time-out Connect is
+    /// pressed again only once the phone shows on the Mac's network, a bounded number of times
+    /// (`mirror::Retry`), and a stuck iPhone Mirroring is relaunched once; giving up says what
+    /// `diagnose` found in the way.
     async fn mirror_live(&mut self, link: &Arc<Link>) -> Result<(), String> {
         let first = self
             .mirror_cmd(link, MirrorCmd::Look, Duration::from_secs(5))
@@ -1826,7 +1914,10 @@ impl Run<'_> {
         } else {
             None
         };
-        let mut pressed = matches!(kick, Some(MirrorCmd::Press(_)));
+        let mut retry = mirror::Retry {
+            presses: u32::from(matches!(kick, Some(MirrorCmd::Press(_)))),
+            relaunched: false,
+        };
         if let Some(kick) = kick
             && let Some(e) = self
                 .mirror_cmd(link, kick, Duration::from_secs(15))
@@ -1839,13 +1930,22 @@ impl Run<'_> {
         let mut kicked = Instant::now();
         let started = Instant::now();
         let mut connecting = false;
+        // Since when it has been connecting, or shown no window to read, this attempt.
+        let mut connecting_since: Option<Instant> = None;
+        let mut unread_since: Option<Instant> = None;
         loop {
             self.sleep(Duration::from_millis(500)).await;
             self.check()?;
             let m = self
                 .mirror_cmd(link, MirrorCmd::Look, Duration::from_secs(5))
                 .await?;
-            let state = settle.see(MirrorState::of(&m.look), Instant::now());
+            let raw = MirrorState::of(&m.look);
+            if matches!(raw, MirrorState::Unread | MirrorState::Closed) {
+                unread_since.get_or_insert_with(Instant::now);
+            } else {
+                unread_since = None;
+            }
+            let state = settle.see(raw, Instant::now());
             match &state {
                 Some(MirrorState::Live) => {
                     // The phone's picture settles a moment after it connects.
@@ -1858,18 +1958,22 @@ impl Run<'_> {
                     | MirrorState::MacLocked
                     | MirrorState::PhoneInUse),
                 ) => return Err(s.advice()),
-                Some(MirrorState::Connecting) => connecting = true,
+                Some(MirrorState::Connecting) => {
+                    connecting = true;
+                    connecting_since.get_or_insert_with(Instant::now);
+                }
                 // The window still shows the last attempt's for a moment after Connect.
                 Some(MirrorState::TimedOut)
                     if connecting || kicked.elapsed() > Duration::from_secs(3) =>
                 {
-                    if pressed || !has_connect(&m) {
-                        // Lock it, or (locked already) it can't be reached: the strip knows.
-                        return Err(self.why_no_taps()?);
-                    }
-                    // Opened on its last attempt's Timed Out: connect once.
-                    pressed = true;
                     connecting = false;
+                    connecting_since = None;
+                    if !has_connect(&m) || self.usb_busy()? {
+                        return Err(self.cant_reach().await?);
+                    }
+                    if !self.press_again(&mut retry).await? {
+                        return Err(self.cant_reach().await?);
+                    }
                     kicked = Instant::now();
                     let _ = self
                         .mirror_cmd(
@@ -1881,10 +1985,102 @@ impl Run<'_> {
                 }
                 _ => {}
             }
+            let stuck = [connecting_since, unread_since]
+                .iter()
+                .any(|t| t.is_some_and(|t| t.elapsed() > mirror::STUCK));
+            if stuck {
+                if retry.stuck() != mirror::Next::Relaunch {
+                    return Err(self.cant_reach().await?);
+                }
+                // Stuck connecting, or no window to read: quit it and open it again (it
+                // connects by itself on launch).
+                self.blocking(mirror::quit).await;
+                self.sleep(Duration::from_millis(1500)).await;
+                if let Some(e) = self
+                    .mirror_cmd(link, MirrorCmd::Open, Duration::from_secs(15))
+                    .await?
+                    .error
+                {
+                    return Err(e);
+                }
+                settle = Settle::default();
+                connecting = false;
+                connecting_since = None;
+                unread_since = None;
+                kicked = Instant::now();
+            }
             if started.elapsed() > MIRROR_CONNECT {
-                return Err(self.why_no_taps()?);
+                return Err(self.cant_reach().await?);
             }
         }
+    }
+
+    /// Whether to press Connect again after a time-out: only once the phone shows on the Mac's
+    /// network (waiting a little for it) or when that can't be told, a bounded number of times.
+    async fn press_again(&mut self, retry: &mut mirror::Retry) -> Result<bool, String> {
+        let mut waited = false;
+        loop {
+            let udid = self.udid()?;
+            let seen = self
+                .blocking(move || diagnose::phone_seen(udid.as_deref()))
+                .await;
+            match retry.timed_out(seen, waited) {
+                mirror::Next::Press => {
+                    // A moment for the last attempt to let go of the phone.
+                    self.sleep(Duration::from_secs(2)).await;
+                    return Ok(true);
+                }
+                mirror::Next::Wait => {
+                    waited = true;
+                    let since = Instant::now();
+                    while since.elapsed() < mirror::PHONE_WAIT {
+                        self.sleep(Duration::from_secs(2)).await;
+                        self.check()?;
+                        let udid = self.udid()?;
+                        let seen = self
+                            .blocking(move || diagnose::phone_seen(udid.as_deref()))
+                            .await;
+                        if seen != Some(false) {
+                            break;
+                        }
+                    }
+                }
+                _ => return Ok(false),
+            }
+        }
+    }
+
+    /// Done trying: find out what's in the way (the panel's line shows it too), and say it.
+    async fn cant_reach(&mut self) -> Result<String, String> {
+        let (udid, locked, bluetooth) = self
+            .this
+            .update(self.cx, |p, _| {
+                let facts = p.facts();
+                // Locked, or lit and in use; else (an old picture) it can't be told.
+                let locked = if facts.locked() {
+                    Some(true)
+                } else {
+                    facts.usb_live().then_some(false)
+                };
+                (
+                    p.phone.as_ref().map(|p| p.udid.clone()),
+                    locked,
+                    (p.status.bluetooth == "off").then_some(false),
+                )
+            })
+            .map_err(gone)?;
+        let d = self
+            .blocking(move || diagnose::run(udid.as_deref(), locked, bluetooth))
+            .await;
+        tracing::info!("iPhone Mirroring can't reach the phone: {:?}", d.checks);
+        self.this
+            .update(self.cx, |p, cx| {
+                p.blocker = Some(d.blocker);
+                p.diagnosed = Some(Instant::now());
+                cx.notify();
+            })
+            .map_err(gone)?;
+        self.why_no_taps()
     }
 
     /// Wait (a little) for the helper: built, running, and reporting.
