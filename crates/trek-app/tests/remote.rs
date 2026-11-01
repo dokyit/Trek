@@ -1593,7 +1593,24 @@ fn basecamp_and_usage_for_the_phone() {
             b.narrative
         );
         let profile = b.profile.expect("a profile");
-        assert_eq!(profile.buckets.len(), 24, "an hour a stretch");
+        // An hour a stretch: 24 on most days, 23 or 25 when the clocks change.
+        let hours_today = {
+            let today = chrono::Local::now().date_naive();
+            let start = today
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_local_timezone(chrono::Local)
+                .single()
+                .unwrap();
+            let end = (today + chrono::Days::new(1))
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_local_timezone(chrono::Local)
+                .single()
+                .unwrap();
+            (end - start).num_hours() as usize
+        };
+        assert_eq!(profile.buckets.len(), hours_today, "an hour a stretch");
         assert!(profile.summit.is_some() && profile.total == "1 prompt");
         assert!(
             b.review.iter().any(|r| r.thread_id == id && !r.needs_you),
