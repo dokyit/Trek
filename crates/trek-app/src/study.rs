@@ -517,7 +517,7 @@ impl StudyView {
             )
             .child(
                 Button::new("study-continue")
-                    .primary()
+                    .outline()
                     .px(px(16.))
                     .label("Continue")
                     .on_click(cx.listener(move |this, _, _, cx| {
