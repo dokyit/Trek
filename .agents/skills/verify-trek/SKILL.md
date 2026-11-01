@@ -35,7 +35,7 @@ The driver always launches with `TREK_SHOT_DIR`, a throwaway `TREK_DATA_DIR`, im
 ./.agents/skills/verify-trek/scripts/trek-dev reset --yes
 ```
 
-Use `--help` after any command for its routes, arguments, dry-run behavior, and examples. `check --quick` is for iteration only: the full check parses shell scripts, runs the same Rust package tests as CI, builds the `shots` feature, then launches isolated Trek and captures Basecamp and General Settings.
+Use `--help` after any command for its routes, arguments, dry-run behavior, and examples. `check --quick` is for iteration only: the full check parses shell scripts and runs `bin/agent-cli --selftest`, runs the same Rust package tests as CI, builds the `shots` feature, then launches isolated Trek and captures Basecamp and General Settings.
 
 ## Development environment
 

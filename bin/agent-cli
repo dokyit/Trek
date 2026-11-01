@@ -1,0 +1,1070 @@
+#!/usr/bin/env -S python3 -I
+"""agent-cli: one place for the questions agents keep asking about this repo.
+
+Terse, one fact per line; --json on every subcommand. Stdlib only (Python 3.9+).
+Built from a tally of the repo's agent transcripts: each subcommand replaces a lookup or
+command sequence that agents repeated across sessions. Run `agent-cli <cmd> --help`.
+"""
+import argparse
+import json
+import os
+import plistlib
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HOME = Path.home()
+IS_MAC = sys.platform == "darwin"
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+GH_TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ")
+ERR_LINE = re.compile(
+    r"##\[error\]|^\s*error(\[E\d+\])?:|panicked at|^test \S+ \.\.\. FAILED|test result: FAILED|^failures:$"
+    r"|error: could not compile|\bFAILED\b|^\s*Error:|^fatal:|BUILD FAILED|error: process didn't exit"
+    r"|^\s*\S+\.(swift|rs|ps1|sh):\d+(:\d+)?: error|Assertion failed|Process completed with exit code [1-9]"
+)
+WARN_LINE = re.compile(r"^\s*warning(\[\w+\])?:|##\[warning\]|: warning:")
+OFFLINE = False
+
+
+class CliError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- helpers
+
+def run(cmd, cwd=None, timeout=30, env=None):
+    """Run a command; return (rc, stdout+stderr text). Never raises for a missing tool or timeout."""
+    try:
+        p = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=timeout, text=True, errors="replace")
+        return p.returncode, p.stdout
+    except FileNotFoundError:
+        return 127, f"{cmd[0]}: not found"
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else (e.stdout or b"").decode("utf-8", "replace")
+        return 124, out + f"\n(timeout after {timeout}s)"
+
+
+def out_of(cmd, cwd=None, timeout=30):
+    rc, out = run(cmd, cwd=cwd, timeout=timeout)
+    return out.strip() if rc == 0 else None
+
+
+def strip_ansi(s):
+    return ANSI.sub("", s)
+
+
+def repo_root():
+    r = out_of(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
+    if r:
+        return Path(r)
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = repo_root()
+
+
+def git(*args, timeout=30):
+    return out_of(["git", "-C", str(ROOT), *args], timeout=timeout)
+
+
+def main_root():
+    """The main checkout (the parent of the shared .git), even from a linked worktree."""
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common:
+        p = Path(common)
+        return p.parent if p.name == ".git" else p
+    return ROOT
+
+
+def project_slug():
+    return re.sub(r"[^A-Za-z0-9]", "-", str(main_root()))
+
+
+def gh_ok():
+    return not OFFLINE and shutil.which("gh") is not None
+
+
+def gh_json(args, timeout=40):
+    if not gh_ok():
+        return None, "offline" if OFFLINE else "gh not installed"
+    rc, out = run(["gh", *args], cwd=str(ROOT), timeout=timeout)
+    if rc != 0:
+        return None, out.strip().splitlines()[-1][:200] if out.strip() else f"gh exit {rc}"
+    try:
+        return json.loads(out), None
+    except ValueError:
+        return None, "gh returned non-JSON"
+
+
+def repo_slug():
+    url = git("remote", "get-url", "origin") or ""
+    m = re.search(r"github\.com[:/]([^/]+/[^/.]+)", url)
+    return m.group(1) if m else None
+
+
+def human_bytes(n):
+    if n is None:
+        return "?"
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit in ("B", "K") else f"{n:.1f}{unit}"
+        n /= 1024.0
+    return str(n)
+
+
+_DU_CACHE = Path(tempfile.gettempdir()) / "agent-cli-du.json"
+FRESH = False
+
+
+def du_bytes(path, ttl=600, timeout=60):
+    """Directory size in bytes via `du -sk`, cached for `ttl` seconds (None if missing/unknown)."""
+    path = Path(path)
+    if not path.exists() or path.is_symlink():
+        return None
+    key = str(path)
+    cache = {}
+    try:
+        cache = json.loads(_DU_CACHE.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    hit = cache.get(key)
+    if hit and not FRESH and time.time() - hit[0] < ttl:
+        return hit[1]
+    if shutil.which("du") is None:
+        return None
+    rc, out = run(["du", "-sk", key], timeout=timeout)
+    try:
+        size = int(out.split()[0]) * 1024
+    except (ValueError, IndexError):
+        return None
+    cache[key] = [time.time(), size]
+    try:
+        _DU_CACHE.write_text(json.dumps(cache))
+    except OSError:
+        pass
+    return size
+
+
+def disk_free(path="/"):
+    try:
+        u = shutil.disk_usage(path)
+        return {"free": u.free, "total": u.total, "free_h": human_bytes(u.free), "used_pct": round(100 * u.used / u.total)}
+    except OSError:
+        return None
+
+
+def shared_target():
+    env = os.environ.get("CARGO_TARGET_DIR")
+    return Path(env) if env else HOME / "Library" / "Caches" / "Trek" / "target.nosync"
+
+
+def ps_lines():
+    if os.name == "nt":
+        return []
+    rc, out = run(["ps", "-axo", "pid=,etime=,command="], timeout=10)
+    return out.splitlines() if rc == 0 else []
+
+
+def trek_processes():
+    """The installed Trek (/Applications/...Trek.app) and dev builds (target*/trek) by pid."""
+    found = []
+    for line in ps_lines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, etime, cmd = parts
+        exe = cmd.split(" --")[0]
+        if re.search(r"/Trek\.app/Contents/MacOS/trek$", exe):
+            app = exe.split("/Contents/MacOS/")[0]
+            found.append({"pid": int(pid), "kind": "app", "path": app, "version": app_version(app), "uptime": etime})
+        elif re.search(r"/target[^ ]*/(debug|release)/trek$", exe):
+            found.append({"pid": int(pid), "kind": "dev", "path": exe, "uptime": etime})
+    return found
+
+
+def app_version(app):
+    try:
+        with open(Path(app) / "Contents" / "Info.plist", "rb") as f:
+            return plistlib.load(f).get("CFBundleShortVersionString")
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return None
+
+
+def cargo_running():
+    """(top-level cargo/xcodebuild commands, number of rustc processes) running now."""
+    tops, rustc = [], 0
+    for l in ps_lines():
+        cmd = (l.strip().split(None, 2) + ["", "", ""])[2]
+        exe = os.path.basename(cmd.split(" ")[0])
+        if exe == "rustc":
+            rustc += 1
+        elif exe in ("cargo", "xcodebuild"):
+            tops.append(exe + " " + cmd.split(" ", 1)[1][:110] if " " in cmd else exe)
+    return tops, rustc
+
+
+def workspace_version():
+    try:
+        m = re.search(r'^\[workspace\.package\][^\[]*?^version\s*=\s*"([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M | re.S)
+        if m:
+            return m.group(1)
+        m = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def latest_tag():
+    tags = git("tag", "--list", "v*", "--sort=-v:refname")
+    return tags.splitlines()[0] if tags else None
+
+
+def next_patch(tag):
+    m = re.match(r"v?(\d+)\.(\d+)\.(\d+)", tag or "")
+    return f"{m.group(1)}.{m.group(2)}.{int(m.group(3)) + 1}" if m else None
+
+
+def recent_runs(limit=30):
+    data, err = gh_json(["run", "list", "--limit", str(limit), "--json",
+                         "databaseId,workflowName,status,conclusion,headBranch,headSha,createdAt,displayTitle,event"])
+    return (data or []), err
+
+
+def run_brief(r):
+    if not r:
+        return None
+    return {"id": r.get("databaseId"), "workflow": r.get("workflowName"), "status": r.get("status"),
+            "conclusion": r.get("conclusion") or "-", "branch": r.get("headBranch"),
+            "sha": (r.get("headSha") or "")[:7], "created": r.get("createdAt"), "title": (r.get("displayTitle") or "")[:70]}
+
+
+def ago(ts):
+    secs = time.time() - ts
+    for unit, n in (("d", 86400), ("h", 3600), ("m", 60)):
+        if secs >= n:
+            return f"{int(secs // n)}{unit}"
+    return f"{int(secs)}s"
+
+
+def tail_bytes(path, n=65536):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - n))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def extract_errors(text, cap=30):
+    """Error lines from a CI/cargo/xcodebuild log, ANSI and GitHub timestamps stripped, deduped."""
+    lines = [GH_TS.sub("", strip_ansi(l)).rstrip() for l in text.splitlines()]
+    hits, seen = [], set()
+    for i, l in enumerate(lines):
+        if not ERR_LINE.search(l) or "##[group]" in l:
+            continue
+        if re.search(r"^\s*(Compiling|Running|Finished)\b|FAILED: 0|0 failed", l):
+            continue
+        item = l.strip()[:240]
+        nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        if nxt.startswith("-->") or ("panicked at" in l and nxt):
+            item += "  " + nxt[:160]
+        if item not in seen:
+            seen.add(item)
+            hits.append(item)
+        if len(hits) >= cap:
+            break
+    return hits
+
+
+# ---------------------------------------------------------------- subcommands
+
+def cmd_status(a):
+    """Branch, HEAD, dirty files, main vs origin/main, tag, CI/release, running Trek, disk."""
+    d = {"root": str(ROOT), "branch": git("branch", "--show-current") or "(detached)"}
+    head = git("log", "-1", "--format=%h %s")
+    d["head"] = head
+    porcelain = git("status", "--porcelain") or ""
+    files = [l for l in porcelain.splitlines() if l.strip()]
+    d["dirty"] = len(files)
+    d["dirty_files"] = [l[:3].strip() + " " + l[3:] for l in files[:15]]
+    if a.fetch:
+        run(["git", "-C", str(ROOT), "fetch", "-q", "origin"], timeout=60)
+    ab = git("rev-list", "--left-right", "--count", "HEAD...origin/main")
+    if ab:
+        ahead, behind = ab.split()
+        d["vs_origin_main"] = f"ahead {ahead} behind {behind}"
+    mo = git("rev-list", "--left-right", "--count", "main...origin/main")
+    if mo:
+        ahead, behind = mo.split()
+        d["main_vs_origin_main"] = f"ahead {ahead} behind {behind}"
+    fetch_head = Path(git("rev-parse", "--path-format=absolute", "--git-common-dir") or ".") / "FETCH_HEAD"
+    if fetch_head.exists():
+        d["last_fetch"] = ago(fetch_head.stat().st_mtime) + " ago"
+    d["latest_tag"] = latest_tag()
+    d["workspace_version"] = workspace_version()
+    runs, err = recent_runs(30)
+    if err:
+        d["ci"] = d["release_run"] = f"unknown ({err})"
+    else:
+        ci = next((r for r in runs if r.get("workflowName") == "CI" and r.get("headBranch") == "main"), None)
+        rel = next((r for r in runs if r.get("workflowName") == "Release"), None)
+        d["ci_main"] = run_brief(ci)
+        d["release_run"] = run_brief(rel)
+        mine = next((r for r in runs if r.get("workflowName") == "CI" and r.get("headBranch") == d["branch"]), None)
+        if mine:
+            d["ci_branch"] = run_brief(mine)
+    procs = trek_processes()
+    app = [p for p in procs if p["kind"] == "app"]
+    d["trek"] = (f"pid {app[0]['pid']} v{app[0]['version']} up {app[0]['uptime']}" if app else "not running")
+    d["trek_dev_builds_running"] = len([p for p in procs if p["kind"] == "dev"])
+    installed = app_version("/Applications/Trek.app")
+    if installed:
+        d["trek_installed"] = installed
+    df = disk_free("/")
+    d["disk_free"] = f"{df['free_h']} ({df['used_pct']}% used)" if df else "?"
+    d["shared_build_cache"] = human_bytes(du_bytes(shared_target()))
+    return d
+
+
+def cmd_ci(a):
+    """Jobs of a GitHub Actions run with conclusions; failed jobs' error lines from the job log."""
+    if not gh_ok():
+        return {"run": a.run, "error": "offline" if OFFLINE else "gh not installed"}
+    run_id = a.run
+    if run_id == "latest":
+        args = ["run", "list", "--limit", "1", "--json", "databaseId"]
+        if a.workflow:
+            args += ["--workflow", a.workflow]
+        if a.branch:
+            args += ["--branch", a.branch]
+        data, err = gh_json(args)
+        if err or not data:
+            raise CliError(f"no run found ({err or 'empty'})")
+        run_id = str(data[0]["databaseId"])
+    data, err = gh_json(["run", "view", run_id, "--json",
+                         "databaseId,workflowName,status,conclusion,headBranch,headSha,event,createdAt,updatedAt,url,displayTitle,jobs"])
+    if err:
+        raise CliError(f"gh run view {run_id}: {err}")
+    d = {"run": data.get("databaseId"), "workflow": data.get("workflowName"), "status": data.get("status"),
+         "conclusion": data.get("conclusion") or "-", "branch": data.get("headBranch"),
+         "sha": (data.get("headSha") or "")[:7], "title": (data.get("displayTitle") or "")[:80], "url": data.get("url")}
+    slug = repo_slug()
+    jobs = []
+    for j in data.get("jobs") or []:
+        conc = j.get("conclusion") or "-"
+        job = {"name": j.get("name"), "status": j.get("status"), "conclusion": conc, "id": j.get("databaseId")}
+        failed_steps = [s.get("name") for s in j.get("steps") or [] if s.get("conclusion") == "failure"]
+        if failed_steps:
+            job["failed_steps"] = failed_steps
+        if conc in ("failure", "timed_out") or failed_steps:
+            if slug and j.get("databaseId") and j.get("status") == "completed":
+                api = ["gh", "api", f"repos/{slug}/actions/jobs/{j['databaseId']}/logs"]
+                rc, log = run(api[:2] + ["--allow-escape-sequences"] + api[2:], cwd=str(ROOT), timeout=120)
+                if rc != 0 and "unknown flag" in log:  # older gh: logs come back without the escape guard
+                    rc, log = run(api, cwd=str(ROOT), timeout=120)
+                job["errors"] = extract_errors(log, a.max) if rc == 0 else [f"log unavailable: {log.strip()[-160:]}"]
+        jobs.append(job)
+    d["counts"] = {k: sum(1 for j in jobs if j["conclusion"] == k) for k in sorted({j["conclusion"] for j in jobs})}
+    # successes are only counted unless asked for: the jobs that need a look come first and alone
+    d["jobs"] = jobs if a.all_jobs else [j for j in jobs if j["conclusion"] not in ("success", "skipped")]
+    return d
+
+
+def crate_purpose(cdir):
+    for f in ("src/lib.rs", "src/main.rs"):
+        p = cdir / f
+        if not p.exists():
+            continue
+        doc = []
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    s = line.strip()
+                    if s.startswith("//!"):
+                        t = s[3:].strip()
+                        if not t and doc:
+                            break
+                        if t.startswith("#") and not doc:
+                            continue
+                        if t:
+                            doc.append(t)
+                    elif doc or (s and not s.startswith("#![")):
+                        break
+        except OSError:
+            continue
+        text = " ".join(doc)
+        m = re.match(r"(.+?[.!?])(\s|$)", text)
+        text = m.group(1) if m else text
+        return (text[:97] + "...") if len(text) > 100 else text, f
+    return "", None
+
+
+def cmd_crates(a):
+    """Workspace crates with the first sentence of their lib.rs/main.rs doc comment."""
+    rows = []
+    for cdir in sorted((ROOT / "crates").iterdir()):
+        if not (cdir / "Cargo.toml").exists():
+            continue
+        purpose, src = crate_purpose(cdir)
+        rows.append({"crate": cdir.name, "purpose": purpose, "src": src})
+    return {"count": len(rows), "crates": rows, "_text": [f"{r['crate']}: {r['purpose']}" for r in rows]}
+
+
+FEATURES = ROOT / ".agents" / "skills" / "verify-trek" / "references" / "features"
+
+
+def cmd_feature(a):
+    """A verify-trek feature doc: its summary and the ids it lists (mocks, routes, controls, code)."""
+    files = sorted(p for p in FEATURES.glob("*.md") if p.name != "README.md")
+    readme = (FEATURES / "README.md").read_text() if (FEATURES / "README.md").exists() else ""
+    summaries = {m.group(2): m.group(3).strip() for m in re.finditer(r"- \[([^\]]+)\]\(([^)]+)\) — (.+)", readme)}
+    if not a.name:
+        rows = [{"feature": p.stem, "summary": summaries.get(p.name, "")[:140]} for p in files]
+        return {"features": rows, "_text": [f"{r['feature']}: {r['summary']}" for r in rows]}
+    q = a.name.lower()
+    match = [p for p in files if p.stem == q] or [p for p in files if q in p.stem] or \
+            [p for p in files if q in p.read_text(errors="replace").lower()[:4000]]
+    if not match:
+        raise CliError(f"no feature matches {a.name!r}; run `agent-cli feature` for the list")
+    p = match[0]
+    text = p.read_text(errors="replace")
+    ids = {
+        "mocks": sorted(set(re.findall(r"\bmock:[a-z][\w-]*", text))),
+        "routes": sorted(set(re.findall(r"\b(?:settings|tool|thread|project|title):[a-z][\w-]*", text))),
+        "trek_dev": sorted(set(m.strip() for m in re.findall(r"trek-dev ((?:open|send|control|project|screenshot|logs|start)[^\n#`]*)", text)))[:25],
+        "code": sorted(set(re.findall(r"\b(?:crates|ios|script|docs)/[\w./-]+\.\w+", text)))[:40],
+        "settings_keys": sorted(k for k in set(re.findall(r"`((?:[a-z_]+\.){1,3}[a-z_]+)`", text))
+                                if not re.search(r"\.(rs|md|swift|toml|sh|ps1|py|json|js|html|plist|yml)$", k))[:20],
+    }
+    d = {"feature": p.stem, "path": str(p.relative_to(ROOT)), "summary": summaries.get(p.name, ""),
+         "other_matches": [m.stem for m in match[1:6]], **ids}
+    if a.full:
+        d["text"] = text
+    return d
+
+
+def cmd_where(a):
+    """Search crates/ (and with --all ios/, script/, docs/, .agents/) for text or a symbol; file:line."""
+    pattern = a.query
+    regex = a.regex
+    if a.defs:
+        name = re.escape(a.query)
+        pattern = (rf"\b(fn|struct|enum|trait|type|const|static|mod|union|macro_rules!|class|func|protocol|extension|var|let)\s+{name}\b"
+                   rf"|\bimpl\b[^{{;]*\b{name}\b")
+        regex = True
+    dirs = ["crates"] + (["ios", "script", "docs", ".agents", ".github"] if a.all else [])
+    dirs = [x for x in dirs if (ROOT / x).exists()]
+    if shutil.which("rg"):
+        cmd = ["rg", "-n", "--no-heading", "--color", "never", "-M", "220", "-g", "!target*", "-g", "!*.lock"]
+        cmd += [] if regex else ["-F"]
+        cmd += ["-S"] if not a.case else []
+        cmd += ["-e", pattern, *dirs]
+    else:
+        cmd = ["grep", "-rnI", "--exclude-dir=target*"] + ([] if regex else ["-F"]) + ([] if a.case else ["-i"])
+        cmd += (["-E"] if regex else []) + ["-e", pattern, *dirs]
+    rc, out = run(cmd, cwd=str(ROOT), timeout=60)
+    if rc not in (0, 1):
+        raise CliError(out.strip()[-200:])
+    hits = [l for l in out.splitlines() if l.strip()]
+    shown = []
+    for l in hits[: a.max]:
+        m = re.match(r"([^:]+):(\d+):(.*)", l)
+        if m:
+            shown.append({"file": m.group(1), "line": int(m.group(2)), "text": m.group(3).strip()[:160]})
+    files = sorted({h["file"] for h in shown})
+    return {"query": a.query, "total": len(hits), "shown": len(shown), "files": len(set(re.match(r"[^:]+", l).group(0) for l in hits)),
+            "hits": shown, "_text": [f"{h['file']}:{h['line']}: {h['text']}" for h in shown] +
+            ([f"... {len(hits) - len(shown)} more (--max)"] if len(hits) > len(shown) else []) +
+            ([] if hits else ["no hits"])}
+
+
+LOG_DIR = HOME / "Library" / "Logs" / "Trek"
+LEVEL = re.compile(r"^\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s")
+
+
+def cmd_logs(a):
+    """Newest ~/Library/Logs/Trek log: warnings/errors/panics first, then the tail. ANSI stripped."""
+    logs = sorted(LOG_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime) if LOG_DIR.exists() else []
+    if not logs:
+        return {"log": None, "note": f"no logs in {LOG_DIR}"}
+    p = logs[-1]
+    text = strip_ansi(tail_bytes(p, 4 * 1024 * 1024))
+    lines = text.splitlines()[1:] if len(text) >= 4 * 1024 * 1024 else text.splitlines()
+    if a.grep:
+        lines = [l for l in lines if a.grep.lower() in l.lower()]
+    bad = [l for l in lines if (LEVEL.match(l) and LEVEL.match(l).group(1) in ("WARN", "ERROR")) or "panicked" in l]
+    cut = lambda l: l[:a.width]
+    d = {"log": str(p), "size": human_bytes(p.stat().st_size), "lines": len(lines),
+         "warn": sum(1 for l in bad if " WARN " in l[:40]), "error": sum(1 for l in bad if " ERROR " in l[:40]),
+         "panics": sum(1 for l in bad if "panicked" in l),
+         "problems": [cut(l) for l in bad[-a.n:]], "tail": [cut(l) for l in lines[-a.n:]]}
+    crash = sorted((HOME / "Library" / "Logs" / "DiagnosticReports").glob("trek*.ips"), key=lambda x: x.stat().st_mtime) \
+        if IS_MAC and (HOME / "Library" / "Logs" / "DiagnosticReports").exists() else []
+    if crash:
+        d["latest_crash_report"] = f"{crash[-1]} ({ago(crash[-1].stat().st_mtime)} ago)"
+    d["_text"] = [f"log {d['log']} {d['size']} warn={d['warn']} error={d['error']} panics={d['panics']}"] + \
+        ([f"crash {d['latest_crash_report']}"] if crash else []) + \
+        ["-- problems (newest last)"] + d["problems"] + ["-- tail"] + d["tail"]
+    return d
+
+
+def worktree_list():
+    out = git("worktree", "list", "--porcelain") or ""
+    wts, cur = [], {}
+    for line in out.splitlines() + [""]:
+        if not line.strip():
+            if cur:
+                wts.append(cur)
+            cur = {}
+            continue
+        k, _, v = line.partition(" ")
+        cur[k] = v or True
+    return wts
+
+
+def cmd_worktrees(a):
+    """git worktrees: branch, merged into main?, commits ahead, dirty count, own target dir size."""
+    base = "main" if git("rev-parse", "--verify", "-q", "main") else "origin/main"
+    rows = []
+    for w in worktree_list():
+        path = w.get("worktree")
+        br = w.get("branch", "")
+        br = br.replace("refs/heads/", "") if isinstance(br, str) else ""
+        row = {"path": path, "branch": br or "(detached)", "head": str(w.get("HEAD", ""))[:7]}
+        ref = br or row["head"]
+        if ref and br != "main":
+            rc, _ = run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", ref, base], timeout=20)
+            row["merged"] = rc == 0
+            ahead = git("rev-list", "--count", f"{base}..{ref}")
+            row["ahead"] = int(ahead) if ahead and ahead.isdigit() else None
+        last = git("log", "-1", "--format=%cr", ref) if ref else None
+        row["last_commit"] = last
+        if path and Path(path).exists() and not a.fast:
+            st = out_of(["git", "-C", path, "status", "--porcelain"], timeout=20)
+            row["dirty"] = len([l for l in (st or "").splitlines() if l.strip()])
+            for t in ("target", "target.nosync"):
+                tp = Path(path) / t
+                if tp.exists() and not tp.is_symlink():
+                    row["target"] = human_bytes(du_bytes(tp))
+        elif path and not Path(path).exists():
+            row["missing"] = True
+        rows.append(row)
+    merged = [r for r in rows if r.get("merged") and not r.get("dirty")]
+    return {"base": base, "count": len(rows), "merged_clean": len(merged), "worktrees": rows,
+            # only agent worktrees: others (phone-update's src, Trek's own) belong to tools
+            "removable": [f"git worktree remove {r['path']}" for r in merged
+                          if r["path"] != str(ROOT) and "/.claude/worktrees/" in r["path"]][:20]}
+
+
+def cmd_disk(a):
+    """Disk free, the build caches' sizes, and the two safe levers this repo uses."""
+    mr = main_root()
+    st = shared_target()
+    paths = {
+        "main target.nosync": mr / "target.nosync",
+        "main target": mr / "target",
+        "shared cache": st,
+        "shared debug": st / "debug",
+        "shared debug/incremental": st / "debug" / "incremental",
+        "shared shots": st / "shots",
+    }
+    if st.exists():
+        for sub in sorted(st.iterdir()):
+            if sub.is_dir() and sub.name not in ("debug", "shots", "tmp"):
+                paths[f"shared {sub.name}"] = sub
+    sizes = {}
+    for k, p in paths.items():
+        b = du_bytes(p)
+        if b is not None:
+            sizes[k] = human_bytes(b)
+    wt_targets = {}
+    for w in worktree_list():
+        p = w.get("worktree")
+        if p and p != str(mr):
+            for t in ("target", "target.nosync"):
+                tp = Path(p) / t
+                if tp.exists() and not tp.is_symlink():
+                    wt_targets[Path(p).name] = human_bytes(du_bytes(tp))
+    inc = st / "debug" / "incremental"
+    stale = 0
+    if inc.exists():
+        cutoff = time.time() - 15 * 60
+        stale = sum(1 for x in inc.iterdir() if x.is_dir() and x.stat().st_mtime < cutoff)
+    builds, rustc = cargo_running()
+    df = disk_free("/")
+    sweep = HOME / ".claude" / "bin" / "sweep-builds.sh"
+    levers = [
+        f"{'~/.claude/bin/sweep-builds.sh' if sweep.exists() else '(sweep-builds.sh missing)'}  # cargo sweep, caps targets at 40G; refuses while cargo/rustc run",
+        f"find {inc} -mindepth 1 -maxdepth 1 -type d -mmin +15 -exec rm -rf {{}} +  # stale incremental dirs; safe while builds run",
+        "export CARGO_INCREMENTAL=0  # before several worktree builds at once",
+    ]
+    d = {"disk_free": df["free_h"] if df else "?", "used_pct": df["used_pct"] if df else None, "sizes": sizes,
+         "worktree_targets": wt_targets, "stale_incremental_dirs": stale, "builds_running": len(builds), "rustc_running": rustc,
+         "sweep_log": str(HOME / "Library" / "Logs" / "trek-sweep-builds.log"), "levers": levers}
+    if builds:
+        d["builds"] = builds[:5]
+    return d
+
+
+def cmd_release(a):
+    """Latest tag, release run state, in-progress guard, and the exact gh line for the next version."""
+    tag = latest_tag()
+    d = {"latest_tag": tag, "workspace_version": workspace_version()}
+    rels, err = gh_json(["release", "list", "--limit", "1", "--json", "tagName,publishedAt,isPrerelease"]) if gh_ok() else (None, "offline")
+    if rels:
+        d["latest_github_release"] = rels[0].get("tagName")
+        d["published"] = rels[0].get("publishedAt")
+        tag = max([tag or "v0.0.0", rels[0].get("tagName") or "v0.0.0"], key=lambda t: [int(x) for x in re.findall(r"\d+", t)[:3]])
+    runs, err = gh_json(["run", "list", "--workflow", "release.yml", "--limit", "3", "--json",
+                         "databaseId,status,conclusion,headBranch,createdAt,displayTitle,event"]) if gh_ok() else (None, "offline")
+    if err:
+        d["release_runs"] = f"unknown ({err})"
+    else:
+        d["release_runs"] = [{"id": r["databaseId"], "status": r["status"], "conclusion": r.get("conclusion") or "-",
+                              "created": r["createdAt"]} for r in runs]
+        d["in_progress"] = any(r["status"] != "completed" for r in runs)
+    nxt = next_patch(tag)
+    d["next_version"] = nxt
+    d["command"] = f"gh workflow run release.yml --ref main -f version={nxt} -f channel=stable -F notes=@notes.md"
+    d["watch"] = "gh run list --workflow release.yml --limit 1  # then: agent-cli ci <id>"
+    ab = git("rev-list", "--left-right", "--count", "main...origin/main")
+    if ab:
+        d["main_vs_origin_main"] = "ahead {} behind {}".format(*ab.split())
+    d["rules"] = ["never run script/release.sh locally", "no push to main while a stable release runs (it pushes its bump)",
+                  "check origin/main for the Windows agent's commits first", "~45 min; git pull main after"]
+    if d.get("in_progress"):
+        d["rules"].insert(0, "RELEASE IN PROGRESS: do not push or dispatch")
+    return d
+
+
+def cmd_phone(a):
+    """iPhone app update state via ios/scripts/phone-update.sh --status (changes nothing)."""
+    script = ROOT / "ios" / "scripts" / "phone-update.sh"
+    d = {"script": str(script.relative_to(ROOT)) if script.exists() else None}
+    if not script.exists():
+        d["note"] = "no ios/scripts/phone-update.sh"
+        return d
+    if OFFLINE:
+        d["skipped"] = "offline"
+        return d
+    rc, out = run(["zsh", str(script), "--status"], cwd=str(ROOT), timeout=a.timeout)
+    lines = [strip_ansi(l).rstrip() for l in out.splitlines() if l.strip()]
+    d["exit"] = rc
+    d["lines"] = lines[-40:]
+    log = HOME / "Library" / "Logs" / "trek-phone-update.log"
+    if log.exists():
+        d["log"] = str(log)
+        d["log_last"] = [l for l in tail_bytes(log, 4096).splitlines() if l.strip()][-3:]
+    d["_text"] = [f"exit {rc}"] + lines[-40:] + ([f"log {log}"] + d.get("log_last", []) if log.exists() else [])
+    return d
+
+
+def memory_dir():
+    return HOME / ".claude" / "projects" / project_slug() / "memory"
+
+
+def cmd_memory(a):
+    """Claude memory notes for this repo: name and description; with a query, the matching notes."""
+    md = memory_dir()
+    if not md.exists():
+        return {"dir": str(md), "notes": [], "note": "no memory dir"}
+    notes = []
+    for p in sorted(md.glob("*.md")):
+        if p.name == "MEMORY.md":
+            continue
+        t = p.read_text(errors="replace")
+        m = re.search(r'^description:\s*"?(.*?)"?\s*$', t, re.M)
+        notes.append({"note": p.stem, "description": (m.group(1) if m else "")[:160], "_body": t})
+    if a.query:
+        q = a.query.lower()
+        hits = [n for n in notes if q in n["note"].lower() or q in n["_body"].lower()]
+        d = {"dir": str(md), "query": a.query, "matches": [{"note": n["note"], "description": n["description"]} for n in hits]}
+        if hits and not a.list:
+            body = re.sub(r"^---\n.*?\n---\n", "", hits[0]["_body"], flags=re.S).strip()
+            d["first"] = hits[0]["note"]
+            d["body"] = body
+            d["_text"] = [f"{n['note']}: {n['description']}" for n in hits] + [f"-- {hits[0]['note']}", body]
+        return d
+    rows = [{"note": n["note"], "description": n["description"]} for n in notes]
+    return {"dir": str(md), "count": len(rows), "notes": rows, "_text": [f"{r['note']}: {r['description']}" for r in rows]}
+
+
+def task_dirs():
+    roots = []
+    if hasattr(os, "getuid"):
+        roots.append(Path(f"/private/tmp/claude-{os.getuid()}"))
+        roots.append(Path(f"/tmp/claude-{os.getuid()}"))
+    roots.append(Path(tempfile.gettempdir()) / f"claude-{os.getuid() if hasattr(os, 'getuid') else 'user'}")
+    seen, out = set(), []
+    for r in roots:
+        base = r / project_slug()
+        try:
+            rp = base.resolve()
+        except OSError:
+            continue
+        if rp in seen or not base.exists():
+            continue
+        seen.add(rp)
+        out.extend(sorted(base.glob("*/tasks")))
+    return out
+
+
+def last_agent_text(path):
+    tool = ""
+    for line in reversed(tail_bytes(path, 262144).splitlines()):
+        if '"assistant"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        for b in reversed((d.get("message") or {}).get("content") or []):
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
+                return b["text"].strip().splitlines()[0][:160]
+            if isinstance(b, dict) and b.get("type") == "tool_use" and not tool:
+                tool = f"[tool {b.get('name')}]"
+    return tool
+
+
+def cmd_tasks(a):
+    """Newest background task outputs and sub-agent transcripts of this repo's sessions, with their last line."""
+    items = []
+    for td in task_dirs():
+        for p in td.glob("*.output"):
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            items.append((st.st_mtime, st.st_size, p))
+    items.sort(reverse=True)
+    rows = []
+    for mt, size, p in items[: a.n]:
+        agent = p.is_symlink() or str(os.path.realpath(p)).endswith(".jsonl")
+        if agent:
+            last = last_agent_text(os.path.realpath(p))
+        else:
+            tail = [l for l in strip_ansi(tail_bytes(p, 8192)).splitlines() if l.strip()]
+            last = tail[-1][:160] if tail else ""
+        rows.append({"id": p.stem, "kind": "agent" if agent else "bash", "age": ago(mt), "size": human_bytes(size),
+                     "session": p.parent.parent.name[:8], "last": last, "path": str(p)})
+    return {"count": len(items), "shown": len(rows), "tasks": rows,
+            "_text": [f"{r['id']} {r['kind']} {r['age']} {r['size']} s={r['session']} | {r['last']}" for r in rows]}
+
+
+def digest_text(text, cap=25):
+    text = strip_ansi(text)
+    lines = [GH_TS.sub("", l).rstrip() for l in text.splitlines()]
+    results = [l.strip() for l in lines if l.strip().startswith("test result:")]
+    failed_tests = sorted({m.group(1) for l in lines for m in [re.match(r"^test (\S+) \.\.\. FAILED", l.strip())] if m})
+    warnings = [l for l in lines if WARN_LINE.search(l)]
+    build = [l.strip() for l in lines if re.search(r"\*\* (BUILD|TEST) (SUCCEEDED|FAILED) \*\*|BUILD (SUCCEEDED|FAILED)", l)]
+    errors = extract_errors(text, cap)
+    passed = sum(int(m.group(1)) for r in results for m in [re.search(r"(\d+) passed", r)] if m)
+    failed = sum(int(m.group(1)) for r in results for m in [re.search(r"(\d+) failed", r)] if m)
+    ok = not errors and not failed_tests and failed == 0 and not any("FAILED" in b for b in build)
+    tail = [l for l in lines if l.strip()][-3:]
+    return {"ok": ok, "lines": len(lines), "errors": errors, "failed_tests": failed_tests[:cap],
+            "tests_passed": passed, "tests_failed": failed, "test_results": results[-10:],
+            "warnings": len(warnings), "first_warnings": [w.strip()[:200] for w in warnings[:5]], "build": build[-2:], "tail": tail}
+
+
+def cmd_digest(a):
+    """Summarise a cargo/xcodebuild/test/CI log file (or - for stdin): errors, failed tests, results."""
+    if a.file == "-":
+        text = sys.stdin.read()
+    else:
+        p = Path(a.file).expanduser()
+        if not p.exists():
+            raise CliError(f"no such file: {p}")
+        text = tail_bytes(p, 32 * 1024 * 1024)
+    d = digest_text(text, a.max)
+    d["file"] = a.file
+    return d
+
+
+def run_and_digest(cmd, a, cwd=None, env=None):
+    if a.dry_run:
+        return {"dry_run": True, "command": shlex.join(cmd)}
+    t0 = time.time()
+    rc, out = run(cmd, cwd=cwd or str(ROOT), timeout=a.timeout, env=env)
+    log = Path(tempfile.gettempdir()) / f"agent-cli-{cmd[0]}-{int(t0)}.log"
+    try:
+        log.write_text(out)
+    except OSError:
+        log = None
+    d = {"command": shlex.join(cmd), "exit": rc, "seconds": round(time.time() - t0, 1), "log": str(log) if log else None}
+    d.update(digest_text(out, a.max))
+    d["ok"] = d["ok"] and rc == 0
+    return d
+
+
+def cmd_test(a):
+    """cargo test -p <crate> [filter], digested (errors, failed tests, test result lines)."""
+    cmd = ["cargo", "test", "-p", a.crate] + (["--lib"] if a.lib else []) + (["--features", a.features] if a.features else [])
+    if a.filter:
+        cmd += ["--", a.filter]
+    return run_and_digest(cmd, a)
+
+
+def cmd_check(a):
+    """cargo check -p <crate> (or clippy with --clippy), digested to errors and warning count."""
+    cmd = ["cargo", "clippy" if a.clippy else "check", "-p", a.crate, "--message-format", "short"]
+    if a.features:
+        cmd += ["--features", a.features]
+    if a.tests:
+        cmd += ["--tests"]
+    return run_and_digest(cmd, a)
+
+
+def cmd_ios_build(a):
+    """Build the iPhone app for the simulator (no signing), digested to error lines and BUILD result."""
+    dd = Path(a.derived_data or (HOME / "Library" / "Caches" / "Trek" / "ios-dd"))
+    cmd = ["xcodebuild", "build", "-project", "ios/Trek.xcodeproj", "-scheme", "Trek", "-configuration", "Debug",
+           "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", str(dd), "CODE_SIGNING_ALLOWED=NO", "-quiet"]
+    d = run_and_digest(cmd, a)
+    if not a.dry_run:
+        app = dd / "Build" / "Products" / "Debug-iphonesimulator" / "Trek.app"
+        d["app"] = str(app) if app.exists() else None
+    return d
+
+
+def cmd_sims(a):
+    """iOS simulators: booted ones first, then Trek-named and newest iPhones (udid, state, runtime)."""
+    if shutil.which("xcrun") is None:
+        return {"note": "xcrun not available", "devices": []}
+    rc, out = run(["xcrun", "simctl", "list", "devices", "available", "--json"], timeout=30)
+    if rc != 0:
+        raise CliError(out.strip()[-200:])
+    devs = []
+    for rt, lst in json.loads(out).get("devices", {}).items():
+        rtn = rt.rsplit(".", 1)[-1].replace("iOS-", "iOS ").replace("-", ".")
+        for x in lst:
+            devs.append({"name": x["name"], "udid": x["udid"], "state": x["state"], "runtime": rtn})
+    devs.sort(key=lambda x: (x["state"] != "Booted", "trek" not in x["name"].lower(), x["runtime"]), reverse=False)
+    booted = [x for x in devs if x["state"] == "Booted"]
+    shown = booted + [x for x in devs if x not in booted][: a.n]
+    return {"booted": len(booted), "available": len(devs), "devices": shown,
+            "_text": [f"{x['state'].lower()} {x['udid']} {x['name']} ({x['runtime']})" for x in shown]}
+
+
+# ---------------------------------------------------------------- output
+
+def render(data, prefix=""):
+    lines = []
+    for k, v in data.items():
+        if k.startswith("_"):
+            continue
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            if not v:
+                continue
+            if all(not isinstance(x, (dict, list)) for x in v.values()):
+                lines.append(f"{key} " + " ".join(f"{kk}={vv}" for kk, vv in v.items()))
+            else:
+                lines.extend(render(v, key + "."))
+        elif isinstance(v, list):
+            if not v:
+                continue
+            for item in v:
+                if isinstance(item, dict):
+                    parts = []
+                    for kk, vv in item.items():
+                        if isinstance(vv, list):
+                            continue
+                        parts.append(f"{kk}={vv}")
+                    lines.append(f"{key} " + " ".join(parts))
+                    for kk, vv in item.items():
+                        if isinstance(vv, list):
+                            lines.extend(f"  {kk} {x}" for x in vv)
+                else:
+                    lines.append(f"{key} {item}")
+        elif v is None:
+            continue
+        elif isinstance(v, str) and "\n" in v:
+            lines.append(f"{key}:")
+            lines.append(v)
+        else:
+            lines.append(f"{key} {v}")
+    return lines
+
+
+def emit(data, as_json):
+    if as_json:
+        print(json.dumps({k: v for k, v in data.items() if not k.startswith("_")}, ensure_ascii=False, default=str))
+    else:
+        print("\n".join(data["_text"]) if "_text" in data else "\n".join(render(data)))
+
+
+# ---------------------------------------------------------------- CLI
+
+COMMANDS = {}
+
+
+def build_parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="machine-readable JSON (one object)")
+    common.add_argument("--offline", action="store_true", default=argparse.SUPPRESS, help="no gh/network or device calls")
+    common.add_argument("--fresh", action="store_true", default=argparse.SUPPRESS, help="ignore the 10-min du size cache")
+    p = argparse.ArgumentParser(prog="agent-cli", description=__doc__.strip().splitlines()[0],
+                                epilog="Use agent-cli first; prefer it over re-reading files or guessing commands.",
+                                parents=[common])
+    p.add_argument("--selftest", action="store_true", help="run every subcommand with --json --offline and check it parses")
+    p.add_argument("--online", action="store_true", help="with --selftest: allow gh/network calls")
+    sub = p.add_subparsers(dest="cmd", metavar="<command>")
+
+    def add(name, fn, aliases=(), **kw):
+        doc = fn.__doc__.strip()
+        sp = sub.add_parser(name, help=doc, description=doc, parents=[common], aliases=list(aliases), **kw)
+        sp.set_defaults(fn=fn)
+        COMMANDS[name] = sp
+        return sp
+
+    s = add("status", cmd_status, epilog="Replaces: git status/log/branch, git rev-list origin/main, gh run list, ps|grep Trek, df -h, du -sh.")
+    s.add_argument("--fetch", action="store_true", help="git fetch origin first (otherwise uses the last fetch)")
+    s = add("ci", cmd_ci, epilog="Examples: agent-cli ci latest; agent-cli ci latest --workflow release.yml; agent-cli ci 41225286016")
+    s.add_argument("run", nargs="?", default="latest", help="run id, or 'latest' (default)")
+    s.add_argument("--workflow", help="with latest: ci.yml, release.yml, ...")
+    s.add_argument("--branch", help="with latest: branch name")
+    s.add_argument("--max", type=int, default=30, help="error lines per failed job (default 30)")
+    s.add_argument("--all-jobs", action="store_true", help="list successful and skipped jobs too (default: counted only)")
+    add("crates", cmd_crates, epilog="Replaces: ls crates; head crates/*/src/lib.rs; cat Cargo.toml.")
+    s = add("feature", cmd_feature, epilog="No name: list features. Example: agent-cli feature video --full")
+    s.add_argument("name", nargs="?", help="feature doc name or substring (e.g. browser, phone, git)")
+    s.add_argument("--full", action="store_true", help="include the whole doc text")
+    s = add("where", cmd_where, epilog="Examples: agent-cli where --defs Workspace; agent-cli where 'fn send_prompt'; agent-cli where -r 'enum (Lucide|Icon)\\b'")
+    s.add_argument("query")
+    s.add_argument("--defs", action="store_true", help="definitions only (fn/struct/enum/trait/impl/mod/const/type, Swift func/class)")
+    s.add_argument("-r", "--regex", action="store_true", help="query is a regex")
+    s.add_argument("--all", action="store_true", help="also ios/, script/, docs/, .agents/, .github/")
+    s.add_argument("--case", action="store_true", help="case-sensitive (default smart case)")
+    s.add_argument("--max", type=int, default=40, help="hits shown (default 40)")
+    s = add("logs", cmd_logs, epilog="Replaces: sed 's/\\x1b...//' ~/Library/Logs/Trek/trek-<date>.log | grep -E ... | tail")
+    s.add_argument("n", nargs="?", type=int, default=20, help="lines of each section (default 20)")
+    s.add_argument("--grep", help="keep only lines containing this (case-insensitive)")
+    s.add_argument("--width", type=int, default=220, help="cut lines at this many chars")
+    s = add("worktrees", cmd_worktrees, epilog="Replaces: git worktree list; git branch --merged; du -sh <wt>/target.")
+    s.add_argument("--fast", action="store_true", help="skip per-worktree git status and du")
+    add("disk", cmd_disk, epilog="Prints levers; never deletes anything itself.")
+    add("release", cmd_release, epilog="Prints the dispatch line; never dispatches.")
+    s = add("phone", cmd_phone, epilog="Runs ios/scripts/phone-update.sh --status (read-only).")
+    s.add_argument("--timeout", type=int, default=90)
+    s = add("memory", cmd_memory, epilog="Examples: agent-cli memory; agent-cli memory release; agent-cli memory disk --list")
+    s.add_argument("query", nargs="?")
+    s.add_argument("--list", action="store_true", help="with a query: only list matches, no body")
+    s = add("tasks", cmd_tasks, epilog="Replaces: until [ -s .../tasks/<id>.output ]; do sleep; done; tail .../tasks/<id>.output")
+    s.add_argument("n", nargs="?", type=int, default=12)
+    s = add("digest", cmd_digest, epilog="Replaces: grep -E '^(error|warning)' -A8 <log>; grep 'test result'; tail -3. Example: cargo test ... 2>&1 | agent-cli digest -")
+    s.add_argument("file", help="log path, or - for stdin")
+    s.add_argument("--max", type=int, default=25)
+    for name, fn in (("test", cmd_test), ("check", cmd_check)):
+        s = add(name, fn)
+        s.add_argument("-p", "--crate", default="trek-app", help="crate (default trek-app)")
+        s.add_argument("--features", help="cargo features, e.g. shots")
+        s.add_argument("--dry-run", action="store_true", help="print the command, run nothing")
+        s.add_argument("--timeout", type=int, default=3600)
+        s.add_argument("--max", type=int, default=25)
+        if name == "test":
+            s.add_argument("filter", nargs="?", help="test name filter")
+            s.add_argument("--lib", action="store_true", help="only the lib tests")
+        else:
+            s.add_argument("--clippy", action="store_true", help="cargo clippy instead of check")
+            s.add_argument("--tests", action="store_true", help="also check test targets")
+    s = add("ios-build", cmd_ios_build, epilog="Replaces: xcodebuild build -project ios/Trek.xcodeproj ... | grep -E 'error:|BUILD'")
+    s.add_argument("--derived-data", help="default ~/Library/Caches/Trek/ios-dd")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--timeout", type=int, default=1800)
+    s.add_argument("--max", type=int, default=25)
+    s = add("sims", cmd_sims)
+    s.add_argument("n", nargs="?", type=int, default=8, help="non-booted devices shown")
+    return p
+
+
+SELFTEST_ARGS = {
+    "status": [], "ci": ["latest"], "crates": [], "feature": ["video"], "where": ["--defs", "main", "--max", "3"],
+    "logs": ["5"], "worktrees": ["--fast"], "disk": [], "release": [], "phone": [], "memory": [], "tasks": ["3"],
+    "digest": ["-"], "test": ["--dry-run", "-p", "trek-time"], "check": ["--dry-run", "-p", "trek-time"],
+    "ios-build": ["--dry-run"], "sims": ["2"],
+}
+DIGEST_SAMPLE = ("2026-10-31T10:00:00.0000000Z \x1b[31merror[E0425]\x1b[0m: cannot find value `x`\n"
+                 "  --> crates/a/src/lib.rs:3:5\nwarning: unused import\n"
+                 "test foo::bar ... FAILED\ntest result: FAILED. 3 passed; 1 failed; 0 ignored\n")
+
+
+def selftest(as_json, online):
+    me = os.path.abspath(__file__)
+    results = []
+    missing = sorted(set(COMMANDS) - set(SELFTEST_ARGS))
+    for name in COMMANDS:
+        args = SELFTEST_ARGS.get(name, [])
+        for variant in (["--help"], args + ["--json"] + ([] if online else ["--offline"])):
+            t0 = time.time()
+            try:
+                p = subprocess.run([sys.executable, "-I", me, name, *variant], cwd=str(ROOT), stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, timeout=180,
+                                   input=DIGEST_SAMPLE if name == "digest" else "")
+                rc, out, err = p.returncode, p.stdout, p.stderr
+            except subprocess.TimeoutExpired:
+                rc, out, err = 124, "", "timeout"
+            ok, why = rc == 0, err.strip()[-200:]
+            if ok and "--json" in variant:
+                try:
+                    obj = json.loads(out)
+                    ok = isinstance(obj, dict)
+                    why = "" if ok else "not an object"
+                    if ok and name == "digest":
+                        ok = obj.get("tests_failed") == 1 and obj.get("failed_tests") == ["foo::bar"] and \
+                            any("E0425" in e and "-->" in e for e in obj.get("errors", []))
+                        why = "" if ok else f"digest fixture mismatch: {obj}"
+                except ValueError as e:
+                    ok, why = False, f"bad JSON: {e}"
+            elif ok:
+                ok = "usage:" in out
+            results.append({"cmd": f"{name} {' '.join(variant)}", "ok": ok, "s": round(time.time() - t0, 2), **({"why": why} if not ok else {})})
+    unit = extract_errors(DIGEST_SAMPLE)
+    results.append({"cmd": "unit extract_errors", "ok": bool(unit) and unit[0].startswith("error[E0425]") and "\x1b" not in unit[0]})
+    if missing:
+        results.append({"cmd": "selftest covers " + ",".join(missing), "ok": False})
+    passed = all(r["ok"] for r in results)
+    data = {"passed": passed, "checks": len(results), "failed": [r for r in results if not r["ok"]],
+            "_text": [f"{'ok  ' if r['ok'] else 'FAIL'} {r['cmd']}" + (f"  {r.get('why', '')}" if not r["ok"] else "") for r in results]
+            + [f"selftest {'passed' if passed else 'FAILED'} ({len(results)} checks)"]}
+    emit(data, as_json)
+    return 0 if passed else 1
+
+
+def main(argv):
+    global OFFLINE, FRESH
+    p = build_parser()
+    a = p.parse_args(argv)
+    as_json = getattr(a, "json", False)
+    OFFLINE = getattr(a, "offline", False) or os.environ.get("AGENT_CLI_OFFLINE") == "1"
+    FRESH = getattr(a, "fresh", False)
+    if a.selftest:
+        return selftest(as_json, online=a.online and not OFFLINE)
+    if not getattr(a, "fn", None):
+        p.print_help()
+        return 0
+    try:
+        data = a.fn(a)
+    except CliError as e:
+        emit({"ok": False, "error": str(e), "_text": [f"error {e}"]}, as_json)
+        return 2
+    emit(data, as_json)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)
