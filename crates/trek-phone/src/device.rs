@@ -201,16 +201,111 @@ pub fn set_assistive_touch(udid: Option<&str>, on: bool) -> Result<(), String> {
 
 /// The user's apps (not the system's), by name.
 pub fn apps(udid: Option<&str>) -> Result<Vec<App>, String> {
+    apps_of(udid, "User")
+}
+
+/// Every app on the phone, Apple's own too (Settings, Safari, …): to open one by its name.
+pub fn all_apps(udid: Option<&str>) -> Result<Vec<App>, String> {
+    apps_of(udid, "Any")
+}
+
+fn apps_of(udid: Option<&str>, kind: &str) -> Result<Vec<App>, String> {
     block_on(async {
         let provider = provider(udid).await?;
         let mut proxy = InstallationProxyClient::connect(&provider)
             .await
             .map_err(err("Couldn't open installation_proxy"))?;
         let found = proxy
-            .get_apps(Some("User"), None)
+            .get_apps(Some(kind), None)
             .await
             .map_err(err("Couldn't list the apps"))?;
         Ok(apps_from(found))
+    })?
+}
+
+/// The phone's clock settings: its offset from UTC in seconds (its time zone, with daylight
+/// saving as it is now) and whether it shows a 24-hour clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Clock {
+    pub utc_offset: i32,
+    pub hours24: bool,
+}
+
+/// What the phone's own clock looks like, from lockdown (no session needed).
+pub fn clock(udid: Option<&str>) -> Result<Clock, String> {
+    block_on(async {
+        let provider = provider(udid).await?;
+        let mut lockdown = LockdownClient::connect(&provider)
+            .await
+            .map_err(err("Couldn't open lockdown"))?;
+        let offset = lockdown
+            .get_value(Some("TimeZoneOffsetFromUTC"), None)
+            .await
+            .map_err(err("Couldn't read the iPhone's time zone"))?;
+        let offset = offset
+            .as_real()
+            .or_else(|| offset.as_signed_integer().map(|i| i as f64))
+            .ok_or("The iPhone didn't say its time zone")?;
+        let hours24 = lockdown
+            .get_value(Some("Uses24HourClock"), None)
+            .await
+            .ok()
+            .and_then(|v| v.as_boolean())
+            .unwrap_or(false);
+        Ok(Clock {
+            utc_offset: offset.round() as i32,
+            hours24,
+        })
+    })?
+}
+
+/// Send `request` to TCP `port` on the phone over the cable (usbmuxd connects to the phone's own
+/// 127.0.0.1, as Xcode's port forwarding does) and read until it closes the connection: one
+/// HTTP/1.1 exchange with `Connection: close`. Nothing on the network can reach that port.
+pub fn exchange(
+    udid: Option<&str>,
+    port: u16,
+    request: &[u8],
+    limit: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    block_on(async move {
+        let work = async {
+            let mut mux = UsbmuxdConnection::default()
+                .await
+                .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+            let mut devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
+            devices.sort_by_key(|d| d.connection_type != Connection::Usb);
+            let device = match udid {
+                Some(u) => devices.into_iter().find(|d| d.udid == u),
+                None => devices.into_iter().next(),
+            }
+            .ok_or("No iPhone is connected: plug it in, unlock it and trust this Mac.")?;
+            // A connection of its own: after Connect it carries only the phone's port.
+            let tunnel = UsbmuxdConnection::default()
+                .await
+                .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+            let mut conn = tunnel
+                .connect_to_device(device.device_id, port, LABEL)
+                .await
+                .map_err(|e| format!("Nothing answers on the iPhone's port {port}: {e}"))?;
+            conn.send_raw(request)
+                .await
+                .map_err(err("Couldn't send to the iPhone"))?;
+            let mut out = Vec::new();
+            loop {
+                match conn.read_any(1 << 16).await {
+                    Ok(chunk) if chunk.is_empty() => break,
+                    Ok(chunk) => out.extend_from_slice(&chunk),
+                    // The far end closing is the end of the answer.
+                    Err(_) if !out.is_empty() => break,
+                    Err(e) => return Err(format!("Couldn't read from the iPhone: {e}")),
+                }
+            }
+            Ok(out)
+        };
+        tokio::time::timeout(limit, work)
+            .await
+            .map_err(|_| format!("The iPhone's port {port} didn't answer in time."))?
     })?
 }
 

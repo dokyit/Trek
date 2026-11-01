@@ -1,7 +1,10 @@
 //! Which way taps and keys reach the phone, decided once from what Trek knows, and what the
 //! iPhone tool's strip and `phone_status` say about it: the same words in both places.
 //!
-//! - **Bluetooth** when the phone took Trek's keyboard and mouse.
+//! - **USB** while the phone is unlocked on the cable and Trek Driver is installed (or should be:
+//!   Trek's iPhone app was installed from this Mac with `install-device.sh`): taps go through the
+//!   driver, an XCUITest inside that app (`crate::driver`).
+//! - Else **Bluetooth** when the phone took Trek's keyboard and mouse.
 //! - Else **iPhone Mirroring** when that route is known to work here: iPhone Mirroring has shown
 //!   an iPhone on this Mac (it pairs only with one on the Mac's own Apple Account, which is just
 //!   the phone that can't take the Bluetooth keyboard), or the phone is bonded to the Mac for
@@ -9,6 +12,7 @@
 //! - Else Bluetooth, which then needs the one-time pairing on the phone.
 
 use crate::diagnose::Blocker;
+use crate::driver::{Avail, INSTALL, State as Driver};
 use crate::helper::Status;
 use crate::mirror::State as Mirror;
 
@@ -18,6 +22,8 @@ pub const USB_QUIET: f64 = 30.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
+    /// Trek Driver over the cable, while the phone is unlocked.
+    Usb,
     Bluetooth,
     Mirroring,
 }
@@ -40,6 +46,9 @@ pub struct Facts {
     /// Someone wants taps now (an agent holds the phone, or the user just tapped it): the lock
     /// step is then a thing to do, not just a state.
     pub wants_taps: bool,
+    /// Whether Trek Driver can be used with this phone, and where it is.
+    pub driver: Avail,
+    pub driver_state: Driver,
     /// What `diagnose` found in the way, after iPhone Mirroring timed out with the phone locked.
     pub blocker: Option<Blocker>,
 }
@@ -110,7 +119,20 @@ impl Facts {
         s.linked_only() || matches!(s.bluetooth.as_str(), "off" | "not allowed" | "unsupported")
     }
 
+    /// Whether taps go over the cable through Trek Driver: it's (or should be) installed and the
+    /// phone is unlocked on the cable (its picture isn't black; or the cable's screen isn't read
+    /// yet and the driver already runs). A locked phone goes to iPhone Mirroring.
+    pub fn usb_route(&self) -> bool {
+        if self.driver == Avail::None || !self.phone || self.locked() || self.mirror_frames {
+            return false;
+        }
+        !self.status.screen.is_empty() || self.driver_state == Driver::Ready
+    }
+
     pub fn route(&self) -> Route {
+        if self.usb_route() {
+            return Route::Usb;
+        }
         let mirroring_here =
             self.mirroring_known || self.mirror.as_ref().is_some_and(Mirror::set_up);
         if self.status.input_ready() {
@@ -149,6 +171,7 @@ impl Facts {
             chip("Screen", Tone::Quiet, "Locked or idle")
         };
         let (taps, mut action, advice) = match route {
+            Route::Usb => self.usb_taps(),
             Route::Bluetooth => self.bluetooth_taps(),
             Route::Mirroring => self.mirroring_taps(),
         };
@@ -184,6 +207,47 @@ impl Facts {
                         .to_string()
                 })
             }),
+        }
+    }
+
+    fn usb_taps(&self) -> (Chip, Option<String>, Option<String>) {
+        let lock_instead = self.mirroring_known
+            || self.mirror.as_ref().is_some_and(Mirror::set_up)
+            || self.status.linked_only();
+        match (&self.driver, &self.driver_state) {
+            (Avail::Install(why), _) => (
+                chip(
+                    "Taps",
+                    Tone::Wait,
+                    format!("Install the driver ({INSTALL})"),
+                ),
+                self.wants_taps.then(|| {
+                    format!(
+                        "Run {INSTALL} to tap over USB{}.",
+                        if lock_instead {
+                            ", or lock the iPhone to tap through iPhone Mirroring"
+                        } else {
+                            ""
+                        }
+                    )
+                }),
+                Some(format!(
+                    "Taps over USB need Trek Driver, and {why}: ask the user to run {INSTALL} (it builds Trek's iPhone app with the driver inside){}.",
+                    if lock_instead {
+                        ", or to lock the iPhone so taps go through iPhone Mirroring"
+                    } else {
+                        ""
+                    }
+                )),
+            ),
+            (_, Driver::Starting) => (chip("Taps", Tone::Wait, "Starting the driver…"), None, None),
+            (_, Driver::Failed(why)) => (
+                chip("Taps", Tone::Bad, "The driver didn't start"),
+                self.wants_taps.then(|| why.clone()),
+                Some(why.clone()),
+            ),
+            // Off: it starts with the first tap.
+            _ => (chip("Taps", Tone::Good, "Ready · USB"), None, None),
         }
     }
 
@@ -349,9 +413,18 @@ pub fn explainer(route: Route) -> Vec<(&'static str, &'static str)> {
         "Apps and files",
         "Installing apps and copying files go over the cable, with nothing to set up.",
     );
+    let usb = (
+        "Taps over USB",
+        "While the iPhone is unlocked on the cable, Trek taps, swipes and types through Trek Driver, a small test runner inside Trek's iPhone app that ios/scripts/install-device.sh builds with it; it starts with the first tap (about 10 seconds) and stops when the agent lets go.",
+    );
+    let clock = (
+        "The clock",
+        "While its screen is captured over USB, iOS shows 9:41 and full bars in the status bar, as it does for QuickTime; Trek draws the iPhone's real time over it.",
+    );
     match route {
-        Route::Mirroring => vec![mirroring, screen, files, bluetooth],
-        Route::Bluetooth => vec![bluetooth, screen, files, mirroring],
+        Route::Usb => vec![usb, screen, clock, files, mirroring, bluetooth],
+        Route::Mirroring => vec![mirroring, screen, clock, files, usb, bluetooth],
+        Route::Bluetooth => vec![bluetooth, screen, clock, files, usb, mirroring],
     }
 }
 
@@ -511,6 +584,98 @@ mod tests {
         assert_eq!(facts(s, Some(Mirror::Closed)).route(), Route::Mirroring);
     }
 
+    fn with_driver(status: Status, avail: Avail) -> Facts {
+        let mut f = facts(status, Some(Mirror::TimedOut));
+        f.mirroring_known = true;
+        f.driver = avail;
+        f
+    }
+
+    #[test]
+    fn an_unlocked_phone_taps_over_usb_when_the_driver_is_there() {
+        // The user's case: same Apple Account (Mirroring known), unlocked on the cable.
+        let f = with_driver(usb_live(), Avail::Ready);
+        let strip = f.strip();
+        assert_eq!(strip.route, Route::Usb);
+        assert_eq!(strip.taps.word, "Ready · USB");
+        assert_eq!((strip.action, strip.advice), (None, None));
+        assert!(strip.assistive.is_none());
+        // Starting, then running.
+        let mut f = f;
+        f.driver_state = Driver::Starting;
+        assert_eq!(f.strip().taps.word, "Starting the driver…");
+        f.driver_state = Driver::Failed(
+            "Unlock the iPhone: Trek Driver starts only while it's unlocked.".into(),
+        );
+        f.wants_taps = true;
+        let strip = f.strip();
+        assert_eq!(strip.taps.word, "The driver didn't start");
+        assert!(strip.action.unwrap().starts_with("Unlock the iPhone"));
+        // Paired over Bluetooth too: the cable still wins while unlocked.
+        let mut s = usb_live();
+        s.hosts = 1;
+        s.bluetooth = "connected".into();
+        assert_eq!(with_driver(s, Avail::Ready).route(), Route::Usb);
+    }
+
+    #[test]
+    fn a_locked_phone_goes_back_to_mirroring_and_no_driver_means_no_usb_route() {
+        let mut s = usb_live();
+        s.dark = true;
+        let f = with_driver(s, Avail::Ready);
+        assert!(f.locked());
+        assert_eq!(f.route(), Route::Mirroring);
+        // Locked while the driver still runs: iPhone Mirroring all the same.
+        let mut f = f;
+        f.driver_state = Driver::Ready;
+        assert_eq!(f.route(), Route::Mirroring);
+        // The cable's screen not read yet, the driver running: USB.
+        let mut f = with_driver(Status::default(), Avail::Ready);
+        f.driver_state = Driver::Ready;
+        assert_eq!(f.route(), Route::Usb);
+        // iPhone Mirroring showing the phone: Mirroring.
+        let mut s = usb_live();
+        s.dark = true;
+        let mut f = with_driver(s, Avail::Ready);
+        f.mirror_frames = true;
+        assert_eq!(f.route(), Route::Mirroring);
+        // A Mac that never built Trek's iPhone app: as before.
+        assert_eq!(
+            with_driver(usb_live(), Avail::None).route(),
+            Route::Mirroring
+        );
+        assert_eq!(
+            with_driver(usb_live(), Avail::None).strip().taps.word,
+            "Lock the iPhone to tap"
+        );
+        // No phone at all: never USB.
+        let mut f = with_driver(usb_live(), Avail::Ready);
+        f.phone = false;
+        assert_ne!(f.route(), Route::Usb);
+    }
+
+    #[test]
+    fn a_missing_driver_says_how_to_install_it() {
+        let mut f = with_driver(usb_live(), Avail::Install("it isn't installed yet".into()));
+        let strip = f.strip();
+        assert_eq!(strip.route, Route::Usb);
+        assert_eq!(
+            strip.taps.word,
+            "Install the driver (ios/scripts/install-device.sh)"
+        );
+        assert_eq!(strip.action, None, "nobody wants taps: nothing to do now");
+        let advice = strip.advice.unwrap();
+        assert!(advice.contains("ios/scripts/install-device.sh"), "{advice}");
+        assert!(advice.contains("lock the iPhone"), "{advice}");
+        f.wants_taps = true;
+        assert!(
+            f.strip()
+                .action
+                .unwrap()
+                .starts_with("Run ios/scripts/install-device.sh")
+        );
+    }
+
     #[test]
     fn no_phone_says_how_to_connect_it() {
         let f = Facts::default();
@@ -535,5 +700,11 @@ mod tests {
             "Taps through iPhone Mirroring"
         );
         assert_eq!(explainer(Route::Bluetooth)[0].0, "Taps over Bluetooth");
+        let usb = explainer(Route::Usb);
+        assert_eq!(usb[0].0, "Taps over USB");
+        assert!(
+            usb.iter()
+                .any(|(t, body)| *t == "The clock" && body.contains("9:41"))
+        );
     }
 }

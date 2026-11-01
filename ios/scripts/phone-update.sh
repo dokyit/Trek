@@ -304,6 +304,21 @@ if ! (cd "$SRC/ios" && nice -n 10 xcodebuild -project Trek.xcodeproj -scheme Tre
   fail "Building Trek $VERSION on your Mac failed${first:+: $first}" "build of Trek $VERSION failed"
 fi
 APP="$DD/Build/Products/Debug-iphoneos/Trek.app"
+# Trek Driver inside it, as install-device.sh does (sources from before it have no build-driver.sh).
+if [[ -f "$SRC/ios/scripts/build-driver.sh" && "${DRIVER:-1}" != 0 ]]; then
+  rm -rf "$STATE/driver.new"
+  if DRIVER_DD="$DD.driver" sh "$SRC/ios/scripts/build-driver.sh" "$APP" "$STATE/driver.new" > "$TMP/driver.log" 2>&1; then
+    rm -rf "$STATE/driver"
+    mv "$STATE/driver.new" "$STATE/driver"
+    APP="$STATE/driver/Trek.app"
+    log "built Trek Driver into it"
+  else
+    log "Trek Driver didn't build (installing Trek without it): $(grep -m1 -iE "error" "$TMP/driver.log" | cut -c1-140)"
+    rm -rf "$STATE/driver.new"
+  fi
+fi
+# A driver left from an older install would put that older Trek back when it starts.
+[[ "$APP" == "$STATE/driver/Trek.app" ]] || rm -rf "$STATE/driver"
 # Over a running app: installd ends the app before it replaces it, as an App Store update does,
 # and nothing starts it again. Seen with `simctl install` over Trek running in the Simulator (the
 # install succeeds, the app is gone); on an iPhone, usbmuxd's install and devicectl's go through
@@ -325,6 +340,9 @@ read -r exp _ <<< "$(profile_expiry "$APP/embedded.mobileprovision")"
   print "expires=$exp"
   print "device=$UDID"
 } > "$STATE/installed"
+if [[ "$APP" == "$STATE/driver/Trek.app" ]]; then
+  printf 'bundle=%s\nbuild=%s\nexpires=%s\ndevice=%s\n' "$BUNDLE" "$BUILD" "$exp" "$UDID" > "$STATE/driver/info"
+fi
 log "installed Trek $VERSION ($BUILD) in $(( $(date +%s) - start )) s; signing good until $(date -r "${exp:-0}" '+%F %R')"
 record ok "Installed Trek $VERSION on $PHONE_NAME"
 event "installed $VERSION"

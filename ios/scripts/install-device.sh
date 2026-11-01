@@ -4,7 +4,9 @@
 # Env: TEAM (a team id; default: the first team Xcode knows, e.g. your Personal Team),
 #      DEVICE (a device UDID; default: the first available real iPhone),
 #      BUNDLE (bundle id; default dev.trek.TrekMobile — a free team may need a unique one, e.g.
-#      dev.trek.TrekMobile.<you>), LAUNCH=0 (install without opening it).
+#      dev.trek.TrekMobile.<you>), LAUNCH=0 (install without opening it), DRIVER=0 (without
+#      Trek Driver, the test runner inside the app that Trek's iPhone tool taps through over USB;
+#      see ios/scripts/build-driver.sh).
 # With a free Apple ID the app works for 7 days from when Xcode made its provisioning profile;
 # installing again with the same profile doesn't extend that, so a profile with 2 days or less
 # left is set aside first and Xcode makes a fresh one. The first time, the iPhone asks you to
@@ -62,6 +64,24 @@ xcodebuild -project Trek.xcodeproj -scheme Trek -configuration Debug \
   ${VERSION:+MARKETING_VERSION="$VERSION"} CURRENT_PROJECT_VERSION="$BUILD" \
   build -quiet
 APP="$DD/Build/Products/Debug-iphoneos/Trek.app"
+# Trek Driver inside the app: the Mac's iPhone tool taps through it over the cable while the
+# iPhone is unlocked (ios/TrekDriver; DRIVER=0 leaves it out). Kept in $STATE/driver with the
+# .xctestrun Trek starts it with.
+DRIVER_DIR="$STATE/driver"
+if [ "${DRIVER:-1}" != 0 ]; then
+  mkdir -p "$STATE"
+  rm -rf "$DRIVER_DIR.new"
+  if DRIVER_DD="$DD.driver" sh scripts/build-driver.sh "$APP" "$DRIVER_DIR.new"; then
+    rm -rf "$DRIVER_DIR"
+    mv "$DRIVER_DIR.new" "$DRIVER_DIR"
+    APP="$DRIVER_DIR/Trek.app"
+  else
+    echo "Trek Driver didn't build: installing Trek without it (taps over USB won't work)." >&2
+    rm -rf "$DRIVER_DIR.new"
+  fi
+fi
+# A driver left from an older install would put that older Trek back when it starts.
+[ "$APP" = "$DRIVER_DIR/Trek.app" ] || rm -rf "$DRIVER_DIR"
 if [ -n "$TREK_MCP" ] && "$TREK_MCP" phone-device install "$APP" --udid "$DEVICE"; then
   :
 else
@@ -71,6 +91,10 @@ fi
 set -- $(expiry "$APP/embedded.mobileprovision")
 mkdir -p "$STATE"
 printf 'version=%s\nbuild=%s\nat=%s\nexpires=%s\ndevice=%s\n' "$VERSION" "$BUILD" "$(date +%s)" "${1:-}" "$DEVICE" > "$STATE/installed"
+if [ "$APP" = "$DRIVER_DIR/Trek.app" ]; then
+  printf 'bundle=%s\nbuild=%s\nexpires=%s\ndevice=%s\n' "$BUNDLE" "$BUILD" "${1:-}" "$DEVICE" > "$DRIVER_DIR/info"
+  echo "Trek Driver installed with it: Trek's iPhone tool taps over USB while the iPhone is unlocked."
+fi
 rm -f "$DD.profile.plist"
 [ -n "${1:-}" ] && [ "$1" != 0 ] && echo "Signed until $(date -r "$1" '+%F %R')."
 if [ "${LAUNCH:-1}" != 0 ]; then
