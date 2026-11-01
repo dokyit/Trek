@@ -222,11 +222,27 @@ URGENT_NOW=$(( ${#EXPIRES} > 0 && LEFT <= URGENT ))
 
 # 4. Not over a build, and not while Trek is open on the iPhone (unless someone asked, from it or
 # from Trek on this Mac).
-if pgrep -x xcodebuild >/dev/null; then
+# Trek Driver's own runner (`xcodebuild test-without-building … TrekDriver…xctestrun`, the Mac's
+# iPhone tool tapping over USB) is not a build in the way: installing over the app ends it, and the
+# tool starts it again at the next tap. Asked from the iPhone, it would otherwise block itself.
+driver_runs=()
+other_builds=()
+for p in ${(f)"$(pgrep -x xcodebuild)"}; do
+  if ps -o command= -p "$p" 2>/dev/null | grep -q "test-without-building.*TrekDriver"; then
+    driver_runs+=("$p")
+  else
+    other_builds+=("$p")
+  fi
+done
+if (( ${#other_builds} )); then
   (( ASKED )) && fail "Your Mac is busy with another Xcode build; try again in a few minutes" \
     "asked (${(j:; :)why}), but an Xcode build is running"
   log "due (${(j:; :)why}), but an Xcode build is running; next time"
   exit 0
+fi
+if (( ${#driver_runs} )); then
+  log "stopping Trek Driver's runner (${(j:, :)driver_runs}) for the install"
+  kill "${driver_runs[@]}" 2>/dev/null || true
 fi
 # TREK_PHONE_UPDATE_IGNORE_BUILDS=1 (set for one run with `launchctl setenv`) goes ahead over a
 # cargo build, as --asked does: for a Mac that builds all day, when the user wants the phone updated now.
