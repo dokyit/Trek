@@ -620,6 +620,10 @@ def run_check(driver: Driver, *, quick: bool) -> dict[str, Any]:
         scripts = sorted((driver.root / "script").glob("*.sh")) + sorted((driver.root / "script" / "lib").glob("*.sh"))
         for script in scripts:
             run_step(f"shell parses: {script.relative_to(driver.root)}", ["zsh", "-n", str(script)])
+        agent_cli = driver.root / "bin" / "agent-cli"
+        if agent_cli.exists():
+            # every subcommand runs with --json --offline and must print one well-formed object
+            run_step("agent-cli selftest", [sys.executable, "-I", str(agent_cli), "--selftest", "--offline"])
         if not quick:
             run_step(
                 "workspace tests",
@@ -798,7 +802,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 text = "\n".join(line for line in text.splitlines() if args.grep.lower() in line.lower())
             data = {"path": str(driver.log_path), "lines": text.splitlines(), "running": driver.status()["running"]}
         elif cmd == "check":
-            checks = ["parse script/*.sh and script/lib/*.sh"]
+            checks = ["parse script/*.sh and script/lib/*.sh", "bin/agent-cli --selftest --offline (every subcommand's --json parses)"]
             if not args.quick:
                 checks.append("run CI-equivalent Rust workspace tests")
             checks.extend(["build trek-app with shots", "launch isolated mock-only Trek", "open and capture Basecamp", "open and capture General settings"])
