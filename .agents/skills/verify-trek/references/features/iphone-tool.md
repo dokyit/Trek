@@ -25,6 +25,7 @@ An isolated run never touches the real phone: the tool starts with a made-up one
 ./.agents/skills/verify-trek/scripts/trek-dev control phone usb        # unlocked, Mirroring route: Lock the iPhone to tap
 ./.agents/skills/verify-trek/scripts/trek-dev control phone lock       # the same while someone wants taps: the action line
 ./.agents/skills/verify-trek/scripts/trek-dev control phone locked     # locked, iPhone Mirroring closed: Ready
+./.agents/skills/verify-trek/scripts/trek-dev control phone unreachable  # locked, timed out, diagnosed: the blocker and Check again
 ./.agents/skills/verify-trek/scripts/trek-dev control phone mirroring  # iPhone Mirroring showing the phone
 ./.agents/skills/verify-trek/scripts/trek-dev control phone pair       # Bluetooth route, not paired yet
 ./.agents/skills/verify-trek/scripts/trek-dev control phone bluetooth  # paired: Ready · Bluetooth, AssistiveTouch chip
@@ -51,9 +52,17 @@ cat "$(./.agents/skills/verify-trek/scripts/trek-dev status | jq -r .runtime_dir
 
 The driver by hand (what Trek does): `ios/scripts/install-device.sh` (or `ios/scripts/build-driver.sh <signed Trek.app> <dir>`), then `xcodebuild test-without-building -xctestrun <copy with TREK_DRIVER=1, TREK_DRIVER_PORT, TREK_DRIVER_TOKEN> -destination id=<udid> -only-testing:TrekDriver/Drive` and HTTP to port 8117 over usbmuxd: `GET /status` (screen in points), `POST /tap {x,y,hold_ms}`, `/swipe {x1,y1,x2,y2,duration_ms}`, `/type {text}`, `/key {key: home|lock|volume_up|volume_down|spotlight|enter|backspace|…}`, `/open {bundle}`, `GET /screenshot`, `POST /stop`, each with `X-Trek-Token`. Its HTTP parsing has its own tests: `xcodebuild test -project ios/TrekDriver/TrekDriver.xcodeproj -scheme TrekDriver -destination 'platform=iOS Simulator,name=iPhone 17'`.
 
+Why iPhone Mirroring can't reach the phone, from the Mac's side (Wi-Fi, Bluetooth, Internet Sharing, firewall, VPN, the phone on the Mac's network, and how its last Connect ended in its log), with the one blocker last:
+
+```sh
+cargo run -p trek-phone --example mirror -- diagnose
+```
+
+The tool runs the same checks when iPhone Mirroring times out with the phone locked, and its action line names that blocker with **Check again**.
+
 ## Code
 
-`crates/trek-app/src/panels/phone.rs` (the tool, its agent calls, the status bar clock), `crates/trek-phone/src/route.rs` (the route and the strip's words, shared with `phone_status`), `crates/trek-phone/src/driver.rs` (starting and talking to Trek Driver, tools onto its endpoints, pixels to points), `ios/TrekDriver/` (the driver; `project.yml` for xcodegen), `ios/scripts/build-driver.sh` (puts it in Trek.app), `crates/trek-phone/src/mirror.rs` (iPhone Mirroring's states, read through Accessibility), `crates/trek-phone/helper/main.swift` (USB capture, Bluetooth, iPhone Mirroring input), `crates/trek-phone/src/device.rs` (lockdown, AssistiveTouch, apps, files, the phone's clock, a TCP port on the phone), `crates/trek-ipc/src/phone.rs` (the tools).
+`crates/trek-app/src/panels/phone.rs` (the tool, its agent calls, the status bar clock), `crates/trek-phone/src/route.rs` (the route and the strip's words, shared with `phone_status`), `crates/trek-phone/src/driver.rs` (starting and talking to Trek Driver, tools onto its endpoints, pixels to points), `ios/TrekDriver/` (the driver; `project.yml` for xcodegen), `ios/scripts/build-driver.sh` (puts it in Trek.app), `crates/trek-phone/src/mirror.rs` (iPhone Mirroring's states, read through Accessibility; Trek's Connect retries), `crates/trek-phone/src/diagnose.rs` (why it can't reach the phone), `crates/trek-phone/helper/main.swift` (USB capture, Bluetooth, iPhone Mirroring input), `crates/trek-phone/src/device.rs` (lockdown, AssistiveTouch, apps, files, the phone's clock, a TCP port on the phone), `crates/trek-ipc/src/phone.rs` (the tools).
 
 ## Verify
 

@@ -11,6 +11,7 @@
 //!   Continuity (its restored subscriptions), or Bluetooth can't work at all.
 //! - Else Bluetooth, which then needs the one-time pairing on the phone.
 
+use crate::diagnose::Blocker;
 use crate::driver::{Avail, INSTALL, State as Driver};
 use crate::helper::Status;
 use crate::mirror::State as Mirror;
@@ -48,6 +49,8 @@ pub struct Facts {
     /// Whether Trek Driver can be used with this phone, and where it is.
     pub driver: Avail,
     pub driver_state: Driver,
+    /// What `diagnose` found in the way, after iPhone Mirroring timed out with the phone locked.
+    pub blocker: Option<Blocker>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +88,9 @@ pub struct Strip {
     pub action: Option<String>,
     /// What an agent should do or tell the user, when taps can't reach the phone.
     pub advice: Option<String>,
+    /// The action line is the diagnosis of a timed-out iPhone Mirroring: the tool offers to
+    /// check again (after the user fixed it, or to find out).
+    pub recheck: bool,
 }
 
 const LOCK: &str = "Lock the iPhone to let Trek tap it.";
@@ -183,12 +189,18 @@ impl Facts {
                     .into(),
             );
         }
+        let recheck = route == Route::Mirroring
+            && self.phone
+            && self.mirror == Some(Mirror::TimedOut)
+            && self.locked()
+            && action.is_some();
         Strip {
             route,
             screen,
             taps,
             assistive,
             action,
+            recheck,
             advice: advice.or_else(|| {
                 (!self.phone).then(|| {
                     "No iPhone is connected: ask the user to plug it in, unlock it and trust this Mac." // words: ok, the iPhone tool is macOS only
@@ -299,13 +311,21 @@ impl Facts {
                 Some("iPhone Mirroring wants Touch ID or your password.".into()),
                 Some(Mirror::MacLocked.advice()),
             ),
-            // Locked and still timing out: iPhone Mirroring can't find the phone on the network
-            // (its log: "Failed to find endpoint"), which locking again won't change.
-            Some(Mirror::TimedOut) if self.locked() => (
-                chip("Taps", Tone::Bad, "iPhone Mirroring can't reach it"),
-                self.wants_taps.then(|| UNREACHABLE.to_string()),
-                Some(Mirror::unreachable_advice().into()),
-            ),
+            // Locked and still timing out: locking again won't change it. The diagnosis names
+            // what's in the way (shown whether or not someone wants taps: it needs the user);
+            // before it's in, the general advice.
+            Some(Mirror::TimedOut) if self.locked() => match &self.blocker {
+                Some(b) => (
+                    chip("Taps", Tone::Bad, "iPhone Mirroring can't reach it"),
+                    Some(b.action()),
+                    Some(b.advice()),
+                ),
+                None => (
+                    chip("Taps", Tone::Bad, "iPhone Mirroring can't reach it"),
+                    self.wants_taps.then(|| UNREACHABLE.to_string()),
+                    Some(Mirror::unreachable_advice().into()),
+                ),
+            },
             Some(Mirror::PhoneInUse | Mirror::TimedOut) => lock(Tone::Wait),
             _ if self.usb_live() => lock(Tone::Wait),
             Some(Mirror::Connecting) => (chip("Taps", Tone::Wait, "Connecting…"), None, None),
@@ -490,12 +510,26 @@ mod tests {
         let strip = f.strip();
         assert_eq!(strip.taps.word, "iPhone Mirroring can't reach it");
         assert_eq!(strip.action.as_deref(), Some(UNREACHABLE));
+        assert!(strip.recheck, "the line offers to check again");
         assert!(
             !strip
                 .advice
                 .unwrap()
                 .contains("lock the iPhone (side button)")
         );
+        // Once diagnosed: the one blocker, in place of the general line, for the user and agents.
+        f.blocker = Some(Blocker::PhoneNotOffering);
+        f.wants_taps = false;
+        let strip = f.strip();
+        assert_eq!(strip.action, Some(Blocker::PhoneNotOffering.action()));
+        assert!(strip.action.unwrap().contains("restart the iPhone"));
+        assert!(strip.advice.unwrap().contains("Reset iPhone Access"));
+        assert!(strip.recheck);
+        // Live again: nothing to do, nothing to check.
+        f.mirror = Some(Mirror::Live);
+        let strip = f.strip();
+        assert_eq!(strip.action, None);
+        assert!(!strip.recheck);
     }
 
     #[test]

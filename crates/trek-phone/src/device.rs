@@ -135,6 +135,45 @@ async fn lockdown(provider: &UsbmuxdProvider) -> Result<LockdownClient, String> 
     Ok(lockdown)
 }
 
+/// The phone on the Mac's own network, as usbmuxd finds it over Wi-Fi (Bonjour): its address
+/// there; `Err` with whether looking means anything (the phone's "Show this iPhone when on
+/// Wi-Fi" is off, so it never shows up there whatever its network).
+pub fn on_network(udid: Option<&str>) -> Result<std::net::IpAddr, bool> {
+    block_on(async {
+        let mut mux = UsbmuxdConnection::default().await.map_err(|_| false)?;
+        let devices = mux.get_devices().await.map_err(|_| false)?;
+        let mine = |d: &&idevice::usbmuxd::UsbmuxdDevice| udid.is_none_or(|u| d.udid == u);
+        if let Some(Connection::Network(ip)) = devices
+            .iter()
+            .filter(mine)
+            .map(|d| d.connection_type.clone())
+            .find(|c| matches!(c, Connection::Network(_)))
+        {
+            return Ok(ip);
+        }
+        // Not there: it means something only when the phone shows itself on Wi-Fi at all.
+        let Some(usb) = devices
+            .iter()
+            .filter(mine)
+            .find(|d| d.connection_type == Connection::Usb)
+        else {
+            return Err(false);
+        };
+        let provider = usb.to_provider(UsbmuxdAddr::default(), LABEL);
+        let mut lockdown = lockdown(&provider).await.map_err(|_| false)?;
+        let shown = lockdown
+            .get_value(
+                Some("EnableWifiConnections"),
+                Some("com.apple.mobile.wireless_lockdown"),
+            )
+            .await
+            .ok()
+            .and_then(|v| v.as_boolean());
+        Err(shown == Some(true))
+    })
+    .unwrap_or(Err(false))
+}
+
 /// Whether AssistiveTouch is on (iOS shows a pointer for a mouse only then).
 pub fn assistive_touch(udid: Option<&str>) -> Result<bool, String> {
     block_on(async {
