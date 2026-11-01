@@ -2580,14 +2580,13 @@ mod tests {
         let g = Gathered::gather(&s, Some(g)).unwrap();
         assert_eq!(g.read, 0);
         assert_eq!(g.recap(Range::All, &now), all);
-        assert_eq!(
-            g.recap(Range::Today, &now).turns,
-            if Range::Today.window(&now).contains(at) {
-                3
-            } else {
-                0
-            }
-        );
+        // A turn counts on the day it ended (a minute after it began): just before 1 a.m. some
+        // of these began yesterday and ended today.
+        let today = Range::Today.window(&now);
+        let ended_today = (0..3)
+            .filter(|i| today.contains(at + i * 1_000 + 60_000))
+            .count();
+        assert_eq!(g.recap(Range::Today, &now).turns, ended_today);
         // A turn in one thread failed after it reported its tokens: that one is read again.
         s.record_usage(
             &ids[1],
