@@ -199,6 +199,69 @@ impl Settle {
     }
 }
 
+/// Trek's own Connect after iPhone Mirroring times out. Pressing again at once only times out
+/// again the same way (seen ten times in a row on macOS 27.2), so: press again only once the
+/// phone shows on the Mac's network (or when that can't be told), a bounded number of times, and
+/// relaunch iPhone Mirroring once when it's stuck (connecting for ever, or a window that can't be
+/// read).
+#[derive(Debug, Clone, Default)]
+pub struct Retry {
+    pub presses: u32,
+    pub relaunched: bool,
+}
+
+/// At most this many presses of Connect for one call, the first included.
+pub const PRESSES: u32 = 3;
+/// How long to wait for the phone to show on the network before giving up on it.
+pub const PHONE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Connecting for longer than this is stuck (an attempt gives up after about 10 s by itself).
+pub const STUCK: std::time::Duration = std::time::Duration::from_secs(25);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    Press,
+    /// Wait for the phone to show on the network, then ask again.
+    Wait,
+    Relaunch,
+    /// Done trying: say what's in the way.
+    Stop,
+}
+
+impl Retry {
+    /// It timed out (again); `seen`: whether the phone shows on the Mac's network now (`None`
+    /// when that can't be told), `waited`: whether Trek already waited for it this round.
+    pub fn timed_out(&mut self, seen: Option<bool>, waited: bool) -> Next {
+        if self.presses >= PRESSES {
+            return Next::Stop;
+        }
+        match seen {
+            Some(false) if waited => Next::Stop,
+            Some(false) => Next::Wait,
+            _ => {
+                self.presses += 1;
+                Next::Press
+            }
+        }
+    }
+
+    /// It's stuck: relaunch it once, then stop.
+    pub fn stuck(&mut self) -> Next {
+        if std::mem::replace(&mut self.relaunched, true) {
+            Next::Stop
+        } else {
+            Next::Relaunch
+        }
+    }
+}
+
+/// Quit iPhone Mirroring (for a relaunch: the helper's `mirror open` brings it back behind the
+/// user's windows). A plain SIGTERM, which an app takes as Quit; no Apple Events, so no prompt.
+pub fn quit() {
+    let _ = std::process::Command::new("/usr/bin/pkill") // spawn: macOS only, and trek-phone has no trek-core
+        .args(["-x", "iPhone Mirroring"])
+        .status();
+}
+
 /// The View menu's shortcuts (chosen through Accessibility, not pressed).
 pub const HOME: &str = "1";
 pub const APP_SWITCHER: &str = "2";
@@ -440,6 +503,24 @@ mod tests {
             State::Closed
         );
         assert_eq!(State::of(&Look::default()), State::Missing);
+    }
+
+    #[test]
+    fn connect_is_pressed_again_only_when_it_can_help() {
+        let mut r = Retry::default();
+        // The phone shows on the network (or that can't be told): press, a bounded number of times.
+        assert_eq!(r.timed_out(Some(true), false), Next::Press);
+        assert_eq!(r.timed_out(None, false), Next::Press);
+        // Not on the network: wait for it once, then give up rather than press into nothing.
+        assert_eq!(r.timed_out(Some(false), false), Next::Wait);
+        assert_eq!(r.timed_out(Some(false), true), Next::Stop);
+        assert_eq!(r.timed_out(Some(true), true), Next::Press);
+        assert_eq!(r.presses, PRESSES);
+        assert_eq!(r.timed_out(Some(true), false), Next::Stop);
+        // Stuck: one relaunch, then stop.
+        let mut r = Retry::default();
+        assert_eq!(r.stuck(), Next::Relaunch);
+        assert_eq!(r.stuck(), Next::Stop);
     }
 
     #[test]

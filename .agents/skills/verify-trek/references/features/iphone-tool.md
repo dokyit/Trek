@@ -21,6 +21,7 @@ An isolated run never touches the real phone: the tool starts with a made-up one
 ./.agents/skills/verify-trek/scripts/trek-dev control phone usb        # unlocked, Mirroring route: Lock the iPhone to tap
 ./.agents/skills/verify-trek/scripts/trek-dev control phone lock       # the same while someone wants taps: the action line
 ./.agents/skills/verify-trek/scripts/trek-dev control phone locked     # locked, iPhone Mirroring closed: Ready
+./.agents/skills/verify-trek/scripts/trek-dev control phone unreachable  # locked, timed out, diagnosed: the blocker and Check again
 ./.agents/skills/verify-trek/scripts/trek-dev control phone mirroring  # iPhone Mirroring showing the phone
 ./.agents/skills/verify-trek/scripts/trek-dev control phone pair       # Bluetooth route, not paired yet
 ./.agents/skills/verify-trek/scripts/trek-dev control phone bluetooth  # paired: Ready · Bluetooth, AssistiveTouch chip
@@ -41,9 +42,17 @@ cat "$(./.agents/skills/verify-trek/scripts/trek-dev status | jq -r .runtime_dir
 
 `call <method> <json>` runs any `phone_*` tool as an agent on full access would; the answer lands in `<runtime>/shot/phone-reply.json`.
 
+Why iPhone Mirroring can't reach the phone, from the Mac's side (Wi-Fi, Bluetooth, Internet Sharing, firewall, VPN, the phone on the Mac's network, and how its last Connect ended in its log), with the one blocker last:
+
+```sh
+cargo run -p trek-phone --example mirror -- diagnose
+```
+
+The tool runs the same checks when iPhone Mirroring times out with the phone locked, and its action line names that blocker with **Check again**.
+
 ## Code
 
-`crates/trek-app/src/panels/phone.rs` (the tool, its agent calls), `crates/trek-phone/src/route.rs` (the route and the strip's words, shared with `phone_status`), `crates/trek-phone/src/mirror.rs` (iPhone Mirroring's states, read through Accessibility), `crates/trek-phone/helper/main.swift` (USB capture, Bluetooth, iPhone Mirroring input), `crates/trek-phone/src/device.rs` (lockdown, AssistiveTouch, apps, files), `crates/trek-ipc/src/phone.rs` (the tools).
+`crates/trek-app/src/panels/phone.rs` (the tool, its agent calls), `crates/trek-phone/src/route.rs` (the route and the strip's words, shared with `phone_status`), `crates/trek-phone/src/mirror.rs` (iPhone Mirroring's states, read through Accessibility; Trek's Connect retries), `crates/trek-phone/src/diagnose.rs` (why it can't reach the phone), `crates/trek-phone/helper/main.swift` (USB capture, Bluetooth, iPhone Mirroring input), `crates/trek-phone/src/device.rs` (lockdown, AssistiveTouch, apps, files), `crates/trek-ipc/src/phone.rs` (the tools).
 
 ## Verify
 
