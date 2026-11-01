@@ -1,0 +1,32 @@
+# Trek Driver: the small XCUITest runner the Mac's iPhone tool taps, swipes and types through
+# while the iPhone is unlocked on the USB cable. Generated with `xcodegen` (the .xcodeproj is
+# checked in, so building needs only Xcode). Built and signed with the iPhone app by
+# ios/scripts/install-device.sh; Trek starts it with `xcodebuild test-without-building`.
+name: TrekDriver
+options:
+  bundleIdPrefix: dev.trek
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  TrekDriver:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Driver
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.trek.TrekDriver
+        TARGETED_DEVICE_FAMILY: "1,2"
+schemes:
+  TrekDriver:
+    build:
+      targets:
+        TrekDriver: [test]
+    test:
+      targets:
+        - TrekDriver

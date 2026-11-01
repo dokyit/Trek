@@ -30,6 +30,16 @@ target without touching `project.pbxproj` (and files under `ios/TrekTests/` are 
 `xcodebuild … test` with the same destination). For a device build, set your team in Signing &
 Capabilities.
 
+## Trek Driver
+
+`ios/TrekDriver` is a small XCUITest (generated with `xcodegen` from its `project.yml`) that the
+Mac's iPhone tool taps, swipes and types through over the USB cable while the phone is unlocked.
+`scripts/install-device.sh` builds it into the installed `Trek.app` (`scripts/build-driver.sh`:
+a free Apple ID installs only three apps on a phone, so it isn't an app of its own) and leaves the
+`.xctestrun` Trek starts it with in `~/Library/Application Support/dev.trek.phone-update/driver`.
+Its HTTP parsing tests run on a simulator: `xcodebuild test -project TrekDriver/TrekDriver.xcodeproj
+-scheme TrekDriver -destination 'platform=iOS Simulator,name=iPhone 17'`.
+
 ## Demo mode
 
 Tap **Explore the demo** on the pairing screen (or launch with `-TrekDemo YES`). `MockHost` plays a

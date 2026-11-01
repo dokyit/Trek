@@ -5,6 +5,12 @@
 //! apps and files go over usbmuxd as Finder's do (`trek_phone::device`). No Xcode, no Developer
 //! Mode, nothing installed on the phone.
 //!
+//! While the phone is unlocked on the cable and Trek's iPhone app was built here with Trek Driver
+//! inside (`ios/scripts/install-device.sh`), taps, swipes and keys go over USB through the driver
+//! instead (`trek_phone::driver`), started on the first tap and stopped when the agent lets go.
+//! While the cable's picture is the screen, iOS draws 9:41 in its status bar (as for QuickTime);
+//! the panel draws the phone's real time over it.
+//!
 //! A phone on the Mac's own Apple Account never takes the Mac as a Bluetooth keyboard (it's
 //! already bonded for Continuity), so its taps and keys go through macOS's iPhone Mirroring
 //! window instead, in the background (`trek_phone::mirror`), and the picture comes from that
@@ -36,6 +42,7 @@ use std::time::{Duration, Instant};
 use trek_agents::Decision;
 use trek_core::HandHolding;
 use trek_ipc::phone::{self as tools, Sensitive};
+use trek_phone::driver::{self, Driver};
 use trek_phone::helper::{self, Event, Link, MirrorCmd, Mirrored, Status};
 use trek_phone::hid::{self, Step};
 use trek_phone::lease::{Lease, TOOK_OVER};
@@ -65,6 +72,12 @@ const MIRROR_CONNECT: Duration = Duration::from_secs(30);
 /// keeps saying what to do about it.
 const WANT_TAPS: Duration = Duration::from_secs(60);
 
+/// How often a frame from the cable is read for iOS's status bar.
+const BAR_EVERY: Duration = Duration::from_millis(500);
+
+/// Trek Driver stops after this long without a tap while no agent holds the phone.
+const DRIVER_IDLE: Duration = Duration::from_secs(10 * 60);
+
 /// Where Trek remembers that iPhone Mirroring has shown an iPhone here, and its name: the route
 /// then stays iPhone Mirroring while its window is closed.
 fn mirroring_marker() -> PathBuf {
@@ -92,6 +105,8 @@ struct Frame {
     image: Arc<RenderImage>,
     width: f32,
     height: f32,
+    /// The status bar iOS drew in it (with its 9:41), when one shows.
+    bar: Option<StatusBar>,
 }
 
 pub struct PhonePanel {
@@ -142,6 +157,19 @@ pub struct PhonePanel {
     /// When the user last tapped the picture without the tap reaching the phone.
     wanted_taps: Option<Instant>,
     explain_open: bool,
+    /// Trek Driver, for taps over the cable while the phone is unlocked.
+    driver: Arc<Driver>,
+    driver_install: Option<driver::Install>,
+    /// Trek's iPhone app was installed on this phone from this Mac (the driver is then offered).
+    driver_built_here: bool,
+    /// The driver's state as the strip last showed it.
+    driver_shown: driver::State,
+    /// A made-up driver for design review.
+    demo_driver: Option<(driver::Avail, driver::State)>,
+    /// The phone's clock settings, for the status bar drawn over iOS's 9:41.
+    clock: Option<device::Clock>,
+    /// The time last drawn there (redrawn when the minute turns).
+    clock_shown: Option<String>,
     /// A made-up phone for design review (`control phone <state>`): nothing real is touched.
     demo: bool,
     notice: Option<SharedString>,
@@ -158,16 +186,25 @@ impl PhonePanel {
         let _ = std::thread::Builder::new()
             .name("trek-phone-decode".into())
             .spawn(move || {
+                // Where iOS's status bar is, looked for twice a second (it moves only when the
+                // app in front changes).
+                let mut bar = None;
+                let mut bar_at: Option<Instant> = None;
                 while let Ok((w, h)) = wake_rx.recv_blocking() {
                     let Some(jpeg) = slot.lock().unwrap().take() else {
                         continue;
                     };
+                    if bar_at.is_none_or(|t| t.elapsed() >= BAR_EVERY) {
+                        bar = status_bar(&jpeg);
+                        bar_at = Some(Instant::now());
+                    }
                     let image = Image::from_bytes(ImageFormat::Jpeg, jpeg);
                     if let Ok(image) = image.to_image_data(renderer.clone()) {
                         let frame = Frame {
                             image,
                             width: w as f32,
                             height: h as f32,
+                            bar,
                         };
                         if frames_tx.send_blocking(frame).is_err() {
                             break;
@@ -236,6 +273,13 @@ impl PhonePanel {
                 .map(|s| s.trim().to_string()),
             wanted_taps: None,
             explain_open: false,
+            driver: Arc::new(Driver::new()),
+            driver_install: None,
+            driver_built_here: false,
+            driver_shown: driver::State::Off,
+            demo_driver: None,
+            clock: None,
+            clock_shown: None,
             // An isolated capture run never reaches for the user's real phone.
             demo: cfg!(feature = "shots") && std::env::var_os("TREK_SHOT_DIR").is_some(),
             notice: None,
@@ -257,7 +301,31 @@ impl PhonePanel {
             wants_taps: self.busy()
                 || self.lease.holder(Instant::now()).is_some()
                 || self.wanted_taps.is_some_and(|t| t.elapsed() < WANT_TAPS),
+            driver: self.driver_avail(),
+            driver_state: match &self.demo_driver {
+                Some((_, state)) => state.clone(),
+                None => self.driver.state(),
+            },
         }
+    }
+
+    /// Whether Trek Driver can be used with the phone on the cable.
+    fn driver_avail(&self) -> driver::Avail {
+        if let Some((avail, _)) = &self.demo_driver {
+            return avail.clone();
+        }
+        let Some(phone) = self.phone.as_ref().filter(|p| p.usb) else {
+            return driver::Avail::None;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        driver::availability(
+            self.driver_install.as_ref(),
+            &phone.udid,
+            self.driver_built_here,
+            now,
+        )
     }
 
     /// Whether iPhone Mirroring is set up with another iPhone of the account than this one: it
@@ -304,6 +372,7 @@ impl PhonePanel {
             call.answer(Err("The user closed Trek's iPhone tool.".into()));
         }
         self.restore_assistive(cx);
+        self.stop_driver(cx);
         self.link = None;
         self._link_events = None;
         for image in self
@@ -320,6 +389,26 @@ impl PhonePanel {
     }
 
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.demo {
+            let state = self.driver.state();
+            if state != self.driver_shown {
+                self.driver_shown = state.clone();
+                cx.notify();
+            }
+            let held = self.busy() || self.lease.holder(Instant::now()).is_some();
+            if state == driver::State::Ready
+                && !held
+                && self.driver.idle().is_some_and(|i| i >= DRIVER_IDLE)
+            {
+                self.stop_driver(cx);
+            }
+        }
+        if self.visible
+            && self.clock_shown.is_some()
+            && self.clock_shown != Some(phone_time(self.clock, chrono::Utc::now()))
+        {
+            cx.notify();
+        }
         let wanted = self.visible || self.busy() || self.lease.holder(Instant::now()).is_some();
         if !wanted || self.demo {
             return;
@@ -428,14 +517,24 @@ impl PhonePanel {
             cx,
             || {
                 let phones = device::list();
-                let assistive = phones
-                    .as_ref()
-                    .ok()
-                    .and_then(|p| p.first())
-                    .map(|p| device::assistive_touch(Some(&p.udid)).ok());
-                (phones, assistive.flatten())
+                let first = phones.as_ref().ok().and_then(|p| p.first());
+                let assistive = first.map(|p| device::assistive_touch(Some(&p.udid)).ok());
+                let clock = first.and_then(|p| device::clock(Some(&p.udid)).ok());
+                let built_here = first.is_some_and(|p| driver::built_here(&p.udid));
+                let install = driver::Install::read(&driver::dir());
+                (phones, assistive.flatten(), (clock, built_here, install))
             },
-            |this, (phones, assistive), _, cx| {
+            |this, (phones, assistive, (clock, built_here, install)), _, cx| {
+                this.clock = clock.or(this.clock);
+                this.driver_built_here = built_here;
+                this.driver_install = install;
+                // Unplugged: the driver (and its xcodebuild) goes rather than waiting out its idle.
+                let on_cable = phones
+                    .as_ref()
+                    .is_ok_and(|p| p.first().is_some_and(|p| p.usb));
+                if !on_cable {
+                    this.stop_driver(cx);
+                }
                 this.refreshing = false;
                 this.refreshed = Some(Instant::now());
                 match phones {
@@ -606,6 +705,56 @@ impl PhonePanel {
             .detach();
     }
 
+    /// Trek Driver stops (in the background: it asks the phone, then ends xcodebuild).
+    fn stop_driver(&mut self, cx: &mut Context<Self>) {
+        if self.demo
+            || matches!(
+                self.driver.state(),
+                driver::State::Off | driver::State::Failed(_)
+            )
+        {
+            return;
+        }
+        let d = self.driver.clone();
+        cx.background_executor()
+            .spawn(async move { d.stop() })
+            .detach();
+    }
+
+    /// The user's tap or key over the cable: the driver started if need be, then `steps` (made
+    /// from the screen's size in points) played.
+    fn usb_input(
+        &mut self,
+        steps: impl FnOnce((f64, f64)) -> Vec<driver::Step> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(install), Some(udid), driver::Avail::Ready) = (
+            self.driver_install.clone(),
+            self.phone.as_ref().map(|p| p.udid.clone()),
+            self.driver_avail(),
+        ) else {
+            self.cant_tap(cx);
+            return;
+        };
+        let d = self.driver.clone();
+        cx.notify();
+        self.background(
+            window,
+            cx,
+            move || {
+                let screen = d.ensure(&install, &udid, driver::START_LIMIT)?;
+                driver::run(&*d, &steps(screen))
+            },
+            |this, result, _, cx| {
+                if let Err(e) = result {
+                    this.notice = Some(e.into());
+                }
+                cx.notify();
+            },
+        );
+    }
+
     // MARK: the user's own input on the mirror
 
     /// Where the screen is drawn in the mirror area, if there's a frame.
@@ -627,6 +776,29 @@ impl PhonePanel {
         let Some(start) = self.press.take() else {
             return;
         };
+        if self.facts().route() == Route::Usb {
+            let (Some(a), Some(b)) = (self.to_fraction(start), self.to_fraction(p)) else {
+                return;
+            };
+            let moved =
+                ((p.x - start.x).as_f32().powi(2) + (p.y - start.y).as_f32().powi(2)).sqrt();
+            self.usb_input(
+                move |screen| {
+                    let (a, b) = (driver::to_points(a, screen), driver::to_points(b, screen));
+                    vec![if moved < TAP_SLOP {
+                        driver::Step::Post("/tap", json!({ "x": a.0, "y": a.1, "hold_ms": 80 }))
+                    } else {
+                        driver::Step::Post(
+                            "/swipe",
+                            json!({ "x1": a.0, "y1": a.1, "x2": b.0, "y2": b.1, "duration_ms": 300 }),
+                        )
+                    }]
+                },
+                window,
+                cx,
+            );
+            return;
+        }
         let mirrored = !self.status.input_ready() && self.mirror_frames;
         if !self.status.input_ready() && !mirrored {
             self.cant_tap(cx);
@@ -666,7 +838,12 @@ impl PhonePanel {
         let _ = link.hid(&steps);
     }
 
-    fn home(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    fn home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.facts().route() == Route::Usb {
+            let home = |_| vec![driver::Step::Post("/key", json!({ "key": "home" }))];
+            self.usb_input(home, window, cx);
+            return;
+        }
         match self.link.clone() {
             Some(link) if self.status.input_ready() => {
                 let _ = link.hid(&hid::home());
@@ -784,12 +961,13 @@ impl PhonePanel {
 
     /// A made-up phone in one of the strip's situations, for design review (`control phone
     /// <state>` in an isolated capture run): usb, lock, locked, mirroring, pair, bluetooth,
-    /// none, how.
+    /// none, how, and Trek Driver's: driver, driver-starting, driver-install, driver-how.
     #[cfg(feature = "shots")]
     pub fn demo(&mut self, state: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
         if state == "real" {
             // The user's real phone after all, for a live check (`phone call …` drives it).
             self.demo = false;
+            self.demo_driver = None;
             self.phone = None;
             self.status = Status::default();
             self.mirror = None;
@@ -828,8 +1006,24 @@ impl PhonePanel {
         self.wanted_taps = None;
         self.explain_open = false;
         self.notice = None;
+        self.demo_driver = None;
         match state {
             "usb" => {}
+            "driver" => self.demo_driver = Some((driver::Avail::Ready, driver::State::Off)),
+            "driver-starting" => {
+                self.demo_driver = Some((driver::Avail::Ready, driver::State::Starting))
+            }
+            "driver-install" => {
+                self.demo_driver = Some((
+                    driver::Avail::Install("it isn't installed yet".into()),
+                    driver::State::Off,
+                ));
+                self.wanted_taps = Some(Instant::now());
+            }
+            "driver-how" => {
+                self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
+                self.explain_open = true;
+            }
             "lock" => self.wanted_taps = Some(Instant::now()),
             "how" => self.explain_open = true,
             "locked" => {
@@ -857,7 +1051,7 @@ impl PhonePanel {
                 self.status = Status::default();
             }
             other => anyhow::bail!(
-                "phone: unknown state {other:?} (usb|lock|locked|mirroring|pair|bluetooth|none|how)"
+                "phone: unknown state {other:?} (usb|lock|locked|mirroring|pair|bluetooth|none|how|driver|driver-starting|driver-install|driver-how)"
             ),
         }
         cx.notify();
@@ -1142,6 +1336,15 @@ impl PhonePanel {
         let layout = self
             .screen_rect()
             .zip(self.frame.as_ref().map(|f| f.image.clone()));
+        // iOS's 9:41 over the cable: the real time drawn over it (never on iPhone Mirroring's
+        // picture, which has the real one).
+        let bar = self
+            .frame
+            .as_ref()
+            .and_then(|f| f.bar)
+            .filter(|_| !self.mirror_frames);
+        self.clock_shown = bar.map(|_| phone_time(self.clock, chrono::Utc::now()));
+        let clock = bar.zip(self.clock_shown.clone());
         let waiting = match &self.helper {
             _ if self.demo => None,
             Some(Err(e)) => Some(e.clone()),
@@ -1206,6 +1409,36 @@ impl PhonePanel {
                         .h(s.size.height)
                         .rounded(radius),
                 )
+                .when_some(clock, |el, (bar, time)| {
+                    let (w, h) = (s.size.width.as_f32(), s.size.height.as_f32());
+                    let (x0, x1) = bar.cover(&time);
+                    let (r, g, b) = bar.background;
+                    let ink = if bar.light_ink {
+                        rgb(0xFFFFFF)
+                    } else {
+                        rgb(0x000000)
+                    };
+                    el.child(
+                        div()
+                            .id("phone-clock")
+                            .absolute()
+                            .left(s.origin.x + px(x0 * w))
+                            .top(s.origin.y + px(bar.top * h))
+                            .w(px((x1 - x0) * w))
+                            .h(px((bar.bottom - bar.top) * h))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(u32::from_be_bytes([0, r, g, b])))
+                            .text_color(ink)
+                            .font_family(".SystemUIFont")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(STATUS_FONT * w))
+                            .line_height(px((bar.bottom - bar.top) * h))
+                            .whitespace_nowrap()
+                            .child(time),
+                    )
+                })
             })
             .when_some(waiting, |el, text| {
                 el.child(
@@ -1289,6 +1522,139 @@ fn fit(area: Size<Pixels>, w: f32, h: f32) -> Option<Bounds<Pixels>> {
     })
 }
 
+/// The status bar clock's type size, as a share of the screen's width (17 pt on a 440 pt screen).
+const STATUS_FONT: f32 = 17. / 440.;
+
+/// The status bar iOS drew in a frame from the cable (with its 9:41): where its clock is, as
+/// fractions of the frame, and its colors. Found only on a portrait frame whose left ear shows a
+/// clock-sized run of text on a flat background: an app that hides the status bar (a video) gets
+/// nothing drawn over it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StatusBar {
+    /// The clock's text, left and right.
+    left: f32,
+    right: f32,
+    /// The band drawn over, top and bottom: inside the status bar, never below it.
+    top: f32,
+    bottom: f32,
+    /// Where what follows the clock starts (a Focus glyph), if anything does.
+    next: Option<f32>,
+    background: (u8, u8, u8),
+    light_ink: bool,
+}
+
+impl StatusBar {
+    /// The band to draw over for `time`: the clock's own box, widened (evenly) for a longer time
+    /// than "9:41", but never over what follows it or off the ear.
+    fn cover(&self, time: &str) -> (f32, f32) {
+        let margin = 0.012;
+        let center = (self.left + self.right) / 2.;
+        let text = time.chars().count() as f32 * STATUS_FONT * 0.62;
+        let half = ((self.right - self.left) / 2.).max(text / 2.) + margin;
+        let limit = self.next.map_or(0.36, |n| n - 0.004);
+        ((center - half).max(0.02), (center + half).min(limit))
+    }
+}
+
+fn luma((r, g, b): (u8, u8, u8)) -> f32 {
+    0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
+}
+
+/// Look for the status bar's clock in a frame from the cable.
+fn status_bar(jpeg: &[u8]) -> Option<StatusBar> {
+    let img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?;
+    find_bar(&img.to_rgb8())
+}
+
+fn find_bar(img: &image::RgbImage) -> Option<StatusBar> {
+    let (w, h) = img.dimensions();
+    if w < 100 || h <= w {
+        return None;
+    }
+    let (wf, hf) = (w as f32, h as f32);
+    let at = |x: f32, y: f32| {
+        let p = img.get_pixel(((x * wf) as u32).min(w - 1), ((y * hf) as u32).min(h - 1));
+        (p[0], p[1], p[2])
+    };
+    // The band the clock sits in, and the background beside it (left of the text: flat).
+    let (y0, y1) = ((0.015 * hf) as u32, (0.055 * hf) as u32);
+    let background = at(0.03, 0.034);
+    let flat = [0.012, 0.02, 0.045].iter().all(|&x| {
+        [0.02, 0.034, 0.048]
+            .iter()
+            .all(|&y| (luma(at(x, y)) - luma(background)).abs() < 24.)
+    });
+    if !flat {
+        return None;
+    }
+    let ink = |x: u32, y: u32| {
+        let p = img.get_pixel(x, y);
+        (luma((p[0], p[1], p[2])) - luma(background)).abs() > 90.
+    };
+    // Columns of the left ear with ink, grouped; the clock is the first groups close together.
+    let ear = (0.36 * wf) as u32;
+    let mut groups: Vec<(u32, u32)> = vec![];
+    for x in 0..ear {
+        if (y0..y1).any(|y| ink(x, y)) {
+            match groups.last_mut() {
+                Some(g) if x <= g.1 + 1 => g.1 = x,
+                _ => groups.push((x, x)),
+            }
+        }
+    }
+    let gap = (0.011 * wf) as u32;
+    let first = *groups.first()?;
+    let mut clock = first;
+    let mut count = 1;
+    let mut next = None;
+    for g in &groups[1..] {
+        if g.0 - clock.1 > gap {
+            next = Some(g.0 as f32 / wf);
+            break;
+        }
+        clock.1 = g.1;
+        count += 1;
+    }
+    let (left, right) = (clock.0 as f32 / wf, clock.1 as f32 / wf);
+    // "9:41" is four glyphs, about a tenth of the width, a little in from the edge.
+    if count < 3 || !(0.04..0.25).contains(&left) || !(0.05..0.2).contains(&(right - left)) {
+        return None;
+    }
+    let rows: Vec<u32> = (y0..y1)
+        .filter(|&y| (clock.0..=clock.1).any(|x| ink(x, y)))
+        .collect();
+    let (top, bottom) = (*rows.first()? as f32 / hf, *rows.last()? as f32 / hf);
+    if !(0.008..0.02).contains(&(bottom - top)) {
+        return None;
+    }
+    Some(StatusBar {
+        left,
+        right,
+        top: (top - 0.008).max(0.012),
+        bottom: (bottom + 0.008).min(0.052),
+        next,
+        background,
+        light_ink: luma(background) < 128.,
+    })
+}
+
+/// The time as the phone's status bar shows it: its time zone, its 12- or 24-hour clock (the
+/// Mac's time zone until the phone's is read).
+fn phone_time(clock: Option<device::Clock>, now: chrono::DateTime<chrono::Utc>) -> String {
+    use chrono::Timelike as _;
+    let (offset, hours24) = match clock {
+        Some(c) => (c.utc_offset, c.hours24),
+        None => (chrono::Local::now().offset().local_minus_utc(), false),
+    };
+    let t = now + chrono::Duration::seconds(i64::from(offset));
+    let (h, m) = (t.hour(), t.minute());
+    if hours24 {
+        format!("{h:02}:{m:02}")
+    } else {
+        format!("{}:{m:02}", if h % 12 == 0 { 12 } else { h % 12 })
+    }
+}
+
 /// "Tapping…" for the strip while a call of `method` runs.
 fn starting(method: &str) -> &'static str {
     match method {
@@ -1353,6 +1719,8 @@ enum Via {
     Bluetooth,
     /// macOS's iPhone Mirroring window, showing the phone.
     Mirroring(Arc<Link>),
+    /// Trek Driver over the cable, running; the screen in points.
+    Usb(Arc<Driver>, (f64, f64)),
 }
 
 fn gone<E>(_: E) -> String {
@@ -1437,6 +1805,7 @@ impl Run<'_> {
             "phone_tap" => {
                 let hold = p["hold_ms"].as_u64().unwrap_or(80).min(10_000) as u32;
                 match self.via().await? {
+                    Via::Usb(d, screen) => self.usb(d, screen, &method, &p).await?,
                     Via::Bluetooth => {
                         let (x, y) = self.point(&p, "x", "y", false)?;
                         self.input(hid::tap(x, y, hold), true).await?;
@@ -1466,6 +1835,7 @@ impl Run<'_> {
             "phone_swipe" => {
                 let ms = p["duration_ms"].as_u64().unwrap_or(300).clamp(60, 5000) as u32;
                 match self.via().await? {
+                    Via::Usb(d, screen) => self.usb(d, screen, &method, &p).await?,
                     Via::Bluetooth => {
                         let from = self.point(&p, "x1", "y1", false)?;
                         let to = self.point(&p, "x2", "y2", false)?;
@@ -1484,6 +1854,7 @@ impl Run<'_> {
             "phone_type" => {
                 let submit = p["submit"].as_bool() == Some(true);
                 match self.via().await? {
+                    Via::Usb(d, screen) => self.usb(d, screen, &method, &p).await?,
                     Via::Bluetooth => {
                         let mut steps = hid::type_text(&s("text"))?;
                         if submit {
@@ -1501,10 +1872,17 @@ impl Run<'_> {
                         }
                     }
                 }
-                text(format!("Typed {} characters.", s("text").chars().count()))
+                {
+                    let n = s("text").chars().count();
+                    text(format!(
+                        "Typed {n} character{}.",
+                        if n == 1 { "" } else { "s" }
+                    ))
+                }
             }
             "phone_key" => {
                 match self.via().await? {
+                    Via::Usb(d, screen) => self.usb(d, screen, &method, &p).await?,
                     Via::Bluetooth => self.input(hid::key(&s("key"))?, false).await?,
                     Via::Mirroring(link) => self.mirror_key(&link, &s("key")).await?,
                 }
@@ -1512,6 +1890,7 @@ impl Run<'_> {
             }
             "phone_home" => {
                 match self.via().await? {
+                    Via::Usb(d, screen) => self.usb(d, screen, &method, &p).await?,
                     Via::Bluetooth => self.input(hid::home(), false).await?,
                     Via::Mirroring(link) => {
                         let cmd = MirrorCmd::Menu(mirror::HOME);
@@ -1526,6 +1905,14 @@ impl Run<'_> {
                     return Err("Which app? Give its name.".into());
                 }
                 match self.via().await? {
+                    Via::Usb(d, screen) => {
+                        self.usb(d, screen, &method, &p).await?;
+                        self.sleep(Duration::from_millis(600)).await;
+                        return text(format!(
+                            "Opened {}. Take a screenshot to check it's the app.",
+                            name.trim()
+                        ));
+                    }
                     Via::Bluetooth => {
                         let mut steps = hid::home();
                         steps.push(Step::Wait(800));
@@ -1649,6 +2036,7 @@ impl Run<'_> {
                     .update(self.cx, |p, cx| {
                         let held = p.lease.release(&thread);
                         p.restore_assistive(cx);
+                        p.stop_driver(cx);
                         p.last = None;
                         cx.notify();
                         held
@@ -1715,6 +2103,9 @@ impl Run<'_> {
     /// them, else iPhone Mirroring, brought to show the phone; or the one thing the user must do.
     async fn via(&mut self) -> Result<Via, String> {
         let link = self.link().await?;
+        if self.facts()?.route() == Route::Usb {
+            return self.usb_via().await;
+        }
         if self.bluetooth()? {
             return Ok(Via::Bluetooth);
         }
@@ -1736,10 +2127,78 @@ impl Run<'_> {
                 let after = self.facts()?;
                 Err(match after.route() {
                     Route::Mirroring => e,
-                    Route::Bluetooth => after.strip().advice.unwrap_or(e),
+                    Route::Bluetooth | Route::Usb => after.strip().advice.unwrap_or(e),
                 })
             }
         }
+    }
+
+    /// Trek Driver running on the phone (started now if need be: the strip says "Starting the
+    /// driver…" meanwhile), or why it can't.
+    async fn usb_via(&mut self) -> Result<Via, String> {
+        let (install, udid, d, avail) = self
+            .this
+            .update(self.cx, |p, cx| {
+                cx.notify();
+                (
+                    p.driver_install.clone(),
+                    p.phone.as_ref().map(|p| p.udid.clone()),
+                    p.driver.clone(),
+                    p.driver_avail(),
+                )
+            })
+            .map_err(gone)?;
+        let (Some(install), Some(udid), driver::Avail::Ready) = (install, udid, avail) else {
+            return Err(self.why_no_taps()?);
+        };
+        self.check()?;
+        let running = d.clone();
+        let screen = self
+            .blocking(move || running.ensure(&install, &udid, driver::START_LIMIT))
+            .await;
+        let _ = self.this.update(self.cx, |_, cx| cx.notify());
+        match screen {
+            Ok(screen) => Ok(Via::Usb(d, screen)),
+            Err(e) => Err(self.why_no_taps().unwrap_or(e)),
+        }
+    }
+
+    /// A tool's taps, swipes or keys through Trek Driver: x/y are pixels of the latest
+    /// screenshot (the cable's), turned into the driver's points.
+    async fn usb(
+        &mut self,
+        d: Arc<Driver>,
+        screen: (f64, f64),
+        method: &str,
+        p: &Value,
+    ) -> Result<(), String> {
+        self.check()?;
+        let (size, mirrored) = self
+            .this
+            .update(self.cx, |p, _| (p.shot_size, p.shot_mirrored))
+            .map_err(gone)?;
+        let pointer = matches!(method, "phone_tap" | "phone_swipe");
+        if pointer && size.is_some() && mirrored {
+            return Err("Take a phone_screenshot first: the picture comes over USB now, and x/y are pixels in it.".into());
+        }
+        let (w, h) = size.unwrap_or((0., 0.));
+        let (p, method) = (p.clone(), method.to_string());
+        let udid = self.udid()?;
+        self.blocking(move || {
+            let point = |kx: &str, ky: &str| {
+                let x = p[kx].as_f64().ok_or(format!("{kx} is missing"))?;
+                let y = p[ky].as_f64().ok_or(format!("{ky} is missing"))?;
+                Ok(driver::to_points(hid::fraction(x, y, w, h)?, screen))
+            };
+            let apps = if method == "phone_open_app" {
+                device::all_apps(udid.as_deref()).unwrap_or_default()
+            } else {
+                vec![]
+            };
+            let steps = driver::plan(&method, &p, &point, &|n| driver::find_app(&apps, n))?;
+            driver::run(&*d, &steps)
+        })
+        .await
     }
 
     /// One command for iPhone Mirroring; what it shows afterwards is the panel's too.
@@ -1965,6 +2424,8 @@ impl Run<'_> {
         lines.push(format!("Taps: {}.", strip.taps.word));
         if let Some(advice) = &strip.advice {
             lines.push(format!("To do: {advice}"));
+        } else if strip.route == Route::Usb {
+            lines.push("Taps, swipes and keys go over the USB cable through Trek Driver while the iPhone stays unlocked (it starts with the first tap, about 10 s, and stops at phone_release); x/y are pixels in the latest phone_screenshot.".into());
         } else if strip.route == Route::Mirroring && !facts.mirror_frames {
             lines.push("Taps go through iPhone Mirroring, which Trek opens behind the user's windows when needed; screenshots then come from its window.".into());
         }
@@ -1986,7 +2447,7 @@ impl Run<'_> {
     async fn screenshot(&mut self, edge: u32) -> Result<Value, String> {
         let link = self.link().await?;
         let mut why_not = None;
-        if !self.bluetooth()? {
+        if !self.bluetooth()? && self.facts()?.route() != Route::Usb {
             let raw = self
                 .mirror_cmd(&link, MirrorCmd::Look, Duration::from_secs(5))
                 .await
@@ -2160,6 +2621,7 @@ impl Run<'_> {
         facts.wants_taps = true;
         let strip = facts.strip();
         Ok(strip.advice.unwrap_or_else(|| match strip.route {
+            Route::Usb => "Trek Driver isn't answering: try once more.".into(),
             Route::Mirroring => "iPhone Mirroring didn't show the iPhone in time: try once more, and if it's unlocked, ask the user to lock it.".into(),
             Route::Bluetooth => route::NOT_PAIRED.into(),
         }))
@@ -2224,9 +2686,13 @@ impl Run<'_> {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's own `test` attribute would come with it.
-    use super::{HandHolding, Sensitive, ask_text, fit, needs_asking, starting, tools};
+    use super::{
+        HandHolding, Sensitive, StatusBar, ask_text, find_bar, fit, needs_asking, phone_time,
+        starting, tools,
+    };
     use gpui_kit::{px, size};
     use serde_json::json;
+    use trek_phone::device::Clock;
 
     #[test]
     fn approvals_follow_the_access_level() {
@@ -2263,6 +2729,80 @@ mod tests {
         assert!((ratio - 2868. / 1320.).abs() < 0.01);
         assert!(s.size.width.as_f32() <= 400. - 36. + 0.5);
         assert!(fit(size(px(50.), px(50.)), 1320., 2868.).is_none());
+    }
+
+    /// A 440×956 frame (a third of the cable's) with a flat status bar and "9:41" drawn as four
+    /// blocks in the left ear, then a Focus glyph.
+    fn frame(background: [u8; 3], ink: [u8; 3]) -> image::RgbImage {
+        let mut img = image::RgbImage::from_pixel(440, 956, image::Rgb(background));
+        let glyphs = [(54, 64), (66, 68), (71, 80), (82, 87), (94, 112)];
+        for (x0, x1) in glyphs {
+            for x in x0..=x1 {
+                for y in 26..39 {
+                    img.put_pixel(x, y, image::Rgb(ink));
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn the_status_bar_clock_is_found_and_covered_within_the_bar() {
+        let bar = find_bar(&frame([10, 10, 11], [255, 255, 255])).expect("a status bar");
+        assert!((bar.left - 54. / 440.).abs() < 0.003, "{bar:?}");
+        assert!((bar.right - 87. / 440.).abs() < 0.003, "{bar:?}");
+        assert!(bar.next.is_some_and(|n| (n - 94. / 440.).abs() < 0.003));
+        assert!(bar.light_ink);
+        // Never below the status bar (about 6% of the height on these phones).
+        assert!(bar.top >= 0.012 && bar.bottom <= 0.052, "{bar:?}");
+        // A longer time widens the cover, but not over the Focus glyph.
+        let (x0, x1) = bar.cover("12:58");
+        assert!(x0 < bar.left && x1 < bar.next.unwrap(), "{x0} {x1} {bar:?}");
+        // Dark text on a light app.
+        let bar = find_bar(&frame([250, 250, 250], [0, 0, 0])).unwrap();
+        assert!(!bar.light_ink);
+    }
+
+    #[test]
+    fn no_status_bar_means_nothing_drawn() {
+        // A full-screen video: content right up to the top.
+        let mut img = image::RgbImage::new(440, 956);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgb([(x * 7 % 255) as u8, (y * 13 % 255) as u8, 90]);
+        }
+        assert_eq!(find_bar(&img), None);
+        // Landscape.
+        assert_eq!(find_bar(&image::RgbImage::new(956, 440)), None);
+        // A flat top with nothing in it (the status bar hidden).
+        assert_eq!(
+            find_bar(&image::RgbImage::from_pixel(
+                440,
+                956,
+                image::Rgb([20, 20, 20])
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn the_time_is_the_phones() {
+        use chrono::TimeZone as _;
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 1, 12, 52, 0)
+            .unwrap();
+        let ny = Clock {
+            utc_offset: -5 * 3600,
+            hours24: false,
+        };
+        assert_eq!(phone_time(Some(ny), now), "7:52");
+        let berlin = Clock {
+            utc_offset: 3600,
+            hours24: true,
+        };
+        assert_eq!(phone_time(Some(berlin), now), "13:52");
+        let midnight = chrono::Utc.with_ymd_and_hms(2026, 11, 1, 5, 3, 0).unwrap();
+        assert_eq!(phone_time(Some(ny), midnight), "12:03");
+        let _ = StatusBar::cover;
     }
 
     #[test]

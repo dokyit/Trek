@@ -8,7 +8,10 @@
 //! - **Or input through iPhone Mirroring**: a phone on the Mac's own Apple Account never takes the
 //!   Mac as a Bluetooth keyboard; then taps and keys go to macOS's iPhone Mirroring window in the
 //!   background, and the screen comes from it (`mirror`, done by the helper).
-//! - **Apps and files**: the phone's own services over usbmuxd, as Finder uses them (`device`):
+//! - **Or input over USB through Trek Driver**: while the phone is unlocked on the cable, a small
+//!   XCUITest inside Trek's own iPhone app (built by `ios/scripts/install-device.sh`) takes taps,
+//!   swipes and keys over HTTP through usbmuxd (`driver`).
+//! - **Apps and files**:the phone's own services over usbmuxd, as Finder uses them (`device`):
 //!   install an app signed for the phone, list apps, copy files to and from its media folder or
 //!   a file-sharing app's Documents, switch AssistiveTouch on and off.
 //! - **One agent at a time** (`lease`).
@@ -19,6 +22,8 @@ pub mod lease;
 
 #[cfg(target_os = "macos")]
 pub mod device;
+#[cfg(target_os = "macos")]
+pub mod driver;
 #[cfg(target_os = "macos")]
 pub mod helper;
 #[cfg(target_os = "macos")]
