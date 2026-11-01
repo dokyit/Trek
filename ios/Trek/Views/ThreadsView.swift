@@ -26,6 +26,8 @@ struct ThreadsView: View {
     @State private var snoozeChoice: ThreadSummary?
     @State private var snoozePicking: ThreadSummary?
     @State private var showingUsage = false
+    /// The list's title row has scrolled under the bar: the bar says "Threads" instead.
+    @State private var titleGone = false
     @Environment(\.compactRows) private var compact
 
     /// Quiet threads a project shows before "Show more" (the Mac's sidebar: 3, and 5 settled).
@@ -38,36 +40,12 @@ struct ThreadsView: View {
         NavigationStack(path: $path.onSet { if Perf.enabled { Perf.navigated = Perf.now } }) {
             ScrollViewReader { proxy in
                 List {
-                    if model.links.count > 1 {
-                        MachineFilterBar(picked: $pickedMachine)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
-                    }
-                    if let update = model.offeredUpdate {
-                        UpdateCard(update: update)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-                    if model.mode == .live {
-                        // Each machine that isn't connected says so under its own name.
-                        ForEach(model.links.filter { $0.connection != .connected }) { link in
-                            Group {
-                                if case .identityChanged(let expected, let seen) = link.connection {
-                                    IdentityChangedCard(host: link.name, expected: expected, seen: seen) { model.leave(link) }
-                                } else {
-                                    ConnectionBanner(state: link.connection, detail: link.connectionText,
-                                                     host: link.name,
-                                                     retry: { model.retryNow(link) }) { model.leave(link) }
-                                }
-                            }
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 8, trailing: 16))
-                        }
-                    }
+                    ThreadsHeader(picked: $pickedMachine, update: model.offeredUpdate,
+                                  unreachable: model.mode == .live || Launch.demoOffline != nil
+                                      ? model.links.filter { $0.connection != .connected } : [])
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets())
                     switch grouping {
                     case .project: byProject
                     case .status: byStatus
@@ -83,11 +61,15 @@ struct ThreadsView: View {
                 .environment(\.defaultMinListHeaderHeight, 0)
                 .scrollContentBackground(.hidden)
                 .background(RidgeBackdrop(height: 300))
-                // Rows pass cleanly under the "New thread" pill and the tab bar (one hard edge for both
-                // bars), and the last row clears them.
-                .scrollEdgeEffectStyle(.hard, for: .bottom)
-                .contentMargins(.bottom, 14, for: .scrollContent)
+                // Rows fade out above the "New thread" pill and the tab bar, and the last row clears them.
+                .fadesUnderBottomBars()
+                .onScrollGeometryChange(for: Bool.self) {
+                    ScreenTitle.isGone(scrolled: $0.contentOffset.y + $0.contentInsets.top)
+                } action: { _, gone in
+                    withAnimation(.easeOut(duration: 0.15)) { titleGone = gone }
+                }
                 .navigationTitle("Threads")
+                .navigationBarTitleDisplayMode(.inline)
                 .refreshable { await model.refresh() }
                 .toolbar { toolbar }
                 .navigationDestination(for: String.self) { tid in
@@ -123,6 +105,13 @@ struct ThreadsView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        // The bar's title, once the list's own has scrolled under it.
+        ToolbarItem(placement: .principal) {
+            Text("Threads")
+                .font(.ui(.headline))
+                .opacity(titleGone ? 1 : 0)
+                .accessibilityHidden(!titleGone)
+        }
         // Plan usage, always in reach, as the Usage button in the Mac's sidebar.
         ToolbarItem(placement: .topBarTrailing) {
             UsageButton { showingUsage = true }
@@ -407,6 +396,7 @@ private struct SectionHeader: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .modifier(HeaderGround())
         .accessibilityLabel("\(title), \(count)")
         .accessibilityHint(folded ? "Shows them" : "Folds them away")
     }
@@ -469,8 +459,22 @@ private struct ProjectHeader: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .modifier(HeaderGround())
         .accessibilityElement(children: .combine)
         .accessibilityHint(folded ? "Shows its threads" : "Folds its threads away")
+    }
+}
+
+/// A section header held at the top of the list stands on the list's own ground, edge to edge,
+/// so the rows passing under it don't show through its words.
+private struct HeaderGround: ViewModifier {
+    func body(content: Content) -> some View {
+        content.background {
+            Trek.background
+                .padding(.horizontal, -24)
+                .padding(.bottom, -4)
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -569,6 +573,10 @@ struct ThreadRow: View {
                     secondary
                         .lineLimit(1)
                         .transaction { $0.animation = nil }
+                        // At large text sizes the tags and the model alone can outgrow the line:
+                        // what doesn't fit is cut off here rather than drawn under the pill.
+                        .frame(minWidth: 0, alignment: .leading)
+                        .clipped()
                     Spacer(minLength: 0)
                     if !thread.runningSubAgents.isEmpty {
                         SubAgentsPill(agents: thread.runningSubAgents)
@@ -880,6 +888,58 @@ private struct FingerprintLabelStyle: LabeledContentStyle {
     }
 }
 
+/// The head of the thread list, one row of it: the title, the machine chips (with more than one
+/// machine), the update card and a banner for each machine that can't be reached. They stack,
+/// each in its own room, and scroll together; the bar's inline title takes over once the title
+/// has gone under it (see `ScreenTitle`).
+struct ThreadsHeader: View {
+    @Environment(AppModel.self) private var model
+    @Binding var picked: String?
+    var update: AppUpdate.Available?
+    /// The machines to say can't be reached, each under its own name.
+    var unreachable: [HostLink] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScreenTitle(title: "Threads")
+                .padding(.leading, 20)
+                .padding(.trailing, 16)
+                .padding(.bottom, 6)
+            if model.links.count > 1 {
+                MachineFilterBar(picked: $picked)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 2)
+                    .padding(.bottom, 6)
+            }
+            if let update {
+                UpdateCard(update: update)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .padding(.bottom, 8)
+                    // Fades where it stands: sliding up, it passed over the title and the chips.
+                    .transition(.asymmetric(insertion: .opacity,
+                                            removal: .opacity.animation(.easeOut(duration: 0.12))))
+            }
+            ForEach(unreachable) { link in
+                Group {
+                    if case .identityChanged(let expected, let seen) = link.connection {
+                        IdentityChangedCard(host: link.name, expected: expected, seen: seen) { model.leave(link) }
+                    } else {
+                        ConnectionBanner(state: link.connection, detail: link.connectionText,
+                                         host: link.name,
+                                         retry: { model.retryNow(link) }) { model.leave(link) }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.snappy, value: update?.version)
+    }
+}
+
 /// Which machines' threads the list shows: all, or one, each by its tag (its platform's mark
 /// and colour), so a Mac's threads and a PC's read apart.
 private struct MachineFilterBar: View {
@@ -887,37 +947,36 @@ private struct MachineFilterBar: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+        // Wrapping rather than scrolling sideways: on iOS 27.2 a scroll view at the head of the
+        // list was taken for the list's own, and the bar's large title stopped following the list.
+        WordFlow(spacing: 8, lineSpacing: 8) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { picked = nil }
+            } label: {
+                Text("All")
+                    .font(.ui(.subheadline).weight(.medium))
+                    .foregroundStyle(picked == nil ? Trek.foreground : Trek.foreground.opacity(0.75))
+                    .padding(.horizontal, 14)
+                    .frame(height: 32)
+                    .background(Trek.foreground.opacity(picked == nil ? 0.14 : 0.06), in: Capsule())
+            }
+            .buttonStyle(.borderless)
+            ForEach(model.links) { link in
                 Button {
-                    withAnimation(.snappy(duration: 0.2)) { picked = nil }
+                    withAnimation(.snappy(duration: 0.2)) { picked = picked == link.id ? nil : link.id }
                 } label: {
-                    Text("All")
-                        .font(.ui(.subheadline).weight(.medium))
-                        .foregroundStyle(picked == nil ? Trek.foreground : Trek.foreground.opacity(0.75))
-                        .padding(.horizontal, 14)
-                        .frame(height: 32)
-                        .background(Trek.foreground.opacity(picked == nil ? 0.14 : 0.06), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                ForEach(model.links) { link in
-                    Button {
-                        withAnimation(.snappy(duration: 0.2)) { picked = picked == link.id ? nil : link.id }
-                    } label: {
-                        HStack(spacing: 6) {
-                            MachineTag(name: link.name, kind: link.kind, selected: picked == link.id)
-                        }
-                        .overlay(alignment: .topTrailing) {
-                            if link.connection != .connected {
-                                Circle().fill(Trek.failed).frame(width: 7, height: 7).offset(x: 1, y: -1)
-                            }
+                    HStack(spacing: 6) {
+                        MachineTag(name: link.name, kind: link.kind, selected: picked == link.id)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if link.connection != .connected {
+                            Circle().fill(Trek.failed).frame(width: 7, height: 7).offset(x: 1, y: -1)
                         }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(link.name)\(link.kind.word.map { ", \($0)" } ?? "")")
                 }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("\(link.name)\(link.kind.word.map { ", \($0)" } ?? "")")
             }
-            .padding(.horizontal, 16)
         }
     }
 }

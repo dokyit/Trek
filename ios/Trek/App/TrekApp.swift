@@ -28,6 +28,15 @@ struct TrekApp: App {
                         for _ in 0..<60 where model.appUpdate == nil { try? await Task.sleep(for: .seconds(0.5)) }
                         if let update = model.appUpdate { model.updatePhone(update) }
                     }
+                    // Screenshots of a machine that can't be reached, its banner over the threads
+                    // (`-TrekDemoOffline demo-pc`, or a machine's name): once the demo has connected.
+                    if let which = Launch.demoOffline {
+                        try? await Task.sleep(for: .seconds(0.6))
+                        if let link = model.links.first(where: { $0.id == which || $0.name == which }) {
+                            link.connectionDetail = "This Wi-Fi may not let devices see each other. Tailscale didn't answer either: is it on, on this iPhone and on the Mac?"
+                            link.connection = .offline("")
+                        }
+                    }
                     #endif
                 }
                 .onOpenURL { url in
@@ -83,6 +92,14 @@ enum Launch {
     static var expandAll: Bool { UserDefaults.standard.bool(forKey: "TrekExpand") }
     static var link: String? { UserDefaults.standard.string(forKey: "TrekLink") }
     static var pairNow: String? { UserDefaults.standard.string(forKey: "TrekPair") }
+    /// A demo machine shown as unreachable, with its banner (debug builds): its id or name.
+    static var demoOffline: String? {
+        #if DEBUG
+        UserDefaults.standard.string(forKey: "TrekDemoOffline")
+        #else
+        nil
+        #endif
+    }
 }
 
 enum MainTab: Hashable {

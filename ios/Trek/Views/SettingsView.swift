@@ -96,6 +96,7 @@ struct SettingsView: View {
                 }
             }
             .scrollContentBackground(.hidden)
+            .fadesUnderBottomBars(Trek.grouped)
             .background(Trek.grouped)
             .navigationTitle("Settings")
             .navigationDestination(for: SettingsRoute.self) { route in
