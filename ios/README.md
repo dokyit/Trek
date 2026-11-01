@@ -53,6 +53,8 @@ with `-TrekSheet background-output` its output open from the strip), `-TrekTab b
 `-TrekOpen`: the model picker), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
 `-TrekDemoOldMac YES` (the demo Mac is one from before rows carried `busy_in_background` and left
 out a chat folder's branch: `t-chat`, `t-waiting`; `t-quiz` asks five questions at once),
+`-TrekDemoPC YES` (a second demo machine, a Windows PC), `-TrekDemoRelease newer` (the update card),
+`-TrekDemoOffline demo-pc` (debug builds: that machine can't be reached, its banner over the threads),
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
 one page), `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
 the paired Mac), `-TrekLink '<trek://pair… link>'` (open the pairing confirmation for it).
