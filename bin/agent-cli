@@ -855,6 +855,49 @@ def cmd_sims(a):
             "_text": [f"{x['state'].lower()} {x['udid']} {x['name']} ({x['runtime']})" for x in shown]}
 
 
+def cmd_dock(a):
+    """Dock tiles and Launch Services records named Trek: a second app record, or a recent-apps tile, means something registered as another Trek."""
+    if sys.platform != "darwin":
+        return {"note": "macOS only", "records": [], "tiles": {}}
+    rc, out = run(["lsappinfo", "list"], timeout=20)
+    if rc != 0:
+        raise CliError(out.strip()[-200:])
+    records = []
+    for asn in re.findall(r'^\d+\) "Trek[^"]*" ASN:(0x[0-9a-f]+-0x[0-9a-f]+)', out, re.M):
+        _, info = run(["lsappinfo", "info", f"ASN:{asn}"], timeout=10)
+        pick = lambda rx: (re.search(rx, info, re.M) or [None, ""])[1]
+        rec = {"asn": asn, "name": pick(r'^"([^"]*)"'), "pid": int(pick(r"pid = (\d+)") or 0) or None,
+               "type": pick(r'type="([^"]+)"'), "executable": pick(r'executable path="([^"]*)"')}
+        orig = pick(r"originalPid=(\d+)")
+        if orig:
+            rec["original_pid"] = int(orig)
+        if rec["pid"]:
+            _, cmd = run(["ps", "-o", "ppid=,command=", "-p", str(rec["pid"])], timeout=5)
+            rec["command"] = cmd.strip()[:160]
+        records.append(rec)
+    tiles = {"pinned": 0, "recent": 0}
+    try:
+        import plistlib
+        _, xml = run(["plutil", "-convert", "xml1", "-o", "-", os.path.expanduser("~/Library/Preferences/com.apple.dock.plist")], timeout=10)
+        d = plistlib.loads(xml.encode("utf-8", "replace"))
+        for key, label in (("persistent-apps", "pinned"), ("recent-apps", "recent")):
+            tiles[label] = sum(1 for e in d.get(key, []) if e.get("tile-data", {}).get("file-label") == "Trek")
+    except Exception as e:  # noqa: BLE001 - a report, not a failure
+        tiles["error"] = str(e)[:120]
+    # The app itself: Trek.app's main executable, not a record pointing back at it. Background and
+    # UI-element records (XPC helpers such as AutoFill) have no tile.
+    main = [r for r in records if r["executable"].endswith("/Trek.app/Contents/MacOS/trek") and "original_pid" not in r]
+    extra = [r for r in records if r not in main and r["type"] not in ("BackgroundOnly", "UIElement")]
+    verdict = ("one Trek, no stale tiles" if len(main) <= 1 and not extra and tiles["recent"] == 0 else
+               f"{len(main)} Trek apps, {len(extra)} extra app records, {tiles['recent']} stale recent tiles"
+               + (" — find each extra record's pid/command and fix the caller" if extra else "")
+               + (" — `killall Dock` clears recent tiles (ask first)" if tiles["recent"] else ""))
+    text = [f"{r['name']!r} asn {r['asn']} pid {r['pid']} type {r['type'] or '?'}"
+            + (f" originalPid {r['original_pid']}" if r.get("original_pid") else "")
+            + (f"  {r.get('command', r['executable'])}" if r.get("pid") else f"  {r['executable']}") for r in records]
+    return {"verdict": verdict, "records": records, "tiles": tiles, "_text": text + [f"tiles: pinned {tiles['pinned']}, recent {tiles['recent']}", verdict]}
+
+
 # ---------------------------------------------------------------- output
 
 def render(data, prefix=""):
@@ -984,10 +1027,12 @@ def build_parser():
     s.add_argument("--max", type=int, default=25)
     s = add("sims", cmd_sims)
     s.add_argument("n", nargs="?", type=int, default=8, help="non-booted devices shown")
+    add("dock", cmd_dock, epilog="Replaces: lsappinfo list/info, defaults read com.apple.dock recent-apps. An extra app record names the process that registered as a second Trek.")
     return p
 
 
 SELFTEST_ARGS = {
+    "dock": [],
     "status": [], "ci": ["latest"], "crates": [], "feature": ["video"], "where": ["--defs", "main", "--max", "3"],
     "logs": ["5"], "worktrees": ["--fast"], "disk": [], "release": [], "phone": [], "memory": [], "tasks": ["3"],
     "digest": ["-"], "test": ["--dry-run", "-p", "trek-time"], "check": ["--dry-run", "-p", "trek-time"],
