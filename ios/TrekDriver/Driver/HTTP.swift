@@ -1,10 +1,12 @@
 import Foundation
 
-/// One HTTP/1.1 request, as much of it as the driver needs: the method, the path (query dropped),
+/// One HTTP/1.1 request, as much of it as the driver needs: the method, the path, its query,
 /// lower-cased headers and the body (by Content-Length; no chunked bodies).
 struct Request: Equatable {
     var method: String
     var path: String
+    /// What followed `?` in the request target, without it ("" when nothing did).
+    var query = ""
     var headers: [String: String]
     var body: Data
 
@@ -63,13 +65,17 @@ struct Request: Equatable {
         if available < length { return .incomplete }
         let body = Data(buffer[bodyStart..<(bodyStart + length)])
         var path = String(start[1])
-        if let q = path.firstIndex(of: "?") { path = String(path[..<q]) }
-        let request = Request(method: String(start[0]).uppercased(), path: path, headers: headers, body: body)
+        var query = ""
+        if let q = path.firstIndex(of: "?") {
+            query = String(path[path.index(after: q)...])
+            path = String(path[..<q])
+        }
+        let request = Request(method: String(start[0]).uppercased(), path: path, query: query, headers: headers, body: body)
         return .done(request, bodyStart + length - buffer.startIndex)
     }
 
     static func == (a: Request, b: Request) -> Bool {
-        a.method == b.method && a.path == b.path && a.headers == b.headers && a.body == b.body
+        a.method == b.method && a.path == b.path && a.query == b.query && a.headers == b.headers && a.body == b.body
     }
 }
 

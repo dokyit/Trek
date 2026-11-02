@@ -42,6 +42,9 @@ pub struct Facts {
     pub mirroring_known: bool,
     /// The picture comes from iPhone Mirroring's window.
     pub mirror_frames: bool,
+    /// The picture comes from Trek Driver: the cable's capture is off, so the iPhone shows its
+    /// real clock (captured, it shows 9:41, on the phone too).
+    pub driver_frames: bool,
     pub assistive: Option<bool>,
     /// Someone wants taps now (an agent holds the phone, or the user just tapped it): the lock
     /// step is then a thing to do, not just a state.
@@ -103,14 +106,18 @@ impl Facts {
     /// connect then).
     pub fn usb_live(&self) -> bool {
         let s = &self.status;
-        !s.screen.is_empty() && s.frames > 0 && !s.dark && (0. ..USB_QUIET).contains(&s.frame_age)
+        self.driver_frames
+            || (!s.screen.is_empty()
+                && s.frames > 0
+                && !s.dark
+                && (0. ..USB_QUIET).contains(&s.frame_age))
     }
 
     /// Whether the iPhone is known to be locked: the cable gives no picture at all (an unlocked
     /// screen sends one as soon as capture starts), or its last one is black.
     pub fn locked(&self) -> bool {
         let s = &self.status;
-        !s.screen.is_empty() && (s.frames == 0 || s.dark)
+        !self.driver_frames && !s.screen.is_empty() && (s.frames == 0 || s.dark)
     }
 
     /// Whether Bluetooth can't carry taps at all here.
@@ -154,6 +161,9 @@ impl Facts {
             chip("Screen", Tone::Quiet, "No iPhone")
         } else if self.mirror_frames {
             chip("Screen", Tone::Good, "Live in iPhone Mirroring")
+        } else if self.driver_frames {
+            // The header says it's the cable; the picture is the driver's, with the real clock.
+            chip("Screen", Tone::Good, "Live")
         } else if !self.helper || s.camera.is_empty() {
             chip("Screen", Tone::Quiet, "Starting…")
         } else if s.camera == "undetermined" {
@@ -419,7 +429,7 @@ pub fn explainer(route: Route) -> Vec<(&'static str, &'static str)> {
     );
     let clock = (
         "The clock",
-        "While its screen is captured over USB, iOS shows 9:41 and full bars in the status bar, as it does for QuickTime; Trek draws the iPhone's real time over it.",
+        "While its screen is captured over USB, iOS shows 9:41 and full bars in the status bar, on the iPhone too, as it does for QuickTime. While Trek Driver runs, the picture comes from the driver instead and the clock is the real one; otherwise Trek draws the iPhone's real time over it.",
     );
     match route {
         Route::Usb => vec![usb, screen, clock, files, mirroring, bluetooth],
@@ -453,6 +463,29 @@ mod tests {
             mirror,
             ..Facts::default()
         }
+    }
+
+    #[test]
+    fn the_drivers_picture_counts_as_live_over_usb_with_the_cable_quiet() {
+        // The cable's capture is off (its last frame long ago), the driver gives the picture.
+        let mut s = usb_live();
+        s.frame_age = 600.;
+        let mut f = facts(s, Some(Mirror::Closed));
+        f.driver = Avail::Ready;
+        f.driver_state = Driver::Ready;
+        f.driver_frames = true;
+        assert!(f.usb_live() && !f.locked());
+        let strip = f.strip();
+        assert_eq!(strip.route, Route::Usb);
+        assert_eq!(
+            (strip.screen.word.as_str(), strip.screen.tone),
+            ("Live", Tone::Good)
+        );
+        assert_eq!(strip.taps.word, "Ready · USB");
+        // Without the driver's picture the same cable state reads as idle.
+        f.driver_frames = false;
+        assert!(!f.usb_live());
+        assert_eq!(f.strip().screen.word, "Locked or idle");
     }
 
     #[test]

@@ -607,6 +607,35 @@ impl Driver {
         body: Option<&Value>,
         limit: Duration,
     ) -> Result<Value, String> {
+        let (status, body) = self.fetch(method, path, body, limit)?;
+        if status != 200 {
+            return Err(Self::said(status, &body));
+        }
+        Ok(serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    /// `GET /screenshot`: the screen as a JPEG of `quality` percent, at most `max_width` pixels
+    /// wide (0: as it is). An older driver answers with a full-size PNG; `image` reads both.
+    pub fn screenshot(&self, max_width: u32, quality: u8) -> Result<Vec<u8>, String> {
+        let path = format!("/screenshot?w={max_width}&q={quality}");
+        let (status, body) = self.fetch("GET", &path, None, Duration::from_secs(15))?;
+        if status != 200 {
+            return Err(Self::said(status, &body));
+        }
+        if body.is_empty() {
+            return Err("Trek Driver sent no picture.".into());
+        }
+        Ok(body)
+    }
+
+    /// One request to the running driver: the status code and body of its answer.
+    fn fetch(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        limit: Duration,
+    ) -> Result<(u16, Vec<u8>), String> {
         let (udid, token) = {
             let inner = self.inner.lock().unwrap();
             let run = inner.run.as_ref().ok_or("Trek Driver isn't running.")?;
@@ -619,17 +648,21 @@ impl Driver {
             limit,
         )?;
         let (status, body) = response(&raw)?;
-        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        if status != 200 {
-            let msg = v["error"].as_str().unwrap_or("it failed").to_string();
-            return Err(match status {
-                401 => "Another Trek Driver answered (a different token): try again.".into(),
-                409 => msg,
-                _ => format!("Trek Driver: {msg}"),
-            });
+        if status == 200 {
+            self.inner.lock().unwrap().used = Some(Instant::now());
         }
-        self.inner.lock().unwrap().used = Some(Instant::now());
-        Ok(v)
+        Ok((status, body))
+    }
+
+    /// What a driver answer other than 200 means.
+    fn said(status: u16, body: &[u8]) -> String {
+        let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        let msg = v["error"].as_str().unwrap_or("it failed").to_string();
+        match status {
+            401 => "Another Trek Driver answered (a different token): try again.".into(),
+            409 => msg,
+            _ => format!("Trek Driver: {msg}"),
+        }
     }
 
     /// Stop it: asked nicely, then `xcodebuild` ended. Blocks a few seconds at most.

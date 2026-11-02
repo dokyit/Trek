@@ -31,9 +31,7 @@ final class Actions {
         case ("POST", "/type"): response = type(request.json)
         case ("POST", "/key"): response = key(request.json)
         case ("POST", "/open"): response = open(request.json)
-        case ("GET", "/screenshot"):
-            let png = XCUIScreen.main.screenshot().pngRepresentation
-            response = Response(status: 200, type: "image/png", body: png)
+        case ("GET", "/screenshot"): response = screenshot(request.query)
         case ("POST", "/stop"):
             stopped = true
             response = .json(["ok": true])
@@ -51,6 +49,40 @@ final class Actions {
 
     /// The screen in points (SpringBoard fills it), read once.
     private lazy var size: CGSize = springboard.frame.size
+
+    /// The screen, at most `w=<n>` pixels wide: a PNG, or with `q=<1-100>` a JPEG of that
+    /// quality (Trek's iPhone tool shows the screen this way while the driver runs, so the
+    /// cable's capture, which makes iOS show 9:41, stays off).
+    private func screenshot(_ query: String) -> Response {
+        var width = 0
+        var quality = 0
+        for pair in query.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2, let n = Int(kv[1]) else { continue }
+            if kv[0] == "w" { width = n } else if kv[0] == "q" { quality = n }
+        }
+        let shot = XCUIScreen.main.screenshot()
+        var image = shot.image
+        let pixels = image.size.width * image.scale
+        guard quality > 0 || (width > 0 && pixels > CGFloat(width)) else {
+            return Response(status: 200, type: "image/png", body: shot.pngRepresentation)
+        }
+        if width > 0, pixels > CGFloat(width) {
+            let factor = CGFloat(width) / pixels
+            let size = CGSize(width: (image.size.width * image.scale * factor).rounded(),
+                              height: (image.size.height * image.scale * factor).rounded())
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                image.draw(in: CGRect(origin: .zero, size: size))
+            }
+        }
+        let (type, data) = quality > 0
+            ? ("image/jpeg", image.jpegData(compressionQuality: CGFloat(min(quality, 100)) / 100))
+            : ("image/png", image.pngData())
+        guard let data else { return .error("couldn't encode the screen", status: 500) }
+        return Response(status: 200, type: type, body: data)
+    }
 
     private func status() -> Response {
         return .json([

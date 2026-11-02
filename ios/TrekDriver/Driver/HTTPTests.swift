@@ -8,6 +8,7 @@ final class HTTPTests: XCTestCase {
         guard case .done(let r, let used) = Request.parse(raw) else { return XCTFail("not parsed") }
         XCTAssertEqual(r.method, "POST")
         XCTAssertEqual(r.path, "/tap")
+        XCTAssertEqual(r.query, "x=1")
         XCTAssertEqual(r.headers["x-trek-token"], "abc")
         XCTAssertEqual(number(r.json["x"]), 10)
         XCTAssertEqual(number(r.json["y"]), 20)

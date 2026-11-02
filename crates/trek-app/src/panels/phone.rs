@@ -39,6 +39,7 @@ use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use trek_agents::Decision;
@@ -82,6 +83,10 @@ const BAR_EVERY: Duration = Duration::from_millis(500);
 
 /// Trek Driver stops after this long without a tap while no agent holds the phone.
 const DRIVER_IDLE: Duration = Duration::from_secs(10 * 60);
+/// How often the picture is asked of Trek Driver while it runs (a screenshot takes it ~0.3 s),
+/// and the JPEG quality it comes at.
+const DRIVER_FRAME: Duration = Duration::from_millis(350);
+const DRIVER_JPEG: u8 = 70;
 
 /// Where Trek remembers that iPhone Mirroring has shown an iPhone here, and its name: the route
 /// then stays iPhone Mirroring while its window is closed.
@@ -112,6 +117,8 @@ struct Frame {
     height: f32,
     /// The status bar iOS drew in it (with its 9:41), when one shows.
     bar: Option<StatusBar>,
+    /// From Trek Driver: the clock in it is the real one.
+    real_clock: bool,
 }
 
 pub struct PhonePanel {
@@ -134,7 +141,13 @@ pub struct PhonePanel {
     stale: Vec<Arc<RenderImage>>,
     /// The newest undecoded frame, for the decoder thread.
     decode_slot: Arc<Mutex<Option<Vec<u8>>>>,
-    decode_wake: async_channel::Sender<(u32, u32)>,
+    decode_wake: async_channel::Sender<(u32, u32, bool)>,
+    /// The picture comes from Trek Driver (`start_driver_frames`), the cable's capture off: the
+    /// iPhone shows its real clock then (captured, it shows 9:41, on the phone too).
+    driver_frames: bool,
+    /// True while the loop asking the driver for frames runs; it clears it when it ends.
+    driver_frames_live: Arc<AtomicBool>,
+    driver_frames_task: Option<Task<()>>,
     area: Rc<Cell<Bounds<Pixels>>>,
     press: Option<Point<Pixels>>,
     lease: Lease,
@@ -190,7 +203,7 @@ impl PhonePanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Frames decode on a thread of their own; only the newest waits.
         let decode_slot: Arc<Mutex<Option<Vec<u8>>>> = Arc::default();
-        let (wake_tx, wake_rx) = async_channel::bounded::<(u32, u32)>(1);
+        let (wake_tx, wake_rx) = async_channel::bounded::<(u32, u32, bool)>(1);
         let (frames_tx, frames_rx) = async_channel::bounded::<Frame>(2);
         let (slot, renderer) = (decode_slot.clone(), cx.svg_renderer());
         let _ = std::thread::Builder::new()
@@ -200,14 +213,28 @@ impl PhonePanel {
                 // app in front changes).
                 let mut bar = None;
                 let mut bar_at: Option<Instant> = None;
-                while let Ok((w, h)) = wake_rx.recv_blocking() {
+                while let Ok((w, h, real_clock)) = wake_rx.recv_blocking() {
                     let Some(jpeg) = slot.lock().unwrap().take() else {
                         continue;
                     };
-                    if bar_at.is_none_or(|t| t.elapsed() >= BAR_EVERY) {
+                    if real_clock {
+                        // The driver's picture: nothing to cover.
+                        bar = None;
+                        bar_at = None;
+                    } else if bar_at.is_none_or(|t| t.elapsed() >= BAR_EVERY) {
                         bar = status_bar(&jpeg);
                         bar_at = Some(Instant::now());
                     }
+                    // The cable says the screen's size with each frame; the driver's picture
+                    // is its own size.
+                    let (w, h) = if w == 0 || h == 0 {
+                        match image::load_from_memory(&jpeg) {
+                            Ok(i) => (i.width(), i.height()),
+                            Err(_) => continue,
+                        }
+                    } else {
+                        (w, h)
+                    };
                     let image = Image::from_bytes(ImageFormat::Jpeg, jpeg);
                     if let Ok(image) = image.to_image_data(renderer.clone()) {
                         let frame = Frame {
@@ -215,6 +242,7 @@ impl PhonePanel {
                             width: w as f32,
                             height: h as f32,
                             bar,
+                            real_clock,
                         };
                         if frames_tx.send_blocking(frame).is_err() {
                             break;
@@ -278,6 +306,9 @@ impl PhonePanel {
             mirror_looked: None,
             mirror_looking: false,
             mirror_frames: false,
+            driver_frames: false,
+            driver_frames_live: Arc::new(AtomicBool::new(false)),
+            driver_frames_task: None,
             mirroring_seen: std::fs::read_to_string(mirroring_marker())
                 .ok()
                 .map(|s| s.trim().to_string()),
@@ -310,6 +341,7 @@ impl PhonePanel {
             mirror: self.mirror.clone().filter(|_| !other),
             mirroring_known: self.mirroring_seen.is_some() && !other,
             mirror_frames: self.mirror_frames,
+            driver_frames: self.driver_frames,
             assistive: self.assistive,
             wants_taps: self.busy()
                 || self.lease.holder(Instant::now()).is_some()
@@ -369,8 +401,11 @@ impl PhonePanel {
             return;
         }
         self.visible = visible;
+        if !visible {
+            self.stop_driver_frames(cx);
+        }
         if let Some(link) = &self.link {
-            link.frames(visible, LIVE_FPS);
+            link.frames(visible && !self.driver_frames, LIVE_FPS);
         }
         if visible {
             self.refreshed = None;
@@ -386,6 +421,7 @@ impl PhonePanel {
             call.answer(Err("The user closed Trek's iPhone tool.".into()));
         }
         self.restore_assistive(cx);
+        self.stop_driver_frames(cx);
         self.stop_driver(cx);
         self.link = None;
         self._link_events = None;
@@ -422,6 +458,9 @@ impl PhonePanel {
             && self.clock_shown != Some(phone_time(self.clock, chrono::Utc::now()))
         {
             cx.notify();
+        }
+        if !self.demo {
+            self.manage_driver_frames(cx);
         }
         let wanted = self.visible || self.busy() || self.lease.holder(Instant::now()).is_some();
         if !wanted || self.demo {
@@ -681,8 +720,11 @@ impl PhonePanel {
                 width,
                 height,
             } => {
+                if self.driver_frames {
+                    return;
+                }
                 *self.decode_slot.lock().unwrap() = Some(jpeg);
-                let _ = self.decode_wake.try_send((width, height));
+                let _ = self.decode_wake.try_send((width, height, false));
             }
             Event::Status(s) => {
                 if s != self.status {
@@ -707,6 +749,16 @@ impl PhonePanel {
     }
 
     fn show_frame(&mut self, frame: Frame, window: &mut Window, cx: &mut Context<Self>) {
+        if frame.real_clock && self.driver_frames_task.is_none() {
+            // A frame of a loop already stopped.
+            return;
+        }
+        if frame.real_clock && !self.driver_frames {
+            self.driver_frames = true;
+            if let Some(link) = &self.link {
+                link.frames(false, LIVE_FPS);
+            }
+        }
         for old in self.stale.drain(..) {
             cx.drop_image(old, Some(&mut *window));
         }
@@ -758,6 +810,74 @@ impl PhonePanel {
     }
 
     /// Trek Driver stops (in the background: it asks the phone, then ends xcodebuild).
+    /// The picture from Trek Driver while it can run (the phone unlocked on the cable, the
+    /// driver installed, the panel on screen): started and stopped as that changes, and
+    /// stopped when its loop ended (the driver went away).
+    fn manage_driver_frames(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.visible
+            && !self.mirror_frames
+            && self.driver_avail() == driver::Avail::Ready
+            && self.facts().route() == Route::Usb;
+        if wanted && self.driver_frames_task.is_none() {
+            self.start_driver_frames(cx);
+        } else if self.driver_frames_task.is_some()
+            && (!wanted || !self.driver_frames_live.load(Ordering::Relaxed))
+        {
+            self.stop_driver_frames(cx);
+        }
+    }
+
+    /// A loop asking the driver (started if need be) for the screen a few times a second; its
+    /// first frame switches the picture over (`show_frame`) and the cable's capture off, so the
+    /// iPhone shows its real clock.
+    fn start_driver_frames(&mut self, cx: &mut Context<Self>) {
+        let (Some(install), Some(udid)) = (
+            self.driver_install.clone(),
+            self.phone.as_ref().map(|p| p.udid.clone()),
+        ) else {
+            return;
+        };
+        let live = Arc::new(AtomicBool::new(true));
+        self.driver_frames_live = live.clone();
+        let d = self.driver.clone();
+        let slot = self.decode_slot.clone();
+        let wake = self.decode_wake.clone();
+        let executor = cx.background_executor().clone();
+        self.driver_frames_task = Some(cx.background_executor().spawn(async move {
+            if d.ensure(&install, &udid, driver::START_LIMIT).is_err() {
+                live.store(false, Ordering::Relaxed);
+                return;
+            }
+            while live.load(Ordering::Relaxed) {
+                let started = Instant::now();
+                match d.screenshot(FRAME_WIDTH, DRIVER_JPEG) {
+                    Ok(jpeg) => {
+                        *slot.lock().unwrap() = Some(jpeg);
+                        let _ = wake.try_send((0, 0, true));
+                    }
+                    Err(_) => break,
+                }
+                if let Some(rest) = DRIVER_FRAME.checked_sub(started.elapsed()) {
+                    executor.timer(rest).await;
+                }
+            }
+            live.store(false, Ordering::Relaxed);
+        }));
+    }
+
+    /// The cable's capture takes the picture over again.
+    fn stop_driver_frames(&mut self, cx: &mut Context<Self>) {
+        self.driver_frames_live.store(false, Ordering::Relaxed);
+        self.driver_frames_task = None;
+        if self.driver_frames {
+            self.driver_frames = false;
+            if let Some(link) = &self.link {
+                link.frames(self.visible, LIVE_FPS);
+            }
+            cx.notify();
+        }
+    }
+
     fn stop_driver(&mut self, cx: &mut Context<Self>) {
         if self.demo
             || matches!(
@@ -1065,6 +1185,7 @@ impl PhonePanel {
         self.mirror = Some(MirrorState::TimedOut);
         self.mirroring_seen = Some("iPhone 16 Pro Max".into());
         self.mirror_frames = false;
+        self.driver_frames = false;
         self.assistive = None;
         self.wanted_taps = None;
         self.explain_open = false;
@@ -1083,6 +1204,10 @@ impl PhonePanel {
                     driver::State::Off,
                 ));
                 self.wanted_taps = Some(Instant::now());
+            }
+            "driver-live" => {
+                self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
+                self.driver_frames = true;
             }
             "driver-how" => {
                 self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
@@ -2642,6 +2767,23 @@ impl Run<'_> {
     /// when Mirroring is the route and the phone is locked), else the cable's.
     async fn screenshot(&mut self, edge: u32) -> Result<Value, String> {
         let link = self.link().await?;
+        // Trek Driver running: its picture has the real clock, and the cable's capture (which
+        // makes iOS show 9:41) stays off.
+        let driver = self
+            .this
+            .update(self.cx, |p, _| {
+                (p.driver_frames || p.driver.state() == driver::State::Ready)
+                    .then(|| p.driver.clone())
+            })
+            .map_err(gone)?;
+        if let Some(d) = driver
+            && self.facts()?.route() == Route::Usb
+        {
+            match self.driver_screenshot(d, edge).await {
+                Ok(v) => return Ok(v),
+                Err(e) => tracing::debug!("the driver's screenshot failed, the cable's next: {e}"),
+            }
+        }
         let mut why_not = None;
         if !self.bluetooth()? && self.facts()?.route() != Route::Usb {
             let raw = self
@@ -2717,6 +2859,36 @@ impl Run<'_> {
                 shot.width, shot.height
             ),
             "image": shot.path,
+        }))
+    }
+
+    /// The screen from Trek Driver as PNG, its long side at most `edge` pixels.
+    async fn driver_screenshot(&mut self, d: Arc<Driver>, edge: u32) -> Result<Value, String> {
+        let path = self.shot_path()?;
+        let bytes = self
+            .blocking(move || {
+                let width = match d.screen() {
+                    Some((w, h)) if h > w => (edge as f64 * w / h).round() as u32,
+                    _ => edge,
+                };
+                d.screenshot(width.max(1), 0)
+            })
+            .await?;
+        let (width, height) = image::load_from_memory(&bytes)
+            .map(|i| (i.width(), i.height()))
+            .map_err(|e| format!("Trek Driver's picture couldn't be read: {e}"))?;
+        std::fs::write(&path, &bytes).map_err(|e| format!("Couldn't save the screenshot: {e}"))?;
+        self.this
+            .update(self.cx, |p, _| {
+                p.shot_size = Some((width as f64, height as f64));
+                p.shot_mirrored = false;
+            })
+            .map_err(gone)?;
+        Ok(json!({
+            "text": format!(
+                "The iPhone's screen, {width}×{height}, from Trek Driver. x/y for phone_tap and phone_swipe are pixels in this picture."
+            ),
+            "image": path.display().to_string(),
         }))
     }
 

@@ -15,7 +15,7 @@ Taps take one of three routes, decided from what Trek knows:
 
 Press ⌘J and choose **iPhone**. The header is one line (the device, its name, iOS and the link). Under it one strip: **Screen** (Live, Live in iPhone Mirroring, Locked, …) and **Taps** (Ready · USB, Starting the driver…, Install the driver (ios/scripts/install-device.sh), The driver didn't start, Ready · Bluetooth, Ready · iPhone Mirroring, Lock the iPhone to tap, Pair once in Bluetooth, iPhone Mirroring can't reach it, …), with **AssistiveTouch** only on the Bluetooth route. A line under the strip appears only when the user must act now; the ⓘ button opens "How this works".
 
-While the picture comes over the cable, iOS draws 9:41 and full bars in its status bar (as for QuickTime). The panel draws the phone's real time (its time zone and 12/24-hour setting, read from lockdown) over the clock, in the status bar's own colors, only when a frame shows a status bar (not over a full-screen app or iPhone Mirroring's picture) and never below it.
+While the picture comes over the cable, iOS draws 9:41 and full bars in its status bar, and the Calendar icon's demo date, on the phone itself too (as for QuickTime). So on the USB route the panel takes its picture from Trek Driver instead whenever the driver can run (the phone unlocked on the cable, the driver installed, the panel on screen): `manage_driver_frames` starts the driver if need be and asks it for a JPEG about three times a second (`GET /screenshot?w=900&q=70`); the first frame switches the picture over and turns the cable's capture off, and the phone shows its real clock again within a few seconds of the tool opening. An agent's `phone_screenshot` comes from the driver too then (a PNG scaled to `max_edge`). When the driver stops (the phone locked or unplugged, the panel hidden), the cable's capture takes over again. Over the cable the panel draws the phone's real time (its time zone and 12/24-hour setting, read from lockdown) over the clock, in the status bar's own colors, only when a frame shows a status bar (not over a full-screen app or iPhone Mirroring's picture) and never below it.
 
 ## Reach it with the CLI
 
@@ -35,6 +35,7 @@ An isolated run never touches the real phone: the tool starts with a made-up one
 ./.agents/skills/verify-trek/scripts/trek-dev control phone driver-starting  # Starting the driver…
 ./.agents/skills/verify-trek/scripts/trek-dev control phone driver-install   # Install the driver (ios/scripts/install-device.sh), with its action line
 ./.agents/skills/verify-trek/scripts/trek-dev control phone driver-how       # the popover on the USB route
+./.agents/skills/verify-trek/scripts/trek-dev control phone driver-live      # the driver's picture: Screen Live, the clock real
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot iphone-tool
 ```
 
@@ -50,7 +51,7 @@ cat "$(./.agents/skills/verify-trek/scripts/trek-dev status | jq -r .runtime_dir
 
 `call <method> <json>` runs any `phone_*` tool as an agent on full access would; the answer lands in `<runtime>/shot/phone-reply.json`.
 
-The driver by hand (what Trek does): `ios/scripts/install-device.sh` (or `ios/scripts/build-driver.sh <signed Trek.app> <dir>`), then `xcodebuild test-without-building -xctestrun <copy with TREK_DRIVER=1, TREK_DRIVER_PORT, TREK_DRIVER_TOKEN> -destination id=<udid> -only-testing:TrekDriver/Drive` and HTTP to port 8117 over usbmuxd: `GET /status` (screen in points), `POST /tap {x,y,hold_ms}`, `/swipe {x1,y1,x2,y2,duration_ms}`, `/type {text}`, `/key {key: home|lock|volume_up|volume_down|spotlight|enter|backspace|…}`, `/open {bundle}`, `GET /screenshot`, `POST /stop`, each with `X-Trek-Token`. Its HTTP parsing has its own tests: `xcodebuild test -project ios/TrekDriver/TrekDriver.xcodeproj -scheme TrekDriver -destination 'platform=iOS Simulator,name=iPhone 17'`.
+The driver by hand (what Trek does): `ios/scripts/install-device.sh` (or `ios/scripts/build-driver.sh <signed Trek.app> <dir>`), then `xcodebuild test-without-building -xctestrun <copy with TREK_DRIVER=1, TREK_DRIVER_PORT, TREK_DRIVER_TOKEN> -destination id=<udid> -only-testing:TrekDriver/Drive` and HTTP to port 8117 over usbmuxd: `GET /status` (screen in points), `POST /tap {x,y,hold_ms}`, `/swipe {x1,y1,x2,y2,duration_ms}`, `/type {text}`, `/key {key: home|lock|volume_up|volume_down|spotlight|enter|backspace|…}`, `/open {bundle}`, `GET /screenshot` (`?w=<max width in pixels>&q=<JPEG quality>`; PNG without `q`), `POST /stop`, each with `X-Trek-Token`. Its HTTP parsing has its own tests: `xcodebuild test -project ios/TrekDriver/TrekDriver.xcodeproj -scheme TrekDriver -destination 'platform=iOS Simulator,name=iPhone 17'`.
 
 Why iPhone Mirroring can't reach the phone, from the Mac's side (Wi-Fi, Bluetooth, Internet Sharing, firewall, VPN, the phone on the Mac's network, and how its last Connect ended in its log), with the one blocker last:
 
