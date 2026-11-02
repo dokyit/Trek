@@ -28,6 +28,8 @@ struct ThreadsView: View {
     @State private var showingUsage = false
     /// The status bar's height: the navigation bar's row starts below it.
     @State private var statusBar: CGFloat = 0
+    /// Where the list's head (title, chips, cards) is: the bar turns solid once it goes under.
+    @State private var head = ListHead()
     @Environment(\.compactRows) private var compact
 
     /// Quiet threads a project shows before "Show more" (the Mac's sidebar: 3, and 5 settled).
@@ -43,6 +45,7 @@ struct ThreadsView: View {
                     ThreadsHeader(picked: $pickedMachine, update: model.offeredUpdate,
                                   unreachable: model.mode == .live || Launch.demoOffline != nil
                                       ? model.links.filter { $0.connection != .connected } : [])
+                        .reportsListHead($head)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets())
@@ -63,9 +66,9 @@ struct ThreadsView: View {
                 .background(RidgeBackdrop(height: 300))
                 // Rows fade out above the "New thread" pill and the tab bar, and the last row clears them.
                 .fadesUnderBottomBars()
-                // The bar turns solid over the rows that scroll under it, and says "Threads" once
-                // the list's own title has gone (drawn from the scroll offset: see `TopBarFade`).
-                .fadesUnderTopBar(title: "Threads", statusBar: statusBar, ground: RidgeBackdrop(height: 300))
+                // The bar turns solid as soon as the head goes under it, and says "Threads" once
+                // the list's own title has gone (drawn from where the head is: see `TopBarFade`).
+                .fadesUnderTopBar(title: "Threads", statusBar: statusBar, head: head, ground: RidgeBackdrop(height: 300))
                 .navigationTitle("Threads")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar(removing: .title)
@@ -99,7 +102,8 @@ struct ThreadsView: View {
                 }
             }
         }
-        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { statusBar = $0 }
+        // The status bar's foot in the window: the stack's top edge (it keeps out of the status bar).
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { statusBar = $0 }
         .environment(\.openThread, OpenThreadAction { path.append($0) })
     }
 
