@@ -138,4 +138,109 @@ struct ThreadsHeaderLayoutTests {
             #expect(mask.height == bar + TopBar.fade, "solid to \(bar) pt, then \(TopBar.fade) pt of fade")
         }
     }
+
+    /// A list whose head rests at the bar's foot, scrolled `d` (negative: pulled down), as the
+    /// tracker sees it: the head's place while its row is laid out, and the scroll view's offset
+    /// with the inset it reports (iOS 27.0's, or none, as iOS 27.2's read as).
+    private func tracker(bar: CGFloat, scrolled d: CGFloat, headShown: Bool = true, inset: CGFloat) -> HeadTracker {
+        var t = HeadTracker()
+        t.barFoot = bar
+        t.inset = inset
+        // At rest first: the row seen where it lies.
+        t.offset = -bar
+        t.head = ListHead(top: bar, shown: true)
+        t.settle()
+        t.offset = -bar + d
+        t.head = ListHead(top: bar - d, shown: headShown)
+        t.settle()
+        return t
+    }
+
+    /// Nothing of the head (the big title, the chips) is ever drawn in the bar region uncovered:
+    /// from the first point it goes above the bar's foot the ground there is solid. On an
+    /// iPhone on iOS 27.2 the title and the chips sat under the clock and the bar's buttons, one
+    /// swipe in, with no ground.
+    @Test func theHeadIsNeverUncoveredInTheBarRegion() {
+        for (_, bar) in Self.bars {
+            for inset in [bar, 0] {
+                var d: CGFloat = 0.02
+                while d < 900 {
+                    let t = tracker(bar: bar, scrolled: d, headShown: d < 400, inset: inset)
+                    #expect(abs(t.scrolled - d) < 0.001, "tracked at \(d) (bar \(bar), inset \(inset))")
+                    #expect(TopBar.groundOpacity(scrolled: t.scrolled) == 1, "solid at \(d)")
+                    #expect(TopBar.uncovered(scrolled: t.scrolled, bar: bar) == 0, "nothing uncovered at \(d)")
+                    d += d < 60 ? 0.25 : 7
+                }
+                // At rest and pulled down: no ground, so the refresh spinner shows.
+                for d: CGFloat in [0, -0.000_000_1, -20, -120] {
+                    let t = tracker(bar: bar, scrolled: d, inset: inset)
+                    #expect(TopBar.groundOpacity(scrolled: t.scrolled) == 0, "no ground at \(d)")
+                    #expect(TopBar.fadeOpacity(scrolled: t.scrolled) == 0)
+                    #expect(!ScreenTitle.isGone(scrolled: t.scrolled))
+                }
+            }
+        }
+        // The rounding seen at rest on a simulator.
+        #expect(TopBar.groundOpacity(scrolled: 2.842170943040401e-14) == 0)
+    }
+
+    /// Once the List drops the head's row, the offset carries on from where the two met, not
+    /// from the head's last place (a List stops placing a row before it drops it).
+    @Test func theHeadIsTrackedFromTheOffsetOnceItsRowIsGone() {
+        var t = tracker(bar: 113, scrolled: 450, inset: 113)
+        // The row's last place, then the list scrolls on and drops it.
+        t.offset += 1400
+        t.head.shown = false
+        t.settle()
+        #expect(abs(t.scrolled - 1850) < 0.001)
+        // Back to the top: the row is laid out again where it rests.
+        t.offset = -113
+        t.head = ListHead(top: 113, shown: true)
+        t.settle()
+        #expect(abs(t.scrolled) < 0.001)
+        // Before the head is ever seen: the scroll view's own numbers.
+        var fresh = HeadTracker()
+        fresh.offset = -100
+        fresh.inset = 113
+        #expect(fresh.scrolled == 13)
+    }
+
+    /// The bottom fade follows the bars: its solid ground starts `lift` above the bars' top edge
+    /// whether they stand expanded (the pill over the tab bar, the safe area ending at the pill)
+    /// or folded (a small tab button, the pill and Search on one row, lower), wherever the safe
+    /// area ends meanwhile. Screens at 393 and 430 pt.
+    @Test func theBottomFadeTracksTheBarsInBothStates() {
+        struct Case { var name: String; var screen: CGFloat; var foot: CGFloat; var barsTop: CGFloat? }
+        var cases: [Case] = []
+        for screen: CGFloat in [852, 932] {  // 393 and 430 pt
+            let expanded = screen - 139, folded = screen - 76
+            cases += [
+                Case(name: "expanded", screen: screen, foot: expanded, barsTop: expanded),
+                // Folded, as iOS 27.0 has it: the safe area follows, nearly.
+                Case(name: "folded, safe area followed", screen: screen, foot: screen - 83, barsTop: folded),
+                // Folded, the safe area left where it was.
+                Case(name: "folded, safe area kept", screen: screen, foot: expanded, barsTop: folded),
+                // Folded, the safe area shrunk past the pill (rows read under and around it).
+                Case(name: "folded, safe area shrunk", screen: screen, foot: screen - 34, barsTop: folded),
+            ]
+        }
+        for c in cases {
+            let bars = c.screen - c.foot
+            let solid = BottomBarsFade.solidTop(listFoot: c.foot, bars: bars, barsTop: c.barsTop)
+            #expect(solid == c.barsTop! - BottomBarsFade.lift, "\(c.name) at \(c.screen)")
+            // The cover as drawn: hung from the screen's foot, its top the fade's.
+            let rise = BottomBarsFade.rise(listFoot: c.foot, bars: bars, barsTop: c.barsTop)
+            let cover = UIHostingController(rootView: BottomBarsFade.cover(color: Trek.background, fade: BottomBarsFade.fade,
+                                                                           bars: max(0, bars + rise) + BottomBarsFade.lift))
+                .sizeThatFits(in: CGSize(width: 393, height: 2000))
+            #expect(abs((c.screen - cover.height) - (solid - BottomBarsFade.fade)) < 0.5, "cover from \(c.name) at \(c.screen)")
+            // The last row still scrolls clear of the fade above the bars.
+            #expect(c.foot - (BottomBarsFade.clearance + max(0, rise)) <= solid - BottomBarsFade.fade + 0.5, "\(c.name)")
+        }
+        // No pill (a Mac that refused this iPhone), the keyboard up, or a pill measured before
+        // it was placed: the safe area's edge.
+        for (foot, bars, top) in [(CGFloat(713), CGFloat(139), CGFloat?.none), (516, 336, 713), (713, 139, 0), (713, 139, 20)] {
+            #expect(BottomBarsFade.solidTop(listFoot: foot, bars: bars, barsTop: top) == foot - BottomBarsFade.lift)
+        }
+    }
 }

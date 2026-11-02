@@ -350,6 +350,8 @@ struct NewThreadAccessory: View {
         }
         .padding(.leading, 18)
         .padding(.trailing, 14)
+        // The lists' fades hang from this edge, the bars expanded or folded (`BottomBars`).
+        .reportsBottomBarsTop()
         .confirmationDialog("Waiting on you", isPresented: Binding(get: { !choosing.isEmpty }, set: { if !$0 { choosing = [] } }),
                             titleVisibility: .visible) {
             ForEach(choosing.prefix(8)) { t in
