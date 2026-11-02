@@ -46,6 +46,10 @@ pub struct DirectOptions {
     /// The model's context window in tokens, in place of what its provider's model list said
     /// (`ModelInfo::context`) or `catalog::context_window`'s guess.
     pub context_window: Option<u64>,
+    /// Anthropic's message threads (the conversation held on the server between requests, so
+    /// each request carries only what's new): `None` on Anthropic's own endpoint only,
+    /// `Some(true)` on this endpoint too, `Some(false)` never.
+    pub message_threads: Option<bool>,
 }
 
 impl Default for DirectOptions {
@@ -62,6 +66,7 @@ impl Default for DirectOptions {
             system_prompt: None,
             observer: None,
             context_window: None,
+            message_threads: None,
         }
     }
 }
@@ -608,6 +613,13 @@ async fn session(
     };
     let mut system = base_system.clone();
     let mut history: Vec<Value> = Vec::new();
+    let mut thread = Thread {
+        off: match options.message_threads {
+            Some(on) => !on,
+            None => url != ANTHROPIC_MESSAGES_URL,
+        } || std::env::var_os("TREK_NO_MESSAGE_THREADS").is_some(),
+        ..Thread::default()
+    };
     let mut kept = VecDeque::new();
     let mut shutdown = false;
     // How full the context is: tokens in it at the last usage report, and `history`'s length
@@ -727,6 +739,7 @@ async fn session(
                                     &system,
                                     &history,
                                     &tools,
+                                    &mut thread,
                                     &events,
                                     &commands,
                                     &mut kept,
@@ -2081,40 +2094,171 @@ fn anthropic_tools(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Anthropic's message thread for the session's conversation (beta `message-threads-2026-08-12`):
+/// the server keeps the conversation, system prompt and tools for five minutes after each
+/// request, so a request within that time carries only the messages since the last response.
+/// Fewer bytes to upload and tokenize, so the first token comes sooner, most of all in a long
+/// run of tool calls. `history` here stays the truth: when the server no longer holds the
+/// conversation as it is here (the thread expired, a message was taken back, the context went on
+/// afresh, the model or system prompt changed), the next request sends all of it again and starts
+/// a new thread; a 404 for a thread the server lost is replayed the same way, once.
+#[derive(Default)]
+struct Thread {
+    /// The response the server's copy ends with, to continue from.
+    previous: Option<String>,
+    /// How many of `history`'s messages the server holds, and a hash of them: an edit means a
+    /// new thread.
+    held: usize,
+    held_hash: u64,
+    /// The fixed fields (model, effort, system prompt, tools) the thread was created with: a
+    /// change means a new thread.
+    fixed: u64,
+    last_use: Option<Instant>,
+    /// No threads this session: another endpoint than Anthropic's, the kill switch, or the API
+    /// refused them.
+    off: bool,
+}
+
+/// A thread expires 5 minutes after its last request; a little under, so a request sent right
+/// at the end isn't a wasted round trip.
+const THREAD_KEEPS: Duration = Duration::from_secs(4 * 60 + 40);
+const THREADS_BETA: &str = "message-threads-2026-08-12";
+const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
+/// The error codes of a continue request the server can't honour: the conversation is replayed
+/// in a new thread.
+const THREAD_LOST: [&str; 4] = [
+    "thread_not_found",
+    "thread_already_continued",
+    "thread_continue_in_flight",
+    "thread_fingerprint_mismatch",
+];
+
+/// What a request says about the thread.
+#[derive(Clone, Debug, PartialEq)]
+enum ThreadRequest {
+    /// No thread: the whole conversation, system prompt and tools, every request.
+    None,
+    /// Start one with the whole conversation.
+    Create,
+    /// Go on from the response `previous`: only the messages after the `held` the server has,
+    /// no system prompt or tools.
+    Continue { previous: String, held: usize },
+}
+
+impl Thread {
+    /// The request to make now: a continue while the server holds this conversation as it is
+    /// here, under the same fixed fields, with something new to send.
+    fn request(&self, fixed: u64, history: &[Value], now: Instant) -> ThreadRequest {
+        if self.off {
+            return ThreadRequest::None;
+        }
+        match (&self.previous, self.last_use) {
+            (Some(previous), Some(at))
+                if self.fixed == fixed
+                    && now.saturating_duration_since(at) < THREAD_KEEPS
+                    && self.held < history.len()
+                    && hash_messages(history[..self.held].iter()) == self.held_hash =>
+            {
+                ThreadRequest::Continue {
+                    previous: previous.clone(),
+                    held: self.held,
+                }
+            }
+            _ => ThreadRequest::Create,
+        }
+    }
+
+    /// The server stored `answer` (sent in reply to `history`) as response `id`.
+    fn stored(&mut self, id: String, fixed: u64, history: &[Value], answer: &Value) {
+        self.previous = Some(id);
+        self.held = history.len() + 1;
+        self.held_hash = hash_messages(history.iter().chain(std::iter::once(answer)));
+        self.fixed = fixed;
+        self.last_use = Some(Instant::now());
+    }
+
+    /// The server's copy can't be continued: the next request starts a thread anew.
+    fn forget(&mut self) {
+        self.previous = None;
+    }
+}
+
+fn hash_messages<'a>(messages: impl Iterator<Item = &'a Value>) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for message in messages {
+        message.to_string().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// The request fields a thread fixes at its creation, as one hash.
+fn fixed_fields(model: &str, effort: Effort, system: &str, tools: &[Value]) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    model.hash(&mut hasher);
+    effort.as_str().hash(&mut hasher);
+    system.hash(&mut hasher);
+    Value::Array(tools.to_vec()).to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
 fn anthropic_body(
     model: &str,
     effort: Effort,
     system: &str,
     history: &[Value],
     tools: &[Value],
+    thread: &ThreadRequest,
 ) -> Value {
     // Prompt caching: the tools and system prompt (the first breakpoint covers both: tools come
     // first), and the conversation up to its last message, so each request in a run of tool
-    // calls reads the one before it from the cache.
+    // calls reads the one before it from the cache. On a thread the top-level `cache_control`
+    // marks the last message instead (a fixed field, the same on every request of the thread),
+    // and a continue request leaves the system prompt and tools out: the server has them.
     let mut tools = anthropic_tools(tools);
     if let Some(last) = tools.last_mut() {
         last["cache_control"] = json!({ "type": "ephemeral" });
     }
-    let mut messages = history.to_vec();
-    if let Some(last) = messages.last_mut() {
-        if let Some(text) = last["content"].as_str() {
-            last["content"] = json!([{ "type": "text", "text": text }]);
-        }
-        if let Some(block) = last["content"]
-            .as_array_mut()
-            .and_then(|blocks| blocks.last_mut())
-        {
-            block["cache_control"] = json!({ "type": "ephemeral" });
+    let mut messages = match thread {
+        ThreadRequest::Continue { held, .. } => history[(*held).min(history.len())..].to_vec(),
+        _ => history.to_vec(),
+    };
+    if *thread == ThreadRequest::None {
+        if let Some(last) = messages.last_mut() {
+            if let Some(text) = last["content"].as_str() {
+                last["content"] = json!([{ "type": "text", "text": text }]);
+            }
+            if let Some(block) = last["content"]
+                .as_array_mut()
+                .and_then(|blocks| blocks.last_mut())
+            {
+                block["cache_control"] = json!({ "type": "ephemeral" });
+            }
         }
     }
     let mut body = json!({
         "model": model,
         "max_tokens": 64000,
         "stream": true,
-        "system": [{ "type": "text", "text": system, "cache_control": { "type": "ephemeral" } }],
         "messages": messages,
-        "tools": tools,
     });
+    if !matches!(thread, ThreadRequest::Continue { .. }) {
+        body["system"] =
+            json!([{ "type": "text", "text": system, "cache_control": { "type": "ephemeral" } }]);
+        body["tools"] = Value::Array(tools);
+    }
+    match thread {
+        ThreadRequest::None => {}
+        ThreadRequest::Create => {
+            body["thread"] = json!({ "type": "create" });
+            body["cache_control"] = json!({ "type": "ephemeral" });
+        }
+        ThreadRequest::Continue { previous, .. } => {
+            body["thread"] = json!({ "type": "continue", "previous_message_id": previous });
+            body["cache_control"] = json!({ "type": "ephemeral" });
+        }
+    }
     if model.starts_with("claude-haiku-4") {
         if effort >= Effort::Low {
             let budget = match effort {
@@ -2148,27 +2292,62 @@ async fn anthropic_turn(
     system: &str,
     history: &[Value],
     tools: &[Value],
+    thread: &mut Thread,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<TurnResponse> {
-    let body = anthropic_body(model, effort, system, history, tools);
-    let mut req = client
-        .post(url)
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body);
-    if body.get("fallbacks").is_some() {
-        req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
-    }
-    let resp = send_request(req, commands, kept, shutdown, Duration::from_secs(60)).await?;
-    if !resp.status().is_success() {
+    let fixed = fixed_fields(model, effort, system, tools);
+    let mut request = thread.request(fixed, history, Instant::now());
+    // Once: a thread the server lost is replayed as a new one; a thread it refuses, left out.
+    let mut retried = false;
+    let resp = loop {
+        let body = anthropic_body(model, effort, system, history, tools, &request);
+        let mut betas = Vec::new();
+        if body.get("fallbacks").is_some() {
+            betas.push(FALLBACK_BETA);
+        }
+        if request != ThreadRequest::None {
+            betas.push(THREADS_BETA);
+        }
+        let mut req = client
+            .post(url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body);
+        if !betas.is_empty() {
+            req = req.header("anthropic-beta", betas.join(","));
+        }
+        let resp = send_request(req, commands, kept, shutdown, Duration::from_secs(60)).await?;
+        if resp.status().is_success() {
+            break resp;
+        }
         let status = resp.status();
         let headers = resp.headers().clone();
         let text = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<Value>(&text)
-            .ok()
+        let error = serde_json::from_str::<Value>(&text).ok();
+        let code = error
+            .as_ref()
+            .and_then(|v| v["error"]["details"]["error_code"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !retried && request != ThreadRequest::None && code.starts_with("thread_") {
+            retried = true;
+            thread.forget();
+            request = match request {
+                ThreadRequest::Continue { .. } if THREAD_LOST.contains(&code.as_str()) => {
+                    ThreadRequest::Create
+                }
+                _ => {
+                    thread.off = true;
+                    ThreadRequest::None
+                }
+            };
+            continue;
+        }
+        let msg = error
+            .as_ref()
             .and_then(|v| v["error"]["message"].as_str().map(String::from))
             .unwrap_or(text);
         return Err(request_error(
@@ -2176,7 +2355,7 @@ async fn anthropic_turn(
             &headers,
             format!("Anthropic API {status}: {msg}"),
         ));
-    }
+    };
     let mut stream = resp.bytes_stream();
     let mut buf = Vec::new();
     let mut blocks: Vec<Value> = Vec::new();
@@ -2187,6 +2366,8 @@ async fn anthropic_turn(
     let mut terminal = false;
     let mut usage = TokenUsage::default();
     let mut long_writes = 0;
+    let mut id = None;
+    let mut fell_back = false;
     loop {
         tokio::select! {
             chunk = stream.next() => {
@@ -2196,6 +2377,7 @@ async fn anthropic_turn(
                     let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
                     anthropic_usage(&v, &mut usage, &mut long_writes);
                     match v["type"].as_str() {
+                        Some("message_start") => id = v["message"]["id"].as_str().map(String::from),
                         Some("content_block_start") => blocks.push(v["content_block"].clone()),
                         Some("content_block_delta") => {
                             let i = v["index"].as_u64().unwrap_or(0) as usize;
@@ -2217,7 +2399,14 @@ async fn anthropic_turn(
                                 _ => {}
                             }
                         }
-                        Some("message_delta") => stop_reason = v["delta"]["stop_reason"].as_str().map(String::from),
+                        Some("message_delta") => {
+                            stop_reason = v["delta"]["stop_reason"].as_str().map(String::from);
+                            // A fallback model's answer: the thread keeps one model, so the
+                            // server doesn't store it.
+                            fell_back |= v["usage"]["iterations"].as_array().is_some_and(|its| {
+                                its.iter().any(|it| it["type"] == "fallback_message" || it.get("fallback_message").is_some())
+                            });
+                        }
                         Some("message_stop") => terminal = true,
                         Some("error") => bail!("{}", v["error"]["message"].as_str().unwrap_or("stream error")),
                         _ => {}
@@ -2228,6 +2417,7 @@ async fn anthropic_turn(
         }
     }
     if !terminal {
+        thread.forget();
         bail!("The connection closed before the answer finished");
     }
     let mut reported = None;
@@ -2249,6 +2439,8 @@ async fn anthropic_turn(
             .await?;
     }
     if stop_reason.as_deref() == Some("refusal") {
+        // The server may hold the refused turn, which a continue can't take back.
+        thread.forget();
         bail!("The model declined this request.");
     }
     events.send(AgentEvent::TextDone(text.clone())).await?;
@@ -2267,9 +2459,19 @@ async fn anthropic_turn(
             arguments: block["input"].to_string(),
         });
     }
+    let answer = json!({ "role": "assistant", "content": blocks });
+    if request != ThreadRequest::None {
+        // Not stored: a fallback model's answer, or one `max_tokens` cut off mid tool call.
+        match id {
+            Some(id) if !fell_back && stop_reason.as_deref() != Some("max_tokens") => {
+                thread.stored(id, fixed, history, &answer)
+            }
+            _ => thread.forget(),
+        }
+    }
     Ok(TurnResponse {
         text,
-        content: Some(json!({ "role": "assistant", "content": blocks })),
+        content: Some(answer),
         reasoning_details: vec![],
         tool_calls,
         usage: reported,
@@ -3134,6 +3336,7 @@ mod tests {
             "sys",
             &[],
             &direct_tools(),
+            &mut Thread::default(),
             &events,
             &commands,
             &mut kept,
@@ -3314,6 +3517,7 @@ mod tests {
             "sys",
             &[],
             &direct_tools(),
+            &ThreadRequest::None,
         );
         let names: Vec<&str> = body["tools"]
             .as_array()
@@ -3339,7 +3543,14 @@ mod tests {
             json!({ "role": "assistant", "content": [{ "type": "text", "text": "yes" }] }),
             json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t", "content": "ok" }, { "type": "text", "text": "and" }] }),
         ];
-        let body = anthropic_body("claude-sonnet-4-5", Effort::Medium, "sys", &history, &[]);
+        let body = anthropic_body(
+            "claude-sonnet-4-5",
+            Effort::Medium,
+            "sys",
+            &history,
+            &[],
+            &ThreadRequest::None,
+        );
         assert_eq!(
             body["messages"][0]["content"], "hi",
             "only the last message"
@@ -3359,6 +3570,7 @@ mod tests {
             "sys",
             &history[..1],
             &[],
+            &ThreadRequest::None,
         );
         assert_eq!(
             body["messages"][0]["content"],
@@ -3391,6 +3603,7 @@ mod tests {
             "sys",
             &[],
             &direct_tools(),
+            &mut Thread::default(),
             &events,
             &commands,
             &mut kept,
@@ -3850,6 +4063,280 @@ mod tests {
                 .contains("hello from notes")
         );
         s.finish().await;
+    }
+
+    /// An Anthropic stream with the response `id` the thread goes on from.
+    fn anthropic_stream(id: &str, events: &str) -> (u16, String) {
+        (
+            200,
+            format!(
+                "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"{id}\",\"usage\":{{\"input_tokens\":5,\"output_tokens\":1}}}}}}\n\n{events}"
+            ),
+        )
+    }
+
+    const ANTHROPIC_TOOL_USE: &str = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"notes.txt\\\"}\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":3}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    const ANTHROPIC_TEXT: &str = concat!(
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    fn thread_error(status: u16, code: &str) -> (u16, String) {
+        (
+            status,
+            json!({ "type": "error", "error": { "type": "not_found_error", "message": "no thread", "details": { "error_code": code } } })
+                .to_string(),
+        )
+    }
+    fn threaded() -> DirectOptions {
+        DirectOptions {
+            message_threads: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_tool_rounds_and_prompts_continue_the_thread() {
+        let s = TestSession::start_with(
+            "anthropic",
+            HandHolding::FullAccess,
+            vec![
+                anthropic_stream("msg_1", ANTHROPIC_TOOL_USE),
+                anthropic_stream("msg_2", ANTHROPIC_TEXT),
+                anthropic_stream("msg_3", ANTHROPIC_TEXT),
+            ],
+            threaded(),
+            false,
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("read it").await;
+        s.tool_finished().await;
+        assert_eq!(s.turn_complete().await, None);
+        // The first request starts the thread with everything; the top-level cache_control
+        // marks the last message, so no block carries a breakpoint of its own.
+        let first = s.body(0);
+        assert_eq!(first["thread"], json!({ "type": "create" }));
+        assert_eq!(first["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            first["system"][0]["text"].as_str().map(|t| t.is_empty()),
+            Some(false)
+        );
+        assert_eq!(first["tools"].as_array().map(|t| t.len()), Some(4));
+        assert_eq!(first["messages"].as_array().map(|m| m.len()), Some(1));
+        assert!(first["messages"][0].to_string().contains("read it"));
+        assert!(!first["messages"][0].to_string().contains("cache_control"));
+        // The tool round goes on from the stored response, with the results only.
+        let second = s.body(1);
+        assert_eq!(
+            second["thread"],
+            json!({ "type": "continue", "previous_message_id": "msg_1" })
+        );
+        assert!(
+            second.get("system").is_none() && second.get("tools").is_none(),
+            "{second}"
+        );
+        assert_eq!(second["cache_control"]["type"], "ephemeral");
+        let messages = second["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert_eq!(messages[0]["content"][0]["tool_use_id"], "toolu_1");
+        // The fixed fields stay as they were.
+        assert_eq!(second["model"], first["model"]);
+        assert_eq!(second["thinking"], first["thinking"]);
+        assert_eq!(second["output_config"], first["output_config"]);
+        // So does the next prompt, within the thread's five minutes.
+        s.prompt("and again").await;
+        assert_eq!(s.turn_complete().await, None);
+        let third = s.body(2);
+        assert_eq!(
+            third["thread"],
+            json!({ "type": "continue", "previous_message_id": "msg_2" })
+        );
+        let messages = third["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert_eq!(messages[0]["role"], "user");
+        assert!(messages[0].to_string().contains("and again"));
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_lost_thread_is_replayed_as_a_new_one() {
+        let s = TestSession::start_with(
+            "anthropic",
+            HandHolding::FullAccess,
+            vec![
+                anthropic_stream("msg_1", ANTHROPIC_TOOL_USE),
+                thread_error(404, "thread_not_found"),
+                anthropic_stream("msg_2", ANTHROPIC_TEXT),
+                anthropic_stream("msg_3", ANTHROPIC_TEXT),
+            ],
+            threaded(),
+            false,
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("read it").await;
+        s.tool_finished().await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.body(1)["thread"]["type"], "continue");
+        let replay = s.body(2);
+        assert_eq!(replay["thread"], json!({ "type": "create" }));
+        assert!(replay.get("system").is_some() && replay.get("tools").is_some());
+        assert_eq!(replay["messages"].as_array().map(|m| m.len()), Some(3));
+        assert_tool_calls_answered(replay["messages"].as_array().unwrap());
+        // The new thread goes on from the replay's response.
+        s.prompt("more").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(
+            s.body(3)["thread"],
+            json!({ "type": "continue", "previous_message_id": "msg_2" })
+        );
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_fallback_models_answer_is_not_continued_from() {
+        let fallen_back = ANTHROPIC_TOOL_USE.replace(
+            "\"usage\":{\"output_tokens\":3}",
+            "\"usage\":{\"output_tokens\":3,\"iterations\":[{\"type\":\"fallback_message\",\"model\":\"other\"}]}",
+        );
+        assert_ne!(fallen_back, ANTHROPIC_TOOL_USE);
+        let s = TestSession::start_with(
+            "anthropic",
+            HandHolding::FullAccess,
+            vec![
+                anthropic_stream("msg_1", &fallen_back),
+                anthropic_stream("msg_2", ANTHROPIC_TEXT),
+            ],
+            threaded(),
+            false,
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("read it").await;
+        s.tool_finished().await;
+        assert_eq!(s.turn_complete().await, None);
+        let second = s.body(1);
+        assert_eq!(second["thread"], json!({ "type": "create" }));
+        assert_eq!(second["messages"].as_array().map(|m| m.len()), Some(3));
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_thread_is_left_out_for_the_session() {
+        let s = TestSession::start_with(
+            "anthropic",
+            HandHolding::FullAccess,
+            vec![
+                thread_error(400, "thread_unsupported_request"),
+                anthropic_stream("msg_1", ANTHROPIC_TEXT),
+                anthropic_stream("msg_2", ANTHROPIC_TEXT),
+            ],
+            threaded(),
+            false,
+        )
+        .await;
+        s.prompt("hi").await;
+        assert_eq!(s.turn_complete().await, None);
+        s.prompt("again").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.body(0)["thread"]["type"], "create");
+        for n in 1..3 {
+            let body = s.body(n);
+            assert!(body.get("thread").is_none(), "{body}");
+            assert!(body.get("system").is_some());
+            // Without a thread, the last message block carries the cache breakpoint.
+            assert!(body.get("cache_control").is_none());
+        }
+        assert_eq!(s.body(2)["messages"].as_array().map(|m| m.len()), Some(3));
+        s.finish().await;
+    }
+
+    #[test]
+    fn a_thread_goes_on_only_while_the_server_holds_the_same_conversation() {
+        let history = vec![
+            json!({ "role": "user", "content": "hi" }),
+            json!({ "role": "assistant", "content": [{ "type": "text", "text": "yes" }] }),
+            json!({ "role": "user", "content": "more" }),
+        ];
+        let mut thread = Thread::default();
+        let now = Instant::now();
+        assert_eq!(thread.request(1, &history, now), ThreadRequest::Create);
+        thread.stored("msg_1".into(), 1, &history[..1], &history[1]);
+        let goes_on = ThreadRequest::Continue {
+            previous: "msg_1".into(),
+            held: 2,
+        };
+        assert_eq!(thread.request(1, &history, now), goes_on);
+        // Nothing new to send, a changed fixed field, an edited message, or time: a new thread.
+        assert_eq!(thread.request(1, &history[..2], now), ThreadRequest::Create);
+        assert_eq!(thread.request(2, &history, now), ThreadRequest::Create);
+        let mut edited = history.clone();
+        edited[0] = json!({ "role": "user", "content": "hello" });
+        assert_eq!(thread.request(1, &edited, now), ThreadRequest::Create);
+        assert_eq!(
+            thread.request(1, &history, now + THREAD_KEEPS + Duration::from_secs(1)),
+            ThreadRequest::Create
+        );
+        thread.forget();
+        assert_eq!(thread.request(1, &history, now), ThreadRequest::Create);
+        thread.off = true;
+        assert_eq!(thread.request(1, &history, now), ThreadRequest::None);
+    }
+
+    #[test]
+    fn thread_requests_carry_only_whats_new() {
+        let history = [
+            json!({ "role": "user", "content": "hi" }),
+            json!({ "role": "assistant", "content": [{ "type": "text", "text": "yes" }] }),
+            json!({ "role": "user", "content": "more" }),
+        ];
+        let create = anthropic_body(
+            "claude-sonnet-4-5",
+            Effort::Medium,
+            "sys",
+            &history,
+            &direct_tools(),
+            &ThreadRequest::Create,
+        );
+        assert_eq!(create["thread"], json!({ "type": "create" }));
+        assert_eq!(create["cache_control"], json!({ "type": "ephemeral" }));
+        assert_eq!(create["messages"].as_array().map(|m| m.len()), Some(3));
+        assert_eq!(
+            create["messages"][2]["content"], "more",
+            "no breakpoint of its own"
+        );
+        assert_eq!(create["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(create["tools"][3]["cache_control"]["type"], "ephemeral");
+        let go_on = anthropic_body(
+            "claude-sonnet-4-5",
+            Effort::Medium,
+            "sys",
+            &history,
+            &direct_tools(),
+            &ThreadRequest::Continue {
+                previous: "msg_9".into(),
+                held: 2,
+            },
+        );
+        assert_eq!(
+            go_on["thread"],
+            json!({ "type": "continue", "previous_message_id": "msg_9" })
+        );
+        assert_eq!(
+            go_on["messages"],
+            json!([{ "role": "user", "content": "more" }])
+        );
+        assert!(go_on.get("system").is_none() && go_on.get("tools").is_none());
+        assert_eq!(go_on["cache_control"], json!({ "type": "ephemeral" }));
+        assert_eq!(go_on["output_config"], create["output_config"]);
+        assert_eq!(go_on["fallbacks"], create["fallbacks"]);
     }
 
     #[tokio::test]

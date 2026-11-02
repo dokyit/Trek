@@ -452,6 +452,7 @@ async fn bench(
         system_prompt,
         observer: Some(observer),
         context_window: args.context_window,
+        message_threads: None,
     };
 
     let (commands, commands_rx) = async_channel::unbounded();
