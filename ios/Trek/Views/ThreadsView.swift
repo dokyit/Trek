@@ -26,8 +26,8 @@ struct ThreadsView: View {
     @State private var snoozeChoice: ThreadSummary?
     @State private var snoozePicking: ThreadSummary?
     @State private var showingUsage = false
-    /// The list's title row has scrolled under the bar: the bar says "Threads" instead.
-    @State private var titleGone = false
+    /// The status bar's height: the navigation bar's row starts below it.
+    @State private var statusBar: CGFloat = 0
     @Environment(\.compactRows) private var compact
 
     /// Quiet threads a project shows before "Show more" (the Mac's sidebar: 3, and 5 settled).
@@ -63,13 +63,12 @@ struct ThreadsView: View {
                 .background(RidgeBackdrop(height: 300))
                 // Rows fade out above the "New thread" pill and the tab bar, and the last row clears them.
                 .fadesUnderBottomBars()
-                .onScrollGeometryChange(for: Bool.self) {
-                    ScreenTitle.isGone(scrolled: $0.contentOffset.y + $0.contentInsets.top)
-                } action: { _, gone in
-                    withAnimation(.easeOut(duration: 0.15)) { titleGone = gone }
-                }
+                // The bar turns solid over the rows that scroll under it, and says "Threads" once
+                // the list's own title has gone (drawn from the scroll offset: see `TopBarFade`).
+                .fadesUnderTopBar(title: "Threads", statusBar: statusBar, ground: RidgeBackdrop(height: 300))
                 .navigationTitle("Threads")
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbar(removing: .title)
                 .refreshable { await model.refresh() }
                 .toolbar { toolbar }
                 .navigationDestination(for: String.self) { tid in
@@ -100,18 +99,12 @@ struct ThreadsView: View {
                 }
             }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { statusBar = $0 }
         .environment(\.openThread, OpenThreadAction { path.append($0) })
     }
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        // The bar's title, once the list's own has scrolled under it.
-        ToolbarItem(placement: .principal) {
-            Text("Threads")
-                .font(.ui(.headline))
-                .opacity(titleGone ? 1 : 0)
-                .accessibilityHidden(!titleGone)
-        }
         // Plan usage, always in reach, as the Usage button in the Mac's sidebar.
         ToolbarItem(placement: .topBarTrailing) {
             UsageButton { showingUsage = true }
@@ -466,12 +459,15 @@ private struct ProjectHeader: View {
 }
 
 /// A section header held at the top of the list stands on the list's own ground, edge to edge,
-/// so the rows passing under it don't show through its words.
+/// so the rows passing under it don't show through its words. The ground reaches up over the
+/// room the list leaves above a header, so one held at the top meets the bar's solid ground
+/// with no strip between where a row scrolling away still showed, faded (`TopBarFade`).
 private struct HeaderGround: ViewModifier {
     func body(content: Content) -> some View {
         content.background {
             Trek.background
                 .padding(.horizontal, -24)
+                .padding(.top, -12)
                 .padding(.bottom, -4)
                 .allowsHitTesting(false)
         }
@@ -816,10 +812,12 @@ struct ConnectionBanner: View {
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(host ?? "Your Mac").font(.ui(.subheadline).weight(.semibold))
+                // Changes in place: a cross-fade drew the old words and the new ones over each
+                // other (seen on iOS 27.2, the row resizing under it), and they change often.
                 Text(detail ?? state.label).font(.ui(.caption)).foregroundStyle(Trek.muted)
                     .fixedSize(horizontal: false, vertical: true)
-                    .contentTransition(.opacity)
-                    .animation(.smooth, value: detail ?? state.label)
+                    .contentTransition(.identity)
+                    .transaction { $0.animation = nil }
             }
             Spacer()
             if case .unauthorized = state, let pairAgain {
@@ -890,8 +888,8 @@ private struct FingerprintLabelStyle: LabeledContentStyle {
 
 /// The head of the thread list, one row of it: the title, the machine chips (with more than one
 /// machine), the update card and a banner for each machine that can't be reached. They stack,
-/// each in its own room, and scroll together; the bar's inline title takes over once the title
-/// has gone under it (see `ScreenTitle`).
+/// each in its own room, and scroll together; the bar's small title takes over once the title
+/// has gone under it (see `TopBarFade`).
 struct ThreadsHeader: View {
     @Environment(AppModel.self) private var model
     @Binding var picked: String?

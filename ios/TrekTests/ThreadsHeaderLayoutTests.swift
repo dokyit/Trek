@@ -79,8 +79,63 @@ struct ThreadsHeaderLayoutTests {
 
     @Test func theFadeCoversTheBarsDownToTheFootOfTheScreen() {
         let bars: CGFloat = 139  // the pill and the tab bar on a 393 pt iPhone
-        let cover = UIHostingController(rootView: BottomBarsFade.cover(color: Trek.background, fade: BottomBarsFade.fade, bars: bars))
+        let cover = UIHostingController(rootView: BottomBarsFade.cover(color: Trek.background, fade: BottomBarsFade.fade,
+                                                                       bars: bars + BottomBarsFade.lift))
             .sizeThatFits(in: CGSize(width: 393, height: 2000))
-        #expect(cover.height == BottomBarsFade.fade + bars)
+        #expect(cover.height == BottomBarsFade.fade + BottomBarsFade.lift + bars)
+    }
+
+    /// The fade ends on solid ground a little above the pill, not at its edge (on iOS 27.2 a
+    /// section header read through the foot of the fade, just over the pill), and the last row
+    /// scrolls clear of all of it.
+    @Test func theBottomFadeIsSolidAboveThePill() {
+        #expect(BottomBarsFade.lift >= 8, "solid ground above the pill's top edge")
+        #expect(BottomBarsFade.fade >= 28)
+        #expect(BottomBarsFade.clearance == BottomBarsFade.fade + BottomBarsFade.lift)
+    }
+
+    // MARK: The bar at the top
+
+    /// iPhone 16 on iOS 27.0: a 59 pt status bar and the bar's row under it (113 pt in all); an
+    /// iPhone 14-sized one on 27.2: 47 and 101.
+    static let bars: [(status: CGFloat, bar: CGFloat)] = [(59, 113), (47, 101), (62, 116)]
+
+    @Test func theBarHasNoGroundAtRestAndASolidOneOnceRowsAreUnderIt() {
+        #expect(TopBar.groundOpacity(scrolled: 0) == 0, "at rest: nothing under the bar")
+        #expect(TopBar.groundOpacity(scrolled: -80) == 0, "pulled down: the refresh spinner shows")
+        #expect(TopBar.groundOpacity(scrolled: TopBar.fade) == 1)
+        #expect(TopBar.groundOpacity(scrolled: 600) == 1)
+        var last = -1.0
+        for y in stride(from: CGFloat(-10), through: TopBar.fade + 10, by: 2) {
+            let o = TopBar.groundOpacity(scrolled: y)
+            #expect(o >= last, "never lighter as the rows go further under, at \(y)")
+            last = o
+        }
+    }
+
+    @Test func theSmallTitleComesOnlyOnceTheBarIsSolid() {
+        // Before it, the big title would still show through a part-drawn ground beside it.
+        #expect(ScreenTitle.scrolledAway >= TopBar.fade)
+        for y in stride(from: CGFloat(-60), through: 300, by: 1) where ScreenTitle.isGone(scrolled: y) {
+            #expect(TopBar.groundOpacity(scrolled: y) == 1, "small title over a solid bar at \(y)")
+        }
+    }
+
+    @Test func theSmallTitleSitsHalfwayDownTheBarsRow() {
+        for (status, bar) in Self.bars {
+            let centre = TopBar.titleCentre(statusBar: status, bar: bar)
+            #expect(centre > status && centre < bar, "inside the bar's row at \(status)/\(bar)")
+            #expect(abs((centre - status) - (bar - centre)) < 0.5, "centred at \(status)/\(bar)")
+        }
+        // Before the geometry is known it stays at the top rather than going negative.
+        #expect(TopBar.titleCentre(statusBar: 59, bar: 0) == 59)
+    }
+
+    @Test func theBarsGroundReachesTheBarsFootThenFades() {
+        for (_, bar) in Self.bars {
+            let mask = UIHostingController(rootView: TopBar.mask(bar: bar, fade: TopBar.fade))
+                .sizeThatFits(in: CGSize(width: 393, height: 2000))
+            #expect(mask.height == bar + TopBar.fade, "solid to \(bar) pt, then \(TopBar.fade) pt of fade")
+        }
     }
 }

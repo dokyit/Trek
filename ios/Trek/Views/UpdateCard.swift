@@ -16,16 +16,18 @@ struct UpdateCard: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 icon
                 VStack(alignment: .leading, spacing: 3) {
+                    // Both change in place as the update goes: cross-faded, the old words and the
+                    // new were drawn over each other while the card resized.
                     Text(title)
                         .font(.ui(.subheadline).weight(.semibold))
-                        .contentTransition(.opacity)
-                        .animation(.smooth, value: title)
+                        .contentTransition(.identity)
+                        .transaction { $0.animation = nil }
                     Text(detail)
                         .font(.ui(.footnote))
                         .foregroundStyle(progress?.state == .failed ? Trek.failed : Trek.muted)
                         .fixedSize(horizontal: false, vertical: true)
-                        .contentTransition(.opacity)
-                        .animation(.smooth, value: detail)
+                        .contentTransition(.identity)
+                        .transaction { $0.animation = nil }
                 }
                 Spacer(minLength: 0)
             }
