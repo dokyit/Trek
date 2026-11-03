@@ -1,9 +1,9 @@
 import XCTest
 
 /// The driver itself: one UI test that serves taps, swipes, keys and text over HTTP on the
-/// iPhone's loopback until Trek stops it (`/stop`, or ending `xcodebuild`), or nothing has asked
-/// for a while. Run only by Trek, which sets `TREK_DRIVER=1`, the port and a fresh token in the
-/// .xctestrun it starts.
+/// iPhone's loopback (and its local network, over Wi-Fi) until Trek stops it (`/stop`, or ending
+/// `xcodebuild`), or nothing has asked for a while. Run only by Trek, which sets `TREK_DRIVER=1`,
+/// the port and a fresh token in the .xctestrun it starts, and over Wi-Fi `TREK_DRIVER_PEERS`.
 final class Drive: XCTestCase {
     private var actions: Actions?
 
@@ -16,9 +16,13 @@ final class Drive: XCTestCase {
         let idle = TimeInterval(env["TREK_DRIVER_IDLE"] ?? "") ?? 900
         let actions = Actions()
         self.actions = actions
-        let server = Server(port: port, token: env["TREK_DRIVER_TOKEN"] ?? "", handle: actions.route)
+        // Over Wi-Fi Trek names the Mac's addresses on the phone's network; over the cable, none.
+        let peers = (env["TREK_DRIVER_PEERS"] ?? "").split(separator: ",").map(String.init)
+        let server = Server(
+            port: port, token: env["TREK_DRIVER_TOKEN"] ?? "", peers: peers.isEmpty ? nil : peers,
+            handle: actions.route)
         try server.start()
-        XCTContext.runActivity(named: "TrekDriver: serving on 127.0.0.1:\(port)") { _ in }
+        XCTContext.runActivity(named: "TrekDriver: serving on \(server.reach), port \(port)") { _ in }
         while !actions.stopped, Date().timeIntervalSince(actions.lastRequest) < idle {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.25))
         }

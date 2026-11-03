@@ -3,6 +3,15 @@ import XCTest
 /// The driver's HTTP parsing, without a phone: `xcodebuild test` on a simulator runs these and
 /// skips `Drive.testRun`.
 final class HTTPTests: XCTestCase {
+    func testTheMacsAddressesOverWiFiCompareByTheirBytes() {
+        // Trek passes the Mac's link-local address with or without its interface.
+        XCTAssertEqual(Server.raw("fe80::1c71:8f4d:be86:59f1%en0"), Server.raw("fe80::1c71:8f4d:be86:59f1"))
+        XCTAssertEqual(Server.raw("192.168.1.20")?.count, 4)
+        // An IPv4 connection on the dual-stack listener can show as IPv4 inside IPv6.
+        XCTAssertEqual(Server.raw("::ffff:192.168.1.20"), Server.raw("192.168.1.20"))
+        XCTAssertNil(Server.raw("not an address"))
+    }
+
     func testAWholeRequestWithABody() {
         let raw = Data("POST /tap?x=1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 15\r\nX-Trek-Token: abc\r\n\r\n{\"x\":10,\"y\":20}".utf8)
         guard case .done(let r, let used) = Request.parse(raw) else { return XCTFail("not parsed") }

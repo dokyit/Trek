@@ -1,6 +1,6 @@
 #!/bin/sh
 # Put Trek Driver (ios/TrekDriver: the small XCUITest runner the Mac's iPhone tool taps through
-# while the iPhone is unlocked on the cable) inside a built, signed Trek.app, and write the
+# while the iPhone is unlocked, on the cable or over Wi-Fi) inside a built, signed Trek.app, and write the
 # .xctestrun Trek starts it with.
 #   ios/scripts/build-driver.sh <signed Trek.app> <out dir>
 # Called by install-device.sh, which then installs <out dir>/Trek.app instead.
@@ -69,4 +69,7 @@ plutil -replace TrekDriver.PreferredScreenCaptureFormat -string screenshots "$RU
 plutil -replace TrekDriver.SystemAttachmentLifetime -string keepNever "$RUN"
 plutil -replace TrekDriver.UserAttachmentLifetime -string keepNever "$RUN"
 plutil -extract CFBundleVersion raw "$HOST/Info.plist" > "$OUT/build"
+# What this driver can do, for the Mac's Trek (a driver built before a feature lacks its line):
+# wifi, it serves over the local network when Trek names the Mac's addresses (TREK_DRIVER_PEERS).
+echo wifi > "$OUT/features"
 echo "Trek Driver: $HOST, $RUN"
