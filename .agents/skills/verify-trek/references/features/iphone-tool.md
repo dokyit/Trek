@@ -53,7 +53,7 @@ cat "$(./.agents/skills/verify-trek/scripts/trek-dev status | jq -r .runtime_dir
 
 The driver by hand (what Trek does): `ios/scripts/install-device.sh` (or `ios/scripts/build-driver.sh <signed Trek.app> <dir>`), then `xcodebuild test-without-building -xctestrun <copy with TREK_DRIVER=1, TREK_DRIVER_PORT, TREK_DRIVER_TOKEN> -destination id=<udid> -only-testing:TrekDriver/Drive` and HTTP to port 8117 over usbmuxd: `GET /status` (screen in points), `POST /tap {x,y,hold_ms}`, `/swipe {x1,y1,x2,y2,duration_ms}`, `/type {text}`, `/key {key: home|lock|volume_up|volume_down|spotlight|enter|backspace|…}`, `/open {bundle}`, `GET /screenshot` (`?w=<max width in pixels>&q=<JPEG quality>`; PNG without `q`), `POST /stop`, each with `X-Trek-Token`. Its HTTP parsing has its own tests: `xcodebuild test -project ios/TrekDriver/TrekDriver.xcodeproj -scheme TrekDriver -destination 'platform=iOS Simulator,name=iPhone 17'`.
 
-Why iPhone Mirroring can't reach the phone, from the Mac's side (Wi-Fi, Bluetooth, Internet Sharing, firewall, VPN, the phone on the Mac's network, and how its last Connect ended in its log), with the one blocker last:
+Why iPhone Mirroring can't reach the phone, from the Mac's side (whether Apple offers it where the Mac is, a management profile, Wi-Fi, Bluetooth, Handoff, Internet Sharing, firewall, VPN, the phone on the Mac's network, and how its last Connect ended in its log: not found, dropped, not set up, or turned down for the iPhone's region), with the one blocker last and the advice for an agent under it (how it all works and what the logs say: `docs/IPHONE-MIRRORING.md`):
 
 ```sh
 cargo run -p trek-phone --example mirror -- diagnose

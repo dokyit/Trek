@@ -556,7 +556,7 @@ mod tests {
         let strip = f.strip();
         assert_eq!(strip.action, Some(Blocker::PhoneNotOffering.action()));
         assert!(strip.action.unwrap().contains("restart the iPhone"));
-        assert!(strip.advice.unwrap().contains("Reset iPhone Access"));
+        assert!(strip.advice.unwrap().contains("Revoke iPhone Access"));
         assert!(strip.recheck);
         // Live again: nothing to do, nothing to check.
         f.mirror = Some(Mirror::Live);

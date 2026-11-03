@@ -10,6 +10,7 @@ fn main() {
         Some("diagnose") => {
             let d = trek_phone::diagnose::run(None, None, None);
             println!("{}", d.report());
+            println!("For an agent: {}", d.blocker.advice());
         }
         _ => {
             eprintln!("usage: mirror diagnose");

@@ -1213,7 +1213,7 @@ impl PhonePanel {
                 self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
                 self.explain_open = true;
             }
-            // Locked and timing out, diagnosed: the phone isn't answering iPhone Mirroring.
+            // Locked and timing out, diagnosed: the phone isn't offering iPhone Mirroring.
             "unreachable" => {
                 self.status.dark = true;
                 self.blocker = Some(Blocker::PhoneNotOffering);
