@@ -5,7 +5,8 @@
 #      DEVICE (a device UDID; default: the first available real iPhone),
 #      BUNDLE (bundle id; default dev.trek.TrekMobile — a free team may need a unique one, e.g.
 #      dev.trek.TrekMobile.<you>), LAUNCH=0 (install without opening it), DRIVER=0 (without
-#      Trek Driver, the test runner inside the app that Trek's iPhone tool taps through over USB;
+#      Trek Driver, the test runner inside the app that Trek's iPhone tool taps through over USB
+#      or Wi-Fi;
 #      see ios/scripts/build-driver.sh).
 # With a free Apple ID the app works for 7 days from when Xcode made its provisioning profile;
 # installing again with the same profile doesn't extend that, so a profile with 2 days or less
@@ -93,7 +94,7 @@ mkdir -p "$STATE"
 printf 'version=%s\nbuild=%s\nat=%s\nexpires=%s\ndevice=%s\n' "$VERSION" "$BUILD" "$(date +%s)" "${1:-}" "$DEVICE" > "$STATE/installed"
 if [ "$APP" = "$DRIVER_DIR/Trek.app" ]; then
   printf 'bundle=%s\nbuild=%s\nexpires=%s\ndevice=%s\n' "$BUNDLE" "$BUILD" "${1:-}" "$DEVICE" > "$DRIVER_DIR/info"
-  echo "Trek Driver installed with it: Trek's iPhone tool taps over USB while the iPhone is unlocked."
+  echo "Trek Driver installed with it: Trek's iPhone tool taps over USB (or Wi-Fi) while the iPhone is unlocked."
 fi
 rm -f "$DD.profile.plist"
 [ -n "${1:-}" ] && [ "$1" != 0 ] && echo "Signed until $(date -r "$1" '+%F %R')."

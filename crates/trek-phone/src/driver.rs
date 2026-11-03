@@ -1,5 +1,6 @@
 //! Trek Driver: taps, swipes and keys over the USB cable while the iPhone is unlocked, with no
-//! Bluetooth pairing and no iPhone Mirroring.
+//! Bluetooth pairing and no iPhone Mirroring; or over Wi-Fi with no cable, once the phone was
+//! paired by cable (usbmuxd and Xcode both reach it over the network then).
 //!
 //! The driver is a small XCUITest (`ios/TrekDriver`) that serves HTTP on the phone's loopback.
 //! `ios/scripts/install-device.sh` builds it into Trek's own iPhone app (a free Apple ID installs
@@ -9,6 +10,13 @@
 //! with `devicectl` never starts serving), reaches its port through usbmuxd as Xcode's port
 //! forwarding does ([`device::exchange`]), and stops it when the agent lets go. Each start gets a
 //! fresh token the driver checks on every request, so another app on the phone can't use it.
+//!
+//! Over Wi-Fi usbmuxd connects to the phone's address on the network rather than its loopback,
+//! so a start over Wi-Fi also hands the driver this Mac's address there (`TREK_DRIVER_PEERS`):
+//! it then listens on the local network and serves only that address, with the token. A driver
+//! built before that (no `wifi` in its `features`) is offered over the cable only. Whether the
+//! phone is locked, which the cable's black picture tells over USB, comes from CoreDevice over
+//! Wi-Fi ([`passcode_required`]).
 //!
 //! Points: the driver speaks in screen points; the tools and the panel in pixels of the cable's
 //! picture, or fractions of it ([`to_points`]).
@@ -54,6 +62,8 @@ pub struct Install {
     pub device: String,
     /// When its signing lapses (seconds since 1970), if known.
     pub expires: Option<i64>,
+    /// It serves over Wi-Fi when asked (`build-driver.sh` wrote `wifi` in its `features`).
+    pub wifi: bool,
 }
 
 impl Install {
@@ -74,6 +84,8 @@ impl Install {
             build: get("build"),
             device: get("device"),
             expires: get("expires").parse().ok().filter(|&e| e > 0),
+            wifi: std::fs::read_to_string(dir.join("features"))
+                .is_ok_and(|f| f.lines().any(|l| l.trim() == "wifi")),
         };
         (install.app.is_dir() && install.xctestrun.is_file() && !install.bundle.is_empty())
             .then_some(install)
@@ -93,8 +105,15 @@ pub enum Avail {
 }
 
 /// What [`Avail`] the driver has: `built_here` when `install-device.sh` installed Trek's iPhone
-/// app on this phone from this Mac (the phone updater's `installed` says which device).
-pub fn availability(install: Option<&Install>, udid: &str, built_here: bool, now: i64) -> Avail {
+/// app on this phone from this Mac (the phone updater's `installed` says which device); `usb`
+/// when the phone is on the cable (else usbmuxd sees it over Wi-Fi only).
+pub fn availability(
+    install: Option<&Install>,
+    udid: &str,
+    built_here: bool,
+    now: i64,
+    usb: bool,
+) -> Avail {
     let Some(install) = install else {
         return if built_here {
             Avail::Install("it isn't installed yet".into())
@@ -108,6 +127,9 @@ pub fn availability(install: Option<&Install>, udid: &str, built_here: bool, now
     if install.expires.is_some_and(|e| e <= now) {
         return Avail::Install("its 7-day signing lapsed".into());
     }
+    if !usb && !install.wifi {
+        return Avail::Install("the one on the iPhone works over the cable only".into());
+    }
     Avail::Ready
 }
 
@@ -116,6 +138,48 @@ pub fn built_here(udid: &str) -> bool {
     let installed = dir().with_file_name("installed");
     std::fs::read_to_string(installed)
         .is_ok_and(|s| s.lines().any(|l| l.strip_prefix("device=") == Some(udid)))
+}
+
+/// Whether the phone `udid` needs its passcode now (locked: XCUITest can't start until it's
+/// unlocked), as CoreDevice tells it over Wi-Fi as well as the cable: `xcrun devicectl device info
+/// lockState`, about 1.5 s. A screen that went dark within the passcode's grace period isn't
+/// locked by this measure (and the driver starts then). Blocks; `None` when it can't tell.
+pub fn passcode_required(udid: &str) -> Option<bool> {
+    let out = std::env::temp_dir().join(format!("trek-lock-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let mut child = Command::new("/usr/bin/xcrun")
+        .args(["devicectl", "device", "info", "lockState", "--quiet"])
+        .args(["--device", udid, "--json-output"])
+        .arg(&out)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while matches!(child.try_wait(), Ok(None)) {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let json = std::fs::read(&out).ok();
+    let _ = std::fs::remove_file(&out);
+    lock_state(&json?)
+}
+
+/// `passcodeRequired` from devicectl's JSON answer.
+pub fn lock_state(json: &[u8]) -> Option<bool> {
+    let v: Value = serde_json::from_slice(json).ok()?;
+    if v["info"]["outcome"]
+        .as_str()
+        .is_some_and(|o| o != "success")
+    {
+        return None;
+    }
+    v["result"]["passcodeRequired"].as_bool()
 }
 
 /// Where the driver is.
@@ -237,6 +301,10 @@ pub fn why(log: &str) -> String {
         "Trust the developer on the iPhone: Settings › General › VPN & Device Management.".into()
     } else if has("maximum number of installed apps") {
         "The iPhone has as many apps from a free Apple ID as it takes (three).".into()
+    } else if has("Unable to find a destination matching") {
+        // Seen when Xcode doesn't reach the phone: over Wi-Fi, it was never paired by cable, or
+        // it's on another network.
+        "Xcode can't reach the iPhone: plug it in once (Xcode then reaches it over Wi-Fi too), or put both on the same Wi-Fi.".into()
     } else {
         let line = log
             .lines()
@@ -393,6 +461,8 @@ struct Run {
     udid: String,
     token: String,
     work: PathBuf,
+    /// Started over Wi-Fi: it serves the local network too (over the cable, the loopback only).
+    wifi: bool,
 }
 
 #[derive(Default)]
@@ -453,6 +523,12 @@ impl Driver {
         self.inner.lock().unwrap().screen
     }
 
+    /// While it runs (or starts): whether it was started over Wi-Fi, so it answers there too. One
+    /// started over the cable serves the phone's loopback only, which Wi-Fi can't reach.
+    pub fn wifi(&self) -> Option<bool> {
+        self.inner.lock().unwrap().run.as_ref().map(|r| r.wifi)
+    }
+
     /// Running and answering on `udid`, started if need be (`limit` for a start): the screen in
     /// points.
     pub fn ensure(
@@ -462,23 +538,50 @@ impl Driver {
         limit: Duration,
     ) -> Result<(f64, f64), String> {
         let _one = self.starting.lock().unwrap();
+        let link = device::link(udid)?
+            .ok_or("No iPhone is connected: plug it in, unlock it and trust this Mac.")?; // words: ok, the iPhone tool is macOS only
+        let wifi = matches!(link, device::Link::Network(_));
         if self.state() == State::Ready {
+            // One started over Wi-Fi answers on the cable too (its loopback); not the other way.
             let same = self
                 .inner
                 .lock()
                 .unwrap()
                 .run
                 .as_ref()
-                .is_some_and(|r| r.udid == udid);
+                .is_some_and(|r| r.udid == udid && (r.wifi || !wifi));
             if same && let Ok(screen) = self.status() {
                 return Ok(screen);
             }
         }
         self.stop_now();
-        self.start(install, udid, limit)
+        self.start(install, udid, link, limit)
     }
 
-    fn start(&self, install: &Install, udid: &str, limit: Duration) -> Result<(f64, f64), String> {
+    fn start(
+        &self,
+        install: &Install,
+        udid: &str,
+        link: device::Link,
+        limit: Duration,
+    ) -> Result<(f64, f64), String> {
+        // Over Wi-Fi: this Mac's address on the phone's network, the one the driver serves.
+        let peer = match link {
+            device::Link::Usb => None,
+            device::Link::Network(_) if !install.wifi => {
+                return Err(self.fail(format!(
+                    "Trek Driver on the iPhone works over the cable only: run {INSTALL} again to tap over Wi-Fi."
+                )));
+            }
+            device::Link::Network(ip) => match device::local_address_toward(ip) {
+                Some(peer) => Some(peer),
+                None => {
+                    return Err(self.fail(format!(
+                        "Couldn't tell this Mac's address on the iPhone's network ({ip}): put both on the same Wi-Fi." // words: ok, the iPhone tool is macOS only
+                    )));
+                }
+            },
+        };
         // xcodebuild installs the driver's copy of Trek's iPhone app first: never an older one
         // over a newer (the phone updater's, from a source without the driver).
         if let Ok(apps) = device::apps(Some(udid))
@@ -498,16 +601,16 @@ impl Driver {
         let token = token();
         let template = std::fs::read(&install.xctestrun)
             .map_err(|e| format!("Couldn't read {}: {e}", install.xctestrun.display()))?;
-        let run = xctestrun(
-            &template,
-            &install.dir,
-            &[
-                ("TREK_DRIVER", "1".into()),
-                ("TREK_DRIVER_PORT", PORT.to_string()),
-                ("TREK_DRIVER_TOKEN", token.clone()),
-                ("TREK_DRIVER_IDLE", PHONE_IDLE_SECS.to_string()),
-            ],
-        )?;
+        let mut env = vec![
+            ("TREK_DRIVER", "1".into()),
+            ("TREK_DRIVER_PORT", PORT.to_string()),
+            ("TREK_DRIVER_TOKEN", token.clone()),
+            ("TREK_DRIVER_IDLE", PHONE_IDLE_SECS.to_string()),
+        ];
+        if let Some(peer) = peer {
+            env.push(("TREK_DRIVER_PEERS", peer.to_string()));
+        }
+        let run = xctestrun(&template, &install.dir, &env)?;
         let xctestrun_path = work.join("run.xctestrun");
         std::fs::write(&xctestrun_path, run).map_err(|e| e.to_string())?;
         let log = work.join("xcodebuild.log");
@@ -536,6 +639,7 @@ impl Driver {
                 udid: udid.to_string(),
                 token,
                 work,
+                wifi: peer.is_some(),
             });
         }
         let started = Instant::now();
@@ -784,28 +888,74 @@ mod tests {
             build: "938".into(),
             device: "PHONE".into(),
             expires: Some(1000),
+            wifi: false,
         };
-        assert_eq!(availability(None, "PHONE", false, 0), Avail::None);
+        assert_eq!(availability(None, "PHONE", false, 0, true), Avail::None);
         assert!(matches!(
-            availability(None, "PHONE", true, 0),
+            availability(None, "PHONE", true, 0, true),
             Avail::Install(_)
         ));
         assert_eq!(
-            availability(Some(&install), "PHONE", true, 999),
+            availability(Some(&install), "PHONE", true, 999, true),
             Avail::Ready
         );
         assert_eq!(
-            availability(Some(&install), "PHONE", true, 1000),
+            availability(Some(&install), "PHONE", true, 1000, true),
             Avail::Install("its 7-day signing lapsed".into())
         );
         assert_eq!(
-            availability(Some(&install), "OTHER", true, 0),
+            availability(Some(&install), "OTHER", true, 0, true),
             Avail::Install("it was built for another iPhone".into())
+        );
+        // Over Wi-Fi: a driver built before it could serve there is offered over the cable only.
+        assert_eq!(
+            availability(Some(&install), "PHONE", true, 999, false),
+            Avail::Install("the one on the iPhone works over the cable only".into())
+        );
+        let wifi = Install {
+            wifi: true,
+            ..install
+        };
+        assert_eq!(
+            availability(Some(&wifi), "PHONE", true, 999, false),
+            Avail::Ready
         );
     }
 
     #[test]
+    fn a_driver_built_for_wifi_says_so_in_its_features() {
+        let dir = std::env::temp_dir().join(format!("trek-driver-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Trek.app")).unwrap();
+        std::fs::write(dir.join("TrekDriver.xctestrun"), "").unwrap();
+        std::fs::write(dir.join("info"), "bundle=dev.trek.TrekMobile\nbuild=958\n").unwrap();
+        assert!(
+            !Install::read(&dir).unwrap().wifi,
+            "no features: the cable only"
+        );
+        std::fs::write(dir.join("features"), "wifi\n").unwrap();
+        assert!(Install::read(&dir).unwrap().wifi);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_lock_comes_from_devicectls_answer() {
+        // As devicectl answered for the user's iPhone over Wi-Fi.
+        let seen = br#"{"info":{"commandType":"devicectl.device.info.lockState","outcome":"success"},
+            "result":{"deviceIdentifier":"1392C405","passcodeRequired":false,"unlockedSinceBoot":true}}"#;
+        assert_eq!(lock_state(seen), Some(false));
+        let locked = br#"{"info":{"outcome":"success"},"result":{"passcodeRequired":true}}"#;
+        assert_eq!(lock_state(locked), Some(true));
+        assert_eq!(lock_state(br#"{"info":{"outcome":"failed"}}"#), None);
+        assert_eq!(lock_state(b"not json"), None);
+    }
+
+    #[test]
     fn xcodebuild_logs_become_the_thing_to_do() {
+        assert!(
+            why("xcodebuild: error: Unable to find a destination matching the provided destination specifier:")
+                .starts_with("Xcode can't reach the iPhone")
+        );
         assert!(
             why(
                 "Error Domain=com.apple.dt.deviceprep Code=-3 \"Unlock tobyj’s iPhone to Continue\""

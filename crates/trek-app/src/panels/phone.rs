@@ -8,6 +8,9 @@
 //! While the phone is unlocked on the cable and Trek's iPhone app was built here with Trek Driver
 //! inside (`ios/scripts/install-device.sh`), taps, swipes and keys go over USB through the driver
 //! instead (`trek_phone::driver`), started on the first tap and stopped when the agent lets go.
+//! With no cable (usbmuxd sees the phone on Wi-Fi only) the driver does the same over Wi-Fi and
+//! gives the picture too, while the phone is unlocked; whether it is comes from CoreDevice
+//! (`driver::passcode_required`), and a locked one goes to iPhone Mirroring.
 //! While the cable's picture is the screen, iOS draws 9:41 in its status bar (as for QuickTime);
 //! the panel draws the phone's real time over it.
 //!
@@ -83,6 +86,12 @@ const BAR_EVERY: Duration = Duration::from_millis(500);
 
 /// Trek Driver stops after this long without a tap while no agent holds the phone.
 const DRIVER_IDLE: Duration = Duration::from_secs(10 * 60);
+/// How often CoreDevice is asked whether the phone is locked while it's on Wi-Fi only (each ask
+/// takes ~1.5 s, in the background).
+const PASSCODE_ASK: Duration = Duration::from_secs(8);
+/// How long the picture waits after the driver failed to start before starting it again (each
+/// try runs xcodebuild for seconds; the strip says why meanwhile).
+const DRIVER_RETRY: Duration = Duration::from_secs(20);
 /// How often the picture is asked of Trek Driver while it runs (a screenshot takes it ~0.3 s),
 /// and the JPEG quality it comes at.
 const DRIVER_FRAME: Duration = Duration::from_millis(350);
@@ -148,6 +157,8 @@ pub struct PhonePanel {
     /// True while the loop asking the driver for frames runs; it clears it when it ends.
     driver_frames_live: Arc<AtomicBool>,
     driver_frames_task: Option<Task<()>>,
+    /// When the picture's last start of the driver failed.
+    driver_frames_retry: Option<Instant>,
     area: Rc<Cell<Bounds<Pixels>>>,
     press: Option<Point<Pixels>>,
     lease: Lease,
@@ -175,7 +186,7 @@ pub struct PhonePanel {
     /// When the user last tapped the picture without the tap reaching the phone.
     wanted_taps: Option<Instant>,
     explain_open: bool,
-    /// Trek Driver, for taps over the cable while the phone is unlocked.
+    /// Trek Driver, for taps over the cable or Wi-Fi while the phone is unlocked.
     driver: Arc<Driver>,
     driver_install: Option<driver::Install>,
     /// Trek's iPhone app was installed on this phone from this Mac (the driver is then offered).
@@ -184,6 +195,11 @@ pub struct PhonePanel {
     driver_shown: driver::State,
     /// A made-up driver for design review.
     demo_driver: Option<(driver::Avail, driver::State)>,
+    /// Over Wi-Fi (no cable), whether the phone needs its passcode now, as CoreDevice last said
+    /// (`driver::passcode_required`): over the cable its black picture says it.
+    passcode: Option<bool>,
+    passcode_asked: Option<Instant>,
+    passcode_asking: bool,
     /// The phone's clock settings, for the status bar drawn over iOS's 9:41.
     clock: Option<device::Clock>,
     /// The time last drawn there (redrawn when the minute turns).
@@ -309,6 +325,7 @@ impl PhonePanel {
             driver_frames: false,
             driver_frames_live: Arc::new(AtomicBool::new(false)),
             driver_frames_task: None,
+            driver_frames_retry: None,
             mirroring_seen: std::fs::read_to_string(mirroring_marker())
                 .ok()
                 .map(|s| s.trim().to_string()),
@@ -319,6 +336,9 @@ impl PhonePanel {
             driver_built_here: false,
             driver_shown: driver::State::Off,
             demo_driver: None,
+            passcode: None,
+            passcode_asked: None,
+            passcode_asking: false,
             clock: None,
             clock_shown: None,
             blocker: None,
@@ -352,15 +372,22 @@ impl PhonePanel {
                 None => self.driver.state(),
             },
             blocker: self.blocker.clone(),
+            wifi: self.on_wifi(),
+            passcode: self.passcode.filter(|_| self.on_wifi()),
         }
     }
 
-    /// Whether Trek Driver can be used with the phone on the cable.
+    /// Whether usbmuxd sees the phone over Wi-Fi only (no cable).
+    fn on_wifi(&self) -> bool {
+        self.phone.as_ref().is_some_and(|p| !p.usb)
+    }
+
+    /// Whether Trek Driver can be used with the phone, on the cable or over Wi-Fi.
     fn driver_avail(&self) -> driver::Avail {
         if let Some((avail, _)) = &self.demo_driver {
             return avail.clone();
         }
-        let Some(phone) = self.phone.as_ref().filter(|p| p.usb) else {
+        let Some(phone) = self.phone.as_ref() else {
             return driver::Avail::None;
         };
         let now = std::time::SystemTime::now()
@@ -371,7 +398,42 @@ impl PhonePanel {
             &phone.udid,
             self.driver_built_here,
             now,
+            phone.usb,
         )
+    }
+
+    /// Over Wi-Fi with the driver on offer, ask CoreDevice now and then whether the phone is
+    /// locked (the route goes to iPhone Mirroring while it is); on the cable, forget it.
+    fn ask_passcode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let udid = match &self.phone {
+            Some(p) if !p.usb => p.udid.clone(),
+            _ => {
+                self.passcode = None;
+                return;
+            }
+        };
+        if self.passcode_asking
+            || self.driver_avail() == driver::Avail::None
+            || self
+                .passcode_asked
+                .is_some_and(|t| t.elapsed() < PASSCODE_ASK)
+        {
+            return;
+        }
+        self.passcode_asking = true;
+        self.passcode_asked = Some(Instant::now());
+        self.background(
+            window,
+            cx,
+            move || driver::passcode_required(&udid),
+            |this, passcode, _, cx| {
+                this.passcode_asking = false;
+                if this.passcode != passcode {
+                    this.passcode = passcode;
+                    cx.notify();
+                }
+            },
+        );
     }
 
     /// Whether iPhone Mirroring is set up with another iPhone of the account than this one: it
@@ -470,6 +532,7 @@ impl PhonePanel {
         if self.refreshed.is_none_or(|t| t.elapsed() >= DEVICE_REFRESH) {
             self.refresh_device(window, cx);
         }
+        self.ask_passcode(window, cx);
         if let Some(link) = &self.link {
             link.ask_status();
         }
@@ -619,11 +682,11 @@ impl PhonePanel {
                 this.clock = clock.or(this.clock);
                 this.driver_built_here = built_here;
                 this.driver_install = install;
-                // Unplugged: the driver (and its xcodebuild) goes rather than waiting out its idle.
-                let on_cable = phones
-                    .as_ref()
-                    .is_ok_and(|p| p.first().is_some_and(|p| p.usb));
-                if !on_cable {
+                // Gone, or unplugged while it ran for the cable (it serves the phone's loopback
+                // only, which Wi-Fi can't reach): the driver (and its xcodebuild) goes rather than
+                // waiting out its idle; over Wi-Fi it starts again for the network.
+                let usb = phones.as_ref().ok().and_then(|p| p.first().map(|p| p.usb));
+                if usb.is_none() || (usb == Some(false) && this.driver.wifi() == Some(false)) {
                     this.stop_driver(cx);
                 }
                 this.refreshing = false;
@@ -809,20 +872,27 @@ impl PhonePanel {
             .detach();
     }
 
-    /// Trek Driver stops (in the background: it asks the phone, then ends xcodebuild).
-    /// The picture from Trek Driver while it can run (the phone unlocked on the cable, the
-    /// driver installed, the panel on screen): started and stopped as that changes, and
-    /// stopped when its loop ended (the driver went away).
+    /// The picture from Trek Driver while it can run (the phone unlocked, on the cable or over
+    /// Wi-Fi, the driver installed, the panel on screen): started and stopped as that changes,
+    /// and stopped when its loop ended (the driver went away). After a start that failed it
+    /// waits `DRIVER_RETRY` before starting again by itself (a tap starts it at once).
     fn manage_driver_frames(&mut self, cx: &mut Context<Self>) {
         let wanted = self.visible
             && !self.mirror_frames
             && self.driver_avail() == driver::Avail::Ready
-            && self.facts().route() == Route::Usb;
-        if wanted && self.driver_frames_task.is_none() {
+            && self.facts().route() == Route::Driver;
+        let waiting = self
+            .driver_frames_retry
+            .is_some_and(|t| t.elapsed() < DRIVER_RETRY)
+            && matches!(self.driver.state(), driver::State::Failed(_));
+        if wanted && !waiting && self.driver_frames_task.is_none() {
             self.start_driver_frames(cx);
         } else if self.driver_frames_task.is_some()
             && (!wanted || !self.driver_frames_live.load(Ordering::Relaxed))
         {
+            if matches!(self.driver.state(), driver::State::Failed(_)) {
+                self.driver_frames_retry = Some(Instant::now());
+            }
             self.stop_driver_frames(cx);
         }
     }
@@ -874,10 +944,17 @@ impl PhonePanel {
             if let Some(link) = &self.link {
                 link.frames(self.visible, LIVE_FPS);
             }
+            // Over Wi-Fi no picture from the cable follows: the last one mustn't pass for live.
+            if self.on_wifi()
+                && let Some(old) = self.frame.take()
+            {
+                self.stale.push(old.image);
+            }
             cx.notify();
         }
     }
 
+    /// Trek Driver stops (in the background: it asks the phone, then ends xcodebuild).
     fn stop_driver(&mut self, cx: &mut Context<Self>) {
         if self.demo
             || matches!(
@@ -948,7 +1025,7 @@ impl PhonePanel {
         let Some(start) = self.press.take() else {
             return;
         };
-        if self.facts().route() == Route::Usb {
+        if self.facts().route() == Route::Driver {
             let (Some(a), Some(b)) = (self.to_fraction(start), self.to_fraction(p)) else {
                 return;
             };
@@ -1011,7 +1088,7 @@ impl PhonePanel {
     }
 
     fn home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.facts().route() == Route::Usb {
+        if self.facts().route() == Route::Driver {
             let home = |_| vec![driver::Step::Post("/key", json!({ "key": "home" }))];
             self.usb_input(home, window, cx);
             return;
@@ -1144,13 +1221,15 @@ impl PhonePanel {
 
     /// A made-up phone in one of the strip's situations, for design review (`control phone
     /// <state>` in an isolated capture run): usb, lock, locked, mirroring, pair, bluetooth,
-    /// none, how, and Trek Driver's: driver, driver-starting, driver-install, driver-how.
+    /// none, how, Trek Driver's: driver, driver-starting, driver-install, driver-how, and with no
+    /// cable: wifi, wifi-starting, wifi-locked, wifi-how.
     #[cfg(feature = "shots")]
     pub fn demo(&mut self, state: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
         if state == "real" {
             // The user's real phone after all, for a live check (`phone call …` drives it).
             self.demo = false;
             self.demo_driver = None;
+            self.passcode = None;
             self.phone = None;
             self.status = Status::default();
             self.mirror = None;
@@ -1192,6 +1271,7 @@ impl PhonePanel {
         self.notice = None;
         self.demo_driver = None;
         self.blocker = None;
+        self.passcode = None;
         match state {
             "usb" => {}
             "driver" => self.demo_driver = Some((driver::Avail::Ready, driver::State::Off)),
@@ -1244,8 +1324,35 @@ impl PhonePanel {
                 self.phone = None;
                 self.status = Status::default();
             }
+            // No cable: usbmuxd sees the phone over Wi-Fi, the driver gives the picture and takes
+            // taps; locked (as CoreDevice says), iPhone Mirroring, here timing out, so the line
+            // says to unlock it.
+            "wifi" | "wifi-starting" | "wifi-locked" | "wifi-how" => {
+                if let Some(p) = &mut self.phone {
+                    p.usb = false;
+                }
+                self.status = Status {
+                    camera: "granted".into(),
+                    bluetooth: "advertising".into(),
+                    ..Status::default()
+                };
+                self.mirror = Some(MirrorState::Closed);
+                self.passcode = Some(state == "wifi-locked");
+                let driver = match state {
+                    "wifi-starting" => driver::State::Starting,
+                    "wifi-locked" => driver::State::Off,
+                    _ => driver::State::Ready,
+                };
+                self.demo_driver = Some((driver::Avail::Ready, driver));
+                self.driver_frames = matches!(state, "wifi" | "wifi-how");
+                self.explain_open = state == "wifi-how";
+                if state == "wifi-locked" {
+                    self.mirror = Some(MirrorState::TimedOut);
+                    self.wanted_taps = Some(Instant::now());
+                }
+            }
             other => anyhow::bail!(
-                "phone: unknown state {other:?} (usb|lock|locked|unreachable|mirroring|pair|bluetooth|none|how|driver|driver-starting|driver-install|driver-how)"
+                "phone: unknown state {other:?} (usb|lock|locked|unreachable|mirroring|pair|bluetooth|none|how|driver|driver-starting|driver-install|driver-how|wifi|wifi-starting|wifi-locked|wifi-how)"
             ),
         }
         cx.notify();
@@ -1351,6 +1458,7 @@ impl PhonePanel {
                 .child(div().child(c.word.clone()))
         };
         let route = strip.route;
+        let wifi = self.on_wifi();
         let explain = Popover::new("phone-how")
             .anchor(Anchor::TopRight)
             .appearance(false)
@@ -1376,12 +1484,16 @@ impl PhonePanel {
                             .font_weight(FontWeight::MEDIUM)
                             .child("How this works"),
                     )
-                    .children(route::explainer(route).into_iter().map(|(title, body)| {
-                        v_flex()
-                            .gap(px(2.))
-                            .child(div().font_weight(FontWeight::MEDIUM).child(title))
-                            .child(div().text_color(theme.muted_foreground).child(body))
-                    }))
+                    .children(
+                        route::explainer(route, wifi)
+                            .into_iter()
+                            .map(|(title, body)| {
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                                    .child(div().text_color(theme.muted_foreground).child(body))
+                            }),
+                    )
             });
         let recheck = strip.recheck;
         let checking = self.diagnosing;
@@ -1561,6 +1673,17 @@ impl PhonePanel {
             _ if self.frame.is_none() => Some(
                 if self.phone.is_none() {
                     "Waiting for an iPhone on the cable…"
+                } else if self.on_wifi() {
+                    let facts = self.facts();
+                    if facts.locked() && facts.route() == Route::Mirroring {
+                        "Locked. Its screen shows here once it's unlocked, or while Trek taps it."
+                    } else if facts.route() == Route::Driver
+                        && facts.driver == driver::Avail::Ready
+                    {
+                        "Over Wi-Fi the screen comes through Trek Driver: starting it…"
+                    } else {
+                        "Plug the iPhone in to see its screen: over Wi-Fi it comes through Trek Driver."
+                    }
                 } else if self.status.frames == 0
                     && !self.status.screen.is_empty()
                     && self.facts().route() == Route::Mirroring
@@ -1929,7 +2052,7 @@ enum Via {
     Bluetooth,
     /// macOS's iPhone Mirroring window, showing the phone.
     Mirroring(Arc<Link>),
-    /// Trek Driver over the cable, running; the screen in points.
+    /// Trek Driver over the cable or Wi-Fi, running; the screen in points.
     Usb(Arc<Driver>, (f64, f64)),
 }
 
@@ -2279,7 +2402,7 @@ impl Run<'_> {
             return Err(if mirrored {
                 "Take a phone_screenshot first: the picture comes from iPhone Mirroring now, and x/y are pixels in it."
             } else {
-                "Take a phone_screenshot first: the picture comes over USB now, and x/y are pixels in it."
+                "Take a phone_screenshot first: the picture no longer comes from iPhone Mirroring, and x/y are pixels in it."
             }
             .into());
         }
@@ -2313,7 +2436,7 @@ impl Run<'_> {
     /// them, else iPhone Mirroring, brought to show the phone; or the one thing the user must do.
     async fn via(&mut self) -> Result<Via, String> {
         let link = self.link().await?;
-        if self.facts()?.route() == Route::Usb {
+        if self.facts()?.route() == Route::Driver {
             return self.usb_via().await;
         }
         if self.bluetooth()? {
@@ -2337,7 +2460,7 @@ impl Run<'_> {
                 let after = self.facts()?;
                 Err(match after.route() {
                     Route::Mirroring => e,
-                    Route::Bluetooth | Route::Usb => after.strip().advice.unwrap_or(e),
+                    Route::Bluetooth | Route::Driver => after.strip().advice.unwrap_or(e),
                 })
             }
         }
@@ -2389,7 +2512,7 @@ impl Run<'_> {
             .map_err(gone)?;
         let pointer = matches!(method, "phone_tap" | "phone_swipe");
         if pointer && size.is_some() && mirrored {
-            return Err("Take a phone_screenshot first: the picture comes over USB now, and x/y are pixels in it.".into());
+            return Err("Take a phone_screenshot first: the picture no longer comes from iPhone Mirroring, and x/y are pixels in it.".into());
         }
         let (w, h) = size.unwrap_or((0., 0.));
         let (p, method) = (p.clone(), method.to_string());
@@ -2726,6 +2849,7 @@ impl Run<'_> {
             "No iPhone is connected: ask the user to plug it in, unlock it and trust this Mac.", // words: ok
         )?;
         facts.phone = true;
+        facts.wifi = !phone.usb;
         facts.assistive = assistive;
         // An agent asking is one that wants to tap.
         facts.wants_taps = true;
@@ -2740,12 +2864,16 @@ impl Run<'_> {
         let mut screen = format!("Screen: {}", strip.screen.word);
         if strip.screen.word == "Live" {
             screen += &format!(" over USB, {}×{} pixels", status.width, status.height);
+        } else if strip.screen.word == "Live · Wi-Fi" {
+            screen += " (from Trek Driver)";
         }
         lines.push(format!("{screen}."));
         lines.push(format!("Taps: {}.", strip.taps.word));
         if let Some(advice) = &strip.advice {
             lines.push(format!("To do: {advice}"));
-        } else if strip.route == Route::Usb {
+        } else if strip.route == Route::Driver && facts.wifi {
+            lines.push("No cable: taps, swipes and keys go over Wi-Fi through Trek Driver while the iPhone stays unlocked (it starts with the first tap or screenshot, slower than over the cable, and stops at phone_release), and screenshots come from it too; x/y are pixels in the latest phone_screenshot. Apps and files go over Wi-Fi.".into());
+        } else if strip.route == Route::Driver {
             lines.push("Taps, swipes and keys go over the USB cable through Trek Driver while the iPhone stays unlocked (it starts with the first tap, about 10 s, and stops at phone_release); x/y are pixels in the latest phone_screenshot.".into());
         } else if strip.route == Route::Mirroring && !facts.mirror_frames {
             lines.push("Taps go through iPhone Mirroring, which Trek opens behind the user's windows when needed; screenshots then come from its window.".into());
@@ -2764,7 +2892,8 @@ impl Run<'_> {
     }
 
     /// The screen as a picture: iPhone Mirroring's window while it shows the phone (brought up
-    /// when Mirroring is the route and the phone is locked), else the cable's.
+    /// when Mirroring is the route and the phone is locked), else Trek Driver's while it runs,
+    /// else the cable's. With no cable, Trek Driver's (started for it) or iPhone Mirroring's.
     async fn screenshot(&mut self, edge: u32) -> Result<Value, String> {
         let link = self.link().await?;
         // Trek Driver running: its picture has the real clock, and the cable's capture (which
@@ -2776,16 +2905,27 @@ impl Run<'_> {
                     .then(|| p.driver.clone())
             })
             .map_err(gone)?;
+        let facts = self.facts()?;
+        let wifi = facts.wifi;
+        // Over Wi-Fi the driver's picture is the one there is: it starts for it.
+        let driver = match driver {
+            None if wifi && facts.route() == Route::Driver => match self.usb_via().await? {
+                Via::Usb(d, _) => Some(d),
+                _ => None,
+            },
+            d => d,
+        };
         if let Some(d) = driver
-            && self.facts()?.route() == Route::Usb
+            && self.facts()?.route() == Route::Driver
         {
             match self.driver_screenshot(d, edge).await {
                 Ok(v) => return Ok(v),
+                Err(e) if wifi => return Err(e),
                 Err(e) => tracing::debug!("the driver's screenshot failed, the cable's next: {e}"),
             }
         }
         let mut why_not = None;
-        if !self.bluetooth()? && self.facts()?.route() != Route::Usb {
+        if !self.bluetooth()? && self.facts()?.route() != Route::Driver {
             let raw = self
                 .mirror_cmd(&link, MirrorCmd::Look, Duration::from_secs(5))
                 .await
@@ -2804,6 +2944,14 @@ impl Run<'_> {
                     Err(e) => why_not = Some(e),
                 }
             }
+        }
+        if wifi {
+            return Err(match why_not {
+                Some(m) => format!(
+                    "No picture: the iPhone has no cable and is locked, and iPhone Mirroring isn't showing it. {m}"
+                ),
+                None => "No picture: with no cable the screen comes through Trek Driver while the iPhone is unlocked, or iPhone Mirroring while it's locked (see phone_status). Ask the user to plug it in to see it now.".into(),
+            });
         }
         self.usb_screenshot(&link, edge)
             .await
@@ -2989,7 +3137,7 @@ impl Run<'_> {
         facts.wants_taps = true;
         let strip = facts.strip();
         Ok(strip.advice.unwrap_or_else(|| match strip.route {
-            Route::Usb => "Trek Driver isn't answering: try once more.".into(),
+            Route::Driver => "Trek Driver isn't answering: try once more.".into(),
             Route::Mirroring => "iPhone Mirroring didn't show the iPhone in time: try once more, and if it's unlocked, ask the user to lock it.".into(),
             Route::Bluetooth => route::NOT_PAIRED.into(),
         }))

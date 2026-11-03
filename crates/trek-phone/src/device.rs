@@ -174,6 +174,49 @@ pub fn on_network(udid: Option<&str>) -> Result<std::net::IpAddr, bool> {
     .unwrap_or(Err(false))
 }
 
+/// How usbmuxd reaches a phone now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    Usb,
+    /// Over Wi-Fi only (no cable), at this address.
+    Network(std::net::IpAddr),
+}
+
+/// How usbmuxd reaches the phone `udid` now: the cable when it's plugged in, else the network;
+/// `None` when usbmuxd doesn't see it at all. No lockdown session: just usbmuxd's list.
+pub fn link(udid: &str) -> Result<Option<Link>, String> {
+    block_on(async {
+        let mut mux = UsbmuxdConnection::default()
+            .await
+            .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+        let devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
+        let mine = || devices.iter().filter(|d| d.udid == udid);
+        if mine().any(|d| d.connection_type == Connection::Usb) {
+            return Ok(Some(Link::Usb));
+        }
+        Ok(mine().find_map(|d| match d.connection_type {
+            Connection::Network(ip) => Some(Link::Network(ip)),
+            _ => None,
+        }))
+    })?
+}
+
+/// This Mac's own address toward `phone` on the network (the one the system routes from, so the
+/// one usbmuxd's connections to the phone come from): Trek Driver takes connections over Wi-Fi
+/// only from it. No packet is sent.
+pub fn local_address_toward(phone: std::net::IpAddr) -> Option<std::net::IpAddr> {
+    let any: std::net::SocketAddr = if phone.is_ipv6() {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    };
+    let socket = std::net::UdpSocket::bind(any).ok()?;
+    // A link-local IPv6 address needs its interface; usbmuxd doesn't say it, so the system's
+    // choice for it stands (a scope of 0 fails to route and gives `None`).
+    socket.connect((phone, 9)).ok()?;
+    Some(socket.local_addr().ok()?.ip())
+}
+
 /// Whether AssistiveTouch is on (iOS shows a pointer for a mouse only then).
 pub fn assistive_touch(udid: Option<&str>) -> Result<bool, String> {
     block_on(async {
@@ -259,9 +302,11 @@ pub fn clock(udid: Option<&str>) -> Result<Clock, String> {
     })?
 }
 
-/// Send `request` to TCP `port` on the phone over the cable (usbmuxd connects to the phone's own
-/// 127.0.0.1, as Xcode's port forwarding does) and read until it closes the connection: one
-/// HTTP/1.1 exchange with `Connection: close`. Nothing on the network can reach that port.
+/// Send `request` to TCP `port` on the phone and read until it closes the connection: one
+/// HTTP/1.1 exchange with `Connection: close`. Over the cable usbmuxd connects to the phone's own
+/// 127.0.0.1, as Xcode's port forwarding does, where nothing on the network can reach; with no
+/// cable, to the phone's address on the network (Trek Driver then takes only this Mac's
+/// connections).
 pub fn exchange(
     udid: Option<&str>,
     port: u16,
