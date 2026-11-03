@@ -1544,17 +1544,22 @@ impl ThreadView {
         let cx: &App = cx;
         // An answer's row draws its document, not the item's text: that isn't copied each frame
         // (a long answer's is megabytes, and each of its parts on screen would copy all of it).
+        // A thought's row draws its document too, and a group's row only its summary, so neither
+        // copies its item (a group's first tool call, output and all) either.
         let Some(item) = at
             .workspace
             .read(cx)
             .live
             .get(&at.thread)
             .and_then(|l| l.items.get(row.item()))
-            .map(|i| match i {
-                Item::Assistant { .. } => Item::Assistant {
+            .map(|i| match (&row, i) {
+                (_, Item::Assistant { .. }) => Item::Assistant {
                     text: String::new(),
                 },
-                i => i.clone(),
+                (_, Item::Reasoning { .. }) | (Row::ToolGroup { .. }, _) => Item::Reasoning {
+                    text: String::new(),
+                },
+                (_, i) => i.clone(),
             })
         else {
             return div().into_any_element();
