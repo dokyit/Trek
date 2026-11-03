@@ -563,27 +563,29 @@ fn diff_lines(tc: &Value) -> Option<(u32, u32)> {
 }
 
 fn tool_output(tc: &Value) -> String {
-    let mut parts = Vec::new();
+    // Borrowed where they can be: an output can run to megabytes, and only its first 8,000
+    // bytes are kept.
+    let mut parts: Vec<std::borrow::Cow<str>> = Vec::new();
     for c in tc["content"].as_array().into_iter().flatten() {
         match c["type"].as_str() {
             Some("content") => {
                 if let Some(t) = c["content"]["text"].as_str() {
-                    parts.push(t.to_string());
+                    parts.push(t.into());
                 }
             }
             Some("diff") => {
-                parts.push(format!("Edited {}", c["path"].as_str().unwrap_or_default()))
+                parts.push(format!("Edited {}", c["path"].as_str().unwrap_or_default()).into())
             }
             _ => {}
         }
     }
     if parts.is_empty() {
         match &tc["rawOutput"] {
-            Value::String(s) => parts.push(s.clone()),
+            Value::String(s) => parts.push(s.as_str().into()),
             Value::Null => {}
             v => match v["output"].as_str().or(v["stdout"].as_str()) {
-                Some(s) => parts.push(s.to_string()),
-                None => parts.push(v.to_string()),
+                Some(s) => parts.push(s.into()),
+                None => parts.push(v.to_string().into()),
             },
         }
     }

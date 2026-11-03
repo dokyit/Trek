@@ -1700,14 +1700,17 @@ fn translate(
                 .flatten();
             for block in blocks {
                 if block["type"] == "tool_result" {
-                    let output = match &block["content"] {
-                        Value::String(s) => s.clone(),
+                    // Borrowed where it can be: a command's output can run to megabytes, and
+                    // only its first 8,000 bytes are kept.
+                    let output: std::borrow::Cow<str> = match &block["content"] {
+                        Value::String(s) => s.as_str().into(),
                         Value::Array(a) => a
                             .iter()
                             .filter_map(|b| b["text"].as_str())
                             .collect::<Vec<_>>()
-                            .join("\n"),
-                        _ => String::new(),
+                            .join("\n")
+                            .into(),
+                        _ => "".into(),
                     };
                     let id: String = block["tool_use_id"].as_str().unwrap_or_default().into();
                     let ok = block["is_error"] != true;
