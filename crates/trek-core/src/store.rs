@@ -921,52 +921,52 @@ impl Store {
                 Self::merge_thread_in(c, gone, &t.id)?;
             }
         }
-        c.execute(
-            &SQL,
-            params![
-                t.id,
-                t.project_id,
-                t.title,
-                t.agent.key(),
-                t.model,
-                t.effort.as_str(),
-                enum_str(&t.hand_holding),
-                t.source.key(),
-                t.native_id,
-                t.cwd.as_ref().map(|p| p.display().to_string()),
-                t.branch,
-                t.created_at,
-                t.updated_at,
-                t.last_seen_at,
-                t.settled_at,
-                t.pinned_at,
-                t.snoozed_until,
-                t.archived_at,
-                enum_str(&t.run_state),
-                t.additions,
-                t.deletions,
-                t.side_of,
-                t.never_settle as i64,
-                t.imported_title,
-                t.import_hidden,
-                t.import_kept as i64,
-                t.worktree.as_ref().map(|w| w.path.display().to_string()),
-                t.worktree.as_ref().map(|w| w.branch.clone()),
-                t.worktree.as_ref().map(|w| w.base.clone()),
-                t.native_at,
-                t.reopen
-                    .as_ref()
-                    .and_then(|r| serde_json::to_string(r).ok()),
-                t.paused
-                    .as_ref()
-                    .and_then(|p| serde_json::to_string(p).ok()),
-                t.parent_id,
-                t.started_by,
-                t.continued_from,
-                t.notify_starter as i64,
-                t.editor_chat as i64
-            ],
-        )?;
+        // Kept prepared: every change to a thread saves it (a run's state, its title, its time),
+        // and an import saves each thread it finds, so the 37-column upsert isn't parsed and
+        // planned again for each.
+        c.prepare_cached(&SQL)?.execute(params![
+            t.id,
+            t.project_id,
+            t.title,
+            t.agent.key(),
+            t.model,
+            t.effort.as_str(),
+            enum_str(&t.hand_holding),
+            t.source.key(),
+            t.native_id,
+            t.cwd.as_ref().map(|p| p.display().to_string()),
+            t.branch,
+            t.created_at,
+            t.updated_at,
+            t.last_seen_at,
+            t.settled_at,
+            t.pinned_at,
+            t.snoozed_until,
+            t.archived_at,
+            enum_str(&t.run_state),
+            t.additions,
+            t.deletions,
+            t.side_of,
+            t.never_settle as i64,
+            t.imported_title,
+            t.import_hidden,
+            t.import_kept as i64,
+            t.worktree.as_ref().map(|w| w.path.display().to_string()),
+            t.worktree.as_ref().map(|w| w.branch.clone()),
+            t.worktree.as_ref().map(|w| w.base.clone()),
+            t.native_at,
+            t.reopen
+                .as_ref()
+                .and_then(|r| serde_json::to_string(r).ok()),
+            t.paused
+                .as_ref()
+                .and_then(|p| serde_json::to_string(p).ok()),
+            t.parent_id,
+            t.started_by,
+            t.continued_from,
+            t.notify_starter as i64,
+            t.editor_chat as i64
+        ])?;
         Ok(())
     }
 
