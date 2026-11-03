@@ -2249,7 +2249,7 @@ impl Render for Sidebar {
         let flip = self.flip.clone();
         // Settled history can be hundreds of threads; while it's folded only the count is needed.
         let mut settled_count = 0;
-        let sections: Vec<(Section, Vec<Thread>)> = ws
+        let mut sections: Vec<(Section, Vec<Thread>)> = ws
             .sections()
             .into_iter()
             .map(|(s, v)| {
@@ -2293,16 +2293,18 @@ impl Render for Sidebar {
 
         let mut list = v_flex().pt_1().pb_3();
         let mut settled: Vec<Thread> = vec![];
-        // Inbox and Working are one run of cards: see `live_order`.
+        // Inbox and Working are one run of cards: see `live_order`. Their threads move out of
+        // `sections` (which draws neither) rather than being copied again on every render.
         let live: Vec<Thread> = {
-            let of = |s: Section| {
+            let mut take = |s: Section| {
                 sections
-                    .iter()
+                    .iter_mut()
                     .find(|(x, _)| *x == s)
-                    .map(|(_, v)| v.clone())
+                    .map(|(_, v)| std::mem::take(v))
                     .unwrap_or_default()
             };
-            live_order(of(Section::Inbox), of(Section::Working))
+            let inbox = take(Section::Inbox);
+            live_order(inbox, take(Section::Working))
         };
         // Pinned or snoozed threads showing mean the live run isn't really empty.
         let named_sections_busy = sections
@@ -2820,7 +2822,7 @@ impl Render for Sidebar {
         let mut history = v_flex();
         if settled_count > 0 {
             let mut groups: Vec<(String, String, Vec<Thread>)> = Vec::new();
-            for t in settled.iter().cloned() {
+            for t in settled {
                 let pid = t.project_id.clone().unwrap_or_default();
                 match groups.iter_mut().find(|g| g.0 == pid) {
                     Some(g) => g.2.push(t),
