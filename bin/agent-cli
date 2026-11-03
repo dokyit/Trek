@@ -877,7 +877,6 @@ def cmd_dock(a):
         records.append(rec)
     tiles = {"pinned": 0, "recent": 0}
     try:
-        import plistlib
         _, xml = run(["plutil", "-convert", "xml1", "-o", "-", os.path.expanduser("~/Library/Preferences/com.apple.dock.plist")], timeout=10)
         d = plistlib.loads(xml.encode("utf-8", "replace"))
         for key, label in (("persistent-apps", "pinned"), ("recent-apps", "recent")):
@@ -888,10 +887,31 @@ def cmd_dock(a):
     # UI-element records (XPC helpers such as AutoFill) have no tile.
     main = [r for r in records if r["executable"].endswith("/Trek.app/Contents/MacOS/trek") and "original_pid" not in r]
     extra = [r for r in records if r not in main and r["type"] not in ("BackgroundOnly", "UIElement")]
+    cleared = None
+    if getattr(a, "clear", False) and tiles["recent"]:
+        # The Dock keeps its recent apps in its preferences and reloads them on a restart, so
+        # a restart alone leaves the tiles; they go by taking them out of the list first.
+        plist = os.path.expanduser("~/Library/Preferences/com.apple.dock.plist")
+        _, xml = run(["plutil", "-convert", "xml1", "-o", "-", plist], timeout=10)
+        d = plistlib.loads(xml.encode("utf-8", "replace"))
+        d["recent-apps"] = [e for e in d.get("recent-apps", []) if e.get("tile-data", {}).get("file-label") != "Trek"]
+        out = os.path.join(tempfile.gettempdir(), "agent-cli-dock.plist")
+        with open(out, "wb") as f:
+            plistlib.dump(d, f)
+        rc, msg = run(["defaults", "import", "com.apple.dock", out], timeout=10)
+        if rc == 0:
+            run(["killall", "Dock"], timeout=10)
+            cleared, tiles["recent"] = tiles["recent"], 0
+        else:
+            cleared = f"not cleared: {msg.strip()[-120:]}"
     verdict = ("one Trek, no stale tiles" if len(main) <= 1 and not extra and tiles["recent"] == 0 else
                f"{len(main)} Trek apps, {len(extra)} extra app records, {tiles['recent']} stale recent tiles"
                + (" — find each extra record's pid/command and fix the caller" if extra else "")
-               + (" — `killall Dock` clears recent tiles (ask first)" if tiles["recent"] else ""))
+               + (" — `agent-cli dock --clear` takes them out of the Dock's recent apps" if tiles["recent"] else ""))
+    if isinstance(cleared, int):
+        verdict += f" (cleared {cleared} stale recent tiles; the Dock restarted)"
+    elif cleared:
+        verdict += f" ({cleared})"
     text = [f"{r['name']!r} asn {r['asn']} pid {r['pid']} type {r['type'] or '?'}"
             + (f" originalPid {r['original_pid']}" if r.get("original_pid") else "")
             + (f"  {r.get('command', r['executable'])}" if r.get("pid") else f"  {r['executable']}") for r in records]
@@ -1027,7 +1047,8 @@ def build_parser():
     s.add_argument("--max", type=int, default=25)
     s = add("sims", cmd_sims)
     s.add_argument("n", nargs="?", type=int, default=8, help="non-booted devices shown")
-    add("dock", cmd_dock, epilog="Replaces: lsappinfo list/info, defaults read com.apple.dock recent-apps. An extra app record names the process that registered as a second Trek.")
+    s = add("dock", cmd_dock, epilog="Replaces: lsappinfo list/info, defaults read com.apple.dock recent-apps. An extra app record names the process that registered as a second Trek.")
+    s.add_argument("--clear", action="store_true", help="take stale Trek tiles out of the Dock's recent apps and restart the Dock")
     return p
 
 

@@ -9,6 +9,8 @@
 //! With a fake-acp-config.json ({"models": {id: [effort values]}, "current": id}) it offers a
 //! model select and the current model's effort select as OpenCode 2 does: a model switch brings
 //! that model's levels (none: no effort select), on "default" if it has one, else its first.
+//! With a fake-acp-signed-out file it turns sessions down with an auth error, offering one
+//! auth method, until `authenticate` is called.
 //! Like OpenCode 1.x, it also sends them as a `config_option_update` after `session/new`'s
 //! answer.
 
@@ -28,6 +30,9 @@ pub fn run() {
     let caps = read_json("fake-acp-mcp.json").unwrap_or_else(|| json!({}));
     let mut config = read_json("fake-acp-config.json");
     let mut effort = config.as_ref().and_then(|c| default_effort(c));
+    // A fake-acp-signed-out file: sessions are refused for want of a sign-in (as Droid does
+    // before its device pairing) until an `authenticate` call, which the log shows.
+    let mut signed_out = std::path::Path::new("fake-acp-signed-out").exists();
 
     let mut lines = stdin.lock().split(b'\n');
     while let Some(Ok(line)) = lines.next() {
@@ -47,7 +52,19 @@ pub fn run() {
         let mut result = json!({});
         if method == "initialize" {
             result = json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": true, "mcpCapabilities": caps.clone() } });
+            if signed_out {
+                result["authMethods"] = json!([{ "id": "device-pairing", "name": "Login" }]);
+            }
+        } else if method == "authenticate" {
+            signed_out = false;
         } else if matches!(method, "session/new" | "session/load") {
+            if signed_out {
+                say(
+                    &mut out,
+                    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "Authentication required" } }),
+                );
+                continue;
+            }
             if let Some(why) = bad_mcp(&m["params"]["mcpServers"], &caps) {
                 say(
                     &mut out,

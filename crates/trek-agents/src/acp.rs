@@ -1932,12 +1932,17 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         "droid" => AgentId::Droid,
         other => AgentId::Acp(other.into()),
     };
+    probe_at(&agent_id, &trek_core::paths::home(), &ProbeCache::dir()).await
+}
+
+/// `acp_probe` with the agent run in `home` and its answer kept in `cache`.
+async fn probe_at(agent_id: &AgentId, home: &Path, cache: &Path) -> Result<AcpInfo> {
+    let agent_id = agent_id.clone();
     let (bin, _, _) = launch_spec(&agent_id)?;
-    let cache = ProbeCache::dir();
-    if let Some(info) = ProbeCache::load(&cache, &agent_id, &bin).filter(|i| !i.needs_auth) {
+    if let Some(info) = ProbeCache::load(cache, &agent_id, &bin).filter(|i| !i.needs_auth) {
         return Ok(info);
     }
-    let home = trek_core::paths::home();
+    let home = home.to_path_buf();
     // The session the probe opened, as soon as the agent says: it's deleted however the probe ends.
     let mut opened: Option<String> = None;
     let probe = async {
@@ -1957,7 +1962,7 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
         match agent
             .call(
                 "session/new",
-                params.clone(),
+                params,
                 &fs,
                 &mut backlog,
                 Duration::from_secs(30),
@@ -1983,51 +1988,12 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
                     opened = None;
                 }
             }
-            Err(e) if is_auth_error(&e) => {
-                let mut authenticated = false;
-                if let Some((first_method, _)) = info.auth_methods.first() {
-                    let auth_params = json!({ "methodId": first_method });
-                    if let Ok(Ok(_)) = agent
-                        .call(
-                            "authenticate",
-                            auth_params,
-                            &fs,
-                            &mut backlog,
-                            Duration::from_secs(5),
-                        )
-                        .await
-                        && let Ok(Ok(r)) = agent
-                            .call(
-                                "session/new",
-                                params,
-                                &fs,
-                                &mut backlog,
-                                Duration::from_secs(30),
-                            )
-                            .await
-                    {
-                        info.models = controls(&r).models;
-                        opened = r["sessionId"].as_str().map(String::from);
-                        if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
-                            && let Ok(Ok(_)) = agent
-                                .call(
-                                    "session/delete",
-                                    json!({ "sessionId": session }),
-                                    &fs,
-                                    &mut backlog,
-                                    Duration::from_secs(10),
-                                )
-                                .await
-                        {
-                            opened = None;
-                        }
-                        authenticated = true;
-                    }
-                }
-                if !authenticated {
-                    info.needs_auth = true;
-                }
-            }
+            // Signed out: noted, never acted on. A probe runs by itself at every launch, and an
+            // agent's `authenticate` can open the browser on a sign-in page (Droid's device
+            // pairing did, each time Trek started); signing in is the user's own step (the
+            // Agents page's "Sign in", `acp_authenticate`), and a session the user starts
+            // authenticates then.
+            Err(e) if is_auth_error(&e) => info.needs_auth = true,
             Err(e) => bail!("{}: {}", agent.name, rpc_message(&e)),
         }
         agent.stop().await;
@@ -2042,8 +2008,8 @@ pub async fn acp_probe(id: &str) -> Result<AcpInfo> {
     if let Some(session) = opened {
         discard_session(&agent_id, &session, &home).await;
     }
-    let info = probed.map_err(|_| anyhow!("{id} didn't respond in 90s"))??;
-    ProbeCache::store(&cache, &agent_id, &bin, &info);
+    let info = probed.map_err(|_| anyhow!("{} didn't respond in 90s", agent_id.key()))??;
+    ProbeCache::store(cache, &agent_id, &bin, &info);
     Ok(info)
 }
 
@@ -3991,6 +3957,32 @@ mod tests {
         // Another binary (an upgrade) isn't the one that was probed.
         std::fs::write(&bin, "version 2").unwrap();
         assert_eq!(ProbeCache::load(&dir, &agent, &bin), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_probe_notes_a_sign_out_without_signing_in() {
+        // Droid turned the probe's session down before its device pairing, and the probe's
+        // `authenticate` then opened the browser on a sign-in page at every launch.
+        let agent = fake_agent();
+        let dir = std::env::temp_dir().join(format!("trek_acp_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fake-acp-signed-out"), "").unwrap();
+        let cache = dir.join("cache");
+        let info = probe_at(&agent, &dir, &cache).await.unwrap();
+        assert!(info.needs_auth, "{info:?}");
+        assert_eq!(
+            info.auth_methods,
+            [("device-pairing".to_string(), "Login".to_string())]
+        );
+        let log = std::fs::read_to_string(dir.join("acp-log.jsonl")).unwrap();
+        assert!(log.contains("session/new"), "{log}");
+        assert!(!log.contains("authenticate"), "the probe signed in: {log}");
+        // Remembered, so the Agents page can say so; probed again next time (a sign-in since
+        // changes the answer).
+        let (bin, _, _) = launch_spec(&agent).unwrap();
+        assert!(ProbeCache::load(&cache, &agent, &bin).is_some_and(|i| i.needs_auth));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
