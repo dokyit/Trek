@@ -625,16 +625,27 @@ async fn session(
     // How full the context is: tokens in it at the last usage report, and `history`'s length
     // then (what came after is estimated).
     let mut used: Option<(u64, usize)> = None;
-    let window_of = |model: &str| {
-        options
-            .context_window
-            .or_else(|| {
-                cached_direct_models(provider.id)
-                    .into_iter()
-                    .find(|m| m.id == model)
-                    .and_then(|m| m.context)
-            })
-            .unwrap_or_else(|| trek_core::catalog::context_window(model))
+    // The window is asked for before every request and after every usage report, and the
+    // provider's model list can be large (OpenRouter's), so the answer is kept until the model
+    // changes or the list is fetched again (its file's time changes).
+    let mut window_known: Option<(String, Option<std::time::SystemTime>, u64)> = None;
+    let mut window_of = |model: &str| {
+        if let Some(window) = options.context_window {
+            return window;
+        }
+        let stamp = cached_direct_models_stamp(provider.id);
+        if let Some((m, s, window)) = &window_known {
+            if m == model && *s == stamp {
+                return *window;
+            }
+        }
+        let window = cached_direct_models(provider.id)
+            .into_iter()
+            .find(|m| m.id == model)
+            .and_then(|m| m.context)
+            .unwrap_or_else(|| trek_core::catalog::context_window(model));
+        window_known = Some((model.to_string(), stamp, window));
+        window
     };
     let mut trail = Trail::default();
 
@@ -2867,17 +2878,28 @@ pub fn cache_direct_models(provider_id: &str, models: &[ModelInfo]) {
     }
 }
 
+/// Where `cache_direct_models` keeps a provider's list (none in an isolated Trek).
+fn cached_direct_models_file(provider_id: &str) -> Option<std::path::PathBuf> {
+    (!trek_core::paths::isolated()).then(|| {
+        trek_core::paths::data_dir()
+            .join("direct-models")
+            .join(format!("{provider_id}.json"))
+    })
+}
+
 pub fn cached_direct_models(provider_id: &str) -> Vec<ModelInfo> {
-    if trek_core::paths::isolated() {
-        return vec![];
-    }
-    let file = trek_core::paths::data_dir()
-        .join("direct-models")
-        .join(format!("{provider_id}.json"));
-    std::fs::read_to_string(file)
-        .ok()
+    cached_direct_models_file(provider_id)
+        .and_then(|file| std::fs::read_to_string(file).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// When the cached list was last written: a stat, for telling whether it changed without
+/// reading it.
+fn cached_direct_models_stamp(provider_id: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(cached_direct_models_file(provider_id)?)
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 pub fn load_all_cached_direct_models() -> HashMap<String, Vec<ModelInfo>> {
