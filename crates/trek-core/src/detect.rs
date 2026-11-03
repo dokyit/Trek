@@ -566,32 +566,37 @@ pub async fn detect_all() -> Vec<DetectedAgent> {
             .map(|h| h.here())
             .unwrap_or_default()
     };
-    let (claude, codex, opencode, droid) = tokio::join!(
-        cli_agent(AgentId::ClaudeCode, "claude", hint(&AgentId::ClaudeCode)),
-        cli_agent(AgentId::Codex, "codex", hint(&AgentId::Codex)),
-        cli_agent(AgentId::OpenCode, OPENCODE, hint(&AgentId::OpenCode)),
-        cli_agent(AgentId::Droid, "droid", hint(&AgentId::Droid)),
-    );
-    let mut codex = codex;
-    if let (Availability::Ready, Some(path)) = (&codex.availability, &codex.path) {
-        if !codex_logged_in(path).await {
-            codex.availability = Availability::NeedsLogin;
+    // Codex's sign-in is asked once it's found; nothing else waits for that, nor for each
+    // other: the ACP agents and the local servers are looked for alongside, not after (the
+    // sign-in check alone can take 4 s, a local server 1.5 s).
+    let codex = async {
+        let mut codex = cli_agent(AgentId::Codex, "codex", hint(&AgentId::Codex)).await;
+        if let (Availability::Ready, Some(path)) = (&codex.availability, &codex.path) {
+            if !codex_logged_in(path).await {
+                codex.availability = Availability::NeedsLogin;
+            }
         }
-    }
-
+        codex
+    };
     let acp = join_all(
         ACP_AGENTS
             .iter()
             .map(|a| cli_agent(AgentId::Acp(a.id.into()), a.binary, a.install_hint)),
-    )
-    .await;
+    );
     let local = join_all(
         DIRECT_PROVIDERS
             .iter()
             .filter(|p| p.local)
             .map(|p| local_server(p.id)),
-    )
-    .await;
+    );
+    let (claude, codex, opencode, droid, acp, local) = tokio::join!(
+        cli_agent(AgentId::ClaudeCode, "claude", hint(&AgentId::ClaudeCode)),
+        codex,
+        cli_agent(AgentId::OpenCode, OPENCODE, hint(&AgentId::OpenCode)),
+        cli_agent(AgentId::Droid, "droid", hint(&AgentId::Droid)),
+        acp,
+        local,
+    );
 
     let mut all = vec![claude, codex, opencode, droid];
     all.extend(acp);
