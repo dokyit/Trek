@@ -327,23 +327,30 @@ const CONTINUE_AT: f64 = 0.85;
 /// What a fresh context's first user message says when it starts mid-answer.
 const CONTINUE_MESSAGE: &str = "Your context was full, so it was started fresh: the system prompt says where things stand. Carry on with the current request from there.";
 
-/// Roughly how many tokens `v` takes: a quarter of its characters, an image's data counted as a
-/// picture's worth (about 1,500 tokens) rather than as text.
-fn estimate_tokens(v: &Value) -> u64 {
-    fn chars(v: &Value) -> usize {
-        match v {
-            Value::String(s)
-                if s.len() > 6_000 && (s.starts_with("data:image") || !s.contains(' ')) =>
-            {
-                6_000
-            }
-            Value::String(s) => s.len(),
-            Value::Array(a) => a.iter().map(chars).sum(),
-            Value::Object(o) => o.iter().map(|(k, v)| k.len() + chars(v)).sum(),
-            other => other.to_string().len(),
-        }
+/// Roughly how many tokens `text` and `values` take together: a quarter of their characters, an
+/// image's data counted as a picture's worth (about 1,500 tokens) rather than as text. An empty
+/// `text` counts nothing. They're read where they are: the context check runs before every
+/// request, and copying the history and the tools into one `Value` only to count them was work
+/// thrown away.
+fn estimate_tokens_of(text: &str, values: &[Value]) -> u64 {
+    ((text_chars(text) + values.iter().map(estimate_chars).sum::<usize>()) / 4) as u64
+}
+
+fn text_chars(s: &str) -> usize {
+    if s.len() > 6_000 && (s.starts_with("data:image") || !s.contains(' ')) {
+        6_000
+    } else {
+        s.len()
     }
-    (chars(v) / 4) as u64
+}
+
+fn estimate_chars(v: &Value) -> usize {
+    match v {
+        Value::String(s) => text_chars(s),
+        Value::Array(a) => a.iter().map(estimate_chars).sum(),
+        Value::Object(o) => o.iter().map(|(k, v)| k.len() + estimate_chars(v)).sum(),
+        other => other.to_string().len(),
+    }
 }
 
 /// What a session has been doing, to tell a fresh context where things stand.
@@ -688,16 +695,16 @@ async fn session(
                         let window = window_of(&model);
                         let estimate = match used {
                             Some((tokens, at)) if at <= history.len() => {
-                                tokens + estimate_tokens(&Value::Array(history[at..].to_vec()))
+                                tokens + estimate_tokens_of("", &history[at..])
                             }
                             _ => {
-                                estimate_tokens(&json!([system, tools]))
-                                    + estimate_tokens(&Value::Array(history.clone()))
+                                estimate_tokens_of(&system, &tools)
+                                    + estimate_tokens_of("", &history)
                             }
                         };
                         // Only when going on afresh frees room: a fresh context still holds the
                         // system prompt, the tools and an orientation (about 2,000 tokens).
-                        let fresh_floor = estimate_tokens(&json!([base_system, tools])) + 2_000;
+                        let fresh_floor = estimate_tokens_of(&base_system, &tools) + 2_000;
                         if history.len() > 1
                             && estimate as f64 > CONTINUE_AT * window as f64
                             && fresh_floor < window / 2
@@ -2210,7 +2217,10 @@ fn fixed_fields(model: &str, effort: Effort, system: &str, tools: &[Value]) -> u
     model.hash(&mut hasher);
     effort.as_str().hash(&mut hasher);
     system.hash(&mut hasher);
-    Value::Array(tools.to_vec()).to_string().hash(&mut hasher);
+    // The same text as `Value::Array(tools.to_vec()).to_string()`, without copying the tools.
+    serde_json::to_string(tools)
+        .unwrap_or_default()
+        .hash(&mut hasher);
     hasher.finish()
 }
 
@@ -5247,9 +5257,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
     }
 
+    /// The estimate of one `Value`, as it was counted before the parts were read in place.
+    fn estimate_tokens(v: &Value) -> u64 {
+        (estimate_chars(v) / 4) as u64
+    }
+
     #[test]
     fn context_estimates_count_text_and_images_apart() {
         assert_eq!(estimate_tokens(&json!("x".repeat(400))), 100);
+        // Counted in place, the same as counted as one array.
+        let system = "You are a helpful agent. ".repeat(40);
+        let parts = vec![
+            json!({ "role": "user", "content": "x".repeat(7_000) }),
+            json!({ "name": "bash", "parameters": { "type": "object", "n": 3, "ok": true } }),
+            json!(null),
+        ];
+        assert_eq!(
+            estimate_tokens_of(&system, &parts),
+            estimate_tokens(&json!([system, parts]))
+        );
+        assert_eq!(
+            estimate_tokens_of("", &parts[1..]),
+            estimate_tokens(&Value::Array(parts[1..].to_vec()))
+        );
+        assert_eq!(
+            serde_json::to_string(&parts[..]).unwrap(),
+            Value::Array(parts.to_vec()).to_string()
+        );
         let image = json!({ "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", "A".repeat(2_000_000)) } });
         assert!(
             estimate_tokens(&image) < 2_000,
