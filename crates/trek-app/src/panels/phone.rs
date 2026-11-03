@@ -242,11 +242,11 @@ impl PhonePanel {
                         bar_at = Some(Instant::now());
                     }
                     // The cable says the screen's size with each frame; the driver's picture
-                    // is its own size.
+                    // is its own size, read from its header (it's decoded once, just below).
                     let (w, h) = if w == 0 || h == 0 {
-                        match image::load_from_memory(&jpeg) {
-                            Ok(i) => (i.width(), i.height()),
-                            Err(_) => continue,
+                        match picture_size(&jpeg) {
+                            Some(size) => size,
+                            None => continue,
                         }
                     } else {
                         (w, h)
@@ -1893,10 +1893,20 @@ fn luma((r, g, b): (u8, u8, u8)) -> f32 {
     0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32
 }
 
+/// A picture's width and height, from its header: without decoding the whole picture.
+fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 /// Look for the status bar's clock in a frame from the cable.
 fn status_bar(jpeg: &[u8]) -> Option<StatusBar> {
     let img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?;
-    find_bar(&img.to_rgb8())
+    // A JPEG decodes to RGB already: `into_rgb8` hands that over where `to_rgb8` copied it.
+    find_bar(&img.into_rgb8())
 }
 
 fn find_bar(img: &image::RgbImage) -> Option<StatusBar> {
@@ -3022,9 +3032,10 @@ impl Run<'_> {
                 d.screenshot(width.max(1), 0)
             })
             .await?;
-        let (width, height) = image::load_from_memory(&bytes)
-            .map(|i| (i.width(), i.height()))
-            .map_err(|e| format!("Trek Driver's picture couldn't be read: {e}"))?;
+        // Its size from its header: this runs on the main thread, and decoding the whole
+        // picture for two numbers kept it busy for nothing.
+        let (width, height) =
+            picture_size(&bytes).ok_or("Trek Driver's picture couldn't be read.")?;
         std::fs::write(&path, &bytes).map_err(|e| format!("Couldn't save the screenshot: {e}"))?;
         self.this
             .update(self.cx, |p, _| {
@@ -3204,11 +3215,29 @@ mod tests {
     // Not `super::*`: gpui's own `test` attribute would come with it.
     use super::{
         HandHolding, Sensitive, StatusBar, ask_text, find_bar, fit, needs_asking, phone_time,
-        starting, tools,
+        picture_size, starting, tools,
     };
     use gpui_kit::{px, size};
     use serde_json::json;
     use trek_phone::device::Clock;
+
+    #[test]
+    fn a_pictures_size_comes_from_its_header() {
+        let img = image::RgbImage::from_pixel(37, 81, image::Rgb([200, 40, 90]));
+        for format in [image::ImageFormat::Jpeg, image::ImageFormat::Png] {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut bytes, format).unwrap();
+            let bytes = bytes.into_inner();
+            let decoded = image::load_from_memory(&bytes).unwrap();
+            assert_eq!(
+                picture_size(&bytes),
+                Some((decoded.width(), decoded.height()))
+            );
+            assert_eq!(picture_size(&bytes), Some((37, 81)));
+        }
+        assert_eq!(picture_size(b"not a picture"), None);
+        assert_eq!(picture_size(&[]), None);
+    }
 
     #[test]
     fn approvals_follow_the_access_level() {
