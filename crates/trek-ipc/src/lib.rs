@@ -308,17 +308,20 @@ impl Connection {
         self.next += 1;
         let id = self.next;
         self.send(&request(id, method, params))?;
-        let answer = self.receive()?;
+        let mut answer = self.receive()?;
         if answer.get("id").and_then(Value::as_u64) != Some(id) {
             return Err("Trek answered another request".into());
         }
-        match (answer.get("result"), answer.get("error")) {
-            (_, Some(e)) => Err(e
+        if let Some(e) = answer.get("error") {
+            return Err(e
                 .as_str()
                 .map(str::to_string)
-                .unwrap_or_else(|| e.to_string())),
-            (Some(r), None) => Ok(r.clone()),
-            (None, None) => Err("Trek's answer has no result".into()),
+                .unwrap_or_else(|| e.to_string()));
+        }
+        // Moved out, not copied: a page's text or a thread's transcript can be large.
+        match answer.get_mut("result") {
+            Some(r) => Ok(r.take()),
+            None => Err("Trek's answer has no result".into()),
         }
     }
 }
