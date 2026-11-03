@@ -549,8 +549,11 @@ impl Gathered {
                 on_disk.get(&history_key(*source, native)),
             )
         });
-        let fresh: Vec<(String, String, String)> =
-            found.iter().filter_map(|(_, keep)| keep.clone()).collect();
+        // Split apart rather than copied: a fresh history's encoded form can be large, and a cold
+        // start reads every imported thread's.
+        let (found, to_keep): (Vec<History>, Vec<Option<(String, String, String)>>) =
+            found.into_iter().unzip();
+        let fresh: Vec<(String, String, String)> = to_keep.into_iter().flatten().collect();
         if !fresh.is_empty()
             && let Err(e) = store.keep_histories(&fresh)
         {
@@ -559,7 +562,7 @@ impl Gathered {
         let mut histories: HashMap<String, History> = imported
             .iter()
             .zip(found)
-            .map(|((t, ..), (h, _))| (t.id.clone(), h))
+            .map(|((t, ..), h)| (t.id.clone(), h))
             .collect();
         let read = changed.len();
         let mut out = Vec::with_capacity(threads.len());
