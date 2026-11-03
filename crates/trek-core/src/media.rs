@@ -201,10 +201,11 @@ fn mention_words(text: &str) -> Vec<&str> {
 /// The video files a message names as `@path` (how a file attached to a message is sent), on disk:
 /// absolute, `~/`, or relative to `cwd`. In order, each once.
 pub fn mentioned_videos(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
-    mentioned_files(text, cwd)
-        .into_iter()
-        .filter(|p| is_video_name(&p.to_string_lossy()))
-        .collect()
+    // The name first: every message on screen asks on every frame, and most of what it names
+    // isn't a video, so only a video's name costs a look at the disk.
+    mentioned_paths(text, cwd, |p| {
+        is_video_name(&p.to_string_lossy()) && p.is_file()
+    })
 }
 
 /// Every file a message names as `@path`, on disk: absolute, `~/`, or relative to `cwd`. In
