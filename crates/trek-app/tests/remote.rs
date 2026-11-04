@@ -1247,6 +1247,56 @@ fn a_phone_changes_only_the_settings_it_may() {
 }
 
 #[test]
+fn a_follow_up_sent_on_the_mac_reaches_a_phone_that_follows_the_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| {
+            ws.start_test_remote();
+            ws.push_remote_changes(cx);
+        });
+        // The phone opens the thread: its last page.
+        let first = ask(&trek, cx, transcript_req(&id, None, Some(50))).unwrap();
+        let users = |t: &tr::Transcript| -> Vec<String> {
+            t.items
+                .iter()
+                .filter_map(|i| match &i.body {
+                    tr::ItemBody::User { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(users(&first), ["first thread"]);
+        // The user goes on from the Mac while the phone looks on.
+        trek.send(cx, "and a follow-up");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+        // What the phone gets, asking for what came after what it has.
+        let since = ask(&trek, cx, transcript_req(&id, Some(first.seq), Some(50))).unwrap();
+        assert_eq!(users(&since), ["and a follow-up"], "{since:#?}");
+        let user_at = since
+            .items
+            .iter()
+            .position(|i| matches!(i.body, tr::ItemBody::User { .. }))
+            .unwrap();
+        assert!(
+            since.items[user_at + 1..]
+                .iter()
+                .any(|i| !matches!(i.body, tr::ItemBody::User { .. })),
+            "the turn's work comes after its message: {since:#?}"
+        );
+        assert!(
+            since.items.iter().all(|i| i.seq > first.seq),
+            "only what's newer: {since:#?}"
+        );
+        // And the whole thread, read afresh, has both.
+        let whole = ask(&trek, cx, transcript_req(&id, None, None)).unwrap();
+        assert_eq!(users(&whole), ["first thread", "and a follow-up"]);
+    });
+}
+
+#[test]
 fn another_phone_connecting_keeps_the_rows_already_sent() {
     run(async |cx| {
         let trek = open(cx);
