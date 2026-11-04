@@ -302,6 +302,52 @@ pub fn clock(udid: Option<&str>) -> Result<Clock, String> {
     })?
 }
 
+/// One HTTP/1.1 exchange over plain TCP: `request` sent, the answer read until it's whole by
+/// its Content-Length or the far end closes.
+async fn exchange_tcp(addr: std::net::SocketAddr, request: &[u8]) -> Result<Vec<u8>, String> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
+        format!(
+            "Nothing answers on the iPhone's port {} over Wi-Fi: {e}",
+            addr.port()
+        )
+    })?;
+    stream
+        .write_all(request)
+        .await
+        .map_err(|e| format!("Couldn't send to the iPhone: {e}"))?;
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        if answer_complete(&out) {
+            break;
+        }
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(_) if !out.is_empty() => break,
+            Err(e) => return Err(format!("Couldn't read from the iPhone: {e}")),
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `raw` holds a whole HTTP answer: its headers, and as many body bytes as its
+/// Content-Length says (an answer without one is whole only when the connection closes).
+pub fn answer_complete(raw: &[u8]) -> bool {
+    let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&raw[..end]);
+    let length = head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| v.trim().parse::<usize>().ok())?
+    });
+    length.is_some_and(|n| raw.len() - (end + 4) >= n)
+}
+
 /// Send `request` to TCP `port` on the phone and read until it closes the connection: one
 /// HTTP/1.1 exchange with `Connection: close`. Over the cable usbmuxd connects to the phone's own
 /// 127.0.0.1, as Xcode's port forwarding does, where nothing on the network can reach; with no
@@ -325,6 +371,12 @@ pub fn exchange(
                 None => devices.into_iter().next(),
             }
             .ok_or("No iPhone is connected: plug it in, unlock it and trust this Mac.")?;
+            // Over the network usbmuxd carries only the phone's own services (its lockdown
+            // port), not a port an app listens on: Trek Driver's is reached straight over TCP,
+            // at the phone's address; the driver takes only this Mac's connections there.
+            if let Connection::Network(ip) = device.connection_type {
+                return exchange_tcp((ip, port).into(), request).await;
+            }
             // A connection of its own: after Connect it carries only the phone's port.
             let tunnel = UsbmuxdConnection::default()
                 .await
@@ -338,6 +390,11 @@ pub fn exchange(
                 .map_err(err("Couldn't send to the iPhone"))?;
             let mut out = Vec::new();
             loop {
+                // A whole answer by its Content-Length is the end too: over Wi-Fi the close
+                // can come late, or not at all.
+                if answer_complete(&out) {
+                    break;
+                }
                 match conn.read_any(1 << 16).await {
                     Ok(chunk) if chunk.is_empty() => break,
                     Ok(chunk) => out.extend_from_slice(&chunk),
@@ -510,4 +567,54 @@ pub fn remove(udid: Option<&str>, path: &str, app: Option<&str>) -> Result<(), S
         let mut afc = afc(&provider, app).await?;
         afc.remove(path).await.map_err(err("Couldn't remove it"))
     })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_answer_is_whole_by_its_content_length() {
+        assert!(!answer_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+        ));
+        assert!(!answer_complete(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc"
+        ));
+        assert!(answer_complete(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nabcde"
+        ));
+        // Without a length only the close says so.
+        assert!(!answer_complete(b"HTTP/1.1 200 OK\r\n\r\nabcde"));
+    }
+
+    /// Over Wi-Fi the far end may close late: the answer is taken as soon as it's whole, even
+    /// when it comes in pieces.
+    #[tokio::test]
+    async fn a_tcp_exchange_ends_when_the_answer_is_whole() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = s.read(&mut buf).await;
+            s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello ")
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            s.write_all(b"wifi").await.unwrap();
+            // Never closed: the reader must not wait for that.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let raw = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            exchange_tcp(addr, b"GET /x HTTP/1.1\r\n\r\n"),
+        )
+        .await
+        .expect("done before the far end closes")
+        .unwrap();
+        let (status, body) = crate::driver::response(&raw).unwrap();
+        assert_eq!((status, body.as_slice()), (200, &b"hello wifi"[..]));
+    }
 }

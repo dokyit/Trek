@@ -119,8 +119,13 @@ final class Server {
     }
 
     private func send(_ connection: NWConnection, _ response: Response) {
-        connection.send(content: response.encoded, completion: .contentProcessed { _ in
-            connection.cancel()
+        // The answer ends the connection: as the last message, so the close follows the last
+        // byte over the wire. Cancelling as soon as the bytes were taken dropped the tail of a
+        // long answer (a screenshot) over Wi-Fi, where they're still in flight; the loopback
+        // never showed it.
+        connection.send(content: response.encoded, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { _ in
+            self.queue.asyncAfter(deadline: .now() + 5) { connection.cancel() }
         })
     }
 }
