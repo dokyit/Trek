@@ -1,5 +1,6 @@
 //! Writes a run file for the installed Trek Driver, as Trek does before `xcodebuild
 //! test-without-building`: `driver_run <out.xctestrun> <token> [peers]`.
+#[cfg(target_os = "macos")]
 fn main() {
     let mut args = std::env::args().skip(1);
     let out = std::path::PathBuf::from(args.next().expect("where to write the run file"));
@@ -19,4 +20,9 @@ fn main() {
     let bytes = trek_phone::driver::xctestrun(&template, &dir, &env).expect("a run file");
     std::fs::write(&out, bytes).expect("written");
     println!("{}", out.display());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("Trek Driver is reached from a Mac only.");
 }

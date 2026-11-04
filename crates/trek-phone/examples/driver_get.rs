@@ -1,6 +1,7 @@
 //! One request to a running Trek Driver, as the iPhone tool makes it: `driver_get <token>
 //! [path] [save-to]` prints the answer's status, headers and body size (or where it was cut
 //! short), and saves the body when told where.
+#[cfg(target_os = "macos")]
 fn main() {
     let mut args = std::env::args().skip(1);
     let token = args.next().expect("the driver's token");
@@ -35,4 +36,9 @@ fn main() {
             }
         }
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("Trek Driver is reached from a Mac only.");
 }
