@@ -232,10 +232,13 @@ final class ThreadStore {
         loaded = true
     }
 
-    /// A live item: queued, and applied with the others that arrive in the same pass.
+    /// A live item: queued, and applied with the others that arrive in the same pass. `seq`
+    /// moves only once the item is among `items`: the cache saves the two together, and a seq
+    /// ahead of the items would ask the Mac only for what's newer than a message never kept,
+    /// which then never came back (the phone showed a turn's work without the message that
+    /// started it).
     func enqueue(_ item: TItem) {
         queued.append(item)
-        seq = max(seq, item.seq)
         guard !flushScheduled else { return }
         flushScheduled = true
         DispatchQueue.main.async { [weak self] in self?.flushQueued() }
@@ -247,6 +250,7 @@ final class ThreadStore {
         let batch = queued
         queued = []
         upsert(batch)
+        seq = batch.reduce(seq) { max($0, $1.seq) }
         onChange?()
     }
 

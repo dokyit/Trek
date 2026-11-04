@@ -168,8 +168,27 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
 
     // MARK: Rows in
 
+    /// Rows that came while an update was under way (`update` lays out, and a layout pass can
+    /// ask for the rows again): applied once it's done, never inside it, so the batch update
+    /// under way sees the counts it was built from.
+    private var updating = false
+    private var pendingRows: (rows: [TranscriptRow], generation: Int, animated: Bool)?
+
     func update(rows new: [TranscriptRow], generation g: Int, animated: Bool = false) {
         guard isViewLoaded else { return }
+        if updating {
+            pendingRows = (new, g, animated || (pendingRows?.animated ?? false))
+            return
+        }
+        updating = true
+        apply(rows: new, generation: g, animated: animated)
+        updating = false
+        if let next = pendingRows.take() {
+            update(rows: next.rows, generation: next.generation, animated: next.animated)
+        }
+    }
+
+    private func apply(rows new: [TranscriptRow], generation g: Int, animated: Bool) {
         if g != generation {
             // A new thread, or one the host rewrote: drawn afresh at the latest.
             let first = generation == nil
@@ -207,7 +226,12 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         heights = new.map { measured[$0.id] ?? estimate($0) }
         let deleted = (p..<(old.count - s)).map { IndexPath(item: $0, section: 0) }
         let inserted = (p..<(new.count - s)).map { IndexPath(item: $0, section: 0) }
-        if old.isEmpty || deleted.count + inserted.count > 3000 {
+        // The collection view counts from its last layout: when that isn't the list the batch
+        // was built from (a layout it skipped), a batch update would be inconsistent and UIKit
+        // stops the app; it is drawn afresh instead.
+        let counted = collectionView.numberOfItems(inSection: 0)
+        if old.isEmpty || counted != old.count || deleted.count + inserted.count > 3000 {
+            if counted != old.count { ScrollProbe.note("rows redrawn: the view counted \(counted), the list had \(old.count)") }
             collectionView.reloadData()
         } else {
             UIView.performWithoutAnimation {

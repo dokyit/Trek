@@ -271,12 +271,13 @@ private struct Confirmation: Identifiable {
     }
 }
 
-private struct TranscriptList: View, Equatable {
-    let store: ThreadStore
+private struct TranscriptList: View, nonisolated Equatable {
+    // Read by `==`, which SwiftUI may call off the main thread: nothing it compares is isolated.
+    nonisolated let store: ThreadStore
     let composer: ComposerState
-    var working: Bool
-    var projectName: String
-    var retryModels: [ModelOption]
+    nonisolated(unsafe) var working: Bool
+    nonisolated(unsafe) var projectName: String
+    nonisolated(unsafe) var retryModels: [ModelOption]
 
     @Environment(AppModel.self) private var model
     @Environment(\.projectHue) private var projectHue
@@ -294,9 +295,7 @@ private struct TranscriptList: View, Equatable {
     @State private var scroller = TranscriptScroller()
 
     nonisolated static func == (a: TranscriptList, b: TranscriptList) -> Bool {
-        MainActor.assumeIsolated {
-            a.store === b.store && a.working == b.working && a.projectName == b.projectName && a.retryModels == b.retryModels
-        }
+        a.store === b.store && a.working == b.working && a.projectName == b.projectName && a.retryModels == b.retryModels
     }
 
     var body: some View {
@@ -441,7 +440,7 @@ private struct TranscriptList: View, Equatable {
 
 /// One row of the transcript's list: what's above the transcript (where this thread came from),
 /// the spinner or marker for earlier items, a block, and what's under it (who's working).
-enum TranscriptRow: View, Equatable, Identifiable {
+enum TranscriptRow: View, nonisolated Equatable, Identifiable {
     case header(ThreadStore)
     /// The transcript isn't in yet.
     case loading
@@ -481,15 +480,15 @@ enum TranscriptRow: View, Equatable, Identifiable {
         }
     }
 
+    // SwiftUI compares rows off the main thread at times (its async renderer): nothing here
+    // may assume the main actor, or the app stops.
     nonisolated static func == (a: TranscriptRow, b: TranscriptRow) -> Bool {
-        MainActor.assumeIsolated {
-            switch (a, b) {
-            case (.header(let x), .header(let y)), (.footer(let x), .footer(let y)): x === y
-            case (.loading, .loading): true
-            case (.earlier(let x), .earlier(let y)): x == y
-            case (.block(let x), .block(let y)): x == y
-            default: false
-            }
+        switch (a, b) {
+        case (.header(let x), .header(let y)), (.footer(let x), .footer(let y)): x === y
+        case (.loading, .loading): true
+        case (.earlier(let x), .earlier(let y)): x == y
+        case (.block(let x), .block(let y)): x == y
+        default: false
         }
     }
 
@@ -557,7 +556,7 @@ enum TranscriptRow: View, Equatable, Identifiable {
 
 /// A stretch of a long answer: whole Markdown blocks (never inside a code fence, a list, a table
 /// or display maths), about `target` characters.
-struct AnswerPart: Equatable {
+nonisolated struct AnswerPart: Equatable {
     var index: Int
     var text: String
 
@@ -661,33 +660,33 @@ struct WorkingFooter: View {
 
 /// One block of the transcript. Equatable on its values (the block compares by id and seqs), so
 /// the list redraws only the rows that changed.
-struct BlockRow: View, Equatable {
-    var block: Block
+struct BlockRow: View, nonisolated Equatable {
+    // Read by `==`, which SwiftUI may call off the main thread: the compared fields are plain
+    // values, marked so the comparison needn't assume the main actor.
+    nonisolated(unsafe) var block: Block
     var threadID: String
-    var projectName: String
-    var expanded: Bool
-    var folded: Set<String>
+    nonisolated(unsafe) var projectName: String
+    nonisolated(unsafe) var expanded: Bool
+    nonisolated(unsafe) var folded: Set<String>
     /// An error, limit or notice a turn stopped with: the turn's actions go under it.
-    var endsTurn: Bool
+    nonisolated(unsafe) var endsTurn: Bool
     /// The latest turn or message: its actions are out.
-    var latest: Bool
+    nonisolated(unsafe) var latest: Bool
     /// A turn is running: the actions that need the Mac idle are off.
-    var busy: Bool
-    var retryModels: [ModelOption]
+    nonisolated(unsafe) var busy: Bool
+    nonisolated(unsafe) var retryModels: [ModelOption]
     var toggle: () -> Void
     var fold: (Set<String>) -> Void
     var act: (RowAction) -> Void
     /// One stretch of a long answer (it's drawn, and measured, a part at a time).
-    var part: AnswerPart? = nil
+    nonisolated(unsafe) var part: AnswerPart? = nil
     /// The latest turn restated its request: "Is that what you meant?", and this go-ahead.
-    var goAhead: String? = nil
+    nonisolated(unsafe) var goAhead: String? = nil
 
     nonisolated static func == (a: BlockRow, b: BlockRow) -> Bool {
-        MainActor.assumeIsolated {
-            a.block == b.block && a.part == b.part && a.expanded == b.expanded && a.folded == b.folded && a.endsTurn == b.endsTurn
-                && a.latest == b.latest
-                && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels && a.goAhead == b.goAhead
-        }
+        a.block == b.block && a.part == b.part && a.expanded == b.expanded && a.folded == b.folded && a.endsTurn == b.endsTurn
+            && a.latest == b.latest
+            && a.busy == b.busy && a.projectName == b.projectName && a.retryModels == b.retryModels && a.goAhead == b.goAhead
     }
 
     var body: some View {

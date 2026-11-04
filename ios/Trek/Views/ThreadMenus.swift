@@ -112,9 +112,9 @@ enum SnoozeWords {
 /// it's open lays itself out again under the finger: rows shift, the glass of the button it grew
 /// from morphs again. So it shows nothing that ticks (the line counts are on the Git button),
 /// and it fits under the button whole, Delete… included (the branch is under the title).
-struct ThreadMenu: View, Equatable {
+struct ThreadMenu: View, nonisolated Equatable {
     /// What the menu shows, and the only thing it's compared on.
-    struct Shown: Equatable {
+    nonisolated struct Shown: Equatable {
         var title: String
         var agent: AgentRef
         /// "Claude Code · Opus 5.5".
@@ -134,7 +134,8 @@ struct ThreadMenu: View, Equatable {
         var delete: Bool
     }
 
-    var shown: Shown?
+    // Read by `==`, which SwiftUI may call off the main thread.
+    nonisolated(unsafe) var shown: Shown?
     /// For the snooze menu; not compared (`shown` says what's on screen).
     var thread: ThreadSummary?
     var usage: () -> Void
@@ -144,9 +145,7 @@ struct ThreadMenu: View, Equatable {
     var delete: () -> Void
     @Environment(AppModel.self) private var model
 
-    nonisolated static func == (a: ThreadMenu, b: ThreadMenu) -> Bool {
-        MainActor.assumeIsolated { a.shown == b.shown }
-    }
+    nonisolated static func == (a: ThreadMenu, b: ThreadMenu) -> Bool { a.shown == b.shown }
 
     var body: some View {
         Menu {

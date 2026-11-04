@@ -775,6 +775,8 @@ final class AppModel {
     /// whatever else is paired: same thread id on two machines stays two transcripts.
     private func saveCache(_ s: ThreadStore) {
         guard s.loaded else { return }
+        // Items still queued go in first: the cache must never hold a seq past its items.
+        s.flushQueued()
         TranscriptCache.save(host: s.hostId, thread: s.bareId, items: s.items, seq: s.seq, more: s.more)
     }
 
