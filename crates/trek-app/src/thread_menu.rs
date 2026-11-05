@@ -509,6 +509,13 @@ pub fn button(ws: Entity<Workspace>, id: String, place: Place) -> impl IntoEleme
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
             build(menu, &weak, &id, place, window, cx)
         })
+        // It opens over the tools panel, where a Browser page would cover it. Only the main window
+        // has one.
+        .on_open_change(move |open, _, cx| {
+            if matches!(place, Place::Main) {
+                ws.update(cx, |ws, cx| ws.set_overlay_open(*open, cx));
+            }
+        })
 }
 
 fn build(
