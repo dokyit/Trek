@@ -16,8 +16,11 @@ const ICONS: [(u16, &str); 3] = [
     (3, "trek-glass.ico"),
 ];
 
+include!("../../script/static_vcruntime.rs");
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    static_vcruntime();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         windows();
     }

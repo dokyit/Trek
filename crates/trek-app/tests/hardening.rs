@@ -9,6 +9,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 use trek_app::workspace::Route;
 
+/// `trek.exe` starts on a Windows without the Visual C++ redistributable, as it carries the runtime
+/// (`script/static_vcruntime.rs`). A program asking for the DLL names it in its imports.
+#[cfg(windows)]
+#[test]
+fn trek_carries_the_visual_c_runtime() {
+    let exe = std::fs::read(env!("CARGO_BIN_EXE_trek")).unwrap();
+    let asks = exe
+        .windows(12)
+        .any(|w| w.eq_ignore_ascii_case(b"vcruntime140"));
+    assert!(!asks, "trek.exe needs vcruntime140.dll");
+}
+
 fn editing(path: &PathBuf) -> impl Fn(&Route) -> bool + '_ {
     move |r| matches!(r, Route::Editor { path: p } if p == path)
 }
