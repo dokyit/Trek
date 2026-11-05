@@ -80,13 +80,15 @@ private struct Thumbnail: View {
 }
 
 /// An image the full-screen viewer shows: one of a message's, one of a note's (`attachments/…`
-/// on the Mac), or a picture on the web a note links.
+/// on the Mac), a picture on the web a note links, or a photo picked for a message not yet sent.
 enum ViewerImage: Hashable {
     case message(threadID: String, itemID: String, index: Int)
     case note(noteID: String, path: String)
     case web(URL)
     /// A picture on the Mac a thread names (an answer's `![](path)`, a watched video's frame).
     case media(threadID: String, path: String)
+    /// Picked in the composer: it's on the phone already.
+    case picked(UIImage)
 
     /// Its thumbnail, if it's been drawn already: shown blurred while the full image comes.
     var thumbnail: UIImage? {
@@ -97,6 +99,7 @@ enum ViewerImage: Hashable {
         case .media(let t, let p):
             Attachments.cache.object(forKey: "media:\(t)/\(p)@\(AnswerImage.thumbPx)" as NSString)
                 ?? Attachments.cache.object(forKey: "media:\(t)/\(p)@\(WatchedVideoView.framePx)" as NSString)
+        case .picked(let image): image
         }
     }
 
@@ -106,6 +109,7 @@ enum ViewerImage: Hashable {
         case .message(let t, let i, let n): return await model.attachment(t, item: i, index: n, maxPx: maxPx)
         case .note(let n, let p): return await model.noteAsset(n, path: p, maxPx: maxPx)
         case .media(let t, let p): return await model.mediaImage(t, path: p, maxPx: maxPx)
+        case .picked(let image): return image
         case .web(let url):
             let key = url.absoluteString as NSString
             if let image = Attachments.cache.object(forKey: key) { return image }
