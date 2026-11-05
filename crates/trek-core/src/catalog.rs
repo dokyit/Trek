@@ -389,10 +389,11 @@ const DEVIN: Hint = Hint {
     windows: "irm https://cli.devin.ai/install.ps1 | iex",
 };
 // Goose's script, without the interactive `goose configure` it ends with (Sign in runs that).
-// Its installer for Windows is a script to download and run; it supports x86-64 only.
+// Its installer for Windows is a script; it supports x86-64 only. Run from memory, as the others
+// are, so that a machine's execution policy doesn't stop it.
 const GOOSE: Hint = Hint {
     unix: "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
-    windows: r#"Invoke-WebRequest -Uri "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1" -OutFile "download_cli.ps1"; .\download_cli.ps1"#,
+    windows: "irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex",
 };
 // Amp's CLI has a native installer, but its ACP adapter (`amp-acp`, a Node program) is an npm
 // package only, as are Pi's CLI and adapter.
@@ -724,8 +725,12 @@ mod tests {
             assert!(
                 line.starts_with("irm ")
                     || line.starts_with("npm i -g ")
-                    || line.starts_with("winget install ")
-                    || line.starts_with("Invoke-WebRequest "),
+                    || line.starts_with("winget install "),
+                "{key}: {line}"
+            );
+            // One command, and no script file for an execution policy to stop.
+            assert!(
+                !line.contains(';') && !line.contains("&&") && !line.contains(".\\"),
                 "{key}: {line}"
             );
         }

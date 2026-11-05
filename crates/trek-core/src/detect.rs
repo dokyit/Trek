@@ -185,6 +185,8 @@ fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -
         r".opencode\bin",
         r".factory\bin",
         r".kimi-code\bin",
+        // Grok's (`irm https://x.ai/cli/install.ps1 | iex`), which only a new session's PATH has.
+        r".grok\bin",
     ]
     .iter()
     .map(|d| home.join(d))
@@ -818,6 +820,7 @@ mod tests_paths {
                 r"C:\Users\me\.opencode\bin",
                 r"C:\Users\me\.factory\bin",
                 r"C:\Users\me\.kimi-code\bin",
+                r"C:\Users\me\.grok\bin",
                 r"C:\Users\me\AppData\Local\devin\cli\bin",
                 r"C:\Users\me\AppData\Local\cursor-agent",
                 r"C:\Users\me\bin",

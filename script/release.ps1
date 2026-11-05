@@ -293,6 +293,9 @@ try {
     foreach ($exe in $exes) {
         $p = Join-Path $BinDir $exe
         if (-not (Test-Path $p)) { Die "$p missing after build" }
+        # They carry the Visual C++ runtime (script/static_vcruntime.rs): one that asks for its DLL
+        # doesn't start on a Windows without the redistributable.
+        if ([Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($p)) -match '(?i)vcruntime140') { Die "$exe needs the Visual C++ runtime DLL" }
         $staged += $p
     }
     Remove-Item $Out -Recurse -Force -ErrorAction SilentlyContinue

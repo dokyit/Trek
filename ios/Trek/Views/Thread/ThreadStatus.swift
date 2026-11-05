@@ -151,9 +151,13 @@ struct ContextCostDetail: View {
     /// The thread, for what fills its context and Compact now (a Mac that serves `context_card`).
     var threadID: String? = nil
     @Environment(AppModel.self) private var model
+    /// The height of what scrolls when it's all shown, which the popover asks room for.
+    @State private var scrollHeight: CGFloat?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        // The popover stops above the keyboard: with less room than the card needs, what's under
+        // the header scrolls, rather than its text squeezing and both its ends clipping.
+        VStack(alignment: .leading, spacing: 0) {
             if let context {
                 HStack(spacing: 12) {
                     ContextRing(percent: context.percent, size: 34, line: 3.5)
@@ -163,33 +167,44 @@ struct ContextCostDetail: View {
                             .font(.ui(.subheadline)).monospacedDigit().foregroundStyle(Trek.muted)
                     }
                 }
-                if let threadID, model.serves(.contextCard, on: threadID) {
-                    ContextBreakdown(threadID: threadID)
-                }
+                .padding([.horizontal, .top], 18)
             }
-            if context != nil, cost != nil {
-                Rectangle().fill(Trek.border).frame(height: 0.5)
-            }
-            if let cost {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(cost.label).font(.ui(.headline))
-                    if let billing = cost.billing, billing != .unknown {
-                        row(Self.billingLabel(billing), symbol: Self.billingSymbol(billing))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if context != nil, let threadID, model.serves(.contextCard, on: threadID) {
+                        ContextBreakdown(threadID: threadID)
                     }
-                    if let plan = cost.plan { row(plan, symbol: "person.crop.circle") }
-                    if let detail = cost.detail {
-                        Text(detail).font(.ui(.footnote)).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
+                    if context != nil, cost != nil {
+                        Rectangle().fill(Trek.border).frame(height: 0.5)
                     }
-                    if let cached = cost.cached {
-                        row(cached, symbol: "bolt.horizontal.circle")
-                        if let detail = cost.cachedDetail {
-                            Text(detail).font(.ui(.footnote)).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
+                    if let cost {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(cost.label).font(.ui(.headline))
+                            if let billing = cost.billing, billing != .unknown {
+                                row(Self.billingLabel(billing), symbol: Self.billingSymbol(billing))
+                            }
+                            if let plan = cost.plan { row(plan, symbol: "person.crop.circle") }
+                            if let detail = cost.detail {
+                                Text(detail).font(.ui(.footnote)).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
+                            }
+                            if let cached = cost.cached {
+                                row(cached, symbol: "bolt.horizontal.circle")
+                                if let detail = cost.cachedDetail {
+                                    Text(detail).font(.ui(.footnote)).foregroundStyle(Trek.muted).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                         }
                     }
                 }
+                .padding(.horizontal, 18)
+                .padding(.top, context == nil ? 18 : 14)
+                .padding(.bottom, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { scrollHeight = $0 }
             }
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(idealHeight: scrollHeight)
         }
-        .padding(18)
         .frame(idealWidth: 290, maxWidth: 320, alignment: .leading)
     }
 

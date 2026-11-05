@@ -135,13 +135,30 @@ fn newest_version(versions: &Path) -> Option<PathBuf> {
 }
 
 /// Where npm is: on `path` (a PATH string), else in the first of `usual` that has it, else in
-/// `own` (Trek's own Node's folder).
+/// `own` (Trek's own Node's folder). On Windows an npm that has no Node to run it isn't one: see
+/// `find_npm_with_node`.
 pub fn find_npm_in(path: &str, usual: &[PathBuf], own: &Path) -> Option<PathBuf> {
-    if let Some(npm) = crate::detect::which_in(path, "npm") {
-        return Some(npm);
-    }
-    let rest = std::env::join_paths(usual.iter().chain([&own.to_path_buf()])).ok()?;
-    crate::detect::which_in(&rest.to_string_lossy(), "npm")
+    find_npm_with_node(path, usual, own, cfg!(windows))
+}
+
+/// `find_npm_in`, passing over (when `check`) an npm with no `node` beside it or on `path`. That's
+/// what uninstalling Node leaves in `%APPDATA%\npm` of an npm that had updated itself, and running
+/// it stops at "The term 'node.exe' is not recognized".
+fn find_npm_with_node(path: &str, usual: &[PathBuf], own: &Path, check: bool) -> Option<PathBuf> {
+    let which = crate::detect::which_in;
+    // Not Trek's own `node`, which the login PATH always ends with: with it, Trek's own npm.
+    let node_on_path = || which(path, "node").is_some_and(|node| node.parent() != Some(own));
+    std::env::split_paths(path)
+        .chain(usual.iter().cloned())
+        .chain([own.to_path_buf()])
+        .filter_map(|dir| which(&dir.to_string_lossy(), "npm"))
+        .find(|npm| {
+            !check
+                || node_on_path()
+                || npm
+                    .parent()
+                    .is_some_and(|dir| which(&dir.to_string_lossy(), "node").is_some())
+        })
 }
 
 /// Where npm is on this computer, if anywhere (`find_npm_in` the login PATH).
@@ -151,6 +168,20 @@ pub fn find_npm() -> Option<PathBuf> {
         &usual_dirs(&crate::paths::home(), |name| std::env::var_os(name)),
         &bin_dir(),
     )
+}
+
+/// What lets npm 12 run the install scripts of the agents' packages on Windows, which put each
+/// one's program in place: it blocks them unless told, and OpenCode or Amp then installs "fine" and
+/// stops at "is not compatible with the version of Windows you're running". Earlier npms ignore it.
+pub fn allowed_scripts_env() -> Vec<(String, String)> {
+    if cfg!(windows) {
+        vec![(
+            "npm_config_allow_scripts".to_string(),
+            "opencode-ai,@ampcode/cli".to_string(),
+        )]
+    } else {
+        Vec::new()
+    }
 }
 
 /// The environment a terminal that installs an agent runs with: `login` (the login PATH) with
@@ -180,11 +211,24 @@ pub fn setup_env_for(login: &str, npm: Option<&Path>, own_root: &Path) -> Vec<(S
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| login.to_string());
     let mut env = vec![("PATH".to_string(), path)];
+    if npm.is_some() {
+        env.extend(allowed_scripts_env());
+    }
     if npm.and_then(Path::parent) == Some(bin_dir_in(own_root).as_path()) {
         env.push((
             "npm_config_prefix".to_string(),
             own_root.display().to_string(),
         ));
+        // npm's warnings and notices are for whoever keeps a Node: "Run `npm install -g
+        // --allow-scripts=…`" or "To update run: `npm install -g npm@…`" after an install that
+        // worked would read as one more thing to do. Errors still show.
+        if cfg!(windows) {
+            env.push(("npm_config_loglevel".to_string(), "error".to_string()));
+            env.push((
+                "npm_config_update_notifier".to_string(),
+                "false".to_string(),
+            ));
+        }
     }
     env
 }
@@ -196,8 +240,8 @@ pub fn setup_env() -> Vec<(String, String)> {
 
 /// Whether a shell's `output` says `npm`, `npx` or `node` couldn't be found: zsh's "command not
 /// found: npm", bash's "npm: command not found", sh's "npm: not found", fish's "Unknown command:
-/// npm", PowerShell's and cmd's "'npm' is not recognized", or `env` failing to find the `node` an
-/// npm script starts with.
+/// npm", PowerShell's and cmd's "'npm' is not recognized" (npm.ps1 asks for "'node.exe'"), or `env`
+/// failing to find the `node` an npm script starts with.
 pub fn missing_in_output(output: &str) -> bool {
     let text = output.to_lowercase();
     ["npm", "npx", "node"].iter().any(|tool| {
@@ -207,6 +251,7 @@ pub fn missing_in_output(output: &str) -> bool {
             format!("{tool}: command not found"),
             format!("{tool}: not found"),
             format!("'{tool}' is not recognized"),
+            format!("'{tool}.exe' is not recognized"),
             format!("env: {tool}: no such file"),
             format!("env: \u{2018}{tool}\u{2019}: no such file"),
         ]
@@ -335,6 +380,15 @@ async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
     String::from_utf8(body).map_err(|_| anyhow!("{url} isn't text"))
 }
 
+/// Remove npm's and npx's PowerShell scripts from a Node.js at `root`. PowerShell prefers `npm.ps1`
+/// to `npm.cmd`, and an execution policy set by group policy stops it whatever Trek starts its
+/// shell with ("running scripts is disabled on this system"); without it `npm` is `npm.cmd`.
+fn remove_powershell_shims(root: &Path) {
+    for shim in ["npm.ps1", "npx.ps1"] {
+        let _ = std::fs::remove_file(root.join(shim));
+    }
+}
+
 /// Install the current Node.js LTS as Trek's own (`root`) and return its `bin_dir`. Never from a
 /// test process: nothing is downloaded there.
 pub async fn install(progress: &(dyn Fn(Progress) + Send + Sync)) -> Result<PathBuf> {
@@ -367,7 +421,9 @@ pub async fn install_into(
     progress(Progress::Finding);
     let index = get_text(&client, &format!("{dist}/index.json"))
         .await
-        .context("Couldn't reach nodejs.org")?;
+        .context(
+            "Couldn't reach nodejs.org. Check your internet connection or proxy, then try again.",
+        )?;
     let version = latest_lts(&index, files_key)
         .ok_or_else(|| anyhow!("nodejs.org lists no LTS release for this computer"))?;
     let file = format!("node-{version}-{suffix}");
@@ -439,6 +495,9 @@ pub async fn install_into(
         if !bin_dir_in(&top).join(NPM).is_file() {
             bail!("The download has no npm");
         }
+        if cfg!(windows) {
+            remove_powershell_shims(&top);
+        }
         let _ = std::fs::remove_dir_all(root);
         std::fs::rename(&top, root)?;
         Ok(())
@@ -477,6 +536,7 @@ mod tests {
             "fish: Unknown command: npm",
             "npm : The term 'npm' is not recognized as a name of a cmdlet, function, script file, or executable program.",
             "'npm' is not recognized as an internal or external command,",
+            "& : The term 'node.exe' is not recognized as the name of a cmdlet, function, script file, or operable program.",
             "env: node: No such file or directory",
             "/usr/bin/env: \u{2018}node\u{2019}: No such file or directory",
             "zsh:1: command not found: npx",
@@ -572,16 +632,73 @@ mod tests {
         dir
     }
 
-    fn touch_npm(dir: &Path) -> PathBuf {
+    /// A file `which_in` finds: the name given, with a `.cmd` on Windows.
+    fn touch_program(dir: &Path, name: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
-        let npm = dir.join(NPM);
-        std::fs::write(&npm, "#!/bin/sh\n").unwrap();
+        let file = dir.join(if cfg!(windows) {
+            format!("{name}.cmd")
+        } else {
+            name.to_string()
+        });
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        npm
+        file
+    }
+
+    /// An npm with its `node` beside it.
+    fn touch_npm(dir: &Path) -> PathBuf {
+        touch_program(dir, "node");
+        touch_program(dir, "npm")
+    }
+
+    /// What uninstalling Node leaves behind is passed over, for Trek's own or another's, and an
+    /// npm whose `node` is elsewhere on the PATH (npm updated by itself) still counts.
+    #[test]
+    fn an_npm_with_no_node_to_run_it_isn_t_found() {
+        let home = temp("leftover");
+        let join = |dirs: &[&Path]| {
+            std::env::join_paths(dirs)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let leftover = home.join("AppData/Roaming/npm");
+        let left = touch_program(&leftover, "npm");
+        let own = home.join("data/node");
+        let find = |path: &str, usual: &[PathBuf]| find_npm_with_node(path, usual, &own, true);
+        // On the PATH, and where Trek looks: neither, and there's no other.
+        assert_eq!(find(&join(&[&leftover]), &[]), None);
+        assert_eq!(find("", std::slice::from_ref(&leftover)), None);
+        // Trek's own Node comes after it, and is what's used.
+        let trek = touch_npm(&own);
+        assert_eq!(find(&join(&[&leftover]), &[]), Some(trek.clone()));
+        assert_eq!(
+            find("", std::slice::from_ref(&leftover)),
+            Some(trek.clone())
+        );
+        // Trek's own `node` on the PATH, as a login PATH always has it, doesn't rescue the leftover.
+        assert_eq!(find(&join(&[&leftover, &own]), &[]), Some(trek.clone()));
+        // So does a real one in a usual place, before Trek's.
+        let real = home.join("nodejs");
+        let installed = touch_npm(&real);
+        assert_eq!(
+            find(&join(&[&leftover]), std::slice::from_ref(&real)),
+            Some(installed)
+        );
+        // With `node` elsewhere on the PATH it can run, so it stays what it was.
+        let bin = home.join("bin");
+        touch_program(&bin, "node");
+        assert_eq!(find(&join(&[&leftover, &bin]), &[]), Some(left.clone()));
+        // And unchecked (macOS) it's found as ever.
+        assert_eq!(
+            find_npm_with_node(&join(&[&leftover]), &[], &own, false),
+            Some(left)
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A fresh computer: no npm on the PATH, none where Node's installers put it, none of
@@ -689,6 +806,24 @@ mod tests {
             get(&env, "npm_config_prefix"),
             Some(own_root.display().to_string())
         );
+        // On Windows, without npm's warnings and notices: on a Mac, as ever.
+        assert_eq!(
+            get(&env, "npm_config_loglevel"),
+            cfg!(windows).then(|| "error".to_string())
+        );
+        assert_eq!(
+            get(&env, "npm_config_update_notifier"),
+            cfg!(windows).then(|| "false".to_string())
+        );
+
+        // Whichever npm, on Windows its install scripts run for the agents that need them.
+        for npm in [nvm.join(NPM), own_bin.join(NPM)] {
+            let env = setup_env_for(&login, Some(&npm), &own_root);
+            assert_eq!(
+                get(&env, "npm_config_allow_scripts"),
+                cfg!(windows).then(|| "opencode-ai,@ampcode/cli".to_string())
+            );
+        }
 
         // None at all: the login PATH alone.
         let env = setup_env_for(&login, None, &own_root);
@@ -721,6 +856,40 @@ mod tests {
         if std::env::var_os("TREK_KEEP_NODE").is_none() {
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// Nothing to answer at `dist`: the words say what to do, not what the socket said.
+    #[test]
+    fn no_network_is_said_plainly() {
+        let dir = temp("offline");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dist = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let err = crate::runtime()
+            .block_on(install_into(&dir.join("data/node"), &dist, &|_| {}))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Couldn't reach nodejs.org. Check your internet connection or proxy, then try again."
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn npm_s_powershell_scripts_are_removed_and_its_commands_kept() {
+        let dir = temp("shims");
+        for file in ["npm.ps1", "npx.ps1", "npm.cmd", "npx.cmd", "node.exe"] {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        remove_powershell_shims(&dir);
+        let mut left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["node.exe", "npm.cmd", "npx.cmd"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A download whose bytes don't match the checksum is refused, and nothing is left.

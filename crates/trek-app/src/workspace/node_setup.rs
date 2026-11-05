@@ -84,7 +84,10 @@ impl Workspace {
                 let _ = progress.try_send(Step::Progress(p));
             })
             .await
-            .map_err(|e| format!("{e:#}"));
+            .map_err(|e| {
+                tracing::warn!("installing Node.js: {e:#}");
+                e.to_string()
+            });
             let _ = tx.send(Step::Done(done)).await;
         });
         let task = cx.spawn(async move |this, cx| {
@@ -109,7 +112,6 @@ impl Workspace {
                             }
                         }
                         Step::Done(Err(error)) => {
-                            tracing::warn!("installing Node.js: {error}");
                             this.node_setup = Some(NodeSetup::Failed {
                                 error,
                                 then: then.clone(),
