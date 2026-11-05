@@ -8,6 +8,7 @@ use super::IdeWorkbench;
 use super::diff_view::{DiffSource, DiffView};
 use super::preview::{Kind, NotText, PreviewEvent, PreviewView};
 use crate::editor::EditorView;
+use crate::fluent;
 use crate::keys::{self, Id};
 use crate::workspace::Route;
 use gpui_kit::component::button::Button;
@@ -1027,7 +1028,7 @@ impl IdeWorkbench {
                 .h(px(28.))
                 .gap_2()
                 .items_center()
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.list_hover))
                 .child(icon)

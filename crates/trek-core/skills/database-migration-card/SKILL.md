@@ -52,6 +52,10 @@ invent values or counts.
   and message now belongs to a workspace").
 - No external scripts or fonts; it stays well under 200 KB.
 - It styles itself with Trek's `--trek-*` variables, so it fits Night and Paper.
+- Its corners, flat resting card and opaque floating fills come from Trek's shape variables
+  (`--trek-radius-control`, `--trek-radius-surface`, `--trek-radius-pill` and friends). Windows sets
+  them; elsewhere they stay unset, so each `var()`'s fallback is the look. Keep the fallbacks, and
+  use none of these without one. Status dots, spinners, row dots and progress rings stay round.
 
 ## The card
 
@@ -71,11 +75,11 @@ invent values or counts.
     --band: var(--trek-surface, #f5f5f5); --hover: color-mix(in srgb, var(--fg) 4%, transparent);
     --strip: color-mix(in srgb, var(--green) 6%, var(--bg)); --strip-line: color-mix(in srgb, var(--ok) 9%, var(--bg));
     --flash: color-mix(in srgb, var(--green) 14%, var(--bg)); --tint: color-mix(in srgb, var(--green) 10%, var(--bg));
-    position: relative; height: 344px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 16px; background: var(--bg); color: var(--fg); font-family: var(--trek-font, system-ui); font-size: 13px; line-height: 20px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.025); -webkit-font-smoothing: antialiased; animation: enter .25s ease-out both;
+    position: relative; height: 344px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--trek-radius-surface, 16px); background: var(--bg); color: var(--fg); font-family: var(--trek-font, system-ui); font-size: 13px; line-height: 20px; overflow: hidden; box-shadow: var(--trek-card-shadow, 0 2px 8px rgba(0,0,0,.025)); -webkit-font-smoothing: antialiased; animation: enter .25s ease-out both;
   }
   .mono { font-family: var(--trek-mono, ui-monospace, monospace); }
   header { flex: none; display: flex; align-items: center; gap: 10px; height: 60px; padding: 0 16px; }
-  .icon { flex: none; width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(0,0,0,.04); color: var(--mute); }
+  .icon { flex: none; width: 30px; height: 30px; border-radius: var(--trek-radius-control, 9px); display: grid; place-items: center; border: 1px solid var(--line); box-shadow: var(--trek-card-shadow, 0 1px 2px rgba(0,0,0,.04)); color: var(--mute); }
   .t { flex: 1; min-width: 0; }
   .t b { display: block; font-size: 14px; font-weight: 500; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .t span { display: block; color: var(--mute); font-size: 12px; line-height: 16px; }
@@ -85,11 +89,11 @@ invent values or counts.
   .clock.bad, .clock.bad b { color: var(--bad); font-weight: 500; }
   .tabs { flex: none; display: flex; align-items: flex-end; height: 40px; padding: 0 16px; background: var(--band); overflow-x: auto; scrollbar-width: none; }
   .tabs::-webkit-scrollbar { display: none; }
-  .tab { position: relative; flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border: 0; border-radius: 10px; background: none; color: var(--mute); font: inherit; white-space: nowrap; cursor: pointer; overflow: hidden; }
+  .tab { position: relative; flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border: 0; border-radius: var(--trek-radius-control, 10px); background: none; color: var(--mute); font: inherit; white-space: nowrap; cursor: pointer; overflow: hidden; }
   .tab svg { flex: none; color: var(--t3); }
   .tab:not(.on):hover { background: var(--hover); }
   .tab:not(.on) + .tab:not(.on)::before { content: ""; position: absolute; left: 0; top: 9px; width: 1px; height: 14px; background: color-mix(in srgb, var(--fg) 11%, transparent); }
-  .tab.on { background: var(--bg); color: var(--fg); font-weight: 500; border-radius: 10px 10px 0 0; cursor: default; }
+  .tab.on { background: var(--bg); color: var(--fg); font-weight: 500; border-radius: var(--trek-radius-control, 10px) var(--trek-radius-control, 10px) 0 0; cursor: default; }
   .tab.on svg { color: var(--fg); }
   .tab .ok svg { color: var(--ok); }
   .tab .x svg { color: var(--bad); }
@@ -113,7 +117,7 @@ invent values or counts.
   th.new { color: var(--ok); }
   th.new svg { color: var(--ok); }
   .strong th.new, .strong td.new { background: var(--flash); }
-  .null { display: inline-block; height: 16px; padding: 0 5px; border: 1px dashed color-mix(in srgb, var(--fg) 18%, transparent); border-radius: 6px; font-size: 9.5px; line-height: 16px; color: var(--t4); letter-spacing: .3px; vertical-align: 1px; }
+  .null { display: inline-block; height: 16px; padding: 0 5px; border: 1px dashed color-mix(in srgb, var(--fg) 18%, transparent); border-radius: var(--trek-radius-control, 6px); font-size: 9.5px; line-height: 16px; color: var(--t4); letter-spacing: .3px; vertical-align: 1px; }
   .dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; vertical-align: 1px; }
   .in { animation: blur-in .16s ease-out both; }
   tr.flash td { animation: flash .6s ease-out both; }
@@ -122,14 +126,14 @@ invent values or counts.
   .scan::before { content: ""; position: absolute; left: 0; right: 0; bottom: 2px; height: 30px; background: linear-gradient(transparent, color-mix(in srgb, var(--green) 16%, transparent)); }
   footer { flex: none; display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 16px; }
   footer > div { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; animation: blur-in .18s ease-out both; }
-  .kind { flex: none; height: 20px; padding: 0 6px; border-radius: 6px; font-size: 11px; font-weight: 500; line-height: 20px; color: var(--mute); background: var(--band); }
+  .kind { flex: none; height: 20px; padding: 0 6px; border-radius: var(--trek-radius-control, 6px); font-size: 11px; font-weight: 500; line-height: 20px; color: var(--mute); background: var(--band); }
   .kind.data { color: var(--ok); background: var(--tint); }
   .sql { min-width: 0; font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sum { min-width: 0; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ok-mark { flex: none; color: var(--ok); margin-right: -2px; }
   .err { color: var(--bad); white-space: normal; line-height: 16px; font-size: 12.5px; }
   .more { flex: none; color: var(--t3); font-size: 12px; }
-  .btn { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 12px; border: 0; border-radius: 13px; font: inherit; font-weight: 500; color: var(--ok); background: var(--tint); text-decoration: none; cursor: pointer; white-space: nowrap; animation: blur-in .18s .1s ease-out both; }
+  .btn { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 12px; border: 0; min-height: var(--trek-button-min-height, 0); border-radius: var(--trek-radius-pill, 13px); font: inherit; font-weight: 500; color: var(--ok); background: var(--tint); text-decoration: none; cursor: pointer; white-space: nowrap; animation: blur-in .18s .1s ease-out both; }
   .btn:hover { background: color-mix(in srgb, var(--green) 16%, var(--bg)); }
   .btn:disabled { cursor: default; color: var(--mute); background: var(--band); }
   .spin { flex: none; animation: spin .8s linear infinite; }

@@ -36,6 +36,7 @@ pub mod shown {
     }
 }
 
+use crate::fluent::{self, PillExt as _};
 use crate::palette;
 use crate::ui;
 use crate::workspace::{Route, SettingsPage, Workspace, WorkspaceEvent};
@@ -197,7 +198,7 @@ impl Render for SettingsNav {
                     .px(px(10.))
                     .h(px(30.))
                     .gap(px(10.))
-                    .rounded(px(7.))
+                    .rounded(px(fluent::control(7.)))
                     .cursor_pointer()
                     .text_size(px(13.))
                     .text_color(theme.muted_foreground)
@@ -240,7 +241,7 @@ impl Render for SettingsNav {
                                         .id("agents-update-count")
                                         .test_support()
                                         .px(px(6.))
-                                        .rounded_full()
+                                        .rounded_pill()
                                         .bg(theme.foreground.opacity(0.08))
                                         .text_size(px(11.))
                                         .text_color(theme.muted_foreground)
@@ -1129,7 +1130,7 @@ impl SettingsView {
                 div()
                     .w(px(100.))
                     .h(px(66.))
-                    .rounded(px(10.))
+                    .rounded(px(fluent::control(10.)))
                     .overflow_hidden()
                     .border_2()
                     .border_color(if selected {
@@ -1161,7 +1162,7 @@ impl SettingsView {
                             .relative()
                             .w(px(100.))
                             .h(px(66.))
-                            .rounded(px(10.))
+                            .rounded(px(fluent::control(10.)))
                             .overflow_hidden()
                             .border_2()
                             .border_color(if selected {
@@ -2304,7 +2305,7 @@ impl SettingsView {
                             .id(SharedString::from(format!("mcp-transport-{i}")))
                             .test_support()
                             .px(px(6.))
-                            .rounded_full()
+                            .rounded_pill()
                             .bg(cx.theme().foreground.opacity(0.07))
                             .text_size(px(11.))
                             .font_normal()
@@ -2791,7 +2792,7 @@ impl SettingsView {
                 .gap(px(6.))
                 .h(px(26.))
                 .px(px(8.))
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .text_size(px(12.5))

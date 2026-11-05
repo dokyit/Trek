@@ -129,7 +129,7 @@ pub fn chip(
         .h(size * 1.62)
         .px(size * 0.42)
         .gap(size * 0.34)
-        .rounded(size * 0.42)
+        .rounded(if cfg!(windows) { px(4.) } else { size * 0.42 })
         .border_1()
         .border_color(t.edge)
         .bg(t.fill)

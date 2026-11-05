@@ -158,6 +158,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use crate::fluent;
 use crate::keys::{self, Id};
 use crate::palette;
 use crate::workspace::{EditorCommand, FileReview, Workspace, WorkspaceEvent};
@@ -1379,7 +1380,7 @@ impl EditorView {
                 .px(px(8.))
                 .gap(px(5.))
                 .items_center()
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .cursor_pointer()
                 .text_size(px(12.))
         };
@@ -1394,11 +1395,14 @@ impl EditorView {
                 .p(px(3.))
                 .gap(px(2.))
                 .items_center()
-                .rounded(px(7.))
+                .rounded(px(fluent::surface(7.)))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.popover)
-                .shadow_md()
+                .when(!fluent::WINDOWS, |el| el.shadow_md())
+                .when(fluent::WINDOWS, |el| {
+                    el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+                })
                 .text_color(theme.muted_foreground)
                 .child(
                     h_flex()
@@ -1503,7 +1507,7 @@ impl EditorView {
                 .px(px(6.))
                 .gap(px(4.))
                 .items_center()
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .cursor_pointer()
                 .hover(|s| {
                     s.bg(theme.foreground.opacity(0.07))
@@ -1525,11 +1529,14 @@ impl EditorView {
                         .py(px(3.))
                         .gap(px(4.))
                         .items_center()
-                        .rounded(px(9.))
+                        .rounded(px(fluent::surface(9.)))
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.popover)
-                        .shadow_md()
+                        .when(!fluent::WINDOWS, |el| el.shadow_md())
+                        .when(fluent::WINDOWS, |el| {
+                            el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+                        })
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
                         .whitespace_nowrap()
@@ -1616,11 +1623,14 @@ impl EditorView {
                 .max_w(relative(0.9))
                 .p(px(8.))
                 .gap(px(6.))
-                .rounded(px(9.))
+                .rounded(px(fluent::surface(9.)))
                 .border_1()
                 .border_color(palette::ember(cx).opacity(0.55))
                 .bg(theme.popover)
-                .shadow_lg()
+                .when(!fluent::WINDOWS, |el| el.shadow_lg())
+                .when(fluent::WINDOWS, |el| {
+                    el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+                })
                 .capture_action(cx.listener(
                     |this, _: &gpui_kit::component::input::Escape, window, cx| {
                         cx.stop_propagation();

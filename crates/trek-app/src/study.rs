@@ -22,6 +22,7 @@
 //! less motion.
 
 use crate::composer::Composer;
+use crate::fluent::{self, PillExt as _};
 use crate::ui;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -272,7 +273,7 @@ impl StudyView {
                 .ghost()
                 .h(px(32.))
                 .px(px(12.))
-                .rounded(px(16.))
+                .rounded(px(fluent::control(16.)))
                 .border_1()
                 .border_color(theme.foreground.opacity(0.08))
                 .child(
@@ -475,7 +476,7 @@ impl StudyView {
             .w_full()
             .p(px(16.))
             .gap(px(16.))
-            .rounded(px(12.))
+            .rounded(px(fluent::surface(12.)))
             .border_1()
             .border_color(theme.foreground.opacity(0.08))
             .cursor_pointer()
@@ -484,7 +485,7 @@ impl StudyView {
                 div()
                     .flex_none()
                     .size(px(40.))
-                    .rounded(px(10.))
+                    .rounded(px(fluent::control(10.)))
                     .bg(theme.foreground.opacity(0.06))
                     .flex()
                     .items_center()
@@ -574,7 +575,7 @@ impl StudyView {
             .min_w_0()
             .p(px(12.))
             .gap(px(8.))
-            .rounded(px(10.))
+            .rounded(px(fluent::surface(10.)))
             .border_1()
             .border_color(if on {
                 ember.opacity(0.55)
@@ -735,7 +736,7 @@ impl StudyView {
             .px(px(16.))
             .py(px(12.))
             .gap(px(12.))
-            .rounded(px(10.))
+            .rounded(px(fluent::surface(10.)))
             .bg(theme.foreground.opacity(0.03))
             .text_size(px(13.))
             .text_color(theme.muted_foreground)
@@ -873,7 +874,7 @@ fn action_chip(id: &'static str, icon: L, label: &'static str, cx: &App) -> Chip
         .h(px(32.))
         .px(px(12.))
         .gap(px(8.))
-        .rounded_full()
+        .rounded_pill()
         .border_1()
         .border_color(theme.foreground.opacity(0.08))
         .text_size(px(13.))
@@ -940,7 +941,7 @@ fn file_card(id: SharedString, icon: L, name: String, meta: String, on: bool, cx
         .h(px(56.))
         .px(px(12.))
         .gap(px(12.))
-        .rounded(px(10.))
+        .rounded(px(fluent::surface(10.)))
         .border_1()
         .border_color(if on {
             ember.opacity(0.55)
@@ -988,7 +989,7 @@ pub fn intro_bubble(intro: &Intro, cx: &App) -> AnyElement {
             .max_w(px(240.))
             .px(px(8.))
             .gap(px(5.))
-            .rounded_full()
+            .rounded_pill()
             .bg(theme.foreground.opacity(0.06))
             .text_size(px(12.))
             .text_color(muted)

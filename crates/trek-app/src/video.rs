@@ -8,6 +8,7 @@
 //! from its own address under a policy that lets in https media and nothing else.
 
 use crate::artifact::Doc;
+use crate::fluent;
 use gpui_kit::component::text::{MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -240,7 +241,7 @@ fn strip(w: &Arc<Watched>, ix: usize, cx: &App) -> AnyElement {
                 div()
                     .w(width)
                     .h(px(THUMB_HEIGHT))
-                    .rounded(px(6.))
+                    .rounded(px(fluent::control(6.)))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border)

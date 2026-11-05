@@ -779,13 +779,13 @@ fn plain_row(id: impl Into<ElementId>) -> Stateful<Div> {
         .px(px(9.))
         .min_h(px(28.))
         .gap(px(8.))
-        .rounded(px(7.))
+        .rounded(px(crate::fluent::control(7.)))
         .text_size(px(13.))
 }
 
 /// A row in an unfolded menu, set in under its row.
 fn sub_row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Div> {
-    look::row(id, active, cx).pl(px(31.))
+    look::picked_row(id, active, cx).pl(px(31.))
 }
 
 fn card(
@@ -806,6 +806,7 @@ fn card(
         u.open_in, u.run, u.branch, u.pull, u.agents, u.sources, u.busy,
     );
     let from_window = matches!(scope, Scope::Thread(_));
+    let pinned = matches!(pop, Closer::Pinned(_));
     let toggle = |ui: &Entity<Ui>, f: fn(&mut Ui)| {
         let ui = ui.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -1488,6 +1489,11 @@ fn card(
 
     let count = sections.len();
     look::surface(cx)
+        // Pinned, it sits in the page beside the transcript and covers nothing, so on Windows it
+        // rests flat on its stroke; only the title bar's popover floats.
+        .when(pinned, |el| {
+            el.shadow(crate::fluent::card_shadow(look::menu_shadow(cx)))
+        })
         .id("hub-card")
         .test_support()
         .w(px(WIDTH))

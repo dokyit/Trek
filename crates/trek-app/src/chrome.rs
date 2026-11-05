@@ -12,6 +12,19 @@
 
 use gpui_kit::*;
 
+/// A window's title bar: see-through over glass or a backdrop, else solid. The kit's own fill is a
+/// faint gradient, which the Mac keeps; Windows' chrome is flat, so it takes the theme's colour.
+pub fn title_bar(transparent: bool, cx: &App) -> gpui_kit::component::TitleBar {
+    use gpui_kit::component::{ActiveTheme as _, TitleBar};
+    if transparent {
+        TitleBar::new().bg(gpui_kit::transparent_black())
+    } else if cfg!(windows) {
+        TitleBar::new().bg(cx.theme().title_bar)
+    } else {
+        TitleBar::new()
+    }
+}
+
 /// Space the title bar leaves at its left before its content: the traffic lights on macOS, a small
 /// margin on Windows. It is `TitleBar`'s own left padding, which is private to it: this is the
 /// same number, for what Trek lines up with the title bar's content (the sidebar's width, Quick

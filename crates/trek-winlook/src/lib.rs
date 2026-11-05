@@ -151,8 +151,9 @@ pub fn reduce_motion() -> bool {
 /// or light tone, so it follows Trek's theme (Night, Paper) rather than the system's: Paper over a
 /// dark Acrylic would be muddy, and Night over a light one glaring (GPUI sets this from the
 /// system's appearance only). Without `glass` the material is taken off the window (GPUI's opaque
-/// background leaves one it set before in place), so none shows at the frame's edge. Call it after
-/// GPUI's `set_background_appearance`, which names a material of its own.
+/// background leaves one it set before in place), so none shows at the frame's edge. It also asks
+/// for Windows 11's rounded corners. Call it after GPUI's `set_background_appearance`, which names
+/// a material of its own.
 #[cfg(windows)]
 pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -179,6 +180,9 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     }
     /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
     const USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    /// `DWMWA_WINDOW_CORNER_PREFERENCE`, and its `DWMWCP_ROUND`.
+    const WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const CORNER_ROUND: i32 = 2;
     /// `DWMWA_SYSTEMBACKDROP_TYPE`, and its `DWMSBT_NONE`.
     const SYSTEMBACKDROP_TYPE: u32 = 38;
     const BACKDROP_NONE: i32 = 1;
@@ -193,8 +197,9 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
     let set = |attribute: u32, value: i32| {
         // SAFETY: `hwnd` is the live window GPUI created for this `window`, on its own thread;
-        // both attributes take a 4-byte value, which `value` is and outlives the call. Windows
-        // before 11 22H2 refuse the backdrop one, which is the answer wanted there.
+        // each attribute takes a 4-byte value, which `value` is and outlives the call. Windows
+        // before 11 refuses the corner one and before 11 22H2 the backdrop one, which is the answer
+        // wanted there.
         unsafe {
             DwmSetWindowAttribute(
                 hwnd,
@@ -205,6 +210,9 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
         };
     };
     set(USE_IMMERSIVE_DARK_MODE, dark as i32);
+    // Windows 11 rounds a window by itself only if it has both a resizing frame and a caption, and
+    // GPUI's have no `WS_CAPTION`, as Trek draws its own title bar: they have to ask.
+    set(WINDOW_CORNER_PREFERENCE, CORNER_ROUND);
     // DWM draws a backdrop material in the window's frame only. Trek draws its own title bar, so
     // all of its window is client area: without the frame reaching all the way in (-1 on every
     // side, "sheet of glass"), no material shows anywhere, whatever is asked for. Off, it goes

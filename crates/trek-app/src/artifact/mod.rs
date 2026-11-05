@@ -643,7 +643,7 @@ fn action(
         .min_w(px(24.))
         .px(px(5.))
         .justify_center()
-        .rounded(px(6.))
+        .rounded(px(crate::fluent::control(6.)))
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .child(Icon::new(icon).size(px(13.)).text_color(muted))
@@ -662,7 +662,7 @@ impl Render for Tip {
             .mt(px(4.))
             .px(px(8.))
             .py(px(4.))
-            .rounded(px(6.))
+            .rounded(px(crate::fluent::control(6.)))
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
@@ -741,7 +741,8 @@ fn css_color(c: Hsla) -> String {
 }
 
 /// A font as CSS: the system's UI font for GPUI's (`.SystemUIFont`), else the named one, then the
-/// system's as fallbacks (a font Trek embeds isn't one the web view knows).
+/// system's as fallbacks (a font Trek embeds isn't one the web view knows). WebView2 passes over the
+/// Mac's names, and knows the variable Segoe only by its "Text" name, not as "Segoe UI Variable".
 fn font_stack(name: &str, mono: bool) -> String {
     let fallback = if mono {
         "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
@@ -760,8 +761,18 @@ fn font_stack(name: &str, mono: bool) -> String {
     }
 }
 
+/// A verdict's colour in the document: Windows' status ink there, Trek's own elsewhere.
+fn verdict_css(kind: crate::fluent::Verdict, mac: Hsla, cx: &App) -> String {
+    css_color(if crate::fluent::WINDOWS {
+        crate::fluent::verdict(kind, cx).0
+    } else {
+        mac
+    })
+}
+
 /// Trek's theme as the document sees it.
 pub fn theme(cx: &App) -> core::Theme {
+    use crate::fluent::Verdict;
     let t = cx.theme();
     let dark = t.mode.is_dark();
     let size = cx
@@ -776,10 +787,10 @@ pub fn theme(cx: &App) -> core::Theme {
         accent: css_color(crate::palette::ember(cx)),
         border: css_color(t.foreground.opacity(if dark { 0.12 } else { 0.13 })),
         surface: css_color(t.foreground.opacity(if dark { 0.045 } else { 0.035 })),
-        positive: css_color(crate::palette::emerald(cx)),
-        warning: css_color(crate::palette::amber(cx)),
-        negative: css_color(crate::palette::red(cx)),
-        info: css_color(crate::palette::sky(cx)),
+        positive: verdict_css(Verdict::Success, crate::palette::emerald(cx), cx),
+        warning: verdict_css(Verdict::Caution, crate::palette::amber(cx), cx),
+        negative: verdict_css(Verdict::Critical, crate::palette::red(cx), cx),
+        info: verdict_css(Verdict::Informational, crate::palette::sky(cx), cx),
         font: font_stack(&t.font_family, false),
         mono: font_stack(&t.mono_font_family, true),
         font_size: (size * 0.93 * 2.).round() / 2.,
@@ -1892,6 +1903,7 @@ mod tests {
         assert!(font_stack(".SystemUIFont", false).starts_with("-apple-system"));
         assert!(font_stack("Inter", false).starts_with("\"Inter\", -apple-system"));
         assert!(font_stack("Lilex", true).starts_with("\"Lilex\", ui-monospace"));
+        assert!(font_stack("Inter", false).contains("\"Segoe UI Variable Text\", \"Segoe UI\""));
         assert!(
             font_stack("x\"; } body { color: red", false).starts_with("-apple-system"),
             "nothing that breaks out of the stylesheet"

@@ -2,6 +2,7 @@
 //! from the ACP Registry, installed in a click, or a command of the user's own. Pay-per-token
 //! model APIs aren't agents to add: the footer points to where their keys go.
 
+use crate::fluent;
 use crate::palette;
 use crate::ui;
 use crate::workspace::{AgentInstall, Route, SettingsPage, Workspace, WorkspaceEvent};
@@ -365,7 +366,7 @@ impl AddAgentSheet {
                 .h(px(24.))
                 .px(px(8.))
                 .gap(px(6.))
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .bg(theme.foreground.opacity(0.05))
                 .text_size(px(12.5))
                 .child(child)
@@ -474,7 +475,7 @@ impl AddAgentSheet {
                 div()
                     .size(px(28.))
                     .flex_none()
-                    .rounded(px(7.))
+                    .rounded(px(fluent::control(7.)))
                     .bg(theme.foreground.opacity(0.045))
                     .flex()
                     .items_center()

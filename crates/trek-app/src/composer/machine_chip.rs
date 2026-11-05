@@ -4,6 +4,7 @@
 //! thread that lives on another machine, a quiet chip names it instead.
 
 use super::Composer;
+use crate::fluent::PillExt as _;
 use crate::palette;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
@@ -160,7 +161,7 @@ impl Composer {
                 .h(px(super::look::CONTROL))
                 .px(px(9.))
                 .gap(px(6.))
-                .rounded_full()
+                .rounded_pill()
                 .text_size(px(super::look::LABEL))
                 .text_color(theme.muted_foreground)
                 .child(reach_dot(reachable, cx))

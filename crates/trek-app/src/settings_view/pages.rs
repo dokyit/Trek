@@ -79,7 +79,7 @@ fn key(label: &str, cx: &App) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(5.))
+        .rounded(px(crate::fluent::control(5.)))
         .border_1()
         .border_color(theme.foreground.opacity(0.1))
         .bg(theme.foreground.opacity(0.04))
@@ -528,7 +528,7 @@ impl SettingsView {
                         .child(
                             div()
                                 .p(px(4.))
-                                .rounded(px(18.))
+                                .rounded(px(crate::fluent::control(18.)))
                                 .border_1()
                                 .border_color(if selected {
                                     theme.foreground.opacity(0.9)
@@ -572,68 +572,75 @@ impl SettingsView {
         let covered = s.appearance.background_placement
             == trek_core::settings::BackgroundPlacement::Everywhere
             && s.appearance.background.is_some();
-        vec![
+        let mut page = vec![
             self.theme_tiles(s.appearance.theme, cx),
             Self::heading("App icon", cx),
             Self::note(crate::words::words().app_icon_note, cx),
             self.app_icon_tiles(s.appearance.app_icon, cx),
-            Self::heading("Material", cx),
-            ui::group(
-                vec![
-                    Self::row(
-                        "Liquid glass",
-                        if covered {
-                            "Your desktop shows through the window, blurred. Hidden while the background art fills the window."
-                        } else {
-                            crate::words::words().glass_note
-                        },
-                        self.switch("glass", glass, |s, v| s.appearance.glass = v),
-                        cx,
-                    ),
-                    Self::row(
-                        "Frost",
-                        "Clear lets more of your desktop through; frosted keeps more of the theme's colour.",
-                        h_flex()
-                            .id("glass-frost")
-                            .test_support()
-                            .w(px(280.))
-                            .gap(px(10.))
-                            .when(!glass, |el| el.opacity(0.45))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Clear"),
-                            )
-                            .child(
-                                div().flex_1().child(
-                                    gpui_kit::component::slider::Slider::new(&self.glass_slider)
-                                        .disabled(!glass),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Frosted"),
-                            )
-                            .child(
-                                div()
-                                    .w(px(34.))
-                                    .text_xs()
-                                    .text_right()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .child(format!(
-                                        "{:.0}%",
-                                        super::frost_of(s.appearance.glass_tint)
-                                    )),
-                            )
-                            .into_any_element(),
-                        cx,
-                    ),
-                ],
-                cx,
-            ),
+        ];
+        // Trek's windows are opaque on Windows, so there's no material to choose.
+        if !cfg!(windows) {
+            page.extend([
+                Self::heading("Material", cx),
+                ui::group(
+                    vec![
+                        Self::row(
+                            "Liquid glass",
+                            if covered {
+                                "Your desktop shows through the window, blurred. Hidden while the background art fills the window."
+                            } else {
+                                crate::words::words().glass_note
+                            },
+                            self.switch("glass", glass, |s, v| s.appearance.glass = v),
+                            cx,
+                        ),
+                        Self::row(
+                            "Frost",
+                            "Clear lets more of your desktop through; frosted keeps more of the theme's colour.",
+                            h_flex()
+                                .id("glass-frost")
+                                .test_support()
+                                .w(px(280.))
+                                .gap(px(10.))
+                                .when(!glass, |el| el.opacity(0.45))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Clear"),
+                                )
+                                .child(
+                                    div().flex_1().child(
+                                        gpui_kit::component::slider::Slider::new(&self.glass_slider)
+                                            .disabled(!glass),
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Frosted"),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(34.))
+                                        .text_xs()
+                                        .text_right()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .child(format!(
+                                            "{:.0}%",
+                                            super::frost_of(s.appearance.glass_tint)
+                                        )),
+                                )
+                                .into_any_element(),
+                            cx,
+                        ),
+                    ],
+                    cx,
+                ),
+            ]);
+        }
+        page.extend([
             Self::heading("Text size", cx),
             ui::group(
                 vec![Self::row(
@@ -654,7 +661,11 @@ impl SettingsView {
             ),
             Self::heading("Background", cx),
             Self::note(
-                "Off by default. Pick art to show behind the composer on a new thread, or tinted behind the whole window.",
+                if cfg!(windows) {
+                    "Off by default. Pick art to show behind the composer on a new thread."
+                } else {
+                    "Off by default. Pick art to show behind the composer on a new thread, or tinted behind the whole window."
+                },
                 cx,
             ),
             self.background_gallery(s, cx),
@@ -663,51 +674,51 @@ impl SettingsView {
             if s.appearance.background.is_none() {
                 div().into_any_element()
             } else {
-                ui::group(
-                    vec![
-                        Self::row(
-                            "Show on",
-                            "",
-                            ui::segmented(
-                                "bg-place",
-                                vec![
-                                    (
-                                        trek_core::settings::BackgroundPlacement::NewThread,
-                                        "New thread",
-                                    ),
-                                    (
-                                        trek_core::settings::BackgroundPlacement::Everywhere,
-                                        "Everywhere",
-                                    ),
-                                ],
-                                s.appearance.background_placement,
-                                self.setter(|s, v| s.appearance.background_placement = v),
-                                cx,
-                            ),
+                let mut rows = Vec::new();
+                // Windows shows art in the New-thread panel only, so there's no choosing where.
+                if !cfg!(windows) {
+                    rows.push(Self::row(
+                        "Show on",
+                        "",
+                        ui::segmented(
+                            "bg-place",
+                            vec![
+                                (
+                                    trek_core::settings::BackgroundPlacement::NewThread,
+                                    "New thread",
+                                ),
+                                (
+                                    trek_core::settings::BackgroundPlacement::Everywhere,
+                                    "Everywhere",
+                                ),
+                            ],
+                            s.appearance.background_placement,
+                            self.setter(|s, v| s.appearance.background_placement = v),
                             cx,
                         ),
-                        Self::row(
-                            "Dim",
-                            "Darkens the art so text stays readable.",
-                            ui::segmented(
-                                "bg-dim",
-                                vec![(0u8, "None"), (1, "Light"), (2, "Medium"), (3, "Strong")],
-                                match s.appearance.background_dim {
-                                    d if d < 0.1 => 0u8,
-                                    d if d < 0.3 => 1,
-                                    d if d < 0.5 => 2,
-                                    _ => 3,
-                                },
-                                self.setter(|s, v: u8| {
-                                    s.appearance.background_dim = [0.0, 0.2, 0.4, 0.6][v as usize]
-                                }),
-                                cx,
-                            ),
-                            cx,
-                        ),
-                    ],
+                        cx,
+                    ));
+                }
+                rows.push(Self::row(
+                    "Dim",
+                    "Darkens the art so text stays readable.",
+                    ui::segmented(
+                        "bg-dim",
+                        vec![(0u8, "None"), (1, "Light"), (2, "Medium"), (3, "Strong")],
+                        match s.appearance.background_dim {
+                            d if d < 0.1 => 0u8,
+                            d if d < 0.3 => 1,
+                            d if d < 0.5 => 2,
+                            _ => 3,
+                        },
+                        self.setter(|s, v: u8| {
+                            s.appearance.background_dim = [0.0, 0.2, 0.4, 0.6][v as usize]
+                        }),
+                        cx,
+                    ),
                     cx,
-                )
+                ));
+                ui::group(rows, cx)
             },
             Self::heading("Motion", cx),
             ui::group(
@@ -721,7 +732,8 @@ impl SettingsView {
                 )],
                 cx,
             ),
-        ]
+        ]);
+        page
     }
 
     pub(super) fn notifications_page(
@@ -2877,7 +2889,7 @@ impl SettingsView {
                 .truncate()
                 .px(px(8.))
                 .py(px(3.))
-                .rounded(px(6.))
+                .rounded(px(crate::fluent::control(6.)))
                 .bg(theme.foreground.opacity(0.06))
                 .font_family(theme.mono_font_family.clone())
                 .text_size(px(12.))
@@ -3175,7 +3187,7 @@ pub(crate) fn theme_tiles(
                     div()
                         .w(px(132.))
                         .h(px(84.))
-                        .rounded(px(9.))
+                        .rounded(px(crate::fluent::control(9.)))
                         .overflow_hidden()
                         .border_1()
                         .border_color(if selected {

@@ -12,6 +12,7 @@ pub mod render;
 mod system;
 
 use crate::composer::look;
+use crate::fluent;
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
@@ -409,20 +410,22 @@ fn choice(
     h_flex()
         .id(id)
         .test_support()
+        .relative()
         .w_full()
         .min_h(px(44.))
         .px(px(10.))
         .py(px(7.))
         .gap(px(10.))
-        .rounded(px(10.))
+        .rounded(px(fluent::control(10.)))
         .cursor_pointer()
         .when(chosen, |el| el.bg(fill))
         .hover(move |s| s.bg(if chosen { fill } else { hover.opacity(0.6) }))
+        .children(fluent::selection_bar(chosen, cx))
         .child(
             div()
                 .flex_none()
                 .size(px(28.))
-                .rounded(px(8.))
+                .rounded(px(fluent::control(8.)))
                 .border_1()
                 .border_color(look::hairline(cx))
                 .bg(look::card_fill(cx))
@@ -548,7 +551,7 @@ impl ShareSheet {
                                         .px(px(10.))
                                         .flex()
                                         .items_center()
-                                        .rounded(px(8.))
+                                        .rounded(px(fluent::control(8.)))
                                         .border_1()
                                         .border_color(look::hairline(cx))
                                         .bg(look::chip_fill(cx))

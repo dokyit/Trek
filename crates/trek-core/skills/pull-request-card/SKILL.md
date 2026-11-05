@@ -58,6 +58,10 @@ from the card); act on it as on any message, then show the card again with the n
 - No external scripts or fonts; it stays well under 200 KB.
 - It styles itself with Trek's `--trek-*` variables (blue is yours, teal a teammate's, amber a
   conflict, green ready, purple merged), so it fits Night and Paper.
+- Its corners, flat resting card and opaque floating fills come from Trek's shape variables
+  (`--trek-radius-control`, `--trek-radius-surface`, `--trek-radius-pill` and friends). Windows sets
+  them; elsewhere they stay unset, so each `var()`'s fallback is the look. Keep the fallbacks, and
+  use none of these without one. Status dots, spinners and graph nodes stay round.
 
 ## The card
 
@@ -69,13 +73,13 @@ from the card); act on it as on any message, then show the card again with the n
 <style>
   body { padding: 4px 0 8px; }
   .card { --you: var(--trek-info, #2f6be8); --other: #14a39a; --base: var(--trek-muted, #8a8a8a); --warn: var(--trek-warning, #c98a12); --ok: var(--trek-positive, #1f9d55); --merged: #8957e5;
-    position: relative; border: 1px solid var(--trek-border, #e5e5e5); border-radius: 16px; background: var(--trek-surface, #fff); color: var(--trek-fg, #1d1d1f); font-family: var(--trek-font, system-ui); font-size: 13.5px; }
+    position: relative; border: 1px solid var(--trek-border, #e5e5e5); border-radius: var(--trek-radius-surface, 16px); background: var(--trek-surface, #fff); color: var(--trek-fg, #1d1d1f); font-family: var(--trek-font, system-ui); font-size: 13.5px; }
   header { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 6px; }
   header .t { font-weight: 650; font-size: 15px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   header .t span { color: var(--trek-muted, #888); font-weight: 500; margin-left: 4px; }
   .badge { font-size: 12.5px; font-weight: 600; white-space: nowrap; }
   .steps { display: flex; flex-wrap: wrap; gap: 4px 2px; padding: 2px 14px 8px; margin: 0; list-style: none; font-size: 11.5px; color: var(--trek-muted, #888); }
-  .steps li { display: flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 999px; }
+  .steps li { display: flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: var(--trek-radius-pill, 999px); }
   .steps li + li::before { content: "→"; margin: 0 4px 0 -4px; opacity: .5; }
   .steps li.done { color: var(--trek-fg, #222); }
   .steps li.now { color: var(--c, var(--you)); background: color-mix(in srgb, var(--c, var(--you)) 12%, transparent); font-weight: 600; }
@@ -84,21 +88,21 @@ from the card); act on it as on any message, then show the card again with the n
   .row { position: relative; display: flex; align-items: center; gap: 8px; height: 34px; padding-left: 64px; animation: in .35s ease both; }
   .row.dim .label { color: var(--trek-muted, #888); }
   .row.warn .label { color: var(--warn); }
-  .row.hot { background: linear-gradient(90deg, color-mix(in srgb, var(--warn) 10%, transparent), transparent 70%); }
+  .row.hot { background: var(--trek-band, linear-gradient(90deg, color-mix(in srgb, var(--warn) 10%, transparent), transparent 70%)); border-radius: var(--trek-radius-control, 0); }
   .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-  .chip { font-family: var(--trek-mono, ui-monospace); font-size: 11.5px; padding: 1px 6px; border-radius: 5px; white-space: nowrap; color: var(--c); background: color-mix(in srgb, var(--c) 13%, transparent); }
-  .count { font-size: 10.5px; font-weight: 700; min-width: 16px; height: 16px; border-radius: 8px; display: inline-grid; place-items: center; color: #fff; background: var(--warn); }
+  .chip { font-family: var(--trek-mono, ui-monospace); font-size: 11.5px; padding: 1px 6px; border-radius: var(--trek-radius-control, 5px); white-space: nowrap; color: var(--c); background: color-mix(in srgb, var(--c) 13%, transparent); }
+  .count { font-size: 10.5px; font-weight: 700; min-width: 16px; height: 16px; border-radius: var(--trek-radius-pill, 8px); display: inline-grid; place-items: center; color: var(--trek-on-status, #fff); background: var(--warn); }
   .count.done { background: var(--ok); }
   .meta { margin-left: auto; padding-left: 10px; white-space: nowrap; color: var(--trek-muted, #888); font-size: 12px; }
   .meta code { font-family: var(--trek-mono, ui-monospace); margin-right: 6px; }
   .word { margin-left: auto; font-size: 12px; font-weight: 600; color: var(--c); }
   .checks { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 16px 2px; }
-  .check { position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border: 1px solid var(--trek-border, #e5e5e5); border-radius: 999px; font-size: 12px; cursor: default; outline: none; }
+  .check { position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border: 1px solid var(--trek-border, #e5e5e5); border-radius: var(--trek-radius-pill, 999px); font-size: 12px; cursor: default; outline: none; }
   .check:hover, .check:focus { background: color-mix(in srgb, var(--trek-fg, #000) 5%, transparent); }
   .check b { font-weight: 600; }
   .check span { color: var(--trek-muted, #888); }
   .check i { font-style: normal; font-weight: 700; color: var(--c); }
-  .tip { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 5; white-space: nowrap; padding: 6px 10px; border-radius: 8px; font-size: 12px; background: var(--trek-surface, #fff); color: var(--trek-fg, #222); border: 1px solid var(--trek-border, #e5e5e5); box-shadow: 0 6px 20px rgba(0,0,0,.14); opacity: 0; transform: translateY(3px); transition: opacity .15s, transform .15s; pointer-events: none; }
+  .tip { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 5; white-space: nowrap; padding: 6px 10px; border-radius: var(--trek-radius-surface, 8px); font-size: 12px; background: var(--trek-panel, var(--trek-surface, #fff)); color: var(--trek-fg, #222); border: 1px solid var(--trek-border, #e5e5e5); box-shadow: 0 6px 20px rgba(0,0,0,.14); opacity: 0; transform: translateY(3px); transition: opacity .15s, transform .15s; pointer-events: none; }
   .tip em { font-style: normal; color: var(--trek-muted, #888); margin-left: 12px; }
   .check.right .tip { left: auto; right: 0; }
   .check:hover .tip, .check:focus .tip { opacity: 1; transform: none; }
@@ -108,12 +112,12 @@ from the card); act on it as on any message, then show the card again with the n
   .conf { color: var(--warn); font-weight: 600; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
   .bar { height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--ok) 20%, transparent); margin: 0 16px; overflow: hidden; }
   .bar div { height: 100%; background: var(--ok); transition: width .4s; }
-  .act { border: 0; border-radius: 999px; padding: 7px 14px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap; color: var(--you); background: color-mix(in srgb, var(--you) 13%, transparent); text-decoration: none; }
+  .act { border: 0; border-radius: var(--trek-radius-pill, 999px); padding: 7px 14px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap; color: var(--you); background: color-mix(in srgb, var(--you) 13%, transparent); text-decoration: none; }
   .act:hover { background: color-mix(in srgb, var(--you) 21%, transparent); }
   .act.busy, .act:disabled { cursor: default; color: var(--trek-muted, #888); background: color-mix(in srgb, var(--trek-fg, #000) 7%, transparent); }
   .act.plain { color: var(--trek-fg, #222); background: none; border: 1px solid var(--trek-border, #ddd); }
   .spin { width: 11px; height: 11px; border-radius: 50%; border: 1.6px solid currentColor; border-right-color: transparent; display: inline-block; animation: spin .8s linear infinite; vertical-align: -1px; }
-  .pop { position: absolute; left: 12px; right: 12px; bottom: 56px; z-index: 6; max-width: 460px; padding: 10px 12px 6px; border-radius: 12px; background: var(--trek-surface, #fff); border: 1px solid var(--trek-border, #e5e5e5); box-shadow: 0 10px 34px rgba(0,0,0,.18); max-height: calc(100% - 66px); overflow: auto; opacity: 0; transform: translateY(4px); transition: opacity .15s, transform .15s; pointer-events: none; }
+  .pop { position: absolute; left: 12px; right: 12px; bottom: 56px; z-index: 6; max-width: 460px; padding: 10px 12px 6px; border-radius: var(--trek-radius-surface, 12px); background: var(--trek-panel, var(--trek-surface, #fff)); border: 1px solid var(--trek-border, #e5e5e5); box-shadow: 0 10px 34px rgba(0,0,0,.18); max-height: calc(100% - 66px); overflow: auto; opacity: 0; transform: translateY(4px); transition: opacity .15s, transform .15s; pointer-events: none; }
   .pop.open { opacity: 1; transform: none; pointer-events: auto; }
   .pop h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
   .pop h4 span { color: var(--trek-muted, #888); font-weight: 400; }
@@ -123,7 +127,7 @@ from the card); act on it as on any message, then show the card again with the n
   .side { display: grid; grid-template-columns: 42px 1fr; align-items: center; gap: 8px; font-size: 11.5px; color: var(--trek-muted, #888); }
   .side code { font-family: var(--trek-mono, ui-monospace); font-size: 12px; color: var(--trek-fg, #222); padding: 3px 8px; border-left: 3px solid var(--c); background: color-mix(in srgb, var(--c) 7%, transparent); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
   .keep { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
-  .keep button { border: 1px solid var(--trek-border, #ddd); background: none; color: var(--trek-fg, #222); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 11.5px; cursor: pointer; }
+  .keep button { border: 1px solid var(--trek-border, #ddd); background: none; color: var(--trek-fg, #222); min-height: var(--trek-button-min-height, 0); border-radius: var(--trek-radius-pill, 999px); padding: 3px 10px; font: inherit; font-size: 11.5px; cursor: pointer; }
   .keep button:hover { background: color-mix(in srgb, var(--trek-fg, #000) 6%, transparent); }
   .keep .sent { color: var(--ok); font-size: 11.5px; font-weight: 600; align-self: center; }
   @keyframes spin { to { transform: rotate(360deg); } }

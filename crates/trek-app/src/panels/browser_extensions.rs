@@ -22,6 +22,7 @@ pub mod registry;
 #[cfg(target_os = "macos")]
 pub mod webkit;
 
+use crate::fluent;
 use crate::ui;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -1153,7 +1154,7 @@ impl ExtensionsPage {
             None => div()
                 .size(px(24.))
                 .flex_none()
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .bg(theme.muted)
                 .flex()
                 .items_center()

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::composer::look;
+use crate::fluent::PillExt as _;
 use crate::palette;
 use crate::ui;
 use crate::workspace::NodeSetup;
@@ -80,10 +81,10 @@ fn card(rows: impl IntoIterator<Item = AnyElement>, cx: &App) -> AnyElement {
     let line = look::hairline(cx);
     v_flex()
         .w_full()
-        .rounded(px(14.))
+        .rounded(px(crate::fluent::surface(14.)))
         .bg(look::card_fill(cx))
         .border_1()
-        .border_color(line)
+        .border_color(look::ring(cx))
         .shadow(look::card_shadow(cx))
         .overflow_hidden()
         .children(rows.into_iter().enumerate().map(move |(i, r)| {
@@ -179,7 +180,7 @@ fn pill(text: impl Into<SharedString>, cx: &App) -> AnyElement {
         .flex_none()
         .px(px(7.))
         .py(px(1.))
-        .rounded_full()
+        .rounded_pill()
         .bg(look::chip_fill(cx))
         .text_size(px(11.5))
         .text_color(cx.theme().muted_foreground)
@@ -198,7 +199,7 @@ fn command_chip(id: &str, command: &str, cx: &App) -> AnyElement {
         .pl(px(8.))
         .pr(px(2.))
         .gap(px(4.))
-        .rounded(px(6.))
+        .rounded(px(crate::fluent::control(6.)))
         .bg(theme.foreground.opacity(0.05))
         .child(
             div()
@@ -366,7 +367,7 @@ impl Onboarding {
                 .flex_none()
                 .gap(px(6.))
                 .p(px(14.))
-                .rounded(px(12.))
+                .rounded(px(crate::fluent::surface(12.)))
                 .bg(look::chip_fill(cx))
                 .child(icon.size(px(16.)).text_color(theme.muted_foreground))
                 .child(
@@ -497,11 +498,29 @@ impl Onboarding {
             .mt(px(10.))
             .px(px(14.))
             .py(px(10.))
-            .rounded(px(12.))
+            .rounded(px(crate::fluent::surface(12.)))
             .bg(look::chip_fill(cx))
             .text_size(px(s.appearance.transcript_font_size()))
             .line_height(relative(1.5))
             .child("Conversations read like this. Agents answer in the same size.");
+        let mut window_rows: Vec<AnyElement> = Vec::new();
+        // Trek's windows are opaque on Windows, so there's no glass to choose.
+        if !cfg!(windows) {
+            window_rows.extend([
+                row(None, "Liquid glass", crate::words::words().glass_note, switch("ob-glass", glass, |s, v| s.appearance.glass = v), cx).into_any_element(),
+                row(None, "Frost", "Clear lets more of your desktop through; frosted keeps more of the theme's colour.", frost, cx).into_any_element(),
+            ]);
+        }
+        window_rows.push(
+            row(
+                None,
+                "Reduce motion",
+                "Fades instead of slides, and the working animations hold still. Trek also follows the system's setting.",
+                switch("ob-reduce-motion", s.appearance.reduce_motion, |s, v| s.appearance.reduce_motion = v),
+                cx,
+            )
+            .into_any_element(),
+        );
         v_flex()
             .child(header(
                 "Make it yours",
@@ -510,21 +529,7 @@ impl Onboarding {
             ))
             .child(crate::settings_view::theme_tiles(s.appearance.theme, set_theme, cx))
             .child(section("Window", cx))
-            .child(card(
-                [
-                    row(None, "Liquid glass", crate::words::words().glass_note, switch("ob-glass", glass, |s, v| s.appearance.glass = v), cx).into_any_element(),
-                    row(None, "Frost", "Clear lets more of your desktop through; frosted keeps more of the theme's colour.", frost, cx).into_any_element(),
-                    row(
-                        None,
-                        "Reduce motion",
-                        "Fades instead of slides, and the working animations hold still. Trek also follows the system's setting.",
-                        switch("ob-reduce-motion", s.appearance.reduce_motion, |s, v| s.appearance.reduce_motion = v),
-                        cx,
-                    )
-                    .into_any_element(),
-                ],
-                cx,
-            ))
+            .child(card(window_rows, cx))
             .child(section("Text size", cx))
             .child(card(
                 [v_flex()
@@ -1454,7 +1459,7 @@ impl Onboarding {
         };
         let appearance = format!(
             "{theme_name}{}",
-            if s.appearance.glass {
+            if s.appearance.glass && !cfg!(windows) {
                 " · Liquid glass"
             } else {
                 ""

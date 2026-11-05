@@ -6,6 +6,7 @@
 //! Each window has its layer (a Root plugin, so it draws over everything in it); `push` puts a
 //! toast up in a window and `dismiss` takes one down.
 
+use crate::fluent;
 use crate::motion::{self, Presence, SURFACE};
 use gpui_kit::base::{Root, RootPlugin, ToastMotion, ToastStack, ToastStackState};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -243,7 +244,7 @@ impl Toasts {
             .border_1()
             .border_color(theme.border)
             .bg(theme.tokens.popover)
-            .rounded(theme.radius_lg)
+            .rounded(px(fluent::surface(theme.radius_lg.as_f32())))
             .py_3p5()
             .px_4()
             .gap_3()
@@ -301,7 +302,7 @@ impl Toasts {
             // can cover it (a translucent card would show its own shadow through).
             .top(px(SLIDE * (1. - t)))
             .opacity(t)
-            .shadow(toast_shadow(t.powi(3)));
+            .shadow(toast_shadow(t.powi(3), cx));
         if item.shown.is_present() {
             face.into_any_element()
         } else {
@@ -310,17 +311,27 @@ impl Toasts {
     }
 }
 
-/// gpui-component's toast shadow, `strength` of the way in.
-fn toast_shadow(strength: f32) -> Vec<BoxShadow> {
-    let ink = hsla(0., 0., 0., 0.1 * strength.clamp(0., 1.));
-    vec![
-        BoxShadow::new(px(0.), px(10.), ink)
-            .blur_radius(px(7.5))
-            .spread_radius(px(-3.)),
-        BoxShadow::new(px(0.), px(4.), ink)
-            .blur_radius(px(3.))
-            .spread_radius(px(-4.)),
-    ]
+/// gpui-component's toast shadow, or Windows' flyout elevation, `strength` of the way in.
+fn toast_shadow(strength: f32, cx: &App) -> Vec<BoxShadow> {
+    let strength = strength.clamp(0., 1.);
+    let ink = hsla(0., 0., 0., 0.1 * strength);
+    let mut shadow = fluent::flyout_shadow(
+        vec![
+            BoxShadow::new(px(0.), px(10.), ink)
+                .blur_radius(px(7.5))
+                .spread_radius(px(-3.)),
+            BoxShadow::new(px(0.), px(4.), ink)
+                .blur_radius(px(3.))
+                .spread_radius(px(-4.)),
+        ],
+        cx,
+    );
+    if fluent::WINDOWS {
+        for s in &mut shadow {
+            s.color.a *= strength;
+        }
+    }
+    shadow
 }
 
 impl Render for Toasts {

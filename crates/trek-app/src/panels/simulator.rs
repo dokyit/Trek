@@ -8,6 +8,7 @@
 //! writes as it goes (`runs_dir`), and an `xcodebuild test` the agent ran in a shell from its
 //! output once the call returns. Each test shows with its mark (`trek_ipc::simtest`).
 
+use crate::fluent;
 use crate::workspace::{Route, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -2185,7 +2186,10 @@ impl SimulatorPanel {
                         } else {
                             theme.border
                         })
-                        .shadow_lg(),
+                        .when(!fluent::WINDOWS, |el| el.shadow_lg())
+                        .when(fluent::WINDOWS, |el| {
+                            el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+                        }),
                 )
                 .child(
                     img(image)
@@ -2234,11 +2238,14 @@ impl SimulatorPanel {
             .px_3()
             .py(px(6.))
             .gap_2()
-            .rounded(px(10.))
+            .rounded(px(fluent::surface(10.)))
             .bg(theme.popover)
             .border_1()
             .border_color(theme.border)
-            .shadow_md()
+            .when(!fluent::WINDOWS, |el| el.shadow_md())
+            .when(fluent::WINDOWS, |el| {
+                el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+            })
             .text_sm()
             .child(
                 Icon::new(Lucide::Hand)
@@ -2336,7 +2343,7 @@ impl SimulatorPanel {
             .px_3()
             .h(px(52.))
             .gap_3()
-            .rounded(px(10.))
+            .rounded(px(fluent::surface(10.)))
             .border_1()
             .border_color(if selected {
                 theme.ring.opacity(0.5)

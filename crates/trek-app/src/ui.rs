@@ -1,5 +1,6 @@
 //! Shared visual primitives so every surface uses the same quiet, consistent styling.
 
+use crate::fluent::{self, PillExt as _};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -233,10 +234,11 @@ pub fn nav_row(
     let theme = cx.theme();
     h_flex()
         .id(id)
+        .relative()
         .px(px(10.))
         .h(px(30.))
         .gap(px(10.))
-        .rounded(px(7.))
+        .rounded(px(fluent::control(7.)))
         .cursor_pointer()
         .text_size(px(13.))
         .when(active, |el| {
@@ -249,6 +251,7 @@ pub fn nav_row(
                     .text_color(theme.foreground)
             })
         })
+        .children(fluent::selection_bar(active, cx))
         .child(icon.size(px(15.)).text_color(if active {
             theme.foreground
         } else {
@@ -584,7 +587,7 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
         .h(px(30.))
         .p(px(2.))
         .gap(px(2.))
-        .rounded(px(8.))
+        .rounded(px(fluent::control(8.)))
         .bg(theme.foreground.opacity(0.05))
         .border_1()
         .border_color(theme.foreground.opacity(0.06))
@@ -602,7 +605,7 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
                         .px(px(11.))
                         .flex()
                         .items_center()
-                        .rounded(px(6.))
+                        .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 6.)))
                         .text_size(px(12.5))
                         .cursor_pointer()
                         .when(selected, |el| {
@@ -846,7 +849,7 @@ impl RenderOnce for Pill {
             .h(px(28.))
             .px(px(10.))
             .gap(px(6.))
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .text_sm()
             .cursor_pointer()
             .when(self.ghost, |el| el.px(px(7.)))
@@ -854,7 +857,7 @@ impl RenderOnce for Pill {
                 el.h(px(22.))
                     .px(px(7.))
                     .gap(px(4.))
-                    .rounded(px(6.))
+                    .rounded(px(fluent::control(6.)))
                     .text_size(px(12.))
             })
             .bg(theme.foreground.opacity(match (self.selected, self.ghost) {
@@ -889,7 +892,7 @@ impl Pill {
             .h(px(look::CONTROL))
             .px(px(11.))
             .gap(px(6.))
-            .rounded_full()
+            .rounded_pill()
             .text_size(px(look::LABEL))
             .text_color(cx.theme().muted_foreground)
             .cursor_pointer()
@@ -924,11 +927,14 @@ pub fn menu_surface(cx: &App) -> Div {
     let theme = cx.theme();
     gpui_kit::component::v_flex()
         .p(px(5.))
-        .rounded(px(12.))
+        .rounded(px(fluent::surface(12.)))
         .bg(theme.popover)
         .border_1()
-        .border_color(theme.border)
+        .border_color(fluent::stroke(theme.border, cx))
         .shadow_lg()
+        .when(fluent::WINDOWS, |el| {
+            el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+        })
 }
 
 /// A checkbox and its label, as the question card draws its multiple-choice boxes.
@@ -973,14 +979,16 @@ pub fn menu_row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Di
     let theme = cx.theme();
     h_flex()
         .id(id)
+        .relative()
         .px(px(10.))
         .min_h(px(34.))
         .gap(px(10.))
-        .rounded(px(8.))
+        .rounded(px(fluent::control(8.)))
         .text_sm()
         .cursor_pointer()
         .when(active, |el| el.bg(theme.list_active))
         .hover(|s| s.bg(theme.list_active))
+        .children(fluent::selection_bar(active, cx))
 }
 
 /// Text with the parts a search matched brought forward: matches in the foreground colour at

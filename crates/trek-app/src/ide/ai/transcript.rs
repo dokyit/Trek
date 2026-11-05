@@ -20,6 +20,7 @@ use super::cards;
 use super::context;
 use super::restore::{self, Files};
 use crate::activity::{Place, ToolKind, op, phrase, placement, tool_kind};
+use crate::fluent;
 use crate::palette;
 use crate::workspace::{Scope, TaskState, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -2113,7 +2114,7 @@ impl Render for AiTranscript {
                                     .ml(px(17.))
                                     .px(px(8.))
                                     .py(px(4.))
-                                    .rounded(px(6.))
+                                    .rounded(px(fluent::control(6.)))
                                     .border_1()
                                     .border_color(theme.foreground.opacity(0.08))
                                     .bg(theme.foreground.opacity(0.025))
@@ -2276,7 +2277,7 @@ impl Render for AiTranscript {
                 View::Error(text) => div()
                     .px(px(8.))
                     .py(px(5.))
-                    .rounded(px(6.))
+                    .rounded(px(fluent::control(6.)))
                     .border_1()
                     .border_color(palette::red(cx).opacity(0.45))
                     .bg(palette::red(cx).opacity(0.07))

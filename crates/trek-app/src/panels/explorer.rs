@@ -7,6 +7,7 @@
 //! the tree also shows git status: a letter and a colour per changed file, a dot on folders
 //! holding changes; and a row's context menu adds it to the AI side bar's chat.
 
+use crate::fluent;
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
@@ -839,7 +840,13 @@ impl ExplorerPanel {
             let row = h_flex()
                 .id(SharedString::from(path.display().to_string()))
                 .test_support()
-                .when(!ide, |el| el.mx_1().h(px(26.)).rounded(px(6.)).text_sm())
+                .relative()
+                .when(!ide, |el| {
+                    el.mx_1()
+                        .h(px(26.))
+                        .rounded(px(fluent::control(6.)))
+                        .text_sm()
+                })
                 .when(ide, |el| el.h(px(22.)).text_size(px(13.)))
                 .pl(px(8. + depth as f32 * if ide { 12. } else { 14. }))
                 .pr_2()
@@ -847,6 +854,7 @@ impl ExplorerPanel {
                 .cursor_pointer()
                 .when(is_sel, |el| el.bg(theme.list_active))
                 .when(!is_sel, |el| el.hover(|s| s.bg(theme.list_hover)))
+                .children(fluent::selection_bar(is_sel, cx))
                 .child(if is_dir {
                     Icon::new(if open {
                         IconName::ChevronDown

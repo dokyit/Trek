@@ -1071,20 +1071,23 @@ impl CommandPalette {
             ),
             "chat scratch no project question",
         );
-        let glass = ws.settings.appearance.glass;
-        add(
-            Entry::new(
-                c,
-                icon(Icon::new(crate::assets::Lucide::Sparkles)),
-                if glass {
-                    "Turn off liquid glass"
-                } else {
-                    "Turn on liquid glass"
-                },
-                Action::Glass(!glass),
-            ),
-            "appearance translucent blur transparent vibrancy theme",
-        );
+        // Trek's windows are opaque on Windows, so there's no glass to turn on.
+        if !cfg!(windows) {
+            let glass = ws.settings.appearance.glass;
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(crate::assets::Lucide::Sparkles)),
+                    if glass {
+                        "Turn off liquid glass"
+                    } else {
+                        "Turn on liquid glass"
+                    },
+                    Action::Glass(!glass),
+                ),
+                "appearance translucent blur transparent vibrancy theme",
+            );
+        }
         // The thread on screen: the harness's, or the editor's AI side bar chat.
         let thread = ws.focused_thread().and_then(|id| ws.thread(id)).cloned();
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {
@@ -1532,11 +1535,12 @@ impl CommandPalette {
             .px(px(10.))
             .min_h(px(32.))
             .gap(px(10.))
-            .rounded(px(8.))
+            .rounded(px(crate::fluent::control(8.)))
             .text_size(px(13.))
             .cursor_pointer()
-            .when(selected, |el| {
-                el.bg(theme.list_active).child(
+            .when(selected, |el| el.bg(theme.list_active))
+            .when(selected && !crate::fluent::WINDOWS, |el| {
+                el.child(
                     div()
                         .absolute()
                         .left_0()
@@ -1547,6 +1551,7 @@ impl CommandPalette {
                         .bg(crate::palette::ember(cx)),
                 )
             })
+            .children(crate::fluent::selection_bar(selected, cx))
             .child(
                 div()
                     .flex_none()

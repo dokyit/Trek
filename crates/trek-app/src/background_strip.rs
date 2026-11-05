@@ -9,6 +9,7 @@
 //! A view of its own, cached at its height: its once-every-two-seconds tick (the clocks, and
 //! reading the tasks' output from the agent) redraws only the strip.
 
+use crate::fluent;
 use crate::workspace::{Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
@@ -293,7 +294,7 @@ impl BackgroundStrip {
             .h(px(SLIM))
             .px(px(8.))
             .gap(px(8.))
-            .rounded(px(7.))
+            .rounded(px(fluent::control(7.)))
             .text_size(px(12.5))
             .text_color(muted)
             .cursor_pointer()
@@ -370,7 +371,7 @@ impl BackgroundStrip {
                 .gap(px(4.))
                 .px(px(6.))
                 .h(px(20.))
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .text_xs()
                 .text_color(muted)
                 .cursor_pointer()
@@ -421,7 +422,7 @@ impl BackgroundStrip {
                 .h(px(ROW))
                 .px(px(8.))
                 .gap(px(8.))
-                .rounded(px(7.))
+                .rounded(px(fluent::control(7.)))
                 .text_size(px(12.5))
                 .cursor_pointer()
                 .when(open, |el| el.bg(theme.foreground.opacity(0.07)))

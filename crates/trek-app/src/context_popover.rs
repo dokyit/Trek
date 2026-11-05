@@ -7,6 +7,7 @@
 //! row Trek has nothing to go on for is left out rather than made up.
 
 use crate::composer::Composer;
+use crate::fluent::{self, PillExt as _};
 use crate::palette;
 use crate::workspace::{Scope, Workspace};
 use gpui_kit::base::{
@@ -48,6 +49,15 @@ const COLLAPSE: Duration = Duration::from_millis(1_100);
 const FADE: Duration = Duration::from_millis(140);
 /// The most chunks the messages segment splits into while compacting.
 const BLOCKS: u64 = 15;
+/// What a row's parts fade to while another row is hovered. The Mac fades the whole row to the
+/// design's 0.4. On Windows' opaque card that leaves labels at 1.7:1 and values at 2.5:1, so there
+/// the text stops at 3:1 or better in Paper and Night, and swatches and bars keep the design's
+/// strength.
+const DIM_ROW: f32 = fluent::pick(1., 0.4);
+const DIM_LABEL: f32 = fluent::pick(0.75, 1.);
+const DIM_VALUE: f32 = fluent::pick(0.55, 1.);
+const DIM_BAR: f32 = fluent::pick(0.4, 1.);
+const DIM_SWATCH: f32 = fluent::pick(0.34, 1.);
 
 /// How full the window is, 0–1.
 pub fn fraction(used: u64, window: u64) -> f32 {
@@ -127,6 +137,8 @@ struct Ink {
     action_text: Hsla,
     /// The check by "Freed …" (#2C893C).
     done: Hsla,
+    /// The flyout's note: faint on the Mac, muted on Windows, where faint is under 3:1 on Paper.
+    note: Hsla,
 }
 
 /// `(night, paper)`, as the theme in use wants it.
@@ -143,15 +155,24 @@ fn ink(cx: &App) -> Ink {
     let fg = |a: f32| theme.foreground.opacity(a);
     let dark = theme.mode.is_dark();
     let blue = pick(cx, (0x5B92F2, 0x4281ED));
+    let faint = fg(0.46);
+    // Night's Compact now is a wash of blue, which Windows flattens onto the card to stay opaque.
+    let flat = |wash: Hsla| {
+        if fluent::WINDOWS {
+            theme.popover.blend(wash)
+        } else {
+            wash
+        }
+    };
     Ink {
         text: theme.foreground,
         muted: theme.muted_foreground,
-        faint: fg(0.46),
+        faint,
         dot: fg(0.42),
         surface: theme.popover,
-        edge: fg(if dark { 0.12 } else { 0.144 }),
-        tip_edge: fg(if dark { 0.1 } else { 0.083 }),
-        fly_edge: fg(if dark { 0.12 } else { 0.13 }),
+        edge: fluent::stroke(fg(if dark { 0.12 } else { 0.144 }), cx),
+        tip_edge: fluent::stroke(fg(if dark { 0.1 } else { 0.083 }), cx),
+        fly_edge: fluent::stroke(fg(if dark { 0.12 } else { 0.13 }), cx),
         rule: fg(if dark { 0.08 } else { 0.07 }),
         track: fg(if dark { 0.1 } else { 0.083 }),
         well: fg(if dark { 0.08 } else { 0.048 }),
@@ -164,17 +185,22 @@ fn ink(cx: &App) -> Ink {
         processing: pick(cx, (0x8DB0F8, 0x3D6BDF)),
         stripe: pick(cx, (0xA9C2F5, 0x2F4FB0)),
         action: if dark {
-            blue.opacity(0.16)
+            flat(blue.opacity(0.16))
         } else {
             rgb(0xE8F2FA).into()
         },
         action_hover: if dark {
-            blue.opacity(0.26)
+            flat(blue.opacity(0.26))
         } else {
             rgb(0xE0E9FB).into()
         },
         action_text: pick(cx, (0xA8C4FA, 0x2D468F)),
         done: pick(cx, (0x4CC86A, 0x2C893C)),
+        note: if fluent::WINDOWS {
+            theme.muted_foreground
+        } else {
+            faint
+        },
     }
 }
 
@@ -326,11 +352,11 @@ impl RenderOnce for RingTrigger {
                             .px(px(10.5))
                             .gap(px(7.5))
                             .items_center()
-                            .rounded(px(8.))
+                            .rounded(px(fluent::control(8.)))
                             .bg(ink.surface)
                             .border_1()
                             .border_color(ink.tip_edge)
-                            .shadow(shadow(4., 10., 0.05))
+                            .shadow(fluent::tooltip_shadow(shadow(4., 10., 0.05), cx))
                             .whitespace_nowrap()
                             .child(div().text_color(ink.muted).child("Context"))
                             .child(
@@ -371,7 +397,7 @@ impl RenderOnce for RingTrigger {
             .flex()
             .items_center()
             .justify_center()
-            .rounded_full()
+            .rounded_pill()
             .cursor_pointer()
             .when(self.open, |el| el.bg(ink.well))
             .hover(move |s| s.bg(ink.well))
@@ -835,7 +861,8 @@ impl Card {
             }
         };
         // 8 px tall at rest, 16 while summarizing: it grows into the room around it, so nothing
-        // below it moves.
+        // below it moves. On Windows, as in the design, the card rises to make that room, with 4 px
+        // more either side of the bar for the playhead to stand into.
         let tall = transition(
             "context-bar-tall",
             if folding { 1. } else { 0. },
@@ -845,6 +872,7 @@ impl Card {
         );
         let height = BAR * (1. + tall);
         let radius = 2. + 2. * tall;
+        let breathing = fluent::pick(4. * tall, 0.);
         let shown_tokens = |p: &Part| match p.kind {
             Kind::Messages => shown_messages,
             Kind::Free => shown_free,
@@ -872,6 +900,14 @@ impl Card {
                     Kind::Messages if folding => {
                         let chunk = (messages.max(shown_messages).div_ceil(BLOCKS)).max(1);
                         let n = shown_messages.div_ceil(chunk).max(1) as usize;
+                        // No more than the segment's width holds, at 1 px and a gap each: late in
+                        // the fold it's slivers wide, and they'd run on over Free.
+                        let room = BAR_WIDTH * shown_messages as f32 / self.window as f32;
+                        let n = if fluent::WINDOWS {
+                            n.min((((room + 2.) / 3.) as usize).max(1))
+                        } else {
+                            n
+                        };
                         // The chunk being summarized: it runs right to left while the agent
                         // works, and rests on the last one as the fold plays.
                         let at = if running && !still {
@@ -880,6 +916,19 @@ impl Card {
                             n - 1
                         };
                         let color = Kind::Messages.color(cx);
+                        // The playhead, standing out of the bar. The Mac holds it at the used
+                        // region's end. On Windows, as in the design, it leads the chunk being
+                        // summarized, with what's folded behind it.
+                        let playhead = || {
+                            div()
+                                .absolute()
+                                .right(px(-2.))
+                                .top(px(-4. * tall))
+                                .w(px(2.))
+                                .h(px(height + 8. * tall))
+                                .opacity(tall)
+                                .bg(ink.text)
+                        };
                         seg(h_flex())
                             .relative()
                             .gap(px(2.))
@@ -887,25 +936,17 @@ impl Card {
                                 let el = grow(div(), CHUNKS[i % CHUNKS.len()])
                                     .h_full()
                                     .min_w(px(1.))
-                                    .rounded(px(radius))
-                                    .overflow_hidden();
+                                    .rounded(px(radius));
                                 if i > at {
-                                    el.child(stripes(ink.stripe))
+                                    el.overflow_hidden().child(stripes(ink.stripe))
                                 } else {
                                     el.bg(if i == at { ink.processing } else { color })
+                                        .when(fluent::WINDOWS && i == at, |el| {
+                                            el.relative().child(playhead())
+                                        })
                                 }
                             }))
-                            // The playhead at the used region's end, standing out of the bar.
-                            .child(
-                                div()
-                                    .absolute()
-                                    .right(px(-2.))
-                                    .top(px(-4. * tall))
-                                    .w(px(2.))
-                                    .h(px(height + 8. * tall))
-                                    .opacity(tall)
-                                    .bg(ink.text),
-                            )
+                            .when(!fluent::WINDOWS, |el| el.child(playhead()))
                             .into_any_element()
                     }
                     kind => seg(div())
@@ -915,16 +956,20 @@ impl Card {
                 }
             })
             .collect();
-        let bar = div().relative().w_full().h(px(BAR)).child(
-            h_flex()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px((BAR - height) / 2.))
-                .h(px(height))
-                .gap(px(2.))
-                .children(segments),
-        );
+        let bar = div()
+            .relative()
+            .w_full()
+            .h(px(fluent::pick(height, BAR)))
+            .child(
+                h_flex()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px(fluent::pick(0., (BAR - height) / 2.)))
+                    .h(px(height))
+                    .gap(px(2.))
+                    .children(segments),
+            );
         let legend = div()
             .grid()
             .grid_cols(2)
@@ -975,8 +1020,8 @@ impl Card {
             .pt(px(11.5))
             .pb(px(13.5))
             .child(header)
-            .child(div().mt(px(10.)).child(bar))
-            .child(div().mt(px(7.)).child(legend));
+            .child(div().mt(px(10. + breathing)).child(bar))
+            .child(div().mt(px(7. + breathing)).child(legend));
         div()
             .relative()
             .child(
@@ -994,11 +1039,11 @@ impl Card {
             .child(
                 v_flex()
                     .w(px(280.))
-                    .rounded(px(14.))
+                    .rounded(px(fluent::surface(14.)))
                     .bg(ink.surface)
                     .border_1()
                     .border_color(ink.edge)
-                    .shadow(shadow(4., 14., 0.05))
+                    .shadow(fluent::flyout_shadow(shadow(4., 14., 0.05), cx))
                     .child(reveal(
                         context.into_any_element(),
                         "context-reveal-context",
@@ -1088,6 +1133,9 @@ impl Card {
         };
         let (label, enabled, why) = match self.compact {
             Compact::Running { .. } => ("Compact now", false, None),
+            // Still folding, the footer still says it's summarizing: the design's button says
+            // Compacted only once that's done.
+            Compact::Freed { .. } if folding && fluent::WINDOWS => ("Compact now", false, None),
             Compact::Freed { .. } => ("Compacted", false, None),
             Compact::Idle | Compact::Unchanged { .. } => {
                 let why = if self.no_thread {
@@ -1118,10 +1166,12 @@ impl Card {
             .test_support()
             .flex_none()
             .h(px(28.))
-            .pl(px(12.5))
-            .pr(px(11.))
+            // Windows' stroke comes out of the padding, so the button stays the same width.
+            .pl(px(fluent::pick(11.5, 12.5)))
+            .pr(px(fluent::pick(10., 11.)))
             .items_center()
-            .rounded_full()
+            .rounded_pill()
+            .when(fluent::WINDOWS, |el| el.border_1().border_color(ink.edge))
             .font_medium()
             .whitespace_nowrap()
             .map(|el| {
@@ -1159,6 +1209,8 @@ impl Card {
 
 /// The card's left and right padding.
 const PAD: f32 = 14.5;
+/// The segmented bar's width: the card's, less its strokes and padding.
+const BAR_WIDTH: f32 = 280. - 2. - 2. * PAD;
 /// The flyout's first line, from its top: its 12 px cap top less the line's leading.
 const FLY_TOP: f32 = 8.3;
 /// The message chunks' relative widths while summarizing: uneven, as messages are.
@@ -1212,7 +1264,7 @@ fn check(color: Hsla) -> AnyElement {
                             };
                             let (l1, l2) = (seg(pts[0], pts[1]), seg(pts[1], pts[2]));
                             let mut left = t * (l1 + l2);
-                            let mut path = PathBuilder::stroke(px(1.5));
+                            let mut path = PathBuilder::stroke(px(fluent::pick(2., 1.5)));
                             path.move_to(p(pts[0]));
                             for (a, b, l) in [(pts[0], pts[1], l1), (pts[1], pts[2], l2)] {
                                 if left <= 0. {
@@ -1275,6 +1327,17 @@ fn level_color(frac: f32, calm: Hsla, cx: &App) -> Hsla {
     }
 }
 
+/// One part of a row's fade, while another row is hovered (see `DIM_ROW`).
+fn fade(id: &str, part: &str, dimmed: bool, to: f32, window: &mut Window, cx: &mut App) -> f32 {
+    transition(
+        SharedString::from(format!("context-dim-{id}{part}")),
+        if dimmed { to } else { 1. },
+        Transition::new(FADE),
+        window,
+        cx,
+    )
+}
+
 /// A legend cell: swatch, name, size. Hovering dims the other cells and the bar's other parts,
 /// and opens the part's flyout to the card's side.
 #[allow(clippy::too_many_arguments)]
@@ -1291,13 +1354,11 @@ fn legend_row(
     let ink = ink(cx);
     let kind = part.kind;
     let dimmed = hovered.is_some() && hovered != Some(kind);
-    let opacity = transition(
-        SharedString::from(format!("context-dim-{}", kind.row_id())),
-        if dimmed { 0.4 } else { 1. },
-        Transition::new(FADE),
-        window,
-        cx,
-    );
+    let id = kind.row_id();
+    let opacity = fade(id, "", dimmed, DIM_ROW, window, cx);
+    let label = fade(id, "-label", dimmed, DIM_LABEL, window, cx);
+    let value = fade(id, "-value", dimmed, DIM_VALUE, window, cx);
+    let swatch = fade(id, "-swatch", dimmed, DIM_SWATCH, window, cx);
     small(h_flex())
         .id(kind.row_id())
         .test_support()
@@ -1331,7 +1392,11 @@ fn legend_row(
                 .rounded(px(2.))
                 .flex_none()
                 // A dimmed swatch goes a little further than its text.
-                .when(dimmed, |el| el.opacity(0.85))
+                .opacity(if dimmed && !fluent::WINDOWS {
+                    0.85
+                } else {
+                    swatch
+                })
                 .bg(kind.color(cx))
                 .when(kind == Kind::Free, |el| {
                     el.border_1().border_color(ink.free_edge)
@@ -1342,12 +1407,14 @@ fn legend_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                .opacity(label)
                 .text_color(ink.muted)
                 .child(kind.label()),
         )
         .child(
             div()
                 .flex_none()
+                .opacity(value)
                 .text_color(ink.text)
                 .font_features(figures())
                 .child(fmt_tokens(tokens)),
@@ -1403,11 +1470,11 @@ fn flyout(part: &Part, cx: &App) -> AnyElement {
         .pl(px(10.))
         .pr(px(11.))
         .gap(px(4.))
-        .rounded(px(10.))
+        .rounded(px(fluent::surface(10.)))
         .bg(ink.surface)
         .border_1()
         .border_color(ink.fly_edge)
-        .shadow(shadow(6., 14., 0.08))
+        .shadow(fluent::flyout_shadow(shadow(6., 14., 0.08), cx))
         .child(
             h_flex()
                 .items_center()
@@ -1431,7 +1498,7 @@ fn flyout(part: &Part, cx: &App) -> AnyElement {
         )
         .children(part.detail.iter().map(row))
         .when_some(part.note.clone(), |el, note| {
-            el.child(div().text_color(ink.faint).child(note))
+            el.child(div().text_color(ink.note).child(note))
         })
         .with_animation(
             SharedString::from(format!("context-flyout-{}", part.kind.row_id())),
@@ -1601,13 +1668,11 @@ fn limit_row(
 ) -> AnyElement {
     let ink = ink(cx);
     let on = hovered == Some(row.id);
-    let opacity = transition(
-        SharedString::from(format!("context-dim-{}", row.id)),
-        if hovered.is_some() && !on { 0.4 } else { 1. },
-        Transition::new(FADE),
-        window,
-        cx,
-    );
+    let dimmed = hovered.is_some() && !on;
+    let opacity = fade(row.id, "", dimmed, DIM_ROW, window, cx);
+    let label_fade = fade(row.id, "-label", dimmed, DIM_LABEL, window, cx);
+    let value_fade = fade(row.id, "-value", dimmed, DIM_VALUE, window, cx);
+    let bar_fade = fade(row.id, "-bar", dimmed, DIM_BAR, window, cx);
     let color = if row.percent >= 95. {
         palette::red(cx)
     } else if row.percent >= 85. {
@@ -1619,6 +1684,7 @@ fn limit_row(
         div()
             .font_medium()
             .font_features(figures())
+            .opacity(value_fade)
             .text_color(ink.text)
             .child(format!("{value:.0}%"))
     };
@@ -1641,11 +1707,17 @@ fn limit_row(
             .w_full()
             .items_center()
             .gap(px(7.5))
-            .child(div().text_color(ink.muted).child(row.label.clone()))
+            .child(
+                div()
+                    .opacity(label_fade)
+                    .text_color(ink.muted)
+                    .child(row.label.clone()),
+            )
             .child(percent(row.percent))
             .child(div().flex_1())
             .child(
                 div()
+                    .opacity(label_fade)
                     .text_color(ink.muted)
                     .font_features(figures())
                     .child(row.resets.clone()),
@@ -1657,6 +1729,7 @@ fn limit_row(
         .w_full()
         .h(px(6.))
         .rounded_full()
+        .opacity(bar_fade)
         .bg(ink.track)
         .child(if expanded {
             h_flex()

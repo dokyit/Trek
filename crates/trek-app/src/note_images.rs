@@ -6,6 +6,7 @@
 //! stay sharp. A click opens the image viewer (`image_preview`), stepping through the note's
 //! other pictures; one that can't be found or read is a placeholder saying so.
 
+use crate::fluent;
 use gpui_kit::component::text::{
     InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
     markdown_ast,
@@ -505,7 +506,7 @@ fn chip(file: &ParsedFile, size: Pixels, height: Pixels, cx: &App) -> AnyElement
         .h(height)
         .px(px(7.))
         .gap(px(5.))
-        .rounded(px(6.))
+        .rounded(px(fluent::control(6.)))
         .border_1()
         .border_color(tint.edge)
         .bg(tint.fill)
@@ -771,7 +772,7 @@ fn file_tile(i: usize, file: &trek_core::notes::FileRef, dir: &Path, cx: &App) -
         .w(px(190.))
         .h(px(TILE))
         .px(px(12.))
-        .rounded(px(8.))
+        .rounded(px(fluent::control(8.)))
         .border_1()
         .overflow_hidden();
     let Some(path) = path else {
@@ -926,7 +927,7 @@ pub fn strip(body: &str, dir: &Path, cx: &App) -> Option<AnyElement> {
                     .flex_none()
                     .w(width)
                     .h(px(TILE))
-                    .rounded(px(8.))
+                    .rounded(px(fluent::control(8.)))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border)

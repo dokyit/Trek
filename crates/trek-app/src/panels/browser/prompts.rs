@@ -5,6 +5,7 @@
 use super::asks::{self, AskKind, Reply};
 use super::{BrowserPanel, Tab, host_of, tool_button};
 use crate::assets::Lucide;
+use crate::fluent;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
@@ -158,12 +159,15 @@ impl BrowserPanel {
                     .h(px(h as f32 + 36.))
                     .max_w_full()
                     .max_h_full()
-                    .rounded(px(10.))
+                    .rounded(px(fluent::surface(10.)))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.background)
-                    .shadow_lg()
+                    .when(!fluent::WINDOWS, |el| el.shadow_lg())
+                    .when(fluent::WINDOWS, |el| {
+                        el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+                    })
                     .child(
                         h_flex()
                             .flex_none()

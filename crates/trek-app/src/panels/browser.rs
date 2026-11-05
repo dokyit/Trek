@@ -5,6 +5,7 @@
 use super::browser_adblock::{self, AdBlocker};
 use super::browser_extensions::{self, ExtensionsEvent, ExtensionsPage};
 use crate::assets::Lucide;
+use crate::fluent;
 use crate::ui;
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -2953,7 +2954,7 @@ impl BrowserPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.foreground.opacity(0.08)))
                 .child(Icon::new(icon).xsmall())
@@ -2978,7 +2979,7 @@ impl BrowserPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.))
+                    .rounded(px(fluent::control(6.)))
                     .text_xs()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.foreground.opacity(0.08)))
@@ -3008,13 +3009,13 @@ impl BrowserPanel {
                     .h(px(24.))
                     .px(px(8.))
                     .gap(px(5.))
-                    .rounded(px(6.))
+                    .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 6.)))
                     .text_xs()
                     .cursor_pointer()
                     .when(on, |el| {
                         el.bg(theme.popover)
                             .text_color(theme.foreground)
-                            .shadow_xs()
+                            .when(!fluent::WINDOWS, |el| el.shadow_xs())
                     })
                     .when(!on, |el| {
                         el.text_color(muted)
@@ -3038,7 +3039,7 @@ impl BrowserPanel {
                 h_flex()
                     .p(px(2.))
                     .gap(px(2.))
-                    .rounded(px(8.))
+                    .rounded(px(fluent::control(8.)))
                     .bg(theme.foreground.opacity(0.06))
                     .child(segment("browser-scheme-auto", PageScheme::Auto, "Auto", cx))
                     .child(segment(
@@ -3240,7 +3241,7 @@ impl BrowserPanel {
             .pl(px(10.))
             .pr(px(4.))
             .gap(px(7.))
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .cursor_pointer()
             .text_size(px(12.5))
             .border_1()
@@ -3248,7 +3249,7 @@ impl BrowserPanel {
                 el.bg(theme.popover)
                     .border_color(theme.border)
                     .text_color(theme.foreground)
-                    .shadow_xs()
+                    .when(!fluent::WINDOWS, |el| el.shadow_xs())
             })
             .when(!active, |el| {
                 el.border_color(transparent_black())
@@ -3285,7 +3286,7 @@ impl BrowserPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.))
+                    .rounded(px(fluent::control(5.)))
                     .when(!active, |el| {
                         el.invisible().group_hover("browser-tab", |s| s.visible())
                     })
@@ -3313,7 +3314,7 @@ impl BrowserPanel {
             .h(px(28.))
             .px(px(12.))
             .gap(px(6.))
-            .rounded(px(14.))
+            .rounded(px(fluent::control(14.)))
             .text_size(px(13.))
             .border_1();
         if self.editing {
@@ -3402,7 +3403,7 @@ impl BrowserPanel {
                         .h(px(18.))
                         .flex()
                         .items_center()
-                        .rounded(px(5.))
+                        .rounded(px(fluent::control(5.)))
                         .text_xs()
                         .text_color(muted)
                         .bg(theme.foreground.opacity(0.07))

@@ -9,6 +9,7 @@
 
 use super::IdeWorkbench;
 use super::diff_view::DiffSource;
+use crate::fluent::PillExt as _;
 use crate::palette;
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -851,7 +852,7 @@ impl ScmView {
             .child(
                 div()
                     .px(px(5.))
-                    .rounded_full()
+                    .rounded_pill()
                     .bg(theme.foreground.opacity(0.1))
                     .text_size(px(10.))
                     .child(files.len().to_string()),

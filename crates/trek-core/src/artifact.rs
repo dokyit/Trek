@@ -237,6 +237,19 @@ pub struct Theme {
     pub radius: f32,
 }
 
+/// What the theme's variables gain on Windows: its shapes and its opaque material (4 px controls,
+/// 8 px cards, flat resting cards, nothing see-through), and text on a status fill that reads against
+/// its bright dark-theme inks. Elsewhere it's nothing: a Mac card has many radii that no one value
+/// could keep, so there (and on the phone) the fallback in each `var()` is the look, which is why a
+/// page never uses these without one.
+pub fn platform_vars(windows: bool) -> &'static str {
+    if windows {
+        ";--trek-radius-control:4px;--trek-radius-surface:8px;--trek-radius-pill:4px;--trek-panel:var(--trek-bg);--trek-panel-alpha:100%;--trek-card-shadow:none;--trek-button-min-height:28px;--trek-band:color-mix(in srgb,var(--trek-fg) 5%,transparent);--trek-on-status:var(--trek-bg)"
+    } else {
+        ""
+    }
+}
+
 /// The theme as the stylesheet Trek puts first in the document: the variables on `:root`, its
 /// `color-scheme`, and quiet defaults (transparent page, Trek's font and colours, no body margin)
 /// under `:where()`, so any rule the document has wins over them.
@@ -245,7 +258,7 @@ pub fn theme_css(theme: &Theme) -> String {
     let mut css = String::new();
     let _ = write!(
         css,
-        ":root{{color-scheme:{scheme};--trek-bg:{};--trek-fg:{};--trek-muted:{};--trek-accent:{};--trek-border:{};--trek-surface:{};--trek-positive:{};--trek-warning:{};--trek-negative:{};--trek-info:{};--trek-font:{};--trek-mono:{};--trek-font-size:{}px;--trek-radius:{}px}}",
+        ":root{{color-scheme:{scheme};--trek-bg:{};--trek-fg:{};--trek-muted:{};--trek-accent:{};--trek-border:{};--trek-surface:{};--trek-positive:{};--trek-warning:{};--trek-negative:{};--trek-info:{};--trek-font:{};--trek-mono:{};--trek-font-size:{}px;--trek-radius:{}px{}}}",
         theme.background,
         theme.foreground,
         theme.muted,
@@ -260,6 +273,7 @@ pub fn theme_css(theme: &Theme) -> String {
         theme.mono,
         theme.font_size,
         theme.radius,
+        platform_vars(cfg!(windows)),
     );
     css.push_str(":where(html){background:transparent}");
     css.push_str(":where(body){margin:0;padding:12px 16px 16px;background:transparent;color:var(--trek-fg);font-family:var(--trek-font);font-size:var(--trek-font-size);line-height:1.5;-webkit-font-smoothing:antialiased}");
@@ -672,7 +686,7 @@ mod tests {
             warning: "#fb3".into(),
             negative: "#f44".into(),
             info: "#4af".into(),
-            font: "-apple-system, system-ui, sans-serif".into(),
+            font: "-apple-system, \"Segoe UI\", system-ui, sans-serif".into(),
             mono: "ui-monospace, Menlo, monospace".into(),
             font_size: 14.5,
             radius: 8.,
@@ -1242,6 +1256,44 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
                 && js.contains("--trek-accent:rgba(255,106,61,1.000)"),
             "{js}"
         );
+    }
+
+    #[test]
+    fn the_platform_sets_the_shapes_and_the_mac_leaves_each_cards_own() {
+        let windows = platform_vars(true);
+        for var in [
+            "--trek-radius-control:4px",
+            "--trek-radius-surface:8px",
+            "--trek-radius-pill:4px",
+            "--trek-panel-alpha:100%",
+            "--trek-card-shadow:none",
+        ] {
+            assert!(windows.contains(var), "{var}");
+        }
+        // Set on the Mac, any of these would override every card's fallback.
+        assert_eq!(platform_vars(false), "");
+        let css = theme_css(&theme());
+        assert!(css.contains(&format!(
+            "--trek-radius:8px{}}}",
+            platform_vars(cfg!(windows))
+        )));
+        assert_eq!(css.contains("--trek-radius-pill"), cfg!(windows));
+    }
+
+    #[test]
+    fn the_card_recipes_keep_a_fallback_for_every_shape_and_no_glass() {
+        for name in crate::skills::CARD_RECIPES {
+            let (_, md) = crate::skills::SHIPPED
+                .iter()
+                .find(|(n, _)| *n == name)
+                .expect("shipped");
+            for (at, _) in md.match_indices("var(--trek-radius-") {
+                let call = md[at..].split(')').next().unwrap_or_default();
+                assert!(call.contains(", "), "{name}: {call}");
+            }
+            assert!(md.contains("var(--trek-radius-surface, "), "{name}");
+            assert!(!md.contains("backdrop-filter"), "{name}");
+        }
     }
 
     #[test]

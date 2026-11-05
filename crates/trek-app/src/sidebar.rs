@@ -1,6 +1,7 @@
 //! Inbox sidebar. Live work and anything waiting on you sit on top as quiet cards
 //! (project · status, title, agent glyph); settled history folds into a footer grouped by project.
 
+use crate::fluent::{self, PillExt as _};
 use crate::palette;
 use crate::time;
 use crate::ui;
@@ -875,7 +876,7 @@ impl Sidebar {
                         .h(px(18.))
                         .px(px(5.))
                         .gap(px(4.))
-                        .rounded_full()
+                        .rounded_pill()
                         .bg(theme.foreground.opacity(0.07))
                         .children(
                             kid_groups(&kids)
@@ -932,7 +933,7 @@ impl Sidebar {
             .py(px(5.))
             .pl(px(ROW_INSET))
             .pr_3()
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .cursor_pointer()
             .text_sm()
             .when(selected, |el| el.bg(theme.list_active))
@@ -953,8 +954,12 @@ impl Sidebar {
     }
 
     /// A thin bar at a row's left edge while its thread is open as a tab (solid for the one on
-    /// screen): what's open, without a second list.
+    /// screen): what's open, without a second list. On Windows the one on screen has the selection
+    /// bar in its place, not as well as it.
     fn tab_mark(&self, id: &str, selected: bool, cx: &App) -> Option<AnyElement> {
+        if let Some(bar) = fluent::selection_bar(selected, cx) {
+            return Some(bar.into_any_element());
+        }
         let open = self.workspace.read(cx).tabs.iter().any(|t| t == id);
         let theme = cx.theme();
         (open || selected).then(|| {
@@ -1031,7 +1036,7 @@ impl Sidebar {
             .mx_2()
             .pl(px(ROW_INSET))
             .pr_3()
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .cursor_pointer()
             .text_sm()
             .when(selected, |el| el.bg(theme.list_active))
@@ -1144,7 +1149,7 @@ impl Sidebar {
             .mx_2()
             .pl(px(ROW_INSET))
             .pr_3()
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .cursor_pointer()
             .text_sm()
             .when(selected, |el| el.bg(theme.list_active))
@@ -1192,7 +1197,7 @@ impl Sidebar {
             .h(px(28.))
             .mt(px(8.))
             .gap_2()
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .text_xs()
             .text_color(theme.muted_foreground)
             .child(
@@ -1842,6 +1847,9 @@ impl Sidebar {
                                 .gap(px(8.))
                                 .p(px(10.))
                                 .rounded_md()
+                                .when(fluent::WINDOWS, |el| {
+                                    el.rounded(px(fluent::SURFACE_RADIUS))
+                                })
                                 .border_1()
                                 .border_color(theme.border)
                                 .child(
@@ -2798,7 +2806,7 @@ impl Render for Sidebar {
                     .px_3()
                     .py_3()
                     .gap_1()
-                    .rounded(px(10.))
+                    .rounded(px(fluent::surface(10.)))
                     .border_1()
                     .border_dashed()
                     .border_color(theme.border)
@@ -2841,7 +2849,7 @@ impl Render for Sidebar {
                     .px_3()
                     .h(px(30.))
                     .gap_2()
-                    .rounded(px(8.))
+                    .rounded(px(fluent::control(8.)))
                     .cursor_pointer()
                     .text_xs()
                     .text_color(theme.muted_foreground)

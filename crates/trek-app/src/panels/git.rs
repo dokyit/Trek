@@ -4,6 +4,7 @@
 //! merge into the base, remove the worktree. It also shows what one turn of a thread changed
 //! (`show_turn`, from the card under the turn's answer): between the checkpoints around it.
 
+use crate::fluent;
 use crate::palette;
 use crate::workspace::{TurnRange, Workspace};
 use gpui_kit::base::ScrollbarHandle;
@@ -1232,15 +1233,17 @@ impl GitPanel {
                     .id(SharedString::from(format!("gf-{}", f.path)))
                     .test_support()
                     .group("git-file")
+                    .relative()
                     .mx_1()
                     .px_2()
                     .h(px(28.))
                     .gap_2()
-                    .rounded(px(6.))
+                    .rounded(px(fluent::control(6.)))
                     .cursor_pointer()
                     .text_sm()
                     .when(is_sel, |el| el.bg(theme.list_active))
                     .when(!is_sel, |el| el.hover(|s| s.bg(theme.list_hover)))
+                    .children(fluent::selection_bar(is_sel, cx))
                     .child(
                         div()
                             .w(px(12.))

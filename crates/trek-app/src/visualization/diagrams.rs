@@ -3,6 +3,7 @@
 use super::charts::{dot, hline, vline};
 use super::layout::{Scale, flow_layout, pack};
 use super::{Frame, format_tick, inset, tone, with_unit};
+use crate::fluent::{self, PillExt as _};
 use gpui_kit::component::{StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -509,7 +510,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                 );
                 window.paint_quad(
                     fill(rect, group_fill)
-                        .corner_radii(px(10.))
+                        .corner_radii(px(fluent::surface(10.)))
                         .border_widths(px(1.))
                         .border_color(group_edge),
                 );
@@ -622,13 +623,13 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                         look.fg.opacity(if look.dark { 0.13 } else { 0.12 })
                     })
                     .bg(look.popover)
-                    .shadow(vec![BoxShadow {
+                    .shadow(fluent::card_shadow(vec![BoxShadow {
                         color: gpui_kit::black().opacity(if look.dark { 0.35 } else { 0.06 }),
                         offset: point(px(0.), px(1.)),
                         blur_radius: px(3.),
                         spread_radius: px(0.),
                         inset: false,
-                    }])
+                    }]))
                     .overflow_hidden()
                     .on_hover(frame.on_hover(v))
                     .when(toned, |el| {
@@ -734,7 +735,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                         .h(px(18.))
                         .flex()
                         .items_center()
-                        .rounded_full()
+                        .rounded_pill()
                         .border_1()
                         .border_color(look.hairline)
                         .bg(look.popover)
@@ -982,7 +983,7 @@ pub(super) fn layers(layers: &[Layer], frame: &Frame, cx: &App) -> AnyElement {
                                 .h(px(19.))
                                 .flex()
                                 .items_center()
-                                .rounded(px(5.))
+                                .rounded(px(fluent::control(5.)))
                                 .border_1()
                                 .border_color(look.hairline)
                                 .bg(look.fg.opacity(0.03))

@@ -5,6 +5,7 @@
 //! header, and a "Show N more" row past the first few. Drawn with the theme's foreground at low
 //! opacities, like the rest of the transcript, so it sits right on Night, Paper and glass alike.
 
+use crate::fluent;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -135,7 +136,7 @@ pub fn card(
                 .test_support()
                 .px(px(8.))
                 .h(px(28.))
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .flex()
                 .items_center()
                 .text_xs()
@@ -170,7 +171,7 @@ pub fn card(
         .test_support()
         .mt(px(4.))
         .mb(px(8.))
-        .rounded(px(10.))
+        .rounded(px(fluent::surface(10.)))
         .border_1()
         .border_color(theme.foreground.opacity(0.08))
         .bg(theme.secondary)
@@ -248,7 +249,7 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
         .gap(px(4.))
         .px(px(8.))
         .h(px(28.))
-        .rounded(px(6.))
+        .rounded(px(fluent::control(6.)))
         .text_size(px(12.5))
         .cursor_pointer()
         .hover(|s| s.bg(theme.foreground.opacity(0.045)))

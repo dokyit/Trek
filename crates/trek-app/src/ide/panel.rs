@@ -3,6 +3,7 @@
 //! and the agents' background tasks.
 
 use super::IdeWorkbench;
+use crate::fluent::PillExt as _;
 use crate::panels::terminal::{Job, TerminalPanel, TitleChanged};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -278,7 +279,7 @@ impl IdeWorkbench {
                         el.child(
                             div()
                                 .px(px(5.))
-                                .rounded_full()
+                                .rounded_pill()
                                 .bg(theme.foreground.opacity(0.1))
                                 .text_size(px(10.))
                                 .child(count.to_string()),
@@ -475,7 +476,7 @@ impl IdeWorkbench {
                     .child(
                         div()
                             .px(px(5.))
-                            .rounded_full()
+                            .rounded_pill()
                             .bg(theme.foreground.opacity(0.08))
                             .text_size(px(10.))
                             .child(diags.len().to_string()),

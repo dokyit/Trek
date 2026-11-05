@@ -10,6 +10,7 @@
 use super::{Device, Family, SimulatorPanel, pretty_runtime, run_simctl};
 use crate::assets::Lucide;
 use crate::composer::look;
+use crate::fluent;
 use crate::workspace::WorkspaceEvent;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::Confirm as Enter;
@@ -761,7 +762,7 @@ fn list_card(id: &'static str, cx: &App) -> Stateful<Div> {
     v_flex()
         .id(id)
         .p(px(4.))
-        .rounded(px(12.))
+        .rounded(px(fluent::surface(12.)))
         .border_1()
         .border_color(look::hairline(cx))
         .bg(look::card_fill(cx))
@@ -986,7 +987,7 @@ impl AddSheet {
         let rows = types.into_iter().enumerate().map(|(ix, t)| {
             let selected = self.device_type.as_ref() == Some(&t.id);
             let id = t.id.clone();
-            look::row(("sim-add-type", ix), selected, cx)
+            look::picked_row(("sim-add-type", ix), selected, cx)
                 .test_support()
                 .child(t.family.icon().small().text_color(muted))
                 .child(div().flex_1().min_w_0().truncate().child(t.name.clone()))
@@ -1038,7 +1039,7 @@ impl AddSheet {
             .test_support()
             .p(px(14.))
             .gap(px(8.))
-            .rounded(px(12.))
+            .rounded(px(fluent::surface(12.)))
             .bg(look::chip_fill(cx))
             .child(
                 h_flex()
@@ -1067,7 +1068,7 @@ impl AddSheet {
                 div()
                     .px(px(8.))
                     .py(px(5.))
-                    .rounded(px(7.))
+                    .rounded(px(fluent::control(7.)))
                     .bg(look::card_fill(cx))
                     .border_1()
                     .border_color(look::hairline(cx))
@@ -1548,7 +1549,7 @@ impl ManageSheet {
             .test_support()
             .px(px(9.))
             .py(px(6.))
-            .rounded(px(7.))
+            .rounded(px(fluent::control(7.)))
             .when(confirming.is_some(), |el| el.bg(fill))
             .hover(move |s| s.bg(fill))
             .child(

@@ -13,6 +13,7 @@
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 
+use crate::fluent::{self, PillExt as _};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -455,7 +456,7 @@ pub fn status_chip(card: &Card, opacity: f32, cx: &App) -> AnyElement {
         .px(px(12.))
         .gap(px(6.))
         .items_center()
-        .rounded_full()
+        .rounded_pill()
         .bg(chip_fill(cx))
         .border_1()
         .border_color(chip_border(cx))
@@ -475,9 +476,12 @@ pub fn status_chip(card: &Card, opacity: f32, cx: &App) -> AnyElement {
 /// The chips' hairline (the reference's #EBEBEB on white).
 pub fn chip_border(cx: &App) -> Hsla {
     let theme = cx.theme();
-    theme
-        .foreground
-        .opacity(if theme.mode.is_dark() { 0.12 } else { 0.085 })
+    fluent::stroke(
+        theme
+            .foreground
+            .opacity(if theme.mode.is_dark() { 0.12 } else { 0.085 }),
+        cx,
+    )
 }
 
 /// The chips' fill: the page's own colour, a touch lifted on a dark page so the pill reads.
@@ -492,13 +496,13 @@ pub fn chip_fill(cx: &App) -> Hsla {
 
 /// The chips' shadow: faint and low, as the reference's 0 1 2 rgba(0,0,0,.04).
 pub fn chip_shadow() -> Vec<BoxShadow> {
-    vec![BoxShadow {
+    fluent::card_shadow(vec![BoxShadow {
         color: hsla(0., 0., 0., 0.05),
         offset: point(px(0.), px(1.)),
         blur_radius: px(2.),
         spread_radius: px(0.),
         inset: false,
-    }]
+    }])
 }
 
 /// Whether the composer's chip shows `card` at `now_ms`.
@@ -2212,12 +2216,14 @@ struct Hue {
     /// How strongly its pills and tiles are washed with it: the reference's pale tints on a light
     /// page (#F0FDF3 behind green), more on a dark one, where a pale wash disappears.
     wash: f32,
+    /// An opaque tint to use in place of the wash (Windows' status colours).
+    tint: Option<Hsla>,
 }
 
 impl Hue {
     /// A soft pill or tile behind its text.
     fn fill(self) -> Hsla {
-        self.mark.opacity(self.wash)
+        self.tint.unwrap_or(self.mark.opacity(self.wash))
     }
     fn border(self) -> Hsla {
         self.mark.opacity(self.wash * 3.4)
@@ -2245,8 +2251,9 @@ fn hues(cx: &App) -> Hues {
         mark: rgb(mark).into(),
         text: rgb(text).into(),
         wash: if dark { 0.13 } else { 0.075 },
+        tint: None,
     };
-    if dark {
+    let reference = if dark {
         Hues {
             blue: hue(0x5AA9FF, 0x8CC2FF),
             amber: hue(0xF2A62A, 0xFFC560),
@@ -2262,6 +2269,40 @@ fn hues(cx: &App) -> Hues {
             red: hue(0xE5484D, 0xC6283D),
             purple: hue(0x8B5CF6, 0x6227AD),
         }
+    };
+    if !fluent::WINDOWS {
+        return reference;
+    }
+    // Windows puts a verdict's words on an opaque tint, from its status colours where they have the
+    // hue. Marks stay the reference's: white glyphs have to read on them, and Night's status inks
+    // are too pale for that.
+    let status = |mark: Hue, kind: fluent::Verdict| {
+        let (text, tint) = fluent::verdict(kind, cx);
+        Hue {
+            text,
+            tint: Some(tint),
+            ..mark
+        }
+    };
+    let caution = status(reference.amber, fluent::Verdict::Caution);
+    Hues {
+        blue: status(reference.blue, fluent::Verdict::Informational),
+        // Night's Caution ink is a yellow, so the reference's amber stays on its tint (7.6:1).
+        amber: if dark {
+            Hue {
+                text: reference.amber.text,
+                ..caution
+            }
+        } else {
+            caution
+        },
+        green: status(reference.green, fluent::Verdict::Success),
+        red: status(reference.red, fluent::Verdict::Critical),
+        // Windows has no purple status, so a tint of the reference's own (7.3:1, Night 7.1:1).
+        purple: Hue {
+            tint: Some(rgb(if dark { 0x33274F } else { 0xEEE8FC }).into()),
+            ..reference.purple
+        },
     }
 }
 
@@ -2305,7 +2346,17 @@ fn ink(cx: &App) -> Ink {
     } else {
         theme.background
     };
-    let band = a(0.034, 0.045);
+    let band = if fluent::WINDOWS {
+        crate::composer::look::chip_fill(cx)
+    } else {
+        a(0.034, 0.045)
+    };
+    // Windows holds grey text on the band and the pills to 4.5:1.
+    let (faint, mono) = if fluent::WINDOWS {
+        (a(0.6, 0.55), a(0.64, 0.62))
+    } else {
+        (a(0.42, 0.45), a(0.52, 0.58))
+    };
     Ink {
         fg,
         muted: theme.muted_foreground,
@@ -2315,11 +2366,11 @@ fn ink(cx: &App) -> Ink {
         band,
         pill: a(0.045, 0.075),
         lane_pill: a(0.065, 0.09),
-        hair: a(0.105, 0.12),
+        hair: fluent::stroke(a(0.105, 0.12), cx),
         card,
         surface: card.blend(band),
-        faint: a(0.42, 0.45),
-        mono: a(0.52, 0.58),
+        faint,
+        mono,
     }
 }
 
@@ -2340,7 +2391,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
         .max_w(px(CARD_W))
         .mt(px(2.))
         .mb(px(8.))
-        .rounded(px(14.))
+        .rounded(px(fluent::surface(14.)))
         .border_1()
         .border_color(ink.hair)
         .bg(ink.card)
@@ -2362,12 +2413,12 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
     }
 }
 
-/// A 22 px round tile with a 12 px glyph: the header's and the footer's lead.
+/// A 22 px tile with a 12 px glyph: the header's and the footer's lead.
 fn tile(icon: Icon, fill: Hsla, color: Hsla) -> AnyElement {
     div()
         .size(px(22.))
         .flex_none()
-        .rounded_full()
+        .rounded_pill()
         .bg(fill)
         .flex()
         .items_center()
@@ -2655,7 +2706,7 @@ fn header(
             .px(px(8.))
             .gap(px(4.))
             .items_center()
-            .rounded_full()
+            .rounded_pill()
             .bg(fill)
             .text_size(px(13.))
             .text_color(color)
@@ -3097,6 +3148,9 @@ fn pr_scene(card: &Card, w: f32, draw: f32, hue: &Hues, ink: &Ink) -> Scene {
     match phase {
         Phase::Open => p.push(pending),
         Phase::Checking => {
+            if fluent::WINDOWS {
+                p.push(pending);
+            }
             p.push(Prim::Spinner {
                 at: end,
                 r: 8.5,
@@ -3400,7 +3454,12 @@ fn pipeline_scene(
                 t: 1.,
             });
         } else {
-            let span = (x - origin.0 - 8.).min(if inline { 110. } else { 200. });
+            // Windows' bends are the reference's short ones, measured off its CI and release graphs.
+            let span = (x - origin.0 - 8.).min(if inline {
+                fluent::pick(56., 110.)
+            } else {
+                fluent::pick(63., 200.)
+            });
             lines.push(Prim::Curve {
                 a: origin,
                 b: (origin.0 + span, y),
@@ -3438,7 +3497,11 @@ fn pipeline_scene(
                 t: 1.,
             });
         } else {
-            let span = (join_x - x - 10.).min(if inline { 140. } else { 220. });
+            let span = (join_x - x - 10.).min(if inline {
+                fluent::pick(83., 140.)
+            } else {
+                fluent::pick(134., 220.)
+            });
             lines.push(Prim::Line {
                 a: (x, y),
                 b: (join_x - span, y),
@@ -3631,10 +3694,16 @@ fn pipeline_scene(
     Scene { prims: lines, live }
 }
 
+/// How far the flat band sits in from the graph's bottom edge.
+const BAND_INSET: f32 = 6.;
+
 /// How tall a card's graph is, before it's laid out (a run with many jobs grows its band).
 fn graph_height(card: &Card) -> f32 {
+    // A feather can fade behind the lower lane's label; a flat band has an edge it would run past,
+    // so on Windows the band goes on 8 px below the label. The lanes stay where they are.
+    let below_label = |bottom: f32| fluent::pick(bottom + 8. + BAND_INSET, 104.);
     match card.kind {
-        Kind::Pr => 104.,
+        Kind::Pr => below_label(86. + 15.),
         _ => {
             let publish = card.kind == Kind::Release
                 && card.stages.iter().any(is_publish)
@@ -3646,6 +3715,8 @@ fn graph_height(card: &Card) -> f32 {
                 .count();
             if k >= 4 {
                 (18. + (k - 1) as f32 * 20. + 25.).max(104.)
+            } else if k == 2 {
+                below_label(90. + 15.)
             } else {
                 104.
             }
@@ -3710,22 +3781,35 @@ fn graph(card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
     )
     .absolute()
     .inset_0();
-    // The band: no hard rectangle, a soft fill fading out over ~10 px at every edge.
-    // A shadow alone (no fill) is a rectangle blurred at every edge.
-    let band = div()
-        .absolute()
-        .left(px(25.))
-        .right(px(25.))
-        .top(px(11.))
-        .bottom(px(12.))
-        .rounded(px(6.))
-        .shadow(vec![BoxShadow {
-            color: ink.band,
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(8.),
-            spread_radius: px(0.),
-            inset: false,
-        }]);
+    let band = if fluent::WINDOWS {
+        // A flat fill over the reference's band (19, 5, 562 wide on a 600 graph). The Mac's box
+        // below is smaller only because its blur reaches out to the same edges.
+        div()
+            .absolute()
+            .left(px(19.))
+            .right(px(19.))
+            .top(px(5.))
+            .bottom(px(BAND_INSET))
+            .rounded(px(fluent::CONTROL_RADIUS))
+            .bg(ink.band)
+    } else {
+        // The band: no hard rectangle, a soft fill fading out over ~10 px at every edge.
+        // A shadow alone (no fill) is a rectangle blurred at every edge.
+        div()
+            .absolute()
+            .left(px(25.))
+            .right(px(25.))
+            .top(px(11.))
+            .bottom(px(12.))
+            .rounded(px(6.))
+            .shadow(vec![BoxShadow {
+                color: ink.band,
+                offset: point(px(0.), px(0.)),
+                blur_radius: px(8.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
+    };
     div()
         .relative()
         .w_full()
@@ -3864,7 +3948,13 @@ fn paint_scene(
                     LabelKind::Lane | LabelKind::Branch => {
                         (mono.clone(), FontWeight::NORMAL, 5., 15., 4.)
                     }
-                    LabelKind::Status => (sans.clone(), FontWeight::MEDIUM, 9., 18., 9.),
+                    LabelKind::Status => (
+                        sans.clone(),
+                        FontWeight::MEDIUM,
+                        9.,
+                        18.,
+                        fluent::control(9.),
+                    ),
                 };
                 let run = TextRun {
                     len: text.len(),
@@ -4263,9 +4353,9 @@ fn file_chip(path: &str, resolved: Option<bool>, hue: &Hues, ink: &Ink, cx: &App
         .px(px(9.))
         .gap(px(6.))
         .items_center()
-        .rounded_full()
+        .rounded_pill()
         .border_1()
-        .border_color(ink.hair.opacity(0.8))
+        .border_color(ink.hair.opacity(fluent::pick(1., 0.8)))
         .bg(ink.card)
         .text_size(px(13.))
         .when(!tag.is_empty(), |el| {
@@ -4274,7 +4364,7 @@ fn file_chip(path: &str, resolved: Option<bool>, hue: &Hues, ink: &Ink, cx: &App
                     .text_size(px(10.))
                     .font_bold()
                     .font_family(cx.theme().mono_font_family.clone())
-                    .text_color(hue.blue.text.opacity(0.8))
+                    .text_color(hue.blue.text.opacity(fluent::pick(1., 0.8)))
                     .child(tag),
             )
         })
@@ -4315,9 +4405,9 @@ fn step_chip(stage: &Stage, hue: &Hues, ink: &Ink) -> AnyElement {
         .px(px(9.))
         .gap(px(6.))
         .items_center()
-        .rounded_full()
+        .rounded_pill()
         .border_1()
-        .border_color(ink.hair.opacity(0.8))
+        .border_color(ink.hair.opacity(fluent::pick(1., 0.8)))
         .bg(ink.card)
         .text_size(px(13.))
         .child(div().text_size(px(11.)).text_color(color).child(mark))
@@ -4335,7 +4425,8 @@ fn lang_tag(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The footer's one action while it asks for a click: the page's ink as its fill.
+/// The footer's one action while it asks for a click: the page's ink as its fill, or on Windows
+/// the accent, white in both themes.
 fn dark_button(
     id: impl Into<ElementId>,
     icon: Option<crate::assets::Lucide>,
@@ -4344,20 +4435,28 @@ fn dark_button(
     ink: &Ink,
     cx: &App,
 ) -> AnyElement {
-    let (bg, fg) = (ink.fg, cx.theme().background);
+    let (bg, fg) = if fluent::WINDOWS {
+        (crate::palette::send(cx), hsla(0., 0., 1., 1.))
+    } else {
+        (ink.fg, cx.theme().background)
+    };
     h_flex()
         .id(id.into())
         .test_support()
         .aria_label(label)
         .flex_none()
-        .h(px(if icon.is_some() { 26. } else { 28. }))
+        .h(px(if icon.is_some() {
+            fluent::pick(28., 26.)
+        } else {
+            28.
+        }))
         .px(px(14.))
         .gap(px(6.))
         .items_center()
-        .rounded_full()
-        .bg(bg.opacity(0.92))
-        .hover(move |s| s.bg(bg.opacity(0.8)))
-        .active(move |s| s.bg(bg))
+        .rounded_pill()
+        .bg(bg.opacity(fluent::pick(1., 0.92)))
+        .hover(move |s| s.bg(bg.opacity(fluent::pick(0.9, 0.8))))
+        .active(move |s| s.bg(bg.opacity(fluent::pick(0.8, 1.))))
         .cursor_pointer()
         .text_size(px(13.))
         .font_medium()
@@ -4386,8 +4485,9 @@ fn light_button(
         .h(px(28.))
         .px(px(12.))
         .items_center()
-        .rounded_full()
+        .rounded_pill()
         .bg(bg)
+        .when(fluent::WINDOWS, |el| el.border_1().border_color(ink.hair))
         .hover(move |s| s.bg(fg.opacity(0.08)))
         .active(move |s| s.bg(fg.opacity(0.11)))
         .cursor_pointer()
@@ -4401,19 +4501,23 @@ fn light_button(
 /// What's left to do with something that finished well: open it on GitHub. A quiet link on its
 /// verdict's tint, with the arrow that says it leaves Trek.
 fn link_pill(id: impl Into<ElementId>, label: &'static str, hue: Hue, on_click: Act) -> AnyElement {
-    let tint = hue.mark;
+    let (rest, hover) = if fluent::WINDOWS {
+        (hue.fill(), hue.fill().blend(hue.mark.opacity(0.1)))
+    } else {
+        (hue.mark.opacity(0.09), hue.mark.opacity(0.15))
+    };
     h_flex()
         .id(id.into())
         .test_support()
         .aria_label(label)
         .flex_none()
-        .h(px(26.))
+        .h(px(fluent::pick(28., 26.)))
         .px(px(10.))
         .gap(px(3.))
         .items_center()
-        .rounded_full()
-        .bg(tint.opacity(0.09))
-        .hover(move |s| s.bg(tint.opacity(0.15)))
+        .rounded_pill()
+        .bg(rest)
+        .hover(move |s| s.bg(hover))
         .cursor_pointer()
         .text_size(px(13.))
         .font_medium()
@@ -4439,8 +4543,9 @@ fn busy_pill(id: impl Into<ElementId>, label: &'static str, ink: &Ink, cx: &App)
         .items_center()
         .h(px(28.))
         .px(px(12.))
-        .rounded_full()
+        .rounded_pill()
         .bg(ink.pill)
+        .when(fluent::WINDOWS, |el| el.border_1().border_color(ink.hair))
         .text_size(px(13.))
         .text_color(ink.muted)
         .child(ring_spinner(12., ink.muted, cx))
@@ -5082,6 +5187,7 @@ mod tests {
             mark: gpui_kit::rgb(m).into(),
             text: gpui_kit::rgb(t).into(),
             wash: 0.075,
+            tint: None,
         };
         Hues {
             blue: hue(0x4A8CF0, 0x3B5BAB),
@@ -5347,7 +5453,7 @@ mod tests {
         assert!(labels.contains(&("Publish".into(), 409., 16., Align::Center, LabelKind::Lane)));
         assert_eq!(status(&scene), Some(("Building 2 of 3".into(), 565., 17.)));
         assert!(scene.live, "a job is running");
-        assert_eq!(graph_height(&card), 104.);
+        assert_eq!(graph_height(&card), crate::fluent::pick(119., 104.));
         // Every job's node sits before the publish step.
         assert!(scene.prims.iter().all(|p| match p {
             Prim::Spinner { at, .. } => at.0 < 409. - 39.,
@@ -5435,6 +5541,35 @@ mod tests {
         assert!(ys.len() >= 6, "{ys:?}");
         assert!(ys.windows(2).all(|w| w[1] - w[0] >= 9.9), "{ys:?}");
         assert!(ys.iter().all(|y| *y + 25. <= graph_height(&card)), "{ys:?}");
+    }
+
+    /// Windows' flat band has an edge, so every label has to end short of it.
+    #[test]
+    fn the_flat_band_holds_every_label() {
+        if !crate::fluent::WINDOWS {
+            return;
+        }
+        for state in [
+            "ready",
+            "merged",
+            "release",
+            "release-published",
+            "release-failed",
+            "run-running",
+            "run-passed",
+            "run-failed",
+        ] {
+            let card = super::demo(state);
+            let scene = match card.kind {
+                Kind::Pr => pr_scene(&card, 600., 1., &hues(), &ink()),
+                _ => pipeline_scene(&card, 600., 1., &hues(), &ink(), &measure),
+            };
+            let band_bottom = graph_height(&card) - super::BAND_INSET;
+            for (text, _, y, _, kind) in texts(&scene) {
+                let h = if kind == LabelKind::Status { 18. } else { 15. };
+                assert!(y + h + 6. <= band_bottom, "{state}: {text} at {y}");
+            }
+        }
     }
 
     #[test]

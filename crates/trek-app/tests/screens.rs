@@ -74,6 +74,32 @@ fn click_after_settling(trek: &Trek, cx: &mut TestAppContext, id: &'static str) 
     trek.render(cx);
 }
 
+/// Trek's windows are opaque on Windows: Appearance offers neither glass nor art behind the whole
+/// window there, while the art for a new thread stays.
+#[test]
+fn appearance_offers_glass_and_window_wide_art_only_off_windows() {
+    run(async |cx| {
+        let trek = common::open_with(cx, |s| {
+            s.appearance.background = Some("builtin:dawn".into());
+        });
+        trek.update(cx, |ws, cx| {
+            ws.navigate(Route::Settings(SettingsPage::Appearance), cx)
+        });
+        trek.render(cx);
+        // Found, not `visible`: these sit below the fold of the settings page's scroll.
+        let (frost, everywhere, dim) = trek.window(cx, |window, _| {
+            (
+                window.try_find("glass-frost").is_some(),
+                window.try_find(("bg-place", 1usize)).is_some(),
+                window.try_find(("bg-dim", 0usize)).is_some(),
+            )
+        });
+        assert_eq!(frost, !cfg!(windows));
+        assert_eq!(everywhere, !cfg!(windows));
+        assert!(dim);
+    });
+}
+
 #[test]
 fn first_run_onboarding_from_an_empty_data_folder() {
     run(async |cx| {
@@ -89,7 +115,12 @@ fn first_run_onboarding_from_an_empty_data_folder() {
             trek.visible(cx, "ob-progress-appearance"),
             "steps with their progress"
         );
-        assert!(trek.visible(cx, "ob-glass"));
+        // Trek's windows are opaque on Windows, so there's no glass to choose.
+        assert_eq!(trek.visible(cx, "ob-glass"), !cfg!(windows));
+        assert_eq!(
+            trek.window(cx, |window, _| window.try_find("ob-frost").is_some()),
+            !cfg!(windows)
+        );
         // Quit here and the next launch picks up on this step.
         let saved = Settings::load();
         assert_eq!(saved.onboarding.step.as_deref(), Some("appearance"));

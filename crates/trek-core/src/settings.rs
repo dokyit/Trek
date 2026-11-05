@@ -1328,7 +1328,8 @@ impl Settings {
 
     /// Bring older files up to date. Font sizes were saved (13 / 14) before Trek applied them; those
     /// untouched defaults become the sizes the app actually renders at, so nothing shrinks. The
-    /// update feed pointed at a placeholder repository before releases were published.
+    /// update feed pointed at a placeholder repository before releases were published. Windows
+    /// gave up see-through windows (`keep_windows_opaque`).
     pub fn migrate(&mut self) {
         let a = &mut self.appearance;
         if a.ui_font_size == 13.0 && a.transcript_font_size == 14.0 {
@@ -1339,6 +1340,7 @@ impl Settings {
         if feed.is_empty() || feed.starts_with(RETIRED_FEED_PREFIX) {
             self.updates.feed_url = crate::update::OFFICIAL_FEED.into();
         }
+        keep_windows_opaque(self, cfg!(windows));
     }
 
     /// The file's text for these settings: values `load` couldn't read go back in unless the
@@ -1378,6 +1380,19 @@ impl Settings {
             let _ = dir.sync_all();
         }
         Ok(saved?)
+    }
+}
+
+/// On Windows a file saved with glass, or with art behind the whole window, opens opaque. The art
+/// stays chosen: it moves to the New-thread panel, which is opaque, rather than being cleared.
+fn keep_windows_opaque(s: &mut Settings, windows: bool) {
+    if !windows {
+        return;
+    }
+    let a = &mut s.appearance;
+    a.glass = false;
+    if a.background_placement == BackgroundPlacement::Everywhere {
+        a.background_placement = BackgroundPlacement::NewThread;
     }
 }
 
@@ -2137,6 +2152,50 @@ mod tests {
         s.updates.feed_url = "http://127.0.0.1:8765/{channel}.json".into();
         s.migrate();
         assert_eq!(s.updates.feed_url, "http://127.0.0.1:8765/{channel}.json");
+    }
+
+    /// Glass over the desktop, with art behind the whole window: what a file from before Windows
+    /// went opaque can hold.
+    const SEE_THROUGH: &str = "[appearance]\nbackground = \"builtin:dawn\"\nbackground_placement = \"everywhere\"\nbackground_dim = 0.2\nglass = true\nglass_tint = 0.2\n";
+
+    #[test]
+    fn a_see_through_file_opens_opaque_on_windows_and_keeps_its_art() {
+        let mut s: Settings = toml::from_str(SEE_THROUGH).unwrap();
+        keep_windows_opaque(&mut s, true);
+        let a = &s.appearance;
+        assert!(!a.glass);
+        assert_eq!(a.background_placement, BackgroundPlacement::NewThread);
+        assert_eq!(a.background.as_deref(), Some("builtin:dawn"), "not cleared");
+        assert_eq!(a.background_dim, 0.2);
+        // Saved like this, it stays like this.
+        let again: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert!(!again.appearance.glass);
+        assert_eq!(
+            again.appearance.background_placement,
+            BackgroundPlacement::NewThread
+        );
+    }
+
+    #[test]
+    fn a_see_through_file_is_left_alone_off_windows() {
+        let mut s: Settings = toml::from_str(SEE_THROUGH).unwrap();
+        keep_windows_opaque(&mut s, false);
+        let a = &s.appearance;
+        assert!(a.glass);
+        assert_eq!(a.glass_tint, 0.2);
+        assert_eq!(a.background_placement, BackgroundPlacement::Everywhere);
+        assert_eq!(a.background.as_deref(), Some("builtin:dawn"));
+    }
+
+    #[test]
+    fn a_new_windows_user_starts_opaque() {
+        let mut s = Settings::default();
+        keep_windows_opaque(&mut s, true);
+        let a = s.appearance;
+        assert_eq!(
+            (a.glass, a.background_placement, a.background),
+            (false, BackgroundPlacement::NewThread, None)
+        );
     }
 }
 

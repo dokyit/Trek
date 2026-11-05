@@ -253,85 +253,81 @@ impl ThreadWindow {
             .map(|(p, old)| (p, old.to_string()));
         let transparent = ws.see_through();
         let hub = crate::hub::shown(ws, &Scope::Thread(self.id.clone()));
-        TitleBar::new()
-            .when(transparent, |t| t.bg(gpui_kit::transparent_black()))
-            .child(
-                h_flex()
-                    .w_full()
-                    .h_full()
-                    .items_center()
-                    .gap_2()
-                    .pr_2()
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .pl_1()
-                            .gap_2()
-                            .text_sm()
-                            .overflow_hidden()
-                            .when_some(name, |el, p| {
+        crate::chrome::title_bar(transparent, cx).child(
+            h_flex()
+                .w_full()
+                .h_full()
+                .items_center()
+                .gap_2()
+                .pr_2()
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .pl_1()
+                        .gap_2()
+                        .text_sm()
+                        .overflow_hidden()
+                        .when_some(name, |el, p| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .child(crate::ui::project_badge(&p, &look, cx)),
+                            )
+                            .when(!narrow, |el| {
                                 el.child(
                                     div()
-                                        .flex_none()
-                                        .child(crate::ui::project_badge(&p, &look, cx)),
+                                        .flex_shrink_1()
+                                        .min_w(px(24.))
+                                        .truncate()
+                                        .text_color(theme.muted_foreground)
+                                        .child(p),
                                 )
-                                .when(!narrow, |el| {
-                                    el.child(
-                                        div()
-                                            .flex_shrink_1()
-                                            .min_w(px(24.))
-                                            .truncate()
-                                            .text_color(theme.muted_foreground)
-                                            .child(p),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_color(theme.muted_foreground.opacity(0.6))
-                                            .child("/"),
-                                    )
-                                })
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(theme.muted_foreground.opacity(0.6))
+                                        .child("/"),
+                                )
                             })
-                            .child(div().min_w_0().font_medium().child(crate::ui::title_text(
-                                "window-title",
-                                &title,
-                                reveal.as_ref().map(|(p, old)| (*p, old.as_str())),
-                                theme.foreground,
-                                cx,
-                            )))
-                            .when_some(worktree, |el, wt| {
-                                el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
+                        })
+                        .child(div().min_w_0().font_medium().child(crate::ui::title_text(
+                            "window-title",
+                            &title,
+                            reveal.as_ref().map(|(p, old)| (*p, old.as_str())),
+                            theme.foreground,
+                            cx,
+                        )))
+                        .when_some(worktree, |el, wt| {
+                            el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
+                        }),
+                )
+                .child(crate::chrome::no_drag(
+                    "thread-menu",
+                    crate::thread_menu::button(
+                        self.workspace.clone(),
+                        self.id.clone(),
+                        crate::thread_menu::Place::OwnWindow,
+                    ),
+                ))
+                .when(hub, |el| {
+                    el.child(crate::chrome::no_drag(
+                        "hub",
+                        crate::hub::button(self.workspace.clone(), Scope::Thread(self.id.clone())),
+                    ))
+                })
+                .when_some(settle_id, |el, id| {
+                    el.child(crate::chrome::no_drag(
+                        "settle",
+                        crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)").on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                let id = id.clone();
+                                this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
                             }),
-                    )
-                    .child(crate::chrome::no_drag(
-                        "thread-menu",
-                        crate::thread_menu::button(
-                            self.workspace.clone(),
-                            self.id.clone(),
-                            crate::thread_menu::Place::OwnWindow,
                         ),
                     ))
-                    .when(hub, |el| {
-                        el.child(crate::chrome::no_drag(
-                            "hub",
-                            crate::hub::button(
-                                self.workspace.clone(),
-                                Scope::Thread(self.id.clone()),
-                            ),
-                        ))
-                    })
-                    .when_some(settle_id, |el, id| {
-                        el.child(crate::chrome::no_drag(
-                            "settle",
-                            crate::ui::icon_button("settle", IconName::Check, "Settle (⌘E)")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let id = id.clone();
-                                    this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
-                                })),
-                        ))
-                    }),
-            )
+                }),
+        )
     }
 
     /// Open `route` in the main window and bring it forward (settings, a new thread).
@@ -464,7 +460,7 @@ impl Render for ThreadWindow {
                 div().flex_1().min_h_0().px_2().pb_2().child(
                     v_flex()
                         .size_full()
-                        .rounded(px(12.))
+                        .rounded(px(crate::fluent::surface(12.)))
                         .border_1()
                         .border_color(crate::ui::panel_border(glass, cx))
                         .bg(crate::ui::panel_bg(glass, cx))

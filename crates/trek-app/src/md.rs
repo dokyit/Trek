@@ -6,6 +6,7 @@
 //! spacing that all follow the transcript's text size (`Metrics`). Inline code stays quiet, and
 //! folders in path chips take the project's colour.
 
+use crate::fluent;
 use gpui_kit::base::Easing;
 use gpui_kit::base::text::{TextView, TextViewMotion, TextViewStyle};
 use gpui_kit::component::button::ButtonVariants as _;
@@ -148,7 +149,7 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
         .bg(theme.foreground.opacity(0.035))
         .border_1()
         .border_color(line)
-        .rounded(px(10.))
+        .rounded(px(fluent::surface(10.)))
         .px(px(14.))
         .py(px(12.))
         .text_size(m.code)
@@ -639,7 +640,7 @@ impl MarkdownPlugin for PathChips {
             .h(height)
             .px(px(5.))
             .gap(px(4.))
-            .rounded(px(5.))
+            .rounded(px(fluent::control(5.)))
             .border_1()
             .border_color(tint.edge)
             .bg(tint.fill)
