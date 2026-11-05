@@ -915,6 +915,10 @@ pub struct Appearance {
     pub glass: bool,
     /// How much of the theme's colour the glass keeps, 0.2 (clear) to 0.95 (frosted).
     pub glass_tint: f32,
+    /// Windows' one clean-up of a file from when its windows could go see-through has run
+    /// (`keep_windows_opaque`), so what's chosen from here on stays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub windows_opaque_applied: bool,
     /// The Dock icon: the cairn on Trek orange, or one of its alternatives.
     pub app_icon: AppIcon,
 }
@@ -992,6 +996,7 @@ impl Default for Appearance {
             background_dim: 0.35,
             glass: false,
             glass_tint: 0.6,
+            windows_opaque_applied: cfg!(windows),
             app_icon: AppIcon::Ember,
         }
     }
@@ -1383,13 +1388,15 @@ impl Settings {
     }
 }
 
-/// On Windows a file saved with glass, or with art behind the whole window, opens opaque. The art
-/// stays chosen: it moves to the New-thread panel, which is opaque, rather than being cleared.
+/// Windows opens opaque after the update that made that its default: a file saved with glass, or
+/// with art behind the whole window, has both put away, once. The art stays chosen, in the
+/// New-thread panel, which is opaque. Settings offers both, so choosing them again sticks.
 fn keep_windows_opaque(s: &mut Settings, windows: bool) {
-    if !windows {
+    if !windows || s.appearance.windows_opaque_applied {
         return;
     }
     let a = &mut s.appearance;
+    a.windows_opaque_applied = true;
     a.glass = false;
     if a.background_placement == BackgroundPlacement::Everywhere {
         a.background_placement = BackgroundPlacement::NewThread;
@@ -2191,10 +2198,39 @@ mod tests {
     fn a_new_windows_user_starts_opaque() {
         let mut s = Settings::default();
         keep_windows_opaque(&mut s, true);
-        let a = s.appearance;
+        assert!(!s.appearance.glass);
+        assert_ne!(
+            s.appearance.background_placement,
+            BackgroundPlacement::Everywhere
+        );
+    }
+
+    /// The clean-up runs once: glass chosen in Settings afterwards is there on the next launch.
+    #[test]
+    fn glass_chosen_on_windows_after_the_clean_up_stays() {
+        let mut s: Settings = toml::from_str(SEE_THROUGH).unwrap();
+        keep_windows_opaque(&mut s, true);
+        assert!(!s.appearance.glass);
+        s.appearance.glass = true;
+        s.appearance.background_placement = BackgroundPlacement::Everywhere;
+        let mut again: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        keep_windows_opaque(&mut again, true);
+        assert!(again.appearance.glass);
         assert_eq!(
-            (a.glass, a.background_placement, a.background),
-            (false, BackgroundPlacement::NewThread, None)
+            again.appearance.background_placement,
+            BackgroundPlacement::Everywhere
+        );
+    }
+
+    /// Off Windows the mark is never set, so a Mac's file doesn't gain a line.
+    #[test]
+    fn the_clean_up_leaves_no_mark_off_windows() {
+        let mut s: Settings = toml::from_str(SEE_THROUGH).unwrap();
+        keep_windows_opaque(&mut s, false);
+        assert!(
+            !toml::to_string_pretty(&s)
+                .unwrap()
+                .contains("windows_opaque")
         );
     }
 }
