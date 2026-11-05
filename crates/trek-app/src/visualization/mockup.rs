@@ -11,6 +11,7 @@ use trek_core::visualization::{
 };
 
 use crate::assets::Lucide;
+use crate::fluent::{self, PillExt as _};
 
 struct Mock<'a> {
     frame: &'a Frame,
@@ -49,7 +50,7 @@ pub(super) fn mockup(nodes: &[MockNode], frame: &Frame, cx: &App) -> AnyElement 
             .test_support()
             .w_full()
             .p_3()
-            .rounded(px(10.))
+            .rounded(px(fluent::surface(10.)))
             .border_1()
             .border_color(look.hairline)
             .bg(m.screen)
@@ -112,7 +113,7 @@ impl Mock<'_> {
                 .min_w(px(160.))
                 .gap_2()
                 .p_3()
-                .rounded(px(10.))
+                .rounded(px(fluent::surface(10.)))
                 .border_1()
                 .border_color(look.hairline)
                 .bg(look.fg.opacity(if look.dark { 0.03 } else { 0.015 }))
@@ -143,7 +144,7 @@ impl Mock<'_> {
                 .child(
                     v_flex()
                         .w_full()
-                        .rounded(px(9.))
+                        .rounded(px(fluent::surface(9.)))
                         .border_1()
                         .border_color(look.hairline)
                         .overflow_hidden()
@@ -257,19 +258,19 @@ impl Mock<'_> {
                     .justify_center()
                     .px(px(12.))
                     .h(px(30.))
-                    .rounded(px(8.))
+                    .rounded(px(fluent::control(8.)))
                     .text_size(px(12.))
                     .font_medium()
                     .when(primary, |el| {
                         el.bg(color)
                             .text_color(gpui_kit::white())
-                            .shadow(vec![BoxShadow {
+                            .shadow(fluent::card_shadow(vec![BoxShadow {
                                 color: color.opacity(0.3),
                                 offset: point(px(0.), px(1.)),
                                 blur_radius: px(3.),
                                 spread_radius: px(0.),
                                 inset: false,
-                            }])
+                            }]))
                     })
                     .when(neutral, |el| {
                         el.border_1()
@@ -289,7 +290,7 @@ impl Mock<'_> {
                     .gap(px(5.))
                     .px(px(8.))
                     .h(px(20.))
-                    .rounded_full()
+                    .rounded_pill()
                     .bg(color.opacity(0.12))
                     .text_size(px(10.5))
                     .font_medium()
@@ -322,7 +323,7 @@ impl Mock<'_> {
                             .h(px(32.))
                             .px(px(10.))
                             .gap(px(8.))
-                            .rounded(px(8.))
+                            .rounded(px(fluent::control(8.)))
                             .border_1()
                             .border_color(if typed.is_some() {
                                 self.color(node, cx).opacity(0.6)
@@ -368,13 +369,13 @@ impl Mock<'_> {
                                     .size(px(16.))
                                     .rounded_full()
                                     .bg(gpui_kit::white())
-                                    .shadow(vec![BoxShadow {
+                                    .shadow(fluent::card_shadow(vec![BoxShadow {
                                         color: gpui_kit::black().opacity(0.25),
                                         offset: point(px(0.), px(1.)),
                                         blur_radius: px(2.),
                                         spread_radius: px(0.),
                                         inset: false,
-                                    }]),
+                                    }])),
                             ),
                     )
                     .into_any_element()
@@ -450,7 +451,7 @@ impl Mock<'_> {
                     .items_center()
                     .justify_center()
                     .gap(px(6.))
-                    .rounded(px(9.))
+                    .rounded(px(fluent::surface(9.)))
                     .border_1()
                     .border_color(look.grid)
                     .bg(linear_gradient(
@@ -484,22 +485,25 @@ impl Mock<'_> {
         self.frames.set(ix + 1);
         let title = node.text.clone();
         let content = v_flex().w_full().gap_3().children(self.children(node, cx));
-        let shadow = vec![
-            BoxShadow {
-                color: gpui_kit::black().opacity(if look.dark { 0.5 } else { 0.12 }),
-                offset: point(px(0.), px(12.)),
-                blur_radius: px(32.),
-                spread_radius: px(-8.),
-                inset: false,
-            },
-            BoxShadow {
-                color: gpui_kit::black().opacity(if look.dark { 0.4 } else { 0.06 }),
-                offset: point(px(0.), px(2.)),
-                blur_radius: px(6.),
-                spread_radius: px(0.),
-                inset: false,
-            },
-        ];
+        let shadow = fluent::flyout_shadow(
+            vec![
+                BoxShadow {
+                    color: gpui_kit::black().opacity(if look.dark { 0.5 } else { 0.12 }),
+                    offset: point(px(0.), px(12.)),
+                    blur_radius: px(32.),
+                    spread_radius: px(-8.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(if look.dark { 0.4 } else { 0.06 }),
+                    offset: point(px(0.), px(2.)),
+                    blur_radius: px(6.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+            ],
+            cx,
+        );
         let lights = || {
             h_flex()
                 .gap(px(6.))
@@ -643,7 +647,7 @@ impl Mock<'_> {
                                     .px(px(10.))
                                     .gap(px(6.))
                                     .justify_center()
-                                    .rounded(px(7.))
+                                    .rounded(px(fluent::control(7.)))
                                     .bg(look.fg.opacity(0.06))
                                     .child(
                                         Icon::new(Lucide::Lock)
@@ -676,7 +680,7 @@ impl Mock<'_> {
                     });
                 v_flex()
                     .w_full()
-                    .rounded(px(11.))
+                    .rounded(px(fluent::surface(11.)))
                     .border_1()
                     .border_color(look.fg.opacity(if look.dark { 0.14 } else { 0.12 }))
                     .bg(self.screen)

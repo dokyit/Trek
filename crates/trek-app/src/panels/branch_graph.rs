@@ -4,8 +4,10 @@
 //! breathing while one runs, violet once it has landed. It draws on over about half a second so
 //! the shape of the work reads at a glance, and holds still when motion is off.
 
+use crate::fluent;
 use crate::palette;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Instant;
 use trek_core::worktree::MergeBlock;
@@ -335,7 +337,8 @@ pub fn card(args: GraphArgs, cx: &App) -> AnyElement {
         .mx_3()
         .mt_2()
         .mb_1()
-        .rounded_md()
+        .when(!fluent::WINDOWS, |el| el.rounded_md())
+        .when(fluent::WINDOWS, |el| el.rounded(px(fluent::SURFACE_RADIUS)))
         .border_1()
         .border_color(theme.border)
         .bg(theme.secondary.opacity(0.4))

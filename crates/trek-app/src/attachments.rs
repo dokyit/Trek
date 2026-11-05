@@ -2,6 +2,7 @@
 //! saving clipboard image data (and converting image files agents can't read) to disk, and the
 //! thumbnail strip above the prompt (a click previews them; see `image_preview`).
 
+use crate::fluent::{self, PillExt as _};
 use crate::mentions;
 use crate::workspace::WorkspaceEvent;
 use anyhow::{Context as _, Result, bail};
@@ -417,7 +418,7 @@ pub fn thumbnails(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
-    let radius = size * (10. / 56.);
+    let radius = px(fluent::control((size * (10. / 56.)).as_f32()));
     let all: std::rc::Rc<[PathBuf]> = paths.into();
     h_flex()
         .gap_2()
@@ -468,7 +469,7 @@ pub fn thumbnails(
                         .top(px(3.))
                         .right(px(3.))
                         .size(px(18.))
-                        .rounded_full()
+                        .rounded_pill()
                         .flex()
                         .items_center()
                         .justify_center()

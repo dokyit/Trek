@@ -27,6 +27,7 @@ use trek_core::visualization::{
 };
 
 use crate::assets::Lucide;
+use crate::fluent;
 
 const PLUGIN: &str = "trek-visualization";
 /// How long marks take to arrive the first time a visualization is drawn.
@@ -615,7 +616,7 @@ pub fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
         .id(id)
         .relative()
         .w_full()
-        .rounded(px(12.))
+        .rounded(px(fluent::surface(12.)))
         .border_1()
         .border_color(look.hairline)
         // Raised off the column: a step lighter at night, the paper itself by day.
@@ -625,38 +626,41 @@ pub fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
             theme.background
         })
         .when(!look.dark, |el| {
-            el.shadow(vec![BoxShadow {
+            el.shadow(fluent::card_shadow(vec![BoxShadow {
                 color: gpui_kit::black().opacity(0.04),
                 offset: point(px(0.), px(1.)),
                 blur_radius: px(2.),
                 spread_radius: px(0.),
                 inset: false,
-            }])
+            }]))
         })
         .overflow_hidden()
-        // The light a glass pane catches: a bright rim and a sheen fading down from it.
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(1.))
-                .bg(sheen_top),
-        )
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .h(px(64.))
-                .bg(linear_gradient(
-                    180.,
-                    linear_color_stop(sheen, 0.),
-                    linear_color_stop(sheen.opacity(0.), 1.),
-                )),
-        )
+        // The light a glass pane catches: a bright rim and a sheen fading down from it. Windows'
+        // panes are opaque, so its card has neither.
+        .when(!fluent::WINDOWS, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(1.))
+                    .bg(sheen_top),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(64.))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(sheen, 0.),
+                        linear_color_stop(sheen.opacity(0.), 1.),
+                    )),
+            )
+        })
 }
 
 /// The title row: what it is, its name, and what can be done with it; the summary runs the full
@@ -683,7 +687,7 @@ pub fn header(
                     div()
                         .flex_none()
                         .size(px(22.))
-                        .rounded(px(6.))
+                        .rounded(px(fluent::control(6.)))
                         .border_1()
                         .border_color(look.hairline)
                         .bg(look.inset)
@@ -1152,7 +1156,7 @@ fn invalid(
                 .gap(px(8.))
                 .px(px(8.))
                 .py(px(6.))
-                .rounded(px(8.))
+                .rounded(px(fluent::control(8.)))
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().list_hover))
                 .text_size(px(12.))
@@ -1214,7 +1218,7 @@ fn view_switch(frame: &Frame, showing_data: bool, cx: &App) -> AnyElement {
             .h(px(20.))
             .flex()
             .items_center()
-            .rounded(px(5.))
+            .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 5.)))
             .text_size(px(11.))
             .cursor_pointer()
             .when(active, |el| {
@@ -1246,7 +1250,7 @@ fn view_switch(frame: &Frame, showing_data: bool, cx: &App) -> AnyElement {
         .mr_1()
         .p(px(2.))
         .gap(px(1.))
-        .rounded(px(7.))
+        .rounded(px(fluent::control(7.)))
         .bg(look.fg.opacity(0.055))
         .child(segment("Chart", !showing_data, false))
         .child(segment("Data", showing_data, true))
@@ -1272,7 +1276,7 @@ fn copy_button(
         .px(px(5.))
         .gap(px(4.))
         .justify_center()
-        .rounded(px(6.))
+        .rounded(px(fluent::control(6.)))
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .child(Icon::new(icon).size(px(13.)).text_color(muted))
@@ -1290,7 +1294,7 @@ fn copy_button(
 }
 
 /// A floating readout: the top layer, over the plot.
-pub(super) fn readout(look: &Look) -> Div {
+pub(super) fn readout(look: &Look, cx: &App) -> Div {
     v_flex()
         .gap(px(3.))
         .px(px(10.))
@@ -1299,29 +1303,32 @@ pub(super) fn readout(look: &Look) -> Div {
         .border_1()
         .border_color(look.fg.opacity(if look.dark { 0.14 } else { 0.10 }))
         .bg(look.popover)
-        .shadow(vec![
-            BoxShadow {
-                color: gpui_kit::black().opacity(if look.dark { 0.45 } else { 0.10 }),
-                offset: point(px(0.), px(6.)),
-                blur_radius: px(18.),
-                spread_radius: px(-4.),
-                inset: false,
-            },
-            BoxShadow {
-                color: gpui_kit::black().opacity(if look.dark { 0.3 } else { 0.05 }),
-                offset: point(px(0.), px(1.)),
-                blur_radius: px(3.),
-                spread_radius: px(0.),
-                inset: false,
-            },
-        ])
+        .shadow(fluent::flyout_shadow(
+            vec![
+                BoxShadow {
+                    color: gpui_kit::black().opacity(if look.dark { 0.45 } else { 0.10 }),
+                    offset: point(px(0.), px(6.)),
+                    blur_radius: px(18.),
+                    spread_radius: px(-4.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(if look.dark { 0.3 } else { 0.05 }),
+                    offset: point(px(0.), px(1.)),
+                    blur_radius: px(3.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+            ],
+            cx,
+        ))
         .text_size(px(11.5))
 }
 
 /// The inset surface marks sit on.
 pub fn inset(look: &Look) -> Div {
     div()
-        .rounded(px(9.))
+        .rounded(px(fluent::surface(9.)))
         .border_1()
         .border_color(look.fg.opacity(if look.dark { 0.05 } else { 0.06 }))
         .bg(look.inset)

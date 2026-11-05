@@ -5,6 +5,7 @@
 
 use super::clone::{self, IgnoredFile, Scheme};
 use super::{CloneStage, PairLink, Pairing};
+use crate::fluent;
 use crate::ui;
 use crate::workspace::{Route, SettingsPage, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -611,7 +612,7 @@ impl Render for CloneSheet {
                     el.child(
                         v_flex()
                             .p(px(8.))
-                            .rounded(px(6.))
+                            .rounded(px(fluent::control(6.)))
                             .bg(theme.foreground.opacity(0.05))
                             .font_family(theme.mono_font_family.clone())
                             .text_size(px(11.5))

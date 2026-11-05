@@ -2,6 +2,7 @@
 //! 48 px rail), and the view they pick: Explorer, Search or Source Control.
 
 use super::IdeWorkbench;
+use crate::fluent::{self, PillExt as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -93,7 +94,7 @@ impl IdeWorkbench {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.))
+                    .rounded(px(fluent::control(6.)))
                     .cursor_pointer()
                     .when(on, |el| el.bg(theme.foreground.opacity(0.08)))
                     .when(!on, |el| el.hover(|s| s.bg(theme.foreground.opacity(0.05))))
@@ -111,7 +112,7 @@ impl IdeWorkbench {
                                 .min_w(px(14.))
                                 .h(px(13.))
                                 .px(px(3.))
-                                .rounded_full()
+                                .rounded_pill()
                                 .bg(ember)
                                 .flex()
                                 .items_center()

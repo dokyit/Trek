@@ -52,7 +52,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
       <br><br>
       <img src="docs/assets/screenshots/windows/thread-night.png" alt="Trek on Windows: a finished answer in the Night theme">
       <br>
-      <sub>Tray icon, taskbar badge, toasts, Mica.</sub>
+      <sub>Tray icon, taskbar badge, toasts.</sub>
     </td>
   </tr>
 </table>
@@ -238,7 +238,7 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 - Dictation is Windows' own (Win+H). Snapshots go through Snipping Tool.
 - No iOS Simulator tool.
 - The first time the phone server is on, allow Trek through Windows Firewall on private networks.
-- Windows 10 22H2 works on a best-effort basis, with an opaque window instead of Mica.
+- Windows 10 22H2 works on a best-effort basis.
 - Keep Trek out of folders that Controlled folder access guards (Documents, Desktop…), or updates can't install. Settings › Updates can move it.
 - Logs: `%LOCALAPPDATA%\Trek\logs`.
 

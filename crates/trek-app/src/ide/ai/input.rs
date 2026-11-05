@@ -20,6 +20,7 @@ use super::context::{self, ContextChip};
 use super::restore::{self, Files};
 use crate::attachments::{self, Attaching, Outbox};
 use crate::composer::{PickerHost, Pickers, pickers};
+use crate::fluent::{self, PillExt as _};
 use crate::palette;
 use crate::ui::{self, Pill};
 use crate::workspace::{ChatMode, Scope, Workspace, WorkspaceEvent};
@@ -738,7 +739,7 @@ impl AiInput {
                 .pr(px(3.))
                 .gap(px(4.))
                 .items_center()
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .border_1()
                 .border_color(line)
                 .bg(theme.foreground.opacity(0.04))
@@ -892,7 +893,7 @@ impl AiInput {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .border_1()
                 .border_color(line)
                 .cursor_pointer()
@@ -1152,7 +1153,7 @@ impl Render for AiInput {
                 .test_support()
                 .size(px(24.))
                 .flex_none()
-                .rounded_full()
+                .rounded_pill()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1225,7 +1226,7 @@ impl Render for AiInput {
             .w_full()
             .p(px(8.))
             .gap(px(7.))
-            .rounded(px(10.))
+            .rounded(px(fluent::surface(10.)))
             .border_1()
             .border_color(border)
             .bg(if glass {
@@ -1284,7 +1285,7 @@ impl Render for AiInput {
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .rounded(px(6.))
+                            .rounded(px(fluent::control(6.)))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.foreground.opacity(0.07)))
                             .tooltip(|window, cx| {

@@ -3,6 +3,7 @@
 //! Undo is off while a turn runs (it would race the agent) and gone outside git; Undo all asks
 //! to be pressed again before it goes ahead.
 
+use crate::fluent;
 use crate::palette;
 use crate::workspace::Workspace;
 use gpui_kit::component::{ActiveTheme as _, h_flex};
@@ -45,7 +46,7 @@ pub fn pending_bar(
             .px(px(6.))
             .h(px(22.))
             .items_center()
-            .rounded(px(5.))
+            .rounded(px(fluent::control(5.)))
             .cursor_pointer()
             .hover(|s| {
                 s.bg(theme.foreground.opacity(0.06))
@@ -148,7 +149,7 @@ pub fn pending_bar(
                     .px(px(8.))
                     .h(px(22.))
                     .items_center()
-                    .rounded(px(5.))
+                    .rounded(px(fluent::control(5.)))
                     .cursor_pointer()
                     .bg(ember)
                     .text_color(gpui_kit::white())

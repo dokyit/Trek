@@ -7,6 +7,7 @@
 //! something to install) and on Settings > Agents: one row per agent with installed → latest and
 //! an Update button, MonoCode's harness updates in Trek's design.
 
+use crate::fluent;
 use crate::workspace::{Hold, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
@@ -626,7 +627,7 @@ fn row(
             .h(px(24.))
             .px(px(8.))
             .gap(px(6.))
-            .rounded(px(6.))
+            .rounded(px(fluent::control(6.)))
             .bg(theme.foreground.opacity(0.05))
             .text_size(px(12.5))
             .child(Spinner::new().xsmall().color(muted))
@@ -638,7 +639,7 @@ fn row(
             .h(px(24.))
             .px(px(8.))
             .gap(px(5.))
-            .rounded(px(6.))
+            .rounded(px(fluent::control(6.)))
             .bg(theme.foreground.opacity(0.05))
             .text_size(px(12.5))
             .text_color(muted)

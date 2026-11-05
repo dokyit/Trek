@@ -13,6 +13,7 @@
 //! 12 ms at its size in points), four times a second while the picture is unfolded: the window
 //! is drawn from its own buffer, so what covers it doesn't show.
 
+use crate::fluent;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -581,7 +582,9 @@ impl Render for Pip {
         let m = self.model.read(cx);
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
-        let card = theme.background.opacity(0.94);
+        let card = theme
+            .background
+            .opacity(if fluent::WINDOWS { 1. } else { 0.94 });
         let live = crate::palette::emerald(cx);
         let accent = theme.primary;
         let Some(s) = m.current() else {
@@ -615,7 +618,7 @@ impl Render for Pip {
                 .id(id)
                 .flex_none()
                 .size(px(22.))
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -628,7 +631,7 @@ impl Render for Pip {
         };
         let shell = div()
             .size_full()
-            .rounded(px(12.))
+            .rounded(px(fluent::surface(12.)))
             .bg(card)
             .border_1()
             .border_color(border)
@@ -639,7 +642,8 @@ impl Render for Pip {
             let model = model.clone();
             return shell
                 .id("background-use-pill")
-                .rounded_full()
+                // It still floats, so Windows keeps a card's corners rather than a chip's.
+                .when(!fluent::WINDOWS, |el| el.rounded_full())
                 .child(
                     h_flex()
                         .size_full()

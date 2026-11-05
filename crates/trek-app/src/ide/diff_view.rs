@@ -11,6 +11,7 @@
 //! with `git diff`. They're read again when the review moves or files change.
 
 use super::IdeWorkbench;
+use crate::fluent;
 use crate::palette;
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -876,7 +877,7 @@ impl DiffView {
                 .px(px(7.))
                 .gap(px(4.))
                 .items_center()
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .cursor_pointer()
         };
         let split = self.split;

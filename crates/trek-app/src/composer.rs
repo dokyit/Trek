@@ -5,6 +5,7 @@
 use crate::TogglePlan;
 use crate::attachments::{self, Attaching, Outbox};
 use crate::dictate;
+use crate::fluent::{self, PillExt as _};
 use crate::mentions::{self, PickKind};
 use crate::palette;
 use crate::screenclip;
@@ -1362,7 +1363,7 @@ impl Composer {
                 .px(px(8.))
                 .flex()
                 .items_center()
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .cursor_pointer()
                 .text_color(if strong {
                     theme.foreground
@@ -1492,7 +1493,7 @@ impl Composer {
                 .id("limit-bar")
                 .test_support()
                 .mx(px(12.))
-                .rounded_t(px(12.))
+                .rounded_t(px(fluent::surface(12.)))
                 .border_1()
                 .border_b_0()
                 .border_color(amber.opacity(0.28))
@@ -2227,14 +2228,13 @@ impl Composer {
         let me = cx.entity();
         let theme = cx.theme().clone();
         let restate = self.restate;
-        gpui_kit::component::button::Button::new("attach")
-            .ghost()
+        look::quiet_button(gpui_kit::component::button::Button::new("attach"), cx)
             // A 30 px circle on the chips' fill.
             .with_size(px(look::CONTROL))
             .w(px(look::CONTROL))
             .h(px(look::CONTROL))
             .p_0()
-            .rounded(px(look::CONTROL / 2.))
+            .rounded(px(fluent::control(look::CONTROL / 2.)))
             .bg(look::chip_fill(cx))
             // A child, not `.icon()`: the kit sizes an icon to 3/4 of its button.
             .child(
@@ -2701,7 +2701,7 @@ impl Composer {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(7.))
+                    .rounded(px(fluent::control(7.)))
                     .cursor_pointer()
                     .when(active, |el| el.bg(look::pressed(cx)))
                     .hover(|s| s.bg(look::chip_fill(cx)))
@@ -2862,7 +2862,7 @@ impl Composer {
                     let on = current
                         .as_ref()
                         .is_some_and(|j| j.agent == agent && same_model(&j.model, &m.id));
-                    look::row(
+                    look::picked_row(
                         SharedString::from(format!("consult-judge-{}-{}", agent.key(), m.id)),
                         on,
                         cx,
@@ -2900,7 +2900,7 @@ impl Composer {
                 look::surface(cx)
                     .w(px(170.))
                     .children(efforts.into_iter().map(|e| {
-                        look::row(
+                        look::picked_row(
                             SharedString::from(format!("consult-eff-{}", e.as_str())),
                             e == current,
                             cx,
@@ -2961,7 +2961,7 @@ impl Composer {
                 div()
                     .when(i > 0, |el| el.ml(px(-5.)))
                     .p(px(1.))
-                    .rounded(px(5.))
+                    .rounded(px(fluent::control(5.)))
                     .bg(look::card_fill(cx))
                     .child(ui::agent_logo(&c.agent, px(14.), cx))
             },
@@ -3077,6 +3077,10 @@ impl Composer {
                 .min_w(px(280.))
                 .max_h(px(360.))
                 .scrollable(true)
+                // As the design has it, and the check no longer takes the icons' column.
+                .when(fluent::WINDOWS, |menu| {
+                    menu.check_side(gpui_kit::component::Side::Right)
+                })
                 .item(
                     PopupMenuItem::new("No project")
                         .checked(project.is_none())
@@ -3089,19 +3093,22 @@ impl Composer {
             for (name, path) in projects.clone() {
                 let ws = ws_entity.clone();
                 let checked = project.as_ref() == Some(&path);
-                menu = menu.item(PopupMenuItem::new(name).checked(checked).on_click(
-                    move |_, _, cx| {
-                        let path = path.clone();
-                        ws.update(cx, |ws, cx| {
-                            ws.navigate(
-                                Route::Draft {
-                                    project: Some(path),
-                                },
-                                cx,
-                            )
-                        })
-                    },
-                ));
+                menu = menu.item(
+                    PopupMenuItem::new(name)
+                        .when(fluent::WINDOWS, |item| item.icon(IconName::Folder))
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let path = path.clone();
+                            ws.update(cx, |ws, cx| {
+                                ws.navigate(
+                                    Route::Draft {
+                                        project: Some(path),
+                                    },
+                                    cx,
+                                )
+                            })
+                        }),
+                );
             }
             let ws = ws_entity.clone();
             let c = composer.clone();
@@ -3209,7 +3216,7 @@ impl Composer {
                 .h(px(look::CONTROL))
                 .px(px(9.))
                 .gap(px(6.))
-                .rounded_full()
+                .rounded_pill()
                 .text_size(px(look::LABEL))
                 .text_color(theme.muted_foreground)
         };
@@ -3356,6 +3363,9 @@ impl Composer {
                             .min_w(px(220.))
                             .max_h(px(320.))
                             .scrollable(true)
+                            .when(fluent::WINDOWS, |menu| {
+                                menu.check_side(gpui_kit::component::Side::Right)
+                            })
                             .label(blocked.clone().unwrap_or_else(|| "Switch branch".into()));
                         for b in branches.clone() {
                             let (ws, cwd) = (ws_entity.clone(), cwd.clone());
@@ -3393,29 +3403,29 @@ impl Composer {
                         .gap(px(2.))
                         .child(branch)
                         .child(
-                            gpui_kit::component::button::Button::new("changes-to-git")
-                                .ghost()
-                                .small()
-                                .h(px(look::CONTROL))
-                                .rounded(px(look::CONTROL / 2.))
-                                .child(
-                                    h_flex()
-                                        .gap(px(5.))
-                                        .text_size(px(look::LABEL))
-                                        .text_color(muted)
-                                        .child(
-                                            Icon::new(crate::assets::Lucide::GitCompare).xsmall(),
-                                        )
-                                        .child(s),
-                                )
-                                .tooltip("Source control")
-                                .on_click(move |_, _, cx| {
-                                    ws.update(cx, |_, cx| {
-                                        cx.emit(crate::workspace::WorkspaceEvent::OpenTool(
-                                            crate::workspace::PanelTool::Git,
-                                        ))
-                                    })
-                                }),
+                            look::quiet_button(
+                                gpui_kit::component::button::Button::new("changes-to-git"),
+                                cx,
+                            )
+                            .small()
+                            .h(px(look::CONTROL))
+                            .rounded(px(fluent::control(look::CONTROL / 2.)))
+                            .child(
+                                h_flex()
+                                    .gap(px(5.))
+                                    .text_size(px(look::LABEL))
+                                    .text_color(muted)
+                                    .child(Icon::new(crate::assets::Lucide::GitCompare).xsmall())
+                                    .child(s),
+                            )
+                            .tooltip("Source control")
+                            .on_click(move |_, _, cx| {
+                                ws.update(cx, |_, cx| {
+                                    cx.emit(crate::workspace::WorkspaceEvent::OpenTool(
+                                        crate::workspace::PanelTool::Git,
+                                    ))
+                                })
+                            }),
                         )
                         .into_any_element()
                 })
@@ -3759,8 +3769,14 @@ impl Render for Composer {
         // Voice mode: the waveform, ✕ and ✓ in place of the toolbar.
         let voice_row = self.voice.active().then(|| {
             let finishing = self.voice.phase == voice::Phase::Finishing;
-            // `#EDEDED`, a shade darker under the pointer.
-            let (rest, hover) = (look::pressed(cx), theme.foreground.opacity(0.12));
+            // `#EDEDED`, a shade darker under the pointer. Night's rest is already firmer than 0.12,
+            // so there the hover needs to go past it to be seen.
+            let hover = if fluent::WINDOWS && theme.mode.is_dark() {
+                0.18
+            } else {
+                0.12
+            };
+            let (rest, hover) = (look::pressed(cx), theme.foreground.opacity(hover));
             let cancel = square("voice-cancel")
                 .test_support()
                 .cursor_pointer()
@@ -3863,7 +3879,7 @@ impl Render for Composer {
             .rounded(px(look::RADIUS))
             .bg(if glass { look::card_fill(cx).opacity(0.82) } else { look::card_fill(cx) })
             .border_1()
-            .border_color(if hh == HandHolding::FullAccess { palette::amber(cx).opacity(0.3) } else { look::hairline(cx) })
+            .border_color(if hh == HandHolding::FullAccess { palette::amber(cx).opacity(0.3) } else if fluent::WINDOWS && prefs.effort == Effort::Max { blue } else { look::ring(cx) })
             .shadow(look::card_shadow(cx))
             // Context row (threads): checkout, branch, activity (a study session has no branch to speak of).
             .when(!is_draft && (!session || preparing || updating.is_some()), |el| {
@@ -4510,11 +4526,11 @@ fn changes_chip(
         .px(px(12.))
         .gap(px(6.))
         .items_center()
-        .rounded_full()
+        .rounded_pill()
         .bg(crate::pr_card::chip_fill(cx))
         .border_1()
         .border_color(crate::pr_card::chip_border(cx))
-        .shadow(crate::pr_card::chip_shadow())
+        .shadow(fluent::card_shadow(crate::pr_card::chip_shadow()))
         .cursor_pointer()
         .hover(|s| s.border_color(theme.foreground.opacity(0.16)))
         .text_size(px(13.))
@@ -4558,7 +4574,12 @@ fn dark_chip(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
-    let (fg, bg) = (theme.background, theme.foreground);
+    // The page's ink is the Mac's primary fill; Windows' is the accent, as the send button's.
+    let (fg, bg) = if fluent::WINDOWS {
+        (gpui_kit::white(), palette::send(cx))
+    } else {
+        (theme.background, theme.foreground)
+    };
     h_flex()
         .id(id)
         .test_support()
@@ -4568,12 +4589,13 @@ fn dark_chip(
         .px(px(12.))
         .gap(px(6.))
         .items_center()
-        .rounded_full()
-        .bg(bg.opacity(0.92))
+        .rounded_pill()
+        .bg(bg.opacity(fluent::pick(1., 0.92)))
         .when(!busy, |el| {
-            el.hover(move |s| s.bg(bg.opacity(0.8))).cursor_pointer()
+            el.hover(move |s| s.bg(bg.opacity(fluent::pick(0.9, 0.8))))
+                .cursor_pointer()
         })
-        .shadow(crate::pr_card::chip_shadow())
+        .shadow(fluent::card_shadow(crate::pr_card::chip_shadow()))
         .text_size(px(13.))
         .font_medium()
         .text_color(fg)

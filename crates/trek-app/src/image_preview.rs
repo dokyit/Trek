@@ -11,6 +11,7 @@
 //! motion.dev's layoutId does it): thumbnails carry a `thumb` that says where they're drawn.
 //! Without one on screen it fades in and out instead.
 
+use crate::fluent::{self, PillExt as _};
 use crate::ui;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -744,14 +745,19 @@ impl ImagePreview {
             .invisible()
             .group_hover("preview", |s| s.visible())
             .size(px(36.))
-            .rounded_full()
+            .rounded_pill()
             .flex()
             .items_center()
             .justify_center()
-            .bg(theme.popover.opacity(0.92))
+            .bg(theme
+                .popover
+                .opacity(if fluent::WINDOWS { 1. } else { 0.92 }))
             .border_1()
             .border_color(theme.foreground.opacity(0.1))
-            .shadow_md()
+            .when(!fluent::WINDOWS, |el| el.shadow_md())
+            .when(fluent::WINDOWS, |el| {
+                el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+            })
             .text_color(theme.foreground.opacity(0.8))
             .cursor_pointer()
             .hover(|s| s.text_color(theme.foreground).bg(theme.popover))
@@ -875,7 +881,7 @@ impl ImagePreview {
                             .test_support()
                             .size(px(THUMB))
                             .flex_none()
-                            .rounded(px(7.))
+                            .rounded(px(fluent::control(7.)))
                             .overflow_hidden()
                             .border_1()
                             .border_color(theme.foreground.opacity(if on { 0.85 } else { 0.1 }))
@@ -907,14 +913,20 @@ impl ImagePreview {
             .foreground
             .opacity(if theme.mode.is_dark() { 0.08 } else { 0.06 });
         let under = theme.foreground.opacity(0.03);
-        fn frame<E: Styled>(el: E, edge: Hsla, under: Hsla) -> E {
-            el.rounded(px(6.))
+        fn frame<E: Styled>(el: E, (edge, under, flyout): (Hsla, Hsla, Vec<BoxShadow>)) -> E {
+            let el = el
+                .rounded(px(fluent::surface(6.)))
                 .overflow_hidden()
                 .border_1()
                 .border_color(edge)
-                .shadow_lg()
-                .bg(under)
+                .bg(under);
+            if fluent::WINDOWS {
+                el.shadow(flyout)
+            } else {
+                el.shadow_lg()
+            }
         }
+        let look = (edge, under, fluent::flyout_shadow(Vec::new(), cx));
         let Some(layout) = Layout::of(
             item,
             s.items.len(),
@@ -959,7 +971,7 @@ impl ImagePreview {
                 .track_scroll(&self.scroll)
                 .child(
                     div().relative().w(content.width).h(content.height).child(
-                        frame(div().id("preview-image").test_support(), edge, under)
+                        frame(div().id("preview-image").test_support(), look)
                             .absolute()
                             .left(at.origin.x)
                             .top(at.origin.y)
@@ -997,14 +1009,14 @@ impl ImagePreview {
             }
         };
         let moving = t < 1.;
-        frame(div().id("preview-image").test_support(), edge, under)
+        frame(div().id("preview-image").test_support(), look)
             .absolute()
             .left(at.origin.x)
             .top(at.origin.y)
             .w(at.size.width)
             .h(at.size.height)
             .when(moving && s.from.is_some(), |el| {
-                el.rounded(px(crate::motion::lerp(10., 6., t)))
+                el.rounded(px(fluent::surface(crate::motion::lerp(10., 6., t))))
             })
             .when(layout.zoomable(), |el| el.cursor_pointer())
             .child(

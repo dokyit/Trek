@@ -4,6 +4,7 @@
 //! then the other machines this one drives (`machines`), with "Add a machine…".
 
 use super::SettingsView;
+use crate::fluent;
 use crate::palette;
 use crate::ui;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -24,7 +25,7 @@ pub(crate) fn qr(url: &str, module: f32) -> AnyElement {
     v_flex()
         .p(px(module * 4.))
         .bg(gpui_kit::white())
-        .rounded(px(10.))
+        .rounded(px(fluent::surface(10.)))
         .children(colors.chunks(width).map(|row| {
             h_flex().children(row.iter().map(|c| {
                 div()
@@ -98,7 +99,7 @@ impl SettingsView {
                 .test_support()
                 .gap(px(28.))
                 .p(px(20.))
-                .rounded(px(12.))
+                .rounded(px(fluent::surface(12.)))
                 .border_1()
                 .border_color(theme.border)
                 .items_start()
@@ -116,7 +117,7 @@ impl SettingsView {
                             div()
                                 .px(px(10.))
                                 .py(px(6.))
-                                .rounded(px(7.))
+                                .rounded(px(fluent::control(7.)))
                                 .bg(theme.foreground.opacity(0.06))
                                 .font_family(theme.mono_font_family.clone())
                                 .text_size(px(12.))
@@ -291,7 +292,7 @@ impl SettingsView {
                         .test_support()
                         .gap(px(28.))
                         .p(px(20.))
-                        .rounded(px(12.))
+                        .rounded(px(fluent::surface(12.)))
                         .border_1()
                         .border_color(theme.border)
                         .items_start()
@@ -341,7 +342,7 @@ impl SettingsView {
                                                         .min_w_0()
                                                         .px(px(8.))
                                                         .py(px(5.))
-                                                        .rounded(px(6.))
+                                                        .rounded(px(fluent::control(6.)))
                                                         .bg(theme.foreground.opacity(0.06))
                                                         .font_family(theme.mono_font_family.clone())
                                                         .text_size(px(11.))

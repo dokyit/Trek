@@ -2,6 +2,7 @@
 //! and a soft shadow, 30 px round chips on a quiet fill, a blue send, and menus that float as
 //! cards of their own. Every colour comes from the theme (or `palette`), so Night follows Paper.
 
+use crate::fluent::{self, PillExt as _};
 use crate::palette;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -13,7 +14,7 @@ pub const CONTROL: f32 = 30.;
 /// The card's padding, all round.
 pub const PAD: f32 = 13.;
 /// The card's corner radius.
-pub const RADIUS: f32 = 18.;
+pub const RADIUS: f32 = fluent::surface(18.);
 /// Between toolbar controls.
 pub const GAP: f32 = 5.;
 /// A chip's label, in px.
@@ -64,46 +65,54 @@ pub fn hairline(cx: &App) -> Hsla {
         .opacity(if dark(cx) { 0.1 } else { 0.06 })
 }
 
+/// The ring round the card or a menu itself. [`hairline`] stays as it is for the rules inside them.
+pub fn ring(cx: &App) -> Hsla {
+    fluent::stroke(hairline(cx), cx)
+}
+
 /// The card's soft drop shadow (0 4 16, 3.5 % black).
 pub fn card_shadow(cx: &App) -> Vec<BoxShadow> {
-    vec![BoxShadow {
+    fluent::card_shadow(vec![BoxShadow {
         color: hsla(0., 0., 0., if dark(cx) { 0.35 } else { 0.05 }),
         offset: point(px(0.), px(4.)),
         blur_radius: px(16.),
         spread_radius: px(0.),
         inset: false,
-    }]
+    }])
 }
 
 /// A menu's shadow: the card's, a touch firmer, so it reads over the card it overlaps.
 pub fn menu_shadow(cx: &App) -> Vec<BoxShadow> {
     let a = if dark(cx) { 0.4 } else { 0.07 };
-    vec![
-        BoxShadow {
-            color: hsla(0., 0., 0., a),
-            offset: point(px(0.), px(4.)),
-            blur_radius: px(16.),
-            spread_radius: px(0.),
-            inset: false,
-        },
-        BoxShadow {
-            color: hsla(0., 0., 0., a * 0.5),
-            offset: point(px(0.), px(1.)),
-            blur_radius: px(3.),
-            spread_radius: px(0.),
-            inset: false,
-        },
-    ]
+    fluent::flyout_shadow(
+        vec![
+            BoxShadow {
+                color: hsla(0., 0., 0., a),
+                offset: point(px(0.), px(4.)),
+                blur_radius: px(16.),
+                spread_radius: px(0.),
+                inset: false,
+            },
+            BoxShadow {
+                color: hsla(0., 0., 0., a * 0.5),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(3.),
+                spread_radius: px(0.),
+                inset: false,
+            },
+        ],
+        cx,
+    )
 }
 
 /// A menu over the composer: the card's fill, hairline and shadow, radius 14, rows inset 4.
 pub fn surface(cx: &App) -> Div {
     v_flex()
         .p(px(4.))
-        .rounded(px(14.))
+        .rounded(px(fluent::surface(14.)))
         .bg(card_fill(cx))
         .border_1()
-        .border_color(hairline(cx))
+        .border_color(ring(cx))
         .shadow(menu_shadow(cx))
         .text_size(px(13.))
         .text_color(cx.theme().foreground)
@@ -117,11 +126,56 @@ pub fn row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Div> {
         .px(px(9.))
         .min_h(px(28.))
         .gap(px(8.))
-        .rounded(px(7.))
+        .rounded(px(fluent::control(7.)))
         .text_size(px(13.))
         .cursor_pointer()
         .when(active, |el| el.bg(fill))
         .hover(move |s| s.bg(fill))
+}
+
+/// A [`row`] that can be the one chosen. Not for a row lit because its side menu is open: that's
+/// [`row`]'s `active`, and Windows' accent bar would say it was picked. Windows starts these rows
+/// further in, or the bar beside an effort's signal reads as one more of its bars.
+pub fn picked_row(id: impl Into<ElementId>, selected: bool, cx: &App) -> Stateful<Div> {
+    row(id, selected, cx)
+        .relative()
+        .when(fluent::WINDOWS, |el| el.pl(px(12.)))
+        .children(fluent::selection_bar(selected, cx))
+}
+
+/// A menu row's leading icon. Windows gives it the width of [`effort_bars`], so the labels of rows
+/// with either one start at the same x.
+pub fn row_icon(icon: impl IntoElement) -> AnyElement {
+    if fluent::WINDOWS {
+        div()
+            .w(px(16.))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .child(icon)
+            .into_any_element()
+    } else {
+        icon.into_any_element()
+    }
+}
+
+/// A kit button with no chrome of its own, for a chip. Windows sets its hover and pressed fills
+/// to the chips': the kit's ghost hover is a wash of accent that in Night sits darker than a chip's
+/// fill, and all but vanishes on the bare card.
+pub fn quiet_button(
+    button: gpui_kit::component::button::Button,
+    cx: &App,
+) -> gpui_kit::component::button::Button {
+    use gpui_kit::component::button::{ButtonCustomVariant, ButtonVariants as _};
+    if fluent::WINDOWS {
+        button.custom(
+            ButtonCustomVariant::new(cx)
+                .hover(chip_hover(cx))
+                .active(pressed(cx)),
+        )
+    } else {
+        button.ghost()
+    }
 }
 
 /// A kit button (a menu's trigger) as a toolbar chip: 30 px round pill on the chips' fill,
@@ -132,14 +186,12 @@ pub fn chip_button(
     cx: &App,
 ) -> gpui_kit::component::button::Button {
     use gpui_kit::component::Sizable as _;
-    use gpui_kit::component::button::ButtonVariants as _;
     let fill = chip_fill(cx);
-    button
-        .ghost()
+    quiet_button(button, cx)
         .small()
         .h(px(CONTROL))
         .px(px(11.))
-        .rounded(px(CONTROL / 2.))
+        .rounded(px(fluent::control(CONTROL / 2.)))
         .bg(fill)
         .child(
             h_flex()
@@ -156,7 +208,7 @@ pub fn circle(id: impl Into<ElementId>) -> Stateful<Div> {
         .id(id)
         .size(px(CONTROL))
         .flex_none()
-        .rounded_full()
+        .rounded_pill()
         .flex()
         .items_center()
         .justify_center()
@@ -172,13 +224,18 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
-    let thumb = card_fill(cx);
+    // Night's card is darker than the track on it, which would sink the thumb Paper raises.
+    let thumb = if fluent::WINDOWS && dark(cx) {
+        pressed(cx)
+    } else {
+        card_fill(cx)
+    };
     let ring = theme.foreground.opacity(if dark(cx) { 0.12 } else { 0.07 });
     h_flex()
         .h(px(CONTROL))
         .p(px(2.))
         .gap(px(2.))
-        .rounded_full()
+        .rounded_pill()
         .bg(chip_fill(cx))
         .children(
             options
@@ -194,20 +251,26 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
                         .px(px(11.))
                         .flex()
                         .items_center()
-                        .rounded_full()
+                        .map(|el| {
+                            if fluent::WINDOWS {
+                                el.rounded(px(fluent::THUMB_RADIUS))
+                            } else {
+                                el.rounded_full()
+                            }
+                        })
                         .text_size(px(LABEL))
                         .cursor_pointer()
                         .when(selected, |el| {
                             el.bg(thumb)
                                 .border_1()
                                 .border_color(ring)
-                                .shadow(vec![BoxShadow {
+                                .shadow(fluent::card_shadow(vec![BoxShadow {
                                     color: hsla(0., 0., 0., 0.05),
                                     offset: point(px(0.), px(1.)),
                                     blur_radius: px(2.),
                                     spread_radius: px(0.),
                                     inset: false,
-                                }])
+                                }]))
                                 .text_color(theme.foreground)
                                 .font_weight(FontWeight::MEDIUM)
                         })

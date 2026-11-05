@@ -5,6 +5,7 @@
 
 use super::Onboarding;
 use crate::composer::look;
+use crate::fluent;
 use crate::permissions::Permission;
 use gpui_kit::component::{ActiveTheme as _, IconName, h_flex, v_flex};
 use gpui_kit::*;
@@ -75,7 +76,7 @@ impl Render for DragHelper {
             .size_full()
             .p(px(14.))
             .gap(px(14.))
-            .rounded(px(16.))
+            .rounded(px(fluent::surface(16.)))
             .bg(look::card_fill(cx))
             .border_1()
             .border_color(look::hairline(cx))
@@ -109,7 +110,7 @@ impl Render for DragHelper {
                     .flex_none()
                     .self_start()
                     .p(px(4.))
-                    .rounded(px(6.))
+                    .rounded(px(fluent::control(6.)))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.foreground.opacity(0.06)))
                     .child(

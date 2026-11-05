@@ -1,6 +1,7 @@
 //! Worktree pieces shared by the sidebar, the title bars, the composer and the Git tool: the
 //! branch chip, and the confirmations before a worktree goes (each says what would be lost).
 
+use crate::fluent;
 use crate::palette;
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -34,7 +35,7 @@ pub fn branch_chip(id: impl Into<ElementId>, wt: &Worktree, cx: &App) -> AnyElem
         .h(px(20.))
         .px(px(6.))
         .gap(px(4.))
-        .rounded(px(6.))
+        .rounded(px(fluent::control(6.)))
         .bg(theme.foreground.opacity(0.06))
         .text_xs()
         .text_color(if missing {

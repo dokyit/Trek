@@ -3,12 +3,14 @@
 //! the composer is its own view (`working_bar`).
 
 use crate::activity::{Place, ToolKind, kind_icon, placement, summarize, tool_kind};
+use crate::fluent;
 use crate::palette;
+use crate::thinking_timeline as timeline;
 use crate::workspace::{ForkAt, ItemRef, Scope, Workspace, WorkspaceEvent};
 use crate::workspace::{LineageRow, TaskState, ThreadState};
 use gpui_kit::component::StyledExt as _;
-use gpui_kit::component::button::Button;
 use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::component::button::{Button, ButtonCustomVariant};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
@@ -73,6 +75,9 @@ enum Row {
         running: bool,
         open: bool,
         tools: Vec<Row>,
+        /// The thought streaming right after its calls, which has no row of its own yet: the
+        /// timeline shows where it has got to.
+        live_thought: Option<usize>,
     },
     /// A sub-agent: one Trek runs as a thread of its own (`delegate_task`), or the agent's own
     /// (Claude's Task, Codex's agents). `open`: its answer shows in full.
@@ -1354,6 +1359,7 @@ impl ThreadView {
                 Slot::Group(members) => {
                     let ix = members[0];
                     let key: SharedString = ids[ix].clone().into();
+                    let live_thought = thought_after(&live.items, live.reasoning, &members);
                     let mut kinds = Vec::with_capacity(members.len());
                     let mut running = false;
                     let tools: Vec<Row> = members
@@ -1418,6 +1424,7 @@ impl ThreadView {
                         kind: tool_kinds.last().copied().unwrap_or(ToolKind::Thought),
                         running,
                         tools,
+                        live_thought,
                     }
                 }
                 Slot::Item(ix) => {
@@ -1493,6 +1500,194 @@ impl ThreadView {
             .join("\n\n")
     }
 
+    /// One step of an open group's timeline. It draws from its item where the item lies: only a
+    /// call's output, once opened, is copied, so long outputs cost a frame nothing until then.
+    fn timeline_step(
+        row: &Row,
+        rail: timeline::Rail,
+        row_ix: usize,
+        view: &WeakEntity<ThreadView>,
+        at: &RowContext,
+        cx: &mut App,
+    ) -> AnyElement {
+        let md = match row {
+            Row::Reasoning {
+                ix,
+                key,
+                open: true,
+            } => view
+                .update(cx, |this, cx| this.markdown(key, 0, *ix, cx))
+                .ok()
+                .flatten(),
+            _ => None,
+        };
+        let cx: &App = cx;
+        let Some(live) = at.workspace.read(cx).live.get(&at.thread) else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let still = !at.pulse;
+        // A step's line, with room for its hover fill either side of the text.
+        let line = |el: Stateful<Div>, clickable: bool, key: &SharedString| {
+            el.test_support()
+                .mx(px(-6.))
+                .px(px(6.))
+                .rounded(px(fluent::CONTROL_RADIUS))
+                .when(clickable, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| s.bg(theme.list_hover))
+                        .on_click(toggle_row(view.clone(), key.clone(), row_ix))
+                })
+        };
+        match (row, live.items.get(row.item())) {
+            (Row::Reasoning { ix, key, open }, Some(_)) => {
+                timeline::step(rail, timeline::Mark::Dot, at.clock, still, cx)
+                    .pb(px(timeline::step_bottom(false, rail.below)))
+                    .child(
+                        v_flex()
+                            .child(
+                                line(h_flex().id(("reasoning", *ix)), true, key)
+                                    .h(px(timeline::LINE))
+                                    .gap_1()
+                                    .text_size(px(timeline::TEXT_SIZE))
+                                    .text_color(muted)
+                                    .child(div().child("Thought"))
+                                    .child(
+                                        Icon::new(if *open {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .xsmall()
+                                        .opacity(CHEVRON),
+                                    ),
+                            )
+                            .when_some(md.filter(|_| *open), |el, md| {
+                                el.child(div().pt_1().child(crate::md::thought(
+                                    &md,
+                                    at.cwd.clone(),
+                                    at.folder,
+                                    at.text_size * 0.93,
+                                    cx,
+                                )))
+                            }),
+                    )
+                    .into_any_element()
+            }
+            (
+                Row::Tool {
+                    ix,
+                    key,
+                    open,
+                    activity,
+                },
+                Some(Item::Tool {
+                    id: tool_id,
+                    title,
+                    detail,
+                    output,
+                    status,
+                }),
+            ) => {
+                let kind = tool_kind(title);
+                let chips = timeline::chips(kind, *status, detail, output);
+                let words = timeline::wording(title, detail, activity.as_deref());
+                let running = *status == ToolStatus::Running;
+                // Its chips say what a read, a change or a fetch was of; a search's are what it
+                // found, under what it looked for.
+                let detail = if !chips.is_empty() && kind != ToolKind::Search {
+                    ""
+                } else {
+                    words.detail
+                };
+                let has_output = !output.is_empty();
+                let lines = live
+                    .lines
+                    .get(tool_id)
+                    .copied()
+                    .filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied));
+                // The step under way is at full foreground; the rest in the theme's muted ink.
+                let (ink, sweep) = if running {
+                    (theme.foreground, muted)
+                } else {
+                    (muted, theme.foreground)
+                };
+                timeline::step(rail, timeline::mark(kind, *status), at.clock, still, cx)
+                    .pb(px(timeline::step_bottom(!chips.is_empty(), rail.below)))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(
+                                line(v_flex().id(("tool", *ix)), has_output, key)
+                                    .child(
+                                        h_flex()
+                                            .h(px(timeline::LINE))
+                                            .gap_2()
+                                            .text_size(px(timeline::TEXT_SIZE))
+                                            .text_color(ink)
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .max_w(relative(0.5))
+                                                    .truncate()
+                                                    .child(crate::working_bar::shimmer(
+                                                        words.label.to_string().into(),
+                                                        at.clock,
+                                                        still || !running,
+                                                        ink,
+                                                        sweep,
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .when(words.code, |el| {
+                                                        el.font_family(
+                                                            theme.mono_font_family.clone(),
+                                                        )
+                                                    })
+                                                    .text_xs()
+                                                    .child(detail.to_string()),
+                                            )
+                                            .when_some(lines, |el, (a, r)| {
+                                                el.child(crate::working_bar::lines_chip(a, r, cx))
+                                            }),
+                                    )
+                                    .children(timeline::source_chips(
+                                        &chips,
+                                        *ix,
+                                        &at.workspace,
+                                        &at.thread,
+                                        cx,
+                                    )),
+                            )
+                            .when(*open && has_output, |el| {
+                                el.child(
+                                    div()
+                                        .id(("tool-out", *ix))
+                                        .test_support()
+                                        .mt_1()
+                                        .max_h(px(260.))
+                                        .overflow_y_scroll()
+                                        .p_3()
+                                        .rounded(px(fluent::surface(theme.radius.as_f32())))
+                                        .bg(theme.muted)
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_xs()
+                                        .whitespace_normal()
+                                        .child(output.clone()),
+                                )
+                            }),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
+    }
+
     /// One transcript row. `row_ix` is its place in the list (tool rows inside a group pass the
     /// group's); `flash` tints it for a moment after a search result scrolled to it.
     fn render_row(
@@ -1525,6 +1720,27 @@ impl ThreadView {
             _ => None,
         };
         let children: Vec<AnyElement> = match &row {
+            Row::ToolGroup {
+                open: true,
+                tools,
+                running,
+                live_thought,
+                ..
+            } if fluent::WINDOWS => {
+                let more_after = live_thought.is_some()
+                    || group_state(tools, *running, at, cx) == timeline::GroupState::Finished;
+                tools
+                    .iter()
+                    .enumerate()
+                    .map(|(n, t)| {
+                        let rail = timeline::Rail {
+                            above: n > 0,
+                            below: n + 1 < tools.len() || more_after,
+                        };
+                        Self::timeline_step(t, rail, row_ix, view, at, cx)
+                    })
+                    .collect()
+            }
             Row::ToolGroup {
                 open: true, tools, ..
             } => tools
@@ -1588,8 +1804,12 @@ impl ThreadView {
                         .right(px(-12.))
                         .bg(tint);
                     let band = band
-                        .rounded_t(px(if reaches_up { 10. } else { 0. }))
-                        .rounded_b(px(if reaches_down { 10. } else { 0. }));
+                        .rounded_t(px(if reaches_up { fluent::surface(10.) } else { 0. }))
+                        .rounded_b(px(if reaches_down {
+                            fluent::surface(10.)
+                        } else {
+                            0.
+                        }));
                     let band = if animate {
                         band.with_animation(("reveal", seq), Animation::new(FLASH), |el, t| {
                             el.opacity(1. - ((t - 0.45) / 0.55).clamp(0., 1.))
@@ -1604,23 +1824,7 @@ impl ThreadView {
             };
             h_flex().w_full().justify_center().px_6().child(el)
         };
-        let toggle = move |key: SharedString| {
-            let view = view.clone();
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                let _ = view.update(cx, |this, cx| {
-                    if !this.expanded.remove(key.as_ref()) {
-                        this.expanded.insert(key.to_string());
-                    }
-                    this.expanded_gen += 1;
-                    this.scroller
-                        .update(cx, |s, cx| _ = s.remeasure_items(row_ix..row_ix + 1, cx));
-                    // An opened sub-agent's activity shimmers at the working bar's rate.
-                    let live = this.workspace.read(cx).any_task_live_in(&this.scope);
-                    this.sync_ticker(live, cx);
-                    cx.notify();
-                });
-            }
-        };
+        let toggle = move |key: SharedString| toggle_row(view.clone(), key, row_ix);
         let ends_turn = trek_core::rewind::ends_turn(&item);
         // The confirmation open on this row, if any.
         let asking = view.upgrade().and_then(|v| {
@@ -1636,6 +1840,7 @@ impl ThreadView {
                 .xsmall()
                 .icon(icon.text_color(muted))
                 .tooltip(tooltip)
+                .map(control_button)
         };
         let live = at.workspace.read(cx).live.get(&at.thread);
         // A tooltip, with why the files won't be restored when they won't (message `pos`).
@@ -1992,6 +2197,7 @@ impl ThreadView {
                                 Button::new(("copy-user", ix))
                                     .ghost()
                                     .xsmall()
+                                    .map(control_button)
                                     .icon(Icon::new(IconName::Copy).text_color(muted))
                                     .tooltip("Copy message")
                                     .on_click(move |_, window, cx| {
@@ -2033,7 +2239,7 @@ impl ThreadView {
                                                 px(64.),
                                                 px(220.),
                                             ))
-                                            .rounded(px(12.))
+                                            .rounded(px(fluent::surface(12.)))
                                             .overflow_hidden()
                                             .border_1()
                                             .border_color(theme.border)
@@ -2065,8 +2271,12 @@ impl ThreadView {
                                         .px(px(16.))
                                         .py(px(10.))
                                         .gap_1()
-                                        .rounded(px(18.))
+                                        .rounded(px(fluent::surface(18.)))
                                         .bg(theme.secondary)
+                                        .when(fluent::WINDOWS, |el| {
+                                            el.border_1()
+                                                .border_color(fluent::stroke(theme.border, cx))
+                                        })
                                         .text_size(text_size)
                                         .line_height(relative(1.5))
                                         .map(|el| match &intro {
@@ -2242,7 +2452,7 @@ impl ThreadView {
                         .child(
                             Button::new(("restate-yes", ix))
                                 .small()
-                                .primary()
+                                .map(|b| go_button(b, false, cx))
                                 .label("That's right — go ahead")
                                 .on_click(move |_, _, cx| {
                                     let thread = thread2.clone();
@@ -2253,6 +2463,7 @@ impl ThreadView {
                             Button::new(("restate-no", ix))
                                 .small()
                                 .ghost()
+                                .map(card_button)
                                 .label("Not quite…")
                                 .on_click(move |_, _, cx| {
                                     let (scope, thread) = (scope.clone(), thread.clone());
@@ -2357,6 +2568,7 @@ impl ThreadView {
                                 Button::new(("copy-turn", ix))
                                     .ghost()
                                     .xsmall()
+                                    .map(control_button)
                                     .icon(Icon::new(IconName::Copy).text_color(muted))
                                     .tooltip("Copy response")
                                     .on_click(move |_, window, cx| {
@@ -2374,7 +2586,7 @@ impl ThreadView {
                             .when(took_secs >= 1, |el| {
                                 el.child(
                                     div()
-                                        .text_color(muted.opacity(0.7))
+                                        .text_color(muted.opacity(fluent::pick(1., 0.7)))
                                         .child(format!("· {}", crate::time::took(took_secs))),
                                 )
                             })
@@ -2478,6 +2690,129 @@ impl ThreadView {
                     }),
             )
             .into_any_element(),
+            // Open on Windows, a group draws as its timeline: the summary line stays for it closed.
+            (
+                Row::ToolGroup {
+                    ix,
+                    key,
+                    summary,
+                    running,
+                    open: true,
+                    tools,
+                    live_thought,
+                    ..
+                },
+                _,
+            ) if fluent::WINDOWS => {
+                let state = group_state(&tools, running, at, cx);
+                let thought_secs = live.and_then(|l| {
+                    timeline::thought_total(tools.iter().filter_map(|t| {
+                        match t {
+                            Row::Reasoning { key, .. } => Some(
+                                l.thought
+                                    .get(key.as_ref())
+                                    .map(|(a, b)| b.saturating_duration_since(*a)),
+                            ),
+                            _ => None,
+                        }
+                    }))
+                });
+                // The turn's clock, when it's also this group's.
+                let elapsed = live
+                    .filter(|l| at.busy && timeline::opens_turn(&l.items, ix))
+                    .and_then(|l| l.turn_started)
+                    .map(|t| crate::time::elapsed(t.elapsed()));
+                let still = !at.pulse;
+                let words: AnyElement = match timeline::header_words(state, &summary, thought_secs)
+                {
+                    timeline::Words::Thinking => h_flex()
+                        .gap_2()
+                        .child(crate::working_bar::shimmer(
+                            "Thinking".into(),
+                            at.clock,
+                            still,
+                            theme.foreground,
+                            muted,
+                        ))
+                        .children(elapsed.map(|e| div().flex_none().child(e)))
+                        .into_any_element(),
+                    timeline::Words::ThoughtFor(secs) => div()
+                        .child(format!(
+                            "Thought for {}",
+                            crate::time::took(secs.min(u32::MAX as u64) as u32)
+                        ))
+                        .into_any_element(),
+                    timeline::Words::Summary(s) => div()
+                        .min_w_0()
+                        .truncate()
+                        .child(s.to_string())
+                        .into_any_element(),
+                };
+                let thinking = live_thought.and_then(|t| match live?.items.get(t)? {
+                    Item::Reasoning { text } => Some(
+                        timeline::thought_line(text)
+                            .unwrap_or("Thinking")
+                            .to_string(),
+                    ),
+                    _ => None,
+                });
+                let finished = state == timeline::GroupState::Finished && thinking.is_none();
+                column(
+                    v_flex()
+                        .py(px(3.))
+                        .child(
+                            h_flex()
+                                .id(("tool-group", ix))
+                                .test_support()
+                                .relative()
+                                .h(px(timeline::LINE))
+                                .mb(px(timeline::GAP))
+                                .pl(px(timeline::TEXT_X))
+                                .gap_2()
+                                .text_size(px(timeline::TEXT_SIZE))
+                                .text_color(muted)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(theme.foreground))
+                                .child(timeline::chevron(cx))
+                                .child(words)
+                                .on_click(toggle(key.clone())),
+                        )
+                        .children(children)
+                        .when_some(thinking, |el, line| {
+                            let rail = timeline::Rail {
+                                above: !tools.is_empty(),
+                                below: false,
+                            };
+                            el.child(
+                                timeline::step(rail, timeline::Mark::Running, at.clock, still, cx)
+                                    .child(
+                                        div()
+                                            .id(("live-thought", ix))
+                                            .test_support()
+                                            .h(px(timeline::LINE))
+                                            .line_height(px(timeline::LINE))
+                                            .text_size(px(timeline::TEXT_SIZE))
+                                            .truncate()
+                                            .child(crate::working_bar::shimmer(
+                                                line.into(),
+                                                at.clock,
+                                                still,
+                                                theme.foreground,
+                                                muted,
+                                            )),
+                                    ),
+                            )
+                        })
+                        .when(finished, |el| {
+                            el.child(
+                                timeline::finished(cx)
+                                    .id(("tool-group-finished", ix))
+                                    .test_support(),
+                            )
+                        }),
+                )
+                .into_any_element()
+            }
             (
                 Row::ToolGroup {
                     ix,
@@ -2519,7 +2854,7 @@ impl ThreadView {
                                         IconName::ChevronRight
                                     })
                                     .xsmall()
-                                    .opacity(0.6),
+                                    .opacity(CHEVRON),
                                 )
                                 .on_click(toggle(key.clone())),
                         )
@@ -2606,7 +2941,7 @@ impl ThreadView {
                             .gap_2()
                             .px_2()
                             .py_1()
-                            .rounded(theme.radius)
+                            .rounded(px(fluent::control(theme.radius.as_f32())))
                             .text_sm()
                             .when(has_output, |el| {
                                 el.cursor_pointer()
@@ -2624,15 +2959,20 @@ impl ThreadView {
                             )
                             // A file read or changed sits in a chip of its type's colour.
                             .map(|el| match file {
-                                Some(f) => el.child(div().flex_1().min_w_0().flex().child(
-                                    crate::file_icon::chip(
-                                        ("tool-file", ix),
-                                        &f,
-                                        detail.clone(),
-                                        px(11.5),
-                                        cx,
+                                Some(f) => el.child(
+                                    div().flex_1().min_w_0().flex().child(
+                                        crate::file_icon::chip(
+                                            ("tool-file", ix),
+                                            &f,
+                                            detail.clone(),
+                                            px(11.5),
+                                            cx,
+                                        )
+                                        .when(fluent::WINDOWS, |el| {
+                                            el.rounded(px(fluent::CONTROL_RADIUS))
+                                        }),
                                     ),
-                                )),
+                                ),
                                 None => el.child(
                                     div()
                                         .flex_1()
@@ -2661,7 +3001,7 @@ impl ThreadView {
                                 .max_h(px(260.))
                                 .overflow_y_scroll()
                                 .p_3()
-                                .rounded(theme.radius)
+                                .rounded(px(fluent::surface(theme.radius.as_f32())))
                                 .bg(theme.muted)
                                 .font_family(theme.mono_font_family.clone())
                                 .text_xs()
@@ -2732,6 +3072,7 @@ impl ThreadView {
                     Button::new(("subagent-open", ix))
                         .ghost()
                         .xsmall()
+                        .map(control_button)
                         .icon(
                             Icon::new(crate::assets::Lucide::SquareArrowOutUpRight)
                                 .text_color(muted),
@@ -2768,7 +3109,7 @@ impl ThreadView {
                                 .px(px(8.))
                                 .py(px(6.))
                                 .mx(px(-8.))
-                                .rounded(px(8.))
+                                .rounded(px(fluent::control(8.)))
                                 .when(expandable, |el| {
                                     el.cursor_pointer()
                                         .hover(|s| s.bg(theme.list_hover))
@@ -2871,7 +3212,7 @@ impl ThreadView {
                                     IconName::ChevronRight
                                 })
                                 .xsmall()
-                                .opacity(0.6),
+                                .opacity(CHEVRON),
                             )
                             .on_click(toggle(key.clone())),
                     )
@@ -2925,10 +3266,14 @@ impl ThreadView {
                             div()
                                 .px_3()
                                 .py_2()
-                                .rounded(theme.radius)
+                                .rounded(px(fluent::surface(theme.radius.as_f32())))
                                 .border_1()
-                                .border_color(palette::red(cx).opacity(0.5))
-                                .bg(palette::red(cx).opacity(0.08))
+                                .border_color(fluent::stroke(palette::red(cx).opacity(0.5), cx))
+                                .bg(if fluent::WINDOWS {
+                                    fluent::verdict(fluent::Verdict::Critical, cx).1
+                                } else {
+                                    palette::red(cx).opacity(0.08)
+                                })
                                 .text_sm()
                                 .child(text),
                         )
@@ -3123,7 +3468,7 @@ impl ThreadView {
                                     .px(px(8.))
                                     .py(px(6.))
                                     .mx(px(-8.))
-                                    .rounded(px(8.))
+                                    .rounded(px(fluent::control(8.)))
                                     .tooltip(move |window, cx| {
                                         gpui_kit::component::tooltip::Tooltip::new(tip)
                                             .build(window, cx)
@@ -3185,7 +3530,7 @@ impl ThreadView {
                                 .gap(px(8.))
                                 .px_2()
                                 .py_2()
-                                .rounded(px(6.))
+                                .rounded(px(fluent::control(6.)))
                                 .text_xs()
                                 .text_color(muted)
                                 .tooltip(move |window, cx| {
@@ -3524,13 +3869,14 @@ impl ThreadView {
                         Button::new("confirm-cancel")
                             .small()
                             .ghost()
+                            .map(card_button)
                             .label("Cancel")
                             .on_click(cx.listener(|this, _, _, cx| this.close_confirm(cx))),
                     )
                     .child(
                         Button::new("confirm-go")
                             .small()
-                            .primary()
+                            .map(|b| go_button(b, false, cx))
                             .label(action)
                             .on_click(cx.listener(|this, _, _, cx| this.run_confirm(cx))),
                     ),
@@ -3648,7 +3994,12 @@ impl ThreadView {
             .collect::<Vec<_>>()
             .into_iter();
         let theme = cx.theme().clone();
-        let ember = palette::ember(cx);
+        // One accent on Windows: the selection bar and the card's primary button wear `send`.
+        let accent = if fluent::WINDOWS {
+            palette::send(cx)
+        } else {
+            palette::ember(cx)
+        };
         let complete = self.card_answers(&request_id, &questions, cx).is_some();
         let picks = self
             .workspace
@@ -3699,20 +4050,22 @@ impl ThreadView {
                         h_flex()
                             .id(SharedString::from(format!("q-{request_id}-{qi}-{oi}")))
                             .test_support()
+                            .relative()
                             .px(px(10.))
                             .py(px(7.))
                             .gap(px(10.))
                             .items_start()
-                            .rounded(px(8.))
+                            .rounded(px(fluent::control(8.)))
                             .border_1()
                             .border_color(if on {
-                                ember.opacity(0.7)
+                                accent.opacity(0.7)
                             } else {
                                 theme.foreground.opacity(0.1)
                             })
-                            .when(on, |el| el.bg(ember.opacity(0.08)))
+                            .when(on, |el| el.bg(accent.opacity(0.08)))
                             .when(!on, |el| el.hover(|s| s.bg(theme.foreground.opacity(0.04))))
                             .cursor_pointer()
+                            .children(fluent::selection_bar(on, cx))
                             .child(
                                 div()
                                     .mt(px(3.))
@@ -3722,7 +4075,7 @@ impl ThreadView {
                                     .when(multi, |el| el.rounded(px(3.)))
                                     .border_1()
                                     .border_color(if on {
-                                        ember
+                                        accent
                                     } else {
                                         theme.foreground.opacity(0.3)
                                     })
@@ -3735,7 +4088,7 @@ impl ThreadView {
                                                 .size(px(7.))
                                                 .when(!multi, |d| d.rounded_full())
                                                 .when(multi, |d| d.rounded(px(1.)))
-                                                .bg(ember),
+                                                .bg(accent),
                                         )
                                     }),
                             )
@@ -3774,7 +4127,13 @@ impl ThreadView {
                             })
                     }))
                     .when_some(q.secret.then(|| fields.next()).flatten(), |el, field| {
-                        el.child(Input::new(&field).small().mask_toggle()).child(
+                        el.child(
+                            Input::new(&field)
+                                .small()
+                                .mask_toggle()
+                                .when(fluent::WINDOWS, |i| i.rounded(px(fluent::CONTROL_RADIUS))),
+                        )
+                        .child(
                             div().text_xs().text_color(theme.muted_foreground).child(
                                 "Private: Trek sends it to the agent without showing or saving it.",
                             ),
@@ -3798,9 +4157,9 @@ impl ThreadView {
             .max_h(tall)
             .gap(px(12.))
             .p(px(14.))
-            .rounded(px(14.))
+            .rounded(px(fluent::surface(14.)))
             .border_1()
-            .border_color(theme.foreground.opacity(0.12))
+            .border_color(fluent::stroke(theme.foreground.opacity(0.12), cx))
             .bg(theme.secondary)
             .child(
                 h_flex()
@@ -3840,6 +4199,7 @@ impl ThreadView {
                         Button::new("q-skip")
                             .small()
                             .ghost()
+                            .map(card_button)
                             .label("Skip")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.clear_secrets(window, cx);
@@ -3851,7 +4211,7 @@ impl ThreadView {
                     .child(
                         Button::new("q-send")
                             .small()
-                            .primary()
+                            .map(|b| go_button(b, !complete, cx))
                             .label("Answer")
                             .disabled(!complete)
                             .on_click(
@@ -3898,9 +4258,9 @@ impl ThreadView {
             .max_h(px(440.))
             .gap(px(10.))
             .p(px(14.))
-            .rounded(px(14.))
+            .rounded(px(fluent::surface(14.)))
             .border_1()
-            .border_color(palette::indigo(cx).opacity(0.45))
+            .border_color(fluent::stroke(palette::indigo(cx).opacity(0.45), cx))
             .bg(theme.secondary)
             .child(
                 h_flex()
@@ -3934,7 +4294,7 @@ impl ThreadView {
                     .child(
                         Button::new("plan-revise")
                             .small()
-                            .outline()
+                            .map(|b| chip_button(b, cx))
                             .label("Keep planning")
                             .on_click(move |_, _, cx| {
                                 ws.update(cx, |ws, cx| ws.respond(&id2, &rid2, Decision::Deny, cx))
@@ -3943,7 +4303,7 @@ impl ThreadView {
                     .child(
                         Button::new("plan-approve")
                             .small()
-                            .primary()
+                            .map(|b| go_button(b, false, cx))
                             .label("Approve and start")
                             .on_click(move |_, _, cx| {
                                 ws2.update(cx, |ws, cx| ws.approve_plan(&id3, &rid3, cx))
@@ -4004,6 +4364,11 @@ impl ThreadView {
                 }
             };
             let amber = palette::amber(cx);
+            let (ink, tint) = if fluent::WINDOWS {
+                fluent::verdict(fluent::Verdict::Caution, cx)
+            } else {
+                (amber, amber.opacity(0.07))
+            };
             return Some(
                 h_flex()
                     .w_full()
@@ -4016,10 +4381,10 @@ impl ThreadView {
                             .max_w(width)
                             .gap_2()
                             .p_3()
-                            .rounded(theme.radius_lg)
+                            .rounded(px(fluent::surface(theme.radius_lg.as_f32())))
                             .border_1()
-                            .border_color(amber.opacity(0.6))
-                            .bg(amber.opacity(0.07))
+                            .border_color(fluent::stroke(amber.opacity(0.6), cx))
+                            .bg(tint)
                             .child(
                                 h_flex()
                                     .gap_2()
@@ -4027,7 +4392,7 @@ impl ThreadView {
                                     .child(
                                         Icon::new(crate::assets::Lucide::ShieldCheck)
                                             .small()
-                                            .text_color(amber),
+                                            .text_color(ink),
                                     )
                                     .child(
                                         div()
@@ -4040,7 +4405,7 @@ impl ThreadView {
                                     div()
                                         .px_2()
                                         .py_1()
-                                        .rounded(theme.radius)
+                                        .rounded(px(fluent::control(theme.radius.as_f32())))
                                         .bg(theme.muted)
                                         .font_family(theme.mono_font_family.clone())
                                         .text_xs()
@@ -4055,20 +4420,21 @@ impl ThreadView {
                                         Button::new("deny")
                                             .small()
                                             .ghost()
+                                            .map(card_button)
                                             .label("Deny")
                                             .on_click(respond(Decision::Deny)),
                                     )
                                     .child(
                                         Button::new("allow-session")
                                             .small()
-                                            .outline()
+                                            .map(|b| chip_button(b, cx))
                                             .label("Always allow")
                                             .on_click(respond(Decision::AllowForSession)),
                                     )
                                     .child(
                                         Button::new("allow")
                                             .small()
-                                            .primary()
+                                            .map(|b| go_button(b, false, cx))
                                             .label("Allow")
                                             .on_click(respond(Decision::Allow)),
                                     ),
@@ -4116,6 +4482,117 @@ impl ThreadView {
             ))
             .into_any_element()
     }
+}
+
+/// What a click on an opening row does: opens or closes `key`, and measures its row (`row_ix` in
+/// the list) again.
+fn toggle_row(
+    view: WeakEntity<ThreadView>,
+    key: SharedString,
+    row_ix: usize,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    move |_, _, cx| {
+        let _ = view.update(cx, |this, cx| {
+            let opened = !this.expanded.remove(key.as_ref());
+            if opened {
+                this.expanded.insert(key.to_string());
+            }
+            this.expanded_gen += 1;
+            this.scroller.update(cx, |s, cx| {
+                s.remeasure_items(row_ix..row_ix + 1, cx);
+                // Pinned to the bottom, a row opening grows upward, and a timeline is tall enough
+                // to take what was just clicked off the top; so it grows down from the top instead.
+                if fluent::WINDOWS && opened && s.is_following_tail() {
+                    s.scroll_to_item(row_ix, cx);
+                }
+            });
+            // An opened sub-agent's activity shimmers at the working bar's rate.
+            let live = this.workspace.read(cx).any_task_live_in(&this.scope);
+            this.sync_ticker(live, cx);
+            cx.notify();
+        });
+    }
+}
+
+/// How the group of `tools` stands right now: a turn ending changes that with no change to its row.
+fn group_state(tools: &[Row], running: bool, at: &RowContext, cx: &App) -> timeline::GroupState {
+    let after = at
+        .workspace
+        .read(cx)
+        .live
+        .get(&at.thread)
+        .zip(tools.last())
+        .map_or(timeline::After::Nothing, |(l, last)| {
+            timeline::after_group(&l.items, last.item())
+        });
+    timeline::group_state(running, after, at.busy)
+}
+
+/// The thought streaming in right after the group of `members`, with no row between them. Only
+/// Windows' timeline shows it.
+fn thought_after(items: &[Item], reasoning: Option<usize>, members: &[usize]) -> Option<usize> {
+    let (thought, last) = (reasoning?, *members.last()?);
+    (fluent::WINDOWS
+        && thought > last
+        && items[last + 1..thought]
+            .iter()
+            .all(|i| matches!(i, Item::Reasoning { .. }) || placement(i) == Place::Hidden))
+    .then_some(thought)
+}
+
+/// How strong a row's chevron is: on Windows' opaque window the Mac's falls under 3:1 on Paper.
+const CHEVRON: f32 = fluent::pick(0.8, 0.6);
+/// A button in a card on Windows is this tall; the kit's small one is under Windows' 28 px.
+const CARD_BUTTON: f32 = 28.;
+
+/// A transcript button's corners: the kit draws the theme's radius, which the Mac keeps.
+fn control_button(button: Button) -> Button {
+    if fluent::WINDOWS {
+        button.rounded(px(fluent::CONTROL_RADIUS))
+    } else {
+        button
+    }
+}
+
+/// A button in a card: a Windows control, as tall as one.
+fn card_button(button: Button) -> Button {
+    if fluent::WINDOWS {
+        control_button(button).h(px(CARD_BUTTON))
+    } else {
+        button
+    }
+}
+
+/// A card's second choice: outlined on the Mac, a chip fill and a stroke on Windows.
+fn chip_button(button: Button, cx: &App) -> Button {
+    let button = button.outline();
+    if fluent::WINDOWS {
+        let theme = cx.theme();
+        card_button(button)
+            .bg(theme.foreground.opacity(0.06))
+            .border_color(fluent::stroke(theme.border, cx))
+    } else {
+        button
+    }
+}
+
+/// A card's main action: the theme's primary on the Mac, `send` with white text on Windows. The
+/// kit fades a custom button's fill, so `bg` sets it; while `off`, the kit's disabled look stands.
+fn go_button(button: Button, off: bool, cx: &App) -> Button {
+    if !fluent::WINDOWS {
+        return button.primary();
+    }
+    let send = palette::send(cx);
+    let button = card_button(
+        button.custom(
+            ButtonCustomVariant::new(cx)
+                .color(send)
+                .foreground(gpui_kit::white())
+                .hover(send.opacity(0.9))
+                .active(send.opacity(0.8)),
+        ),
+    );
+    if off { button } else { button.bg(send) }
 }
 
 /// What a sub-agent row shows.
@@ -4465,7 +4942,7 @@ impl ThreadView {
             .small()
             .icon(IconName::ArrowDown)
             .tooltip("Jump to latest")
-            .rounded(theme.radius_full())
+            .rounded(px(fluent::control(theme.radius_full().as_f32())))
             .border_1()
             .border_color(theme.border)
             .bg(bg)

@@ -15,6 +15,7 @@ pub mod simulator;
 pub mod terminal;
 pub mod terminal_links;
 
+use crate::fluent;
 use crate::ui;
 use crate::workspace::{PanelTool, Workspace};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -505,7 +506,7 @@ impl RightPanel {
                     .gap(px(12.))
                     .px(px(14.))
                     .h(px(34.))
-                    .rounded(px(10.))
+                    .rounded(px(fluent::control(10.)))
                     .cursor_pointer()
                     .text_sm()
                     .hover(|s| s.bg(theme.foreground.opacity(0.08)))
@@ -533,7 +534,7 @@ impl RightPanel {
                 .gap(px(10.))
                 .px(px(10.))
                 .py(px(9.))
-                .rounded(px(10.))
+                .rounded(px(fluent::control(10.)))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.foreground.opacity(0.06)))
                 .child(
@@ -543,7 +544,7 @@ impl RightPanel {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(7.))
+                        .rounded(px(fluent::control(7.)))
                         .bg(theme.foreground.opacity(0.06))
                         .child(tool_icon(tool).small().text_color(theme.muted_foreground)),
                 )
@@ -639,7 +640,7 @@ impl Render for RightPanel {
                     .pl(px(if icon_only { 8. } else { 10. }))
                     .pr(px(if icon_only { 8. } else { 4. }))
                     .gap(px(6.))
-                    .rounded(px(8.))
+                    .rounded(px(fluent::control(8.)))
                     .flex_none()
                     .cursor_pointer()
                     .text_sm()

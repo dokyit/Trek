@@ -12,6 +12,8 @@
 //! transcript (the bar shrinks under it), for its quarter second.
 
 use crate::activity::{self, ToolKind};
+use crate::fluent;
+use crate::thinking_timeline as timeline;
 use crate::workspace::{Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -26,9 +28,12 @@ use trek_core::{AgentId, RunState};
 /// The header's height: the trail plus the gap above the composer.
 pub const HEIGHT: f32 = crate::mascot::HEIGHT + 6.;
 /// The live group: its summary line, a row per call, "+N earlier" over the rows when some
-/// scrolled away, and the space around them.
-const SUMMARY: f32 = 28.;
-const ROW: f32 = 22.;
+/// scrolled away, and the space around them. On Windows the live group is a timeline, at its pitch.
+const SUMMARY: f32 = fluent::pick(timeline::PITCH, PLAIN_SUMMARY);
+const ROW: f32 = fluent::pick(timeline::PITCH, PLAIN_ROW);
+/// The same in a sub-agent's row, which lists its calls the Mac's way everywhere.
+const PLAIN_SUMMARY: f32 = 28.;
+const PLAIN_ROW: f32 = 22.;
 const EARLIER: f32 = 20.;
 const GROUP_PAD: f32 = 4.;
 /// Calls shown at once; older ones fold into "+N earlier".
@@ -121,6 +126,10 @@ pub struct Group {
     rows: Vec<LiveRow>,
     /// Calls before those.
     earlier: usize,
+    /// It's the first thing its turn did, so the turn's clock is its clock too.
+    opens_turn: bool,
+    /// Where the thought streaming after its calls has got to (Windows' timeline shows it).
+    thinking: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -131,6 +140,8 @@ struct LiveRow {
     lines: Option<(u32, u32)>,
     running: bool,
     failed: bool,
+    /// It searched: its node is the magnifier on Windows' timeline.
+    search: bool,
     /// A sub-agent's progress ("Reading src/routes.rs · 2 steps").
     activity: Option<String>,
 }
@@ -175,6 +186,7 @@ pub fn steps_group(
             lines: None,
             running: running && n + 1 == steps.len(),
             failed: false,
+            search: false,
             activity: None,
         })
         .collect();
@@ -184,6 +196,8 @@ pub fn steps_group(
         phrase: activity::phrase(title, detail, None),
         earlier: earlier + steps.len().saturating_sub(ROWS),
         rows,
+        opens_turn: false,
+        thinking: None,
     })
 }
 
@@ -274,6 +288,10 @@ fn group(ws: &Workspace, id: &str, tools: &[usize], headline: Option<&str>) -> O
                 .filter(|_| !matches!(status, ToolStatus::Failed | ToolStatus::Denied)),
             running: *status == ToolStatus::Running,
             failed: matches!(status, ToolStatus::Failed | ToolStatus::Denied),
+            search: matches!(
+                activity::tool_kind(title),
+                ToolKind::Search | ToolKind::WebSearch
+            ),
             activity: task.map(|t| {
                 let steps = if t.tool_uses == 1 {
                     "1 step".to_string()
@@ -295,7 +313,41 @@ fn group(ws: &Workspace, id: &str, tools: &[usize], headline: Option<&str>) -> O
         phrase: activity::phrase(title, detail, headline),
         earlier: tools.len().saturating_sub(ROWS),
         rows,
+        opens_turn: false,
+        thinking: None,
     })
+}
+
+/// What Windows' timeline adds to the live group `current` of thread `live`: the thought streaming
+/// after its calls, if none of them is still running. A thought with no calls before it, once it
+/// has text to show, is a group of its own for now.
+fn with_thought(current: Option<Group>, live: &crate::workspace::LiveThread) -> Option<Group> {
+    let thought = live.reasoning.and_then(|ix| match live.items.get(ix)? {
+        Item::Reasoning { text } => Some((ix, timeline::thought_line(text))),
+        _ => None,
+    });
+    let thinking = |line: Option<&str>| Some(line.unwrap_or("Thinking").to_string());
+    match (current, thought) {
+        (Some(mut g), Some((_, line))) => {
+            if !g.rows.iter().any(|r| r.running) {
+                g.thinking = thinking(line);
+            }
+            Some(g)
+        }
+        (Some(g), None) => Some(g),
+        (None, Some((ix, line @ Some(_)))) if activity::trail(&live.items).is_none() => {
+            Some(Group {
+                summary: String::new(),
+                kind: ToolKind::Thought,
+                phrase: String::new(),
+                rows: vec![],
+                earlier: 0,
+                opens_turn: timeline::opens_turn(&live.items, ix),
+                thinking: thinking(line),
+            })
+        }
+        (None, _) => None,
+    }
 }
 
 fn ease_out(t: f32) -> f32 {
@@ -346,6 +398,7 @@ impl WorkingBar {
             settled: cx.new(|_| SettledRows {
                 rows: vec![],
                 earlier: 0,
+                more: false,
                 width: px(0.),
                 open: None,
             }),
@@ -405,8 +458,22 @@ impl WorkingBar {
                 b.session(id).map(|s| (s.chip(), b.showing()))
             },
         });
-        let current =
-            activity::live(ws, id).and_then(|t| group(ws, id, &t.tools, t.headline.as_deref()));
+        let current = activity::live(ws, id).and_then(|t| {
+            let g = group(ws, id, &t.tools, t.headline.as_deref())?;
+            Some(Group {
+                opens_turn: timeline::opens_turn(&live.items, t.start),
+                ..g
+            })
+        });
+        // Only while it works, with nothing waiting on the user, as for the group itself.
+        let current = if fluent::WINDOWS
+            && thread.run_state == RunState::Working
+            && live.permissions.is_empty()
+        {
+            with_thought(current, live)
+        } else {
+            current
+        };
         // The transcript holds a folding group back wherever it's shown, so every bar on it shows
         // the group until then: folding, or as it was when the bar is still.
         let folding = live
@@ -462,7 +529,9 @@ impl WorkingBar {
     fn bottom_height(&self) -> f32 {
         let Some(s) = &self.shown else { return 0. };
         let rows = s.group.as_ref().map_or(0., |g| {
-            g.rows.len().saturating_sub(self.settled_len) as f32 * ROW + GROUP_PAD
+            let live =
+                g.rows.len().saturating_sub(self.settled_len) + usize::from(g.thinking.is_some());
+            live as f32 * ROW + GROUP_PAD
         });
         rows + if s.header.is_some() { HEIGHT } else { 0. }
     }
@@ -517,27 +586,33 @@ impl WorkingBar {
     /// first that's still running or sliding in.
     fn settle(&mut self, cx: &mut Context<Self>) {
         let width = self.shown.as_ref().map_or(px(0.), |s| s.width);
-        let (rows, earlier) = match self.shown.as_ref().and_then(|s| s.group.as_ref()) {
+        let (rows, earlier, more) = match self.shown.as_ref().and_then(|s| s.group.as_ref()) {
             Some(g) => {
                 let n = g
                     .rows
                     .iter()
                     .position(|r| r.running || self.arrived.contains_key(&r.id))
                     .unwrap_or(g.rows.len());
-                (g.rows[..n].to_vec(), g.earlier)
+                (
+                    g.rows[..n].to_vec(),
+                    g.earlier,
+                    fluent::WINDOWS && (n < g.rows.len() || g.thinking.is_some()),
+                )
             }
-            None => (vec![], 0),
+            None => (vec![], 0, false),
         };
         self.settled_len = rows.len();
         let open = self.opener();
         self.settled.update(cx, |s, cx| {
             if s.rows != rows
                 || s.earlier != earlier
+                || s.more != more
                 || s.width != width
                 || s.open.as_ref().map(|o| &o.thread) != open.as_ref().map(|o| &o.thread)
             {
                 s.rows = rows;
                 s.earlier = earlier;
+                s.more = more;
                 s.width = width;
                 s.open = open;
                 cx.notify();
@@ -845,7 +920,8 @@ impl WorkingBar {
         h_flex()
             .id(if live { "live-summary" } else { "fold-summary" })
             .test_support()
-            .h(px(SUMMARY))
+            // Only a sub-agent's row has no chevron, and it isn't laid out by these heights.
+            .h(px(if chevron { SUMMARY } else { PLAIN_SUMMARY }))
             .gap_2()
             .text_sm()
             .text_color(muted)
@@ -877,13 +953,54 @@ impl WorkingBar {
                 el.child(
                     Icon::new(IconName::ChevronRight)
                         .xsmall()
-                        .opacity(0.6 * phrase_opacity),
+                        .opacity(fluent::pick(0.8, 0.6) * phrase_opacity),
                 )
             })
             .when_some(open, |el, o| {
                 el.cursor_pointer()
                     .hover(|s| s.text_color(theme.foreground))
                     .on_click(o.on_click(None))
+            })
+            .into_any_element()
+    }
+
+    /// The live group's head on the timeline: its chevron on the rail, "Thinking", and its time
+    /// when it's known. With calls to show, it opens the group in the transcript.
+    fn timeline_head(
+        g: &Group,
+        clock: f32,
+        elapsed: Option<Duration>,
+        open: Option<&Opener>,
+        still: bool,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let has_calls = !g.rows.is_empty();
+        h_flex()
+            .id("live-summary")
+            .test_support()
+            .relative()
+            .h(px(SUMMARY))
+            .items_start()
+            .pl(px(timeline::TEXT_X))
+            .when(has_calls, |el| el.child(timeline::chevron(cx)))
+            .child(
+                h_flex()
+                    .h(px(timeline::LINE))
+                    .gap(px(8.))
+                    .text_size(px(timeline::TEXT_SIZE))
+                    .text_color(theme.muted_foreground)
+                    .child(shimmer(
+                        "Thinking".into(),
+                        clock,
+                        still,
+                        theme.foreground,
+                        theme.muted_foreground,
+                    ))
+                    .children(elapsed.map(|d| div().flex_none().child(crate::time::elapsed(d)))),
+            )
+            .when_some(open.filter(|_| has_calls), |el, o| {
+                el.cursor_pointer().on_click(o.on_click(None))
             })
             .into_any_element()
     }
@@ -933,11 +1050,172 @@ fn earlier_line(n: usize, open: Option<&Opener>, cx: &App) -> AnyElement {
 
 /// A whole group's rows, drawn as they are (a group folding away).
 fn all_rows(g: &Group, cx: &App) -> Div {
-    rows_rail(cx)
+    let len = g.rows.len();
+    live_rows(cx)
         .when(g.earlier > 0, |el| {
-            el.child(earlier_line(g.earlier, None, cx))
+            el.child(live_earlier(g.earlier, None, cx))
         })
-        .children(g.rows.iter().map(|r| row(r, None, 0., true, None, cx)))
+        .children(g.rows.iter().enumerate().map(|(n, r)| {
+            let rail = timeline::Rail {
+                above: n > 0,
+                below: n + 1 < len,
+            };
+            live_row(r, rail, None, 0., true, None, cx)
+        }))
+}
+
+/// What the live group's rows hang from: the hairline, or on Windows nothing, as each row of its
+/// timeline brings its own rail.
+fn live_rows(cx: &App) -> Div {
+    if fluent::WINDOWS {
+        v_flex()
+    } else {
+        rows_rail(cx)
+    }
+}
+
+/// "+N earlier", over a live group's rows, in line with their text.
+fn live_earlier(n: usize, open: Option<&Opener>, cx: &App) -> AnyElement {
+    let line = earlier_line(n, open, cx);
+    if fluent::WINDOWS {
+        div()
+            .pl(px(timeline::TEXT_X - 4.))
+            .child(line)
+            .into_any_element()
+    } else {
+        line
+    }
+}
+
+/// A live group's row: a step on the timeline on Windows.
+fn live_row(
+    r: &LiveRow,
+    rail: timeline::Rail,
+    slide: Option<f32>,
+    clock: f32,
+    still: bool,
+    open: Option<&Opener>,
+    cx: &App,
+) -> AnyElement {
+    if fluent::WINDOWS {
+        step_row(r, rail, slide, clock, still, open, cx)
+    } else {
+        row(r, slide, clock, still, open, cx)
+    }
+}
+
+/// One call as a step of the timeline. Rows here have one height to animate by, so a file it used
+/// sits on its line; opening the group in the transcript shows them under it.
+fn step_row(
+    r: &LiveRow,
+    rail: timeline::Rail,
+    slide: Option<f32>,
+    clock: f32,
+    still: bool,
+    open: Option<&Opener>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let muted = theme.muted_foreground;
+    // The step under way is at full foreground; the rest in the theme's muted ink.
+    let (ink, sweep) = if r.running {
+        (theme.foreground, muted)
+    } else {
+        (muted, theme.foreground)
+    };
+    let mark = timeline::live_mark(r.search, r.running, r.failed);
+    timeline::step(rail, mark, clock, still, cx)
+        .id(SharedString::from(format!("live-row-{}", r.id)))
+        .test_support()
+        .h(px(ROW))
+        .when_some(slide, |el, t| el.top(px(5. * (1. - t))).opacity(t))
+        .child(
+            h_flex()
+                .h(px(timeline::LINE))
+                .gap(px(6.))
+                .mx(px(-6.))
+                .px(px(6.))
+                .rounded(px(fluent::CONTROL_RADIUS))
+                .text_size(px(timeline::TEXT_SIZE))
+                .text_color(ink)
+                .when(!r.op.verb.is_empty(), |el| {
+                    el.child(div().flex_none().child(r.op.verb.clone()))
+                })
+                .map(|el| match r.op.file.as_deref() {
+                    Some(f) => el.child(timeline::inline_chip(
+                        SharedString::from(format!("live-file-{}", r.id)),
+                        f,
+                        r.op.text.clone().into(),
+                        ink,
+                        cx,
+                    )),
+                    None => el.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_family(theme.mono_font_family.clone())
+                            .when(r.failed, |el| el.line_through())
+                            .child(shimmer(
+                                r.op.text.clone().into(),
+                                clock,
+                                still || !r.running,
+                                ink,
+                                sweep,
+                            )),
+                    ),
+                })
+                .when_some(r.activity.clone(), |el, a| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .max_w(relative(0.4))
+                            .truncate()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(a),
+                    )
+                })
+                .when_some(r.lines, |el, (a, d)| el.child(lines_chip(a, d, cx)))
+                .when(open.is_some(), |el| el.hover(|s| s.bg(theme.list_hover))),
+        )
+        .when_some(open, |el, o| {
+            el.cursor_pointer().on_click(o.on_click(Some(&r.id)))
+        })
+        .into_any_element()
+}
+
+/// The thought streaming after a live group's calls: the step under way, with where it has got to.
+fn thinking_row(line: &str, above: bool, clock: f32, still: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    timeline::step(
+        timeline::Rail {
+            above,
+            below: false,
+        },
+        timeline::Mark::Running,
+        clock,
+        still,
+        cx,
+    )
+    .id("live-thought")
+    .test_support()
+    .h(px(ROW))
+    .child(
+        div()
+            .h(px(timeline::LINE))
+            .line_height(px(timeline::LINE))
+            .text_size(px(timeline::TEXT_SIZE))
+            .truncate()
+            .child(shimmer(
+                line.to_string().into(),
+                clock,
+                still,
+                theme.foreground,
+                theme.muted_foreground,
+            )),
+    )
+    .into_any_element()
 }
 
 /// One call's row. `slide`: how far in it has slid (0 to 1), while it does.
@@ -955,7 +1233,7 @@ fn row(
     h_flex()
         .id(SharedString::from(format!("live-row-{}", r.id)))
         .test_support()
-        .h(px(ROW))
+        .h(px(PLAIN_ROW))
         .px(px(4.))
         .gap(px(6.))
         .rounded(px(4.))
@@ -979,10 +1257,10 @@ fn row(
                     el.child(
                         h_flex()
                             .min_w_0()
-                            .h(px(ROW - 4.))
+                            .h(px(PLAIN_ROW - 4.))
                             .px(px(5.))
                             .gap(px(5.))
-                            .rounded(px(5.))
+                            .rounded(px(fluent::control(5.)))
                             .border_1()
                             .border_color(t.edge)
                             .bg(t.fill)
@@ -991,7 +1269,11 @@ fn row(
                                 r.op.text.clone().into(),
                                 clock,
                                 still || !r.running,
-                                if r.running { t.ink.opacity(0.7) } else { t.ink },
+                                if r.running {
+                                    t.ink.opacity(fluent::pick(0.85, 0.7))
+                                } else {
+                                    t.ink
+                                },
                                 theme.foreground,
                             ))),
                     )
@@ -1037,6 +1319,8 @@ fn row(
 pub struct SettledRows {
     rows: Vec<LiveRow>,
     earlier: usize,
+    /// Rows that aren't settled yet follow these, in the bar.
+    more: bool,
     width: Pixels,
     open: Option<Opener>,
 }
@@ -1046,13 +1330,20 @@ impl Render for SettledRows {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::rendered("SettledRows");
         let open = self.open.as_ref();
+        let len = self.rows.len();
         column(
             self.width,
-            rows_rail(cx)
+            live_rows(cx)
                 .when(self.earlier > 0, |el| {
-                    el.child(earlier_line(self.earlier, open, cx))
+                    el.child(live_earlier(self.earlier, open, cx))
                 })
-                .children(self.rows.iter().map(|r| row(r, None, 0., true, open, cx))),
+                .children(self.rows.iter().enumerate().map(|(n, r)| {
+                    let rail = timeline::Rail {
+                        above: n > 0,
+                        below: n + 1 < len || self.more,
+                    };
+                    live_row(r, rail, None, 0., true, open, cx)
+                })),
         )
     }
 }
@@ -1113,15 +1404,19 @@ impl Render for BarTop {
                     .id("live-group")
                     .test_support()
                     .pt(px(GROUP_PAD))
-                    .child(WorkingBar::summary_line(
-                        g,
-                        clock,
-                        open.as_ref(),
-                        still,
-                        1.,
-                        true,
-                        cx,
-                    )),
+                    .child(if fluent::WINDOWS {
+                        // The turn's clock, when it's also this group's and nothing else is on
+                        // the header's clock.
+                        let elapsed = shown
+                            .header
+                            .as_ref()
+                            .filter(|h| h.waiting.is_none() && g.opens_turn)
+                            .and_then(|h| h.started)
+                            .map(|t| t.elapsed());
+                        WorkingBar::timeline_head(g, clock, elapsed, open.as_ref(), still, cx)
+                    } else {
+                        WorkingBar::summary_line(g, clock, open.as_ref(), still, 1., true, cx)
+                    }),
             )
         });
         v_flex()
@@ -1152,7 +1447,8 @@ impl Render for WorkingBar {
             return div().into_any_element();
         };
         let theme = cx.theme();
-        let muted = theme.muted_foreground.opacity(0.85);
+        // Fainter over the Mac's glass; on an opaque window that falls under 4.5:1 on Paper.
+        let muted = theme.muted_foreground.opacity(fluent::pick(1., 0.85));
         let elapsed = shown
             .header
             .as_ref()
@@ -1164,13 +1460,24 @@ impl Render for WorkingBar {
         let rows = shown.group.as_ref().map(|g| {
             let settled = self.settled_len.min(g.rows.len());
             let open = self.opener();
+            let len = g.rows.len();
             column(
                 shown.width,
-                rows_rail(cx).children(
-                    g.rows[settled..]
-                        .iter()
-                        .map(|r| row(r, self.slide(r, still), clock, still, open.as_ref(), cx)),
-                ),
+                live_rows(cx)
+                    .children(g.rows[settled..].iter().enumerate().map(|(n, r)| {
+                        let at = settled + n;
+                        let rail = timeline::Rail {
+                            above: at > 0,
+                            below: at + 1 < len || g.thinking.is_some(),
+                        };
+                        let slide = self.slide(r, still);
+                        live_row(r, rail, slide, clock, still, open.as_ref(), cx)
+                    }))
+                    .children(
+                        g.thinking
+                            .as_deref()
+                            .map(|line| thinking_row(line, len > 0, clock, still, cx)),
+                    ),
             )
             .pb(px(GROUP_PAD))
         });
@@ -1322,7 +1629,7 @@ fn behind_chip(label: &str, showing: bool, workspace: &Entity<Workspace>, cx: &A
                 .flex_none()
                 .px(px(6.))
                 .py(px(1.))
-                .rounded(px(5.))
+                .rounded(px(fluent::control(5.)))
                 .text_color(theme.foreground.opacity(0.85))
                 .hover(|el| el.bg(theme.foreground.opacity(0.08)))
                 .child(if showing { "Hide" } else { "Show" })
@@ -1470,7 +1777,13 @@ impl WorkingBar {
     /// The live group as shown: its summary line, then a line per row ("Read src/main.rs",
     /// "+12 −3" after an edit's), "+N earlier" first when some scrolled away.
     pub fn live_group(&self) -> Option<Vec<String>> {
-        let g = self.shown.as_ref()?.group.as_ref()?;
+        // A thought alone isn't a group of calls, whatever the bar draws for it.
+        let g = self
+            .shown
+            .as_ref()?
+            .group
+            .as_ref()
+            .filter(|g| !g.rows.is_empty())?;
         let mut out = vec![format!("{} · {}", g.summary, g.phrase)];
         if g.earlier > 0 {
             out.push(format!("+{} earlier", g.earlier));
@@ -1607,6 +1920,7 @@ mod tests {
             lines: None,
             running: false,
             failed: false,
+            search: false,
             activity: None,
         };
         let mut g = Group {
@@ -1615,6 +1929,8 @@ mod tests {
             phrase: "Exploring the project".into(),
             rows: vec![row("a")],
             earlier: 0,
+            opens_turn: false,
+            thinking: None,
         };
         assert_eq!(g.rows_height(), ROW);
         g.rows = (0..ROWS).map(|i| row(&i.to_string())).collect();

@@ -27,6 +27,7 @@
 //! a pointer and off again when the agent lets go or the user takes the phone back.
 
 use crate::assets::Lucide;
+use crate::fluent;
 use crate::workspace::Workspace;
 use crate::workspace::phone_use::PhoneCall;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -1731,7 +1732,10 @@ impl PhonePanel {
                         .bg(rgb(0x0B0B0D))
                         .border_1()
                         .border_color(theme.border)
-                        .shadow_lg(),
+                        .when(!fluent::WINDOWS, |el| el.shadow_lg())
+                        .when(fluent::WINDOWS, |el| {
+                            el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+                        }),
                 )
                 .child(
                     img(image)

@@ -4,6 +4,7 @@
 //! thread; the list is kept until files change, and a search runs again only when the query,
 //! the folder or the files do (not on every redraw of the workspace).
 
+use crate::fluent;
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
@@ -265,7 +266,7 @@ impl Render for IdeSearch {
                             .px_2()
                             .py(px(5.))
                             .gap_2()
-                            .rounded(px(6.))
+                            .rounded(px(fluent::control(6.)))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.list_hover))
                             .child(crate::file_icon::badge(&name, px(14.), cx))

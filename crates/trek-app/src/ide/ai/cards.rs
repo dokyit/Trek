@@ -3,6 +3,7 @@
 //! The logic is the harness's (`Workspace::respond`, `answer`, `approve_plan`, the turn's
 //! changes); the markup is the side bar's own.
 
+use crate::fluent;
 use crate::palette;
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -75,7 +76,7 @@ pub fn approval(
                     .overflow_y_scroll()
                     .px(px(8.))
                     .py(px(5.))
-                    .rounded(px(5.))
+                    .rounded(px(fluent::control(5.)))
                     .bg(theme.foreground.opacity(0.05))
                     .font_family(theme.mono_font_family.clone())
                     .text_size(px(11.5))
@@ -166,7 +167,7 @@ pub fn questions(
                         .py(px(5.))
                         .gap(px(8.))
                         .items_start()
-                        .rounded(px(6.))
+                        .rounded(px(fluent::control(6.)))
                         .border_1()
                         .border_color(if on {
                             ember.opacity(0.7)

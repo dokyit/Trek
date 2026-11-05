@@ -4,6 +4,7 @@
 //! a `Pickers` and implements `PickerHost`; the functions here draw and drive them for it.
 
 use super::{default_model, hand_icon, look, model_name, same_model};
+use crate::fluent;
 use crate::mentions::{self, PickIcon, PickItem, PickKind, Trigger};
 use crate::palette;
 use crate::ui::{self, Pill};
@@ -157,7 +158,7 @@ pub fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded(px(8.))
+        .rounded(px(fluent::control(8.)))
         .hover(|s| s.bg(theme.foreground.opacity(0.065)))
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
@@ -292,11 +293,11 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         .when(fast_ok, |el| {
             el.child(
                 look::row("mm-fast", false, cx)
-                    .child(
+                    .child(look::row_icon(
                         Icon::new(crate::assets::Lucide::Zap)
                             .small()
                             .text_color(muted),
-                    )
+                    ))
                     .child(div().flex_1().child("Fast"))
                     .child(
                         Switch::new("mm-fast-switch")
@@ -336,7 +337,7 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         .child(
             look::row("mm-model", sub == Some(Sub::Model), cx)
                 .test_support()
-                .child(ui::agent_glyph(&prefs.agent, cx))
+                .child(look::row_icon(ui::agent_glyph(&prefs.agent, cx)))
                 .child(div().flex_1().child("Model"))
                 .child(
                     div().text_color(muted).max_w(px(120.)).truncate().child(
@@ -395,7 +396,7 @@ fn effort_panel<H: PickerHost>(
     look::surface(cx)
         .w(px(200.))
         .children(efforts.into_iter().map(|e| {
-            look::row(
+            look::picked_row(
                 SharedString::from(format!("eff-{}", e.as_str())),
                 e == current,
                 cx,
@@ -508,7 +509,7 @@ fn model_panel<H: PickerHost>(
     let custom_row = custom_target.map(|(agent, custom_id)| {
         let agent2 = agent.clone();
         let id2 = custom_id.clone();
-        look::row(
+        look::picked_row(
             SharedString::from(format!("m-custom-{}", custom_id)),
             false,
             cx,
@@ -555,7 +556,7 @@ fn model_panel<H: PickerHost>(
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .cursor_pointer()
             .when(active, |el| el.bg(look::pressed(cx)))
             .hover(|s| s.bg(look::chip_fill(cx)))
@@ -601,7 +602,7 @@ fn model_panel<H: PickerHost>(
         let is_fav = favorites.contains(&fav_key);
         let id = m.id.clone();
         let agent2 = agent.clone();
-        look::row(
+        look::picked_row(
             SharedString::from(format!("m-{}-{}", agent.key(), m.id)),
             selected,
             cx,
@@ -756,14 +757,14 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
             } else {
                 theme.muted_foreground
             };
-            look::row(
+            look::picked_row(
                 SharedString::from(format!("hh-{level:?}")),
                 level == current,
                 cx,
             )
             .items_start()
             .py(px(8.))
-            .rounded(px(9.))
+            .rounded(px(fluent::control(9.)))
             .child(
                 div()
                     .pt(px(2.))
@@ -1074,7 +1075,13 @@ pub fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<AnyEleme
                 };
                 let bounds = s.input_bounds();
                 let origin = point(
-                    caret.right(),
+                    // Windows sets it against the typed text: past the caret's width the two read
+                    // as separate words, where the design draws one.
+                    if fluent::WINDOWS {
+                        caret.left()
+                    } else {
+                        caret.right()
+                    },
                     caret.top() - (height - caret.size.height) / 2. + s.scroll_offset().y,
                 );
                 let run = TextRun {
@@ -1265,7 +1272,7 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
         look::surface(cx)
             .w(px(if files { 420. } else { 326. }))
             .max_w_full()
-            .rounded(px(16.))
+            .rounded(px(fluent::surface(16.)))
             .when(items.is_empty(), |el| {
                 el.child(
                     div()
@@ -1299,12 +1306,14 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                             .py(px(6.))
                             .min_h(px(if files { 30. } else { 47. }))
                             .gap(px(9.))
-                            .rounded(px(12.))
+                            .relative()
+                            .rounded(px(fluent::control(12.)))
                             .cursor_pointer()
                             .when(i == picked, |el| el.bg(lit))
                             .hover(move |s| s.bg(lit))
+                            .children(fluent::selection_bar(i == picked, cx))
                             .when(files, |el| {
-                                el.rounded(px(8.)).child(
+                                el.rounded(px(fluent::control(8.))).child(
                                     icon.size(px(look::ICON)).text_color(theme.muted_foreground),
                                 )
                             })

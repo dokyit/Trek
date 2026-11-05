@@ -67,6 +67,10 @@ reads without it.
   https. Keep the attribution.
 - The card styles itself with Trek's `--trek-*` variables, so it fits Night and Paper; the map's
   own palette starts as Night in a dark theme and Vivid in a light one.
+- Its corners, flat resting card and opaque floating fills come from Trek's shape variables
+  (`--trek-radius-control`, `--trek-radius-surface`, `--trek-radius-pill` and friends). Windows sets
+  them; elsewhere they stay unset, so each `var()`'s fallback is the look. Keep the fallbacks, and
+  use none of these without one. Status dots, spinners, swatches and map pins stay round.
 - **Send to iPhone** calls `trek.send(DATA.send)`: Trek posts that text as the user's next message
   in this thread, marked as from the card. Act on it when it arrives: say the thread is on their
   phone (Trek shows it there). A filter chip's `send` arrives the same way: run that search and
@@ -86,12 +90,12 @@ reads without it.
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
 <style>
   body { padding: 4px 0 8px; font-family: var(--trek-font, system-ui); color: var(--trek-fg, #1c1c1c); }
-  .card { position: relative; height: 368px; border: 1px solid var(--trek-border, #e8e8e8); border-radius: 16px; overflow: hidden; background: var(--land); isolation: isolate; -webkit-font-smoothing: antialiased; }
-  .stays .card { height: 360px; box-shadow: 0 6px 20px rgba(0,0,0,.07); }
+  .card { position: relative; height: 368px; border: 1px solid var(--trek-border, #e8e8e8); border-radius: var(--trek-radius-surface, 16px); overflow: hidden; background: var(--land); isolation: isolate; -webkit-font-smoothing: antialiased; }
+  .stays .card { height: 360px; box-shadow: var(--trek-card-shadow, 0 6px 20px rgba(0,0,0,.07)); }
   #map { position: absolute; inset: 0; background: var(--land); }
   .leaflet-container { font-family: inherit; background: var(--land); }
   .leaflet-tile-pane { filter: var(--tiles, none); }
-  .leaflet-control-attribution { font-size: 9.5px; line-height: 16px; padding: 0 7px !important; margin: 8px 0 0 8px !important; border-radius: 999px; background: color-mix(in srgb, var(--panel) 78%, transparent) !important; color: var(--faint) !important; }
+  .leaflet-control-attribution { font-size: 9.5px; line-height: 16px; padding: 0 7px !important; margin: 8px 0 0 8px !important; border-radius: var(--trek-radius-pill, 999px); background: color-mix(in srgb, var(--panel) var(--trek-panel-alpha, 78%), transparent) !important; color: var(--faint) !important; }
   .leaflet-control-attribution a { color: inherit !important; }
   .stays .leaflet-control-attribution { margin: 12px 12px 0 0 !important; }
   .leaflet-control-attribution.min { width: 16px; height: 16px; padding: 0 !important; overflow: hidden; color: transparent !important; position: relative; cursor: pointer; }
@@ -125,7 +129,7 @@ reads without it.
   .lm i { width: 11px; height: 11px; border-radius: 50%; background: #3a70e0; border: 1.5px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
   .lm div { display: flex; align-items: center; gap: 5px; height: 24px; padding: 0 11px 0 9px; border-radius: 12px; background: #2861c6; color: #fff; font-size: 13px; font-weight: 500; box-shadow: 0 2px 7px rgba(0,0,0,.18); }
   path.route { stroke: var(--accent); transition: stroke .3s; }
-  .picker { position: absolute; top: 12.5px; right: 10.5px; z-index: 600; width: 28px; height: 28px; border-radius: 14px; background: var(--picker); box-shadow: 0 0 0 1px var(--picker-line), 0 2px 6px rgba(0,0,0,.12); overflow: hidden; cursor: pointer; transition: width .16s cubic-bezier(.3,1.25,.5,1), background .15s; view-transition-name: picker; }
+  .picker { position: absolute; top: 12.5px; right: 10.5px; z-index: 600; width: 28px; height: 28px; border-radius: var(--trek-radius-pill, 14px); background: var(--picker); box-shadow: 0 0 0 1px var(--picker-line), 0 2px 6px rgba(0,0,0,.12); overflow: hidden; cursor: pointer; transition: width .16s cubic-bezier(.3,1.25,.5,1), background .15s; view-transition-name: picker; }
   .picker.open { width: 188px; cursor: default; }
   .stays .picker { display: none; }
   .picker .name { position: absolute; left: 12px; top: 0; line-height: 28px; font-size: 12px; color: var(--picker-fg); opacity: 0; transition: opacity .08s; }
@@ -134,15 +138,15 @@ reads without it.
   .picker:not(.open) .sw { right: 4.5px; }
   .picker:not(.open) .sw:not(.on) { transform: scaleX(.3); opacity: 0; pointer-events: none; }
   .picker.open .sw.on { box-shadow: 0 0 0 1.7px var(--picker), 0 0 0 3.1px var(--ring); transition-delay: 0s, 0s, 0s, .03s; }
-  .zoom { position: absolute; left: 10.5px; top: 10.5px; z-index: 600; display: flex; flex-direction: column; width: 30px; border-radius: 7px; background: var(--panel); box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .zoom { position: absolute; left: 10.5px; top: 10.5px; z-index: 600; display: flex; flex-direction: column; width: 30px; border-radius: var(--trek-radius-control, 7px); background: var(--panel); box-shadow: 0 2px 8px rgba(0,0,0,.12); }
   .zoom button { width: 30px; height: 30px; border: 0; padding: 0; background: none; color: var(--fg); opacity: .75; font-size: 15px; cursor: pointer; }
   .zoom button + button { border-top: 1px solid var(--line); }
-  .info { position: absolute; left: 10.5px; right: 10.5px; bottom: 10.5px; z-index: 600; display: flex; gap: 14px; height: 86px; box-sizing: border-box; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: 0 2px 6px rgba(0,0,0,.1); color: var(--fg); transition: background .3s, color .3s; }
+  .info { position: absolute; left: 10.5px; right: 10.5px; bottom: 10.5px; z-index: 600; display: flex; gap: 14px; height: 86px; box-sizing: border-box; padding: 10px; border: 1px solid var(--line); border-radius: var(--trek-radius-surface, 14px); background: var(--panel); box-shadow: 0 2px 6px rgba(0,0,0,.1); color: var(--fg); transition: background .3s, color .3s; }
   .stays .info { height: 98px; gap: 12px; }
   .thumb, .body, .send { transition: opacity .1s, filter .1s; }
   .info.swap .thumb, .info.swap .body, .info.swap .send { opacity: 0; filter: blur(4px); }
-  .thumb { flex: none; width: 64px; height: 64px; border-radius: 7px; background: var(--blank) center / cover no-repeat; display: grid; place-items: center; color: var(--faint); }
-  .stays .thumb { width: 76px; height: 76px; border-radius: 10px; color: var(--sub); }
+  .thumb { flex: none; width: 64px; height: 64px; border-radius: var(--trek-radius-control, 7px); background: var(--blank) center / cover no-repeat; display: grid; place-items: center; color: var(--faint); }
+  .stays .thumb { width: 76px; height: 76px; border-radius: var(--trek-radius-control, 10px); color: var(--sub); }
   .body { flex: 1; min-width: 0; margin-top: -2px; }
   .title { display: flex; align-items: baseline; gap: 7px; height: 20px; padding-right: 76px; white-space: nowrap; }
   .title b { font-size: 15px; line-height: 20px; font-weight: 600; letter-spacing: -.1px; overflow: hidden; text-overflow: ellipsis; }
@@ -158,11 +162,11 @@ reads without it.
   .tags svg { flex: none; width: 12px; height: 12px; color: var(--faint); }
   .stays .tags svg { color: inherit; }
   .pager { position: absolute; top: 8px; right: 10px; display: flex; align-items: center; height: 20px; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .pager button { display: grid; place-items: center; width: 22px; height: 22px; border: 0; padding: 0; border-radius: 6px; background: none; color: var(--sub); cursor: pointer; }
+  .pager button { display: grid; place-items: center; width: 22px; height: 22px; border: 0; padding: 0; border-radius: var(--trek-radius-control, 6px); background: none; color: var(--sub); cursor: pointer; }
   .pager button:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
   .pager span { padding: 0 7px; letter-spacing: .5px; }
   .pager .back { display: flex; width: auto; gap: 4px; padding: 0 6px 0 2px; font: inherit; color: var(--sub); }
-  .send { position: absolute; right: 11px; bottom: 10px; display: flex; align-items: center; gap: 7px; min-width: 121px; height: 27px; box-sizing: border-box; padding: 0 12px; border: 0; border-radius: 14px; background: var(--btn); color: var(--btn-fg); font: 500 12.5px/1 var(--trek-font, system-ui); cursor: pointer; text-decoration: none; white-space: nowrap; transition: background .15s, opacity .1s, filter .1s; }
+  .send { position: absolute; right: 11px; bottom: 10px; display: flex; align-items: center; gap: 7px; min-width: 121px; height: 27px; box-sizing: border-box; padding: 0 12px; border: 0; min-height: var(--trek-button-min-height, 0); border-radius: var(--trek-radius-pill, 14px); background: var(--btn); color: var(--btn-fg); font: 500 12.5px/1 var(--trek-font, system-ui); cursor: pointer; text-decoration: none; white-space: nowrap; transition: background .15s, opacity .1s, filter .1s; }
   .send:hover { background: color-mix(in srgb, var(--btn-fg) 8%, var(--btn)); }
   .send:disabled { cursor: default; }
   .send[hidden] { display: none; }
@@ -179,14 +183,14 @@ reads without it.
   .strip { display: flex; gap: 8px; margin-top: 10px; overflow-x: auto; scrollbar-width: none; }
   .strip::-webkit-scrollbar { display: none; }
   .tile { flex: none; width: 184px; border: 0; padding: 0; background: none; text-align: left; font: inherit; color: var(--trek-fg, #1a1a1a); cursor: pointer; }
-  .tile div { position: relative; height: 138px; border-radius: 13px; background: color-mix(in srgb, var(--trek-fg, #000) 7%, transparent) center / cover no-repeat; display: grid; place-items: center; color: var(--trek-muted, #545454); }
-  .tile .r { position: absolute; top: 6px; left: 6px; display: flex; align-items: center; gap: 3px; height: 21px; padding: 0 8px 0 7px; border-radius: 11px; background: #f9f9f9; color: #000; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+  .tile div { position: relative; height: 138px; border-radius: var(--trek-radius-surface, 13px); background: color-mix(in srgb, var(--trek-fg, #000) 7%, transparent) center / cover no-repeat; display: grid; place-items: center; color: var(--trek-muted, #545454); }
+  .tile .r { position: absolute; top: 6px; left: 6px; display: flex; align-items: center; gap: 3px; height: 21px; padding: 0 8px 0 7px; border-radius: var(--trek-radius-pill, 11px); background: #f9f9f9; color: #000; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
   .tile .r svg { width: 11px; height: 11px; fill: #e99f21; }
   .tile b { display: block; margin: 9px 2px 0; font-size: 13px; font-weight: 600; line-height: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tile span { display: block; margin: 0 2px; font-size: 12px; line-height: 17px; color: var(--trek-muted, #6d6d6d); }
   .tile span b { display: inline; margin: 0; font-size: 12px; color: var(--trek-fg, #1a1a1a); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-  .chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border: 0; border-radius: 12px; background: var(--trek-surface, #fbfbfb); box-shadow: inset 0 0 0 1px var(--trek-border, #eee); color: var(--trek-fg, #3c3c3c); font: 12px var(--trek-font, system-ui); cursor: pointer; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border: 0; border-radius: var(--trek-radius-pill, 12px); background: var(--trek-surface, #fbfbfb); box-shadow: inset 0 0 0 1px var(--trek-border, #eee); color: var(--trek-fg, #3c3c3c); font: 12px var(--trek-font, system-ui); cursor: pointer; }
   .chip:hover { background: color-mix(in srgb, var(--trek-fg, #000) 6%, transparent); }
   .chip svg { width: 10px; height: 10px; color: var(--trek-muted, #555); }
   .chip em { font-style: normal; color: var(--trek-muted, #888); margin-left: 3px; }

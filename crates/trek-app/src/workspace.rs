@@ -3812,8 +3812,12 @@ impl Workspace {
         catalog::default_models(agent)
     }
 
-    /// The window-wide backdrop image, when the user chose "Everywhere".
+    /// The window-wide backdrop image, when the user chose "Everywhere". Never on Windows, where
+    /// art shows only in the opaque New-thread panel: the sidebar and title bar paint solid fills.
     pub fn backdrop(&self) -> Option<(String, f32)> {
+        if cfg!(windows) {
+            return None;
+        }
         let a = &self.settings.appearance;
         (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere)
             .then(|| a.background.clone().map(|b| (b, a.background_dim)))
@@ -3821,19 +3825,18 @@ impl Workspace {
     }
 
     /// Liquid glass's tint, when it's on and no window-wide image covers the desktop (and the
-    /// system allows it: macOS isn't set to Reduce transparency; Windows has the system backdrop, with
-    /// Transparency effects on).
+    /// system allows it: macOS isn't set to Reduce transparency). Never on Windows: `glass_unless`.
     pub fn glass(&self) -> Option<f32> {
         self.glass_unless(
             !cfg!(any(test, feature = "test-support")) && crate::system::reduce_transparency(),
         )
     }
 
-    /// `glass`, given whether the system asks for less transparency (macOS's Reduce transparency;
-    /// Windows 10, or 11 with Transparency effects off: `winlook::glass_available`): then the
-    /// window stays opaque.
+    /// `glass`, given whether the system asks for less transparency (macOS's Reduce transparency):
+    /// then the window stays opaque. On Windows it's always opaque, whatever a settings file says;
+    /// `glass` skips the system's answer under test, so that's decided here where tests see it too.
     pub fn glass_unless(&self, reduced: bool) -> Option<f32> {
-        if self.backdrop().is_some() || reduced {
+        if cfg!(windows) || self.backdrop().is_some() || reduced {
             return None;
         }
         self.settings.appearance.glass_tint()

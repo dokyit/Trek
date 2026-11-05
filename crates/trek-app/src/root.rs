@@ -3,6 +3,7 @@
 use crate::basecamp::Basecamp;
 use crate::command_palette::CommandPalette;
 use crate::composer::Composer;
+use crate::fluent;
 use crate::onboarding::Onboarding;
 use crate::panels::RightPanel;
 use crate::panels::terminal::Job;
@@ -728,7 +729,7 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
         .h(px(26.))
         .p(px(2.))
         .gap(px(2.))
-        .rounded(px(7.))
+        .rounded(px(fluent::control(7.)))
         .bg(theme.foreground.opacity(0.05))
         .border_1()
         .border_color(theme.foreground.opacity(0.07))
@@ -757,7 +758,7 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
                     .px(px(9.))
                     .gap(px(5.))
                     .items_center()
-                    .rounded(px(5.))
+                    .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 5.)))
                     .text_size(px(12.))
                     .cursor_pointer()
                     .when(on, |el| {
@@ -812,8 +813,7 @@ impl WindowTitle {
                 .when(on, |b| b.selected(true))
                 .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
         };
-        TitleBar::new()
-            .when(transparent, |t| t.bg(gpui_kit::transparent_black()))
+        crate::chrome::title_bar(transparent, cx)
             .child(
                 h_flex()
                     .w_full()
@@ -857,7 +857,7 @@ impl WindowTitle {
                                             .gap(px(8.))
                                             .items_center()
                                             .justify_center()
-                                            .rounded(px(7.))
+                                            .rounded(px(fluent::control(7.)))
                                             .border_1()
                                             .border_color(theme.foreground.opacity(0.08))
                                             .bg(theme.foreground.opacity(0.035))
@@ -1049,8 +1049,7 @@ impl Render for WindowTitle {
         // A narrow window keeps what the bar does and drops what repeats: the wordmark and the
         // project's name beside its badge.
         let narrow = window.viewport_size().width < px(TITLE_NARROW);
-        TitleBar::new()
-            .when(transparent, |t| t.bg(gpui_kit::transparent_black()))
+        crate::chrome::title_bar(transparent, cx)
             .child(
                 h_flex()
                     .w_full()
@@ -1700,7 +1699,7 @@ impl Render for TrekWindow {
                 .size_full()
                 .when(glass.is_none(), |el| el.bg(cx.theme().background))
                 .text_color(cx.theme().foreground)
-                .child(TitleBar::new())
+                .child(crate::chrome::title_bar(false, cx))
                 .child(
                     div()
                         .flex_1()
@@ -2364,7 +2363,7 @@ impl TrekWindow {
                     .child(
                         div()
                             .size_full()
-                            .rounded(px(12.))
+                            .rounded(px(fluent::surface(12.)))
                             .border_1()
                             .border_color(crate::ui::panel_border(glass, cx))
                             .bg(crate::ui::panel_bg(glass, cx))
@@ -2430,11 +2429,14 @@ impl TrekWindow {
                     .child(
                         div()
                             .size_full()
-                            .rounded(px(12.))
+                            .rounded(px(fluent::surface(12.)))
                             .border_1()
                             .border_color(crate::ui::panel_border(glass, cx))
                             // Over the chat it needs a solid face, and a shadow to lift it off.
                             .when(overlay, |el| el.bg(theme.background).shadow_lg())
+                            .when(overlay && fluent::WINDOWS, |el| {
+                                el.shadow(fluent::flyout_shadow(Vec::new(), cx))
+                            })
                             .when(!overlay, |el| el.bg(crate::ui::panel_bg(glass, cx)))
                             .overflow_hidden()
                             .relative()

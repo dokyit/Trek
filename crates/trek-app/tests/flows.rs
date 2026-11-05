@@ -148,6 +148,26 @@ fn tool_calls_fold_into_summary_rows() {
 }
 
 #[test]
+fn opening_a_group_at_the_bottom_keeps_what_was_clicked_in_view() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "use the tools");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        // Only Windows scrolls it into view: on the Mac an opened group grows upward, as it did.
+        if !cfg!(windows) {
+            return;
+        }
+        let first = trek.item_ix(cx, &id, |i| matches!(i, Item::Reasoning { .. }));
+        trek.click(cx, ("tool-group", first));
+        assert!(trek.visible(cx, ("tool-group", first)));
+        assert!(trek.visible(cx, ("reasoning", first)));
+        // Closing it again is one more click on the same header.
+        trek.click(cx, ("tool-group", first));
+        assert!(!trek.visible(cx, ("reasoning", first)));
+    });
+}
+
+#[test]
 fn sub_agents_out_after_the_answer_keep_the_thread_waiting_until_they_report() {
     run(async |cx| {
         let trek = open(cx);

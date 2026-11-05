@@ -40,10 +40,44 @@ impl AssetSource for Assets {
     }
 }
 
-pub fn theme_json() -> String {
+/// The kit's radii on Windows: its controls take 4 px corners and its dialogs and notifications 8,
+/// as `fluent` gives Trek's own.
+const WINDOWS_RADIUS: u32 = 4;
+const WINDOWS_RADIUS_LG: u32 = 8;
+
+fn shipped_theme() -> String {
     Embedded::get("themes/trek.json")
         .map(|f| String::from_utf8_lossy(&f.data).to_string())
         .unwrap_or_default()
+}
+
+/// The theme the kit's components draw from. `trek.json` has the Mac's radii, and Windows' go in
+/// here rather than on `Theme`, as a mode change reapplies the config over anything set there.
+pub fn theme_json() -> String {
+    let json = shipped_theme();
+    if cfg!(windows) {
+        with_radii(&json, WINDOWS_RADIUS, WINDOWS_RADIUS_LG)
+    } else {
+        json
+    }
+}
+
+/// `json`, a theme set, with every theme's radii replaced. Parsed rather than searched, so each
+/// theme gets both whatever the file's spacing; a text that doesn't parse is the loader's to report.
+fn with_radii(json: &str, radius: u32, radius_lg: u32) -> String {
+    let Ok(mut set) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let themes = set.get_mut("themes").and_then(|t| t.as_array_mut());
+    for theme in themes
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.as_object_mut())
+    {
+        theme.insert("radius".to_string(), radius.into());
+        theme.insert("radius.lg".to_string(), radius_lg.into());
+    }
+    set.to_string()
 }
 
 pub fn brand_bytes(path: &str) -> Option<Vec<u8>> {
@@ -53,6 +87,63 @@ pub fn brand_bytes(path: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The themes as the kit reads them: the same parse its registry does.
+    fn themes(json: &str) -> Vec<gpui_kit::component::ThemeConfig> {
+        serde_json::from_str::<gpui_kit::component::ThemeSet>(json)
+            .expect("a theme set the kit can read")
+            .themes
+    }
+
+    #[test]
+    fn windows_radii_change_nothing_else_in_the_theme() {
+        let shipped = shipped_theme();
+        let patched = with_radii(&shipped, WINDOWS_RADIUS, WINDOWS_RADIUS_LG);
+        let read = themes(&patched);
+        assert_eq!(read.len(), 2, "Night and Paper");
+        for theme in &read {
+            assert_eq!(theme.radius, Some(4), "{}", theme.name);
+            assert_eq!(theme.radius_lg, Some(8), "{}", theme.name);
+            // `tests/look.rs` holds the app to these, in both themes.
+            assert_eq!(
+                theme.font_family.as_deref(),
+                Some("Inter"),
+                "{}",
+                theme.name
+            );
+            assert_eq!(
+                theme.mono_font_family.as_deref(),
+                Some("JetBrains Mono NL"),
+                "{}",
+                theme.name
+            );
+        }
+        // With the radii taken out, what's left is what shipped.
+        let bare = |json: &str| {
+            let mut set: serde_json::Value = serde_json::from_str(json).unwrap();
+            for theme in set["themes"].as_array_mut().unwrap() {
+                let theme = theme.as_object_mut().unwrap();
+                theme.remove("radius");
+                theme.remove("radius.lg");
+            }
+            set
+        };
+        assert_eq!(bare(&patched), bare(&shipped));
+    }
+
+    #[test]
+    fn trek_json_keeps_the_macs_radii_and_only_windows_gets_its_own() {
+        for theme in themes(&shipped_theme()) {
+            assert_eq!((theme.radius, theme.radius_lg), (Some(8), Some(14)));
+        }
+        let want = if cfg!(windows) { (4, 8) } else { (8, 14) };
+        for theme in themes(&theme_json()) {
+            assert_eq!(
+                (theme.radius, theme.radius_lg),
+                (Some(want.0), Some(want.1))
+            );
+        }
+    }
 
     /// `Lucide::Name` in kebab case, as Lucide names its files (`Grid3x3` → `grid-3x3`).
     fn file_name(name: &str) -> String {

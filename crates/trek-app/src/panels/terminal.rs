@@ -1,5 +1,6 @@
 //! A real terminal: the user's login shell in a PTY, parsed by vt100, painted as styled rows.
 
+use crate::fluent;
 use crate::workspace::Workspace;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
@@ -1691,7 +1692,7 @@ impl Render for TerminalPanel {
                 .px(px(10.))
                 .gap(px(5.))
                 .items_center()
-                .rounded(px(12.))
+                .rounded(px(fluent::control(12.)))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.background)

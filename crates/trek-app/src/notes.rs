@@ -11,6 +11,7 @@
 //! them as tiles under the text, and a click opens the image viewer or Quick Look (see
 //! `note_images`).
 
+use crate::fluent::{self, PillExt as _};
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -863,7 +864,7 @@ impl NotesView {
             div()
                 .id(SharedString::from(format!("swatch-{row}-{i}")))
                 .size(px(22.))
-                .rounded_full()
+                .rounded_pill()
                 .cursor_pointer()
                 .border_1()
                 .border_color(theme.foreground.opacity(0.15))
@@ -1129,7 +1130,7 @@ impl NotesView {
             .h(px(30.))
             .p(px(2.))
             .gap(px(2.))
-            .rounded(px(8.))
+            .rounded(px(fluent::control(8.)))
             .bg(theme.foreground.opacity(0.05))
             .border_1()
             .border_color(theme.foreground.opacity(0.06))
@@ -1148,7 +1149,7 @@ impl NotesView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(6.))
+                            .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 6.)))
                             .cursor_pointer()
                             .when(selected, |el| el.bg(theme.foreground.opacity(0.12)))
                             .child(icon.small().text_color(if selected {
@@ -1224,15 +1225,17 @@ impl NotesView {
                         v_flex()
                             .id(SharedString::from(format!("note-{}", n.id)))
                             .test_support()
+                            .relative()
                             .px(px(10.))
                             .py(px(8.))
                             .gap(px(2.))
-                            .rounded(px(8.))
+                            .rounded(px(fluent::control(8.)))
                             .cursor_pointer()
                             .when(active, |el| el.bg(theme.foreground.opacity(0.075)))
                             .when(!active, |el| {
                                 el.hover(|s| s.bg(theme.foreground.opacity(0.04)))
                             })
+                            .children(fluent::selection_bar(active, cx))
                             .child(
                                 h_flex()
                                     .gap(px(8.))

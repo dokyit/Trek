@@ -15,6 +15,7 @@ use trek_core::visualization::{
 };
 
 use crate::assets::Lucide;
+use crate::fluent::{self, PillExt as _};
 
 // ---------- painting ----------
 
@@ -278,7 +279,7 @@ fn legend(labels: &[(String, Hsla)], frame: &Frame, line: bool) -> AnyElement {
                 .gap(px(6.))
                 .h(px(22.))
                 .px(px(8.))
-                .rounded_full()
+                .rounded_pill()
                 .border_1()
                 .border_color(if off { look.grid } else { look.hairline })
                 .cursor_pointer()
@@ -475,7 +476,7 @@ pub(super) fn line(
         .child(canvas(|_, _, _| {}, paint).size_full())
         .when_some(frame.cursor.filter(|c| *c < n), |el, ix| {
             let frac = ix as f32 / (n - 1) as f32;
-            let tip = readout(&look)
+            let tip = readout(&look, cx)
                 .absolute()
                 .top(px(6.))
                 .min_w(px(120.))
@@ -774,7 +775,7 @@ pub(super) fn donut(
                 .gap(px(10.))
                 .h(px(26.))
                 .px(px(8.))
-                .rounded(px(6.))
+                .rounded(px(fluent::control(6.)))
                 .cursor_pointer()
                 .when(hover == Some(ix), |el| el.bg(look.fg.opacity(0.05)))
                 .on_hover(frame.on_hover(ix))
@@ -995,7 +996,7 @@ pub(super) fn stats(tiles: &[StatTile], frame: &Frame, cx: &App) -> AnyElement {
                                             .gap(px(2.))
                                             .h(px(18.))
                                             .px(px(6.))
-                                            .rounded_full()
+                                            .rounded_pill()
                                             .bg(status.opacity(0.12))
                                             .text_color(status)
                                             .when(dir != 0, |el| {
@@ -1158,7 +1159,7 @@ pub(super) fn table_view(
                     .bottom_0()
                     .right_0()
                     .w(px(28.))
-                    .rounded_r(px(9.))
+                    .rounded_r(px(fluent::surface(9.)))
                     .bg(linear_gradient(
                         90.,
                         linear_color_stop(fade.opacity(0.), 0.),
@@ -1390,7 +1391,7 @@ pub(super) fn treemap(items: &[TreemapItem], frame: &Frame, cx: &App) -> AnyElem
                         .size_full()
                         .gap(px(3.))
                         .p(px(8.))
-                        .rounded(px(6.))
+                        .rounded(px(fluent::control(6.)))
                         .border_1()
                         .border_color(color.opacity(if hovered {
                             0.6
