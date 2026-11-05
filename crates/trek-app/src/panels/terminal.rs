@@ -304,6 +304,17 @@ fn shell_cwd(
     [cwd, home].into_iter().find(|dir| exists(dir))
 }
 
+/// What lets one of Trek's own commands run in PowerShell, for this process and what it starts and
+/// no longer. Windows' default policy (Restricted) stops `npm` there, which is `npm.ps1`, and an
+/// npm-installed agent's sign-in, with "running scripts is disabled on this system". The policy of
+/// the machine and the user stays as it is; `agent_update`'s PowerShell runs the same way.
+fn execution_policy_args(flavor: Flavor, job: Option<&Job>) -> &'static [&'static str] {
+    match (flavor, job) {
+        (Flavor::PowerShell, Some(Job::Setup(_))) => &["-ExecutionPolicy", "Bypass"],
+        _ => &[],
+    }
+}
+
 /// What a terminal runs besides an interactive shell, and whose command it is.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Job {
@@ -373,6 +384,7 @@ fn shell_command(setting: &str, cwd: Option<PathBuf>, job: Option<&Job>) -> Comm
     let command = job.map(Job::command);
     let flavor = flavor(&shell, windows);
     let mut cmd = CommandBuilder::new(shell);
+    cmd.args(execution_policy_args(flavor, job));
     cmd.args(shell_args(flavor, command));
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -1779,9 +1791,9 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        Flavor, Job, Screen, Shortcut, choose_shell, cursor_queries, cursor_report, flavor,
-        home_end, new_screen, paste_bytes, plain_path, powershell_quote, pump, shell_args,
-        shell_cwd, shell_for, shortcut, wheel_report,
+        Flavor, Job, Screen, Shortcut, choose_shell, cursor_queries, cursor_report,
+        execution_policy_args, flavor, home_end, new_screen, paste_bytes, plain_path,
+        powershell_quote, pump, shell_args, shell_cwd, shell_for, shortcut, wheel_report,
     };
     use gpui_kit::Modifiers;
     use std::path::{Path, PathBuf};
@@ -2042,6 +2054,24 @@ mod tests {
         assert_eq!(
             shell_cwd(None, Flavor::Posix, false, home, |_: &Path| false),
             None
+        );
+    }
+
+    /// Only Trek's own commands, only in PowerShell: a project's action, an interactive shell and
+    /// every shell on a Mac (`flavor` says Posix) start as they always did.
+    #[test]
+    fn only_trek_s_own_commands_in_powershell_pass_the_execution_policy() {
+        let setup = Job::Setup("npm i -g opencode-ai".into());
+        let action = Job::Action("npm run dev".into());
+        assert_eq!(
+            execution_policy_args(Flavor::PowerShell, Some(&setup)),
+            ["-ExecutionPolicy", "Bypass"]
+        );
+        assert!(execution_policy_args(Flavor::PowerShell, Some(&action)).is_empty());
+        assert!(execution_policy_args(Flavor::PowerShell, None).is_empty());
+        assert!(execution_policy_args(Flavor::Cmd, Some(&setup)).is_empty());
+        assert!(
+            execution_policy_args(flavor("/opt/homebrew/bin/pwsh", false), Some(&setup)).is_empty()
         );
     }
 
@@ -2442,6 +2472,68 @@ mod tests {
 
         fn has_line(text: &str, line: &str) -> bool {
             text.lines().any(|l| l.trim() == line)
+        }
+
+        /// The whole of an agent's install on a clean Windows, as Trek runs it: Node.js first when
+        /// `find_npm` says there's none, then the line (`TREK_E2E_LINE`) in a real pseudo-terminal,
+        /// then the agent (`TREK_E2E_BIN`) found and started. Off by default, as it downloads and
+        /// installs for real: run it in Windows Sandbox, with `TREK_DATA_DIR` set (it won't run
+        /// without, so it can't reach the user's own Trek).
+        #[test]
+        #[ignore]
+        fn real_install_on_a_clean_machine() {
+            let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+            let (Some(_), Some(line)) = (var("TREK_DATA_DIR"), var("TREK_E2E_LINE")) else {
+                panic!("set TREK_DATA_DIR and TREK_E2E_LINE");
+            };
+            let npm = trek_core::node::find_npm();
+            eprintln!("find_npm: {npm:?}");
+            if trek_core::node::needs_node(&line) && npm.is_none() {
+                trek_core::runtime()
+                    .block_on(trek_core::node::install_into(
+                        &trek_core::node::root(),
+                        trek_core::node::DIST,
+                        &|p| eprintln!("{}", p.label()),
+                    ))
+                    .unwrap();
+                eprintln!("find_npm after: {:?}", trek_core::node::find_npm());
+            }
+            let text = run("", Some(Job::Setup(line)), None, |t| {
+                t.contains("[finished with exit code")
+            });
+            eprintln!("--- terminal ---\n{}\n--- end ---", text.trim_end());
+            assert!(text.contains("[finished with exit code 0]"), "{text}");
+            assert!(!text.contains("cannot be loaded"), "{text}");
+            assert!(!text.contains("is not recognized"), "{text}");
+            if let Some(bin) = var("TREK_E2E_BIN") {
+                let found = trek_core::detect::which(&bin);
+                eprintln!("which {bin}: {found:?}");
+                let version = trek_core::runtime()
+                    .block_on(trek_core::detect::version_of(&found.expect("found")));
+                eprintln!("{bin} --version: {version:?}");
+                assert!(version.is_some());
+            }
+        }
+
+        /// In the real shell: Trek's own command runs with the policy for that process, and the
+        /// user's own with whatever their machine has.
+        #[test]
+        fn trek_s_own_command_gets_past_the_execution_policy() {
+            let finished = |t: &str| t.contains("[finished with exit code");
+            let own = run(
+                "",
+                Some(Job::Setup("Get-ExecutionPolicy".into())),
+                None,
+                finished,
+            );
+            assert!(has_line(&own, "Bypass"), "{own}");
+            let action = run(
+                "powershell",
+                Some(Job::Action("Get-ExecutionPolicy".into())),
+                None,
+                finished,
+            );
+            assert!(!has_line(&action, "Bypass"), "{action}");
         }
 
         /// `exit` typed into PowerShell ends the session: ConPTY keeps the shell's output open

@@ -1302,6 +1302,17 @@ impl UpdateCommand {
     }
 }
 
+/// The environment an npm update runs in: into `prefix`, with the agents' install scripts allowed
+/// (`node::allowed_scripts_env`), as their install had.
+fn npm_env(prefix: &Path) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "npm_config_prefix".to_string(),
+        prefix.display().to_string(),
+    )];
+    env.extend(crate::node::allowed_scripts_env());
+    env
+}
+
 /// A package move's exit codes: the new package didn't install, and the old one is back
 /// (`PUT_BACK`) or couldn't be put back either (`LOST`).
 pub const PUT_BACK: i32 = 75;
@@ -1395,7 +1406,7 @@ pub fn update_command(
         )
         .map(|c| UpdateCommand {
             path: vec![npm_dir(prefix)],
-            env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
+            env: npm_env(prefix),
             ..c
         }),
         Install::Bun { package } if h.moved(package) => {
@@ -1412,7 +1423,7 @@ pub fn update_command(
         // neither, so the npm on PATH installs there.
         Install::Npm { package, prefix } => Some(UpdateCommand {
             path: vec![npm_dir(prefix)],
-            env: vec![("npm_config_prefix".into(), prefix.display().to_string())],
+            env: npm_env(prefix),
             ..UpdateCommand::new("npm", &["install", "-g", &format!("{package}@latest")])
         }),
         Install::Volta => h
@@ -2907,7 +2918,7 @@ mod tests {
         assert_eq!(cmd.program, Path::new("npm"));
         assert_eq!(cmd.path, [crate::node::bin_dir()]);
         assert_eq!(
-            cmd.env,
+            cmd.env[..1],
             [("npm_config_prefix".to_string(), root.display().to_string())]
         );
         // Its npm is the first one the update finds.
@@ -3191,7 +3202,7 @@ mod tests {
         assert_eq!(cmd.program, Path::new("npm"));
         assert_eq!(cmd.path, [dir("/opt/homebrew")]);
         assert_eq!(
-            cmd.env,
+            cmd.env[..1],
             [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]
         );
         assert!(
@@ -3207,7 +3218,7 @@ mod tests {
         };
         let cmd = update_command(h("codex"), &own, bin, false, None).unwrap();
         assert_eq!(
-            cmd.env,
+            cmd.env[..1],
             [(
                 "npm_config_prefix".to_string(),
                 "/Users/me/.npm-global".to_string()
@@ -3394,7 +3405,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            cmd.env,
+            cmd.env[..1],
             [("npm_config_prefix".to_string(), "/opt/homebrew".to_string())]
         );
         let pnpm = update_command(
