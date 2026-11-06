@@ -1228,7 +1228,25 @@ mod tests {
         assert_eq!(store.projects().unwrap()[0].path, wt);
 
         let found = plans(&store, &home);
-        assert_eq!(found[0].moving(), 1);
+        // What's there when the count is off, to see why (Windows counted 2 here once).
+        let threads: Vec<_> = store
+            .threads()
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.title, t.native_id, t.cwd, t.project_id))
+            .collect();
+        let worktrees: Vec<_> = found
+            .iter()
+            .flat_map(|p| {
+                p.all_worktrees()
+                    .map(move |w| (p.app, w.path.clone(), w.moving))
+            })
+            .collect();
+        assert_eq!(
+            found[0].moving(),
+            1,
+            "threads {threads:#?}\nworktrees {worktrees:#?}\nwt {wt:?}"
+        );
         let done = adopt(
             &store,
             &found[0],
