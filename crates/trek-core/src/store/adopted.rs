@@ -120,14 +120,26 @@ impl Store {
             Self::save_thread_in(&tx, &t)?;
         }
         // The folder's own project, once nothing's in it: the sidebar would list a project per
-        // workspace otherwise. One the user has other threads in stays.
-        let own = w.path.display().to_string();
+        // workspace otherwise. One the user has other threads in stays. Its folder is compared as
+        // a path, which either slash spells on Windows.
+        let real = real_path(&w.path);
         for old in emptied {
-            tx.execute(
-                "DELETE FROM projects WHERE id = ?1 AND path = ?2
-                 AND NOT EXISTS (SELECT 1 FROM threads WHERE project_id = ?1)",
-                params![old, own],
-            )?;
+            let path: Option<String> = tx
+                .query_row("SELECT path FROM projects WHERE id = ?1", [&old], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let own = path.is_some_and(|p| {
+                let p = Path::new(&p);
+                p == w.path.as_path() || real_path(p) == real
+            });
+            if own {
+                tx.execute(
+                    "DELETE FROM projects WHERE id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM threads WHERE project_id = ?1)",
+                    params![old],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(moved)

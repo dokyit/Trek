@@ -75,9 +75,11 @@ impl WorktreeApp {
     /// Where it keeps worktrees unless told otherwise.
     fn default_folder(self, home: &Path) -> PathBuf {
         match self {
-            WorktreeApp::Conductor => home.join("conductor/workspaces"),
-            WorktreeApp::T3Code => home.join(".t3/worktrees"),
-            WorktreeApp::Orca => home.join("orca/workspaces"),
+            // A part at a time, so the folders found under it are spelled as Windows spells
+            // them too (`a/b` joined as one stays half forward slashes there).
+            WorktreeApp::Conductor => home.join("conductor").join("workspaces"),
+            WorktreeApp::T3Code => home.join(".t3").join("worktrees"),
+            WorktreeApp::Orca => home.join("orca").join("workspaces"),
         }
     }
 }
