@@ -40,7 +40,7 @@ impl AdoptedWorktree {
 /// A folder with its links resolved: agents record `cwd` as they found it, and `/tmp`, a renamed
 /// workspace's link and the like are other spellings of the same folder.
 fn real_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::resolved(path)
 }
 
 fn read_all(c: &Connection) -> rusqlite::Result<Vec<(AdoptedWorktree, PathBuf)>> {
@@ -174,10 +174,19 @@ impl Store {
 /// renamed workspaces) sits next to it.
 fn unfiled_in(c: &Connection, path: &Path) -> rusqlite::Result<Vec<Thread>> {
     let real = real_path(path);
-    let beside = |p: &Path| p.parent().unwrap_or(p).display().to_string();
+    // A first pass by text, either slash passing (Windows spells a folder with both); the paths
+    // themselves decide below.
+    let beside = |p: &Path| {
+        p.parent()
+            .unwrap_or(p)
+            .display()
+            .to_string()
+            .replace('\\', "/")
+    };
     let mut st = c.prepare(&format!(
         "SELECT {} FROM threads WHERE worktree_path IS NULL AND cwd IS NOT NULL
-         AND (substr(cwd, 1, length(?1)) = ?1 OR substr(cwd, 1, length(?2)) = ?2)",
+         AND (substr(replace(cwd, '\\', '/'), 1, length(?1)) = ?1
+           OR substr(replace(cwd, '\\', '/'), 1, length(?2)) = ?2)",
         Store::THREAD_COLS
     ))?;
     let rows = st.query_map(params![beside(path), beside(&real)], Store::row_to_thread)?;

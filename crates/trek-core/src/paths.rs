@@ -145,6 +145,28 @@ pub fn updates_dir() -> PathBuf {
     dir
 }
 
+/// Windows's long form of a path (`\\?\C:\x`) as the plain one (`C:\x`), which is how git, the
+/// agents and the user write it (git can't take the long one). Any other path comes back as it is.
+pub fn plain(path: &std::path::Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::VerbatimDisk(drive) => out.push(format!("{}:", drive as char)),
+                _ => out.push(c.as_os_str()),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// `path` with its links resolved, in its plain form (`plain`); as it is when it can't be.
+pub fn resolved(path: &std::path::Path) -> PathBuf {
+    plain(&std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
 /// Shorten a path for display: `/Users/me/Documents/x` → `~/Documents/x`, and on Windows
 /// `C:\Users\me\Documents\x` → `~\Documents\x` (PowerShell's own `~`): the folders under `~` are
 /// joined with the platform's separator, never the half-and-half `~/Documents\x` that `~/` plus
