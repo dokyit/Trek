@@ -227,3 +227,25 @@ fn the_privacy_page_takes_the_answer_the_card_asks_for() {
         assert_eq!(trek_telemetry::consent(), Some(Consent::No));
     });
 }
+
+#[test]
+fn what_was_sent_shows_the_project_key_cut_to_its_ends() {
+    let body = serde_json::to_string_pretty(&serde_json::json!({
+        "api_key": "phc_qLaKdAVD2NvszYYrRjtMXtjHpgiQ5HTQH8wXE3d93urq",
+        "batch": [{ "event": "app_opened" }],
+    }))
+    .unwrap();
+    let shown = trek_app::settings_view::privacy::shown_body(&body);
+    assert!(shown.contains("\"api_key\": \"phc_qLaK…3urq\""), "{shown}");
+    assert!(!shown.contains("dAVD2NvszYY"), "{shown}");
+    // Everything else as it went.
+    assert!(shown.contains("\"event\": \"app_opened\""), "{shown}");
+    // Not JSON, or no key: as it is.
+    assert_eq!(trek_app::settings_view::privacy::shown_body("{"), "{");
+    let keyless = serde_json::to_string_pretty(&serde_json::json!({ "batch": [] })).unwrap();
+    assert_eq!(
+        trek_app::settings_view::privacy::shown_body(&keyless),
+        keyless
+    );
+    assert!(trek_app::settings_view::privacy::KEY_NOTE.contains("can only add events"));
+}

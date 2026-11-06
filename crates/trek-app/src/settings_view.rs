@@ -6,7 +6,7 @@ mod coming_from;
 mod connections;
 mod mobile;
 mod pages;
-mod privacy;
+pub mod privacy;
 mod rules;
 pub(crate) use mobile::qr;
 pub(crate) use pages::theme_tiles;

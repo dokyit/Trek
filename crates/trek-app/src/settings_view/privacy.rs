@@ -102,7 +102,7 @@ impl SettingsView {
         let showing = SHOWING_SENT.load(Ordering::Relaxed) && sent.is_some();
         let sent_line = match &sent {
             Some(s) => format!(
-                "{}, {} {}, exactly as it went.",
+                "{}, {} {}, as it went (Trek's project key shortened).",
                 super::relative_ago(s.at * 1000),
                 s.events,
                 if s.events == 1 { "event" } else { "events" }
@@ -123,7 +123,8 @@ impl SettingsView {
             cx,
         ));
         if let Some(sent) = sent.filter(|_| showing) {
-            let body = sent.body.clone();
+            let body = shown_body(&sent.body);
+            let copied = body.clone();
             out.push(
                 div()
                     .pt(px(10.))
@@ -139,20 +140,37 @@ impl SettingsView {
                             .font_family(theme.mono_font_family.clone())
                             .text_size(px(text::LABEL))
                             .line_height(relative(1.45))
-                            .child(sent.body.clone()),
+                            .child(body),
                     )
                     .child(
-                        h_flex().pt(px(8.)).gap(px(8.)).child(
-                            Button::new("privacy-copy-sent")
-                                .small()
-                                .ghost()
-                                .icon(IconName::Copy)
-                                .label("Copy")
-                                .on_click(move |_, window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(body.clone()));
-                                    crate::toast::push(window, "Copied what was sent", cx);
-                                }),
-                        ),
+                        h_flex()
+                            .pt(px(8.))
+                            .gap(px(8.))
+                            .items_start()
+                            .child(
+                                Button::new("privacy-copy-sent")
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Copy)
+                                    .label("Copy")
+                                    .on_click(move |_, window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copied.clone(),
+                                        ));
+                                        crate::toast::push(window, "Copied what was sent", cx);
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("privacy-key-note")
+                                    .test_support()
+                                    // Wraps within the column, beside Copy.
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(text::LABEL))
+                                    .text_color(theme.muted_foreground)
+                                    .child(KEY_NOTE),
+                            ),
                     )
                     .into_any_element(),
             );
@@ -187,4 +205,33 @@ impl SettingsView {
         );
         out
     }
+}
+
+/// What the note under what was sent says of its `api_key`.
+pub const KEY_NOTE: &str = "api_key is Trek's public project key: it's in every copy of Trek \
+and can only add events to Trek's PostHog project, never read them.";
+
+/// What was sent, for the screen: as it went, but with the project key cut to its ends
+/// (`phc_qLaK…3urq`). It's public, being in every copy of Trek, yet a long key in plain sight
+/// reads like a leak.
+pub fn shown_body(body: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    if let Some(key) = value.get_mut("api_key")
+        && let Some(text) = key.as_str()
+        && text.chars().count() > 12
+    {
+        let start: String = text.chars().take(8).collect();
+        let end: String = text
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        *key = serde_json::Value::String(format!("{start}…{end}"));
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| body.to_string())
 }

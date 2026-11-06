@@ -1978,13 +1978,16 @@ impl Composer {
         )
     }
 
-    /// Tell the workspace whether one of our popovers is open (native views hide under it). Only
-    /// the main window has native views.
+    /// Tell the workspace whether one of our popovers is open over the tools panel (native views
+    /// hide under it). Only the main window has native views. The `/`, `@` and `$` list isn't
+    /// one: it sits over the composer, in the thread's column, and stays up as long as the draft
+    /// has its word at the caret, so counting it left the Browser's page hidden (black) while a
+    /// draft held a path or a mention.
     fn sync_overlay(&self, cx: &mut Context<Self>) {
         if !self.scope.in_main_window() {
             return;
         }
-        let open = self.pickers.open() || self.consult_open;
+        let open = self.pickers.model_open || self.pickers.access_open || self.consult_open;
         self.workspace.update(cx, |ws, cx| {
             if ws.overlay_open != open {
                 ws.overlay_open = open;

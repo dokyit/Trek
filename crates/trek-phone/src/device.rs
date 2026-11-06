@@ -205,6 +205,12 @@ pub fn link(udid: &str) -> Result<Option<Link>, String> {
 /// one usbmuxd's connections to the phone come from): Trek Driver takes connections over Wi-Fi
 /// only from it. No packet is sent.
 pub fn local_address_toward(phone: std::net::IpAddr) -> Option<std::net::IpAddr> {
+    Some(local_toward(phone)?.ip())
+}
+
+/// The system's route toward `phone`, as this Mac's end of it: a UDP socket connected there,
+/// which sends nothing.
+fn local_toward(phone: std::net::IpAddr) -> Option<std::net::SocketAddr> {
     let any: std::net::SocketAddr = if phone.is_ipv6() {
         (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
     } else {
@@ -214,7 +220,21 @@ pub fn local_address_toward(phone: std::net::IpAddr) -> Option<std::net::IpAddr>
     // A link-local IPv6 address needs its interface; usbmuxd doesn't say it, so the system's
     // choice for it stands (a scope of 0 fails to route and gives `None`).
     socket.connect((phone, 9)).ok()?;
-    Some(socket.local_addr().ok()?.ip())
+    socket.local_addr().ok()
+}
+
+/// Where to reach `port` on the phone at `phone`: a link-local IPv6 address (what usbmuxd gives
+/// over Wi-Fi, without its interface) gets the interface the system routes it through, as TCP
+/// to one without it fails with "No route to host".
+pub fn phone_socket(phone: std::net::IpAddr, port: u16) -> std::net::SocketAddr {
+    if let std::net::IpAddr::V6(v6) = phone
+        && v6.is_unicast_link_local()
+        && let Some(std::net::SocketAddr::V6(local)) = local_toward(phone)
+        && local.scope_id() != 0
+    {
+        return std::net::SocketAddrV6::new(v6, port, 0, local.scope_id()).into();
+    }
+    (phone, port).into()
 }
 
 /// Whether AssistiveTouch is on (iOS shows a pointer for a mouse only then).
@@ -375,7 +395,7 @@ pub fn exchange(
             // port), not a port an app listens on: Trek Driver's is reached straight over TCP,
             // at the phone's address; the driver takes only this Mac's connections there.
             if let Connection::Network(ip) = device.connection_type {
-                return exchange_tcp((ip, port).into(), request).await;
+                return exchange_tcp(phone_socket(ip, port), request).await;
             }
             // A connection of its own: after Connect it carries only the phone's port.
             let tunnel = UsbmuxdConnection::default()
@@ -586,6 +606,28 @@ mod tests {
         ));
         // Without a length only the close says so.
         assert!(!answer_complete(b"HTTP/1.1 200 OK\r\n\r\nabcde"));
+    }
+
+    #[test]
+    fn a_phone_on_the_network_is_reached_at_its_address_with_the_interface_it_needs() {
+        // An IPv4 or routable address as it is.
+        let v4: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+        assert_eq!(phone_socket(v4, 8117), "192.168.1.20:8117".parse().unwrap());
+        let global: std::net::IpAddr = "2001:db8::5".parse().unwrap();
+        assert_eq!(
+            phone_socket(global, 8117),
+            "[2001:db8::5]:8117".parse().unwrap()
+        );
+        // A link-local one keeps its address and port, and takes the routed interface when the
+        // system has one for it (usbmuxd gives it without, and TCP can't route that).
+        let link: std::net::IpAddr = "fe80::1cc8:1497:b602:a73a".parse().unwrap();
+        let at = phone_socket(link, 8117);
+        assert_eq!((at.ip(), at.port()), (link, 8117));
+        if let (std::net::SocketAddr::V6(at), Some(std::net::SocketAddr::V6(route))) =
+            (at, local_toward(link))
+        {
+            assert_eq!(at.scope_id(), route.scope_id());
+        }
     }
 
     /// Over Wi-Fi the far end may close late: the answer is taken as soon as it's whole, even
