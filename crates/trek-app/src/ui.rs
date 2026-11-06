@@ -16,32 +16,37 @@ use trek_core::AgentId;
 pub enum Material {
     /// macOS 26's Liquid Glass: frosts the desktop heavily.
     Native,
-    /// Windows 11's Acrylic: what's behind the window (the desktop, other windows) frosted, as
-    /// Liquid Glass does on the Mac. `linear` while Windows blends it in linear light (HDR or Auto
-    /// Color Management on, `winlook::linear_now`), where the same see-through lets more of
-    /// what's behind through.
-    Acrylic { linear: bool },
+    /// Windows 11's glass: what's behind the window (the desktop, other windows) shows through,
+    /// blurred, and at the Frost slider's Clear end as it is (`winlook::set_backdrop`). `linear`
+    /// while Windows blends it in linear light (HDR or Auto Color Management on,
+    /// `winlook::linear_now`), where the same see-through lets more of what's behind through.
+    SeeThrough { linear: bool },
     /// GPUI's blur of what's behind (macOS before 26): lighter, so panels stay firmer.
     Blur,
 }
 
-/// What a window's glass was last told: whether it's on, whether Trek's theme is dark (Windows'
-/// glass follows the theme, not the system), and whether Windows blends it in linear light.
-pub type GlassState = (bool, bool, bool);
+/// What a window's glass was last told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlassState {
+    on: bool,
+    /// Whether Trek's theme is dark: Windows' glass follows the theme, not the system.
+    dark: bool,
+    /// Whether what's behind is blurred: Windows' glass isn't at the Frost slider's Clear end.
+    frosted: bool,
+    /// Whether Windows blends it in linear light.
+    linear: bool,
+}
 
-/// The background to ask of a window for glass: nothing when `on` is false; the system's own glass
-/// laid under a transparent window (`native`); the system backdrop where `system` says this
-/// platform has one (Windows 11 22H2, see `winlook`); else GPUI's blur. On Windows GPUI is asked
-/// for its system-backdrop path (it draws the window see-through for it), and `winlook` then picks
-/// the material itself: Acrylic, which frosts what's behind the window as Liquid Glass does. (Mica,
-/// asked for before, only tints the window with the wallpaper's colour and never lets anything
-/// through, so the Frost slider's Clear end looked the same as its Frosted one.)
-pub fn backdrop(on: bool, native: bool, system: bool) -> WindowBackgroundAppearance {
-    match (on, native, system) {
-        (false, _, _) => WindowBackgroundAppearance::Opaque,
-        (true, true, _) => WindowBackgroundAppearance::Transparent,
-        (true, false, true) => WindowBackgroundAppearance::MicaAltBackdrop,
-        (true, false, false) => WindowBackgroundAppearance::Blurred,
+/// The background to ask of a window for glass: nothing when `on` is false; a see-through window,
+/// with the system's own glass laid under it (`native`) or, on Windows (`see_through`), what's
+/// behind blurred by `winlook`; else GPUI's blur. (Windows' own materials frost too much for the
+/// Frost slider's Clear end: Mica only tints the window with the wallpaper's colour, and Acrylic
+/// hides two thirds of what's behind under its grey before Trek's colour goes on.)
+pub fn backdrop(on: bool, native: bool, see_through: bool) -> WindowBackgroundAppearance {
+    match (on, native || see_through) {
+        (false, _) => WindowBackgroundAppearance::Opaque,
+        (true, true) => WindowBackgroundAppearance::Transparent,
+        (true, false) => WindowBackgroundAppearance::Blurred,
     }
 }
 
@@ -54,30 +59,34 @@ pub fn colours_changed(applied: &mut Option<GlassState>) {
     *applied = None;
 }
 
-/// Liquid glass on `window`: the system's Liquid Glass behind it when there is one (macOS 26),
-/// Acrylic on Windows 11, else a blur of what's behind; opaque when off. `applied` is what was
-/// last asked of the window, so it's only told when that changes. The window's root paints the
-/// theme's background under everything; under glass it paints nothing, after this frame (it's
-/// drawing this one).
+/// Liquid glass on `window`, at `glass`'s tint (`None`: off): the system's Liquid Glass behind it
+/// when there is one (macOS 26), what's behind shown through on Windows 11, else a blur of what's
+/// behind; opaque when off. `applied` is what was last asked of the window, so it's only told when
+/// that changes. The window's root paints the theme's background under everything; under glass it
+/// paints nothing, after this frame (it's drawing this one).
 pub fn apply_glass(
     window: &mut Window,
-    on: bool,
+    glass: Option<f32>,
     dark: bool,
     applied: &mut Option<GlassState>,
     cx: &mut App,
 ) {
+    let on = glass.is_some();
     // Checked every frame rather than with `applied`: a theme change puts the theme's own colour
-    // back, glass or not, and GPUI's full screen puts back the window style it saved. (Changing the
-    // theme redraws every window.)
+    // back, glass or not. (Changing the theme redraws every window.)
     if cfg!(windows) {
         retune_quiet_text(on, dark, cx);
-        #[cfg(windows)]
-        crate::winlook::keep_frame_for_glass(window, on);
     }
-    // Only Windows' glass follows the theme's tone, elsewhere a theme change leaves glass alone; and
-    // only Windows blends it in linear light (asked each frame, as its switches are).
-    let linear = on && crate::winlook::linear_now();
-    let state = (on, dark && cfg!(windows), linear);
+    // Only Windows' glass follows the theme's tone (elsewhere a theme change leaves glass alone),
+    // goes unblurred at the Frost slider's Clear end, and is blended in linear light (asked each
+    // frame, as its switches are).
+    let windows = cfg!(windows) && on;
+    let state = GlassState {
+        on,
+        dark: dark && cfg!(windows),
+        frosted: windows && glass.is_some_and(frosted),
+        linear: windows && crate::winlook::linear_now(),
+    };
     if *applied == Some(state) {
         return;
     }
@@ -85,11 +94,12 @@ pub fn apply_glass(
     #[cfg(any(test, feature = "test-support"))]
     BACKDROP_ASKS.with(|n| n.set(n.get() + 1));
     let native = crate::system::native_glass(window, on);
-    let system = cfg!(windows) && on;
     let material = if native {
         Material::Native
-    } else if system {
-        Material::Acrylic { linear }
+    } else if windows {
+        Material::SeeThrough {
+            linear: state.linear,
+        }
     } else {
         Material::Blur
     };
@@ -98,11 +108,11 @@ pub fn apply_glass(
     if MATERIAL.with(|m| m.replace(material)) != material {
         cx.refresh_windows();
     }
-    tracing::debug!("glass: on={on} dark={dark} native={native} system={system} linear={linear}");
-    window.set_background_appearance(backdrop(on, native, system));
-    // After GPUI's ask, which names a material of its own.
+    tracing::debug!("glass: {state:?} native={native}");
+    window.set_background_appearance(backdrop(on, native, windows));
+    // After GPUI's ask, which shows what's behind a see-through window as it is.
     #[cfg(windows)]
-    crate::winlook::set_backdrop(window, dark, on);
+    crate::winlook::set_backdrop(window, dark, on, state.frosted);
     window.defer(cx, move |window, cx| {
         if let Some(Some(root)) = window.root::<gpui_kit::component::Root>() {
             root.update(cx, |root, cx| {
@@ -114,25 +124,36 @@ pub fn apply_glass(
 }
 
 /// The chrome behind the sidebar and title bar: the theme's sidebar colour, or under glass that
-/// colour let `chrome_alpha` of the way through.
+/// colour let `chrome_alpha` of the way through (in linear light, what lets as much through as that
+/// does on an SDR display, `in_linear_light`).
 pub fn chrome_bg(glass: Option<f32>, cx: &App) -> Hsla {
     let theme = cx.theme();
-    let side = theme.sidebar;
-    match glass {
-        Some(t) => side.opacity(chrome_alpha(t, material(), theme.mode.is_dark())),
-        None => side,
+    let (side, dark) = (theme.sidebar, theme.mode.is_dark());
+    match (glass, material()) {
+        (Some(t), Material::SeeThrough { linear: true }) => side.opacity(in_linear_light(
+            chrome_alpha(t, material(), dark),
+            side,
+            dark,
+        )),
+        (Some(t), material) => side.opacity(chrome_alpha(t, material, dark)),
+        (None, _) => side,
     }
 }
 
 /// How much of the sidebar colour the chrome keeps at glass `tint`, on `material`, in a `dark`
-/// theme or a light one: the tint itself on the Mac. On Acrylic the Frost slider's whole travel
-/// runs from `acrylic_chrome_floor` to `acrylic_chrome_top`, so every step of it shows, and none
-/// lets the quiet text fall under 4.5:1.
+/// theme or a light one, as an SDR display shows it: the tint itself on the Mac. On Windows the
+/// Frost slider runs from `SEE_THROUGH_CLEAR` at Clear, where what's behind shows as it is, to
+/// `see_through_reads` at its middle, from where the text reads over anything behind, and on to
+/// `SEE_THROUGH_TOP` at Frosted; every step of it shows.
 pub fn chrome_alpha(tint: f32, material: Material, dark: bool) -> f32 {
     match material {
-        Material::Acrylic { linear } => {
-            let floor = acrylic_chrome_floor(dark, linear);
-            floor + (acrylic_chrome_top(dark, linear) - floor) * frost(tint)
+        Material::SeeThrough { .. } => {
+            let (frost, reads) = (frost(tint), see_through_reads(dark));
+            if frost <= 0.5 {
+                SEE_THROUGH_CLEAR + (reads - SEE_THROUGH_CLEAR) * frost / 0.5
+            } else {
+                reads + (SEE_THROUGH_TOP - reads) * (frost - 0.5) / 0.5
+            }
         }
         Material::Native | Material::Blur => tint,
     }
@@ -143,32 +164,66 @@ pub(crate) fn frost(tint: f32) -> f32 {
     ((tint - 0.2) / 0.75).clamp(0., 1.)
 }
 
-/// The least of the sidebar colour Acrylic's chrome keeps, at the Frost slider's Clear end:
-/// measured from the screen on Windows 11, over a white window behind (the brightest dark
-/// Acrylic, Night's worst) and a black one (the dimmest light Acrylic, Paper's), it's where
-/// `glass_quiet_text` holds 4.8:1 against Acrylic's grain, a little over the 4.5:1 it needs.
-/// Blended in linear light (`linear`), dark colour laid over light lets far more of it through:
-/// there Night's 68% would leave its quiet text at 3:1 or less over a white window, and its 92% shows
-/// about as much of what's behind as 68% does on an SDR display. Paper's reads better in linear
-/// light, and keeps its own.
-pub const fn acrylic_chrome_floor(dark: bool, linear: bool) -> f32 {
-    match (dark, linear) {
-        (true, false) => 0.68,
-        (true, true) => 0.92,
-        (false, _) => 0.74,
-    }
+/// Whether Windows' glass blurs what's behind at `tint`: everywhere but the Frost slider's Clear
+/// end, where what's behind shows as it is.
+pub fn frosted(tint: f32) -> bool {
+    // Over half of one of the slider's hundred steps.
+    frost(tint) > 0.005
 }
 
-/// How much Acrylic's chrome keeps at the Frost slider's Frosted end: nearly the theme's own
-/// colour, as frosted as Acrylic goes before it's opaque. Night's in linear light keeps more for
-/// the same frost, as at its Clear end (`acrylic_chrome_floor`).
-pub const fn acrylic_chrome_top(dark: bool, linear: bool) -> f32 {
-    if dark && linear { 0.98 } else { 0.92 }
+/// How much of the sidebar colour Windows' glass keeps at the Frost slider's Clear end: a breath
+/// of it, over what's behind as it is.
+pub const SEE_THROUGH_CLEAR: f32 = 0.1;
+
+/// How much Windows' glass keeps at the Frost slider's Frosted end: nearly the theme's own colour.
+pub const SEE_THROUGH_TOP: f32 = 0.95;
+
+/// How much Windows' glass keeps at the Frost slider's middle, and more from there to Frosted:
+/// where `glass_quiet_text` holds 4.5:1 over anything behind, a white window (a dark theme's
+/// worst) or a black one (a light theme's). Clearer than that, what's behind is as much the text's
+/// ground as the theme's colour is, which is Clear's to choose.
+pub const fn see_through_reads(dark: bool) -> f32 {
+    if dark { 0.81 } else { 0.86 }
+}
+
+/// The alpha that lays `side` over what's behind in linear light (HDR, Auto Color Management on)
+/// as `alpha` does on an SDR display, which blends colours as their sRGB values: matched over what
+/// makes a theme's text hardest to read, a white window for a dark theme and a black one for a
+/// light theme, so it reads and shows as much there. In linear light dark colour laid over light
+/// lets far more of the light through, and light over dark less of the dark.
+pub fn in_linear_light(alpha: f32, side: Hsla, dark: bool) -> f32 {
+    let lin = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let rgb = side.to_rgb();
+    let luminance = 0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b);
+    if !(luminance > 0. && luminance < 1.) {
+        return alpha;
+    }
+    // The side colour as the grey of its luminance, in sRGB values.
+    let grey = if luminance <= 0.003_130_8 {
+        luminance * 12.92
+    } else {
+        1.055 * luminance.powf(1. / 2.4) - 0.055
+    };
+    let matched = if dark {
+        // Over white, an SDR display shows `alpha * grey + 1 - alpha`.
+        (1. - lin(alpha * grey + 1. - alpha)) / (1. - luminance)
+    } else {
+        // Over black, `alpha * grey`.
+        lin(alpha * grey) / luminance
+    };
+    matched.clamp(0., 1.)
 }
 
 /// The quieter text's colour on Windows' glass (the sidebar's counts and times, the project's
 /// name): a step lighter on Night, darker on Paper, as Fluent's secondary text on Acrylic is, so
-/// it holds 4.5:1 down to `acrylic_chrome_floor`. Its step down from the text stays.
+/// it holds 4.5:1 from the Frost slider's middle up (`see_through_reads`). Its step down from the
+/// text stays.
 pub fn glass_quiet_text(dark: bool) -> Hsla {
     if dark {
         rgb(0xA9A9B2).into()
@@ -199,10 +254,10 @@ thread_local! {
     static UNTUNED_QUIET: std::cell::Cell<Option<Hsla>> = const { std::cell::Cell::new(None) };
 }
 
-/// Whether what's read sits on solid panes under `glass`: on Windows' Acrylic, whose glass is the
-/// window's frame (`panel_alpha`).
+/// Whether what's read sits on solid panes under `glass`: on Windows, whose glass is the chrome's
+/// (`panel_alpha`).
 pub fn solid_panes(glass: Option<f32>) -> bool {
-    glass.is_some() && matches!(material(), Material::Acrylic { .. })
+    glass.is_some() && matches!(material(), Material::SeeThrough { .. })
 }
 
 /// Swap the theme's quiet text for glass's or back (`quiet_text`): whether it changed.
@@ -245,7 +300,7 @@ fn material() -> Material {
 pub fn panel_alpha(tint: f32, material: Material) -> f32 {
     let floor = match material {
         Material::Native => 0.6,
-        Material::Acrylic { .. } => return 1.,
+        Material::SeeThrough { .. } => return 1.,
         Material::Blur => 0.82,
     };
     (tint + 0.2).clamp(floor, 0.95)
@@ -266,7 +321,7 @@ pub fn panel_bg(glass: Option<f32>, cx: &App) -> Hsla {
 pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
     let theme = cx.theme();
     match glass {
-        Some(_) if matches!(material(), Material::Acrylic { .. }) => {
+        Some(_) if matches!(material(), Material::SeeThrough { .. }) => {
             fluent::stroke(theme.sidebar_border, cx)
         }
         Some(_) => theme
@@ -281,7 +336,7 @@ pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
 /// Windows, whose panes are solid and whose glass catches no light.
 pub fn glass_sheen(glass: Option<f32>, cx: &App) -> Option<AnyElement> {
     glass?;
-    if matches!(material(), Material::Acrylic { .. }) {
+    if matches!(material(), Material::SeeThrough { .. }) {
         return None;
     }
     let dark = cx.theme().mode.is_dark();
@@ -1340,44 +1395,88 @@ pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        Material, PROJECT_COLORS, acrylic_chrome_floor, acrylic_chrome_top, chrome_alpha,
-        glass_quiet_text, lead_to_match, project_hue, project_ink, quiet_headings, quiet_text,
-        reveal_alphas,
+        Material, PROJECT_COLORS, SEE_THROUGH_CLEAR, SEE_THROUGH_TOP, chrome_alpha, frosted,
+        glass_quiet_text, in_linear_light, lead_to_match, project_hue, project_ink, quiet_headings,
+        quiet_text, reveal_alphas, see_through_reads,
     };
+    use gpui_kit::{Hsla, rgb};
 
-    /// The Frost slider moves Acrylic's chrome all the way along, every step of it, from the
-    /// floor at Clear to short of opaque at Frosted, blended in linear light or not; the Mac's
-    /// chrome is the tint itself.
+    /// The Frost slider moves Windows' glass all the way along, every one of its hundred steps:
+    /// from a breath of the theme's colour at Clear, where nothing's blurred, to the middle, from
+    /// where text reads over anything behind, to short of opaque at Frosted. The Mac's chrome is
+    /// the tint itself.
     #[test]
     fn every_step_of_the_frost_slider_shows_on_windows_glass() {
-        for (dark, linear) in [(true, false), (false, false), (true, true), (false, true)] {
-            let at = |tint: f32| chrome_alpha(tint, Material::Acrylic { linear }, dark);
-            let top = acrylic_chrome_top(dark, linear);
-            assert_eq!(at(0.2), acrylic_chrome_floor(dark, linear));
-            assert!((at(0.95) - top).abs() < 1e-6);
-            assert!(top < 1.);
+        for dark in [true, false] {
+            let at = |tint: f32| chrome_alpha(tint, Material::SeeThrough { linear: false }, dark);
+            assert_eq!(at(0.2), SEE_THROUGH_CLEAR);
+            assert!((at(0.575) - see_through_reads(dark)).abs() < 1e-6);
+            assert!((at(0.95) - SEE_THROUGH_TOP).abs() < 1e-6);
+            assert!(SEE_THROUGH_TOP < 1.);
             let mut last = at(0.2);
-            for step in 1..=15 {
-                let next = at(0.2 + 0.05 * step as f32);
-                assert!(
-                    next > last,
-                    "dark={dark} linear={linear}: step {step} changed nothing"
-                );
+            for step in 1..=100 {
+                let next = at(0.2 + 0.0075 * step as f32);
+                assert!(next > last, "dark={dark}: step {step} changed nothing");
                 last = next;
             }
             // Out of range on either side, the ends.
             assert_eq!(at(0.), at(0.2));
             assert!((at(1.) - at(0.95)).abs() < 1e-6);
         }
-        // In linear light Night's chrome keeps more of its colour all along; Paper's is as it was.
-        for tint in [0.2, 0.6, 0.95] {
-            let night = |linear| chrome_alpha(tint, Material::Acrylic { linear }, true);
-            let paper = |linear| chrome_alpha(tint, Material::Acrylic { linear }, false);
-            assert!(night(true) > night(false));
-            assert_eq!(paper(true), paper(false));
-        }
         assert_eq!(chrome_alpha(0.3, Material::Native, true), 0.3);
         assert_eq!(chrome_alpha(0.3, Material::Blur, false), 0.3);
+    }
+
+    /// Clear is clear: nothing's blurred at the slider's Clear end, and everything after it is.
+    #[test]
+    fn only_the_clear_end_is_unblurred() {
+        assert!(!frosted(0.2));
+        assert!(!frosted(0.));
+        assert!(frosted(0.2 + 0.0075));
+        assert!(frosted(0.6));
+        assert!(frosted(0.95));
+    }
+
+    /// In linear light the chrome keeps what makes it look, and read, as it does on an SDR display
+    /// over the theme's worst window behind: more of Night's colour over white, less of Paper's
+    /// over black. Its order along the slider stays.
+    #[test]
+    fn linear_light_keeps_the_look_of_an_sdr_display() {
+        let lin = |c: f32| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        for (side, dark) in [(rgb(0x101012), true), (rgb(0xF6F5F4), false)] {
+            let side: Hsla = side.into();
+            let c = side.to_rgb();
+            let mut last = 0.;
+            for step in 0..=100 {
+                let alpha =
+                    SEE_THROUGH_CLEAR + (SEE_THROUGH_TOP - SEE_THROUGH_CLEAR) * step as f32 / 100.;
+                let matched = in_linear_light(alpha, side, dark);
+                assert!(matched > last, "dark={dark}: step {step}");
+                last = matched;
+                // What an SDR display shows over the worst window, against linear light's, in
+                // luminance, channel by channel.
+                let behind = if dark { 1. } else { 0. };
+                for ch in [c.r, c.g, c.b] {
+                    let sdr = lin(alpha * ch + (1. - alpha) * behind);
+                    let linear = matched * lin(ch) + (1. - matched) * behind;
+                    assert!(
+                        (sdr - linear).abs() < 0.01,
+                        "dark={dark} alpha {alpha:.2}: {sdr:.4} against {linear:.4}"
+                    );
+                }
+                assert!(if dark {
+                    matched >= alpha
+                } else {
+                    matched <= alpha
+                });
+            }
+        }
     }
 
     /// Glass's quiet text goes in while there's glass and the theme's own comes back after; a

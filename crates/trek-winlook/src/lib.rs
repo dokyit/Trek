@@ -1,7 +1,7 @@
 //! What Windows says about how Trek should look and move, read the way macOS's Reduce motion and
 //! Reduce transparency are: the "Animation effects" and "Transparency effects" switches in
-//! Settings, and whether this Windows has the Mica material at all. Reading only; Trek never
-//! writes any of it.
+//! Settings, contrast themes, and HDR. Reading only; Trek never writes any of it. And how a
+//! window's glass is asked of DWM (`set_backdrop`).
 //!
 //! The decisions are plain functions of what was read (`glass_available`, `reduces_motion`), so
 //! they run, and are tested, on every platform; the reads are Windows-only.
@@ -9,45 +9,16 @@
 // The decisions are plain functions that other platforms' tests run too; only Windows calls them.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-/// The first Windows 11 build with the system backdrop material (Mica, Mica Alt) a window can ask
-/// for (22H2). Windows 10, and 11 before this, get an opaque window where macOS gets glass.
-pub const MICA_BUILD: u32 = 22621;
+/// The first Windows build Trek shows glass on: Windows 11 22H2, where it's been tried. Windows 10,
+/// and 11 before it, get an opaque window where macOS gets glass.
+pub const GLASS_BUILD: u32 = 22621;
 
 /// Whether a Windows at `build`, with the Transparency effects switch at `transparency` and High
-/// Contrast at `high_contrast`, can show glass: a window's system backdrop (Acrylic). Off any way,
-/// Trek's window stays opaque: High Contrast asks for the plainest surfaces there are.
+/// Contrast at `high_contrast`, can show glass: what's behind a window showing through it
+/// (`set_backdrop`). Off any way, Trek's window stays opaque: High Contrast asks for the plainest
+/// surfaces there are.
 pub fn glass_available(build: u32, transparency: bool, high_contrast: bool) -> bool {
-    build >= MICA_BUILD && transparency && !high_contrast
-}
-
-/// `WS_SYSMENU`, the window style bit for the system menu.
-pub const WS_SYSMENU: u32 = 0x0008_0000;
-/// `WS_CAPTION`, which Windows gives every overlapped window, GPUI's included.
-pub const WS_CAPTION: u32 = 0x00C0_0000;
-/// The bits a framed window has (`WS_THICKFRAME`, `WS_MINIMIZEBOX`, `WS_MAXIMIZEBOX`): GPUI's full
-/// screen takes all of them, and puts back the style it saved on the way out.
-const FRAMED: u32 = 0x0004_0000 | 0x0002_0000 | 0x0001_0000;
-
-/// What glass takes from a window's style while it's on: the system menu. DWM draws its buttons
-/// (minimize, maximize, close) into a frame extended across the window, and they'd show through
-/// the glass behind Trek's own. The caption stays, as Windows fits a maximized window to the work
-/// area (clear of the taskbar) and animates minimizing and maximizing only for a window with one;
-/// what goes with the menu is Alt+Space's window menu, back when glass is off. Trek's own buttons,
-/// snapping and resizing don't need it.
-pub const GLASS_TAKES: u32 = WS_SYSMENU;
-
-/// The window style to give a window for glass `on`, from the one it has (`style`) and whether
-/// glass took `GLASS_TAKES` from it before (`taken`): taken while there's glass, given back
-/// after. A window in full screen is left as it is. `None`: leave it as is.
-pub fn style_for_glass(style: u32, on: bool, taken: bool) -> Option<u32> {
-    if style & FRAMED == 0 {
-        return None;
-    }
-    match (on, style & GLASS_TAKES != 0) {
-        (true, true) => Some(style & !GLASS_TAKES),
-        (false, false) if taken => Some(style | GLASS_TAKES),
-        _ => None,
-    }
+    build >= GLASS_BUILD && transparency && !high_contrast
 }
 
 /// Whether Windows asks for reduced motion, given its "Animation effects" switch
@@ -356,25 +327,19 @@ pub fn reduce_motion() -> bool {
     read != 0 && reduces_motion(on != 0)
 }
 
-/// Tell DWM how the window's backdrop material should look: Acrylic, which frosts what's behind
-/// the window (the desktop, other windows) as Liquid Glass does on the Mac. `dark` picks its dark
-/// or light tone, so it follows Trek's theme (Night, Paper) rather than the system's: Paper over a
-/// dark Acrylic would be muddy, and Night over a light one glaring (GPUI sets this from the
-/// system's appearance only). Without `glass` the material is taken off the window (GPUI's opaque
-/// background leaves one it set before in place), so none shows at the frame's edge. It also asks
-/// for Windows 11's rounded corners. Call it after GPUI's `set_background_appearance`, which names
-/// a material of its own.
+/// Tell DWM how to show what's behind the window, after GPUI's see-through window (or its opaque
+/// one, without `glass`): blurred where glass is `frosted`, and as it is at the Frost slider's
+/// Clear end, where it isn't. The blur is a plain one (`ACCENT_ENABLE_BLURBEHIND`), under none of
+/// Windows' own colour: its materials frost too much for a clear end (Mica lets nothing through,
+/// and Acrylic hides two thirds of what's behind under its grey before Trek's colour goes on), and
+/// GPUI's blurred window is Acrylic's (`ACCENT_ENABLE_ACRYLICBLURBEHIND`), which lags behind the
+/// pointer as a window is dragged. Nothing of the frame reaches into the window, as DWM's would
+/// draw minimize, maximize and close there, under Trek's own. `dark` gives the window Windows'
+/// dark frame in a dark theme, Trek's own choice rather than the system's (GPUI sets it from the
+/// system's appearance only); and Windows 11's rounded corners are asked for.
 #[cfg(windows)]
-pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
+pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool, frosted: bool) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    /// `MARGINS`: how far the frame reaches into the window, from each edge.
-    #[repr(C)]
-    struct Margins {
-        left: i32,
-        right: i32,
-        top: i32,
-        bottom: i32,
-    }
     #[link(name = "dwmapi")]
     unsafe extern "system" {
         fn DwmSetWindowAttribute(
@@ -383,21 +348,12 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
             value: *const core::ffi::c_void,
             size: u32,
         ) -> i32;
-        fn DwmExtendFrameIntoClientArea(
-            hwnd: *mut core::ffi::c_void,
-            margins: *const Margins,
-        ) -> i32;
     }
     /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
     const USE_IMMERSIVE_DARK_MODE: u32 = 20;
     /// `DWMWA_WINDOW_CORNER_PREFERENCE`, and its `DWMWCP_ROUND`.
     const WINDOW_CORNER_PREFERENCE: u32 = 33;
     const CORNER_ROUND: i32 = 2;
-    /// `DWMWA_SYSTEMBACKDROP_TYPE`, and its `DWMSBT_NONE`.
-    const SYSTEMBACKDROP_TYPE: u32 = 38;
-    const BACKDROP_NONE: i32 = 1;
-    /// `DWMSBT_TRANSIENTWINDOW`: Acrylic, what's behind the window frosted.
-    const BACKDROP_ACRYLIC: i32 = 3;
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
@@ -408,8 +364,7 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     let set = |attribute: u32, value: i32| {
         // SAFETY: `hwnd` is the live window GPUI created for this `window`, on its own thread;
         // each attribute takes a 4-byte value, which `value` is and outlives the call. Windows
-        // before 11 refuses the corner one and before 11 22H2 the backdrop one, which is the answer
-        // wanted there.
+        // before 11 refuses the corner one, which is the answer wanted there.
         unsafe {
             DwmSetWindowAttribute(
                 hwnd,
@@ -423,78 +378,58 @@ pub fn set_backdrop(window: &gpui_kit::Window, dark: bool, glass: bool) {
     // Windows 11 rounds a window by itself only if it has a resizing frame and a caption it draws,
     // and GPUI's draw none, as Trek draws its own title bar: they have to ask.
     set(WINDOW_CORNER_PREFERENCE, CORNER_ROUND);
-    // DWM draws a backdrop material in the window's frame only. Trek draws its own title bar, so
-    // all of its window is client area: without the frame reaching all the way in (-1 on every
-    // side, "sheet of glass"), no material shows anywhere, whatever is asked for. Off, it goes
-    // back to the edges.
-    let reach = if glass { -1 } else { 0 };
-    let margins = Margins {
-        left: reach,
-        right: reach,
-        top: reach,
-        bottom: reach,
-    };
-    // SAFETY: `hwnd` as above; `margins` is a live `MARGINS` (four `i32`s, `repr(C)`) for the call.
-    unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) };
-    if glass {
-        set(SYSTEMBACKDROP_TYPE, BACKDROP_ACRYLIC);
-    } else {
-        set(SYSTEMBACKDROP_TYPE, BACKDROP_NONE);
+    if glass && frosted {
+        blur_behind(hwnd);
     }
 }
 
-/// Keep `window`'s style as glass wants it (`style_for_glass`), marking on the window that glass
-/// took `GLASS_TAKES`, so only what it took is given back. Called on every frame: GPUI's full
-/// screen puts back the style it saved before, glass or not. Two reads when there's nothing to do.
+/// Blur what's behind `hwnd`, through user32's `SetWindowCompositionAttribute`, which GPUI asks
+/// for its see-through and blurred windows with too (it's not in Windows' headers).
 #[cfg(windows)]
-pub fn keep_frame_for_glass(window: &gpui_kit::Window, glass: bool) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_STYLE, GetPropW, GetWindowLongW, RemovePropW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetPropW, SetWindowLongW, SetWindowPos,
-    };
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
-    };
-    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-        return;
-    };
-    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
-    let mark = windows_sys::w!("TrekGlassTookSystemMenu");
-    // SAFETY: `hwnd` is the live window GPUI made for `window`, on its own thread, and `mark` is a
-    // NUL-terminated static. The style is 32 bits, so the Long forms read and write all of it. The
-    // mark's value only has to be non-null: the window itself.
+fn blur_behind(hwnd: *mut core::ffi::c_void) {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    /// `ACCENT_POLICY`, and the `WINDOWCOMPOSITIONATTRIBDATA` that carries it.
+    #[repr(C)]
+    struct AccentPolicy {
+        state: u32,
+        flags: u32,
+        gradient: u32,
+        animation: u32,
+    }
+    #[repr(C)]
+    struct CompositionData {
+        attribute: u32,
+        data: *mut core::ffi::c_void,
+        size: usize,
+    }
+    /// `WCA_ACCENT_POLICY`, and `ACCENT_ENABLE_BLURBEHIND`.
+    const ACCENT_POLICY: u32 = 19;
+    const ENABLE_BLURBEHIND: u32 = 3;
+    type SetWindowCompositionAttribute =
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut CompositionData) -> i32;
+    // SAFETY: user32 is loaded in any process with a window, and both names are NUL-terminated
+    // statics. What's found is user32's `SetWindowCompositionAttribute`, whose signature this is;
+    // `hwnd` is the live window GPUI made, on its own thread, and the policy and what carries it
+    // outlive the call, which only reads them.
     unsafe {
-        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-        let taken = !GetPropW(hwnd, mark).is_null();
-        match style_for_glass(style, glass, taken) {
-            Some(next) => {
-                // Marked first: a window that can't be marked keeps its style, rather than lose a
-                // part of it that wouldn't come back.
-                if glass && SetPropW(hwnd, mark, hwnd) == 0 {
-                    return;
-                }
-                SetWindowLongW(hwnd, GWL_STYLE, next as i32);
-                // The frame is drawn again, without (or with) the menu's buttons.
-                SetWindowPos(
-                    hwnd,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-                if !glass {
-                    RemovePropW(hwnd, mark);
-                }
-            }
-            // Given back already (full screen's saved style had it): nothing more to give back.
-            None if !glass && taken && style & FRAMED != 0 => {
-                RemovePropW(hwnd, mark);
-            }
-            None => {}
-        }
+        let user32 = GetModuleHandleW(windows_sys::w!("user32.dll"));
+        let Some(found) = GetProcAddress(user32, c"SetWindowCompositionAttribute".as_ptr().cast())
+        else {
+            return;
+        };
+        let set_attribute: SetWindowCompositionAttribute = std::mem::transmute(found);
+        let mut accent = AccentPolicy {
+            state: ENABLE_BLURBEHIND,
+            flags: 0,
+            gradient: 0,
+            animation: 0,
+        };
+        let mut data = CompositionData {
+            attribute: ACCENT_POLICY,
+            data: (&mut accent as *mut AccentPolicy).cast(),
+            size: std::mem::size_of::<AccentPolicy>(),
+        };
+        set_attribute(hwnd, &mut data);
     }
 }
 
@@ -503,16 +438,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glass_needs_mica_and_the_transparency_switch() {
-        // Windows 10 (19045) and 11 before 22H2: no Mica, whatever the switch says.
+    fn glass_needs_windows_11_22h2_and_the_transparency_switch() {
+        // Windows 10 (19045) and 11 before 22H2: no glass, whatever the switch says.
         assert!(!glass_available(19045, true, false));
         assert!(!glass_available(22000, true, false));
-        assert!(!glass_available(MICA_BUILD - 1, true, false));
-        // 22H2 and later: Mica, unless transparency effects are off.
-        assert!(glass_available(MICA_BUILD, true, false));
+        assert!(!glass_available(GLASS_BUILD - 1, true, false));
+        // 22H2 and later: glass, unless transparency effects are off.
+        assert!(glass_available(GLASS_BUILD, true, false));
         assert!(glass_available(26100, true, false));
         assert!(!glass_available(26100, false, false));
-        // An unreadable build (0) is not Mica.
+        // An unreadable build (0) is too old.
         assert!(!glass_available(0, true, false));
     }
 
@@ -520,40 +455,6 @@ mod tests {
     fn high_contrast_keeps_the_window_opaque() {
         assert!(!glass_available(26100, true, true));
         assert!(!glass_available(26100, false, true));
-    }
-
-    /// A GPUI window as Windows reports it: shown, clipping its siblings, with the caption
-    /// Windows gives every overlapped window, the system menu, a resizing frame and both boxes.
-    const GPUI_WINDOW: u32 = 0x1000_0000 | 0x0400_0000 | WS_CAPTION | WS_SYSMENU | FRAMED;
-
-    #[test]
-    fn glass_takes_the_system_menu_and_gives_it_back() {
-        // On: the menu goes, and nothing else does: the caption stays.
-        let on = style_for_glass(GPUI_WINDOW, true, false).unwrap();
-        assert_eq!(on, GPUI_WINDOW & !WS_SYSMENU);
-        assert_eq!(on & WS_CAPTION, WS_CAPTION);
-        // On again: nothing to do.
-        assert_eq!(style_for_glass(on, true, true), None);
-        // Off: back, as it was.
-        assert_eq!(style_for_glass(on, false, true), Some(GPUI_WINDOW));
-        // Off for a window glass never took it from: left as it is.
-        assert_eq!(style_for_glass(on, false, false), None);
-        // Off with it there already: left alone.
-        assert_eq!(style_for_glass(GPUI_WINDOW, false, true), None);
-    }
-
-    /// GPUI's full screen takes the frame away and puts back the style it saved on the way out:
-    /// glass leaves a window alone meanwhile, and sees to it again once it's framed.
-    #[test]
-    fn a_window_in_full_screen_is_left_alone() {
-        let full_screen = GPUI_WINDOW & !(FRAMED | WS_SYSMENU | WS_CAPTION);
-        assert_eq!(style_for_glass(full_screen, true, false), None);
-        assert_eq!(style_for_glass(full_screen, false, true), None);
-        // Out of it with the style saved before glass came on: taken now.
-        assert_eq!(
-            style_for_glass(GPUI_WINDOW, true, false),
-            Some(GPUI_WINDOW & !WS_SYSMENU)
-        );
     }
 
     /// The reads themselves run here and answer something sensible; what they answer is this

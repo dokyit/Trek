@@ -1789,7 +1789,7 @@ impl Render for TrekWindow {
             let glass = self.workspace.read(cx).glass();
             crate::ui::apply_glass(
                 window,
-                glass.is_some(),
+                glass,
                 cx.theme().mode.is_dark(),
                 &mut self.glass_applied,
                 cx,
@@ -1835,7 +1835,7 @@ impl Render for TrekWindow {
         let glass = self.workspace.read(cx).glass();
         crate::ui::apply_glass(
             window,
-            glass.is_some(),
+            glass,
             cx.theme().mode.is_dark(),
             &mut self.glass_applied,
             cx,
