@@ -455,6 +455,10 @@ impl TrekWindow {
             // Back from a terminal: a branch switched or a commit made there shows.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
+                    // Back from Windows' Settings, maybe: its Transparency effects and contrast
+                    // themes are asked again, as GPUI tells of a switch between light and dark only.
+                    // (Nothing to ask on a Mac.)
+                    crate::winlook::forget();
                     this.workspace.update(cx, |ws, cx| {
                         ws.refresh_git(cx);
                         // A release that came out while Trek sat behind other windows.

@@ -65,6 +65,8 @@ impl Render for DraggedTab {
 /// draft with no tabs open in its project).
 pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<AnyElement> {
     let ws = workspace.read(cx);
+    // On Windows' glass the strip sits on a solid pane, so it's drawn as it is without glass.
+    let glass = glass && !crate::ui::solid_panes(ws.glass());
     let tabs = ws.tabs_here();
     let draft = matches!(ws.route, Route::Draft { .. });
     if tabs.is_empty() {

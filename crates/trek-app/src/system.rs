@@ -344,9 +344,9 @@ pub fn reduce_transparency() -> bool {
     })
 }
 
-/// Where the system won't have glass: on Windows, a Windows without the system backdrop (10, or 11 before 22H2)
-/// or with Transparency effects off (`winlook`), as macOS's Reduce Transparency does. The window
-/// stays opaque.
+/// Where the system won't have glass: on Windows, a Windows without the system backdrop (10, or 11 before 22H2),
+/// with Transparency effects off, or with a contrast theme on (`winlook`), as macOS's Reduce
+/// Transparency does. The window stays opaque.
 #[cfg(not(target_os = "macos"))]
 pub fn reduce_transparency() -> bool {
     #[cfg(windows)]

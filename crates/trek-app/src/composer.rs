@@ -3877,7 +3877,7 @@ impl Render for Composer {
             .w_full()
             // A near-white card on a 1 px hairline with a soft shadow (the design's composer).
             .rounded(px(look::RADIUS))
-            .bg(if glass { look::card_fill(cx).opacity(0.82) } else { look::card_fill(cx) })
+            .bg(if glass && !crate::ui::solid_panes(self.workspace.read(cx).glass()) { look::card_fill(cx).opacity(0.82) } else { look::card_fill(cx) })
             .border_1()
             .border_color(if hh == HandHolding::FullAccess { palette::amber(cx).opacity(0.3) } else if fluent::WINDOWS && prefs.effort == Effort::Max { blue } else { look::ring(cx) })
             .shadow(look::card_shadow(cx))

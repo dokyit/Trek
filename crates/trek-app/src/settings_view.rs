@@ -443,7 +443,7 @@ pub fn tint_at(percent: f32) -> f32 {
 }
 
 pub fn frost_of(tint: f32) -> f32 {
-    ((tint - 0.2) / 0.75 * 100.).clamp(0., 100.)
+    crate::ui::frost(tint) * 100.
 }
 
 impl SettingsView {
