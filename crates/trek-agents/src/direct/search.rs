@@ -29,14 +29,21 @@ fn walker(root: &Path) -> ignore::WalkBuilder {
     walk
 }
 
-/// The path to show for `path`: relative to `root`, as the model will pass it on.
+/// The path to show for `path`: relative to `root`, as the model will pass it on, with `/`
+/// between its parts on every platform (Windows takes it too, and one spelling reads better).
 fn shown(path: &Path, root: &Path) -> String {
-    path.strip_prefix(root)
+    match path
+        .strip_prefix(root)
         .ok()
         .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    {
+        Some(relative) => relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        None => path.display().to_string(),
+    }
 }
 
 fn clip_line(line: &str) -> String {
@@ -211,9 +218,22 @@ fn split_outside_braces(text: &str) -> Vec<&str> {
 
 /// Files under `root` matching `pattern`, most recently changed first.
 pub fn glob(root: &Path, pattern: &str) -> Result<String, String> {
-    // An absolute pattern under the root means the same relative one.
-    let root_text = format!("{}/", root.display());
-    let relative_pattern = pattern.strip_prefix(root_text.as_str()).unwrap_or(pattern);
+    // An absolute pattern under the root means the same relative one. On Windows either slash
+    // may separate its parts (elsewhere a backslash is a pattern's escape, so it's left alone).
+    let windows = |s: String| {
+        if cfg!(windows) {
+            s.replace('\\', "/")
+        } else {
+            s
+        }
+    };
+    let root_text = windows(format!("{}/", root.display()));
+    let spelled = windows(pattern.to_string());
+    let relative_pattern = spelled
+        .strip_prefix(root_text.as_str())
+        .unwrap_or(&spelled)
+        .to_string();
+    let relative_pattern = relative_pattern.as_str();
     let filter = Filter::new(relative_pattern)?;
     let walk = walker(root);
     let started = Instant::now();

@@ -569,6 +569,10 @@ fn form_matches(pattern: &str, form: &Path, roots: &[PathBuf], wide: bool) -> bo
         }
     };
     let mut pattern = fold(pattern.trim()).replace('\\', "/");
+    // Windows's long form (`\\?\C:\x`), as `slashed` reads a path: the same place as `C:/x`.
+    if let Some(rest) = pattern.strip_prefix("//?/") {
+        pattern = rest.to_string();
+    }
     if pattern.len() > 1 && pattern.ends_with('/') {
         pattern.pop();
     }

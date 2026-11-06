@@ -645,7 +645,24 @@ fn plan_app(
 
 /// A folder with its links resolved, for comparing what agents recorded with what git says.
 fn real(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    plain(&std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Windows's long form of a resolved folder (`\\?\C:\x`) as the plain one (`C:\x`), which is how
+/// git, the agents and the user write it (and git can't take the long one).
+fn plain(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::Prefix(p) => match p.kind() {
+                Prefix::VerbatimDisk(drive) => out.push(format!("{}:", drive as char)),
+                _ => out.push(c.as_os_str()),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Conductor's database, by the home folder it's under.
@@ -769,6 +786,16 @@ mod tests {
     use super::*;
     use crate::worktree::git;
     use std::collections::BTreeSet;
+
+    #[cfg(windows)]
+    #[test]
+    fn a_long_windows_path_reads_as_the_plain_one() {
+        assert_eq!(
+            plain(Path::new(r"\\?\C:\Users\me\code")),
+            PathBuf::from(r"C:\Users\me\code")
+        );
+        assert_eq!(plain(Path::new(r"C:\x")), PathBuf::from(r"C:\x"));
+    }
 
     /// A folder of its own for each test: a made-up home with repositories and worktrees in it,
     /// never the user's.

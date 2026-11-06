@@ -236,7 +236,13 @@ mod tests {
             forget("thread-1");
             assert!(!path.exists());
             assert!(other.exists(), "another thread's stays");
-            assert!(known().iter().any(|(_, v)| v == "second"), "still known");
+            // Its last value: saved again above only where file modes exist.
+            let last = if cfg!(unix) {
+                "second"
+            } else {
+                "hunter2-value"
+            };
+            assert!(known().iter().any(|(_, v)| v == last), "still known");
             forget_all();
             assert!(!other.exists());
             assert!(known().is_empty());
