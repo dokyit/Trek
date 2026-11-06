@@ -3,12 +3,13 @@
 
 mod common;
 
-use common::{new_project, open, run};
+use common::{make_repo, new_project, open, run};
 use gpui_kit::{WindowBounds, px, size};
 use std::time::Duration;
 use trek_app::single_instance::Forwarded;
 use trek_app::window_place::{Placement, initial, load};
 use trek_app::workspace::Route;
+use trek_core::RunState;
 use trek_ipc::instance::Open;
 
 #[test]
@@ -311,6 +312,65 @@ fn a_window_moved_to_another_scale_lays_out_on_whole_device_pixels() {
                 "at {scale}: still about 26pt tall ({:?})",
                 pill.size.height
             );
+        }
+    });
+}
+
+/// The composer's chips ("1 file +1 −0", the PR's) float over its top, above where the composer's
+/// own layout starts: a chip's text there can sit on a half device pixel below zero in that layout
+/// (a 13pt line centred in a 31pt pill at 125 %) and on a half above zero in the window's. The
+/// window lays the composer out from its content on frames where it changed and from its cache on
+/// the others, which during a turn alternate many times a second: both have to put the text on the
+/// same device pixel, or it bounces in its pill while the pill holds still.
+#[test]
+fn the_composers_chips_hold_still_in_and_out_of_its_cache() {
+    run(async |cx| {
+        let trek = open(cx);
+        make_repo(&trek, cx);
+        let id = trek.send(cx, "mock:write");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        for scale in [1., 1.25, 1.5, 1.75, 2.] {
+            cx.simulate_window_scale_factor_change(trek.window, scale);
+            trek.render(cx);
+            // Where it's drawn, in device pixels (a cached view adds its origin in points, which
+            // can leave a float's error behind).
+            let device = |b: Option<gpui_kit::Bounds<gpui_kit::Pixels>>| {
+                b.map(|b| {
+                    let y = b.origin.y.as_f32() * scale;
+                    assert!(
+                        (y - y.round()).abs() < 0.01,
+                        "at {scale}: {y} device pixels"
+                    );
+                    (
+                        y.round() as i32,
+                        (b.size.height.as_f32() * scale).round() as i32,
+                    )
+                })
+            };
+            let mut seen = vec![];
+            for _ in 0..2 {
+                // Laid out from its content: it changed, and the window draws that frame itself.
+                composer.update(cx, |_, cx| cx.notify());
+                cx.run_until_parked();
+                let chip = device(trek.bounds(cx, "changes-chip"));
+                let text = device(trek.bounds(cx, "changes-chip-files"));
+                seen.push(("from its content", chip, text));
+                // From its cache: nothing changed since.
+                trek.render(cx);
+                let chip = device(trek.bounds(cx, "changes-chip"));
+                let text = device(trek.bounds(cx, "changes-chip-files"));
+                seen.push(("from its cache", chip, text));
+            }
+            let (_, chip, text) = seen[0];
+            assert!(
+                chip.is_some() && text.is_some(),
+                "at {scale}: the changes chip is up"
+            );
+            for (how, c, t) in &seen {
+                assert_eq!(*c, chip, "at {scale}: the chip, laid out {how}");
+                assert_eq!(*t, text, "at {scale}: its text, laid out {how}");
+            }
         }
     });
 }
