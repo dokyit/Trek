@@ -214,6 +214,9 @@ pub fn no_drag(id: &'static str, control: impl IntoElement) -> impl IntoElement 
         .child(control)
 }
 
+/// Either side of the line on Windows between Trek's title bar buttons and the caption buttons.
+pub const CAPTION_DIVIDER_MARGIN: f32 = 8.;
+
 /// Width of the title bar's left cluster (the sidebar toggle and Trek's mark) so that what follows
 /// it starts where the sidebar ends: the sidebar's width less what `TitleBar` leaves before it.
 pub const fn left_cluster(sidebar_width: f32) -> f32 {

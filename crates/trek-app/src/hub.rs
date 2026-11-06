@@ -87,6 +87,10 @@ impl RenderOnce for Hub {
             .offset(px(6.))
             .appearance(false)
             .on_open_change(move |open: &bool, _, cx: &mut App| {
+                // It opens over the tools panel, where a Browser page would cover it.
+                if on_open_scope == Scope::Main {
+                    on_open_ws.update(cx, |ws, cx| ws.set_overlay_open(*open, cx));
+                }
                 if !*open {
                     return;
                 }

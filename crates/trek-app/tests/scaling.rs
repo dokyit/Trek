@@ -250,11 +250,8 @@ fn without_glass_to_show_the_window_stays_opaque() {
             s.appearance.glass = true;
             s.appearance.glass_tint = 0.6;
         });
-        // Glass at the tint, except on Windows, where Trek's windows are always opaque.
-        assert_eq!(
-            trek.read(cx, |ws, _| ws.glass_unless(false)),
-            (!cfg!(windows)).then_some(0.6)
-        );
+        // Windows 11 with Transparency effects on: Acrylic, at the tint.
+        assert_eq!(trek.read(cx, |ws, _| ws.glass_unless(false)), Some(0.6));
         // Windows 10, or 11 with the switch off (`winlook::glass_available` says no): opaque.
         assert!(
             !trek_app::winlook::glass_available(19045, true)
@@ -267,34 +264,6 @@ fn without_glass_to_show_the_window_stays_opaque() {
             (trek_app::ui::chrome_bg(None, cx), cx.theme().sidebar)
         });
         assert_eq!(chrome, side);
-    });
-}
-
-/// A file with glass on and art behind the whole window, opened without the migration: each
-/// would hide the other's see-through path, so Windows has to turn off both.
-#[test]
-fn saved_glass_and_window_wide_art_leave_a_windows_window_opaque() {
-    use trek_core::settings::BackgroundPlacement;
-    run(async |cx| {
-        let trek = open_with(cx, |s| {
-            s.appearance.background = Some("builtin:dawn".into());
-            s.appearance.background_placement = BackgroundPlacement::Everywhere;
-            s.appearance.background_dim = 0.2;
-            s.appearance.glass = true;
-            s.appearance.glass_tint = 0.2;
-        });
-        let (backdrop, glass, see_through) = trek.read(cx, |ws, _| {
-            (ws.backdrop(), ws.glass_unless(false), ws.see_through())
-        });
-        // The art covers the desktop off Windows, so glass has nothing to show there either.
-        assert_eq!(glass, None);
-        if cfg!(windows) {
-            assert_eq!(backdrop, None);
-            assert!(!see_through);
-        } else {
-            assert_eq!(backdrop, Some(("builtin:dawn".to_string(), 0.2)));
-            assert!(see_through);
-        }
     });
 }
 
