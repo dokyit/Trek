@@ -3838,7 +3838,8 @@ impl Workspace {
     }
 
     /// `glass`, given whether the system asks for less transparency (macOS's Reduce transparency;
-    /// Windows 10, or 11 with Transparency effects off: `winlook::glass_available`): then the
+    /// Windows 10, or 11 with Transparency effects off or a contrast theme on:
+    /// `winlook::glass_available`): then the
     /// window stays opaque.
     pub fn glass_unless(&self, reduced: bool) -> Option<f32> {
         if self.backdrop().is_some() || reduced {

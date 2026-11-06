@@ -16,15 +16,17 @@ pub enum Material {
     /// macOS 26's Liquid Glass: frosts the desktop heavily.
     Native,
     /// Windows 11's Acrylic: what's behind the window (the desktop, other windows) frosted, as
-    /// Liquid Glass does on the Mac.
-    Acrylic,
+    /// Liquid Glass does on the Mac. `linear` while Windows blends it in linear light (HDR or Auto
+    /// Color Management on, `winlook::linear_now`), where the same see-through lets more of
+    /// what's behind through.
+    Acrylic { linear: bool },
     /// GPUI's blur of what's behind (macOS before 26): lighter, so panels stay firmer.
     Blur,
 }
 
-/// What a window's glass was last told: whether it's on, and whether Trek's theme is dark (Windows'
-/// glass follows the theme, not the system).
-pub type GlassState = (bool, bool);
+/// What a window's glass was last told: whether it's on, whether Trek's theme is dark (Windows'
+/// glass follows the theme, not the system), and whether Windows blends it in linear light.
+pub type GlassState = (bool, bool, bool);
 
 /// The background to ask of a window for glass: nothing when `on` is false; the system's own glass
 /// laid under a transparent window (`native`); the system backdrop where `system` says this
@@ -42,11 +44,10 @@ pub fn backdrop(on: bool, native: bool, system: bool) -> WindowBackgroundAppeara
     }
 }
 
-/// The system's colours changed (dark or light, the Transparency effects switch): `applied` is
-/// forgotten so the window is told its glass and tone again at the next frame. Windows announces
-/// the Transparency switch with the colours, so glass asks the switch again too; and it sets a
-/// window's dark title and glass tone from the system's colours when they change, which Trek's own
-/// theme (Night or Paper chosen against them) may not be.
+/// The system's colours changed between dark and light: `applied` is forgotten so the window is
+/// told its glass and tone again at the next frame, and glass asks Windows' switches again too
+/// (`winlook::glass_now`); Windows sets a window's dark title and glass tone from the system's
+/// colours when they change, which Trek's own theme (Night or Paper chosen against them) may not be.
 pub fn colours_changed(applied: &mut Option<GlassState>) {
     crate::winlook::forget();
     *applied = None;
@@ -64,8 +65,18 @@ pub fn apply_glass(
     applied: &mut Option<GlassState>,
     cx: &mut App,
 ) {
-    // Only Windows' glass follows the theme's tone; elsewhere a theme change leaves glass alone.
-    let state = (on, dark && cfg!(windows));
+    // Checked every frame rather than with `applied`: a theme change puts the theme's own colour
+    // back, glass or not, and GPUI's full screen puts back the window style it saved. (Changing the
+    // theme redraws every window.)
+    if cfg!(windows) {
+        retune_quiet_text(on, dark, cx);
+        #[cfg(windows)]
+        crate::winlook::keep_frame_for_glass(window, on);
+    }
+    // Only Windows' glass follows the theme's tone, elsewhere a theme change leaves glass alone; and
+    // only Windows blends it in linear light (asked each frame, as its switches are).
+    let linear = on && crate::winlook::linear_now();
+    let state = (on, dark && cfg!(windows), linear);
     if *applied == Some(state) {
         return;
     }
@@ -74,17 +85,19 @@ pub fn apply_glass(
     BACKDROP_ASKS.with(|n| n.set(n.get() + 1));
     let native = crate::system::native_glass(window, on);
     let system = cfg!(windows) && on;
-    MATERIAL.store(
-        if native {
-            Material::Native
-        } else if system {
-            Material::Acrylic
-        } else {
-            Material::Blur
-        } as u8,
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    tracing::debug!("glass: on={on} dark={dark} native={native} system={system}");
+    let material = if native {
+        Material::Native
+    } else if system {
+        Material::Acrylic { linear }
+    } else {
+        Material::Blur
+    };
+    // What's drawn on the glass is drawn again on the new one, in every window (it's theirs too),
+    // views kept from the last frame and all: HDR coming on changes nothing else that would.
+    if MATERIAL.with(|m| m.replace(material)) != material {
+        cx.refresh_windows();
+    }
+    tracing::debug!("glass: on={on} dark={dark} native={native} system={system} linear={linear}");
     window.set_background_appearance(backdrop(on, native, system));
     // After GPUI's ask, which names a material of its own.
     #[cfg(windows)]
@@ -102,25 +115,109 @@ pub fn apply_glass(
 /// The chrome behind the sidebar and title bar: the theme's sidebar colour, or under glass that
 /// colour let `chrome_alpha` of the way through.
 pub fn chrome_bg(glass: Option<f32>, cx: &App) -> Hsla {
-    let side = cx.theme().sidebar;
+    let theme = cx.theme();
+    let side = theme.sidebar;
     match glass {
-        Some(t) => side.opacity(chrome_alpha(t, material())),
+        Some(t) => side.opacity(chrome_alpha(t, material(), theme.mode.is_dark())),
         None => side,
     }
 }
 
-/// How much of the sidebar colour the chrome keeps at glass `tint`, on `material`: the tint
-/// itself, but on Acrylic never under `ACRYLIC_CHROME_FLOOR`, below which the quieter text (the
-/// sidebar's counts and times) falls under 3:1 over a bright window frosted behind it.
-pub fn chrome_alpha(tint: f32, material: Material) -> f32 {
+/// How much of the sidebar colour the chrome keeps at glass `tint`, on `material`, in a `dark`
+/// theme or a light one: the tint itself on the Mac. On Acrylic the Frost slider's whole travel
+/// runs from `acrylic_chrome_floor` to `acrylic_chrome_top`, so every step of it shows, and none
+/// lets the quiet text fall under 4.5:1.
+pub fn chrome_alpha(tint: f32, material: Material, dark: bool) -> f32 {
     match material {
-        Material::Acrylic => tint.clamp(ACRYLIC_CHROME_FLOOR, 0.95),
+        Material::Acrylic { linear } => {
+            let floor = acrylic_chrome_floor(dark, linear);
+            floor + (acrylic_chrome_top(dark, linear) - floor) * frost(tint)
+        }
         Material::Native | Material::Blur => tint,
     }
 }
 
-/// The least of the sidebar colour Acrylic's chrome keeps (see `chrome_alpha`).
-const ACRYLIC_CHROME_FLOOR: f32 = 0.4;
+/// Where glass `tint` sits on the Frost slider, from Clear (0) to Frosted (1).
+pub(crate) fn frost(tint: f32) -> f32 {
+    ((tint - 0.2) / 0.75).clamp(0., 1.)
+}
+
+/// The least of the sidebar colour Acrylic's chrome keeps, at the Frost slider's Clear end:
+/// measured from the screen on Windows 11, over a white window behind (the brightest dark
+/// Acrylic, Night's worst) and a black one (the dimmest light Acrylic, Paper's), it's where
+/// `glass_quiet_text` holds 4.8:1 against Acrylic's grain, a little over the 4.5:1 it needs.
+/// Blended in linear light (`linear`), dark colour laid over light lets far more of it through:
+/// there Night's 68% would leave its quiet text at 3:1 or less over a white window, and its 92% shows
+/// about as much of what's behind as 68% does on an SDR display. Paper's reads better in linear
+/// light, and keeps its own.
+pub const fn acrylic_chrome_floor(dark: bool, linear: bool) -> f32 {
+    match (dark, linear) {
+        (true, false) => 0.68,
+        (true, true) => 0.92,
+        (false, _) => 0.74,
+    }
+}
+
+/// How much Acrylic's chrome keeps at the Frost slider's Frosted end: nearly the theme's own
+/// colour, as frosted as Acrylic goes before it's opaque. Night's in linear light keeps more for
+/// the same frost, as at its Clear end (`acrylic_chrome_floor`).
+pub const fn acrylic_chrome_top(dark: bool, linear: bool) -> f32 {
+    if dark && linear { 0.98 } else { 0.92 }
+}
+
+/// The quieter text's colour on Windows' glass (the sidebar's counts and times, the project's
+/// name): a step lighter on Night, darker on Paper, as Fluent's secondary text on Acrylic is, so
+/// it holds 4.5:1 down to `acrylic_chrome_floor`. Its step down from the text stays.
+pub fn glass_quiet_text(dark: bool) -> Hsla {
+    if dark {
+        rgb(0xA9A9B2).into()
+    } else {
+        rgb(0x5C5A56).into()
+    }
+}
+
+/// The theme's quiet text colour to draw with, given the one it has now: `tuned` while there's
+/// `glass`, else the theme's own, remembered in `untuned` across the swap. A theme change puts
+/// the theme's own back, which is taken as the new one to remember.
+pub fn quiet_text(
+    current: Hsla,
+    glass: bool,
+    tuned: Hsla,
+    untuned: Option<Hsla>,
+) -> (Hsla, Option<Hsla>) {
+    match (glass, current == tuned) {
+        (true, true) => (current, untuned),
+        (true, false) => (tuned, Some(current)),
+        (false, true) => (untuned.unwrap_or(current), None),
+        (false, false) => (current, None),
+    }
+}
+
+thread_local! {
+    /// The theme's own quiet text colour while Windows' glass has it swapped (`quiet_text`).
+    static UNTUNED_QUIET: std::cell::Cell<Option<Hsla>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether what's read sits on solid panes under `glass`: on Windows' Acrylic, whose glass is the
+/// window's frame (`panel_alpha`).
+pub fn solid_panes(glass: Option<f32>) -> bool {
+    glass.is_some() && matches!(material(), Material::Acrylic { .. })
+}
+
+/// Swap the theme's quiet text for glass's or back (`quiet_text`): whether it changed.
+fn retune_quiet_text(glass: bool, dark: bool, cx: &mut App) -> bool {
+    let current = cx.theme().muted_foreground;
+    let next = UNTUNED_QUIET.with(|u| {
+        let (next, untuned) = quiet_text(current, glass, glass_quiet_text(dark), u.get());
+        u.set(untuned);
+        next
+    });
+    if next == current {
+        return false;
+    }
+    gpui_kit::component::Theme::update(cx, |theme| theme.muted_foreground = next);
+    true
+}
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -128,28 +225,26 @@ thread_local! {
     pub static BACKDROP_ASKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// What backs the windows now (`Material`, as a number so a window can set it from a frame).
-static MATERIAL: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(Material::Blur as u8);
+thread_local! {
+    /// What backs the windows now. Kept on the thread the app draws on, as each of its windows has
+    /// the same material, and each GPUI test is an app of its own on a thread of its own.
+    static MATERIAL: std::cell::Cell<Material> = const { std::cell::Cell::new(Material::Blur) };
+}
 
 fn material() -> Material {
-    match MATERIAL.load(std::sync::atomic::Ordering::Relaxed) {
-        m if m == Material::Native as u8 => Material::Native,
-        m if m == Material::Acrylic as u8 => Material::Acrylic,
-        _ => Material::Blur,
-    }
+    MATERIAL.with(|m| m.get())
 }
 
 /// How much of the theme's background an inset panel keeps at glass `tint`, on `material`: the
 /// panels read as frosted panes on the glass, but never so clear that what's behind shows through
 /// the text. The system's glass frosts the desktop heavily, so panels can let it through down to
-/// 60%; Windows' Acrylic lets a bright window behind through more, so 76%, where the quieter
-/// text still reads at 4.5:1 in both themes; over the lighter blur of older macOS they stay at 82%
-/// or more.
+/// 60%; over the lighter blur of older macOS they stay at 82% or more. On Windows what's read
+/// stays on a solid layer, as Windows' own apps keep it: its glass is the chrome's. (A pane let
+/// through showed none of the desktop anyway, as what's under it is the chrome: only greyer.)
 pub fn panel_alpha(tint: f32, material: Material) -> f32 {
     let floor = match material {
         Material::Native => 0.6,
-        Material::Acrylic => 0.76,
+        Material::Acrylic { .. } => return 1.,
         Material::Blur => 0.82,
     };
     (tint + 0.2).clamp(floor, 0.95)
@@ -165,10 +260,14 @@ pub fn panel_bg(glass: Option<f32>, cx: &App) -> Hsla {
     }
 }
 
-/// An inset panel's edge: under glass a faint rim of light, as glass catches it.
+/// An inset panel's edge: under glass a faint rim of light, as glass catches it; on Windows'
+/// glass the stroke its solid cards have.
 pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
     let theme = cx.theme();
     match glass {
+        Some(_) if matches!(material(), Material::Acrylic { .. }) => {
+            fluent::stroke(theme.sidebar_border, cx)
+        }
         Some(_) => theme
             .foreground
             .opacity(if theme.mode.is_dark() { 0.1 } else { 0.14 }),
@@ -177,9 +276,13 @@ pub fn panel_border(glass: Option<f32>, cx: &App) -> Hsla {
 }
 
 /// Under glass, the light a pane catches: a bright rim along its top edge and a sheen fading
-/// down from it. Laid over a pane's top (it doesn't take clicks); nothing without glass.
+/// down from it. Laid over a pane's top (it doesn't take clicks); nothing without glass, nor on
+/// Windows, whose panes are solid and whose glass catches no light.
 pub fn glass_sheen(glass: Option<f32>, cx: &App) -> Option<AnyElement> {
     glass?;
+    if matches!(material(), Material::Acrylic { .. }) {
+        return None;
+    }
     let dark = cx.theme().mode.is_dark();
     let light = gpui_kit::white();
     Some(
@@ -1229,8 +1332,70 @@ pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{
-        PROJECT_COLORS, lead_to_match, project_hue, project_ink, quiet_headings, reveal_alphas,
+        Material, PROJECT_COLORS, acrylic_chrome_floor, acrylic_chrome_top, chrome_alpha,
+        glass_quiet_text, lead_to_match, project_hue, project_ink, quiet_headings, quiet_text,
+        reveal_alphas,
     };
+
+    /// The Frost slider moves Acrylic's chrome all the way along, every step of it, from the
+    /// floor at Clear to short of opaque at Frosted, blended in linear light or not; the Mac's
+    /// chrome is the tint itself.
+    #[test]
+    fn every_step_of_the_frost_slider_shows_on_windows_glass() {
+        for (dark, linear) in [(true, false), (false, false), (true, true), (false, true)] {
+            let at = |tint: f32| chrome_alpha(tint, Material::Acrylic { linear }, dark);
+            let top = acrylic_chrome_top(dark, linear);
+            assert_eq!(at(0.2), acrylic_chrome_floor(dark, linear));
+            assert!((at(0.95) - top).abs() < 1e-6);
+            assert!(top < 1.);
+            let mut last = at(0.2);
+            for step in 1..=15 {
+                let next = at(0.2 + 0.05 * step as f32);
+                assert!(
+                    next > last,
+                    "dark={dark} linear={linear}: step {step} changed nothing"
+                );
+                last = next;
+            }
+            // Out of range on either side, the ends.
+            assert_eq!(at(0.), at(0.2));
+            assert!((at(1.) - at(0.95)).abs() < 1e-6);
+        }
+        // In linear light Night's chrome keeps more of its colour all along; Paper's is as it was.
+        for tint in [0.2, 0.6, 0.95] {
+            let night = |linear| chrome_alpha(tint, Material::Acrylic { linear }, true);
+            let paper = |linear| chrome_alpha(tint, Material::Acrylic { linear }, false);
+            assert!(night(true) > night(false));
+            assert_eq!(paper(true), paper(false));
+        }
+        assert_eq!(chrome_alpha(0.3, Material::Native, true), 0.3);
+        assert_eq!(chrome_alpha(0.3, Material::Blur, false), 0.3);
+    }
+
+    /// Glass's quiet text goes in while there's glass and the theme's own comes back after; a
+    /// theme changed meanwhile (its own colour back on) is what's remembered from then on.
+    #[test]
+    fn the_quiet_text_swaps_for_glass_and_back() {
+        let own = gpui_kit::rgb(0x8B8B94).into();
+        let other = gpui_kit::rgb(0x6E6C68).into();
+        let tuned = glass_quiet_text(true);
+        // On: tuned, the theme's own kept.
+        assert_eq!(quiet_text(own, true, tuned, None), (tuned, Some(own)));
+        // Still on: left as it is.
+        assert_eq!(
+            quiet_text(tuned, true, tuned, Some(own)),
+            (tuned, Some(own))
+        );
+        // A theme change while on: its colour is the one kept now, and tuned again.
+        assert_eq!(
+            quiet_text(other, true, tuned, Some(own)),
+            (tuned, Some(other))
+        );
+        // Off: the theme's own back.
+        assert_eq!(quiet_text(tuned, false, tuned, Some(other)), (other, None));
+        // Off and never tuned: nothing to do.
+        assert_eq!(quiet_text(own, false, tuned, None), (own, None));
+    }
 
     #[test]
     fn only_real_headings_go_quiet() {
