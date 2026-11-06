@@ -446,33 +446,48 @@ extension View {
     func shimmering() -> some View { modifier(Shimmer()) }
 }
 
+/// A sweep across work under way (the shimmer, a chart's skeleton), placed by the clock.
+///
+/// Not a repeating animation: a `repeatForever` begun with `withAnimation` goes with whatever
+/// else changes in that update, and loops it too. A thread's toolbar buttons took it: their
+/// labels slid down their glass every 1.6 s, over and over, for as long as the screen stayed. A
+/// clock has no transaction to lend.
+nonisolated enum Sweep {
+    /// One pass, in seconds.
+    static let period: TimeInterval = 1.6
+
+    /// How far through its pass a sweep begun at `start` is at `date`: 0 as a pass begins, rising
+    /// evenly to 1, then from 0 again.
+    static func progress(at date: Date, since start: Date, period: TimeInterval = period) -> CGFloat {
+        let t = max(0, date.timeIntervalSince(start))
+        return CGFloat(t.truncatingRemainder(dividingBy: period) / period)
+    }
+}
+
 private struct Shimmer: ViewModifier {
-    @State private var phase: CGFloat = -1
+    /// When the sweep began: it starts from the left as the text comes in.
+    @State private var start = Date.now
     @MotionAllowed private var motion
 
     func body(content: Content) -> some View {
         content
             .overlay {
                 if motion {
-                    GeometryReader { geo in
-                        LinearGradient(colors: [.clear, Color(hex: 0xFFC56B).opacity(0.9), Color(hex: 0xFF8A3D).opacity(0.9), .clear],
-                                       startPoint: .leading, endPoint: .trailing)
-                            .frame(width: geo.size.width * 0.6)
-                            .offset(x: phase * geo.size.width * 1.6)
+                    TimelineView(.animation) { ctx in
+                        GeometryReader { geo in
+                            LinearGradient(colors: [.clear, Color(hex: 0xFFC56B).opacity(0.9), Color(hex: 0xFF8A3D).opacity(0.9), .clear],
+                                           startPoint: .leading, endPoint: .trailing)
+                                .frame(width: geo.size.width * 0.6)
+                                .offset(x: (Sweep.progress(at: ctx.date, since: start) * 2 - 1) * geo.size.width * 1.6)
+                        }
                     }
                     .mask(content)
                     .allowsHitTesting(false)
                 }
             }
-            // From the start each time motion comes on: begun once at first sight, a shimmer
-            // that motion was off for then never ran.
-            .onChange(of: motion, initial: true) { _, on in
-                var still = Transaction()
-                still.disablesAnimations = true
-                withTransaction(still) { phase = -1 }
-                if on {
-                    withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { phase = 1 }
-                }
+            // From the start again each time motion comes back on.
+            .onChange(of: motion) { _, on in
+                if on { start = .now }
             }
     }
 }

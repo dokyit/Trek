@@ -395,7 +395,8 @@ struct VizPending: View {
     var title: String?
     @Environment(\.colorScheme) private var scheme
     @MotionAllowed private var motion
-    @State private var phase: CGFloat = 0
+    /// When the sweep over the skeleton began (`Sweep`: by the clock, never a repeating animation).
+    @State private var sweepStart = Date.now
 
     var body: some View {
         let look = VizLook(dark: scheme == .dark)
@@ -418,10 +419,12 @@ struct VizPending: View {
                 .background(look.inset)
                 .overlay {
                     if motion {
-                        GeometryReader { g in
-                            LinearGradient(colors: [.clear, look.fg.opacity(look.dark ? 0.05 : 0.055), .clear], startPoint: .leading, endPoint: .trailing)
-                                .frame(width: g.size.width * 0.4)
-                                .offset(x: (phase * 1.6 - 0.4) * g.size.width)
+                        TimelineView(.animation) { ctx in
+                            GeometryReader { g in
+                                LinearGradient(colors: [.clear, look.fg.opacity(look.dark ? 0.05 : 0.055), .clear], startPoint: .leading, endPoint: .trailing)
+                                    .frame(width: g.size.width * 0.4)
+                                    .offset(x: (Sweep.progress(at: ctx.date, since: sweepStart) * 1.6 - 0.4) * g.size.width)
+                            }
                         }
                         .allowsHitTesting(false)
                     }
@@ -433,11 +436,8 @@ struct VizPending: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title.map { "Visualization being drawn: \($0)" } ?? "Visualization being drawn")
-        .onChange(of: motion, initial: true) { _, on in
-            var still = Transaction()
-            still.disablesAnimations = true
-            withTransaction(still) { phase = 0 }
-            if on { withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { phase = 1 } }
+        .onChange(of: motion) { _, on in
+            if on { sweepStart = .now }
         }
     }
 
