@@ -105,6 +105,10 @@ struct GitSheet: View {
         }
     }
 
+    private var canCommit: Bool {
+        !busy && !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && status?.files.isEmpty == false
+    }
+
     private func load() {
         model.loadGitStatus(target)
         model.loadBranches(target)
@@ -214,10 +218,15 @@ struct GitSheet: View {
                     committing = true
                     model.commit(target, message: message.trimmingCharacters(in: .whitespacesAndNewlines))
                 } label: {
-                    Label("Commit", systemImage: "checkmark.circle").frame(maxWidth: .infinity)
+                    // The theme's ink on the foreground: iOS's white label (and its icon) vanished
+                    // on Night's near-white button.
+                    Label("Commit", systemImage: "checkmark.circle")
+                        .foregroundStyle(canCommit ? Trek.background : Trek.muted)
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glassProminent)
-                .disabled(busy || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || status?.files.isEmpty != false)
+                .tint(Trek.foreground)
+                .disabled(!canCommit)
                 Button {
                     model.push(target)
                 } label: {

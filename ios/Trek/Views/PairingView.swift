@@ -102,7 +102,8 @@ struct PairingView: View {
 
     private var steps: some View {
         VStack(alignment: .leading, spacing: 14) {
-            step(1, "Open Trek on your Mac", "Settings › Phone › Pair an iPhone")
+            // The Mac's page is "Phone & Machines" (settings_view/mobile.rs); "Phone" alone isn't there.
+            step(1, "Open Trek on your Mac", "Settings › Phone & Machines")
             step(2, "Scan the code it shows", "Same Wi-Fi, or anywhere over Tailscale")
             step(3, "Approve, steer and start work", "Agents keep running on the Mac")
         }
@@ -140,7 +141,9 @@ struct PairingView: View {
                 .font(.code(.body))
             Divider()
             HStack(spacing: 8) {
-                TextField("Fingerprint, e.g. ABCD-1234-EF56-7890", text: $fingerprint)
+                // The example is in the hint under it: in the code font it didn't fit the field
+                // and ended in "…".
+                TextField("Fingerprint", text: $fingerprint)
                     .textInputAutocapitalization(.characters)
                     .autocorrectionDisabled()
                     .font(.code(.body))
@@ -157,12 +160,15 @@ struct PairingView: View {
                     confirmPlain = true
                 }
             } label: {
-                Text("Pair").fontWeight(.semibold).frame(maxWidth: .infinity)
+                // The theme's ink on the foreground tint, as "Scan pairing code" has: iOS's own
+                // white label vanished on Night's near-white button.
+                Text("Pair").fontWeight(.semibold).foregroundStyle(canPair ? Trek.background : Trek.muted)
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.glassProminent)
             .tint(Trek.foreground)
             .controlSize(.large)
-            .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty || code.count < 8 || fingerprintInvalid)
+            .disabled(!canPair)
             .padding(.top, 4)
         }
         .padding(16)
@@ -173,13 +179,17 @@ struct PairingView: View {
 extension PairingView {
     static let plainWarning = "Without a fingerprint this iPhone can't check that it's really talking to your Mac, and everything you send and see, approvals included, crosses the network unencrypted. Only continue for an older Trek on a network you trust."
 
+    private var canPair: Bool {
+        !address.trimmingCharacters(in: .whitespaces).isEmpty && code.count >= 8 && !fingerprintInvalid
+    }
+
     private var fingerprintInvalid: Bool {
         !fingerprint.trimmingCharacters(in: .whitespaces).isEmpty && Fingerprint.typedPrefix(fingerprint) == nil
     }
 
     private var fingerprintHint: String {
         fingerprintInvalid ? "\(Fingerprint.typedLength) characters, 0–9 and A–F, as your Mac shows it."
-            : "Shown beside the code on your Mac. It proves this is your Mac."
+            : "Shown beside the code on your Mac, like ABCD-1234-EF56-7890. It proves this is your Mac."
     }
 
     private func pairTyped(_ transport: Transport) {

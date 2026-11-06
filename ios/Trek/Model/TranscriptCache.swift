@@ -79,6 +79,31 @@ nonisolated enum TranscriptCache {
         queue.sync { if let dir = folder(host: host) { try? FileManager.default.removeItem(at: dir) } }
     }
 
+    /// How many threads are kept, and their bytes, across every machine (Settings › Storage).
+    static func usage() -> (threads: Int, bytes: Int64) {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return (0, 0) }
+        let root = caches.appending(path: "Transcripts", directoryHint: .isDirectory)
+        let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey]
+        var threads = 0
+        var bytes: Int64 = 0
+        let walk = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys)
+        while let url = walk?.nextObject() as? URL {
+            guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
+            threads += 1
+            bytes += Int64(v.fileSize ?? 0)
+        }
+        return (threads, bytes)
+    }
+
+    /// Drops every machine's kept threads (Settings › Storage › Clear). They come back from the
+    /// Mac the next time each is opened.
+    static func removeEverything() {
+        queue.sync {
+            guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+            try? FileManager.default.removeItem(at: caches.appending(path: "Transcripts", directoryHint: .isDirectory))
+        }
+    }
+
     /// Drops one thread's cache (after a reset that couldn't be applied, or the thread's gone).
     static func remove(host: String, thread: String) {
         queue.async { if let url = file(host: host, thread: thread) { try? FileManager.default.removeItem(at: url) } }

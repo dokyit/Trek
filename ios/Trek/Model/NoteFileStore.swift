@@ -65,6 +65,20 @@ nonisolated struct NoteFileStore: Sendable {
         entries().reduce(0) { $0 + $1.size }
     }
 
+    /// How many whole files are kept, and the bytes the folder holds (Settings › Storage).
+    func summary() -> (files: Int, bytes: Int64) {
+        let all = entries()
+        return (all.count { $0.url.pathExtension != "part" }, all.reduce(0) { $0 + $1.size })
+    }
+
+    /// Takes every file out (Settings › Storage › Clear), but not a download still coming in.
+    func removeAll() {
+        let busy = Date().addingTimeInterval(-600)
+        for e in entries() where !(e.url.pathExtension == "part" && e.used > busy) {
+            try? FileManager.default.removeItem(at: e.url)
+        }
+    }
+
     /// Takes the least recently used files out until the folder is within `limit`; `keeping` (the
     /// one just fetched, or being shown) stays even if it alone is bigger. Returns what went.
     @discardableResult

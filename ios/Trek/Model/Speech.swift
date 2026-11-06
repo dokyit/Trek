@@ -124,11 +124,12 @@ nonisolated private final class RequestBox: @unchecked Sendable {
         guard !listening else { return }
         onFailure = failed
 
+        // Since iOS 18 an app's switches are under Settings › Apps, not at the top of Settings.
         guard await microphone() else {
-            return fail("Trek needs the microphone to hear you. Turn it on in Settings › Trek.")
+            return fail("Trek needs the microphone to hear you. Turn it on in Settings › Apps › Trek.")
         }
         guard await speechRecognition() else {
-            return fail("Trek needs Speech Recognition to turn what you say into text. Turn it on in Settings › Trek.")
+            return fail("Trek needs Speech Recognition to turn what you say into text. Turn it on in Settings › Apps › Trek.")
         }
         guard let recognizer = SFSpeechRecognizer(locale: .current) else {
             let language = Locale.current.language.languageCode

@@ -25,7 +25,8 @@ struct MacSettingsView: View {
         }
         .scrollContentBackground(.hidden)
         .background(Trek.grouped)
-        .navigationTitle("Mac settings")
+        // Named as the machine's row names it: a PC has these too.
+        .navigationTitle("Trek settings")
         .navigationSubtitle(link?.name ?? "")
         .task { model.loadSettings(on: link) }
     }
@@ -79,7 +80,7 @@ private struct MacSettingsForm: View {
         } header: {
             Text("Composer")
         } footer: {
-            Text("Steer slips your message in at the agent's next step. Queue holds it until the turn ends. For messages sent on the Mac; this iPhone has its own under Follow-ups.")
+            Text("Steer slips your message in at the agent's next step. Queue holds it until the turn ends. For messages sent on the Mac; this iPhone has its own in Settings › Threads.")
                 .font(.ui(.footnote))
         }
 

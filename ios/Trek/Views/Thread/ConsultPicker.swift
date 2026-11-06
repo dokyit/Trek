@@ -27,9 +27,13 @@ struct ConsultSheet: View {
                     .pickerStyle(.segmented)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
+                    // Green when on, as the app's other switches: the app-wide tint is the
+                    // foreground, which drew it near-white on white in Night.
                     Toggle("Then implement", isOn: $implement)
+                        .tint(Trek.done)
                 } footer: {
-                    Text(styleHelp)
+                    // In the footnote size every other footer has; it came in at body size.
+                    Text(styleHelp).font(.ui(.footnote))
                 }
                 ForEach(agents) { agent in
                     Section {

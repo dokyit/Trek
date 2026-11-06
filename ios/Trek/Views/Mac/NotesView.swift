@@ -432,8 +432,22 @@ private struct FormatBar: View {
     var apply: (Action) -> Void
     /// Where a picked photo goes; nil on a Mac that can't keep one.
     var photo: Binding<PhotosPickerItem?>? = nil
+    /// Tools past the bar's right edge, still to scroll to.
+    @State private var more = true
 
     var body: some View {
+        tools
+            // The tools run on past the bar's edge: they fade out there while there's more to
+            // scroll to, instead of stopping flush against it as if cut off.
+            .onScrollGeometryChange(for: Bool.self) { g in g.visibleRect.maxX < g.contentSize.width - 2 } action: { _, now in
+                more = now
+            }
+            .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: more ? 0.88 : 1),
+                                         .init(color: more ? .clear : .black, location: 1)],
+                                 startPoint: .leading, endPoint: .trailing))
+    }
+
+    private var tools: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
                 if let photo {

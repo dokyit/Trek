@@ -207,7 +207,25 @@ private struct TextSizeModifier: ViewModifier {
     var size: DynamicTypeSize?
 
     func body(content: Content) -> some View {
-        if let size { content.dynamicTypeSize(size) } else { content }
+        Group {
+            if let size { content.dynamicTypeSize(size) } else { content }
+        }
+        // Sheets are hosted apart from this view and take their size from the window, so the
+        // window is told too: without it New thread, the model picker and Git stayed at the
+        // iPhone's own size while the thread behind them grew.
+        .onChange(of: size, initial: true) { _, size in Self.pin(size) }
+    }
+
+    private static func pin(_ size: DynamicTypeSize?) {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows {
+                if let size {
+                    window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategory(size)
+                } else if window.traitOverrides.contains(UITraitPreferredContentSizeCategory.self) {
+                    window.traitOverrides.remove(UITraitPreferredContentSizeCategory.self)
+                }
+            }
+        }
     }
 }
 
