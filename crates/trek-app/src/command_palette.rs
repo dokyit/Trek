@@ -1169,23 +1169,22 @@ impl CommandPalette {
             ),
             "chat scratch no project question",
         );
-        // Trek's windows are opaque on Windows, so there's no glass to turn on.
-        if !cfg!(windows) {
-            let glass = ws.settings.appearance.glass;
-            add(
-                Entry::new(
-                    c,
-                    icon(Icon::new(crate::assets::Lucide::Sparkles)),
-                    if glass {
-                        "Turn off liquid glass"
-                    } else {
-                        "Turn on liquid glass"
-                    },
-                    Action::Glass(!glass),
-                ),
-                "appearance translucent blur transparent vibrancy theme",
-            );
-        }
+
+        let glass = ws.settings.appearance.glass;
+        add(
+            Entry::new(
+                c,
+                icon(Icon::new(crate::assets::Lucide::Sparkles)),
+                if glass {
+                    "Turn off liquid glass"
+                } else {
+                    "Turn on liquid glass"
+                },
+                Action::Glass(!glass),
+            ),
+            "appearance translucent blur transparent vibrancy theme",
+        );
+
         // The thread on screen: the harness's, or the editor's AI side bar chat.
         let thread = ws.focused_thread().and_then(|id| ws.thread(id)).cloned();
         if let Some(t) = thread.as_ref().filter(|t| t.settled_at.is_none()) {

@@ -507,7 +507,7 @@ impl Onboarding {
             .line_height(relative(1.5))
             .child("Conversations read like this. Agents answer in the same size.");
         let mut window_rows: Vec<AnyElement> = Vec::new();
-        // Trek's windows are opaque on Windows, so there's no glass to choose.
+        // Windows starts opaque, with glass to turn on in Settings, so there's no glass to choose.
         if !cfg!(windows) {
             window_rows.extend([
                 row(None, "Liquid glass", crate::words::words().glass_note, switch("ob-glass", glass, |s, v| s.appearance.glass = v), cx).into_any_element(),

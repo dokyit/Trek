@@ -178,6 +178,13 @@ impl ThreadWindow {
                 crate::ui::colours_changed(&mut this.glass_applied);
                 cx.notify();
             }),
+            // Back in front, Windows' Transparency effects and contrast themes are asked again.
+            cx.observe_window_activation(window, |_, window, cx| {
+                if cfg!(windows) && window.is_window_active() {
+                    crate::winlook::forget();
+                    cx.notify();
+                }
+            }),
             // Dragged to a display of another scale, it has its own icons cut again, as the main
             // window does (its taskbar button is its own).
             {

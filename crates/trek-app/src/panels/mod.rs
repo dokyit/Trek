@@ -96,6 +96,7 @@ pub struct RightPanel {
     tabs: Vec<Tab>,
     active: Option<u64>,
     next_id: u64,
+    tabs_menu_open: bool,
     launcher_open: bool,
     /// Where the tab strip is scrolled to, and what it was drawn with: overflowing, cut off at
     /// its start, at its end (see `watch_overflow`).
@@ -126,6 +127,7 @@ impl RightPanel {
             active: None,
             next_id: 1,
             launcher_open: false,
+            tabs_menu_open: false,
             tab_scroll: ScrollHandle::new(),
             drawn: Default::default(),
             scrolled_to: None,
@@ -481,13 +483,19 @@ impl RightPanel {
     /// The Simulator only mirrors (and polls the device) while its tab is on screen.
     pub fn sync_native(&mut self, cx: &mut Context<Self>) {
         let active = self.active;
-        // Editor mode and Settings don't draw this panel (`root.rs` leaves it out), so its views
-        // must not float over them.
+        // Editor mode, Settings and Onboarding don't draw this panel (`root.rs` leaves it out), so
+        // its views must not float over them.
         let open = {
             let ws = self.workspace.read(cx);
-            self.open && !ws.ide() && !matches!(ws.route, crate::workspace::Route::Settings(_))
+            self.open
+                && !ws.ide()
+                && !matches!(
+                    ws.route,
+                    crate::workspace::Route::Settings(_) | crate::workspace::Route::Onboarding
+                )
         };
-        let menu_open = self.launcher_open || self.workspace.read(cx).overlay_open;
+        let menu_open =
+            self.launcher_open || self.tabs_menu_open || self.workspace.read(cx).overlay_open;
         for t in &self.tabs {
             match &t.view {
                 View::Browser(b) => {
@@ -732,6 +740,13 @@ impl Render for RightPanel {
                 self.drawn.clone(),
                 self.tabs.iter().position(|t| Some(t.id) == active),
             ));
+        // On Windows the panel's own controls lead its header: at its right end they'd stack under
+        // the window's minimize, maximize and close, and read as more of them.
+        let anchor = if crate::fluent::WINDOWS {
+            Anchor::TopLeft
+        } else {
+            Anchor::TopRight
+        };
         let all_tabs = over.then(|| {
             let items: Vec<(u64, PanelTool, bool)> = self
                 .tabs
@@ -739,8 +754,9 @@ impl Render for RightPanel {
                 .map(|t| (t.id, t.tool, Some(t.id) == active))
                 .collect();
             let panel = cx.entity().downgrade();
+            let tabs_panel = panel.clone();
             ui::icon_button("panel-tabs-all", IconName::ChevronDown, "All tabs")
-                .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+                .dropdown_menu_with_anchor(anchor, move |mut menu, _, _| {
                     menu = menu.min_w(px(180.));
                     for (id, tool, on) in &items {
                         let (panel, id) = (panel.clone(), *id);
@@ -758,12 +774,18 @@ impl Render for RightPanel {
                     }
                     menu
                 })
+                .on_open_change(move |open, _, cx| {
+                    let _ = tabs_panel.update(cx, |p, cx| {
+                        p.tabs_menu_open = *open;
+                        p.sync_native(cx);
+                    });
+                })
         });
 
         let launcher_open = self.launcher_open;
         let entity = cx.entity();
         let launcher = Popover::new("panel-launcher")
-            .anchor(Anchor::TopRight)
+            .anchor(anchor)
             .appearance(false)
             .open(launcher_open)
             .on_open_change(cx.listener(|this, open: &bool, _, cx| {
@@ -777,39 +799,48 @@ impl Render for RightPanel {
                 ui::menu_surface(cx).w(px(220.)).children(rows)
             });
 
-        let header = h_flex()
+        let wide = {
+            let wide = self.width >= WIDE_PANEL - 1.;
+            ui::icon_button(
+                "panel-wide",
+                if wide {
+                    IconName::Minimize
+                } else {
+                    IconName::Maximize
+                },
+                if wide { "Narrower" } else { "Wider" },
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let w = if wide {
+                    trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH
+                } else {
+                    WIDE_PANEL
+                };
+                this.set_width(w, cx);
+            }))
+        };
+        let row = h_flex()
             .h(px(44.))
             .px_2()
             .gap_1()
             .border_b_1()
-            .border_color(theme.border)
-            .child(tabs)
-            .children(all_tabs)
-            .child(launcher)
-            .child({
-                let wide = self.width >= WIDE_PANEL - 1.;
-                ui::icon_button(
-                    "panel-wide",
-                    if wide {
-                        IconName::Minimize
-                    } else {
-                        IconName::Maximize
-                    },
-                    if wide { "Narrower" } else { "Wider" },
+            .border_color(theme.border);
+        let header = if crate::fluent::WINDOWS {
+            // No close here: the title bar's tools button, right above it, does that.
+            row.child(launcher)
+                .child(wide)
+                .child(tabs)
+                .children(all_tabs)
+        } else {
+            row.child(tabs)
+                .children(all_tabs)
+                .child(launcher)
+                .child(wide)
+                .child(
+                    ui::icon_button("panel-close", IconName::PanelRightClose, "Hide panel (⌘J)")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let w = if wide {
-                        trek_core::settings::DEFAULT_RIGHT_PANEL_WIDTH
-                    } else {
-                        WIDE_PANEL
-                    };
-                    this.set_width(w, cx);
-                }))
-            })
-            .child(
-                ui::icon_button("panel-close", IconName::PanelRightClose, "Hide panel (⌘J)")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle(cx))),
-            );
+        };
 
         let body = match self.active_tab() {
             Some(t) => match &t.view {

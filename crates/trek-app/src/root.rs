@@ -480,6 +480,10 @@ impl TrekWindow {
             // Back from a terminal: a branch switched or a commit made there shows.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
+                    // Back from Windows' Settings, maybe: its Transparency effects and contrast
+                    // themes are asked again, as GPUI tells of a switch between light and dark only.
+                    // (Nothing to ask on a Mac.)
+                    crate::winlook::forget();
                     this.workspace.update(cx, |ws, cx| {
                         ws.refresh_git(cx);
                         // A release that came out while Trek sat behind other windows.
@@ -1051,6 +1055,27 @@ impl Render for WindowTitle {
             .as_ref()
             .filter(|t| t.settled_at.is_none())
             .map(|t| t.id.clone());
+        // On Windows Settle leads Trek's buttons, away from the window's Minimize.
+        let settle = settle_id.map(|id| {
+            crate::chrome::no_drag(
+                "settle",
+                Button::new("settle")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Check)
+                    .label("Settle")
+                    .tooltip(crate::keys::shared("Settle (⌘E)"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
+                    })),
+            )
+        });
+        let (settle_first, settle_last) = if crate::fluent::WINDOWS {
+            (settle, None)
+        } else {
+            (None, settle)
+        };
         let worktree = thread.as_ref().and_then(|t| t.worktree.clone());
         let reveal = match (&ws.route, &thread) {
             (Route::Thread(_), Some(t)) => {
@@ -1159,6 +1184,7 @@ impl Render for WindowTitle {
                                 el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
                             }),
                     )
+                    .children(settle_first)
                     .when_some(thread.as_ref().map(|t| t.id.clone()), |el, id| {
                         el.child(crate::chrome::no_drag(
                             "thread-menu",
@@ -1175,14 +1201,16 @@ impl Render for WindowTitle {
                             crate::hub::toggle(self.workspace.clone(), hub_open),
                         ))
                     })
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(1.))
-                            .h(px(16.))
-                            .mx_1()
-                            .bg(theme.border),
-                    )
+                    .when(!crate::fluent::WINDOWS, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .w(px(1.))
+                                .h(px(16.))
+                                .mx_1()
+                                .bg(theme.border),
+                        )
+                    })
                     .child(crate::chrome::no_drag(
                         "toggle-tools",
                         crate::ui::icon_button(
@@ -1194,20 +1222,17 @@ impl Render for WindowTitle {
                             this.right_panel.update(cx, |p, cx| p.toggle(cx))
                         })),
                     ))
-                    .when_some(settle_id, |el, id| {
-                        el.child(crate::chrome::no_drag(
-                            "settle",
-                            Button::new("settle")
-                                .ghost()
-                                .small()
-                                .icon(IconName::Check)
-                                .label("Settle")
-                                .tooltip(crate::keys::shared("Settle (⌘E)"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let id = id.clone();
-                                    this.workspace.update(cx, |ws, cx| ws.settle(&id, cx))
-                                })),
-                        ))
+                    .children(settle_last)
+                    // Where Trek's buttons end and the window's own begin.
+                    .when(crate::fluent::WINDOWS, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .w(px(1.))
+                                .h(px(20.))
+                                .mx(px(crate::chrome::CAPTION_DIVIDER_MARGIN))
+                                .bg(theme.border),
+                        )
                     }),
             )
             .into_any_element()

@@ -829,7 +829,8 @@ impl Render for Onboarding {
         let theme = cx.theme().clone();
         let reduce = !self.workspace.read(cx).motion(cx);
         let glass = self.workspace.read(cx).glass();
-        let bg = if glass.is_some() {
+        // On Windows' glass the steps are read on a solid page, as a thread is (`ui::solid_panes`).
+        let bg = if glass.is_some() && !crate::ui::solid_panes(glass) {
             crate::ui::chrome_bg(glass, cx)
         } else {
             theme.background

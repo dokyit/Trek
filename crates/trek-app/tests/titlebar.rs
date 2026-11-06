@@ -45,7 +45,16 @@ fn the_title_bar_clears_the_window_controls_on_each_platform() {
             3. * 34.
         };
         assert_eq!(RIGHT_RESERVE, reserve);
-        near(right(&trek, cx, "toggle-tools"), px(WIDTH - 8. - reserve));
+        // On Windows a line sets them apart from the caption buttons, the row's 5 px gap before it.
+        let line = if cfg!(windows) {
+            5. + 1. + 2. * trek_app::chrome::CAPTION_DIVIDER_MARGIN
+        } else {
+            0.
+        };
+        near(
+            right(&trek, cx, "toggle-tools"),
+            px(WIDTH - 8. - reserve - line),
+        );
     });
 }
 
@@ -285,7 +294,15 @@ fn the_empty_strip_of_the_title_bar_is_still_the_windows_handle() {
         // nothing: both are the handle, so a press there moves the window and a double click
         // maximises it.
         let switch_end = right(&trek, cx, "mode-switch");
-        let hub_start = x(&trek, cx, "thread-menu");
+        let hub_start = x(
+            &trek,
+            cx,
+            if cfg!(windows) {
+                "settle"
+            } else {
+                "thread-menu"
+            },
+        );
         assert!(
             hub_start - switch_end > px(200.),
             "there's a strip to drag by: {switch_end:?} to {hub_start:?}"
@@ -301,16 +318,19 @@ fn the_empty_strip_of_the_title_bar_is_still_the_windows_handle() {
             );
         }
         // The Mac's and Windows's alike: what sits between the controls (the gaps) is the handle's too.
-        let (tools_end, settle_start) = (right(&trek, cx, "toggle-tools"), x(&trek, cx, "settle"));
-        assert!(
-            settle_start > tools_end,
-            "the buttons have a gap between them"
-        );
+        // Settle leads Trek's buttons on Windows, away from the window's Minimize, and ends them
+        // on the Mac; the gap checked is the one between it and the next button.
+        let (gap_start, gap_end) = if cfg!(windows) {
+            (right(&trek, cx, "settle"), x(&trek, cx, "thread-menu"))
+        } else {
+            (right(&trek, cx, "toggle-tools"), x(&trek, cx, "settle"))
+        };
+        assert!(gap_end > gap_start, "the buttons have a gap between them");
         assert!(!in_a_control(
             &trek,
             cx,
             &AGENTS_CONTROLS,
-            gpui_kit::point((tools_end + settle_start) / 2., mid)
+            gpui_kit::point((gap_start + gap_end) / 2., mid)
         ));
     });
 }

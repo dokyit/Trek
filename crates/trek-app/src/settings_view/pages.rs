@@ -606,9 +606,8 @@ impl SettingsView {
             Self::note(crate::words::words().app_icon_note, cx),
             self.app_icon_tiles(s.appearance.app_icon, cx),
         ];
-        // Trek's windows are opaque on Windows, so there's no material to choose.
-        if !cfg!(windows) {
-            page.extend([
+
+        page.extend([
                 Self::heading("Material", cx),
                 ui::group(
                     vec![
@@ -667,7 +666,7 @@ impl SettingsView {
                     cx,
                 ),
             ]);
-        }
+
         page.extend([
             Self::heading("Text size", cx),
             ui::group(
@@ -689,11 +688,7 @@ impl SettingsView {
             ),
             Self::heading("Background", cx),
             Self::note(
-                if cfg!(windows) {
-                    "Off by default. Pick art to show behind the composer on a new thread."
-                } else {
-                    "Off by default. Pick art to show behind the composer on a new thread, or tinted behind the whole window."
-                },
+                "Off by default. Pick art to show behind the composer on a new thread, or tinted behind the whole window.",
                 cx,
             ),
             self.background_gallery(s, cx),
@@ -703,8 +698,7 @@ impl SettingsView {
                 div().into_any_element()
             } else {
                 let mut rows = Vec::new();
-                // Windows shows art in the New-thread panel only, so there's no choosing where.
-                if !cfg!(windows) {
+
                     rows.push(Self::row(
                         "Show on",
                         "",
@@ -726,7 +720,7 @@ impl SettingsView {
                         ),
                         cx,
                     ));
-                }
+
                 rows.push(Self::row(
                     "Dim",
                     "Darkens the art so text stays readable.",

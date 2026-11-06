@@ -516,7 +516,12 @@ impl Render for IdeWorkbench {
                                 .w(px(ai_w))
                                 .h_full()
                                 .flex_none()
-                                .bg(chrome)
+                                // A chat is read: solid on Windows' glass, as it is in a thread.
+                                .bg(if crate::ui::solid_panes(glass) {
+                                    cx.theme().sidebar
+                                } else {
+                                    chrome
+                                })
                                 .border_l_1()
                                 .border_color(line)
                                 .child(self.ai.clone().cached(fill()))
