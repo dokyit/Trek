@@ -4,6 +4,7 @@ use super::layout::{Rect, Scale, squarify};
 use super::{
     Frame, Look, format_number, format_tick, inset, readout, series_color, tone, with_unit,
 };
+use crate::scale::{radius, text};
 use gpui_kit::component::{Icon, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -105,7 +106,10 @@ fn centred_at(frac: f32, w: f32) -> Div {
 }
 
 fn caption(text: String, look: &Look) -> Div {
-    div().text_size(px(11.)).text_color(look.muted).child(text)
+    div()
+        .text_size(px(text::META))
+        .text_color(look.muted)
+        .child(text)
 }
 
 // ---------- bar ----------
@@ -148,7 +152,7 @@ pub(super) fn bars(
                     div()
                         .w_full()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(look.fg.opacity(0.86 * frame.presence(ix)))
                         .child(bar.label.clone()),
                 )
@@ -196,7 +200,7 @@ pub(super) fn bars(
                         .flex()
                         .items_center()
                         .font_family(look.mono.clone())
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(look.fg.opacity(if hovered { 1. } else { 0.78 * presence }))
                         .when(!negative, |el| el.left(relative(right)).pl(px(6.)))
                         .when(negative, |el| el.right(relative(1. - left)).pr(px(6.)))
@@ -216,8 +220,8 @@ pub(super) fn bars(
                                 .left(relative(left))
                                 .w(relative(right - left))
                                 // Square at the baseline, rounded at the value's end.
-                                .when(!negative, |el| el.rounded_r(px(4.)))
-                                .when(negative, |el| el.rounded_l(px(4.)))
+                                .when(!negative, |el| el.rounded_r(px(radius::TAG)))
+                                .when(negative, |el| el.rounded_l(px(radius::TAG)))
                                 .bg(color.opacity(if hovered { 1. } else { 0.86 * presence })),
                         )
                         .child(value)
@@ -234,7 +238,7 @@ pub(super) fn bars(
                     centred_at(scale.frac(*t), 64.).child(
                         div()
                             .font_family(look.mono.clone())
-                            .text_size(px(10.))
+                            .text_size(px(text::META))
                             .text_color(look.muted)
                             .child(format_tick(*t, scale.step)),
                     )
@@ -293,6 +297,7 @@ fn legend(labels: &[(String, Hsla)], frame: &Frame, line: bool) -> AnyElement {
                         *color
                     })
                 } else {
+                    // scale: ok, a legend key
                     div().size(px(8.)).rounded(px(2.)).bg(if off {
                         look.muted.opacity(0.4)
                     } else {
@@ -301,7 +306,7 @@ fn legend(labels: &[(String, Hsla)], frame: &Frame, line: bool) -> AnyElement {
                 })
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(if off {
                             look.muted.opacity(0.7)
                         } else {
@@ -484,7 +489,7 @@ pub(super) fn line(
                 .when(frac > 0.55, |el| el.right(relative(1. - frac)).mr(px(14.)))
                 .child(
                     div()
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(look.muted)
                         .child(x_labels[ix].clone()),
                 )
@@ -520,7 +525,7 @@ pub(super) fn line(
                 .top(relative(1. - scale.frac(*t)))
                 .mt(px(-7.))
                 .font_family(look.mono.clone())
-                .text_size(px(10.))
+                .text_size(px(text::META))
                 .text_color(look.muted)
                 .child(format_tick(*t, scale.step))
         }));
@@ -537,7 +542,7 @@ pub(super) fn line(
                 .map(|i| {
                     let frac = i as f32 / (n - 1) as f32;
                     let label = div()
-                        .text_size(px(10.))
+                        .text_size(px(text::META))
                         .text_color(if frame.cursor == Some(i) {
                             look.fg
                         } else {
@@ -733,7 +738,7 @@ pub(super) fn donut(
                 .gap(px(1.))
                 .child(
                     div()
-                        .text_size(px(if narrow { 18. } else { 21. }))
+                        .text_size(px(text::DISPLAY_S))
                         .font_semibold()
                         .text_color(look.fg)
                         .child(center.0),
@@ -742,7 +747,7 @@ pub(super) fn donut(
                     div()
                         .max_w(px(d - thick * 2. - 16.))
                         .truncate()
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(look.muted)
                         .child(center.1),
                 )
@@ -750,7 +755,7 @@ pub(super) fn donut(
                     el.child(
                         div()
                             .font_family(look.mono.clone())
-                            .text_size(px(10.5))
+                            .text_size(px(text::META))
                             .text_color(look.muted)
                             .child(share),
                     )
@@ -775,7 +780,7 @@ pub(super) fn donut(
                 .gap(px(10.))
                 .h(px(26.))
                 .px(px(8.))
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
                 .when(hover == Some(ix), |el| el.bg(look.fg.opacity(0.05)))
                 .on_hover(frame.on_hover(ix))
@@ -785,6 +790,7 @@ pub(super) fn donut(
                 } else {
                     frame.presence(ix).max(0.5)
                 })
+                // scale: ok, a legend key
                 .child(div().flex_none().size(px(9.)).rounded(px(2.5)).bg(if off {
                     look.muted.opacity(0.5)
                 } else {
@@ -795,7 +801,7 @@ pub(super) fn donut(
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(look.fg)
                         .when(off, |el| el.line_through())
                         .child(part.label.clone()),
@@ -803,7 +809,7 @@ pub(super) fn donut(
                 .child(
                     div()
                         .font_family(look.mono.clone())
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(look.fg.opacity(0.85))
                         .child(with_unit(format_number(part.value), unit)),
                 )
@@ -812,7 +818,7 @@ pub(super) fn donut(
                         .w(px(38.))
                         .text_right()
                         .font_family(look.mono.clone())
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(look.muted)
                         .child(share),
                 )
@@ -972,7 +978,7 @@ pub(super) fn stats(tiles: &[StatTile], frame: &Frame, cx: &App) -> AnyElement {
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(11.5))
+                                .text_size(px(text::LABEL))
                                 .text_color(look.muted)
                                 .child(tile.label.clone()),
                         )
@@ -984,7 +990,7 @@ pub(super) fn stats(tiles: &[StatTile], frame: &Frame, cx: &App) -> AnyElement {
                                 .gap_y(px(2.))
                                 .child(
                                     div()
-                                        .text_size(px(22.))
+                                        .text_size(px(text::DISPLAY_S))
                                         .font_semibold()
                                         .line_height(relative(1.2))
                                         .text_color(look.fg)
@@ -1011,7 +1017,10 @@ pub(super) fn stats(tiles: &[StatTile], frame: &Frame, cx: &App) -> AnyElement {
                                                 )
                                             })
                                             .child(
-                                                div().text_size(px(11.)).font_medium().child(delta),
+                                                div()
+                                                    .text_size(px(text::META))
+                                                    .font_medium()
+                                                    .child(delta),
                                             ),
                                     )
                                 }),
@@ -1079,7 +1088,7 @@ pub(super) fn table_view(
         .children(columns.iter().enumerate().map(|(c, name)| {
             cell(c, div())
                 .truncate()
-                .text_size(px(11.))
+                .text_size(px(text::META))
                 .font_medium()
                 .text_color(look.muted)
                 .child(name.clone())
@@ -1115,7 +1124,7 @@ pub(super) fn table_view(
                     TableCell::Text(t) => t.clone(),
                 };
                 cell(c, div())
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .line_height(px(17.))
                     .text_color(if c == 0 {
                         look.fg
@@ -1125,7 +1134,7 @@ pub(super) fn table_view(
                     .when(matches!(value, TableCell::Number(_)), |el| {
                         el.whitespace_nowrap()
                             .font_family(look.mono.clone())
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                     })
                     .child(text)
             }))
@@ -1159,7 +1168,7 @@ pub(super) fn table_view(
                     .bottom_0()
                     .right_0()
                     .w(px(28.))
-                    .rounded_r(px(fluent::surface(9.)))
+                    .rounded_r(px(fluent::surface(radius::BUTTON)))
                     .bg(linear_gradient(
                         90.,
                         linear_color_stop(fade.opacity(0.), 0.),
@@ -1215,7 +1224,7 @@ pub(super) fn heatmap(
                 .min_w_0()
                 .text_center()
                 .truncate()
-                .text_size(px(10.))
+                .text_size(px(text::META))
                 .text_color(if hovered.is_some_and(|h| h.1 == c) {
                     look.fg
                 } else {
@@ -1237,7 +1246,7 @@ pub(super) fn heatmap(
                     .flex_none()
                     .pr_2()
                     .truncate()
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .text_color(if hovered.is_some_and(|h| h.0 == r) {
                         look.fg
                     } else {
@@ -1263,7 +1272,7 @@ pub(super) fn heatmap(
                     .flex_1()
                     .min_w(px(8.))
                     .h(px(24.))
-                    .rounded(px(4.))
+                    .rounded(px(radius::TAG))
                     .bg(color.opacity(alpha))
                     .when(frame.hover == Some(ix), |el| {
                         el.border_1().border_color(look.fg.opacity(0.7))
@@ -1273,7 +1282,7 @@ pub(super) fn heatmap(
                             .items_center()
                             .justify_center()
                             .font_family(look.mono.clone())
-                            .text_size(px(10.))
+                            .text_size(px(text::META))
                             .text_color(if on_dark {
                                 gpui_kit::white().opacity(0.92)
                             } else {
@@ -1304,7 +1313,7 @@ pub(super) fn heatmap(
         .gap(px(8.))
         .justify_end()
         .font_family(look.mono.clone())
-        .text_size(px(10.))
+        .text_size(px(text::META))
         .text_color(look.muted)
         .child(format_number(if diverging { -reach } else { min }))
         .child(div().w(px(112.)).h(px(6.)).rounded_full().bg(legend_bar))
@@ -1391,7 +1400,7 @@ pub(super) fn treemap(items: &[TreemapItem], frame: &Frame, cx: &App) -> AnyElem
                         .size_full()
                         .gap(px(3.))
                         .p(px(8.))
-                        .rounded(px(fluent::control(6.)))
+                        .rounded(px(fluent::control(radius::CONTROL)))
                         .border_1()
                         .border_color(color.opacity(if hovered {
                             0.6
@@ -1421,7 +1430,7 @@ pub(super) fn treemap(items: &[TreemapItem], frame: &Frame, cx: &App) -> AnyElem
                                 div()
                                     .w_full()
                                     .truncate()
-                                    .text_size(px(11.5))
+                                    .text_size(px(text::LABEL))
                                     .font_medium()
                                     .line_height(relative(1.3))
                                     .text_color(look.fg)
@@ -1432,7 +1441,7 @@ pub(super) fn treemap(items: &[TreemapItem], frame: &Frame, cx: &App) -> AnyElem
                                     h_flex()
                                         .gap(px(6.))
                                         .font_family(look.mono.clone())
-                                        .text_size(px(10.5))
+                                        .text_size(px(text::META))
                                         .child(
                                             div()
                                                 .text_color(look.fg.opacity(0.8))

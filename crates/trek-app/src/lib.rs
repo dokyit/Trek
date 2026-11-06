@@ -17,9 +17,11 @@ pub mod composer;
 pub mod context_popover;
 pub mod cost;
 pub mod deep_link;
+pub mod diff_review;
 pub mod fluent;
 pub use trek_dictate as dictate;
 pub mod editor;
+pub mod feedback;
 pub mod hub;
 pub use trek_assets::file_icon;
 pub use trek_assets::fonts;
@@ -45,7 +47,9 @@ pub mod note_images;
 pub mod notes;
 pub mod onboarding;
 pub mod pr_card;
+pub mod privacy;
 pub use trek_palette as palette;
+pub use trek_palette::scale;
 pub mod panels;
 pub mod permissions;
 pub use trek_perf as perf;
@@ -82,6 +86,7 @@ pub mod winsys;
 pub use trek_words as words;
 pub mod working_bar;
 pub mod workspace;
+pub mod worktree_apps_ui;
 pub mod worktree_ui;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -112,6 +117,7 @@ actions!(
         ToggleRightPanel,
         OpenPalette,
         OpenInNewWindow,
+        OpenBeside,
         OpenBasecamp,
         CloseWindow,
         CloseTab,
@@ -131,7 +137,10 @@ actions!(
         ShareThread,
         CopyThreadLink,
         CopyThreadMarkdown,
-        CopyThreadFolder
+        CopyThreadFolder,
+        NextNeedsYou,
+        BackToLastPrompt,
+        SendFeedback
     ]
 );
 
@@ -201,7 +210,11 @@ pub fn menus() -> Vec<Menu> {
         Menu {
             name: "Thread".into(),
             items: vec![
+                MenuItem::action("Next Thread That Needs You", NextNeedsYou),
+                MenuItem::action("Back to Last Prompt", BackToLastPrompt),
+                MenuItem::separator(),
                 MenuItem::action("Open in New Window", OpenInNewWindow),
+                MenuItem::action("Open Beside…", OpenBeside),
                 MenuItem::separator(),
                 MenuItem::action("Share…", ShareThread),
                 MenuItem::action("Copy Link", CopyThreadLink),
@@ -234,6 +247,11 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Minimize", Minimize),
                 MenuItem::action("Close Window", CloseWindow),
             ],
+            disabled: false,
+        },
+        Menu {
+            name: "Help".into(),
+            items: vec![MenuItem::action("Send Feedback…", SendFeedback)],
             disabled: false,
         },
     ]
@@ -369,6 +387,8 @@ pub fn run() {
         root::init(ws.clone(), cx);
         root::open_main(ws.clone(), !background, cx).expect("open window");
         perf::phase("window");
+        // After the main window: the card asking about usage data goes up in it.
+        privacy::start(&ws, cx);
         single_instance::hear(forwarded, own, ws.clone(), forwarded_links, cx);
         #[cfg(feature = "shots")]
         shots::init(ws.clone(), cx);
@@ -420,6 +440,9 @@ pub fn app_actions(cx: &mut App) {
     cx.on_action(|_: &OpenStudy, cx| {
         in_main(cx, |ws, cx| ws.navigate(workspace::Route::Study, cx))
     });
+    cx.on_action(|_: &SendFeedback, cx| feedback::open_in_main(cx));
+    cx.on_action(|_: &NextNeedsYou, cx| root::jump_to_needs_you(cx));
+    cx.on_action(|_: &BackToLastPrompt, cx| root::jump_to_last_prompt(cx));
     cx.on_action(|_: &SwitchMode, cx| in_main(cx, |ws, cx| ws.toggle_ide(cx)));
     cx.on_action(|_: &CheckForUpdates, cx| {
         in_main(cx, |ws, cx| {

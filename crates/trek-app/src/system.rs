@@ -632,6 +632,41 @@ pub fn native_glass(_: &Window, _: bool) -> bool {
     false
 }
 
+/// Put `window` above other apps' windows without activating Trek or taking the keyboard, for what
+/// it costs to be on screen (`perf front`). Whether macOS then counts it as visible: on another
+/// Space, or under a full-screen app, it doesn't.
+#[cfg(all(target_os = "macos", feature = "shots"))]
+pub fn order_front_quietly(window: &Window) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    /// `NSWindowOcclusionStateVisible`.
+    const VISIBLE: usize = 1 << 1;
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return false;
+    };
+    // SAFETY: `ns_view` is the live NSView GPUI created for this window; both messages are plain
+    // AppKit calls made on the main thread.
+    unsafe {
+        let view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return false;
+        }
+        let _: () = msg_send![ns_window, orderFrontRegardless];
+        let state: usize = msg_send![ns_window, occlusionState];
+        state & VISIBLE != 0
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "shots"))]
+pub fn order_front_quietly(_: &Window) -> bool {
+    false
+}
+
 /// With `TREK_FORCE_ACTIVE`, a display link's worth of frame requests (60 Hz) for `window` while
 /// macOS hides it, so measurements and screenshots of a window kept behind others
 /// (`TREK_BACKGROUND`) cover drawing too. Every Trek window keeps one for as long as it's open.

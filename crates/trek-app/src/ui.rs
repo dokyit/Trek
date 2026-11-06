@@ -1,6 +1,7 @@
 //! Shared visual primitives so every surface uses the same quiet, consistent styling.
 
 use crate::fluent::{self, PillExt as _};
+use crate::scale::{radius, text, to_rems};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -238,9 +239,9 @@ pub fn nav_row(
         .px(px(10.))
         .h(px(30.))
         .gap(px(10.))
-        .rounded(px(fluent::control(7.)))
+        .rounded(px(fluent::control(radius::BUTTON)))
         .cursor_pointer()
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .when(active, |el| {
             el.bg(theme.foreground.opacity(0.08))
                 .font_weight(FontWeight::MEDIUM)
@@ -261,7 +262,7 @@ pub fn nav_row(
         .when_some(hint, |el, h| {
             el.child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground.opacity(0.7))
                     .child(h),
             )
@@ -349,11 +350,11 @@ fn monogram_in(name: &str, hue: f32, dark: bool) -> Div {
         .h(px(16.))
         .min_w(px(20.))
         .px(px(3.))
-        .rounded(px(4.))
+        .rounded(px(radius::TAG))
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(9.5))
+        .text_size(px(text::META))
         .font_weight(FontWeight::BOLD)
         .bg(project_fill(hue, dark))
         .text_color(project_ink(hue, dark))
@@ -413,7 +414,7 @@ pub fn project_badge(name: &str, look: &ProjectLook, cx: &App) -> AnyElement {
             img(path)
                 .flex_none()
                 .size(px(16.))
-                .rounded(px(4.))
+                .rounded(px(radius::TAG))
                 .border_1()
                 .border_color(cx.theme().foreground.opacity(0.1))
                 .object_fit(ObjectFit::Cover)
@@ -428,7 +429,7 @@ pub fn project_badge(name: &str, look: &ProjectLook, cx: &App) -> AnyElement {
                 .flex_none()
                 .h(px(16.))
                 .w(px(20.))
-                .rounded(px(4.))
+                .rounded(px(radius::TAG))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -496,6 +497,7 @@ pub fn agent_logo(agent: &AgentId, size: Pixels, cx: &App) -> AnyElement {
             img(SharedString::from(format!("logos/{theme}/{key}.png")))
                 .size(size)
                 .flex_none()
+                // scale: ok, an app icon's squircle
                 .rounded(size * 0.22)
                 .into_any_element()
         }
@@ -543,6 +545,7 @@ pub fn registry_logo(
             div()
                 .flex_none()
                 .size(size)
+                // scale: ok, an app icon's squircle
                 .rounded(size * 0.22)
                 .flex()
                 .items_center()
@@ -550,6 +553,7 @@ pub fn registry_logo(
                 .bg(theme.foreground.opacity(0.08))
                 .text_color(theme.foreground.opacity(0.75))
                 .text_size(
+                    // scale: ok, the icon's letters, in proportion
                     size * if letters.chars().count() > 1 {
                         0.4
                     } else {
@@ -587,7 +591,7 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
         .h(px(30.))
         .p(px(2.))
         .gap(px(2.))
-        .rounded(px(fluent::control(8.)))
+        .rounded(px(fluent::control(radius::BUTTON)))
         .bg(theme.foreground.opacity(0.05))
         .border_1()
         .border_color(theme.foreground.opacity(0.06))
@@ -605,8 +609,8 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
                         .px(px(11.))
                         .flex()
                         .items_center()
-                        .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 6.)))
-                        .text_size(px(12.5))
+                        .rounded(px(fluent::pick(fluent::THUMB_RADIUS, radius::CONTROL)))
+                        .text_size(px(text::BODY))
                         .cursor_pointer()
                         .when(selected, |el| {
                             el.bg(theme.foreground.opacity(0.12))
@@ -672,7 +676,7 @@ pub fn releases_notes(
                             el.child(
                                 h_flex()
                                     .gap(px(6.))
-                                    .text_size(px(12.5))
+                                    .text_size(px(text::BODY))
                                     .child(
                                         div().font_semibold().child(format!("Trek {}", r.version)),
                                     )
@@ -690,7 +694,7 @@ pub fn releases_notes(
                         })
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(text::BODY))
                                 .line_height(relative(1.5))
                                 .text_color(theme.foreground.opacity(0.85))
                                 .child(
@@ -746,7 +750,7 @@ pub fn web_link(
         .id(id.into())
         .test_support()
         .gap(px(4.))
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .text_color(color)
         .cursor_pointer()
         .hover(|s| s.text_color(cx.theme().foreground))
@@ -849,16 +853,16 @@ impl RenderOnce for Pill {
             .h(px(28.))
             .px(px(10.))
             .gap(px(6.))
-            .rounded(px(fluent::control(8.)))
-            .text_sm()
+            .rounded(px(fluent::control(radius::BUTTON)))
+            .text_size(to_rems(text::LABEL))
             .cursor_pointer()
             .when(self.ghost, |el| el.px(px(7.)))
             .when(self.small, |el| {
                 el.h(px(22.))
                     .px(px(7.))
                     .gap(px(4.))
-                    .rounded(px(fluent::control(6.)))
-                    .text_size(px(12.))
+                    .rounded(px(fluent::control(radius::CONTROL)))
+                    .text_size(px(text::LABEL))
             })
             .bg(theme.foreground.opacity(match (self.selected, self.ghost) {
                 (true, _) => 0.12,
@@ -898,7 +902,10 @@ impl Pill {
             .cursor_pointer()
             .when(self.ghost, |el| el.px(px(9.)))
             .when(self.small, |el| {
-                el.h(px(24.)).px(px(8.)).gap(px(4.)).text_size(px(11.5))
+                el.h(px(24.))
+                    .px(px(8.))
+                    .gap(px(4.))
+                    .text_size(px(text::LABEL))
             })
             .map(|el| match (self.selected, self.ghost) {
                 (true, _) => el.bg(pressed),
@@ -927,7 +934,7 @@ pub fn menu_surface(cx: &App) -> Div {
     let theme = cx.theme();
     gpui_kit::component::v_flex()
         .p(px(5.))
-        .rounded(px(fluent::surface(12.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .bg(theme.popover)
         .border_1()
         .border_color(fluent::stroke(theme.border, cx))
@@ -950,14 +957,14 @@ pub fn check_row(
     h_flex()
         .id(id)
         .gap(px(8.))
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .when(!disabled, |el| el.cursor_pointer())
         .when(disabled, |el| el.opacity(0.55))
         .child(
             div()
                 .size(px(14.))
                 .flex_none()
-                .rounded(px(3.))
+                .rounded(px(radius::TAG))
                 .border_1()
                 .border_color(if on {
                     ember
@@ -968,6 +975,7 @@ pub fn check_row(
                 .items_center()
                 .justify_center()
                 .when(on, |el| {
+                    // scale: ok, the box's mark, a glyph
                     el.child(div().size(px(7.)).rounded(px(1.)).bg(ember))
                 }),
         )
@@ -983,8 +991,8 @@ pub fn menu_row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Di
         .px(px(10.))
         .min_h(px(34.))
         .gap(px(10.))
-        .rounded(px(fluent::control(8.)))
-        .text_sm()
+        .rounded(px(fluent::control(radius::BUTTON)))
+        .text_size(to_rems(text::LABEL))
         .cursor_pointer()
         .when(active, |el| el.bg(theme.list_active))
         .hover(|s| s.bg(theme.list_active))

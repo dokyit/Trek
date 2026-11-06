@@ -38,3 +38,52 @@ struct ThreadStoreTests {
         #expect(s.seq == 12)
     }
 }
+
+/// The working line under the transcript: it goes with the turn's last rows, not before them.
+@MainActor
+struct WorkingLineTests {
+    private func row(_ state: RunState) -> ThreadSummary {
+        ThreadSummary(id: "h:t", title: "t", project: nil, agent: AgentRef(key: "codex", name: "Codex"), model: nil, modelLabel: nil,
+                      runState: state, needs: nil, section: .inbox, unseen: false, pinned: false, branch: nil, worktree: false,
+                      activity: nil, workingSince: nil, updatedAt: 0, additions: 0, deletions: 0)
+    }
+
+    private func item(_ id: String, _ seq: Int64) -> TItem { TItem(id: id, seq: seq, body: .turnEnd(tookSecs: 3)) }
+
+    @Test func itWaitsForTheTurnsLastRows() {
+        // As a Mac sends them: the row says the turn is over, then the items come.
+        let store = ThreadStore(id: "h:t", host: "h", summary: row(.working))
+        #expect(store.showsWorking && !store.footerEmpty)
+        store.setSummary(row(.idle))
+        #expect(store.showsWorking, "the row alone doesn't take it away")
+        store.enqueue(item("i1", 1))
+        store.flushQueued()
+        #expect(!store.showsWorking, "gone with the rows, in the same pass")
+        #expect(store.footerEmpty)
+        #expect(store.blocks.count == 1)
+    }
+
+    @Test func aTurnEndingWithNoMoreRowsDoesntKeepItUp() async throws {
+        let store = ThreadStore(id: "h:t", host: "h", summary: row(.working))
+        store.setSummary(row(.idle))
+        try await Task.sleep(for: .seconds(ThreadStore.turnEndHold + 0.3))
+        #expect(!store.showsWorking)
+    }
+
+    @Test func aNewTurnStartingMeanwhileKeepsIt() async throws {
+        let store = ThreadStore(id: "h:t", host: "h", summary: row(.working))
+        store.setSummary(row(.idle))
+        store.setSummary(row(.working))
+        try await Task.sleep(for: .seconds(ThreadStore.turnEndHold + 0.3))
+        #expect(store.showsWorking, "the first hold's timer doesn't end the new turn's line")
+        store.enqueue(item("i1", 1))
+        store.flushQueued()
+        #expect(store.showsWorking, "rows of a running turn leave it")
+    }
+
+    @Test func aThreadOpenedIdleHasNothingUnderIt() {
+        let store = ThreadStore(id: "h:t", host: "h", summary: row(.idle))
+        #expect(!store.showsWorking && store.footerEmpty)
+        #expect(ThreadStore(id: "h:t", host: "h", summary: nil).footerEmpty)
+    }
+}

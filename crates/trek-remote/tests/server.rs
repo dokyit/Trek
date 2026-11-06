@@ -106,6 +106,7 @@ fn long_transcript() -> Transcript {
         title: "Run command".into(),
         detail: "make".into(),
         state: ApprovalState::Pending,
+        asked_by: None,
     };
     items.push(Item {
         id: "rreq".into(),

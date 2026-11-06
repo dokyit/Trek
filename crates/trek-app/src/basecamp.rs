@@ -9,6 +9,7 @@
 //! the end of this file.
 
 use crate::palette;
+use crate::scale::text;
 use crate::ui;
 use crate::workspace::{Route, Workspace, fmt_tokens};
 use chrono::{DateTime, Datelike as _, Duration as Days, NaiveDate, TimeZone, Timelike as _};
@@ -285,7 +286,7 @@ impl Basecamp {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(22.))
+                    .text_size(px(text::DISPLAY_S))
                     .font_semibold()
                     .line_height(px(30.))
                     .child("Basecamp"),
@@ -381,7 +382,7 @@ impl Basecamp {
                         el.child(
                             div()
                                 .py(px(6.))
-                                .text_size(px(13.))
+                                .text_size(px(text::BODY))
                                 .text_color(theme.muted_foreground)
                                 .child("Nothing is waiting on you."),
                         )
@@ -407,7 +408,7 @@ impl Basecamp {
                                         .test_support()
                                         .pt(px(6.))
                                         .px(px(8.))
-                                        .text_size(px(12.))
+                                        .text_size(px(text::LABEL))
                                         .text_color(theme.muted_foreground)
                                         .cursor_pointer()
                                         .hover(|s| s.text_color(theme.foreground))
@@ -462,14 +463,14 @@ impl Basecamp {
                             .when(i > 0, |el| el.border_l_1().border_color(line))
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(px(text::LABEL))
                                     .text_color(theme.muted_foreground)
                                     .truncate()
                                     .child(label),
                             )
                             .child(
                                 div()
-                                    .text_size(px(17.))
+                                    .text_size(px(text::HEADING))
                                     .font_medium()
                                     .truncate()
                                     .when_some(color, |el, c| el.text_color(c))
@@ -558,6 +559,7 @@ impl Basecamp {
                                 .max_w(px(MAX_BAR))
                                 .h(relative(frac))
                                 .min_h(px(2. * grown))
+                                // scale: ok, a chart's bar
                                 .rounded(px(1.5))
                                 .bg(if hovered {
                                     theme.foreground.opacity(0.8)
@@ -587,7 +589,7 @@ impl Basecamp {
             .gap(px(8.))
             .child(
                 h_flex()
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .child(
                         div()
                             .flex_1()
@@ -618,7 +620,7 @@ impl Basecamp {
                 h_flex()
                     .w_full()
                     .gap(px(gap))
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .text_color(theme.muted_foreground)
                     .children(labels),
             )
@@ -649,7 +651,7 @@ impl Basecamp {
         let header = h_flex()
             .h(px(28.))
             .px(px(8.))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(line)
@@ -675,7 +677,7 @@ impl Basecamp {
                 .test_support()
                 .h(px(32.))
                 .px(px(8.))
-                .text_size(px(13.))
+                .text_size(px(text::BODY))
                 .border_b_1()
                 .border_color(line)
                 .child(
@@ -722,7 +724,7 @@ impl Basecamp {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
                     .child(text),
             )
@@ -764,7 +766,7 @@ impl Render for Basecamp {
             Some(_) => vec![self.empty(cx)],
             None => vec![
                 div()
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
                     .child("Loading…")
                     .into_any_element(),
@@ -802,7 +804,7 @@ fn section_title(title: &'static str, count: Option<usize>, cx: &App) -> AnyElem
     h_flex()
         .pb(px(6.))
         .gap(px(6.))
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .child(div().font_medium().child(title))
         .when_some(count.filter(|n| *n > 0), |el, n| {
             el.child(
@@ -882,7 +884,7 @@ fn needs_row(
         .h(px(34.))
         .gap(px(10.))
         .px(px(8.))
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .cursor_pointer()
         .hover(|s| s.bg(theme.list_hover))
         .child(icon.size(px(14.)).text_color(color))
@@ -893,7 +895,7 @@ fn needs_row(
                     .max_w(px(180.))
                     .flex_none()
                     .truncate()
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .text_color(theme.muted_foreground)
                     .child(p),
             )
@@ -903,7 +905,7 @@ fn needs_row(
                 h_flex()
                     .flex_none()
                     .gap(px(4.))
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .child(
                         div()
                             .text_color(palette::emerald(cx))
@@ -923,7 +925,7 @@ fn needs_row(
                 .flex_none()
                 .min_w(px(36.))
                 .text_right()
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .map(|el| match status {
                     Some(s) => el.font_medium().text_color(color).child(s),
                     None => el
@@ -1615,6 +1617,8 @@ pub enum Waiting {
     Approval,
     Question,
     Plan,
+    /// A secret the agent asked for, as its card names it (a question in form, not in words).
+    Secret,
     /// The request went with its session (Trek was relaunched): it's asked again on reopening.
     Unknown,
     /// A sub-agent of the thread's waits on an approval: its row in the thread opens it.
@@ -1626,6 +1630,7 @@ impl Waiting {
         match request.map(|r| &r.prompt) {
             Some(Some(trek_agents::Prompt::Questions(_))) => Waiting::Question,
             Some(Some(trek_agents::Prompt::Plan(_))) => Waiting::Plan,
+            Some(Some(trek_agents::Prompt::Secret { .. })) => Waiting::Secret,
             Some(None) => Waiting::Approval,
             None => Waiting::Unknown,
         }
@@ -1636,6 +1641,7 @@ impl Waiting {
             Waiting::Approval => "Approval",
             Waiting::Question => "Question",
             Waiting::Plan => "Plan to review",
+            Waiting::Secret => "Secret",
             Waiting::Unknown => "Needs you",
             Waiting::SubAgent => "Sub-agent needs you",
         }
@@ -1646,6 +1652,7 @@ impl Waiting {
             Waiting::Approval => Icon::new(crate::assets::Lucide::ShieldCheck),
             Waiting::Question => Icon::new(crate::assets::Lucide::MessageSquare),
             Waiting::Plan => Icon::new(crate::assets::Lucide::ListChecks),
+            Waiting::Secret => Icon::new(crate::assets::Lucide::ShieldCheck),
             Waiting::Unknown => Icon::new(IconName::CircleAlert),
             Waiting::SubAgent => Icon::new(crate::assets::Lucide::ShieldCheck),
         }
@@ -1675,8 +1682,8 @@ pub fn profile_line(recap: &Recap, hovered: Option<usize>) -> String {
             parts.join(" · ")
         }
         None => match recap.peak() {
-            Some(i) => format!("Summit {}", summit_label(recap, i)),
-            None => "A flat trail so far".into(),
+            Some(i) => format!("Peak {}", summit_label(recap, i)),
+            None => "No activity yet".into(),
         },
     }
 }
@@ -2003,7 +2010,7 @@ mod tests {
             axis.len() == 5 && axis[0].1.chars().rev().take(4).all(|c| c.is_ascii_digit()),
             "{axis:?}"
         );
-        assert_eq!(super::profile_line(&r, None), "A flat trail so far");
+        assert_eq!(super::profile_line(&r, None), "No activity yet");
         // Years: several weeks a stretch.
         let r = recap(3 * 365);
         assert!(
@@ -2012,5 +2019,25 @@ mod tests {
             stretch_label(&r, 0)
         );
         assert!(summit_label(&r, 0).starts_with("in the weeks from "));
+    }
+
+    #[test]
+    fn a_secret_is_named_as_its_card_names_it() {
+        use super::Waiting;
+        let asked = |prompt| crate::workspace::PendingPermission {
+            request_id: "r".into(),
+            title: String::new(),
+            detail: String::new(),
+            prompt,
+            after_turn: false,
+            call: None,
+        };
+        let secret = asked(Some(trek_agents::Prompt::Secret {
+            name: "GITHUB_TOKEN".into(),
+            why: "To open the pull request.".into(),
+        }));
+        assert_eq!(Waiting::of(Some(&secret)), Waiting::Secret);
+        assert_eq!(Waiting::Secret.label(), "Secret");
+        assert_eq!(Waiting::of(Some(&asked(None))), Waiting::Approval);
     }
 }

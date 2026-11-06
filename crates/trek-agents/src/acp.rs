@@ -2,6 +2,7 @@
 //! Covers OpenCode, Droid and every ACP agent in the catalog. Trek acts as the ACP client:
 //! it answers permission prompts and `fs/*` requests; the agent keeps its own login.
 
+use crate::rules::Ruling;
 use crate::{
     AgentEvent, Command, CommandKind, Decision, GroupChild, SessionConfig, SlashCommand,
     StderrTail, Step, clip, plan_row,
@@ -16,6 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use trek_core::catalog::{ACP_AGENTS, ModelInfo};
+use trek_core::permission_rules::{self, Call, PermissionRule};
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost, detect};
 
 /// What `acp_probe` learns about an installed ACP agent.
@@ -364,6 +366,14 @@ impl FsPolicy {
                         -32003,
                         format!("{} is outside the project folder", path.display()),
                     ));
+                }
+                // The agent's own write, through Trek, at any level. (An ask rule's question is
+                // the one on its permission prompt, so only a deny is for here.)
+                let edit = Call::edit("fs/write_text_file", path.display().to_string());
+                if let Ruling::Refuse { message, .. } =
+                    crate::rules::ruling(&permission_rules::current(), &[edit], &self.cwd, false)
+                {
+                    return Err((-32003, message));
                 }
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent)
@@ -1112,6 +1122,7 @@ fn controls(result: &Value) -> Controls {
                         tier: i.min(255) as u8,
                         fast: None,
                         context: None,
+                        caps: None,
                     })
                 })
                 .collect();
@@ -1133,6 +1144,7 @@ fn controls(result: &Value) -> Controls {
                     tier: i.min(255) as u8,
                     fast: None,
                     context: None,
+                    caps: None,
                 })
                 .collect();
             let switch = o["id"]
@@ -1533,9 +1545,24 @@ pub async fn run(
     if let Some(notice) = agent.db_notice.take() {
         events.send(AgentEvent::Notice(notice)).await?;
     }
-    if lost {
-        events.send(crate::lost_session(&agent.name)).await?;
-    }
+    // Its session has gone: the recap, if it was given one to fall back on, brings it up to speed.
+    let commands = match config.recap.clone().filter(|_| lost) {
+        Some(recap) => {
+            events
+                .send(AgentEvent::Notice(format!(
+                    "{} couldn't reopen this conversation, so it continues in a new session with a recap of it.",
+                    agent.name
+                )))
+                .await?;
+            crate::recap_first(commands, recap)
+        }
+        None => {
+            if lost {
+                events.send(crate::lost_session(&agent.name)).await?;
+            }
+            commands
+        }
+    };
 
     let turn = Turn {
         resumed: config.resume.is_some() && !lost,
@@ -1845,16 +1872,29 @@ impl Live {
             return Ok(vec![]);
         }
         self.turn.produced = true;
-        match self.turn.permission(p, hand_holding, self.planning) {
+        let rules = permission_rules::current();
+        match self.turn.permission_under(
+            p,
+            hand_holding,
+            self.planning,
+            &rules,
+            &fs.cwd,
+            fs.read_only,
+        ) {
             Ask::Answer(option) => {
                 rpc.reply(rpc_id, Ok(permission_outcome(Some(option))))
                     .await?;
                 Ok(vec![])
             }
+            Ask::Refuse { option, note } => {
+                rpc.reply(rpc_id, Ok(permission_outcome(option))).await?;
+                Ok(vec![AgentEvent::Notice(note)])
+            }
             Ask::User {
                 title,
                 detail,
                 options,
+                call,
             } => {
                 let request_id = format!("acp-{rpc_id}");
                 self.perms.insert(request_id.clone(), (rpc_id, options));
@@ -1863,6 +1903,7 @@ impl Live {
                     title,
                     detail,
                     prompt: None,
+                    call,
                 }])
             }
         }
@@ -1874,17 +1915,33 @@ impl Live {
 enum Ask {
     /// The thread's access level covers it: pick this option.
     Answer(String),
+    /// A rule says no: pick this option (none says no: cancel it, which refuses it too), and
+    /// note why.
+    Refuse {
+        option: Option<String>,
+        note: String,
+    },
     User {
         title: String,
         detail: String,
         options: Vec<Value>,
+        call: Option<Call>,
     },
 }
 
 impl Turn {
     /// `planning`: the session is in plan mode, so an edit the agent asks to make (its own rules
-    /// would normally forbid it) goes to the user whatever the access level.
-    fn permission(&self, p: &Value, hand_holding: HandHolding, planning: bool) -> Ask {
+    /// would normally forbid it) goes to the user whatever the access level. The user's `rules`
+    /// come before the level, and before plan mode when they say no.
+    fn permission_under(
+        &self,
+        p: &Value,
+        hand_holding: HandHolding,
+        planning: bool,
+        rules: &[PermissionRule],
+        cwd: &Path,
+        read_only: bool,
+    ) -> Ask {
         let tc = &p["toolCall"];
         let known = tc["toolCallId"].as_str().and_then(|id| self.tools.get(id));
         let kind = tc["kind"]
@@ -1894,7 +1951,33 @@ impl Turn {
             .to_string();
         let options = p["options"].as_array().cloned().unwrap_or_default();
         let edit = matches!(kind.as_str(), "edit" | "delete" | "move");
-        if auto_allow(hand_holding, &kind)
+        let named = tc["title"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .or(known.map(|t| t.title.as_str()))
+            .unwrap_or_default();
+        let shown = Some(tool_detail(tc, &kind))
+            .filter(|d| !d.is_empty())
+            .or(known.map(|t| t.detail.clone()))
+            .unwrap_or_default();
+        let calls = crate::rules::acp_calls(&kind, named, &shown, tc);
+        let ruling = crate::rules::ruling(rules, &calls, cwd, !planning && !read_only);
+        match &ruling {
+            Ruling::Refuse { note, .. } => {
+                return Ask::Refuse {
+                    option: pick_option(&options, Decision::Deny),
+                    note: note.clone(),
+                };
+            }
+            Ruling::Allow => {
+                if let Some(option) = pick_option(&options, Decision::Allow) {
+                    return Ask::Answer(option);
+                }
+            }
+            Ruling::Ask | Ruling::Level => {}
+        }
+        if ruling == Ruling::Level
+            && auto_allow(hand_holding, &kind)
             && !(planning && edit)
             && let Some(option) = pick_option(&options, Decision::Allow)
         {
@@ -1919,7 +2002,16 @@ impl Turn {
             title,
             detail,
             options,
+            call: calls.into_iter().next(),
         }
+    }
+}
+
+#[cfg(test)]
+impl Turn {
+    /// `permission_under` with no rules.
+    fn permission(&self, p: &Value, hand_holding: HandHolding, planning: bool) -> Ask {
+        self.permission_under(p, hand_holding, planning, &[], Path::new("/"), false)
     }
 }
 
@@ -2284,6 +2376,105 @@ mod tests {
                 )
             }
         }
+    }
+
+    /// A resumed session with a recap to fall back on, on an agent that can or can't reopen it:
+    /// the methods it was sent, the prompts, and what the user was told.
+    fn resume_with_recap(tag: &str, can_load: bool) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("trek-acp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if !can_load {
+            std::fs::write(dir.join("fake-acp-no-load"), "").unwrap();
+        }
+        let config = SessionConfig {
+            agent: fake_agent(),
+            cwd: dir.clone(),
+            model: None,
+            effort: Effort::Off,
+            hand_holding: HandHolding::Auto,
+            plan: false,
+            read_only: false,
+            resume: Some("fake-9".into()),
+            resume_at: None,
+            fork: false,
+            recap: Some("User: remember APPLE".into()),
+            fast: None,
+            mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
+            script: false,
+            transcript: None,
+        };
+        let h = crate::start(config);
+        let notices = trek_core::runtime().block_on(async {
+            h.commands
+                .send(Command::Prompt {
+                    text: "Resume working".into(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
+            let mut notices = vec![];
+            loop {
+                match next_event(&h, &dir).await {
+                    AgentEvent::TurnComplete { error, .. } => {
+                        assert_eq!(error, None);
+                        break;
+                    }
+                    AgentEvent::Notice(n) => notices.push(n),
+                    AgentEvent::Error(e) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+            h.commands.send(Command::Shutdown).await.unwrap();
+            notices
+        });
+        let log: Vec<Value> = std::fs::read_to_string(dir.join("acp-log.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let methods = log
+            .iter()
+            .filter_map(|m| m["method"].as_str().map(String::from))
+            .collect();
+        let prompts = log
+            .iter()
+            .filter(|m| m["method"] == "session/prompt")
+            .map(|m| {
+                m["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        (methods, prompts, notices)
+    }
+
+    #[test]
+    fn a_session_is_reopened_where_it_can_be_and_else_starts_from_its_recap() {
+        // After a restart: the agent's own session, and no recap sent over it.
+        let (methods, prompts, notices) = resume_with_recap("reopen", true);
+        assert!(methods.iter().any(|m| m == "session/load"), "{methods:?}");
+        assert!(!methods.iter().any(|m| m == "session/new"), "{methods:?}");
+        assert_eq!(prompts, ["Resume working"]);
+        assert!(notices.is_empty(), "{notices:?}");
+
+        // It can't: a new session, brought up to speed, and the user is told.
+        let (methods, prompts, notices) = resume_with_recap("no-reopen", false);
+        assert!(!methods.iter().any(|m| m == "session/load"), "{methods:?}");
+        assert!(methods.iter().any(|m| m == "session/new"), "{methods:?}");
+        assert!(
+            prompts[0].contains("<recap>\nUser: remember APPLE\n</recap>")
+                && prompts[0].ends_with("Resume working"),
+            "{prompts:?}"
+        );
+        assert!(
+            notices.iter().any(|n| n.contains("with a recap")),
+            "{notices:?}"
+        );
     }
 
     #[test]
@@ -3287,6 +3478,95 @@ mod tests {
     }
 
     #[test]
+    fn rules_come_before_the_level_on_a_permission_prompt() {
+        use trek_core::permission_rules::{RuleAction, RuleKind};
+        let t = Turn::default();
+        let ask = json!({
+            "toolCall": { "toolCallId": "c", "kind": "execute", "title": "Run", "rawInput": { "command": "rm -rf x" } },
+            "options": [
+                { "optionId": "yes", "kind": "allow_once", "name": "Allow" },
+                { "optionId": "no", "kind": "reject_once", "name": "Reject" },
+            ],
+        });
+        let rule = |pattern: &str, action| PermissionRule::new(RuleKind::Command, pattern, action);
+        let at = |rules: &[PermissionRule], level, planning, read_only| {
+            t.permission_under(&ask, level, planning, rules, Path::new("/p"), read_only)
+        };
+        // A deny holds at Full access, where Trek would otherwise answer yes by itself.
+        for level in HandHolding::ALL {
+            let Ask::Refuse { option, note } =
+                at(&[rule("rm", RuleAction::Deny)], level, false, false)
+            else {
+                panic!("{level:?}");
+            };
+            assert_eq!(option.as_deref(), Some("no"));
+            assert!(note.contains("Deny command `rm`"), "{note}");
+        }
+        // An ask rule asks at Full access.
+        assert!(matches!(
+            at(&[rule("rm", RuleAction::Ask)], HandHolding::FullAccess, false, false),
+            Ask::User { call: Some(c), .. } if c.target == "rm -rf x"
+        ));
+        // An allow rule answers at Supervised, but not over plan mode or a read-only session.
+        let allow = [rule("rm", RuleAction::Allow)];
+        assert_eq!(
+            at(&allow, HandHolding::Supervised, false, false),
+            Ask::Answer("yes".into())
+        );
+        assert!(matches!(
+            at(&allow, HandHolding::Supervised, true, false),
+            Ask::User { .. }
+        ));
+        assert!(matches!(
+            at(&allow, HandHolding::Supervised, false, true),
+            Ask::User { .. }
+        ));
+        // No option that says no: cancelled, which refuses it.
+        let only_yes = json!({
+            "toolCall": ask["toolCall"],
+            "options": [{ "optionId": "yes", "kind": "allow_once", "name": "Allow" }],
+        });
+        assert!(matches!(
+            t.permission_under(
+                &only_yes,
+                HandHolding::FullAccess,
+                false,
+                &[rule("rm", RuleAction::Deny)],
+                Path::new("/p"),
+                false,
+            ),
+            Ask::Refuse { option: None, .. }
+        ));
+        // An agent that doesn't say what it would run: a deny holds, an allow doesn't.
+        let silent = json!({
+            "toolCall": { "toolCallId": "c", "kind": "execute" },
+            "options": ask["options"],
+        });
+        assert!(matches!(
+            t.permission_under(
+                &silent,
+                HandHolding::FullAccess,
+                false,
+                &[rule("git", RuleAction::Deny)],
+                Path::new("/p"),
+                false,
+            ),
+            Ask::Refuse { .. }
+        ));
+        assert!(matches!(
+            t.permission_under(
+                &silent,
+                HandHolding::Supervised,
+                false,
+                &[rule("*", RuleAction::Allow)],
+                Path::new("/p"),
+                false,
+            ),
+            Ask::User { .. }
+        ));
+    }
+
+    #[test]
     fn hand_holding_gates_auto_allow() {
         assert!(auto_allow(HandHolding::FullAccess, "execute"));
         assert!(auto_allow(HandHolding::AutoAcceptEdits, "edit"));
@@ -3489,6 +3769,7 @@ mod tests {
             title,
             detail,
             options,
+            ..
         } = t.permission(ask, HandHolding::Supervised, false)
         else {
             panic!()
@@ -3933,6 +4214,7 @@ mod tests {
             tier: 0,
             fast: None,
             context: None,
+            caps: None,
         };
         let info = AcpInfo {
             models: vec![model("a")],
@@ -4177,6 +4459,7 @@ fn parse_copilot_models(help: &str) -> Vec<ModelInfo> {
         tier: 0,
         fast: None,
         context: None,
+        caps: None,
     }];
     for line in help.lines() {
         if line.trim_start().starts_with("`model`:") {
@@ -4196,6 +4479,7 @@ fn parse_copilot_models(help: &str) -> Vec<ModelInfo> {
                     tier: 1,
                     fast: None,
                     context: None,
+                    caps: None,
                 }),
                 None if line.trim().is_empty() || line.trim_start().starts_with('-') => {}
                 None => break,

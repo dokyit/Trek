@@ -25,7 +25,7 @@ impl Default for Clock {
 }
 
 impl Clock {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn new(f: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
         Clock(Arc::new(f))
     }
@@ -41,6 +41,9 @@ const RECHECK: Duration = Duration::from_secs(30);
 
 /// How long after launch overdue resumes wait: the windows are up and the agents found first.
 pub const LAUNCH_DELAY_MS: i64 = 8_000;
+
+/// Between a handoff side's name and its account's label ("Claude Opus 5.5 · Work").
+const ACCOUNT_IN_NAME: &str = " · ";
 
 /// A limit the running turn reported, applied when the turn ends.
 #[derive(Debug, Clone, PartialEq)]
@@ -92,16 +95,23 @@ pub struct Resuming {
 pub type UsageProbe = Rc<dyn Fn(&AgentId, &Path) -> async_channel::Receiver<Option<AgentStatus>>>;
 
 /// Claude Code's, Codex's and Devin's own usage report (`claude_status`, `codex_status`,
-/// `devin_status`), off the main thread.
-fn ask_agent(agent: &AgentId, cwd: &Path) -> async_channel::Receiver<Option<AgentStatus>> {
+/// `devin_status`), off the main thread, on `account` when one is given.
+fn ask_agent(
+    agent: &AgentId,
+    cwd: &Path,
+    account: Option<trek_core::accounts::Account>,
+) -> async_channel::Receiver<Option<AgentStatus>> {
     let (tx, rx) = async_channel::bounded(1);
     let (agent, cwd) = (agent.clone(), cwd.to_path_buf());
     trek_core::runtime().spawn(async move {
-        let status = match agent {
-            AgentId::ClaudeCode => trek_agents::claude_status(&cwd).await,
-            AgentId::Acp(_) => trek_agents::devin_status().await,
-            _ => trek_agents::codex_status(&cwd).await,
-        };
+        let status = trek_agents::on_account(account.as_ref(), async {
+            match agent {
+                AgentId::ClaudeCode => trek_agents::claude_status(&cwd).await,
+                AgentId::Acp(_) => trek_agents::devin_status().await,
+                _ => trek_agents::codex_status(&cwd).await,
+            }
+        })
+        .await;
         let _ = tx.send(status.ok()).await;
     });
     rx
@@ -121,10 +131,11 @@ impl Workspace {
     fn reset_from_status(
         &self,
         agent: &AgentId,
+        account: Option<&str>,
         model: Option<&str>,
         scope: &LimitScope,
     ) -> Option<i64> {
-        let status = self.agent_status.get(&agent.key())?;
+        let status = self.status_on(agent, account)?;
         trek_agents::limits::reset_from_usage(&status.limits, scope, model, self.now())
     }
 
@@ -150,9 +161,14 @@ impl Workspace {
             None => (None, vec![]),
         };
         let tries = resuming.as_ref().map_or(0, |r| r.tries + 1);
-        let reported = hit
-            .resets_at
-            .or_else(|| self.reset_from_status(&thread.agent, thread.model.as_deref(), &hit.scope));
+        let reported = hit.resets_at.or_else(|| {
+            self.reset_from_status(
+                &thread.agent,
+                thread.account.as_deref(),
+                thread.model.as_deref(),
+                &hit.scope,
+            )
+        });
         let resets_at = trek_core::limit::reset_ahead(reported, now, tries);
         let auto =
             self.settings.general.on_usage_limit == OnUsageLimit::Resume || resuming.is_some();
@@ -195,13 +211,30 @@ impl Workspace {
         if let Some(l) = self.live.get_mut(id) {
             l.revision += 1;
         }
+        self.note_account_limited(&thread.agent, thread.account.as_deref(), resets_at);
         // The agent's usage windows may say when it resets: ask them now rather than in minutes.
         // Read whether or not the Usage card shows it.
-        if unknown && matches!(thread.agent, AgentId::ClaudeCode | AgentId::Codex) {
+        if let (true, Some(account)) = (unknown, &thread.account) {
+            self.fetch_account(account, true, cx);
+        } else if unknown && matches!(thread.agent, AgentId::ClaudeCode | AgentId::Codex) {
             self.fetch_usage(thread.agent.clone(), true, cx);
         } else if unknown && thread.agent == super::devin_agent() {
             self.devin_status_at = 0;
             self.refresh_devin_usage(cx);
+        }
+        // Set to carry on by itself, on another account with room. A sub-agent's limit is its
+        // parent's to deal with, and a side chat has returned above.
+        if self.settings.general.continue_on_other_account
+            && thread.parent_id.is_none()
+            && let Some(next) = self.next_account(id)
+        {
+            self.continue_on_account(id, next.id, cx);
+            cx.emit(WorkspaceEvent::Attention {
+                message: format!("Continued on {}: {}", next.label, thread.title),
+                thread: id.to_string(),
+                button: None,
+            });
+            return;
         }
         // A resume that met the limit again moves on without a word: the bar and the card say it,
         // and the alert for the limit went when it was first hit.
@@ -220,10 +253,13 @@ impl Workspace {
     /// `id`'s agent said how full its plan's windows are (`AgentEvent::LimitUsed`): the usage
     /// Trek shows follows, and a turn running close to a limit is asked to wrap up.
     pub(super) fn windows_used(&mut self, id: &str, windows: Vec<Window>, cx: &mut Context<Self>) {
-        let Some(agent) = self.thread(id).map(|t| t.agent.key()) else {
+        let Some((agent, account)) = self
+            .thread(id)
+            .map(|t| (t.agent.clone(), t.account.clone()))
+        else {
             return;
         };
-        if let Some(status) = self.agent_status.get_mut(&agent) {
+        if let Some(status) = self.status_on_mut(&agent, account.as_deref()) {
             for w in &windows {
                 let length = match w.scope {
                     LimitScope::Session => "5h",
@@ -260,9 +296,18 @@ impl Workspace {
     /// `agent`'s usage was just read (`refresh_usage`, `refresh_devin_usage`): the turns running
     /// on it that a window close to its limit applies to are asked to wrap up.
     pub fn wrap_up_where_due(&mut self, agent: &AgentId, cx: &mut Context<Self>) {
+        self.wrap_up_due_on(agent, None, cx);
+    }
+
+    /// `wrap_up_where_due` for the turns on `account` of `agent` (`None`: its normal login).
+    pub(super) fn wrap_up_due_on(
+        &mut self,
+        agent: &AgentId,
+        account: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(limits) = self
-            .agent_status
-            .get(&agent.key())
+            .status_on(agent, account)
             .map(|s| s.limits.clone())
             .filter(|l| !l.is_empty())
         else {
@@ -271,7 +316,9 @@ impl Workspace {
         let running: Vec<(String, Option<String>)> = self
             .threads
             .iter()
-            .filter(|t| t.agent == *agent && self.turn_running(&t.id))
+            .filter(|t| {
+                t.agent == *agent && t.account.as_deref() == account && self.turn_running(&t.id)
+            })
             .map(|t| (t.id.clone(), t.model.clone()))
             .collect();
         for (id, model) in running {
@@ -369,14 +416,20 @@ impl Workspace {
 
     /// Whether a turn is running on `agent` while one of its windows fills up (wrap-ups on).
     fn filling(&self, agent: &AgentId) -> bool {
+        self.filling_on(agent, None)
+    }
+
+    /// `filling`, on `account` of `agent` (`None`: its normal login).
+    fn filling_on(&self, agent: &AgentId, account: Option<&str>) -> bool {
         self.settings.general.wrap_up_near_limit
-            && self.agent_status.get(&agent.key()).is_some_and(|s| {
+            && self.status_on(agent, account).is_some_and(|s| {
                 s.limits
                     .iter()
                     .any(|l| (FILLING..100.0).contains(&l.percent))
             })
             && self.threads.iter().any(|t| {
                 t.agent == *agent
+                    && t.account.as_deref() == account
                     && self.turn_running(&t.id)
                     && !trek_agents::limits::is_fable_model(t.model.as_deref())
                     && !trek_agents::limits::is_swe_model(t.model.as_deref())
@@ -386,7 +439,14 @@ impl Workspace {
     /// How long Claude Code's and Codex's usage is left unread (unix ms): five minutes, or two
     /// while a turn runs on one whose window is filling up, so a wrap-up comes in time.
     pub(super) fn usage_every(&self) -> i64 {
-        if self.filling(&AgentId::ClaudeCode) || self.filling(&AgentId::Codex) {
+        if self.filling(&AgentId::ClaudeCode)
+            || self.filling(&AgentId::Codex)
+            || self
+                .settings
+                .accounts
+                .iter()
+                .any(|a| self.filling_on(&a.agent(), Some(&a.id)))
+        {
             FILLING_EVERY_MS
         } else {
             5 * 60_000
@@ -410,7 +470,7 @@ impl Workspace {
 
     /// Fill in resets the agents' usage windows now know (after `refresh_usage`).
     pub(super) fn fill_unknown_resets(&mut self, cx: &mut Context<Self>) {
-        let unknown: Vec<(String, AgentId, Option<String>, LimitScope)> = self
+        let unknown: Vec<(String, AgentId, Option<String>, Option<String>, LimitScope)> = self
             .threads
             .iter()
             .filter_map(|t| {
@@ -421,6 +481,7 @@ impl Workspace {
                         (
                             t.id.clone(),
                             t.agent.clone(),
+                            t.account.clone(),
                             t.model.clone(),
                             p.scope.clone(),
                         )
@@ -428,8 +489,10 @@ impl Workspace {
             })
             .collect();
         let mut any = false;
-        for (id, agent, model, scope) in unknown {
-            if let Some(at) = self.reset_from_status(&agent, model.as_deref(), &scope) {
+        for (id, agent, account, model, scope) in unknown {
+            if let Some(at) =
+                self.reset_from_status(&agent, account.as_deref(), model.as_deref(), &scope)
+            {
                 self.mutate_thread(&id, cx, |t| {
                     if let Some(p) = t.paused.as_mut() {
                         p.resets_at = Some(at);
@@ -480,6 +543,22 @@ impl Workspace {
             p.queued.remove(ix);
         });
         self.hand_back(id, vec![q], cx);
+    }
+
+    /// Move a message waiting for the reset to another place in line.
+    pub fn move_queued_for_reset(
+        &mut self,
+        id: &str,
+        ix: usize,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_pause(id, cx, |p| {
+            if ix != to && ix < p.queued.len() && to < p.queued.len() {
+                let q = p.queued.remove(ix);
+                p.queued.insert(to, q);
+            }
+        });
     }
 
     fn hand_back(&mut self, id: &str, queued: Vec<Queued>, cx: &mut Context<Self>) {
@@ -627,13 +706,16 @@ impl Workspace {
         let Some(t) = self.thread(id).cloned() else {
             return;
         };
+        let account = t.account.as_deref().and_then(|a| self.account(a).cloned());
         let probe: Option<UsageProbe> = match &self.usage_probe {
             Some(p) => Some(p.clone()),
             None if (matches!(t.agent, AgentId::ClaudeCode | AgentId::Codex)
                 || t.agent == super::devin_agent())
                 && !trek_core::paths::isolated() =>
             {
-                Some(Rc::new(ask_agent))
+                Some(Rc::new(move |agent: &AgentId, cwd: &Path| {
+                    ask_agent(agent, cwd, account.clone())
+                }))
             }
             None => None,
         };
@@ -669,7 +751,7 @@ impl Workspace {
                     )
                 });
                 if let Some(s) = status {
-                    this.agent_status.insert(t.agent.key(), s);
+                    this.set_status_on(&t.agent, t.account.as_deref(), s);
                 }
                 match still {
                     Some(at) => this.update_pause(&id, cx, |p| p.resets_at = Some(at)),
@@ -709,7 +791,7 @@ impl Workspace {
 
     /// Send what `pause` held for `id`: the first message starts a turn, the rest queue behind it.
     /// The thread's history is read first, so the agent (or the recap it starts from) has it.
-    fn send_resume(&mut self, id: &str, pause: &Pause, cx: &mut Context<Self>) {
+    pub(super) fn send_resume(&mut self, id: &str, pause: &Pause, cx: &mut Context<Self>) {
         self.ensure_loaded(id, cx);
         // A sub-agent takes its task back up, before its session starts (an advising one's is
         // read-only).
@@ -801,11 +883,12 @@ impl Workspace {
     pub(super) fn note_handoff(
         &mut self,
         id: &str,
-        from: (&AgentId, Option<String>),
-        to: (&AgentId, Option<String>),
+        from: (&AgentId, Option<String>, Option<&str>),
+        to: (&AgentId, Option<String>, Option<&str>),
     ) -> bool {
-        // Each side as it is now: the model it ran (the default, if none was picked) and its name.
-        let side = |agent: &AgentId, model: Option<String>| {
+        // Each side as it is now: the model it ran (the default, if none was picked) and its name,
+        // with its account's when the agent has more than one.
+        let side = |agent: &AgentId, model: Option<String>, account: Option<&str>| {
             let models = self.models_for(agent);
             let model =
                 model.or_else(|| crate::composer::default_model(&models).map(|m| m.id.clone()));
@@ -816,9 +899,13 @@ impl Workspace {
                     .map(|m| crate::composer::model_name(&models, m))
                     .as_deref(),
             );
+            let name = match self.account_label(agent, account) {
+                Some(label) => format!("{name}{ACCOUNT_IN_NAME}{label}"),
+                None => name,
+            };
             (agent.key(), model, name)
         };
-        let (mut from, to) = (side(from.0, from.1), side(to.0, to.1));
+        let (mut from, to) = (side(from.0, from.1, from.2), side(to.0, to.1, to.2));
         let Some(live) = self.live.get_mut(id) else {
             return false;
         };
@@ -844,7 +931,12 @@ impl Workspace {
             let last = live.items.len() - 1;
             live.items.truncate(last);
         }
-        if from.0 != to.0 {
+        // Back where it started, whatever model it's on: no divider. Its account is part of that.
+        let account = |name: &str| {
+            name.rsplit_once(ACCOUNT_IN_NAME)
+                .map(|(_, label)| label.to_string())
+        };
+        if from.0 != to.0 || account(&from.2) != account(&to.2) {
             live.items.push(Item::Handoff {
                 from: from.0,
                 from_model: from.1,

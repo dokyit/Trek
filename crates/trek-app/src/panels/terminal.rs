@@ -1,6 +1,7 @@
 //! A real terminal: the user's login shell in a PTY, parsed by vt100, painted as styled rows.
 
 use crate::fluent;
+use crate::scale::{radius, text};
 use crate::workspace::Workspace;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
@@ -17,9 +18,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// The text size a terminal starts at; ⌘+ and ⌘- move it within `FONT_SIZES`, ⌘0 brings it back.
-const FONT_SIZE: f32 = 12.5;
+const FONT_SIZE: f32 = text::LABEL;
 const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=28.0;
-/// A row's height for the text size: 18 points at 12.5.
+/// A row's height for the text size: 18 points at the size it starts at.
 fn line_height_for(font_size: f32) -> f32 {
     (font_size * 18. / FONT_SIZE).round()
 }
@@ -1704,12 +1705,12 @@ impl Render for TerminalPanel {
                 .px(px(10.))
                 .gap(px(5.))
                 .items_center()
-                .rounded(px(fluent::control(12.)))
+                .rounded(px(fluent::control(radius::FULL)))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.background)
                 .font_family(theme.font_family.clone())
-                .text_size(px(11.5))
+                .text_size(px(text::LABEL))
                 .text_color(theme.muted_foreground)
                 .cursor_pointer()
                 .hover(|s| s.text_color(theme.foreground))

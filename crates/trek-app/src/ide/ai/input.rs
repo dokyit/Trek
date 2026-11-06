@@ -22,6 +22,7 @@ use crate::attachments::{self, Attaching, Outbox};
 use crate::composer::{PickerHost, Pickers, pickers};
 use crate::fluent::{self, PillExt as _};
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::ui::{self, Pill};
 use crate::workspace::{ChatMode, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{
@@ -739,11 +740,11 @@ impl AiInput {
                 .pr(px(3.))
                 .gap(px(4.))
                 .items_center()
-                .rounded(px(fluent::control(5.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .border_1()
                 .border_color(line)
                 .bg(theme.foreground.opacity(0.04))
-                .text_size(px(11.5))
+                .text_size(px(text::LABEL))
                 .child(icon)
                 .child(div().min_w_0().truncate().child(label))
                 .tooltip(move |window, cx| {
@@ -759,7 +760,7 @@ impl AiInput {
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .rounded(px(3.))
+                .rounded(px(radius::TAG))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.foreground.opacity(0.1)))
                 .child(
@@ -893,7 +894,7 @@ impl AiInput {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(fluent::control(5.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .border_1()
                 .border_color(line)
                 .cursor_pointer()
@@ -976,7 +977,7 @@ impl AiInput {
                                     .child(div().font_medium().child(m.label()))
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(to_rems(text::META))
                                             .whitespace_normal()
                                             .text_color(theme.muted_foreground)
                                             .child(m.description()),
@@ -1046,7 +1047,7 @@ impl AiInput {
                 .id("ai-editing")
                 .test_support()
                 .gap(px(4.))
-                .text_size(px(11.5))
+                .text_size(px(text::LABEL))
                 .text_color(theme.muted_foreground)
                 .child(
                     h_flex()
@@ -1143,7 +1144,7 @@ impl Render for AiInput {
             .and_then(|id| self.workspace.read(cx).live.get(id))
             .and_then(|l| l.context);
         let hh = self.workspace.read(cx).prefs_in(&self.scope).hand_holding;
-        let model_pill = pickers::model_pill(self, narrow, true, true, cx);
+        let model_pill = pickers::model_pill(self, narrow, true, !narrow, true, cx);
         let access_pill = pickers::access_pill(self, true, true, cx);
         let mode_pill = self.mode_pill(cx);
         let picker = pickers::picker(self, cx);
@@ -1167,6 +1168,7 @@ impl Render for AiInput {
                     gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared("Stop (⌘.)"))
                         .build(window, cx)
                 })
+                // scale: ok, the stop glyph
                 .child(div().size(px(8.)).rounded(px(1.5)).bg(theme.background))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(id) = thread.clone() {
@@ -1226,7 +1228,7 @@ impl Render for AiInput {
             .w_full()
             .p(px(8.))
             .gap(px(7.))
-            .rounded(px(fluent::surface(10.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .border_1()
             .border_color(border)
             .bg(if glass {
@@ -1237,7 +1239,7 @@ impl Render for AiInput {
             .children(self.edit_banner(cx))
             .child(self.chips_row(cx))
             .children(attachments_strip)
-            .child(div().px(px(2.)).text_size(px(13.)).child(
+            .child(div().px(px(2.)).text_size(px(text::BODY)).child(
                 Textarea::new(&self.input).appearance(false).on_paste({
                     let me = cx.entity().downgrade();
                     move |item, window, cx| match attachments::pasted(item) {
@@ -1285,7 +1287,7 @@ impl Render for AiInput {
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .rounded(px(fluent::control(6.)))
+                            .rounded(px(fluent::control(radius::CONTROL)))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.foreground.opacity(0.07)))
                             .tooltip(|window, cx| {

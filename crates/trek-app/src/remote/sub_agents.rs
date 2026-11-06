@@ -69,7 +69,11 @@ impl Workspace {
             .and_then(|l| l.permissions.first())
             .map(|p| &p.prompt)
         {
-            Some(Some(trek_agents::Prompt::Questions(_))) => tr::NeedsKind::Question,
+            // A secret is asked as a question is (as the thread's own row has it), never an
+            // approval: there's nothing on the phone to allow.
+            Some(Some(trek_agents::Prompt::Questions(_) | trek_agents::Prompt::Secret { .. })) => {
+                tr::NeedsKind::Question
+            }
             Some(Some(trek_agents::Prompt::Plan(_))) => tr::NeedsKind::Plan,
             _ => tr::NeedsKind::Approval,
         };

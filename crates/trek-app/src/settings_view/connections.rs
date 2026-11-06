@@ -4,6 +4,7 @@
 
 use super::SettingsView;
 use crate::palette;
+use crate::scale::text;
 use crate::ui;
 use crate::workspace::WorkspaceEvent;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -138,7 +139,7 @@ impl SettingsView {
             h_flex()
                 .gap(px(10.))
                 .child(logo)
-                .child(div().text_size(px(13.5)).font_medium().child(text))
+                .child(div().text_size(px(text::TITLE)).font_medium().child(text))
         };
 
         let running = self.figma_desktop.value;
@@ -147,7 +148,7 @@ impl SettingsView {
             None => (
                 "Looking for the Figma desktop app…",
                 div()
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .text_color(muted)
                     .child("Checking…")
                     .into_any_element(),
@@ -215,7 +216,7 @@ impl SettingsView {
             let control: AnyElement = match link {
                 None => div().into_any_element(),
                 Some(FigmaLink::Connected) => Self::status_dot(palette::emerald(cx), "Connected"),
-                Some(FigmaLink::NotInstalled) => div().text_size(px(12.5)).text_color(muted).child("Not installed").into_any_element(),
+                Some(FigmaLink::NotInstalled) => div().text_size(px(text::BODY)).text_color(muted).child("Not installed").into_any_element(),
                 Some(FigmaLink::NotConnected) => h_flex()
                     .gap_2()
                     .when(claude, |el| {
@@ -253,7 +254,7 @@ impl SettingsView {
         }
         vec![
             // The page's first section: no room above it for one before.
-            div().pb(px(10.)).text_size(px(13.)).font_semibold().child("Connections").into_any_element(),
+            div().pb(px(10.)).text_size(px(text::BODY)).font_semibold().child("Connections").into_any_element(),
             ui::group(rows, cx),
             div()
                 .pt_3()

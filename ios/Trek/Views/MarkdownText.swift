@@ -5,12 +5,18 @@ import SwiftUI
 /// code, tables and display maths. Inline styling (bold, italics, links, `code` and file chips) is
 /// `RichText`, with maths typeset in the line by `RichMathText`.
 /// The text is parsed once (and may already be, in the background, as the transcript arrived).
-struct MarkdownText: View, Equatable {
-    var text: String
-    var size: CGFloat = 16
+struct MarkdownText: View, nonisolated Equatable {
+    // Read by `==`, which SwiftUI may call off the main thread (as `BlockRow`'s): a conformance
+    // left to the target's default isolation stops the app there.
+    nonisolated(unsafe) var text: String
+    nonisolated(unsafe) var size: CGFloat = 16
     /// The answer is still being written: a visualization whose fence is still open is on its
     /// way, not one that was never finished.
-    var live = false
+    nonisolated(unsafe) var live = false
+
+    nonisolated static func == (a: MarkdownText, b: MarkdownText) -> Bool {
+        a.size == b.size && a.live == b.live && a.text == b.text
+    }
 
     typealias Align = Markdown.Align
     typealias Block = Markdown.Block
@@ -314,7 +320,7 @@ struct MarkdownTable: View {
     var size: CGFloat
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        SidewaysScroll {
             Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                 GridRow {
                     ForEach(header.indices, id: \.self) { c in

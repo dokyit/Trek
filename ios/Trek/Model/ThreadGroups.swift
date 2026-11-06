@@ -73,7 +73,7 @@ extension ThreadSummary {
     /// thread with work running in the background is kept out with them too, under its project,
     /// so "Show more" never hides that something still runs (a folded project's header counts it).
     var isActive: Bool {
-        waitsOnYou || runState == .working || !runningSubAgents.isEmpty || waitsInBackground || runsInBackground
+        waitsOnYou || runState == .working || !runningSubAgents.isEmpty || waitsInBackground || runsInBackground || cutShort != nil
     }
 }
 

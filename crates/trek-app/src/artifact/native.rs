@@ -272,7 +272,8 @@ mod platform {
     /// that isn't flipped.
     const BOTTOM_CORNERS: usize = 1 | 2;
     /// The card's corner radius, less its 1 px edge.
-    const RADIUS: f64 = 11.;
+    // scale: ok, as in `super`
+    const RADIUS: f64 = (crate::scale::radius::CARD - 1.) as f64;
 
     /// An `NSView` over the window's GPUI view that clips the web view in it to its frame.
     pub struct Clip {

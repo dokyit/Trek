@@ -4,6 +4,7 @@
 
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text};
 use crate::ui;
 use crate::workspace::{AgentInstall, Route, SettingsPage, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -262,7 +263,7 @@ impl AddAgentSheet {
                     .test_support()
                     .flex_none()
                     .gap(px(2.))
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .text_color(muted)
                     .child(status)
                     .child(refresh),
@@ -342,7 +343,7 @@ impl AddAgentSheet {
             .items_center()
             .justify_center()
             .px(px(PAD * 2.))
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .text_color(cx.theme().muted_foreground)
             .child(content)
             .into_any_element()
@@ -366,9 +367,9 @@ impl AddAgentSheet {
                 .h(px(24.))
                 .px(px(8.))
                 .gap(px(6.))
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .bg(theme.foreground.opacity(0.05))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .child(child)
                 .into_any_element()
         };
@@ -376,7 +377,7 @@ impl AddAgentSheet {
             RowState::BuiltIn => div()
                 .id(SharedString::from(format!("registry-built-in-{id}")))
                 .test_support()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(muted)
                 .child("Built in")
                 .into_any_element(),
@@ -384,7 +385,7 @@ impl AddAgentSheet {
                 .id(SharedString::from(format!("registry-added-{id}")))
                 .test_support()
                 .gap(px(5.))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .child(
                     Icon::new(IconName::Check)
                         .xsmall()
@@ -415,7 +416,7 @@ impl AddAgentSheet {
                 .on_click(install)
                 .into_any_element(),
             RowState::Unavailable => div()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(muted)
                 .child(format!("Not for {}", crate::words::words().this_computer))
                 .into_any_element(),
@@ -432,14 +433,14 @@ impl AddAgentSheet {
             .map(|p| p.kind());
         let detail: AnyElement = match &state {
             RowState::Failed(e) => div()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .line_height(relative(1.45))
                 .text_color(palette::red(cx))
                 .child(e.clone())
                 .into_any_element(),
             _ => div()
                 .truncate()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(muted)
                 .child(if a.description.is_empty() {
                     a.authors.join(", ")
@@ -475,7 +476,7 @@ impl AddAgentSheet {
                 div()
                     .size(px(28.))
                     .flex_none()
-                    .rounded(px(fluent::control(7.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .bg(theme.foreground.opacity(0.045))
                     .flex()
                     .items_center()
@@ -499,14 +500,14 @@ impl AddAgentSheet {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(13.5))
+                                    .text_size(px(text::TITLE))
                                     .font_medium()
                                     .child(a.name.clone()),
                             )
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(12.))
+                                    .text_size(px(text::LABEL))
                                     .text_color(muted.opacity(0.8))
                                     .child(a.version.clone()),
                             )
@@ -515,9 +516,9 @@ impl AddAgentSheet {
                                     div()
                                         .flex_none()
                                         .px(px(5.))
-                                        .rounded(px(4.))
+                                        .rounded(px(radius::TAG))
                                         .bg(theme.foreground.opacity(0.06))
-                                        .text_size(px(11.))
+                                        .text_size(px(text::META))
                                         .text_color(muted)
                                         .child(r),
                                 )
@@ -563,7 +564,7 @@ impl AddAgentSheet {
                     .w(px(92.))
                     .flex_none()
                     .pt(px(3.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(cx.theme().foreground.opacity(0.85))
                     .child(label.to_string()),
             )
@@ -576,7 +577,7 @@ impl AddAgentSheet {
                     .when_some(hint, |el, h| {
                         el.child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .line_height(relative(1.45))
                                 .text_color(muted)
                                 .child(h.to_string()),
@@ -824,7 +825,7 @@ impl AddAgentSheet {
             .id("add-agent-api-keys")
             .test_support()
             .gap(px(6.))
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .text_color(muted)
             .cursor_pointer()
             .hover(|s| s.text_color(theme.foreground))
@@ -852,7 +853,7 @@ impl AddAgentSheet {
                             .id("command-error")
                             .test_support()
                             .gap(px(7.))
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .line_height(relative(1.35))
                             .text_color(palette::red(cx))
                             .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none())
@@ -895,11 +896,11 @@ impl Render for AddAgentSheet {
             .pt(px(18.))
             .pb(px(14.))
             .gap(px(4.))
-            .child(div().text_size(px(16.)).font_semibold().child("Add an agent"))
+            .child(div().text_size(px(text::HEADING)).font_semibold().child("Add an agent"))
             .child(
                 div()
                     .max_w(px(520.))
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .line_height(relative(1.5))
                     .text_color(theme.muted_foreground)
                     .child("Any agent that speaks the Agent Client Protocol runs in Trek like the built-in ones, signed in with its own account."),

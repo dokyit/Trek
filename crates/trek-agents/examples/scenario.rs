@@ -138,6 +138,7 @@ impl Session {
                 title,
                 detail,
                 prompt,
+                ..
             } => (request_id, title, detail, prompt),
             _ => unreachable!(),
         }

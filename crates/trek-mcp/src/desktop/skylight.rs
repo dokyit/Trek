@@ -443,6 +443,44 @@ fn type_text(pid: i32, text: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    /// Process Manager calls check the caller in as an app, and Launch Services files a child of
+    /// Trek's under Trek's own record: a second Trek in the Dock for as long as the session runs.
+    /// None is called or looked up in computer use (the names are put together here, so this
+    /// file's own text doesn't hold them).
+    #[test]
+    fn computer_use_never_checks_itself_in_as_an_app() {
+        let sources = [
+            ("skylight.rs", include_str!("skylight.rs")),
+            ("macos.rs", include_str!("macos.rs")),
+            ("spaces.rs", include_str!("spaces.rs")),
+            ("desktop.rs", include_str!("../desktop.rs")),
+            ("computer.rs", include_str!("../computer.rs")),
+        ];
+        for name in [
+            "ProcessForPID",
+            "CurrentProcess",
+            "FrontProcess",
+            "NextProcess",
+            "ProcessInformation",
+        ] {
+            for call in [
+                format!("Get{name}("),
+                format!("\"Get{name}\""),
+                format!("Set{name}("),
+            ] {
+                for (file, source) in sources {
+                    assert!(!source.contains(&call), "{file} calls {call}");
+                }
+            }
+        }
+        for (file, source) in sources {
+            assert!(
+                !source.contains(&["Transform", "ProcessType"].concat()),
+                "{file}"
+            );
+        }
+    }
+
     #[test]
     fn a_process_serial_number_from_lsappinfo() {
         let psn = super::parse_asn("ASN:0x0-0x1acaac9-\"TextEdit\":\n").unwrap();

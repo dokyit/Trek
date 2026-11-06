@@ -12,6 +12,7 @@
 //! Without one on screen it fades in and out instead.
 
 use crate::fluent::{self, PillExt as _};
+use crate::scale::{radius, text};
 use crate::ui;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -792,7 +793,7 @@ impl ImagePreview {
                             .id("preview-name")
                             .test_support()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_size(px(text::BODY))
                             .font_medium()
                             .text_color(theme.foreground)
                             .child(item.name()),
@@ -802,7 +803,7 @@ impl ImagePreview {
                             .id("preview-meta")
                             .test_support()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .child(meta(s)),
                     ),
@@ -881,7 +882,7 @@ impl ImagePreview {
                             .test_support()
                             .size(px(THUMB))
                             .flex_none()
-                            .rounded(px(fluent::control(7.)))
+                            .rounded(px(fluent::control(radius::BUTTON)))
                             .overflow_hidden()
                             .border_1()
                             .border_color(theme.foreground.opacity(if on { 0.85 } else { 0.1 }))
@@ -915,7 +916,7 @@ impl ImagePreview {
         let under = theme.foreground.opacity(0.03);
         fn frame<E: Styled>(el: E, (edge, under, flyout): (Hsla, Hsla, Vec<BoxShadow>)) -> E {
             let el = el
-                .rounded(px(fluent::surface(6.)))
+                .rounded(px(fluent::surface(radius::CONTROL)))
                 .overflow_hidden()
                 .border_1()
                 .border_color(edge)
@@ -977,7 +978,7 @@ impl ImagePreview {
                             .top(at.origin.y)
                             .w(at.size.width)
                             .h(at.size.height)
-                            .rounded(px(2.))
+                            .rounded(px(radius::TAG))
                             .cursor(if grabbing {
                                 CursorStyle::ClosedHand
                             } else {
@@ -1016,7 +1017,11 @@ impl ImagePreview {
             .w(at.size.width)
             .h(at.size.height)
             .when(moving && s.from.is_some(), |el| {
-                el.rounded(px(fluent::surface(crate::motion::lerp(10., 6., t))))
+                el.rounded(px(fluent::surface(crate::motion::lerp(
+                    radius::BUTTON,
+                    radius::CONTROL,
+                    t,
+                ))))
             })
             .when(layout.zoomable(), |el| el.cursor_pointer())
             .child(

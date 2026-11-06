@@ -513,14 +513,14 @@ fn the_bell_flashes_the_title_names_the_shell_and_the_text_sizes() {
         trek.press(cx, bigger);
         trek.press(cx, bigger);
         trek.render(cx);
-        assert_eq!(term.read_with(cx, |t, _| t.font_size()), 14.5);
+        assert_eq!(term.read_with(cx, |t, _| t.font_size()), 14.);
         assert!(
             term.read_with(cx, |t, _| t.visible_rows().len()) < rows,
             "bigger text, fewer rows"
         );
         trek.press(cx, actual);
         trek.render(cx);
-        assert_eq!(term.read_with(cx, |t, _| t.font_size()), 12.5);
+        assert_eq!(term.read_with(cx, |t, _| t.font_size()), 12.);
         assert_eq!(term.read_with(cx, |t, _| t.visible_rows().len()), rows);
     });
 }

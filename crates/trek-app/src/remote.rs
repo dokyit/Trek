@@ -1155,6 +1155,13 @@ impl Workspace {
         let Some(t) = self.thread(&req.thread_id).cloned() else {
             return Err(tr::HostError::not_found("No such thread"));
         };
+        // A secret's card is up: what was typed may be the secret, pasted in the wrong place. It
+        // goes in the card on this computer, and nowhere from here (not even a queue).
+        if self.asks_for_secret(&t.id) {
+            return Err(tr::HostError::conflict(
+                crate::workspace::permission_requests::secret_waits_here(),
+            ));
+        }
         // Trek's own commands: `/new` is the phone's to carry out, `/consult` and `/restate` become
         // the message the composer would send, the rest are answered as on the Mac.
         let text = match self.phone_command(&t, &req.text)? {
@@ -1173,7 +1180,9 @@ impl Workspace {
             tr::SendMode::Steer => trek_core::settings::FollowUp::Steer,
             tr::SendMode::Queue => trek_core::settings::FollowUp::Queue,
         });
-        self.send_as(&req.thread_id, text, images, follow, cx);
+        // Typed on the phone as on the Mac: waiting on an approval or a plan, the words decline
+        // it and go now, rather than wait behind the very card they answer.
+        self.send_typed_to(&req.thread_id, text, images, follow, cx);
         Ok(None)
     }
 
@@ -1301,14 +1310,18 @@ impl Workspace {
         // Started the way the Mac's composer starts one, without taking over the Mac's screen.
         // `draft_became` too: the Mac's own draft didn't become this thread, and the terminal dock
         // would give the draft's shells to it.
-        let (route, prefs, tabs, became) = (
+        let (route, prefs, tabs, became, split) = (
             self.route.clone(),
             self.draft_prefs.clone(),
             self.tabs.clone(),
             self.draft_became.clone(),
+            self.split.clone(),
         );
         self.route = Route::Draft { project };
         self.draft_prefs.agent = agent;
+        // On the agent's normal login: the phone picks no account, and the Mac's draft may be on
+        // one of another agent's, or one the user picked for something else.
+        self.draft_prefs.account = None;
         self.draft_prefs.model = req.model.clone();
         self.draft_prefs.worktree = req.worktree;
         self.draft_prefs.plan = req.plan;
@@ -1327,6 +1340,11 @@ impl Workspace {
         self.draft_prefs = prefs;
         self.tabs = tabs;
         self.draft_became = became;
+        // Nor does it take a pane of a split on the Mac.
+        if split.is_some() {
+            self.split = split;
+            self.save_split(cx);
+        }
         cx.notify();
         started.ok_or_else(|| tr::HostError::other("The thread didn't start"))
     }
@@ -1370,6 +1388,20 @@ impl Workspace {
             (tr::AnswerResponse::Approval { decision }, None) => {
                 let decision = match decision {
                     tr::Decision::Allow => trek_agents::Decision::Allow,
+                    // A rule of the user's asks about this every time: a session's yes would
+                    // never let it ask again (a phone from before `asked_by` still offers it).
+                    tr::Decision::AllowForSession
+                        if !self.session_approval_offered(&id, &req.request_id) =>
+                    {
+                        if let Some(remote) = self.remote.as_mut() {
+                            remote
+                                .answered
+                                .remove(&(id.clone(), req.request_id.clone()));
+                        }
+                        return Err(tr::HostError::bad_request(
+                            "Your rule asks about this every time. Allow it just this once, or deny it.",
+                        ));
+                    }
                     // Anything that holds the phone's token can say this, whatever the phone's
                     // own check (Face ID) was: only the Mac's setting lets it through.
                     tr::Decision::AllowForSession if !self.settings.mobile.session_approvals => {
@@ -1413,6 +1445,19 @@ impl Workspace {
                 },
                 Some(trek_agents::Prompt::Plan(_)),
             ) => {
+                // Its feedback is a message, which can't go while a secret's card is up.
+                if feedback.as_ref().is_some_and(|f| !f.trim().is_empty())
+                    && self.asks_for_secret(&id)
+                {
+                    if let Some(remote) = self.remote.as_mut() {
+                        remote
+                            .answered
+                            .remove(&(id.clone(), req.request_id.clone()));
+                    }
+                    return Err(tr::HostError::conflict(
+                        crate::workspace::permission_requests::secret_waits_here(),
+                    ));
+                }
                 self.respond(&id, &req.request_id, trek_agents::Decision::Deny, cx);
                 // Feedback is a message like any other (`/new` in it opens nothing: it was an answer).
                 let thread = self.thread(&id).cloned();
@@ -1652,11 +1697,14 @@ impl Workspace {
                     kind: tr::NeedsKind::Plan,
                     text: "Plan ready to review".into(),
                 },
+                Some(trek_agents::Prompt::Secret { name, .. }) => tr::Needs {
+                    kind: tr::NeedsKind::Question,
+                    text: secret_elsewhere(name),
+                },
+                // The words the Mac's own row says after "Waiting:".
                 None => tr::Needs {
                     kind: tr::NeedsKind::Approval,
-                    text: format!("{} {}", p.title, first_line(&p.detail))
-                        .trim()
-                        .to_string(),
+                    text: asking_words(&p.title, &p.detail),
                 },
             });
         let needs = needs
@@ -1820,9 +1868,47 @@ impl Workspace {
                 resume: p.resume,
                 wrapped: p.wrapped,
             }),
+            // Only whole: a one-tap Allow (the Lock Screen's) on a command with its middle cut out
+            // to fit would allow what nobody read. That one is answered in the thread.
+            ask: live
+                .and_then(|l| l.permissions.first())
+                .filter(|p| p.prompt.is_none())
+                .map(|p| (p, clip_text_to(&p.detail, tr::MAX_ASK_DETAIL)))
+                .filter(|(p, detail)| *detail == p.detail)
+                .map(|(p, detail)| tr::RowAsk {
+                    request_id: p.request_id.clone(),
+                    detail,
+                }),
+            cut_short: self.remote_cut_short(t),
         };
         self.remote_sub_agent_needs(t, &mut row);
         row
+    }
+
+    /// The offer to resume `t`'s turn, while the Mac has one open or under way.
+    fn remote_cut_short(&self, t: &Thread) -> Option<tr::CutShort> {
+        use crate::workspace::resume::{ResumeState, how_it_resumes};
+        let offer = self.interrupted_offer(&t.id)?;
+        let (state, why) = match &offer.state {
+            ResumeState::Offered => (tr::CutShortState::Offered, None),
+            ResumeState::Resuming => (tr::CutShortState::Resuming, None),
+            ResumeState::Failed(why) => {
+                (tr::CutShortState::Failed, Some(clip_text_to(why, 1 << 10)))
+            }
+            // The agent is back at it: its row says so.
+            ResumeState::Going => return None,
+        };
+        Some(tr::CutShort {
+            state,
+            how: how_it_resumes(t),
+            waiting: offer.turn.waiting,
+            asked: offer
+                .turn
+                .asked
+                .as_deref()
+                .map(|a| clip_text_to(a, 1 << 10)),
+            why,
+        })
     }
 
     /// What `t` has at work, as its sidebar card and its tooltip say: its sub-agents (Trek's, and
@@ -2071,7 +2157,7 @@ impl Workspace {
         }
         if asks {
             // Requests: new or changed ones as they are, answered ones as resolved.
-            let requests = request_cards(live);
+            let requests = request_cards(self, id);
             let open: HashSet<&str> = requests.iter().map(|(r, _)| r.as_str()).collect();
             for (rid, last, _) in w
                 .requests
@@ -2233,13 +2319,14 @@ impl Workspace {
             }
             None => {
                 let cwd = self.thread(id).and_then(|t| t.cwd.clone());
+                let cards = request_cards(self, id);
                 let Some(live) = self.live.get_mut(id) else {
                     return tr::Transcript::default();
                 };
                 let _ = live.items.take_edited_from();
                 let mut w = Watched::fresh(live.items.len());
                 (w.revision, w.streaming, w.cwd) = (live.revision, live.streaming, cwd);
-                for (rid, body) in request_cards(live) {
+                for (rid, body) in cards {
                     w.seq += 1;
                     w.requests.push((rid, body, w.seq));
                 }
@@ -2505,6 +2592,8 @@ impl Workspace {
                 return;
             };
             for event in events {
+                #[cfg(any(test, feature = "test-support"))]
+                tests::EVENTS_PUSHED.with(|e| e.borrow_mut().push(event.clone()));
                 remote.handle.push(event);
             }
             remote.watched.insert(id, w);
@@ -2836,8 +2925,33 @@ fn thread_link(ws: &Workspace, row_id: &str, detail: &str) -> tr::ItemBody {
     }
 }
 
-/// The requests open in `live`, as cards, by request id.
-fn request_cards(live: &LiveThread) -> Vec<(String, tr::ItemBody)> {
+/// What the phone says about a secret's card: its name, and where to answer it.
+fn secret_elsewhere(name: &str) -> String {
+    format!(
+        "Needs {name}. Enter it on {}.",
+        crate::words::words().this_computer
+    )
+}
+
+/// What the phone's row for a secret's card says once it's closed: it was given or declined on
+/// the computer, and either way nothing waits any more.
+fn secret_closed(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("Needs ")?;
+    let name = rest.strip_suffix(&format!(
+        ". Enter it on {}.",
+        crate::words::words().this_computer
+    ))?;
+    Some(format!(
+        "Asked for {name} on {}.",
+        crate::words::words().this_computer
+    ))
+}
+
+/// The requests open in thread `id`, as cards, by request id.
+fn request_cards(ws: &Workspace, id: &str) -> Vec<(String, tr::ItemBody)> {
+    let Some(live) = ws.live.get(id) else {
+        return vec![];
+    };
     live.permissions
         .iter()
         .map(|p| {
@@ -2847,6 +2961,10 @@ fn request_cards(live: &LiveThread) -> Vec<(String, tr::ItemBody)> {
                     title: clip_text_to(&p.title, 64 << 10),
                     detail: clip_text_to(&p.detail, MAX_PHONE_ITEM_TEXT - (64 << 10)),
                     state: tr::ApprovalState::Pending,
+                    // No "Allow for session" on the phone for what a rule asks about every time.
+                    asked_by: ws
+                        .rule_asking(id, &p.request_id)
+                        .map(|r| clip_text_to(&r, 1 << 10)),
                 },
                 Some(trek_agents::Prompt::Questions(qs)) => tr::ItemBody::Question {
                     request_id: p.request_id.clone(),
@@ -2858,6 +2976,10 @@ fn request_cards(live: &LiveThread) -> Vec<(String, tr::ItemBody)> {
                     request_id: p.request_id.clone(),
                     markdown: clip_text(markdown),
                     state: tr::PlanState::Pending,
+                },
+                // Nothing to answer here: a secret is typed on the computer, into its own card.
+                Some(trek_agents::Prompt::Secret { name, .. }) => tr::ItemBody::Notice {
+                    text: secret_elsewhere(name),
                 },
             };
             (p.request_id.clone(), body)
@@ -2938,6 +3060,16 @@ fn restore_phone_answers(answers: &mut [tr::QA], questions: &[trek_agents::Quest
             }
         }
         answer.question = original.question.clone();
+    }
+}
+
+/// An approval in a few plain words, as a sentence of its own: "Run cargo test?".
+fn asking_words(title: &str, detail: &str) -> String {
+    let words = crate::workspace::attention::approval_words(title, detail);
+    let mut chars = words.trim_end_matches('?').chars();
+    match chars.next() {
+        Some(first) => format!("{}{}?", first.to_uppercase(), chars.as_str()),
+        None => String::new(),
     }
 }
 
@@ -3055,6 +3187,12 @@ fn resolved(mut body: tr::ItemBody, answer: Option<tr::AnswerResponse>) -> tr::I
         (tr::ItemBody::Approval { state, .. }, _) => *state = tr::ApprovalState::Resolved,
         (tr::ItemBody::Question { state, .. }, _) => *state = tr::QuestionState::Resolved,
         (tr::ItemBody::Plan { state, .. }, _) => *state = tr::PlanState::Resolved,
+        // A secret's card (`secret_elsewhere`): it no longer asks for anything.
+        (tr::ItemBody::Notice { text }, _) => {
+            if let Some(closed) = secret_closed(text) {
+                *text = closed;
+            }
+        }
         _ => {}
     }
     body
@@ -3285,6 +3423,8 @@ pub mod tests {
         pub static SNAPSHOTS_PUSHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         /// Rows `push_remote_changes` has pushed to phones, in order.
         pub static ROWS_PUSHED: RefCell<Vec<trek_remote::ThreadSummary>> = RefCell::default();
+        /// What open transcripts `push_remote_changes` has pushed to phones, in order.
+        pub static EVENTS_PUSHED: RefCell<Vec<trek_remote::HostEvent>> = RefCell::default();
     }
 
     #[test]

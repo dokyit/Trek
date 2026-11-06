@@ -167,7 +167,7 @@ struct StatusLook {
         case .working: return StatusLook(label: "Working", color: Trek.working, symbol: nil, pulses: true)
         case .needsYou: return StatusLook(label: "Needs you", color: Trek.approval, symbol: "hand.raised.fill", pulses: false)
         case .failed: return StatusLook(label: "Failed", color: Trek.failed, symbol: "exclamationmark.triangle.fill", pulses: false)
-        case .idle: return nil
+        case .idle: return t.cutShort == nil ? nil : StatusLook(label: "Interrupted", color: Trek.approval, symbol: "bolt.horizontal.circle", pulses: false)
         }
     }
 }

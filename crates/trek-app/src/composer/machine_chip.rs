@@ -6,6 +6,7 @@
 use super::Composer;
 use crate::fluent::PillExt as _;
 use crate::palette;
+use crate::scale::{text, to_rems};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -169,7 +170,7 @@ impl Composer {
                 .when(!reachable, |el| {
                     el.child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child("reconnecting…"),
                     )

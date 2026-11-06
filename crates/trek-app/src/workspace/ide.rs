@@ -184,7 +184,7 @@ impl Workspace {
     /// The scope the main window's AI input is: the harness composer, or the AI side bar's.
     pub fn focused_scope(&self) -> Scope {
         match self.mode {
-            Mode::Agents => Scope::Main,
+            Mode::Agents => self.harness_scope(),
             Mode::Editor => Scope::Ide,
         }
     }
@@ -536,10 +536,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match self.chats(scope).active_thread().map(str::to_string) {
-            Some(id) => self.send_as(&id, text, images, Some(follow), cx),
+            // The user's own typing, as from the main composer (`send_typed`): a secret's card
+            // keeps it back, and sent to steer it declines an approval waiting on it.
+            Some(id) => {
+                self.typed_reply = true;
+                self.send_as(&id, text, images, Some(follow), cx);
+                self.typed_reply = false;
+            }
             None if *scope == Scope::Side => self.send_side_draft(text, images, cx),
             None => self.send_ide_draft(text, images, cx),
         }
+        self.note_prompt_sent(scope);
     }
 
     /// The chat ⌘K's edits of `path` go to, while it's still there (an editor chat: one made
@@ -566,6 +573,7 @@ impl Workspace {
                     plan: false,
                     fast: self.live.get(&t.id).is_some_and(|l| l.fast),
                     worktree: false,
+                    account: t.account.clone(),
                 },
             ),
             None => (
@@ -893,6 +901,7 @@ mod tests {
             plan: false,
             fast: false,
             worktree: false,
+            account: None,
         }
     }
 

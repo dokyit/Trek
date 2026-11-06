@@ -6,6 +6,7 @@
 //! opacities, like the rest of the transcript, so it sits right on Night, Paper and glass alike.
 
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -76,7 +77,7 @@ pub fn card(
         .pl(px(14.))
         .pr(px(8.))
         .py(px(8.))
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .child(
             div()
                 .font_semibold()
@@ -92,7 +93,7 @@ pub fn card(
                 h_flex()
                     .gap(px(6.))
                     .font_family(theme.mono_font_family.clone())
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .child(div().text_color(green).child(format!("+{added}")))
                     .child(div().text_color(red).child(format!("−{removed}"))),
                 LineBreakdown::of_changes(&changes.files),
@@ -136,10 +137,10 @@ pub fn card(
                 .test_support()
                 .px(px(8.))
                 .h(px(28.))
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .flex()
                 .items_center()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(muted)
                 .cursor_pointer()
                 .hover(|s| {
@@ -161,7 +162,7 @@ pub fn card(
             .py(px(6.))
             .border_t_1()
             .border_color(line)
-            .text_xs()
+            .text_size(to_rems(text::META))
             .line_height(relative(1.45))
             .text_color(muted)
             .child("Counted from the agent's edits (no git checkpoints for this turn), so changes made by commands aren't in it.")
@@ -171,7 +172,7 @@ pub fn card(
         .test_support()
         .mt(px(4.))
         .mb(px(8.))
-        .rounded(px(fluent::surface(10.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .border_1()
         .border_color(theme.foreground.opacity(0.08))
         .bg(theme.secondary)
@@ -249,8 +250,8 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
         .gap(px(4.))
         .px(px(8.))
         .h(px(28.))
-        .rounded(px(fluent::control(6.)))
-        .text_size(px(12.5))
+        .rounded(px(fluent::control(radius::CONTROL)))
+        .text_size(px(text::BODY))
         .cursor_pointer()
         .hover(|s| s.bg(theme.foreground.opacity(0.045)))
         .tooltip(move |window, cx| {
@@ -264,7 +265,7 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
             div()
                 .w(px(12.))
                 .flex_none()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .font_semibold()
                 .text_color(tint)
                 .child(letter),
@@ -296,7 +297,7 @@ fn file_row(ix: usize, i: usize, f: &FileChange, actions: &Actions, cx: &App) ->
             div()
                 .flex_none()
                 .font_family(theme.mono_font_family.clone())
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .child(lines),
         )
         .into_any_element()

@@ -117,6 +117,8 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         layout = TranscriptLayout()
         layout.source = self
         let cv = TranscriptCollectionView(frame: view.bounds, collectionViewLayout: layout)
+        // First: as soon as it has a delegate it can scroll, and that reads `collectionView`.
+        collectionView = cv
         cv.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         cv.backgroundColor = .clear
         cv.dataSource = self
@@ -131,7 +133,6 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         cv.didLayout = { [weak self] in self?.afterLayout() }
         cv.insetsChanged = { [weak self] in self?.afterInsetsChange() }
         view.addSubview(cv)
-        collectionView = cv
         if ScrollProbe.on { CADisplayLink(target: self, selector: #selector(probeTick)).add(to: .main, forMode: .common) }
         #if DEBUG
         if ScrollProbe.autoScroll > 0 {
@@ -221,9 +222,11 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         var s = 0
         while s < old.count - p, s < new.count - p, old[old.count - 1 - s].id == new[new.count - 1 - s].id { s += 1 }
         let anchor = pinned ? nil : captureAnchor()
+        carryWhole(from: old[p..<(old.count - s)], to: new[p..<(new.count - s)])
         rows = new
         reindex()
         heights = new.map { measured[$0.id] ?? estimate($0) }
+        emptyFooter()
         let deleted = (p..<(old.count - s)).map { IndexPath(item: $0, section: 0) }
         let inserted = (p..<(new.count - s)).map { IndexPath(item: $0, section: 0) }
         // The collection view counts from its last layout: when that isn't the list the batch
@@ -252,6 +255,30 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         collectionView.layoutIfNeeded()
         if inserted.count > 0, p <= 2 { ScrollProbe.note("\(inserted.count) rows in above, kept \(anchor?.id ?? "the bottom")") }
         checkEarlier()
+    }
+
+    /// The turn's last rows are coming in, and the working line under them is going: its room goes
+    /// in the same layout. Left to measure itself, a frame or two later, it had the bottom go up by
+    /// the rows and back down by the line at each turn's end (the scroll probe: 74 pt, then 93).
+    private func emptyFooter() {
+        guard case .footer(let store)? = rows.last, store.footerEmpty, let last = heights.indices.last, heights[last] > 0 else { return }
+        heights[last] = 0
+        measured[rows[last].id] = 0
+        (collectionView.cellForItem(at: IndexPath(item: last, section: 0)) as? TranscriptCell)?.measureAgain()
+    }
+
+    /// An answer done being written goes from one row to its parts (`AnswerPart`), with new ids and
+    /// no heights. Its own height is known, so their guesses are made to add up to it: from guesses
+    /// of their own the answer lurched, at the latest, up a frame and back the next (the scroll
+    /// probe had it at +88 and -93 pt), then settled as they were measured.
+    private func carryWhole(from old: ArraySlice<TranscriptRow>, to new: ArraySlice<TranscriptRow>) {
+        for row in old {
+            guard case .block(let whole) = row, whole.part == nil, let height = measured[row.id] else { continue }
+            let parts = new.filter { if case .block(let b) = $0 { b.part != nil && b.block.id == whole.block.id } else { false } }
+            guard !parts.isEmpty else { continue }
+            let shares = TranscriptRow.shareOut(height, guesses: parts.map { estimate($0) }, gaps: parts.dropFirst().reduce(0) { $0 + $1.gapBefore })
+            for (part, share) in zip(parts, shares) { estimates[part.id] = share }
+        }
     }
 
     private func reindex() {
@@ -333,7 +360,8 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
     /// After rows changed: the anchor row back where it was, or the bottom at the latest.
     private func settle(_ anchor: Anchor?) {
         if pinned { return scrollToBottom() }
-        guard let anchor, let i = index[anchor.id], let cv = collectionView else { return }
+        // The row may have just become parts: the first starts where it did.
+        guard let anchor, let i = index[anchor.id] ?? index["\(anchor.id)#0"], let cv = collectionView else { return }
         let y = layout.origin(of: i) - anchor.offset
         let clamped = min(max(y, minOffset), max(minOffset, maxOffset))
         if abs(cv.contentOffset.y - clamped) > 0.25 { cv.contentOffset.y = clamped }
@@ -679,6 +707,9 @@ final class TranscriptCell: UICollectionViewCell {
         host = hc
         container = box
     }
+
+    /// Its content is about to change: what it measured before doesn't stand.
+    func measureAgain() { size = nil }
 
     /// The row's content laid out at `height`: when that isn't the height the cell was given (it
     /// grew or shrank by itself), it's measured again.

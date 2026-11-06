@@ -9,6 +9,7 @@
 
 use crate::artifact::Doc;
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use gpui_kit::component::text::{MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -241,7 +242,7 @@ fn strip(w: &Arc<Watched>, ix: usize, cx: &App) -> AnyElement {
                 div()
                     .w(width)
                     .h(px(THUMB_HEIGHT))
-                    .rounded(px(fluent::control(6.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border)
@@ -250,7 +251,7 @@ fn strip(w: &Arc<Watched>, ix: usize, cx: &App) -> AnyElement {
             )
             .child(
                 div()
-                    .text_size(px(10.5))
+                    .text_size(px(text::META))
                     .text_color(theme.muted_foreground)
                     .font_family(theme.mono_font_family.clone())
                     .child(media::clock(t)),
@@ -267,7 +268,7 @@ fn strip(w: &Arc<Watched>, ix: usize, cx: &App) -> AnyElement {
         .gap_1()
         .child(
             div()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(theme.muted_foreground)
                 .child(match count {
                     1 => "The frame the agent saw".to_string(),
@@ -287,7 +288,7 @@ fn strip(w: &Arc<Watched>, ix: usize, cx: &App) -> AnyElement {
         .when(count == 0, |el| {
             el.child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("(no frames: the video had no picture, or they were cleared)"),
             )

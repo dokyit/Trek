@@ -22,6 +22,7 @@ use super::restore::{self, Files};
 use crate::activity::{Place, ToolKind, op, phrase, placement, tool_kind};
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text};
 use crate::workspace::{Scope, TaskState, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -1004,7 +1005,7 @@ impl AiTranscript {
         }
         let note = |text: String| {
             div()
-                .text_size(px(11.5))
+                .text_size(px(text::LABEL))
                 .line_height(relative(1.45))
                 .text_color(muted)
                 .child(text)
@@ -1013,7 +1014,7 @@ impl AiTranscript {
         let files: AnyElement = match &c.files {
             Files::Checking => h_flex()
                 .gap(px(6.))
-                .text_size(px(11.5))
+                .text_size(px(text::LABEL))
                 .text_color(muted)
                 .child(Spinner::new().xsmall())
                 .child("Checking which files changed…")
@@ -1049,7 +1050,7 @@ impl AiTranscript {
                             .children(shown.iter().map(|f| {
                                 h_flex()
                                     .gap(px(8.))
-                                    .text_size(px(11.))
+                                    .text_size(px(text::META))
                                     .child(
                                         div()
                                             .flex_1()
@@ -1064,10 +1065,9 @@ impl AiTranscript {
                             }))
                             .when(changes.len() > restore::LISTED, |el| {
                                 el.child(
-                                    div().text_size(px(11.)).text_color(muted).child(format!(
-                                        "and {} more",
-                                        changes.len() - restore::LISTED
-                                    )),
+                                    div().text_size(px(text::META)).text_color(muted).child(
+                                        format!("and {} more", changes.len() - restore::LISTED),
+                                    ),
                                 )
                             }),
                     )
@@ -1096,13 +1096,13 @@ impl AiTranscript {
                 .w_full()
                 .p(px(10.))
                 .gap(px(8.))
-                .rounded(px(8.))
+                .rounded(px(radius::BUTTON))
                 .border_1()
                 .border_color(theme.foreground.opacity(0.12))
                 .bg(theme.foreground.opacity(0.03))
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.foreground)
                         .child(title),
@@ -1185,7 +1185,7 @@ impl AiTranscript {
                     .px(px(4.))
                     .h(px(18.))
                     .items_center()
-                    .rounded(px(4.))
+                    .rounded(px(radius::TAG))
                     .when(off, |el| el.opacity(0.45))
                     .when(!off, |el| {
                         el.cursor_pointer().hover(|s| {
@@ -1266,7 +1266,7 @@ impl AiTranscript {
                     .id(("ai-turn-actions", n))
                     .test_support()
                     .gap(px(2.))
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .text_color(muted.opacity(0.85))
                     .when(!shown, |el| {
                         el.invisible().group_hover(group.clone(), |s| s.visible())
@@ -1309,7 +1309,7 @@ impl AiTranscript {
                         .gap(px(6.))
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .text_color(muted)
                                 .child("Is that what you meant?"),
                         )
@@ -1392,6 +1392,10 @@ impl AiTranscript {
             .and_then(|l| l.permissions.first())
             .and_then(|p| match &p.prompt {
                 Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+                Some(trek_agents::Prompt::Secret { name, why }) => Some((
+                    p.request_id.clone(),
+                    vec![trek_agents::Prompt::secret_question(name, why)],
+                )),
                 _ => None,
             });
         let Some((request_id, questions)) = pending else {
@@ -1440,15 +1444,17 @@ impl AiTranscript {
     /// What waits on the user, pinned under the transcript: an approval, questions or a plan.
     fn request_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = self.current.clone()?;
-        let (p, agent, picks, cwd) = {
+        let (p, agent, picks, cwd, asked_by) = {
             let ws = self.workspace.read(cx);
             let live = ws.live.get(&id)?;
             let p = live.permissions.first()?.clone();
+            let asked_by = ws.rule_asking(&id, &p.request_id);
             (
                 p,
                 ws.thread(&id)?.agent.display_name(),
                 live.picks.clone(),
                 ws.cwd_in(&self.scope),
+                asked_by,
             )
         };
         let card = match &p.prompt {
@@ -1459,6 +1465,7 @@ impl AiTranscript {
                 &agent,
                 &p.title,
                 &p.detail,
+                asked_by,
                 cx,
             ),
             Some(trek_agents::Prompt::Questions(questions)) => {
@@ -1476,6 +1483,30 @@ impl AiTranscript {
                     &p.request_id,
                     &agent,
                     questions,
+                    &picks,
+                    &fields,
+                    complete,
+                    submit,
+                    cx,
+                )
+            }
+            // A secret asked for here takes the same masked form (`answer` knows it's a secret).
+            Some(trek_agents::Prompt::Secret { name, why }) => {
+                let questions = vec![trek_agents::Prompt::secret_question(name, why)];
+                self.secret_fields(&p.request_id, &questions, window, cx);
+                let complete = self.card_answers(&p.request_id, &questions, cx).is_some();
+                let me = cx.entity().downgrade();
+                let submit = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                    let _ = me.update(cx, |this, cx| this.submit_answers(window, cx));
+                });
+                let fields: Vec<Entity<InputState>> =
+                    self.secrets.1.iter().map(|(f, _)| f.clone()).collect();
+                cards::questions(
+                    &self.workspace,
+                    &id,
+                    &p.request_id,
+                    &agent,
+                    &questions,
                     &picks,
                     &fields,
                     complete,
@@ -1558,7 +1589,7 @@ impl AiTranscript {
                 .child(
                     h_flex()
                         .gap(px(7.))
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(muted)
                         .child(Spinner::new().xsmall().color(palette::ember(cx)))
                         .child(
@@ -1579,7 +1610,7 @@ impl AiTranscript {
                         .group("ai-queued")
                         .gap(px(6.))
                         .pl(px(19.))
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(muted)
                         .child(div().flex_none().child("Queued"))
                         .child(
@@ -1650,14 +1681,14 @@ impl Render for AiTranscript {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let ember = palette::ember(cx);
-        let ui = px(13.);
+        let ui = px(text::BODY);
         let mut rows: Vec<AnyElement> = vec![];
         if earlier > 0 {
             rows.push(
                 div()
                     .id("ai-earlier")
                     .test_support()
-                    .text_size(px(11.5))
+                    .text_size(px(text::LABEL))
                     .text_color(muted)
                     .cursor_pointer()
                     .hover(|s| s.text_color(theme.foreground))
@@ -1687,11 +1718,11 @@ impl Render for AiTranscript {
                 .px(px(5.))
                 .gap(px(4.))
                 .items_center()
-                .rounded(px(4.))
+                .rounded(px(radius::TAG))
                 .border_1()
                 .border_color(theme.foreground.opacity(0.1))
                 .bg(theme.foreground.opacity(0.04))
-                .text_size(px(11.5))
+                .text_size(px(text::LABEL))
                 .text_color(theme.foreground.opacity(0.85))
                 .child(crate::file_icon::badge(name, px(11.), cx))
                 .child(name.to_string())
@@ -1736,7 +1767,7 @@ impl Render for AiTranscript {
                     .test_support()
                     .pt(px(4.))
                     .gap(px(6.))
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .child(crate::ui::agent_logo(&agent, px(16.), cx))
                     .child(
                         div()
@@ -1780,7 +1811,7 @@ impl Render for AiTranscript {
                         .child(
                             h_flex()
                                 .gap(px(6.))
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .child(
                                     div()
                                         .size(px(18.))
@@ -1793,14 +1824,14 @@ impl Render for AiTranscript {
                                         .child(Icon::new(crate::assets::Lucide::User).size(px(11.)).text_color(if aside { muted } else { ember })),
                                 )
                                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme.foreground).child(if aside { "You (aside)" } else { "You" }))
-                                .children(at.map(|at| div().text_size(px(11.)).text_color(muted.opacity(0.7)).child(crate::time::clock(at)))),
+                                .children(at.map(|at| div().text_size(px(text::META)).text_color(muted.opacity(0.7)).child(crate::time::clock(at)))),
                         )
                         .child(div().text_size(ui).line_height(relative(1.45)).text_color(theme.foreground).when(long && !open, |el| el.line_clamp(8)).child(text))
                         .when(long, |el| {
                             el.child(
                                 div()
                                     .id(("ai-user-more", n))
-                                    .text_size(px(11.))
+                                    .text_size(px(text::META))
                                     .text_color(muted)
                                     .cursor_pointer()
                                     .child(if open { "Show less" } else { "Show more" })
@@ -1814,7 +1845,7 @@ impl Render for AiTranscript {
                                 .min_h(px(16.))
                                 .gap(px(6.))
                                 .flex_wrap()
-                                .text_size(px(11.))
+                                .text_size(px(text::META))
                                 .text_color(muted)
                                 .when(ask, |el| el.child(h_flex().gap(px(3.)).text_color(palette::sky(cx)).child(Icon::new(crate::assets::Lucide::MessageCircleQuestionMark).size(px(11.))).child("Ask")))
                                 .children(chips.into_iter().map(|c| h_flex().gap(px(3.)).child(crate::file_icon::badge(c.split(':').next().unwrap_or(&c), px(10.), cx)).child(c)))
@@ -1873,7 +1904,7 @@ impl Render for AiTranscript {
                         h_flex()
                             .id(("ai-wake", n))
                             .gap(px(6.))
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(muted)
                             .cursor_pointer()
                             .child(Icon::new(crate::assets::Lucide::CornerDownRight).size(px(11.)))
@@ -1885,7 +1916,7 @@ impl Render for AiTranscript {
                         el.child(
                             div()
                                 .pl(px(17.))
-                                .text_size(px(11.5))
+                                .text_size(px(text::LABEL))
                                 .text_color(muted)
                                 .child(text),
                         )
@@ -1904,7 +1935,7 @@ impl Render for AiTranscript {
                                 .id(("ai-thought", n))
                                 .test_support()
                                 .gap(px(5.))
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .text_color(muted)
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.foreground))
@@ -1946,7 +1977,7 @@ impl Render for AiTranscript {
                             .test_support()
                             .gap(px(5.))
                             .flex_wrap()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(muted)
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.foreground))
@@ -1975,7 +2006,7 @@ impl Render for AiTranscript {
                                 .pt(px(2.))
                                 .gap(px(5.))
                                 .flex_wrap()
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .text_color(muted)
                                 .children(part_elements(parts, n, cx)),
                         )
@@ -1991,7 +2022,7 @@ impl Render for AiTranscript {
                                 .children(calls.into_iter().map(|(text, _, status)| {
                                     h_flex()
                                         .gap(px(6.))
-                                        .text_size(px(11.5))
+                                        .text_size(px(text::LABEL))
                                         .text_color(muted)
                                         .child(
                                             div()
@@ -2023,7 +2054,7 @@ impl Render for AiTranscript {
                     .test_support()
                     .gap(px(5.))
                     .flex_wrap()
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .text_color(muted)
                     .child(if running {
                         Spinner::new().xsmall().color(muted).into_any_element()
@@ -2079,7 +2110,7 @@ impl Render for AiTranscript {
                         .test_support()
                         .w_full()
                         .gap(px(3.))
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .child(
                             h_flex()
                                 .id(("ai-command-head", n))
@@ -2098,10 +2129,10 @@ impl Render for AiTranscript {
                                         .min_w_0()
                                         .truncate()
                                         .px(px(5.))
-                                        .rounded(px(4.))
+                                        .rounded(px(radius::TAG))
                                         .bg(theme.foreground.opacity(0.06))
                                         .font_family(theme.mono_font_family.clone())
-                                        .text_size(px(11.5))
+                                        .text_size(px(text::LABEL))
                                         .text_color(theme.foreground.opacity(0.85))
                                         .child(command),
                                 )
@@ -2114,12 +2145,12 @@ impl Render for AiTranscript {
                                     .ml(px(17.))
                                     .px(px(8.))
                                     .py(px(4.))
-                                    .rounded(px(fluent::control(6.)))
+                                    .rounded(px(fluent::control(radius::CONTROL)))
                                     .border_1()
                                     .border_color(theme.foreground.opacity(0.08))
                                     .bg(theme.foreground.opacity(0.025))
                                     .font_family(theme.mono_font_family.clone())
-                                    .text_size(px(11.5))
+                                    .text_size(px(text::LABEL))
                                     .text_color(theme.foreground.opacity(0.7))
                                     .map(|el| match output {
                                         Some(full) => el.child(
@@ -2141,7 +2172,7 @@ impl Render for AiTranscript {
                                             .pt(px(2.))
                                             .gap(px(4.))
                                             .font_family(theme.font_family.clone())
-                                            .text_size(px(11.))
+                                            .text_size(px(text::META))
                                             .text_color(muted.opacity(0.8))
                                             .cursor_pointer()
                                             .hover(|s| s.text_color(theme.foreground))
@@ -2181,7 +2212,7 @@ impl Render for AiTranscript {
                         .id(("ai-subagent", n))
                         .test_support()
                         .gap(px(8.))
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .child(
                             div()
                                 .relative()
@@ -2212,7 +2243,7 @@ impl Render for AiTranscript {
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_size(px(11.))
+                                        .text_size(px(text::META))
                                         .text_color(muted)
                                         .child(detail),
                                 ),
@@ -2270,32 +2301,32 @@ impl Render for AiTranscript {
                 }
                 View::Notice(text) if text.is_empty() => div().into_any_element(),
                 View::Notice(text) => div()
-                    .text_size(px(11.5))
+                    .text_size(px(text::LABEL))
                     .text_color(muted)
                     .child(text)
                     .into_any_element(),
                 View::Error(text) => div()
                     .px(px(8.))
                     .py(px(5.))
-                    .rounded(px(fluent::control(6.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .border_1()
                     .border_color(palette::red(cx).opacity(0.45))
                     .bg(palette::red(cx).opacity(0.07))
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .child(text)
                     .into_any_element(),
                 View::Limit(text) => h_flex()
                     .id(("ai-limit", n))
                     .test_support()
                     .gap(px(6.))
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .text_color(palette::amber(cx))
                     .child(Icon::new(crate::assets::Lucide::Gauge).size(px(12.)))
                     .child(div().min_w_0().truncate().child(text))
                     .into_any_element(),
                 View::Handoff(text) => h_flex()
                     .gap(px(6.))
-                    .text_size(px(11.5))
+                    .text_size(px(text::LABEL))
                     .text_color(muted)
                     .child(Icon::new(crate::assets::Lucide::ArrowLeftRight).size(px(11.)))
                     .child(text)

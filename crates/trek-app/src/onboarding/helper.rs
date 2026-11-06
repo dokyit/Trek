@@ -7,6 +7,7 @@ use super::Onboarding;
 use crate::composer::look;
 use crate::fluent;
 use crate::permissions::Permission;
+use crate::scale::{radius, text};
 use gpui_kit::component::{ActiveTheme as _, IconName, h_flex, v_flex};
 use gpui_kit::*;
 
@@ -76,7 +77,7 @@ impl Render for DragHelper {
             .size_full()
             .p(px(14.))
             .gap(px(14.))
-            .rounded(px(fluent::surface(16.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .bg(look::card_fill(cx))
             .border_1()
             .border_color(look::hairline(cx))
@@ -89,13 +90,13 @@ impl Render for DragHelper {
                     .gap(px(3.))
                     .child(
                         div()
-                            .text_size(px(13.5))
+                            .text_size(px(text::TITLE))
                             .font_weight(FontWeight::MEDIUM)
                             .child("Drag Trek into the list"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .line_height(relative(1.4))
                             .text_color(theme.muted_foreground)
                             .child(format!(
@@ -110,7 +111,7 @@ impl Render for DragHelper {
                     .flex_none()
                     .self_start()
                     .p(px(4.))
-                    .rounded(px(fluent::control(6.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.foreground.opacity(0.06)))
                     .child(

@@ -55,6 +55,7 @@ jobs:
       - name: Script tests
         run: |
           bash script/tests/release-notes.sh
+          bash script/tests/merge-manifest.sh
           zsh ios/scripts/tests/phone-update.sh
 
       - uses: dtolnay/rust-toolchain@master
@@ -358,6 +359,7 @@ jobs:
         with:
           toolchain: '1.99.0'
           components: clippy
+          targets: x86_64-apple-darwin
 
       - name: Cache key
         id: key
@@ -393,6 +395,14 @@ jobs:
 
       - name: Clippy (workspace lib and bins)
         run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      # Intel Macs get a build of their own at release (`release.yml`'s `intel` job): a change that
+      # only breaks that target is caught here, not at release time. A check, not a build, and in
+      # a target folder of its own so the Apple-silicon cache above stays as it is.
+      - name: Check for Intel Macs
+        run: |
+          rustup target add x86_64-apple-darwin
+          MACOSX_DEPLOYMENT_TARGET=13.0 cargo check -p trek-app -p trek-mcp --target x86_64-apple-darwin --locked
 
       - name: Cache contents
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'

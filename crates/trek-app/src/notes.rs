@@ -12,6 +12,7 @@
 //! `note_images`).
 
 use crate::fluent::{self, PillExt as _};
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{InputEvent, Redo, Textarea, TextareaState, Undo};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -876,7 +877,7 @@ impl NotesView {
                         .bg(gpui_kit::transparent_black())
                         .child(
                             div()
-                                .text_size(px(13.))
+                                .text_size(px(text::BODY))
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(color)
                                 .child("A"),
@@ -899,7 +900,7 @@ impl NotesView {
             .gap(px(8.))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("Text colour"),
             )
@@ -913,7 +914,7 @@ impl NotesView {
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("Highlight"),
             )
@@ -1130,7 +1131,7 @@ impl NotesView {
             .h(px(30.))
             .p(px(2.))
             .gap(px(2.))
-            .rounded(px(fluent::control(8.)))
+            .rounded(px(fluent::control(radius::BUTTON)))
             .bg(theme.foreground.opacity(0.05))
             .border_1()
             .border_color(theme.foreground.opacity(0.06))
@@ -1149,7 +1150,7 @@ impl NotesView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 6.)))
+                            .rounded(px(fluent::pick(fluent::THUMB_RADIUS, radius::CONTROL)))
                             .cursor_pointer()
                             .when(selected, |el| el.bg(theme.foreground.opacity(0.12)))
                             .child(icon.small().text_color(if selected {
@@ -1185,7 +1186,7 @@ impl NotesView {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(13.5))
+                            .text_size(px(text::TITLE))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Notes"),
                     )
@@ -1211,7 +1212,7 @@ impl NotesView {
                         el.child(
                             div()
                                 .p(px(12.))
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(theme.muted_foreground)
                                 .child(crate::keys::shared(
                                     "No notes yet. Start typing, or press ⌘N.", // keys::shared
@@ -1229,7 +1230,7 @@ impl NotesView {
                             .px(px(10.))
                             .py(px(8.))
                             .gap(px(2.))
-                            .rounded(px(fluent::control(8.)))
+                            .rounded(px(fluent::control(radius::BUTTON)))
                             .cursor_pointer()
                             .when(active, |el| el.bg(theme.foreground.opacity(0.075)))
                             .when(!active, |el| {
@@ -1244,14 +1245,14 @@ impl NotesView {
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(13.))
+                                            .text_size(px(text::BODY))
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(n.title()),
                                     )
                                     .child(
                                         div()
                                             .flex_none()
-                                            .text_xs()
+                                            .text_size(to_rems(text::META))
                                             .text_color(theme.muted_foreground)
                                             .child(crate::time::relative(n.modified)),
                                     ),
@@ -1260,7 +1261,7 @@ impl NotesView {
                                 el.child(
                                     div()
                                         .truncate()
-                                        .text_xs()
+                                        .text_size(to_rems(text::META))
                                         .text_color(theme.muted_foreground)
                                         .child(preview),
                                 )

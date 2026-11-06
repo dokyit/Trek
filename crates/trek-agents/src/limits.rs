@@ -459,6 +459,26 @@ pub fn applies(l: &UsageLimit, scope: &LimitScope, model: Option<&str>) -> bool 
         || model.is_some_and(|m| m.to_lowercase().contains(word))
 }
 
+/// How far through its window `l` is at `now` (0-1): where its use would stand at an even pace, so
+/// a bar past this is running ahead. `None` without a reset ahead or a window length to go by.
+pub fn pace(l: &UsageLimit, now: i64) -> Option<f32> {
+    let length = window_ms(&l.window)?;
+    let left = l.resets_at? - now;
+    (left > 0 && left <= length).then(|| 1. - left as f32 / length as f32)
+}
+
+/// A window's length as usage reports write it: "5h", "7d", "90m".
+fn window_ms(window: &str) -> Option<i64> {
+    let (n, unit) = window.split_at(window.len().checked_sub(1)?);
+    let n: i64 = n.parse().ok().filter(|n| *n > 0)?;
+    match unit {
+        "m" => Some(n * 60_000),
+        "h" => Some(n * 3_600_000),
+        "d" => Some(n * 86_400_000),
+        _ => None,
+    }
+}
+
 /// Which limit usage window `l` is: the account's 5-hour or weekly one, or a model's or
 /// surface's own ("Weekly · Fable").
 pub fn window_scope(l: &UsageLimit) -> LimitScope {
@@ -576,6 +596,32 @@ pub(crate) fn from_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pace_says_how_far_through_its_window_a_limit_is() {
+        let at = 1_000_000_000_000;
+        let limit = |window: &str, left_ms: Option<i64>| UsageLimit {
+            label: "5-hour limit".into(),
+            percent: 40.,
+            resets_at: left_ms.map(|l| at + l),
+            window: window.into(),
+        };
+        let hour = 3_600_000;
+        assert_eq!(pace(&limit("5h", Some(5 * hour)), at), Some(0.));
+        assert_eq!(pace(&limit("5h", Some(hour)), at), Some(0.8));
+        assert_eq!(pace(&limit("7d", Some(84 * hour)), at), Some(0.5));
+        assert_eq!(
+            pace(&limit("90m", Some(hour)), at).map(|p| (p * 3.).round()),
+            Some(1.)
+        );
+        // Nothing to go by: no reset, one gone, one further off than the window is long, a window
+        // it can't read.
+        assert_eq!(pace(&limit("5h", None), at), None);
+        assert_eq!(pace(&limit("5h", Some(-1)), at), None);
+        assert_eq!(pace(&limit("5h", Some(6 * hour)), at), None);
+        assert_eq!(pace(&limit("", Some(hour)), at), None);
+        assert_eq!(pace(&limit("monthly", Some(hour)), at), None);
+    }
 
     /// New York in October (UTC-4); UTC for "(UTC)".
     fn zones(zone: Option<&str>, _: i64) -> Option<i32> {

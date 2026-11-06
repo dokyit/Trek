@@ -349,6 +349,7 @@ fn report(agent: &AgentId, with_usage: bool) -> AgentStatus {
         tier: 0,
         fast: None,
         context: None,
+        caps: None,
     }];
     st
 }
@@ -754,5 +755,73 @@ fn the_footer_shows_the_usage_of_the_provider_in_use() {
         // A provider with no limits to show: the nearest of any, by its logo.
         trek.update(cx, |ws, _| ws.draft_prefs.agent = AgentId::Codex);
         assert_eq!(focus(&trek, cx).map(|f| f.0), Some(devin()));
+    });
+}
+
+/// A slow answer from Claude Code about its plan's usage leaves the last reading on the card, said
+/// to be the last, rather than blank meters and an error.
+#[test]
+fn a_usage_read_that_runs_late_keeps_the_last_reading() {
+    run(async |cx| {
+        let trek = open(cx);
+        install(&trek, cx);
+        let answers: Rc<RefCell<Vec<Result<AgentStatus, String>>>> = Rc::new(RefCell::new(vec![
+            Ok(AgentStatus {
+                plan: Some("Claude Max".into()),
+                logged_in: true,
+                limits: vec![UsageLimit {
+                    label: "5-hour limit".into(),
+                    percent: 40.0,
+                    resets_at: None,
+                    window: "5h".into(),
+                }],
+                ..Default::default()
+            }),
+            Ok(AgentStatus {
+                plan: Some("Claude Max".into()),
+                logged_in: true,
+                error: Some(trek_agents::USAGE_LATE.to_string()),
+                ..Default::default()
+            }),
+        ]));
+        let given = answers.clone();
+        trek.update(cx, |ws, _| {
+            ws.settings.usage.shown = Some(vec![AgentId::ClaudeCode.key()]);
+            ws.usage_fetch = Some(Rc::new(move |agent, _, with_usage| {
+                let (tx, rx) = async_channel::bounded(1);
+                let status =
+                    if *agent == AgentId::ClaudeCode && with_usage && !given.borrow().is_empty() {
+                        given.borrow_mut().remove(0)
+                    } else {
+                        Ok(AgentStatus::default())
+                    };
+                let _ = tx.try_send(status);
+                rx
+            }))
+        });
+        trek.update(cx, |ws, cx| ws.refresh_usage_now(cx));
+        cx.run_until_parked();
+        let first = trek
+            .read(cx, |ws, _| {
+                ws.usage_status(&AgentId::ClaudeCode.key()).cloned()
+            })
+            .expect("a status");
+        assert_eq!(first.limits.len(), 1);
+        trek.update(cx, |ws, cx| ws.refresh_usage_now(cx));
+        cx.run_until_parked();
+        let st = trek
+            .read(cx, |ws, _| {
+                ws.usage_status(&AgentId::ClaudeCode.key()).cloned()
+            })
+            .expect("a status");
+        assert_eq!(st.limits.len(), 1, "the last reading stays");
+        assert!(
+            st.error
+                .as_deref()
+                .is_some_and(|e| e.contains("last reading")),
+            "{:?}",
+            st.error
+        );
+        assert!(answers.borrow().is_empty(), "both answers were used");
     });
 }

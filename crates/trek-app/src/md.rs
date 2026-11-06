@@ -7,6 +7,7 @@
 //! folders in path chips take the project's colour.
 
 use crate::fluent;
+use crate::scale::{radius, text};
 use gpui_kit::base::Easing;
 use gpui_kit::base::text::{TextView, TextViewMotion, TextViewStyle};
 use gpui_kit::component::button::ButtonVariants as _;
@@ -149,7 +150,7 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
         .bg(theme.foreground.opacity(0.035))
         .border_1()
         .border_color(line)
-        .rounded(px(fluent::surface(10.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .px(px(14.))
         .py(px(12.))
         .text_size(m.code)
@@ -158,7 +159,7 @@ pub fn style(size: Pixels, tone: Tone, cx: &App) -> TextViewStyle {
     let table = StyleRefinement::default()
         .border_1()
         .border_color(line)
-        .rounded(px(8.));
+        .rounded(px(radius::BUTTON));
     let table_head = StyleRefinement::default()
         .bg(theme.foreground.opacity(0.035))
         .text_color(ink.strong)
@@ -404,13 +405,19 @@ fn dress(
         // Language label and a copy button in the block's corner.
         let code = block.code().to_string();
         let lang = block.lang().map(|l| l.to_string()).unwrap_or_default();
+        // A split's panes are narrow enough for code to run under the corner: the label steps
+        // aside there, and the button stays.
+        let split = cx
+            .try_global::<crate::workspace::GlobalWorkspace>()
+            .is_some_and(|ws| ws.0.read(cx).split_live().is_some());
+        let lang = if split { String::new() } else { lang };
         let muted = cx.theme().muted_foreground;
         h_flex()
             .absolute()
             .top(px(8.))
             .right(px(8.))
             .gap(px(6.))
-            .text_size(px(11.5))
+            .text_size(px(text::LABEL))
             .text_color(muted)
             .when(!lang.is_empty(), |el| el.child(lang))
             .child(
@@ -609,6 +616,7 @@ impl MarkdownPlugin for PathChips {
             .filter(|s| !s.is_empty())
             .unwrap_or(trimmed)
             .to_string();
+        // scale: ok, in proportion to the answer's text
         let size = context.font_size() * 0.88;
         let height = context.line_height().min(context.font_size() * 1.5);
         let resolved = data.resolved.clone();
@@ -640,7 +648,7 @@ impl MarkdownPlugin for PathChips {
             .h(height)
             .px(px(5.))
             .gap(px(4.))
-            .rounded(px(fluent::control(5.)))
+            .rounded(px(fluent::control(radius::CONTROL)))
             .border_1()
             .border_color(tint.edge)
             .bg(tint.fill)
@@ -742,7 +750,7 @@ impl MarkdownPlugin for LocalImages {
             .w(shown.width)
             .h(shown.height)
             .my(px(4.))
-            .rounded(px(8.))
+            .rounded(px(radius::BUTTON))
             .overflow_hidden()
             .border_1()
             .border_color(theme.border)

@@ -134,6 +134,7 @@ impl Workspace {
         output: &str,
         cx: &mut gpui_kit::Context<Self>,
     ) {
+        self.account_setup_finished(command, cx);
         if !node::needs_node(command) {
             return;
         }

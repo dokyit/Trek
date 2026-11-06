@@ -452,9 +452,9 @@ fn forking_copies_the_conversation_and_leaves_the_original_alone() {
             window.right_click(format!("live-line-{id}"), cx)
         });
         cx.run_until_parked();
-        // After "Open in new window".
+        // After "Open in new window" and "Open beside".
         trek.window(cx, |window, cx| {
-            window.within("popup-menu").click(1usize, cx)
+            window.within("popup-menu").click(2usize, cx)
         });
         cx.run_until_parked();
         let whole = trek.thread_id(cx);
@@ -847,6 +847,101 @@ fn a_stop_while_the_checkpoint_is_taken_keeps_the_message_from_the_agent() {
         })
         .await;
         assert_eq!(recall(&trek, cx, &id).await, "I remember: apple");
+    });
+}
+
+/// How many messages are held back from `id`'s agent now.
+fn held_prompts(trek: &Trek, cx: &TestAppContext, id: &str) -> usize {
+    trek.read(cx, |ws, _| {
+        ws.live[id]
+            .held
+            .iter()
+            .filter(|c| matches!(c, trek_agents::Command::Prompt { .. }))
+            .count()
+    })
+}
+
+/// Whether the message saying `text` has a file checkpoint.
+fn has_checkpoint(trek: &Trek, cx: &TestAppContext, id: &str, text: &str) -> bool {
+    let ix = user_ix(trek, cx, id, text);
+    trek.read(cx, |ws, _| {
+        let item = ws.live[id].items.id_at(ix).unwrap();
+        ws.store.checkpoint(id, item).unwrap().is_some()
+    })
+}
+
+#[test]
+fn a_checkpoint_too_big_for_its_wait_doesnt_keep_the_message_from_the_agent() {
+    run(async |cx| {
+        let trek = open(cx);
+        git_project(&trek.project);
+        let id = turn(&trek, cx, "apple").await;
+        // A checkpoint under way that doesn't finish, as in a very big repository.
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().stall_git(true));
+        trek.update(cx, |ws, cx| ws.send_to(&id, "banana".into(), vec![], cx));
+        assert_eq!(held_prompts(&trek, cx, &id), 1, "it waits at first");
+        // The wait runs out with the checkpoint still being taken: the agent has the message and
+        // answers it, and has the next one too.
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(held_prompts(&trek, cx, &id), 0);
+        assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | banana");
+        assert!(trek.read(cx, |ws, _| !ws.live[&id].git_jobs_idle()));
+        assert!(!has_checkpoint(&trek, cx, &id, "banana"), "not yet taken");
+        // The checkpoints waiting behind it are taken once it's done.
+        trek.update(cx, |ws, cx| ws.end_stalled_git(&id, cx));
+        trek.wait(cx, "the checkpoints", |ws| ws.live[&id].git_jobs_idle())
+            .await;
+        assert!(has_checkpoint(&trek, cx, &id, "banana"));
+        assert!(has_checkpoint(&trek, cx, &id, "recall"));
+    });
+}
+
+#[test]
+fn a_stop_after_a_slow_checkpoints_wait_goes_to_the_agent_that_has_the_message() {
+    run(async |cx| {
+        let trek = open(cx);
+        git_project(&trek.project);
+        let id = turn(&trek, cx, "apple").await;
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().stall_git(true));
+        trek.update(cx, |ws, cx| {
+            ws.send_to(&id, "mock:long 600s".into(), vec![], cx)
+        });
+        cx.executor()
+            .advance_clock(trek_app::workspace::CHECKPOINT_WAIT);
+        cx.run_until_parked();
+        assert_eq!(held_prompts(&trek, cx, &id), 0, "the wait is over");
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, cx| ws.end_stalled_git(&id, cx));
+        trek.wait(cx, "the git work", |ws| ws.live[&id].git_jobs_idle())
+            .await;
+        assert_eq!(
+            recall(&trek, cx, &id).await,
+            "I remember: apple | mock:long 600s",
+            "it heard the message, unlike one stopped while it waited"
+        );
+    });
+}
+
+#[test]
+fn git_work_other_than_checkpoints_holds_the_message_for_as_long_as_it_takes() {
+    run(async |cx| {
+        let trek = open(cx);
+        git_project(&trek.project);
+        let id = turn(&trek, cx, "apple").await;
+        // Files a rewind is putting back, say: a turn mustn't start until they're there.
+        trek.update(cx, |ws, _| ws.live.get_mut(&id).unwrap().stall_git(false));
+        trek.update(cx, |ws, cx| ws.send_to(&id, "banana".into(), vec![], cx));
+        cx.executor()
+            .advance_clock(trek_app::workspace::CHECKPOINT_WAIT * 5);
+        cx.run_until_parked();
+        assert_eq!(held_prompts(&trek, cx, &id), 1, "still held");
+        // Done, the checkpoint behind it comes before the agent, as it does in any repo that's
+        // quick about it.
+        trek.update(cx, |ws, cx| ws.end_stalled_git(&id, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert!(has_checkpoint(&trek, cx, &id, "banana"));
+        assert_eq!(recall(&trek, cx, &id).await, "I remember: apple | banana");
     });
 }
 

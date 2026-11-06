@@ -43,7 +43,7 @@ struct ThreadsView: View {
             ScrollViewReader { proxy in
                 List {
                     ThreadsHeader(picked: $pickedMachine, update: model.offeredUpdate,
-                                  unreachable: model.mode == .live || Launch.demoOffline != nil
+                                  unreachable: model.mode == .live || Launch.demoOffline != nil || Launch.demoConnection != nil
                                       ? model.links.filter { $0.connection != .connected } : [])
                         .reportsListHead($head)
                         .listRowBackground(Color.clear)
@@ -57,6 +57,7 @@ struct ThreadsView: View {
                         ContentUnavailableView("No threads yet", systemImage: "bubble.left.and.text.bubble.right",
                                                description: Text("Start one here or on your Mac."))
                             .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
                     }
                 }
                 .listStyle(.plain)
@@ -520,13 +521,53 @@ struct ThreadRow: View {
     var host: String? = nil
     var hostKind: MachineKind = .unknown
     @Environment(\.compactRows) private var compact
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var recedes: Bool {
         thread.runState == .idle && !thread.unseen && thread.needs == nil && thread.runningSubAgents.isEmpty && !thread.waitsInBackground
+            && thread.cutShort == nil
     }
 
     var body: some View {
-        if compact { compactBody } else { fullBody }
+        if typeSize.isAccessibilitySize { accessibleBody } else if compact { compactBody } else { fullBody }
+    }
+
+    /// At the accessibility sizes, a line for each: beside the status, the title was squeezed down
+    /// to nothing and the row said only "Working".
+    private var accessibleBody: some View {
+        HStack(alignment: .top, spacing: 10) {
+            AgentGlyph(thread.agent, size: 24)
+                .padding(.top, 4)
+                .opacity(recedes ? 0.7 : 1)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(thread.title)
+                    .scaledFont(17, weight: thread.unseen ? .semibold : .regular)
+                    .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
+                    .lineLimit(3)
+                WordFlow(spacing: 8, lineSpacing: 4) {
+                    trailing
+                    SubAgentsPill(agents: thread.runningSubAgents)
+                    if thread.additions + thread.deletions > 0, thread.needs == nil, !thread.onlyRunsInBackground {
+                        DiffStat(additions: thread.additions, deletions: thread.deletions, font: .ui(.caption).monospacedDigit())
+                            .opacity(recedes ? 0.6 : 0.9)
+                    }
+                }
+                if hasDetail {
+                    detail
+                        .font(.ui(.subheadline))
+                        .lineLimit(2)
+                        .transaction { $0.animation = nil }
+                }
+                if showsProject, let p = thread.project {
+                    HStack(spacing: 6) {
+                        ProjectBadge(project: p, size: 16)
+                        Text(p.name).font(.ui(.subheadline)).foregroundStyle(Trek.muted).lineLimit(1)
+                    }
+                }
+                if let host { MachineTag(name: host, kind: hostKind, compact: true) }
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     /// One line: logo, project badge, title, sub-agents, status.
@@ -565,8 +606,9 @@ struct ThreadRow: View {
                     if showsProject, let p = thread.project {
                         ProjectBadge(project: p, size: 16)
                         // At work, the model and what it's doing need the room (and what still
-                        // runs in the background): the badge says which project.
-                        if thread.runState != .working, !thread.onlyRunsInBackground {
+                        // runs in the background, or why it waits on you: the name was squeezed
+                        // down to "tr" beside it): the badge says which project.
+                        if thread.runState != .working, !thread.onlyRunsInBackground, thread.needs == nil, thread.cutShort == nil {
                             Text(p.name).foregroundStyle(Trek.muted).lineLimit(1).layoutPriority(-1)
                         }
                     }
@@ -660,7 +702,7 @@ struct ThreadRow: View {
     }
 
     private var hasDetail: Bool {
-        thread.needs != nil || (thread.section == .snoozed && thread.snoozedUntil != nil)
+        thread.needs != nil || (thread.section == .snoozed && thread.snoozedUntil != nil) || thread.cutShort != nil
             || (thread.runState == .working && thread.activity != nil) || thread.runsInBackground || thread.branch != nil
     }
 
@@ -668,6 +710,8 @@ struct ThreadRow: View {
     private var detail: some View {
         if let needs = thread.needs {
             Text(needs.text.replacingOccurrences(of: "`", with: "")).foregroundStyle(Trek.muted)
+        } else if thread.cutShort != nil, thread.runState != .working {
+            Text("Cut short when Trek closed").foregroundStyle(Trek.muted)
         } else if thread.section == .snoozed, let until = SnoozeWords.until(thread.snoozedUntil) {
             Label(until, systemImage: "moon.zzz").labelStyle(BranchLabelStyle()).foregroundStyle(Trek.muted.opacity(0.85))
         } else if thread.runState == .working, let activity = thread.activity {

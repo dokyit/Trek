@@ -86,12 +86,49 @@ pub struct AvailableUpdate {
     pub artifact: Artifact,
 }
 
+/// The manifest's name for the build this Trek should update to: its own architecture's, so each
+/// Mac gets its own. An Intel build under Rosetta asks for the Apple-silicon one, and moves to it
+/// with its next update.
 pub fn platform_key() -> String {
-    let os = match std::env::consts::OS {
+    platform_key_for(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        under_rosetta(),
+    )
+}
+
+fn platform_key_for(os: &str, arch: &str, rosetta: bool) -> String {
+    let os = match os {
         "macos" => "darwin",
         other => other,
     };
-    format!("{os}-{}", std::env::consts::ARCH)
+    let arch = if rosetta { "aarch64" } else { arch };
+    format!("{os}-{arch}")
+}
+
+/// Whether macOS is translating this Intel build on an Apple-silicon Mac.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn under_rosetta() -> bool {
+    let mut translated: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: the name is a C string and the out pointers are valid for the sizes given. An Intel
+    // Mac, which has no such name, fails the call.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"sysctl.proc_translated".as_ptr(),
+            (&raw mut translated).cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    result == 0 && translated == 1
+}
+
+/// A build that isn't for Intel Macs never runs under Rosetta.
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn under_rosetta() -> bool {
+    false
 }
 
 pub fn current_version() -> semver::Version {
@@ -2133,6 +2170,64 @@ mod tests {
             ("0.3.0".into(), "- fixed things")
         );
         assert!(newer_than(manifest("soon"), &current).is_err());
+    }
+
+    #[test]
+    fn each_mac_asks_for_the_build_of_its_own_architecture() {
+        assert_eq!(
+            platform_key_for("macos", "aarch64", false),
+            "darwin-aarch64"
+        );
+        assert_eq!(platform_key_for("macos", "x86_64", false), "darwin-x86_64");
+        assert_eq!(
+            platform_key_for("windows", "x86_64", false),
+            "windows-x86_64"
+        );
+        assert_eq!(
+            platform_key_for("macos", "x86_64", true),
+            "darwin-aarch64",
+            "under Rosetta: the Mac's own architecture, not the build's"
+        );
+    }
+
+    /// Only an Intel build gets here: under Rosetta on an Apple-silicon Mac, natively on an Intel one.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    #[test]
+    fn an_intel_build_knows_when_it_runs_under_rosetta() {
+        let said = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-in", "sysctl.proc_translated"])
+            .output()
+            .unwrap()
+            .stdout;
+        let translated = String::from_utf8_lossy(&said).trim() == "1";
+        assert_eq!(under_rosetta(), translated);
+        assert_eq!(
+            platform_key(),
+            if translated {
+                "darwin-aarch64"
+            } else {
+                "darwin-x86_64"
+            }
+        );
+    }
+
+    #[test]
+    fn a_manifest_with_both_mac_builds_offers_this_macs() {
+        let current = semver::Version::parse("0.2.0").unwrap();
+        let artifact = |url: &str| Artifact {
+            url: url.into(),
+            sha256: "s".into(),
+            signature: String::new(),
+        };
+        let mut m = manifest("0.3.0");
+        m.platforms.clear();
+        for key in ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"] {
+            m.platforms.insert(key.into(), artifact(key));
+        }
+        let Found::Update(u) = newer_than(m, &current).unwrap() else {
+            panic!("0.3.0 is newer")
+        };
+        assert_eq!(u.artifact.url, platform_key());
     }
 
     #[test]

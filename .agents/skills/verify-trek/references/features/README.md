@@ -5,6 +5,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 ## Work
 
 - [Threads and composer](threads-and-composer.md) — start, steer, stop, and continue agent work with models, effort, plan mode, mentions, commands, skills, and attachments.
+- [Two threads side by side](split-view.md) — open a thread beside the one on screen, each pane a whole thread with its own composer, model and scroll position.
 - [Thread history and inbox](thread-history-and-inbox.md) — search, pin, snooze, rename, settle, retry, rewind, fork, detach, and reopen work.
 - [Projects and worktrees](projects-and-worktrees.md) — organize folders, set project defaults and actions, and isolate work in Git worktrees.
 - [Basecamp and Notes](basecamp-and-notes.md) — review recent work and keep persistent Markdown notes, with pictures.
@@ -17,7 +18,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 
 ## Tools
 
-- [Git and turn changes](git-and-turn-changes.md) — inspect working-tree or per-turn diffs, commit, push, and create pull requests.
+- [Git and turn changes](git-and-turn-changes.md) — inspect working-tree or per-turn diffs, comment on lines and send the comments to the agent, review by keyboard, commit, push, and create pull requests.
 - [File Explorer and Terminal](explorer-and-terminal.md) — inspect project files and use a real shell under the chat (⌃`) or beside the thread.
 - [Editor and deep links](editor.md) — open and edit project files in-app, and reach them from `trek://` links and editor extensions; Editor mode, a code editor of its own whose AI side bar keeps editor chats apart from Agents threads.
 - [Browser](browser.md) — browse, inspect elements, take page screenshots, and open devtools; agents' browser use (`trek-browser`, `mock:browser`).
@@ -34,3 +35,4 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Phone companion](phone-companion.md) — pair an iPhone, follow threads, and answer agents remotely.
 - [Machines](machines.md) — pair another computer running Trek, start threads on it from the composer's machine chip, clone a project there, and follow its threads here; the isolated app pairs with itself as machine B.
 - [Imports and updates](imports-and-updates.md) — browse/resume supported local history and install signed Trek releases.
+- [Privacy and feedback](privacy-and-feedback.md) — the usage-data card asked once, Settings → Privacy (what's shared, the install id, what was last sent), and Send feedback… (PostHog, Copy report, a GitHub issue).

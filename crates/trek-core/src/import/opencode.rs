@@ -125,6 +125,15 @@ pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
     scan_all(&dbs(), min_updated, held)
 }
 
+/// [`scan`], of the OpenCode folder at `dir`.
+pub(crate) fn scan_dir(
+    dir: &Path,
+    min_updated: i64,
+    held: &HashSet<String>,
+) -> Vec<ImportedThread> {
+    scan_all(&dbs_in(dir), min_updated, held)
+}
+
 /// Every database's sessions; one in both (a copied file) is read from where it changed last.
 fn scan_all(dbs: &[Connection], min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
     let mut found: HashMap<String, ImportedThread> = HashMap::new();

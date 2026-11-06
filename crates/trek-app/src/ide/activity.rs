@@ -3,6 +3,7 @@
 
 use super::IdeWorkbench;
 use crate::fluent::{self, PillExt as _};
+use crate::scale::{radius, text};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -50,7 +51,7 @@ pub(super) fn section_header(title: impl Into<SharedString>, cx: &App) -> Div {
         .flex_none()
         .px(px(12.))
         .gap(px(4.))
-        .text_size(px(11.))
+        .text_size(px(text::META))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.muted_foreground)
         .child(
@@ -94,7 +95,7 @@ impl IdeWorkbench {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(fluent::control(6.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .cursor_pointer()
                     .when(on, |el| el.bg(theme.foreground.opacity(0.08)))
                     .when(!on, |el| el.hover(|s| s.bg(theme.foreground.opacity(0.05))))
@@ -117,7 +118,7 @@ impl IdeWorkbench {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(9.))
+                                .text_size(px(text::META))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(gpui_kit::white())
                                 .child(if badge > 99 {

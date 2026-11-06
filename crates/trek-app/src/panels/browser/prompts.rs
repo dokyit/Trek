@@ -6,6 +6,7 @@ use super::asks::{self, AskKind, Reply};
 use super::{BrowserPanel, Tab, host_of, tool_button};
 use crate::assets::Lucide;
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
@@ -83,7 +84,7 @@ impl BrowserPanel {
                 .px(px(12.))
                 .py(px(7.))
                 .gap(px(6.))
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .bg(ember.opacity(0.08))
                 .border_b_1()
                 .border_color(theme.border)
@@ -159,7 +160,7 @@ impl BrowserPanel {
                     .h(px(h as f32 + 36.))
                     .max_w_full()
                     .max_h_full()
-                    .rounded(px(fluent::surface(10.)))
+                    .rounded(px(fluent::surface(radius::CARD)))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border)
@@ -175,7 +176,7 @@ impl BrowserPanel {
                             .pl(px(12.))
                             .pr(px(4.))
                             .gap(px(8.))
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .border_b_1()
                             .border_color(theme.border)
                             .child(

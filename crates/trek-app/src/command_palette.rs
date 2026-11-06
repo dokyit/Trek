@@ -7,6 +7,7 @@
 
 use crate::keys::{self, Id};
 use crate::panels::RightPanel;
+use crate::scale::{radius, text};
 use crate::ui;
 use crate::workspace::{ItemRef, PanelTool, Route, SettingsPage, Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
@@ -55,6 +56,8 @@ enum Action {
     Settle(String),
     Fork(String),
     CheckForUpdates,
+    /// Help › Send Feedback….
+    SendFeedback,
     /// Onboarding again, from the start.
     Onboarding,
     /// Go to file — the IDE's ⌘P.
@@ -79,6 +82,10 @@ enum Action {
 enum WindowCommand {
     /// The thread on screen, in a window of its own.
     OpenInNewWindow,
+    /// Pick a thread to open beside the one on screen, or with a split open, the focus across it.
+    OpenBeside,
+    /// The split's pane with the focus.
+    ClosePane,
     /// The Share sheet for the thread on screen.
     Share,
     /// One of its copies, as its shortcut does.
@@ -89,6 +96,9 @@ enum WindowCommand {
     StopAgent,
     /// The composer's plan mode, for the thread on screen or the next one.
     TogglePlan,
+    /// The keys that go through what needs the user.
+    NextNeedsYou,
+    BackToLastPrompt,
     Minimize,
     Quit,
 }
@@ -322,11 +332,11 @@ fn keycap(text: impl Into<SharedString>, cx: &App) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.))
+        .rounded(px(radius::TAG))
         .border_1()
         .border_color(theme.foreground.opacity(0.1))
         .bg(theme.foreground.opacity(0.03))
-        .text_size(px(11.))
+        .text_size(px(text::META))
         .text_color(theme.muted_foreground)
         .child(text.into())
 }
@@ -397,6 +407,8 @@ pub struct CommandPalette {
     _index: Option<Task<()>>,
     /// Quick Open (⌘P in the editor): files only, `>` for commands.
     pub files_only: bool,
+    /// Picking a thread to open beside the one on screen (⌘\): threads only.
+    pub beside_only: bool,
     workspace: Entity<Workspace>,
     right_panel: Entity<RightPanel>,
     basecamp: Entity<crate::basecamp::Basecamp>,
@@ -460,6 +472,7 @@ impl CommandPalette {
             file_root: None,
             _index: None,
             files_only: false,
+            beside_only: false,
             input,
             open: false,
             presence: crate::motion::Presence::new(crate::motion::SURFACE),
@@ -483,10 +496,24 @@ impl CommandPalette {
     }
 
     pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open && !self.files_only {
+        if self.open && !self.files_only && !self.beside_only {
             self.dismiss(window, cx)
         } else {
             self.set_files_only(false, window, cx);
+            self.show(window, cx)
+        }
+    }
+
+    /// ⌘\ on a thread: pick another to open beside it (again: closes it).
+    pub fn toggle_beside(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open && self.beside_only {
+            self.dismiss(window, cx)
+        } else {
+            self.set_files_only(false, window, cx);
+            self.beside_only = true;
+            self.input.update(cx, |s, cx| {
+                s.set_placeholder("Pick a thread to open beside this one", window, cx)
+            });
             self.show(window, cx)
         }
     }
@@ -503,6 +530,7 @@ impl CommandPalette {
 
     fn set_files_only(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.files_only = on;
+        self.beside_only = false;
         let hint = if on {
             "Go to file, or > for commands"
         } else {
@@ -515,6 +543,10 @@ impl CommandPalette {
     /// Show the palette, or leave it as it is when it's already open (⌘K from a thread window).
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open {
+            // The beside picker was for the keys that asked for it.
+            if self.beside_only {
+                self.set_files_only(false, window, cx);
+            }
             self.show(window, cx);
         }
     }
@@ -614,8 +646,8 @@ impl CommandPalette {
         let q = self.query.trim().to_string();
         let ws = self.workspace.read(cx);
         self.epoch = ws.search_epoch;
-        // Quick Open lists no threads: nothing to search for.
-        if trek_core::store::fts_query(&q).is_none() || self.files_only {
+        // Quick Open lists no threads, and the beside picker goes by title: nothing to search for.
+        if trek_core::store::fts_query(&q).is_none() || self.files_only || self.beside_only {
             self.hits.clear();
             self.hits_for = q;
             self._search = None;
@@ -652,6 +684,9 @@ impl CommandPalette {
     pub fn entries(&self, cx: &App) -> Vec<Entry> {
         if self.files_only {
             return self.file_entries(cx);
+        }
+        if self.beside_only {
+            return self.beside_entries(cx);
         }
         let ws = self.workspace.read(cx);
         let q = self.query.trim();
@@ -787,6 +822,49 @@ impl CommandPalette {
             out.extend(commands);
         }
         out
+    }
+
+    /// The threads ⌘\ offers: the sub-agents of the thread on screen first (to watch one beside
+    /// its parent), then the recent ones. Not the thread on screen: it can't go beside itself.
+    fn beside_entries(&self, cx: &App) -> Vec<Entry> {
+        let ws = self.workspace.read(cx);
+        let now = trek_core::store::now_ms();
+        let front = ws.focused_thread();
+        let mut threads: Vec<&trek_core::store::Thread> = ws
+            .threads
+            .iter()
+            .filter(|t| {
+                t.side_of.is_none()
+                    && !t.editor_chat
+                    && t.archived_at.is_none()
+                    && Some(t.id.as_str()) != front
+            })
+            .collect();
+        threads.sort_by_key(|t| {
+            let child = front.is_some() && t.parent_id.as_deref() == front;
+            (!child, t.parent_id.is_some(), -t.updated_at)
+        });
+        let candidates = threads
+            .into_iter()
+            .map(|t| {
+                let mut e = Entry::new(
+                    Group::Threads,
+                    Glyph::Agent(t.agent.clone()),
+                    one_line(&t.title),
+                    Action::OpenThread(t.id.clone()),
+                );
+                if let Some(p) = t.project_id.as_ref().and_then(|p| ws.project(p)) {
+                    let branch = t.worktree.as_ref().map(|w| w.branch.clone());
+                    e.project = Some((p.name.clone(), ws.project_look(&p.path), branch));
+                }
+                e.age = Some(age(t.updated_at, now).into());
+                (e, t.title.clone(), ws.model_label(t).to_string())
+            })
+            .collect();
+        rank(self.query.trim(), candidates)
+            .into_iter()
+            .take(RECENT)
+            .collect()
     }
 
     /// The IDE folder's files matching `q`, best first.
@@ -1000,6 +1078,26 @@ impl CommandPalette {
         add(
             Entry::new(
                 c,
+                icon(Icon::new(IconName::CircleAlert)),
+                "Next thread that needs you",
+                Action::Window(WindowCommand::NextNeedsYou),
+            )
+            .hint(keys::hint(Id::NextNeedsYou)),
+            "jump go waiting approval question failed finished unread inbox attention",
+        );
+        add(
+            Entry::new(
+                c,
+                icon(Icon::new(crate::assets::Lucide::Undo2)),
+                "Back to where you last sent a prompt",
+                Action::Window(WindowCommand::BackToLastPrompt),
+            )
+            .hint(keys::hint(Id::BackToLastPrompt)),
+            "jump go return previous thread message",
+        );
+        add(
+            Entry::new(
+                c,
                 icon(Icon::new(crate::assets::Lucide::Compass)),
                 "Show onboarding",
                 Action::Onboarding,
@@ -1206,6 +1304,15 @@ impl CommandPalette {
             ),
             "update version release upgrade",
         );
+        add(
+            Entry::new(
+                c,
+                icon(Icon::new(crate::assets::Lucide::MessageSquarePlus)),
+                "Send feedback…",
+                Action::SendFeedback,
+            ),
+            "feedback bug report issue problem idea suggestion help contact",
+        );
         // The thread and window commands a Mac's menus have and Windows, with no menu bar, finds here.
         let running = thread
             .as_ref()
@@ -1221,6 +1328,39 @@ impl CommandPalette {
                 .hint(keys::hint(Id::OpenInNewWindow)),
                 "pop out separate window detach",
             );
+            if ws.split_live().is_some() {
+                add(
+                    Entry::new(
+                        c,
+                        icon(Icon::new(crate::assets::Lucide::Columns2)),
+                        "Focus the other pane",
+                        Action::Window(WindowCommand::OpenBeside),
+                    )
+                    .hint(keys::hint(Id::OpenBeside)),
+                    "split view side by side switch across",
+                );
+                add(
+                    Entry::new(
+                        c,
+                        icon(Icon::new(IconName::Close)),
+                        "Close this pane",
+                        Action::Window(WindowCommand::ClosePane),
+                    )
+                    .hint(keys::hint(Id::CloseTab)),
+                    "split view side by side full width",
+                );
+            } else if !ws.ide() {
+                add(
+                    Entry::new(
+                        c,
+                        icon(Icon::new(crate::assets::Lucide::Columns2)),
+                        "Open a thread beside this one",
+                        Action::Window(WindowCommand::OpenBeside),
+                    )
+                    .hint(keys::hint(Id::OpenBeside)),
+                    "split view side by side two compare models",
+                );
+            }
             add(
                 Entry::new(
                     c,
@@ -1333,9 +1473,11 @@ impl CommandPalette {
         let Some(entry) = self.entries(cx).into_iter().nth(ix) else {
             return;
         };
+        let beside = std::mem::take(&mut self.beside_only);
         self.dismiss(window, cx);
         let ws = self.workspace.clone();
         match entry.action {
+            Action::OpenThread(id) if beside => ws.update(cx, |ws, cx| ws.open_beside(&id, cx)),
             Action::OpenThread(id) => ws.update(cx, |ws, cx| ws.open_thread_here(&id, cx)),
             Action::OpenMessage(id, at) => ws.update(cx, |ws, cx| ws.open_thread_at(&id, at, cx)),
             Action::NewThreadIn(path) => ws.update(cx, |ws, cx| {
@@ -1426,10 +1568,17 @@ impl CommandPalette {
                 ws.check_for_updates(true, cx);
                 ws.navigate(Route::Settings(SettingsPage::Updates), cx);
             }),
+            Action::SendFeedback => {
+                crate::feedback::open(ws, window, cx);
+            }
             Action::Window(command) => match command {
                 WindowCommand::OpenInNewWindow => {
                     window.dispatch_action(Box::new(crate::OpenInNewWindow), cx)
                 }
+                WindowCommand::OpenBeside => {
+                    window.dispatch_action(Box::new(crate::OpenBeside), cx)
+                }
+                WindowCommand::ClosePane => window.dispatch_action(Box::new(crate::CloseTab), cx),
                 WindowCommand::Share => window.dispatch_action(Box::new(crate::ShareThread), cx),
                 WindowCommand::CopyLink => {
                     window.dispatch_action(Box::new(crate::CopyThreadLink), cx)
@@ -1447,6 +1596,12 @@ impl CommandPalette {
                     prefs.plan = !prefs.plan;
                     ws.set_prefs_in(&scope, prefs, cx);
                 }),
+                WindowCommand::NextNeedsYou => {
+                    window.dispatch_action(Box::new(crate::NextNeedsYou), cx)
+                }
+                WindowCommand::BackToLastPrompt => {
+                    window.dispatch_action(Box::new(crate::BackToLastPrompt), cx)
+                }
                 WindowCommand::Minimize => window.minimize_window(),
                 WindowCommand::Quit => window.dispatch_action(Box::new(crate::Quit), cx),
             },
@@ -1484,7 +1639,7 @@ impl CommandPalette {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(ui::match_text(&snippet, &ranges, cx)),
                 )
@@ -1498,7 +1653,7 @@ impl CommandPalette {
                     el.child(
                         div()
                             .flex_none()
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground.opacity(0.8))
                             .child(age),
                     )
@@ -1511,7 +1666,7 @@ impl CommandPalette {
                 .flex_none()
                 .max_w(px(200.))
                 .gap(px(6.))
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(theme.muted_foreground)
                 .child(ui::project_badge(&name, &look, cx))
                 .child(div().min_w_0().truncate().child(name))
@@ -1535,8 +1690,8 @@ impl CommandPalette {
             .px(px(10.))
             .min_h(px(32.))
             .gap(px(10.))
-            .rounded(px(crate::fluent::control(8.)))
-            .text_size(px(13.))
+            .rounded(px(crate::fluent::control(radius::BUTTON)))
+            .text_size(px(text::BODY))
             .cursor_pointer()
             .when(selected, |el| el.bg(theme.list_active))
             .when(selected && !crate::fluent::WINDOWS, |el| {
@@ -1567,7 +1722,7 @@ impl CommandPalette {
                         .flex_none()
                         .max_w(px(200.))
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(h),
                 )
@@ -1578,7 +1733,7 @@ impl CommandPalette {
                 el.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground.opacity(0.8))
                         .child(age),
                 )
@@ -1634,7 +1789,7 @@ impl Render for CommandPalette {
                         .px(px(15.))
                         .pt(px(10.))
                         .pb(px(4.))
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .font_medium()
                         .text_color(theme.muted_foreground.opacity(0.8))
                         .child(e.group.label(searching)),
@@ -1647,7 +1802,7 @@ impl Render for CommandPalette {
                 div()
                     .px(px(15.))
                     .py(px(12.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
                     .child(if pending {
                         "Searching…"
@@ -1754,7 +1909,7 @@ impl Render for CommandPalette {
                                 .justify_end()
                                 .border_t_1()
                                 .border_color(theme.foreground.opacity(0.07))
-                                .text_size(px(11.5))
+                                .text_size(px(text::LABEL))
                                 .text_color(theme.muted_foreground.opacity(0.8))
                                 .children(footer_keys(jump).into_iter().map(|(key, what)| {
                                     h_flex().gap(px(6.)).child(keycap(key, cx)).child(what)

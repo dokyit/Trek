@@ -8,6 +8,8 @@ use trek_core::changelog::{self, Release};
 use trek_core::settings::Channel;
 use trek_core::update::{AvailableUpdate, Blocker, Found};
 
+pub mod wait;
+
 /// A quarter of an hour between background checks, on every channel. Stable releases come out
 /// several times on some days, and an hour's wait still read as "it never told me" (the release
 /// was out, Trek hadn't looked yet). A check is a small manifest per channel.
@@ -45,8 +47,9 @@ pub enum UpdateStatus {
         version: String,
         staged: PathBuf,
     },
-    /// Ready, waiting for agent work to be over: running or paused turns, plans waiting for an
-    /// answer (`Workspace::work_in_flight`).
+    /// Ready, and the user asked for it once Trek is free: waiting for agent work to be over
+    /// (running or paused turns, plans waiting for an answer, sub-agents out in the background:
+    /// `Workspace::work_in_flight`), then for the user (`wait::Moment::hold`).
     RestartPending {
         version: String,
         staged: PathBuf,
@@ -63,6 +66,10 @@ pub enum UpdateAction {
     Restart,
     /// A restart waiting on agents: go now, stopping them.
     RestartNow,
+    /// An update ready, with work running: install it now, stopping that work.
+    InstallNow,
+    /// An update ready, with work running: leave it until Trek quits, or the user comes back to it.
+    Later,
     /// Windows: Trek is where it can't update itself (a folder ransomware protection guards, say):
     /// copy itself to the user's programs folder and start from there (`trek_core::update::relocate`).
     Move,
@@ -81,6 +88,8 @@ impl UpdateAction {
             UpdateAction::Download => "Download",
             UpdateAction::Restart => "Restart to update",
             UpdateAction::RestartNow => "Restart now",
+            UpdateAction::InstallNow => "Install now",
+            UpdateAction::Later => "Later",
             UpdateAction::Move => "Move Trek to its own folder",
             UpdateAction::MoveNow => "Move now",
             UpdateAction::RemoveOldCopy => "Remove old copy",
@@ -106,6 +115,8 @@ pub struct UpdateView {
     /// Checking or downloading: the action button spins.
     pub busy: bool,
     pub progress: Option<f32>,
+    /// An update ready with work running: what waiting would mean, and what going now would cost.
+    pub choices: Option<wait::Choices>,
 }
 
 /// The copy of Trek left in the folder it moved out of, while the Updates page offers to remove it
@@ -152,6 +163,7 @@ pub fn describe_old_copy(old: &OldCopy) -> UpdateView {
             secondary: None,
             busy: false,
             progress: None,
+            choices: None,
         };
     }
     let line = with_shortcuts(
@@ -167,6 +179,7 @@ pub fn describe_old_copy(old: &OldCopy) -> UpdateView {
         secondary: Some(UpdateAction::DismissOldCopy),
         busy: false,
         progress: None,
+        choices: None,
     }
 }
 
@@ -187,6 +200,9 @@ pub struct Updater {
     pub status: UpdateStatus,
     /// The newest release the last check found (version, notes, download).
     pub offer: Option<AvailableUpdate>,
+    /// The version the user chose Later for: it installs when Trek quits, and the updater doesn't
+    /// ask about it again. A newer release is asked about afresh.
+    pub later: Option<String>,
     /// Every published release, newest first (`trek_core::changelog`); empty until the first
     /// fetch.
     pub changelog: Vec<Release>,
@@ -571,6 +587,7 @@ pub fn describe_update(
         secondary: None,
         busy: false,
         progress: None,
+        choices: None,
     };
     if let Some(blocker) = blocker {
         // Windows: Trek can move itself out of where it is, in one click.

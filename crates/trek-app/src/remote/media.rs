@@ -133,6 +133,11 @@ pub(super) fn allowed(asked: &str, cwd: Option<&Path>, named: &[Named]) -> Optio
     let canon = |p: &Path| std::fs::canonicalize(p).ok();
     let file = crate::md::link_path(asked, cwd).filter(|p| p.is_file())?;
     let want = canon(&file)?;
+    // A secret an agent asked for lives in a file whose path it knows, and could link in an
+    // answer: never sent, however it's named.
+    if trek_core::session_secrets::holds(&file) || trek_core::session_secrets::holds(&want) {
+        return None;
+    }
     let is = |p: &Path| canon(p).is_some_and(|c| c == want);
     let found = named.iter().any(|n| match n {
         Named::Link(target) => crate::md::link_path(target, cwd).is_some_and(|p| is(&p)),

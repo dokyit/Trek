@@ -231,7 +231,7 @@ nonisolated struct ElevationProfile: Codable, Hashable {
     var now: Int? = nil
     /// Where "now" is across the range, 0–1.
     var nowAt: Double? = nil
-    /// "Summit at 2 PM", "A flat trail so far".
+    /// "Peak at 2 PM", "No activity yet".
     var line: String
     /// "18 prompts".
     var total: String

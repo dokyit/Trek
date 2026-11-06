@@ -69,6 +69,10 @@ impl Workspace {
         let Some((project, wt)) = self.worktree_of(id) else {
             return;
         };
+        // Where the other app's worktree was is that app's to fill again.
+        if self.worktree_owner(id).is_some() {
+            return;
+        }
         if self.live.get(id).is_some_and(|l| l.preparing) || !wt.is_missing() {
             return;
         }
@@ -302,6 +306,14 @@ impl Workspace {
         let Some((project, wt)) = self.worktree_of(id).or_else(|| self.stored_worktree(id)) else {
             return Task::ready(Err(anyhow::anyhow!("This thread has no worktree.")));
         };
+        // Brought over from another app, which goes on using it: Trek never deletes it, whichever
+        // way this was reached.
+        if let Some(app) = self.worktree_apps.owner(&wt.path) {
+            return Task::ready(Err(anyhow::anyhow!(
+                "This worktree is {}'s, so Trek leaves it where it is.",
+                app.name()
+            )));
+        }
         // Nothing may be writing in the folder while it's deleted: the sessions of threads sharing
         // it end too, and messages to any of them wait until it's gone (or stays).
         // Their sub-agents work in it too (unlisted, so not among the sharers).

@@ -361,11 +361,12 @@ fn turns_an_earlier_run_left_open_are_closed_at_launch() {
             for id in [&working, &asking] {
                 assert_eq!(ws.thread(id).map(|t| t.run_state), Some(RunState::Idle));
             }
-            assert_eq!(
-                ws.needs_you_count(),
-                0,
-                "no Dock badge for cards that are gone"
-            );
+            // The card is gone, but the one that waited on it waits on the user still (its offer
+            // runs it again only when they say so): the Dock badge counts it. Not the one cut off
+            // working, which is only news.
+            assert_eq!(ws.needs_you_count(), 1);
+            assert!(ws.cut_off_waiting(ws.thread(&asking).unwrap()));
+            assert!(!ws.cut_off_waiting(ws.thread(&working).unwrap()));
         });
         let notice = Item::Notice {
             text: trek_core::store::INTERRUPTED_BY_QUIT.into(),

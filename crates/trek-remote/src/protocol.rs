@@ -497,6 +497,11 @@ pub enum ThreadAction {
     /// The context card's Compact now: the agent's own `/compact` (feature `context_card`);
     /// `conflict` while a turn runs or the thread is paused.
     Compact,
+    /// A turn cut off when Trek closed (`ThreadSummary::cut_short`, feature
+    /// `resume_interrupted`): Resume, or Retry after one failed. `conflict` with no offer open.
+    ResumeInterrupted,
+    /// Leave it as it is: it stays stopped and the offer goes.
+    DismissInterrupted,
 }
 
 /// The Mac's snooze menu.
@@ -578,6 +583,8 @@ pub mod feature {
     pub const TURN_PREVIEW: &str = "turn_preview";
     /// `send.consult`: sending with consultants, as the Mac's composer does.
     pub const CONSULT: &str = "consult";
+    /// `ThreadSummary::cut_short` and `thread_action` `resume_interrupted`, `dismiss_interrupted`.
+    pub const RESUME_INTERRUPTED: &str = "resume_interrupted";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -603,6 +610,7 @@ pub mod feature {
         CONTEXT_CARD,
         TURN_PREVIEW,
         CONSULT,
+        RESUME_INTERRUPTED,
     ];
 }
 
@@ -1167,6 +1175,14 @@ pub struct ThreadSummary {
     /// Paused at a usage limit: the limit bar's state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause: Option<LimitPause>,
+    /// `needs` is an approval of this thread's own: what answering it from outside the thread
+    /// takes (the phone's Live Activity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<RowAsk>,
+    /// Its last turn was cut off when the Mac's Trek closed, and that isn't dealt with yet: the
+    /// offer the Mac's sidebar and composer make (feature `resume_interrupted`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_short: Option<CutShort>,
 }
 
 /// A context window's use.
@@ -1525,6 +1541,10 @@ pub enum ItemBody {
         #[serde(default)]
         detail: String,
         state: ApprovalState,
+        /// The user's rule that asks about this every time, as the Mac's Settings shows it: there's
+        /// no "Allow for session" for it (the Mac refuses one). Absent from a Mac before it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asked_by: Option<String>,
     },
     Question {
         request_id: String,
@@ -1971,7 +1991,7 @@ pub struct Profile {
     /// Where "now" is across the range, 0–1.
     #[serde(default)]
     pub now_at: f32,
-    /// The line over it: "Summit at 2 PM", "A flat trail so far".
+    /// The line over it: "Peak at 2 PM", "No activity yet".
     pub line: String,
     /// "18 prompts".
     pub total: String,

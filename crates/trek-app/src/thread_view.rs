@@ -5,6 +5,7 @@
 use crate::activity::{Place, ToolKind, kind_icon, placement, summarize, tool_kind};
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::thinking_timeline as timeline;
 use crate::workspace::{ForkAt, ItemRef, Scope, Workspace, WorkspaceEvent};
 use crate::workspace::{LineageRow, TaskState, ThreadState};
@@ -27,6 +28,9 @@ use trek_agents::Decision;
 use trek_core::checkpoint::{Change, FileChange};
 use trek_core::orchestrate as orch;
 use trek_core::store::{Item, ToolStatus};
+
+mod permission_cards;
+use permission_cards::AlwaysAllow;
 
 /// How long a message a search result led to stays tinted (it holds, then fades).
 const FLASH: std::time::Duration = std::time::Duration::from_millis(2200);
@@ -457,6 +461,8 @@ pub struct ThreadView {
     secrets: (Option<String>, Vec<(Entity<InputState>, Subscription)>),
     /// Rendered plan for the plan card on screen (request id, markdown, redraw when it's parsed).
     plan_md: Option<(String, Entity<TextViewState>, Subscription)>,
+    /// The rule being written on the approval card (its "Always allow…").
+    always_allow: Option<AlwaysAllow>,
     /// Rows built for (thread, transcript revision, expansion state, where the transcript stops);
     /// rebuilt only when one changes.
     rows_cache:
@@ -696,6 +702,7 @@ impl ThreadView {
             stash_order: Default::default(),
             secrets: (None, vec![]),
             plan_md: None,
+            always_allow: None,
             rows_cache: Default::default(),
             end: None,
             opened: None,
@@ -753,6 +760,23 @@ impl ThreadView {
             }
         }
         self.watch_scroller(cx);
+    }
+
+    /// The thread `id` moves to the view `to` (a split closing: the right pane's thread goes to
+    /// the window's own views), with its place in the transcript, what's open and its measured
+    /// rows. It left this view already, so it's in the stash; `to` has it on screen, built afresh.
+    pub fn hand_over(&mut self, id: &str, to: &Entity<ThreadView>, cx: &mut Context<Self>) {
+        let Some(stashed) = self.stashed.remove(id) else {
+            return;
+        };
+        self.stash_order.retain(|t| t != id);
+        to.update(cx, |v, cx| {
+            v.stashed.insert(id.to_string(), stashed);
+            if v.restore(id, cx) {
+                v.sync(false, cx);
+                cx.notify();
+            }
+        });
     }
 
     /// Scroll activity on the current scroller repaints this view (the jump-to-latest tail).
@@ -1263,7 +1287,7 @@ impl ThreadView {
     /// Scroll to the message `Workspace::reveal` asks for, once its thread is on screen and loaded.
     /// Search results open in the main window; a thread window on the same thread keeps its place.
     fn reveal(&mut self, cx: &mut Context<Self>) {
-        if self.scope != Scope::Main {
+        if !self.scope.in_main_window() {
             return;
         }
         let ws = self.workspace.read(cx);
@@ -1649,7 +1673,7 @@ impl ThreadView {
                                                             theme.mono_font_family.clone(),
                                                         )
                                                     })
-                                                    .text_xs()
+                                                    .text_size(to_rems(text::META))
                                                     .child(detail.to_string()),
                                             )
                                             .when_some(lines, |el, (a, r)| {
@@ -1676,7 +1700,7 @@ impl ThreadView {
                                         .rounded(px(fluent::surface(theme.radius.as_f32())))
                                         .bg(theme.muted)
                                         .font_family(theme.mono_font_family.clone())
-                                        .text_xs()
+                                        .text_size(to_rems(text::META))
                                         .whitespace_normal()
                                         .child(output.clone()),
                                 )
@@ -1804,9 +1828,13 @@ impl ThreadView {
                         .right(px(-12.))
                         .bg(tint);
                     let band = band
-                        .rounded_t(px(if reaches_up { fluent::surface(10.) } else { 0. }))
+                        .rounded_t(px(if reaches_up {
+                            fluent::surface(radius::CARD)
+                        } else {
+                            0.
+                        }))
                         .rounded_b(px(if reaches_down {
-                            fluent::surface(10.)
+                            fluent::surface(radius::CARD)
                         } else {
                             0.
                         }));
@@ -2181,7 +2209,7 @@ impl ThreadView {
                 let meta = h_flex()
                     .h(px(20.))
                     .gap(px(6.))
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .when(!rewinding, |el| {
                         el.invisible().group_hover("user-msg", |s| s.visible())
@@ -2239,7 +2267,7 @@ impl ThreadView {
                                                 px(64.),
                                                 px(220.),
                                             ))
-                                            .rounded(px(fluent::surface(12.)))
+                                            .rounded(px(fluent::surface(radius::CARD)))
                                             .overflow_hidden()
                                             .border_1()
                                             .border_color(theme.border)
@@ -2271,7 +2299,7 @@ impl ThreadView {
                                         .px(px(16.))
                                         .py(px(10.))
                                         .gap_1()
-                                        .rounded(px(fluent::surface(18.)))
+                                        .rounded(px(fluent::surface(radius::CARD)))
                                         .bg(theme.secondary)
                                         .when(fluent::WINDOWS, |el| {
                                             el.border_1()
@@ -2293,7 +2321,7 @@ impl ThreadView {
                                             el.child(
                                                 div()
                                                     .id(("user-more", ix))
-                                                    .text_xs()
+                                                    .text_size(to_rems(text::META))
                                                     .text_color(theme.muted_foreground)
                                                     .cursor_pointer()
                                                     .hover(|s| s.text_color(theme.foreground))
@@ -2317,7 +2345,7 @@ impl ThreadView {
                                         .test_support()
                                         .gap(px(6.))
                                         .max_w(relative(0.78))
-                                        .text_size(px(12.))
+                                        .text_size(px(text::LABEL))
                                         .text_color(muted)
                                         .child(h_flex().children(
                                             agents.iter().take(4).enumerate().map(|(i, a)| {
@@ -2335,7 +2363,7 @@ impl ThreadView {
                                         .id(("restating", ix))
                                         .test_support()
                                         .gap(px(6.))
-                                        .text_size(px(12.))
+                                        .text_size(px(text::LABEL))
                                         .text_color(muted)
                                         .child(
                                             Icon::new(crate::assets::Lucide::MessageSquareQuote)
@@ -2445,7 +2473,7 @@ impl ThreadView {
                             div()
                                 .min_w_0()
                                 .pr(px(4.))
-                                .text_size(px(12.5))
+                                .text_size(px(text::BODY))
                                 .text_color(muted)
                                 .child("Is that what you meant?"),
                         )
@@ -2504,20 +2532,20 @@ impl ThreadView {
                     };
                     // The diff shows in the Git tool, which only the main window has.
                     let view_diff = (c.counted == trek_core::changes::Counted::Checkpoints
-                        && at.scope == Scope::Main)
-                        .then(|| {
-                            let (ws, thread, end) =
-                                (at.workspace.clone(), at.thread.clone(), end.clone());
-                            std::rc::Rc::new(
-                                move |path: Option<String>, _: &mut Window, cx: &mut App| {
-                                    let (thread, end) = (thread.clone(), end.clone());
-                                    ws.update(cx, |_, cx| {
-                                        cx.emit(WorkspaceEvent::ShowTurnDiff { thread, end, path })
-                                    });
-                                },
-                            )
-                                as std::rc::Rc<dyn Fn(Option<String>, &mut Window, &mut App)>
-                        });
+                        && at.scope.in_main_window())
+                    .then(|| {
+                        let (ws, thread, end) =
+                            (at.workspace.clone(), at.thread.clone(), end.clone());
+                        std::rc::Rc::new(
+                            move |path: Option<String>, _: &mut Window, cx: &mut App| {
+                                let (thread, end) = (thread.clone(), end.clone());
+                                ws.update(cx, |_, cx| {
+                                    cx.emit(WorkspaceEvent::ShowTurnDiff { thread, end, path })
+                                });
+                            },
+                        )
+                            as std::rc::Rc<dyn Fn(Option<String>, &mut Window, &mut App)>
+                    });
                     // Undo asks the same confirmation the turn-end controls do; its popover
                     // opens on the row's undo button.
                     let undo = (!at.busy
@@ -2562,7 +2590,7 @@ impl ThreadView {
                             .pt(px(2.))
                             .pb(px(10.))
                             .gap(px(6.))
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(muted)
                             .child(
                                 Button::new(("copy-turn", ix))
@@ -2657,7 +2685,7 @@ impl ThreadView {
                             .id(("reasoning", ix))
                             .test_support()
                             .gap_1()
-                            .text_sm()
+                            .text_size(to_rems(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .cursor_pointer()
                             .child(
@@ -2835,7 +2863,7 @@ impl ThreadView {
                                 .test_support()
                                 .gap_2()
                                 .py_1()
-                                .text_sm()
+                                .text_size(to_rems(text::LABEL))
                                 .text_color(muted)
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.foreground))
@@ -2942,7 +2970,7 @@ impl ThreadView {
                             .px_2()
                             .py_1()
                             .rounded(px(fluent::control(theme.radius.as_f32())))
-                            .text_sm()
+                            .text_size(to_rems(text::LABEL))
                             .when(has_output, |el| {
                                 el.cursor_pointer()
                                     .hover(|s| s.bg(theme.list_hover))
@@ -2981,7 +3009,7 @@ impl ThreadView {
                                         .when(code, |el| {
                                             el.font_family(theme.mono_font_family.clone())
                                         })
-                                        .text_xs()
+                                        .text_size(to_rems(text::META))
                                         .text_color(theme.muted_foreground)
                                         .child(detail),
                                 ),
@@ -3004,7 +3032,7 @@ impl ThreadView {
                                 .rounded(px(fluent::surface(theme.radius.as_f32())))
                                 .bg(theme.muted)
                                 .font_family(theme.mono_font_family.clone())
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .whitespace_normal()
                                 .child(output),
                         )
@@ -3109,7 +3137,7 @@ impl ThreadView {
                                 .px(px(8.))
                                 .py(px(6.))
                                 .mx(px(-8.))
-                                .rounded(px(fluent::control(8.)))
+                                .rounded(px(fluent::control(radius::BUTTON)))
                                 .when(expandable, |el| {
                                     el.cursor_pointer()
                                         .hover(|s| s.bg(theme.list_hover))
@@ -3122,14 +3150,14 @@ impl ThreadView {
                                         .min_w_0()
                                         .child(
                                             div()
-                                                .text_size(px(13.5))
+                                                .text_size(px(text::TITLE))
                                                 .font_medium()
                                                 .truncate()
                                                 .child(sub.label),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(12.5))
+                                                .text_size(px(text::BODY))
                                                 .text_color(muted)
                                                 .truncate()
                                                 .child(sub.detail),
@@ -3139,7 +3167,7 @@ impl ThreadView {
                                     el.child(
                                         div()
                                             .flex_none()
-                                            .text_xs()
+                                            .text_size(to_rems(text::META))
                                             .text_color(muted)
                                             .child(crate::time::elapsed(d)),
                                     )
@@ -3164,7 +3192,7 @@ impl ThreadView {
                                     .pl(px(32.))
                                     .pr(px(28.))
                                     .pb(px(2.))
-                                    .text_size(px(12.5))
+                                    .text_size(px(text::BODY))
                                     .line_height(relative(1.45))
                                     .text_color(muted)
                                     .line_clamp(2)
@@ -3199,7 +3227,7 @@ impl ThreadView {
                             .id(("wake", ix))
                             .test_support()
                             .gap(px(8.))
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .text_color(muted)
                             .cursor_pointer()
                             .hover(|s| s.text_color(theme.foreground))
@@ -3227,7 +3255,7 @@ impl ThreadView {
                                 .border_color(theme.foreground.opacity(0.07))
                                 .max_h(px(320.))
                                 .overflow_y_scroll()
-                                .text_size(px(12.5))
+                                .text_size(px(text::BODY))
                                 .line_height(relative(1.5))
                                 .text_color(muted)
                                 .whitespace_normal()
@@ -3247,7 +3275,7 @@ impl ThreadView {
                         .justify_center()
                         .gap(px(6.))
                         .py_1()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(theme.muted_foreground)
                         .child(text.replace("**", "").replace('`', ""))
                         .when(turn, |el| el.child(turn_actions(ix))),
@@ -3274,7 +3302,7 @@ impl ThreadView {
                                 } else {
                                     palette::red(cx).opacity(0.08)
                                 })
-                                .text_sm()
+                                .text_size(to_rems(text::LABEL))
                                 .child(text),
                         )
                         .when(turn, |el| el.child(turn_actions(ix))),
@@ -3306,7 +3334,7 @@ impl ThreadView {
                                 .min_w_0()
                                 .gap(px(8.))
                                 .py_1()
-                                .text_sm()
+                                .text_size(to_rems(text::LABEL))
                                 // What the agent said, in its words.
                                 .tooltip(move |window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(words.clone())
@@ -3368,7 +3396,7 @@ impl ThreadView {
                             .test_support()
                             .gap(px(8.))
                             .py_2()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(muted)
                             .tooltip(|window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(
@@ -3468,7 +3496,7 @@ impl ThreadView {
                                     .px(px(8.))
                                     .py(px(6.))
                                     .mx(px(-8.))
-                                    .rounded(px(fluent::control(8.)))
+                                    .rounded(px(fluent::control(radius::BUTTON)))
                                     .tooltip(move |window, cx| {
                                         gpui_kit::component::tooltip::Tooltip::new(tip)
                                             .build(window, cx)
@@ -3486,7 +3514,7 @@ impl ThreadView {
                                             .child(
                                                 h_flex()
                                                     .gap(px(6.))
-                                                    .text_size(px(13.5))
+                                                    .text_size(px(text::TITLE))
                                                     .min_w_0()
                                                     .child(
                                                         div()
@@ -3504,7 +3532,7 @@ impl ThreadView {
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(12.5))
+                                                    .text_size(px(text::BODY))
                                                     .text_color(muted)
                                                     .truncate()
                                                     .child(state.label()),
@@ -3530,8 +3558,8 @@ impl ThreadView {
                                 .gap(px(8.))
                                 .px_2()
                                 .py_2()
-                                .rounded(px(fluent::control(6.)))
-                                .text_xs()
+                                .rounded(px(fluent::control(radius::CONTROL)))
+                                .text_size(to_rems(text::META))
                                 .text_color(muted)
                                 .tooltip(move |window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(tip)
@@ -3602,12 +3630,23 @@ impl ThreadView {
                         cx.open_url(&url);
                     }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
                 });
+                let send_failure = at
+                    .workspace
+                    .read(cx)
+                    .pr_checks_offered(&thread, card.url.as_deref())
+                    .then(|| {
+                        let (ws, thread) = (ws.clone(), thread.clone());
+                        std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                            ws.update(cx, |ws, cx| ws.pr_checks_send(&thread, cx));
+                        }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+                    });
                 let actions = crate::pr_card::Actions {
                     merge,
                     resolve: Some(resolve),
                     open,
                     rerun,
                     notes,
+                    send_failure,
                 };
                 column(
                     div()
@@ -3767,7 +3806,7 @@ impl ThreadView {
         });
         let note = |text: String| {
             div()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .line_height(relative(1.45))
                 .text_color(muted)
                 .child(text)
@@ -3776,7 +3815,7 @@ impl ThreadView {
         let files: AnyElement = match &c.files {
             Files::Checking => h_flex()
                 .gap(px(8.))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(muted)
                 .child(Spinner::new().xsmall())
                 .child("Checking which files changed…")
@@ -3806,7 +3845,7 @@ impl ThreadView {
                             };
                             h_flex()
                                 .gap(px(8.))
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .child(
                                     div()
                                         .flex_1()
@@ -3820,7 +3859,7 @@ impl ThreadView {
                         .when(changes.len() > FILES_SHOWN, |el| {
                             el.child(
                                 div()
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .text_color(muted)
                                     .child(format!("and {} more", changes.len() - FILES_SHOWN)),
                             )
@@ -3848,7 +3887,7 @@ impl ThreadView {
             .gap(px(10.))
             .child(
                 div()
-                    .text_size(px(13.5))
+                    .text_size(px(text::TITLE))
                     .font_medium()
                     .text_color(theme.foreground)
                     .child(title),
@@ -3962,6 +4001,10 @@ impl ThreadView {
             .and_then(|l| l.permissions.first())
             .and_then(|p| match &p.prompt {
                 Some(trek_agents::Prompt::Questions(q)) => Some((p.request_id.clone(), q.clone())),
+                Some(trek_agents::Prompt::Secret { name, why }) => Some((
+                    p.request_id.clone(),
+                    vec![trek_agents::Prompt::secret_question(name, why)],
+                )),
                 _ => None,
             });
         let Some((request_id, questions)) = pending else {
@@ -4026,14 +4069,14 @@ impl ThreadView {
                     .gap(px(6.))
                     .child(
                         div()
-                            .text_size(px(13.5))
+                            .text_size(px(text::TITLE))
                             .font_medium()
                             .child(q.question.clone()),
                     )
                     .when(q.multi, |el| {
                         el.child(
                             div()
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(theme.muted_foreground)
                                 .child("Choose any that apply."),
                         )
@@ -4055,7 +4098,7 @@ impl ThreadView {
                             .py(px(7.))
                             .gap(px(10.))
                             .items_start()
-                            .rounded(px(fluent::control(8.)))
+                            .rounded(px(fluent::control(radius::BUTTON)))
                             .border_1()
                             .border_color(if on {
                                 accent.opacity(0.7)
@@ -4072,7 +4115,7 @@ impl ThreadView {
                                     .size(px(14.))
                                     .flex_none()
                                     .when(!multi, |el| el.rounded_full())
-                                    .when(multi, |el| el.rounded(px(3.)))
+                                    .when(multi, |el| el.rounded(px(radius::TAG)))
                                     .border_1()
                                     .border_color(if on {
                                         accent
@@ -4087,6 +4130,7 @@ impl ThreadView {
                                             div()
                                                 .size(px(7.))
                                                 .when(!multi, |d| d.rounded_full())
+                                                // scale: ok, the box's mark, a glyph
                                                 .when(multi, |d| d.rounded(px(1.)))
                                                 .bg(accent),
                                         )
@@ -4096,11 +4140,11 @@ impl ThreadView {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().text_size(px(13.)).child(label.clone()))
+                                    .child(div().text_size(px(text::BODY)).child(label.clone()))
                                     .when(!desc.is_empty(), |el| {
                                         el.child(
                                             div()
-                                                .text_xs()
+                                                .text_size(to_rems(text::META))
                                                 .line_height(relative(1.45))
                                                 .text_color(theme.muted_foreground)
                                                 .child(desc.clone()),
@@ -4128,16 +4172,19 @@ impl ThreadView {
                     }))
                     .when_some(q.secret.then(|| fields.next()).flatten(), |el, field| {
                         el.child(
-                            Input::new(&field)
-                                .small()
-                                .mask_toggle()
-                                .when(fluent::WINDOWS, |i| i.rounded(px(fluent::CONTROL_RADIUS))),
-                        )
-                        .child(
-                            div().text_xs().text_color(theme.muted_foreground).child(
+                        Input::new(&field)
+                            .small()
+                            .mask_toggle()
+                            .when(fluent::WINDOWS, |i| i.rounded(px(fluent::CONTROL_RADIUS))),
+                    )
+                    .child(
+                        div()
+                            .text_size(to_rems(text::META))
+                            .text_color(theme.muted_foreground)
+                            .child(
                                 "Private: Trek sends it to the agent without showing or saving it.",
                             ),
-                        )
+                    )
                     })
             }));
         // Tall enough that a few questions show their options whole; a longer card scrolls.
@@ -4157,14 +4204,14 @@ impl ThreadView {
             .max_h(tall)
             .gap(px(12.))
             .p(px(14.))
-            .rounded(px(fluent::surface(14.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .border_1()
             .border_color(fluent::stroke(theme.foreground.opacity(0.12), cx))
             .bg(theme.secondary)
             .child(
                 h_flex()
                     .gap_2()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .child(
                         Icon::new(crate::assets::Lucide::MessageSquare)
                             .small()
@@ -4188,10 +4235,12 @@ impl ThreadView {
             .child(
                 h_flex()
                     .gap_2()
+                    // It wraps, so the buttons keep their place in a narrow card.
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
+                            .min_w_0()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(hint),
                     )
@@ -4258,14 +4307,14 @@ impl ThreadView {
             .max_h(px(440.))
             .gap(px(10.))
             .p(px(14.))
-            .rounded(px(fluent::surface(14.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .border_1()
             .border_color(fluent::stroke(palette::indigo(cx).opacity(0.45), cx))
             .bg(theme.secondary)
             .child(
                 h_flex()
                     .gap_2()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .child(
                         Icon::new(crate::assets::Lucide::ListChecks)
                             .small()
@@ -4287,7 +4336,7 @@ impl ThreadView {
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child("Nothing has been changed yet."),
                     )
@@ -4335,6 +4384,9 @@ impl ThreadView {
                 trek_agents::Prompt::Plan(plan) => {
                     self.plan_card(id.clone(), request_id, plan, agent, cx)
                 }
+                trek_agents::Prompt::Secret { name, why } => {
+                    self.secret_card(id.clone(), request_id, name, why, agent, window, cx)
+                }
             };
             return Some(
                 h_flex()
@@ -4354,7 +4406,23 @@ impl ThreadView {
         if let Some(p) = live.permissions.first().cloned() {
             let agent = thread.agent.display_name();
             let rid_anim = p.request_id.clone();
+            let rise = ws.motion(cx);
             let ws_handle = self.workspace.clone();
+            // What the user's rules have to do with this card, and the one it could add.
+            let cwd = thread.cwd.clone();
+            let rules_now = &ws.settings.permissions.rules;
+            let asked_by = p.call.as_ref().and_then(|call| {
+                let verdict = trek_core::permission_rules::decide(rules_now, call, cwd.as_deref())?;
+                (verdict.action == trek_core::permission_rules::RuleAction::Ask)
+                    .then(|| rules_now[verdict.rule].shown())
+            });
+            let draft = p
+                .call
+                .as_ref()
+                .filter(|_| asked_by.is_none())
+                .and_then(|call| trek_core::permission_rules::allow_draft(call, cwd.as_deref()));
+            let writing = self.always_allow_row(&p, cwd.as_deref(), cx);
+            let open_id = p.request_id.clone();
             let respond = move |decision: Decision| {
                 let ws = ws_handle.clone();
                 let id = id.clone();
@@ -4388,7 +4456,7 @@ impl ThreadView {
                             .child(
                                 h_flex()
                                     .gap_2()
-                                    .text_sm()
+                                    .text_size(to_rems(text::LABEL))
                                     .child(
                                         Icon::new(crate::assets::Lucide::ShieldCheck)
                                             .small()
@@ -4408,14 +4476,26 @@ impl ThreadView {
                                         .rounded(px(fluent::control(theme.radius.as_f32())))
                                         .bg(theme.muted)
                                         .font_family(theme.mono_font_family.clone())
-                                        .text_xs()
+                                        .text_size(to_rems(text::META))
                                         .child(p.detail.clone()),
                                 )
                             })
+                            .when_some(asked_by.clone(), |el, rule| {
+                                el.child(
+                                    div()
+                                        .text_size(to_rems(text::META))
+                                        .text_color(theme.muted_foreground)
+                                        .child(format!(
+                                            "Your rule asks about this every time: {rule}."
+                                        )),
+                                )
+                            })
+                            .children(writing)
                             .child(
                                 h_flex()
                                     .gap_2()
                                     .justify_end()
+                                    .flex_wrap()
                                     .child(
                                         Button::new("deny")
                                             .small()
@@ -4424,28 +4504,58 @@ impl ThreadView {
                                             .label("Deny")
                                             .on_click(respond(Decision::Deny)),
                                     )
-                                    .child(
-                                        Button::new("allow-session")
-                                            .small()
-                                            .map(|b| chip_button(b, cx))
-                                            .label("Always allow")
-                                            .on_click(respond(Decision::AllowForSession)),
+                                    .when(asked_by.is_none(), |el| {
+                                        el.child(
+                                            Button::new("allow-session")
+                                                .small()
+                                                .map(|b| chip_button(b, cx))
+                                                .label("Allow for session")
+                                                .on_click(respond(Decision::AllowForSession)),
+                                        )
+                                    })
+                                    .when_some(
+                                        draft.filter(|_| self.always_allow.is_none()),
+                                        |el, draft| {
+                                            el.child(
+                                                Button::new("always-allow")
+                                                    .small()
+                                                    .map(|b| chip_button(b, cx))
+                                                    .label("Always allow…")
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.open_always_allow(
+                                                                open_id.clone(),
+                                                                draft.clone(),
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        },
+                                                    )),
+                                            )
+                                        },
                                     )
                                     .child(
                                         Button::new("allow")
                                             .small()
-                                            .map(|b| go_button(b, false, cx))
+                                            .map(|b| {
+                                                if self.always_allow.is_some() {
+                                                    chip_button(b, cx)
+                                                } else {
+                                                    go_button(b, false, cx)
+                                                }
+                                            })
                                             .label("Allow")
                                             .on_click(respond(Decision::Allow)),
                                     ),
                             ),
                     )
                     // Keyed on the request, not the transcript revision, so streaming doesn't replay it.
+                    // With reduced motion it fades in where it stands.
                     .with_animation(
                         SharedString::from(format!("perm-in-{rid_anim}")),
                         Animation::new(std::time::Duration::from_millis(220))
                             .with_easing(ease_out_quint()),
-                        |el, t| el.opacity(t).mt(px(10. * (1. - t))),
+                        move |el, t| el.opacity(t).mt(px(if rise { 10. * (1. - t) } else { 0. })),
                     )
                     .into_any_element(),
             );
@@ -4790,7 +4900,11 @@ struct RowContext {
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-support"))]
-        crate::test_support::rendered("ThreadView");
+        crate::test_support::rendered(if self.scope == Scope::Beside {
+            "ThreadView:beside"
+        } else {
+            "ThreadView"
+        });
         self.draws += 1;
         let rows = self.rows(cx);
         let footer = self.live_footer(window, cx);

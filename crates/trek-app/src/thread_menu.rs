@@ -4,6 +4,7 @@
 //! copies (`copy_text`), which the menus, the shortcuts and the palette share.
 
 use crate::keys::{self, Id};
+use crate::scale::{text, to_rems};
 use crate::workspace::{Workspace, WorkspaceEvent};
 use crate::worktree_ui::Leave;
 use gpui_kit::component::WindowExt as _;
@@ -56,7 +57,8 @@ impl Facts {
             pinned: t.pinned_at.is_some(),
             cwd: t.cwd.clone(),
             resume: resume_command(t),
-            in_worktree: t.worktree.is_some(),
+            // One another app keeps never goes with the thread, so there's nothing to ask.
+            in_worktree: t.worktree.is_some() && ws.worktree_owner(&t.id).is_none(),
             archive_note: ws.sub_agents_note(&t.id, "archived"),
             remote: crate::machines::is_remote(&t.id),
         })
@@ -212,7 +214,7 @@ fn entry(
                 el.child(
                     div()
                         .flex_none()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(cx.theme().muted_foreground)
                         .child(hint),
                 )
@@ -233,6 +235,16 @@ pub fn open_in_new_window(ws: &WeakEntity<Workspace>, id: &str) -> PopupMenuItem
             crate::thread_window::open(ws, &id, cx);
         }
     })
+}
+
+/// Beside the thread on screen, in the main window (`workspace::split`).
+pub fn open_beside(ws: &WeakEntity<Workspace>, id: &str) -> PopupMenuItem {
+    let (ws, id) = (ws.clone(), id.to_string());
+    entry("thread-open-beside", "Open beside", None)
+        .icon(crate::assets::Lucide::Columns2)
+        .on_click(move |_, _, cx| {
+            let _ = ws.update(cx, |ws, cx| ws.open_beside(&id, cx));
+        })
 }
 
 pub fn fork(ws: &WeakEntity<Workspace>, id: &str) -> PopupMenuItem {

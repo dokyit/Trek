@@ -136,9 +136,10 @@ fn the_data_view_shows_the_values_as_a_table_and_back() {
 fn a_narrow_window_still_draws_every_type() {
     run(async |cx| {
         let trek = open(cx);
-        trek.window(cx, |window, _| {
-            window.resize(gpui_kit::size(gpui_kit::px(560.), gpui_kit::px(900.)))
-        });
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(560.), gpui_kit::px(900.)),
+        );
         for (kind, answer) in trek_agents::mock::VIZ_GALLERY {
             let (_, body, _) = PARTS.iter().find(|p| p.0 == *kind).unwrap();
             answered(&trek, cx, answer);
@@ -331,9 +332,10 @@ fn an_answer_with_visualizations_keeps_its_rows_apart() {
         let trek = open(cx);
         // With motion, as on screen: the marks arrive over the first frames.
         cx.update(|cx| cx.set_reduce_motion(false));
-        trek.window(cx, |window, _| {
-            window.resize(gpui_kit::size(gpui_kit::px(1440.), gpui_kit::px(1000.)))
-        });
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(1440.), gpui_kit::px(1000.)),
+        );
         let id = trek.send(cx, "mock:visualization");
         trek.wait_done(cx, &id, trek_core::RunState::Idle).await;
         for _ in 0..3 {

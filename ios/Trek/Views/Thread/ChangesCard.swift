@@ -11,6 +11,7 @@ struct ChangesCard: View {
     /// The folders folded, by path ("" for the top folder).
     @Binding var folded: Set<String>
     @State private var diff: DiffRequest?
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var groups: [(dir: String, files: [ChangedFile])] { Self.folders(changes.files) }
     private var allFolded: Bool { groups.allSatisfy { folded.contains($0.dir) } }
@@ -34,7 +35,8 @@ struct ChangesCard: View {
         .background(Trek.foreground.opacity(0.025), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Trek.foreground.opacity(0.1), lineWidth: 0.75))
         .sheet(item: $diff) { request in
-            DiffSheet(target: .thread(threadID), files: changes.files, opening: request.path)
+            // In the card's order: going from file to file follows what was just read down.
+            DiffSheet(target: .thread(threadID), files: groups.flatMap(\.files), opening: request.path)
         }
     }
 
@@ -49,19 +51,20 @@ struct ChangesCard: View {
     }
 
     private var header: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 5) {
+        let big = typeSize.isAccessibilitySize
+        return BesideOrOver(spacing: big ? 2 : 6) {
+            BesideOrOver(spacing: big ? 2 : 5) {
                 Text("CHANGED FILES (\(changes.files.count))").tracking(0.3)
                 if changes.added + changes.removed > 0 {
-                    Text("·")
+                    if !big { Text("·") }
                     LineCounts(added: changes.added, removed: changes.removed, quiet: false)
                 }
             }
             .font(.ui(.caption).weight(.medium))
             .foregroundStyle(Trek.muted)
-            .lineLimit(1)
+            .lineLimit(big ? 2 : 1)
             .layoutPriority(1)
-            Spacer(minLength: 4)
+            if !big { Spacer(minLength: 4) }
             // The buttons keep their words when there's room for them, and are icons when not.
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 2) { foldButton(labelled: true); diffButton(labelled: true) }
@@ -70,6 +73,7 @@ struct ChangesCard: View {
         }
         .padding(.leading, 12)
         .padding(.trailing, 4)
+        .padding(.top, big ? 8 : 0)
         .frame(minHeight: 40)
     }
 
@@ -120,7 +124,7 @@ struct ChangesCard: View {
                     .frame(width: 12)
                 FolderIcon(path: dir.isEmpty ? rootName : dir, open: open, size: 15)
                 Text(dir.isEmpty ? rootName : dir)
-                    .lineLimit(1)
+                    .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
                     .truncationMode(.middle)
                 if !open {
                     Text("\(count)").foregroundStyle(Trek.muted.opacity(0.7))
@@ -141,20 +145,25 @@ struct ChangesCard: View {
         Button {
             diff = DiffRequest(path: f.path)
         } label: {
-            HStack(spacing: 8) {
+            let big = typeSize.isAccessibilitySize
+            HStack(alignment: big ? .top : .center, spacing: 8) {
                 FileBadge(path: f.path, size: 16)
-                Text(f.name)
-                    .font(.ui(.subheadline))
-                    .strikethrough(f.status == .deleted)
-                    .foregroundStyle(f.status == .deleted ? Trek.muted : Trek.foreground.opacity(0.92))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .layoutPriority(1)
-                FileTag(file: f)
-                Spacer(minLength: 6)
-                FileLines(file: f)
+                    .padding(.top, big ? 8 : 0)
+                BesideOrOver(spacing: big ? 2 : 8) {
+                    Text(f.name)
+                        .font(.ui(.subheadline))
+                        .strikethrough(f.status == .deleted)
+                        .foregroundStyle(f.status == .deleted ? Trek.muted : Trek.foreground.opacity(0.92))
+                        .lineLimit(big ? 3 : 1)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
+                    FileTag(file: f)
+                    if !big { Spacer(minLength: 6) }
+                    FileLines(file: f)
+                }
             }
-            .padding(.leading, 30)
+            .padding(.vertical, big ? 4 : 0)
+            .padding(.leading, big ? 12 : 30)
             .padding(.trailing, 8)
             .frame(minHeight: 34)
             .contentShape(Rectangle())

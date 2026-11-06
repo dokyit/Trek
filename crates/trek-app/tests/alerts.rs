@@ -63,6 +63,7 @@ fn ask(trek: &Trek, cx: &mut TestAppContext, id: &str) {
         title: "Run command".into(),
         detail: "make deploy".into(),
         prompt: None,
+        call: None,
     };
     trek.update(cx, |ws, cx| {
         ws.apply_events(
@@ -139,13 +140,13 @@ fn alerts_follow_focus_and_what_is_on_screen() {
         ask(&trek, cx, &away);
         assert_eq!(
             said.borrow().last().map(String::as_str),
-            Some("Needs your approval: Run command")
+            Some("Waiting: run make deploy? · Fix the login bug")
         );
         assert_eq!(
             banners(cx),
             [(
                 format!("trek-attention-{away}"),
-                "Needs your approval: Run command".to_string()
+                "Waiting: run make deploy? · Fix the login bug".to_string()
             )]
         );
         assert_eq!(sounds(), 1);

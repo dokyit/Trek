@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
-// Trek: vendored for the activation-policy patch in platform.rs and the editing keys a native
-// subview gets in window.rs. Its deprecated cocoa calls
-// warned silently from crates.io (lints capped); keep them quiet under the workspace's -D warnings.
+// Trek: vendored for the activation-policy patch in platform.rs, the editing keys a native
+// subview gets in window.rs, and frames on demand (window.rs, `FRAMES_IDLE_LIMIT`). Its deprecated
+// cocoa calls warned silently from crates.io (lints capped); keep them quiet under the workspace's -D warnings.
 #![allow(warnings)]
 //! macOS platform implementation for GPUI.
 //!

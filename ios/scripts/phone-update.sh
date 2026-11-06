@@ -189,6 +189,8 @@ ours=()   # Xcode's cached profiles for this app
 cached=""
 for f in "$PROFILES"/*.mobileprovision(N); do
   read -r exp app <<< "$(profile_expiry "$f")"
+  # The Live Activity's profile lapses with the app's, and goes aside with it.
+  [[ "$app" == *".$BUNDLE.Activity" ]] && { ours+=("$f"); continue }
   [[ "$app" == *".$BUNDLE" ]] || continue
   ours+=("$f")
   [[ -z "$cached" ]] || (( exp > cached )) && cached=$exp
@@ -320,6 +322,18 @@ if ! (cd "$SRC/ios" && nice -n 10 xcodebuild -project Trek.xcodeproj -scheme Tre
   fail "Building Trek $VERSION on your Mac failed${first:+: $first}" "build of Trek $VERSION failed"
 fi
 APP="$DD/Build/Products/Debug-iphoneos/Trek.app"
+# The Live Activity inside it, as install-device.sh does (sources from before it have no script).
+ACTIVITY_SCRIPT="$SRC/ios/scripts/embed-activity.sh"
+if [[ -f "$ACTIVITY_SCRIPT" && "${ACTIVITY:-1}" != 0 ]]; then
+  if nice -n 10 sh "$ACTIVITY_SCRIPT" "$APP" "$DD" -destination "id=$UDID" -allowProvisioningUpdates \
+      DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE.Activity" CODE_SIGN_STYLE=Automatic \
+      MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD" > "$TMP/activity.log" 2>&1; then
+    log "built the Live Activity into it"
+  else
+    log "the Live Activity didn't build (installing Trek without it): $(grep -m1 -iE "error" "$TMP/activity.log" | cut -c1-140)"
+    sh "$ACTIVITY_SCRIPT" --remove "$APP" >/dev/null 2>&1 || true
+  fi
+fi
 # Trek Driver inside it, as install-device.sh does (sources from before it have no build-driver.sh).
 if [[ -f "$SRC/ios/scripts/build-driver.sh" && "${DRIVER:-1}" != 0 ]]; then
   rm -rf "$STATE/driver.new"
@@ -341,12 +355,26 @@ fi
 # the same installd, but that wasn't tried on one. So the app is opened again below if it was open,
 # and the iPhone that asked was told ("Installing… Trek will close and open again").
 event "installing $VERSION"
-if (( VIA_MUX )) && "$TREK_MCP" phone-device install "$APP" --udid "$UDID" > "$TMP/install.log" 2>&1; then
-  log "installed over usbmuxd (no Xcode)"
-elif ! xcrun devicectl device install app --device "$UDID" "$APP" > "$TMP/install.log" 2>&1; then
-  said=$(grep -iE "error" "$TMP/install.log" | head -2 | tr '\n' ' ')
-  fail "Your Mac couldn't install Trek on the iPhone: unlock it, and keep it plugged in or on the same Wi-Fi" \
-    "install failed: $said"
+install_app() {
+  if (( VIA_MUX )) && "$TREK_MCP" phone-device install "$APP" --udid "$UDID" > "$TMP/install.log" 2>&1; then
+    log "installed over usbmuxd (no Xcode)"
+  else
+    xcrun devicectl device install app --device "$UDID" "$APP" > "$TMP/install.log" 2>&1
+  fi
+}
+if ! install_app; then
+  installed=0
+  if [[ -d "$APP/PlugIns/TrekActivity.appex" ]]; then
+    # A free team's three apps may have no room for the extension: Trek itself comes first.
+    log "the iPhone refused the install: trying without the Live Activity"
+    sh "$ACTIVITY_SCRIPT" --remove "$APP" >/dev/null 2>&1 || true
+    install_app && installed=1
+  fi
+  if (( ! installed )); then
+    said=$(grep -iE "error" "$TMP/install.log" | head -2 | tr '\n' ' ')
+    fail "Your Mac couldn't install Trek on the iPhone: unlock it, and keep it plugged in or on the same Wi-Fi" \
+      "install failed: $said"
+  fi
 fi
 read -r exp _ <<< "$(profile_expiry "$APP/embedded.mobileprovision")"
 {

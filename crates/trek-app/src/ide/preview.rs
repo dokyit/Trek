@@ -11,6 +11,7 @@
 //! downloads.
 
 use crate::assets::Lucide;
+use crate::scale::text;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
@@ -526,7 +527,7 @@ impl PreviewView {
             .items_center()
             .border_b_1()
             .border_color(theme.border)
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .child(
                 div()
                     .id("ide-preview-name")
@@ -580,7 +581,7 @@ impl PreviewView {
                     .test_support()
                     .max_w(px(480.))
                     .text_center()
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .child(text),
             )
             .when_some(hint, |el, hint| {
@@ -588,7 +589,7 @@ impl PreviewView {
                     div()
                         .max_w(px(480.))
                         .text_center()
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(hint),
                 )

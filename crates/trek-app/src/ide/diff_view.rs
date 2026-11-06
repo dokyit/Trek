@@ -4,16 +4,19 @@
 //! removed ones on red, and the unchanged stretches between hunks folded ("⋯ 42 unchanged
 //! lines", a click opens them). Side by side on the toolbar's toggle. A Review's files and hunks
 //! each have Undo and Keep (`Workspace::undo_files`, `keep_hunk`, …); Source Control's files
-//! open in the editor from their header.
+//! open in the editor from their header, and their hunks stage and unstage one at a time. Line
+//! comments, the keys and viewed files are `diff_review`'s.
 //!
 //! The hunks are read off the main thread: a Review's against its baseline
 //! (`checkpoint::Repo::file_diff`, the same cut the editor's hunk bar keeps and undoes), git's
 //! with `git diff`. They're read again when the review moves or files change.
 
 use super::IdeWorkbench;
+use crate::diff_review::{self, Card, DiffReview, Draft, Nav, ReviewHost};
 use crate::fluent;
 use crate::palette;
-use crate::workspace::{Workspace, WorkspaceEvent};
+use crate::scale::{radius, text};
+use crate::workspace::{Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -99,6 +102,12 @@ enum Row {
         lines: u32,
     },
     Note(SharedString),
+    /// A row a comment's card covers (`diff_review::card_row`).
+    Card {
+        card: Card,
+        part: usize,
+        rows: usize,
+    },
 }
 
 /// How a line reads on screen: tabs as four spaces, no carriage return, cut when very long.
@@ -323,6 +332,117 @@ fn build_rows(
     out
 }
 
+/// What `rows` (no cards among them yet) are, to move around on.
+fn nav_of(rows: &[Row], files: &[DiffFile]) -> Vec<Nav> {
+    let mut file = 0;
+    // The hunk a line is in, by its numbers: opened out of a fold, it isn't in one.
+    let hunk_of = |file: usize, old: Option<u32>, new: Option<u32>| -> Option<usize> {
+        files.get(file)?.diff.hunks.iter().position(|h| {
+            let (first_old, first_new, old_after, new_after) = span(h);
+            new.is_some_and(|n| first_new <= n && n < new_after)
+                || old.is_some_and(|o| first_old <= o && o < old_after)
+        })
+    };
+    rows.iter()
+        .map(|row| match row {
+            Row::File(f) => {
+                file = *f;
+                Nav::File { file }
+            }
+            Row::Hunk { file, hunk, .. } => Nav::Hunk {
+                file: *file,
+                hunk: *hunk,
+            },
+            Row::Line { kind, old, new, .. } => Nav::Line {
+                file,
+                hunk: hunk_of(file, *old, *new),
+                old: *old,
+                new: *new,
+                changed: *kind != Kind::Ctx,
+            },
+            Row::Pair { left, right } => {
+                let (old, new) = (
+                    left.as_ref().map(|(n, ..)| *n),
+                    right.as_ref().map(|(n, ..)| *n),
+                );
+                Nav::Line {
+                    file,
+                    hunk: hunk_of(file, old, new),
+                    old,
+                    new,
+                    changed: [left, right]
+                        .into_iter()
+                        .flatten()
+                        .any(|(_, k, _)| *k != Kind::Ctx),
+                }
+            }
+            _ => Nav::Skip,
+        })
+        .collect()
+}
+
+/// The lines of a row as a diff has them, `+`, `-` or a space first.
+fn row_text(row: &Row) -> Vec<String> {
+    let line = |kind: Kind, text: &SharedString| match kind {
+        Kind::Add => format!("+{text}"),
+        Kind::Del => format!("-{text}"),
+        Kind::Ctx => format!(" {text}"),
+    };
+    match row {
+        Row::Line { kind, text, .. } => vec![line(*kind, text)],
+        // Unchanged, both sides say the same: once is enough.
+        Row::Pair {
+            left: Some((_, Kind::Ctx, text)),
+            right: Some(_),
+        } => vec![line(Kind::Ctx, text)],
+        Row::Pair { left, right } => [left, right]
+            .into_iter()
+            .flatten()
+            .map(|(_, kind, text)| line(*kind, text))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// What a file's diff says (`diff_review::sig_of`): a binary one by its counts.
+fn file_sig(f: &DiffFile) -> String {
+    let bodies = f.diff.hunks.iter().flat_map(|h| h.body.lines());
+    if f.diff.hunks.is_empty() {
+        let counts = format!("{}+{}-{}", f.status, f.added, f.removed);
+        return diff_review::sig_of(std::iter::once(counts.as_str()));
+    }
+    diff_review::sig_of(bodies)
+}
+
+/// Take a hunk into the index (`reverse`: back out of it).
+fn apply_to_index(top: &Path, patch: &str, reverse: bool) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut args = vec!["apply", "--cached", "--recount", "--whitespace=nowarn"];
+    if reverse {
+        args.push("--reverse");
+    }
+    args.push("-");
+    let mut child = super::git::command(top)
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(patch.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
 /// The text of a file on the new side, as lines: `None` when it's binary or too large.
 fn read_lines(bytes: Option<Vec<u8>>) -> Result<Vec<String>, &'static str> {
     let Some(bytes) = bytes else {
@@ -488,6 +608,8 @@ pub struct DiffView {
     collapsed: HashSet<String>,
     /// Unchanged stretches opened: (file, its first new line).
     opened: HashSet<(String, u32)>,
+    /// Files marked viewed that were opened again all the same.
+    viewed_open: HashSet<String>,
     split: bool,
     loading: bool,
     error: Option<String>,
@@ -496,6 +618,12 @@ pub struct DiffView {
     run: u64,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
+    /// Comments, the cursor and the keys (`diff_review`).
+    review: DiffReview,
+    /// What each row is, to move around on.
+    nav: Vec<Nav>,
+    /// The cards among the rows (`diff_review::card_ends`).
+    cards: Vec<(Card, usize)>,
     _load: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -508,7 +636,12 @@ impl DiffView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&workspace, |this, _, cx| this.maybe_reload(cx)),
+            cx.observe(&workspace, |this, ws, cx| {
+                this.maybe_reload(cx);
+                if ws.read(cx).review_notes_epoch != this.review.seen_epoch {
+                    this.rebuild(cx);
+                }
+            }),
             cx.subscribe(&workspace, |this, _, event: &WorkspaceEvent, cx| {
                 if let (WorkspaceEvent::ReviewChanged { id }, DiffSource::Review { thread }) =
                     (event, &this.source)
@@ -527,6 +660,7 @@ impl DiffView {
             rows: Default::default(),
             collapsed: HashSet::new(),
             opened: HashSet::new(),
+            viewed_open: HashSet::new(),
             split: false,
             loading: true,
             error: None,
@@ -534,6 +668,9 @@ impl DiffView {
             run: 0,
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
+            review: DiffReview::default(),
+            nav: vec![],
+            cards: vec![],
             _load: None,
             _subscriptions: subscriptions,
         };
@@ -643,28 +780,289 @@ impl DiffView {
                     Ok(files) => {
                         this.files = files;
                         this.error = None;
+                        this.drop_stale_viewed(cx);
                     }
                     Err(e) => this.error = Some(e),
                 }
                 this.rebuild(cx);
+                if this.review.cursor.is_none() {
+                    this.review.cursor = diff_review::first_stop(&this.nav);
+                }
             });
         }));
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        self.rows = std::rc::Rc::new(build_rows(
-            &self.files,
-            &self.collapsed,
-            &self.opened,
-            self.split,
-        ));
+        let moved = self.compute_rows(cx);
+        if !moved.is_empty() {
+            if let Some(key) = self.notes_key(cx) {
+                self.workspace
+                    .update(cx, |ws, cx| ws.move_comments(&key, &moved, cx));
+            }
+        }
+        self.review.seen_epoch = self.workspace.read(cx).review_notes_epoch;
+        self.take_reveal();
         cx.notify();
     }
 
+    /// The rows as things stand (comments' cards among them, files marked viewed folded); what
+    /// moved under its comments.
+    fn compute_rows(&mut self, cx: &App) -> Vec<(u64, u32, u32)> {
+        let was = self.review.remember(&self.nav);
+        let drafts = self.notes_key(cx).map_or_else(Vec::new, |key| {
+            let ws = self.workspace.read(cx);
+            ws.review_notes
+                .get(&key)
+                .map(|n| n.drafts.clone())
+                .unwrap_or_default()
+        });
+        let mut collapsed = self.collapsed.clone();
+        collapsed.extend(
+            self.files
+                .iter()
+                .filter(|f| self.file_viewed(&f.rel, cx) && !self.viewed_open.contains(&f.rel))
+                .map(|f| f.rel.clone()),
+        );
+        let rows = build_rows(&self.files, &collapsed, &self.opened, self.split);
+        let nav = nav_of(&rows, &self.files);
+        let width = self.card_width();
+        let (placed, moved, editor_placed) = {
+            let files = &self.files;
+            let path_of = |f: usize| files.get(f).map(|f| f.rel.clone());
+            let text_of = |ix: usize| row_text(&rows[ix]);
+            diff_review::place_cards(
+                &nav,
+                &path_of,
+                &text_of,
+                &drafts,
+                self.review.editing.as_ref(),
+                ROW,
+                width,
+                cx,
+            )
+        };
+        self.cards = diff_review::card_ends(&placed);
+        let (rows, nav) = diff_review::merge(rows, nav, &placed, |p, part| Row::Card {
+            card: p.card,
+            part,
+            rows: p.rows,
+        });
+        self.rows = std::rc::Rc::new(rows);
+        self.nav = nav;
+        self.review.editing_placed = editor_placed;
+        self.review.restore(was, &self.nav);
+        moved
+    }
+
+    /// How wide the list is, as last drawn.
+    fn list_width(&self) -> f32 {
+        self.scroll
+            .0
+            .borrow()
+            .base_handle
+            .bounds()
+            .size
+            .width
+            .as_f32()
+    }
+
+    /// Where a card's left edge is: over the code column.
+    const CARD_LEFT: f32 = 100.;
+
+    fn card_width(&self) -> f32 {
+        diff_review::card_width(self.list_width().max(480.), Self::CARD_LEFT)
+    }
+
+    /// Scroll to the card waiting to be shown, if it's in the rows now.
+    fn take_reveal(&mut self) {
+        let Some(id) = self.review.reveal else {
+            return;
+        };
+        let end = self
+            .cards
+            .iter()
+            .find(|(card, _)| *card == Card::Draft(id))
+            .map(|(_, end)| *end);
+        if let Some(end) = end {
+            self.scroll.scroll_to_item(end, ScrollStrategy::Nearest);
+            self.review.reveal = None;
+        }
+    }
+
+    /// What a file's viewed mark goes by: the index's diff isn't the working tree's.
+    fn viewed_name(&self, rel: &str) -> String {
+        match &self.source {
+            DiffSource::Git { staged: true, .. } => format!("index:{rel}"),
+            _ => rel.to_string(),
+        }
+    }
+
+    fn file_viewed(&self, rel: &str, cx: &App) -> bool {
+        self.notes_key(cx).is_some_and(|key| {
+            self.workspace
+                .read(cx)
+                .is_viewed(&key, &self.viewed_name(rel))
+        })
+    }
+
+    /// A file marked viewed whose diff has changed since is back to being reviewed.
+    fn drop_stale_viewed(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.notes_key(cx) else {
+            return;
+        };
+        let stale: Vec<String> = {
+            let ws = self.workspace.read(cx);
+            self.files
+                .iter()
+                .filter_map(|f| {
+                    let name = self.viewed_name(&f.rel);
+                    let sig = ws.viewed_sig(&key, &name)?;
+                    (sig != file_sig(f) && sig != diff_review::SIG_UNKNOWN).then_some(name)
+                })
+                .collect()
+        };
+        if !stale.is_empty() {
+            self.workspace.update(cx, |ws, cx| {
+                for name in &stale {
+                    ws.set_viewed(&key, name, None, cx);
+                }
+            });
+        }
+    }
+
+    /// Source Control's list this diff is from, by path: what `]`, `[` and the count go through.
+    fn scm_list(&self, cx: &App) -> Vec<crate::ide::scm::ScmFile> {
+        let DiffSource::Git { staged, .. } = &self.source else {
+            return vec![];
+        };
+        let Some(scm) = self
+            .workbench
+            .upgrade()
+            .and_then(|wb| wb.read(cx).scm.clone())
+        else {
+            return vec![];
+        };
+        let state = &scm.read(cx).state;
+        if *staged {
+            state.staged.clone()
+        } else {
+            state.changes.clone()
+        }
+    }
+
+    /// Of this diff's files (a Source Control diff: its list's), how many are marked viewed, and
+    /// how many there are.
+    fn viewed_counts(&self, cx: &App) -> (usize, usize) {
+        let list = self.scm_list(cx);
+        if list.is_empty() {
+            let viewed = self
+                .files
+                .iter()
+                .filter(|f| self.file_viewed(&f.rel, cx))
+                .count();
+            return (viewed, self.files.len());
+        }
+        let viewed = list.iter().filter(|f| self.file_viewed(&f.rel, cx)).count();
+        (viewed, list.len())
+    }
+
+    /// Open Source Control's file `to` in this tab's place, or none if there's no such file.
+    fn open_scm_file(
+        &mut self,
+        to: Option<crate::ide::scm::ScmFile>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(file), DiffSource::Git { staged, .. }) = (to, &self.source) else {
+            return;
+        };
+        let staged = *staged;
+        let Some(scm) = self
+            .workbench
+            .upgrade()
+            .and_then(|wb| wb.read(cx).scm.clone())
+        else {
+            return;
+        };
+        scm.update(cx, |s, cx| s.open_changes(&file, staged, true, window, cx));
+    }
+
+    /// The hunk at `file`, `hunk` into the index, or back out of it. Git's state moved: everything
+    /// that shows it reads it again.
+    fn stage_hunk_at(
+        &mut self,
+        file: usize,
+        hunk: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let DiffSource::Git { top, staged, .. } = &self.source else {
+            return;
+        };
+        let (top, reverse) = (top.clone(), *staged);
+        let Some(patch) = self.files.get(file).and_then(|f| f.diff.patch(hunk)) else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let t = top.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { apply_to_index(&t, &patch, reverse) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Err(e) = result {
+                    let verb = if reverse { "Unstage" } else { "Stage" };
+                    this.workspace.update(cx, |_, cx| {
+                        cx.emit(WorkspaceEvent::Toast {
+                            message: format!("{verb} failed: {e}"),
+                            undo: None,
+                        })
+                    });
+                    return;
+                }
+                this.reload(cx);
+                let (wb, ws) = (this.workbench.clone(), this.workspace.clone());
+                window.defer(cx, move |window, cx| {
+                    let scm = wb.upgrade().and_then(|wb| wb.read(cx).scm.clone());
+                    match scm {
+                        Some(scm) => scm.update(cx, |s, cx| s.git_moved(window, cx)),
+                        None => {
+                            ws.update(cx, |ws, cx| ws.refresh_git_at(top, cx));
+                        }
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
     fn toggle_file(&mut self, rel: String, cx: &mut Context<Self>) {
-        if !self.collapsed.remove(&rel) {
+        if self.file_viewed(&rel, cx) {
+            if !self.viewed_open.remove(&rel) {
+                self.viewed_open.insert(rel);
+            }
+        } else if !self.collapsed.remove(&rel) {
             self.collapsed.insert(rel);
         }
+        self.rebuild(cx);
+    }
+
+    /// File `f`'s viewed mark on, or off. A file that's marked folds up, and a file that's opened
+    /// later stays open until it's marked again.
+    fn toggle_viewed_file(&mut self, f: usize, cx: &mut Context<Self>) {
+        let (Some(file), Some(key)) = (self.files.get(f), self.notes_key(cx)) else {
+            return;
+        };
+        let (rel, name, sig) = (
+            file.rel.clone(),
+            self.viewed_name(&file.rel),
+            file_sig(file),
+        );
+        let on = !self.file_viewed(&rel, cx);
+        self.viewed_open.remove(&rel);
+        self.workspace.update(cx, |ws, cx| {
+            ws.set_viewed(&key, &name, on.then_some(sig), cx)
+        });
         self.rebuild(cx);
     }
 
@@ -710,6 +1108,8 @@ impl DiffView {
         };
         if let Some(ix) = next {
             self.scroll.scroll_to_item(*ix, ScrollStrategy::Top);
+            self.review.anchor = None;
+            self.review.cursor = Some(diff_review::landing(&self.nav, *ix));
             cx.notify();
         }
     }
@@ -861,6 +1261,7 @@ impl DiffView {
             .iter()
             .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
         let n = self.files.len();
+        let (viewed, listed) = self.viewed_counts(cx);
         let review = match &self.source {
             DiffSource::Review { thread } => {
                 Some((thread.clone(), self.workspace.read(cx).turn_running(thread)))
@@ -877,7 +1278,7 @@ impl DiffView {
                 .px(px(7.))
                 .gap(px(4.))
                 .items_center()
-                .rounded(px(fluent::control(5.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
         };
         let split = self.split;
@@ -890,7 +1291,7 @@ impl DiffView {
             .items_center()
             .border_b_1()
             .border_color(theme.border.opacity(0.6))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(theme.muted_foreground)
             .child(Icon::new(crate::assets::Lucide::FileDiff).size(px(13.)))
             .child(
@@ -904,7 +1305,7 @@ impl DiffView {
                     h_flex()
                         .gap(px(6.))
                         .font_family(theme.mono_font_family.clone())
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .when(added > 0, |el| {
                             el.child(
                                 div()
@@ -925,6 +1326,14 @@ impl DiffView {
                             .map(|f| (f.rel.as_str(), f.added, f.removed)),
                     ),
                 ))
+            })
+            .when(listed > 0, |el| {
+                el.child(
+                    div()
+                        .id("diff-viewed")
+                        .test_support()
+                        .child(diff_review::viewed_label(viewed, listed)),
+                )
             })
             .when(self.loading, |el| {
                 el.child(Spinner::new().xsmall().color(theme.muted_foreground))
@@ -977,7 +1386,7 @@ impl DiffView {
                     .child(
                         link("diff-keep-all")
                             .bg(ember)
-                            .text_color(gpui_kit::white())
+                            .text_color(cx.theme().primary_foreground)
                             .hover(|s| s.opacity(0.9))
                             .child("Keep all")
                             .on_click(move |_, _, cx| {
@@ -991,9 +1400,16 @@ impl DiffView {
     fn render_rows(
         &mut self,
         range: std::ops::Range<usize>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let focused = self.focus.is_focused(window);
+        let first_shown = range.start;
+        let card_w = self.card_width();
+        let git_diff = match &self.source {
+            DiffSource::Git { staged, .. } => Some(*staged),
+            DiffSource::Review { .. } => None,
+        };
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let mono = theme.mono_font_family.clone();
@@ -1025,10 +1441,10 @@ impl DiffView {
                 .h(px(18.))
                 .px(px(6.))
                 .items_center()
-                .rounded(px(4.))
+                .rounded(px(radius::TAG))
                 .cursor_pointer()
                 .font_family(theme.font_family.clone())
-                .text_size(px(11.))
+                .text_size(px(text::META))
                 .text_color(muted)
                 .hover(|s| {
                     s.bg(theme.foreground.opacity(0.08))
@@ -1046,8 +1462,21 @@ impl DiffView {
                     .items_center()
                     .whitespace_nowrap()
                     .font_family(mono.clone())
-                    .text_size(px(12.));
+                    .text_size(px(text::LABEL));
+                let marks = self.review.marks(&self.nav, ix, focused);
                 match row {
+                    Row::Card { card, part, rows } => diff_review::card_row(
+                        self,
+                        ix,
+                        first_shown,
+                        card,
+                        part,
+                        rows,
+                        ROW,
+                        Self::CARD_LEFT,
+                        card_w,
+                        cx,
+                    ),
                     Row::Space => base.into_any_element(),
                     Row::Note(text) => base
                         .pl(px(108.))
@@ -1069,10 +1498,16 @@ impl DiffView {
                             'D' => red,
                             _ => palette::amber(cx),
                         };
-                        let open = !self.collapsed.contains(&file.rel);
+                        let viewed = self.file_viewed(&file.rel, cx);
+                        let open = if viewed {
+                            self.viewed_open.contains(&file.rel)
+                        } else {
+                            !self.collapsed.contains(&file.rel)
+                        };
                         let pending = self.pending(&file.rel, cx).is_some();
                         let rel = file.rel.clone();
-                        base.id(("diff-file", f))
+                        diff_review::head_chrome(base, marks, cx)
+                            .id(("diff-file", f))
                             .test_support()
                             .px(px(8.))
                             .gap(px(6.))
@@ -1094,16 +1529,21 @@ impl DiffView {
                             .child(crate::file_icon::badge(&name, px(13.), cx))
                             .child(
                                 div()
-                                    .text_color(theme.foreground)
+                                    .text_color(if viewed { muted } else { theme.foreground })
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(name),
                             )
                             .when(!dir.is_empty(), |el| {
-                                el.child(div().text_size(px(11.5)).text_color(muted).child(dir))
+                                el.child(
+                                    div()
+                                        .text_size(px(text::LABEL))
+                                        .text_color(muted)
+                                        .child(dir),
+                                )
                             })
                             .child(
                                 div()
-                                    .text_size(px(11.))
+                                    .text_size(px(text::META))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(color)
                                     .child(file.status.to_string()),
@@ -1112,7 +1552,7 @@ impl DiffView {
                                 el.child(
                                     div()
                                         .font_family(mono.clone())
-                                        .text_size(px(11.5))
+                                        .text_size(px(text::LABEL))
                                         .text_color(green)
                                         .child(format!("+{}", file.added)),
                                 )
@@ -1121,12 +1561,32 @@ impl DiffView {
                                 el.child(
                                     div()
                                         .font_family(mono.clone())
-                                        .text_size(px(11.5))
+                                        .text_size(px(text::LABEL))
                                         .text_color(red)
                                         .child(format!("−{}", file.removed)),
                                 )
                             })
                             .child(div().w(px(12.)))
+                            .when(viewed, |el| {
+                                el.child(
+                                    Icon::new(crate::assets::Lucide::Check)
+                                        .size(px(12.))
+                                        .text_color(green),
+                                )
+                            })
+                            .child(
+                                small(
+                                    ("diff-viewed-file", f).into(),
+                                    if viewed { "Viewed" } else { "Mark viewed" },
+                                )
+                                .when(viewed, |el| el.ml(px(-4.)))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_viewed_file(f, cx);
+                                    },
+                                )),
+                            )
                             .when(file.status != 'D', |el| {
                                 el.child(small(("diff-open-file", f).into(), "Open File").on_click(
                                     cx.listener(move |this, _, _, cx| {
@@ -1171,12 +1631,27 @@ impl DiffView {
                             .get(file)
                             .map_or(0, |f| f.diff.hunks.iter().take(hunk).count());
                         let key = file * 10_000 + n;
-                        base.id(("diff-hunk", key))
+                        diff_review::head_chrome(base, marks, cx)
+                            .id(("diff-hunk", key))
                             .bg(theme.info.opacity(0.07))
                             .text_color(muted)
                             .gap(px(4.))
                             .pl(px(92.))
                             .child(head)
+                            .when_some(git_diff, |el, staged| {
+                                el.child(div().w(px(10.))).child(
+                                    small(
+                                        ("diff-stage-hunk", key).into(),
+                                        if staged { "Unstage" } else { "Stage" },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.stage_hunk_at(file, hunk, window, cx)
+                                        },
+                                    )),
+                                )
+                            })
                             .when(pending, |el| {
                                 el.child(div().w(px(10.)))
                                     .child(
@@ -1203,7 +1678,8 @@ impl DiffView {
                         text,
                     } => {
                         let color = tint(kind);
-                        base.when_some(color, |el, c| el.bg(c.opacity(0.11)))
+                        let el = base
+                            .when_some(color, |el, c| el.bg(c.opacity(0.11)))
                             .child(
                                 number(old)
                                     .when_some(color.filter(|_| kind == Kind::Del), |el, c| {
@@ -1236,7 +1712,9 @@ impl DiffView {
                                         0.95
                                     }))
                                     .child(text),
-                            )
+                            );
+                        diff_review::line_chrome(el, ix, marks, 2., ROW, cx)
+                            .test_support()
                             .into_any_element()
                     }
                     Row::Pair { left, right } => {
@@ -1275,8 +1753,9 @@ impl DiffView {
                                         )
                                 }))
                         };
-                        base.child(half(left, true))
-                            .child(half(right, false))
+                        let el = base.child(half(left, true)).child(half(right, false));
+                        diff_review::line_chrome(el, ix, marks, 2., ROW, cx)
+                            .test_support()
                             .into_any_element()
                     }
                     Row::Fold { file, at, lines } => base
@@ -1287,7 +1766,7 @@ impl DiffView {
                         .bg(theme.foreground.opacity(0.025))
                         .cursor_pointer()
                         .font_family(theme.font_family.clone())
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(muted)
                         .hover(|s| {
                             s.text_color(theme.foreground)
@@ -1312,9 +1791,169 @@ impl Focusable for DiffView {
     }
 }
 
+impl ReviewHost for DiffView {
+    fn review(&self) -> &DiffReview {
+        &self.review
+    }
+
+    fn review_mut(&mut self) -> &mut DiffReview {
+        &mut self.review
+    }
+
+    fn workspace_entity(&self) -> Entity<Workspace> {
+        self.workspace.clone()
+    }
+
+    fn nav(&self) -> &[Nav] {
+        &self.nav
+    }
+
+    fn list_scroll(&self) -> &UniformListScrollHandle {
+        &self.scroll
+    }
+
+    fn diff_focus(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    /// A Review's are its chat's. Source Control's aren't any one chat's: they stay with the folder
+    /// while the side bar changes chats, and go to whichever is in front.
+    fn notes_key(&self, _: &App) -> Option<String> {
+        Some(match &self.source {
+            DiffSource::Review { thread } => thread.clone(),
+            DiffSource::Git { top, .. } => diff_review::folder_key(top),
+        })
+    }
+
+    fn path_of(&self, file: usize) -> Option<String> {
+        self.files.get(file).map(|f| f.rel.clone())
+    }
+
+    fn text_of(&self, ix: usize) -> Vec<String> {
+        self.rows.get(ix).map(row_text).unwrap_or_default()
+    }
+
+    fn placements(&self) -> &[(Card, usize)] {
+        &self.cards
+    }
+
+    fn rows_changed(&mut self, cx: &mut Context<Self>) {
+        self.rebuild(cx);
+    }
+
+    /// A Review's files are all here; Source Control's come one to a tab.
+    fn go_to_file(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if let DiffSource::Git { rel, .. } = &self.source {
+            let list = self.scm_list(cx);
+            let at = list.iter().position(|f| &f.rel == rel);
+            let next = match at {
+                Some(at) if by > 0 => list.get(at + 1).cloned(),
+                Some(at) => at.checked_sub(1).and_then(|at| list.get(at).cloned()),
+                None => list.first().cloned(),
+            };
+            return self.open_scm_file(next, window, cx);
+        }
+        if let Some(head) = diff_review::step_file(&self.nav, self.review.cursor, by) {
+            diff_review::go_to_head(self, head, cx);
+        }
+    }
+
+    fn ran_out_of_hunks(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.source, DiffSource::Git { .. }) {
+            self.go_to_file(by, window, cx);
+        }
+    }
+
+    /// The file the cursor's in. Marked by key, the next file not viewed comes up.
+    fn toggle_viewed(&mut self, advance: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(f) = self
+            .review
+            .cursor
+            .and_then(|c| self.nav.get(c)?.file())
+            .or_else(|| (!self.files.is_empty()).then_some(0))
+        else {
+            return;
+        };
+        self.toggle_viewed_file(f, cx);
+        let rel = self.files.get(f).map(|file| file.rel.clone());
+        if !advance || !rel.is_some_and(|rel| self.file_viewed(&rel, cx)) {
+            return;
+        }
+        if let DiffSource::Git { rel, .. } = &self.source {
+            let list = self.scm_list(cx);
+            let at = list.iter().position(|f| &f.rel == rel).unwrap_or(0);
+            let next = list[at..]
+                .iter()
+                .chain(list[..at].iter())
+                .find(|f| !self.file_viewed(&f.rel, cx))
+                .cloned();
+            return self.open_scm_file(next, window, cx);
+        }
+        let next = (0..self.files.len())
+            .map(|i| (f + i) % self.files.len())
+            .find(|i| !self.file_viewed(&self.files[*i].rel, cx));
+        let head = next.and_then(|file| self.nav.iter().position(|n| *n == Nav::File { file }));
+        if let Some(head) = head {
+            diff_review::go_to_head(self, head, cx);
+        }
+    }
+
+    fn stage_hunk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((file, hunk)) = self.review.cursor.and_then(|c| self.nav.get(c)?.hunk()) {
+            self.stage_hunk_at(file, hunk, window, cx);
+        }
+    }
+
+    /// To a Review's chat; Source Control's to the chat in front of the AI side bar (a new one if
+    /// it's on a new chat), which comes up to show it.
+    fn deliver(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match self.source.clone() {
+            DiffSource::Review { thread } => self.workspace.update(cx, |ws, cx| {
+                ws.send_comments_in(&Scope::Thread(thread), text, cx)
+            }),
+            DiffSource::Git { .. } => {
+                if !self
+                    .workspace
+                    .update(cx, |ws, cx| ws.send_comments_in(&Scope::Ide, text, cx))
+                {
+                    return false;
+                }
+                let wb = self.workbench.clone();
+                window.defer(cx, move |window, cx| {
+                    if let Some(wb) = wb.upgrade() {
+                        wb.update(cx, |wb, cx| {
+                            if !wb.layout.ai_open {
+                                wb.toggle_ai(window, cx);
+                            }
+                        });
+                    }
+                });
+                true
+            }
+        }
+    }
+
+    fn show_draft(&mut self, draft: &Draft, cx: &mut Context<Self>) {
+        // Folded, it has no lines for its card to go under.
+        self.collapsed.remove(&draft.path);
+        if self.file_viewed(&draft.path, cx) {
+            self.viewed_open.insert(draft.path.clone());
+        }
+        self.rebuild(cx);
+    }
+}
+
 impl Render for DiffView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // Cards wrap to the width they're drawn at: measured again when that moves.
+        let width = self.list_width();
+        if (width - self.review.measured).abs() > 1. {
+            self.review.measured = width;
+            if !self.cards.is_empty() {
+                self.compute_rows(cx);
+            }
+        }
         let body: AnyElement = if let Some(e) = &self.error {
             crate::panels::empty(format!("Couldn't read the changes: {e}"), cx).into_any_element()
         } else if self.files.is_empty() && !self.loading {
@@ -1363,15 +2002,20 @@ impl Render for DiffView {
                 .when(!self.split, |el| el.horizontal_scrollbar(&self.scroll))
                 .into_any_element()
         };
-        v_flex()
-            .id("diff-view")
-            .test_support()
-            .track_focus(&self.focus)
-            .size_full()
-            .bg(crate::ui::panel_bg(self.workspace.read(cx).glass(), cx))
-            .text_color(theme.foreground)
-            .child(self.toolbar(cx))
-            .child(div().flex_1().min_h_0().child(body))
+        let tray = diff_review::tray(self, cx);
+        let focused = self.focus.is_focused(window);
+        diff_review::keys(
+            v_flex().id("diff-view").track_focus(&self.focus),
+            focused,
+            cx,
+        )
+        .test_support()
+        .size_full()
+        .bg(crate::ui::panel_bg(self.workspace.read(cx).glass(), cx))
+        .text_color(theme.foreground)
+        .child(self.toolbar(cx))
+        .child(div().flex_1().min_h_0().child(body))
+        .children(tray)
     }
 }
 
@@ -1413,8 +2057,20 @@ impl DiffView {
                 Row::Pair { left, right } => format!("pair {} | {}", side(left), side(right)),
                 Row::Fold { at, lines, .. } => format!("fold {lines} at {at}"),
                 Row::Note(t) => format!("note {t}"),
+                Row::Card { .. } => "card".to_string(),
             })
             .collect()
+    }
+
+    /// The line the cursor's on, as `row_text` has it.
+    pub fn cursor_line(&self) -> Option<String> {
+        self.rows
+            .get(self.review.cursor?)
+            .and_then(|r| row_text(r).first().cloned())
+    }
+
+    pub fn viewed_count(&self, cx: &App) -> (usize, usize) {
+        self.viewed_counts(cx)
     }
 
     pub fn loaded(&self) -> bool {
@@ -1432,7 +2088,10 @@ impl DiffView {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffFile, FileDiff, HashSet, Row, build_rows, file, untracked};
+    use super::{
+        DiffFile, FileDiff, HashSet, Nav, Row, apply_to_index, build_rows, file, file_sig, nav_of,
+        row_text, untracked,
+    };
 
     fn modified(rel: &str, patch: &str, new: &str) -> DiffFile {
         file(rel, FileDiff::parse(patch), Some(new.as_bytes().to_vec()))
@@ -1457,6 +2116,7 @@ mod tests {
                 ),
                 Row::Note(t) => format!("note {t}"),
                 Row::Space => "space".into(),
+                Row::Card { .. } => "card".into(),
             })
             .collect()
     }
@@ -1518,6 +2178,136 @@ mod tests {
             "{:?}",
             text(&rows)
         );
+    }
+
+    #[test]
+    fn rows_say_what_they_are_to_move_around_on() {
+        let new: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let patch = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n 1\n-x\n+2\n";
+        let f = modified("f", patch, &new);
+        let opened: HashSet<(String, u32)> = [("f".to_string(), 3)].into();
+        let files = [f];
+        let rows = build_rows(&files, &HashSet::new(), &opened, false);
+        let nav = nav_of(&rows, &files);
+        assert_eq!(nav[0], Nav::File { file: 0 });
+        assert_eq!(nav[1], Nav::Hunk { file: 0, hunk: 0 });
+        assert_eq!(
+            nav[3],
+            Nav::Line {
+                file: 0,
+                hunk: Some(0),
+                old: Some(2),
+                new: None,
+                changed: true
+            }
+        );
+        // Opened out of the fold after the hunk, a line isn't the hunk's.
+        assert_eq!(
+            nav[5],
+            Nav::Line {
+                file: 0,
+                hunk: None,
+                old: Some(3),
+                new: Some(3),
+                changed: false
+            }
+        );
+        assert_eq!(row_text(&rows[3]), ["-x"]);
+        assert_eq!(row_text(&rows[4]), ["+2"]);
+        assert_eq!(row_text(&rows[2]), [" 1"]);
+
+        // Side by side, a row is both lines (once, when they're the same).
+        let rows = build_rows(&files, &HashSet::new(), &HashSet::new(), true);
+        let nav = nav_of(&rows, &files);
+        assert_eq!(row_text(&rows[2]), [" 1"]);
+        assert_eq!(row_text(&rows[3]), ["-x", "+2"]);
+        assert!(matches!(
+            nav[3],
+            Nav::Line {
+                old: Some(2),
+                new: Some(2),
+                changed: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn what_a_file_says_changes_with_its_lines() {
+        let a = modified(
+            "f",
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n",
+            "b\n",
+        );
+        let moved = modified(
+            "f",
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -9 +9 @@\n-a\n+b\n",
+            "b\n",
+        );
+        let other = modified(
+            "f",
+            "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+c\n",
+            "c\n",
+        );
+        assert_eq!(file_sig(&a), file_sig(&moved));
+        assert_ne!(file_sig(&a), file_sig(&other));
+    }
+
+    #[test]
+    fn a_hunk_goes_into_the_index_and_back_out_on_its_own() {
+        let dir = std::env::temp_dir().join(format!("trek-diff-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| crate::ide::git::run(&dir, args).expect("git");
+        run(&["init", "-q"]);
+        let before: String = (1..=30).map(|n| format!("{n}\n")).collect();
+        std::fs::write(dir.join("f.txt"), &before).unwrap();
+        run(&["add", "."]);
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "one",
+        ]);
+        let after = before
+            .replace("\n2\n", "\ntwo\n")
+            .replace("\n28\n", "\ntwenty-eight\n");
+        std::fs::write(dir.join("f.txt"), &after).unwrap();
+        let diff = FileDiff::parse(&run(&["diff", "--no-color", "--", "f.txt"]));
+        assert_eq!(diff.hunks.len(), 2);
+
+        // The second hunk only: the first stays unstaged, line numbers and all.
+        apply_to_index(&dir, &diff.patch(1).unwrap(), false).unwrap();
+        let staged = run(&["diff", "--cached", "--no-color"]);
+        assert!(
+            staged.contains("+twenty-eight") && !staged.contains("+two"),
+            "{staged}"
+        );
+        let left = run(&["diff", "--no-color"]);
+        assert!(
+            left.contains("+two") && !left.contains("+twenty-eight"),
+            "{left}"
+        );
+
+        // Back out, by the staged diff's own hunk.
+        let cached = FileDiff::parse(&staged);
+        apply_to_index(&dir, &cached.patch(0).unwrap(), true).unwrap();
+        assert_eq!(run(&["diff", "--cached", "--no-color"]), "");
+
+        // A file git doesn't know yet stages by its one hunk.
+        std::fs::write(dir.join("new.txt"), "a\nb\n").unwrap();
+        let new = untracked("new.txt", Some(b"a\nb\n".to_vec()));
+        apply_to_index(&dir, &new.diff.patch(0).unwrap(), false).unwrap();
+        assert_eq!(run(&["show", ":new.txt"]), "a\nb\n");
+
+        // A hunk that no longer fits says so.
+        assert!(apply_to_index(&dir, &diff.patch(0).unwrap(), true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

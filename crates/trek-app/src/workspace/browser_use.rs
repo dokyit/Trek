@@ -110,17 +110,24 @@ impl Workspace {
             return (id, rx);
         };
         ASKS.lock().unwrap().insert(id.clone(), tx);
+        let why = super::attention::Why::asking(&title, &detail, None);
         live.permissions.push(PendingPermission {
             request_id: id.clone(),
-            title: title.clone(),
+            title,
             detail,
             prompt: None,
             after_turn: false,
+            call: None,
         });
         live.revision += 1;
         self.mutate_thread(thread, cx, |t| t.run_state = RunState::NeedsYou);
+        let name = self
+            .thread(thread)
+            .map(|t| t.title.as_str())
+            .unwrap_or_default();
+        let message = why.alert(name);
         cx.emit(WorkspaceEvent::Attention {
-            message: format!("Needs your approval: {title}"),
+            message,
             thread: thread.to_string(),
             button: None,
         });

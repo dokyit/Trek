@@ -5,6 +5,7 @@ use super::*;
 use crate::composer::look;
 use crate::fluent::PillExt as _;
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use crate::workspace::NodeSetup;
 use gpui_kit::component::input::Input;
@@ -33,6 +34,7 @@ pub(super) fn drag_tile(id: impl Into<ElementId>, size: f32, cx: &App) -> AnyEle
         .test_support()
         .flex_none()
         .size(px(size))
+        // scale: ok, an app icon's squircle
         .rounded(px(size * 0.22))
         .cursor(CursorStyle::OpenHand)
         .hover(|s| s.bg(theme.foreground.opacity(0.05)))
@@ -61,14 +63,14 @@ fn header(title: &str, body: impl Into<SharedString>, cx: &App) -> AnyElement {
         .pb(px(24.))
         .child(
             div()
-                .text_size(px(24.))
+                .text_size(px(text::DISPLAY))
                 .font_semibold()
                 .line_height(relative(1.2))
                 .child(title.to_string()),
         )
         .child(
             div()
-                .text_size(px(14.))
+                .text_size(px(text::TITLE))
                 .line_height(relative(1.55))
                 .text_color(cx.theme().muted_foreground)
                 .child(body.into()),
@@ -81,7 +83,7 @@ fn card(rows: impl IntoIterator<Item = AnyElement>, cx: &App) -> AnyElement {
     let line = look::hairline(cx);
     v_flex()
         .w_full()
-        .rounded(px(crate::fluent::surface(14.)))
+        .rounded(px(crate::fluent::surface(radius::CARD)))
         .bg(look::card_fill(cx))
         .border_1()
         .border_color(look::ring(cx))
@@ -123,11 +125,11 @@ fn row(
                 .flex_1()
                 .min_w_0()
                 .gap(px(2.))
-                .child(div().text_size(px(13.5)).font_medium().child(title))
+                .child(div().text_size(px(text::TITLE)).font_medium().child(title))
                 .when(!detail.is_empty(), |el| {
                     el.child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .line_height(relative(1.45))
                             .text_color(cx.theme().muted_foreground)
                             .child(detail),
@@ -142,7 +144,7 @@ fn section(text: &str, cx: &App) -> AnyElement {
     div()
         .pt(px(26.))
         .pb(px(10.))
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .font_semibold()
         .text_color(cx.theme().foreground)
         .child(text.to_string())
@@ -152,7 +154,7 @@ fn section(text: &str, cx: &App) -> AnyElement {
 fn note(text: impl Into<SharedString>, cx: &App) -> AnyElement {
     div()
         .pt(px(12.))
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .line_height(relative(1.5))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
@@ -165,7 +167,7 @@ fn state_label(id: impl Into<ElementId>, text: &str, color: Hsla, check: bool) -
         .id(id)
         .test_support()
         .gap(px(5.))
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .text_color(color)
         .when(check, |el| {
             el.child(Icon::new(IconName::Check).size(px(13.)).text_color(color))
@@ -182,7 +184,7 @@ fn pill(text: impl Into<SharedString>, cx: &App) -> AnyElement {
         .py(px(1.))
         .rounded_pill()
         .bg(look::chip_fill(cx))
-        .text_size(px(11.5))
+        .text_size(px(text::LABEL))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
         .into_any_element()
@@ -199,7 +201,7 @@ fn command_chip(id: &str, command: &str, cx: &App) -> AnyElement {
         .pl(px(8.))
         .pr(px(2.))
         .gap(px(4.))
-        .rounded(px(crate::fluent::control(6.)))
+        .rounded(px(crate::fluent::control(radius::CONTROL)))
         .bg(theme.foreground.opacity(0.05))
         .child(
             div()
@@ -207,7 +209,7 @@ fn command_chip(id: &str, command: &str, cx: &App) -> AnyElement {
                 .flex_1()
                 .truncate()
                 .font_family(theme.mono_font_family.clone())
-                .text_size(px(11.5))
+                .text_size(px(text::LABEL))
                 .child(command.to_string()),
         )
         .child(
@@ -356,9 +358,10 @@ impl Onboarding {
             window.request_animation_frame();
         }
         let walk = span(t, 0., 0.7);
-        // Half a lap: from the trail's start to its end, slowing to a stop there.
-        let hiker =
-            crate::mascot::trail(0.5 * walk, self.intro_at.elapsed().as_secs_f32(), false, cx);
+        // The last stretch of the trail, at a walk: it sets off, takes a few strides and slows
+        // to a stop by the cairn. (The whole trail in this time would be a sprint.)
+        let eased = walk * walk * (3. - 2. * walk);
+        let hiker = crate::mascot::crossing(0.65 + 0.35 * eased, walk > 0. && walk < 1., cx);
         let words = span(t, 0.45, 0.8);
         let rise = |el: Div, k: f32| el.opacity(k).mt(px(8. * (1. - k)));
         let point = |icon: Icon, title: &str, body: &str| {
@@ -367,18 +370,18 @@ impl Onboarding {
                 .flex_none()
                 .gap(px(6.))
                 .p(px(14.))
-                .rounded(px(crate::fluent::surface(12.)))
+                .rounded(px(crate::fluent::surface(radius::CARD)))
                 .bg(look::chip_fill(cx))
                 .child(icon.size(px(16.)).text_color(theme.muted_foreground))
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(px(text::BODY))
                         .font_medium()
                         .child(title.to_string()),
                 )
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .line_height(relative(1.45))
                         .text_color(theme.muted_foreground)
                         .child(body.to_string()),
@@ -409,7 +412,7 @@ impl Onboarding {
                     .gap(px(10.))
                     .child(
                         div()
-                            .text_size(px(30.))
+                            .text_size(px(text::DISPLAY))
                             .font_semibold()
                             .child("Welcome to Trek"),
                     )
@@ -417,10 +420,10 @@ impl Onboarding {
                         div()
                             .max_w(px(460.))
                             .text_center()
-                            .text_size(px(14.5))
+                            .text_size(px(text::TITLE))
                             .line_height(relative(1.55))
                             .text_color(theme.muted_foreground)
-                            .child("One calm place for every coding agent you use. A couple of minutes to set up, and every step can wait."),
+                            .child("Every coding agent you use, in one place. Setup takes a couple of minutes, and every step can wait."),
                     ),
             )
             .child(
@@ -429,7 +432,7 @@ impl Onboarding {
                     .w(px(COLUMN))
                     .pt(px(30.))
                     .gap(px(10.))
-                    .child(point(Icon::new(IconName::Bot), "Your agents, your plans", "Claude Code, Codex and more, with the logins you already pay for."))
+                    .child(point(Icon::new(IconName::Bot), "Your agents", "Claude Code, Codex and more, with the logins you already pay for."))
                     .child(point(Icon::new(crate::assets::Lucide::Laptop), &format!("Kept on {this}"), "Threads, keys and settings stay here. Nothing goes through Trek's servers."))
                     .child(point(Icon::new(crate::assets::Lucide::ShieldCheck), "You decide", "How much an agent may do on its own, per thread.")),
             )
@@ -481,7 +484,7 @@ impl Onboarding {
             .when(!glass, |el| el.opacity(0.45))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("Clear"),
             )
@@ -490,7 +493,7 @@ impl Onboarding {
             ))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("Frosted"),
             );
@@ -498,7 +501,7 @@ impl Onboarding {
             .mt(px(10.))
             .px(px(14.))
             .py(px(10.))
-            .rounded(px(crate::fluent::surface(12.)))
+            .rounded(px(crate::fluent::surface(radius::CARD)))
             .bg(look::chip_fill(cx))
             .text_size(px(s.appearance.transcript_font_size()))
             .line_height(relative(1.5))
@@ -523,7 +526,7 @@ impl Onboarding {
         );
         v_flex()
             .child(header(
-                "Make it yours",
+                "How Trek looks",
                 "Pick a theme and how the window looks. It changes as you choose, and it's all in Settings › Appearance later.",
                 cx,
             ))
@@ -537,7 +540,7 @@ impl Onboarding {
                     .py(px(14.))
                     .child(
                         h_flex()
-                            .child(div().flex_1().text_size(px(13.5)).font_medium().child("Conversation text"))
+                            .child(div().flex_1().text_size(px(text::TITLE)).font_medium().child("Conversation text"))
                             .child(ui::segmented(
                                 "ob-text-size",
                                 vec![(0u8, "Small"), (1, "Default"), (2, "Large"), (3, "Larger")],
@@ -650,7 +653,7 @@ impl Onboarding {
                     ))
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .child("Not in the list? Drag Trek into it, then turn it on."),
                     )
@@ -681,12 +684,17 @@ impl Onboarding {
                         .child(
                             h_flex()
                                 .gap(px(8.))
-                                .child(div().text_size(px(13.5)).font_medium().child(p.title()))
+                                .child(
+                                    div()
+                                        .text_size(px(text::TITLE))
+                                        .font_medium()
+                                        .child(p.title()),
+                                )
                                 .when(p.optional(), |el| el.child(pill("Optional", cx))),
                         )
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(text::BODY))
                                 .line_height(relative(1.45))
                                 .text_color(theme.muted_foreground)
                                 .child(detail),
@@ -815,12 +823,12 @@ impl Onboarding {
                             .flex_1()
                             .min_w_0()
                             .gap(px(2.))
-                            .child(div().text_size(px(13.5)).font_medium().child(title))
+                            .child(div().text_size(px(text::TITLE)).font_medium().child(title))
                             .when(!detail.is_empty(), |el| {
                                 el.child(
                                     div()
                                         .truncate()
-                                        .text_size(px(12.5))
+                                        .text_size(px(text::BODY))
                                         .text_color(if a.state == AgentState::NotSignedIn {
                                             palette::amber(cx)
                                         } else {
@@ -872,7 +880,7 @@ impl Onboarding {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_size(px(13.5))
+                                    .text_size(px(text::TITLE))
                                     .font_medium()
                                     .child(a.name.clone()),
                             )
@@ -903,7 +911,7 @@ impl Onboarding {
                     h_flex()
                         .gap(px(10.))
                         .pb(px(14.))
-                        .text_size(px(13.))
+                        .text_size(px(text::BODY))
                         .text_color(theme.muted_foreground)
                         .child(Spinner::new().small())
                         .child("Scanning for agent CLIs and their logins…"),
@@ -994,7 +1002,7 @@ impl Onboarding {
                         .map(|url| {
                             div()
                                 .id(SharedString::from(format!("ob-key-page-{id}")))
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .text_color(theme.muted_foreground)
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.foreground))
@@ -1158,7 +1166,7 @@ impl Onboarding {
                             .gap(px(8.))
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size(px(text::BODY))
                                     .text_color(theme.muted_foreground)
                                     .child("Use in Trek"),
                             )
@@ -1231,7 +1239,12 @@ impl Onboarding {
                             .child(
                                 h_flex()
                                     .gap(px(8.))
-                                    .child(div().text_size(px(13.5)).font_medium().child(s.name))
+                                    .child(
+                                        div()
+                                            .text_size(px(text::TITLE))
+                                            .font_medium()
+                                            .child(s.name),
+                                    )
                                     .when(s.running, |el| {
                                         el.child(
                                             div()
@@ -1243,7 +1256,7 @@ impl Onboarding {
                             )
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size(px(text::BODY))
                                     .text_color(theme.muted_foreground)
                                     .child(detail),
                             )
@@ -1374,9 +1387,9 @@ impl Onboarding {
                                 .gap(px(8.))
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().text_size(px(13.5)).font_medium().child("Scan this with Trek on your iPhone"))
-                                .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type:"))
-                                .child(div().text_size(px(20.)).font_semibold().font_family(theme.mono_font_family.clone()).child(offer.code.clone()))
+                                .child(div().text_size(px(text::TITLE)).font_medium().child("Scan this with Trek on your iPhone"))
+                                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type:"))
+                                .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(offer.code.clone()))
                                 .child(
                                     Button::new("ob-pair-cancel")
                                         .small()
@@ -1549,7 +1562,7 @@ impl Onboarding {
                         div()
                             .w(px(130.))
                             .flex_none()
-                            .text_size(px(13.))
+                            .text_size(px(text::BODY))
                             .text_color(theme.muted_foreground)
                             .child(k),
                     )
@@ -1558,7 +1571,7 @@ impl Onboarding {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.5))
+                            .text_size(px(text::TITLE))
                             .child(v),
                     )
                     .child(
@@ -1625,6 +1638,7 @@ impl Onboarding {
                 cx,
             ))
             .child(card(summary_rows, cx))
+            .children(self.coming_from(cx))
             .child(section("Start your first thread in", cx))
             .when(!project_rows.is_empty(), |el| {
                 el.child(card(project_rows, cx))
@@ -1640,6 +1654,69 @@ impl Onboarding {
                 ),
             )
             .into_any_element()
+    }
+
+    /// Someone coming from another app: what it left, to bring over before they start. Nothing
+    /// shows when it left nothing.
+    fn coming_from(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let offers = crate::worktree_apps_ui::offers(self.workspace.read(cx));
+        offers
+            .into_iter()
+            .flat_map(|(app, folder, counts)| {
+                let ws = self.workspace.clone();
+                let theme = cx.theme().clone();
+                [
+                    section(&format!("Coming from {}", app.name()), cx),
+                    card(
+                        [h_flex()
+                            .w_full()
+                            .px(px(16.))
+                            .py(px(12.))
+                            .gap(px(12.))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "ob-worktree-app-{}",
+                                                app.key()
+                                            )))
+                                            .test_support()
+                                            .text_size(px(text::TITLE))
+                                            .child(counts),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(text::BODY))
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!(
+                                                "In {folder}. Nothing moves, and {} goes on working.",
+                                                app.name()
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "ob-worktree-app-review-{}",
+                                    app.key()
+                                )))
+                                .small()
+                                .outline()
+                                .label("Review…")
+                                .on_click(move |_, window, cx| {
+                                    crate::worktree_apps_ui::review(ws.clone(), app, window, cx)
+                                }),
+                            )
+                            .into_any_element()],
+                        cx,
+                    ),
+                ]
+            })
+            .collect()
     }
 
     /// Add a folder as a project without leaving onboarding (`Workspace::open_folder` navigates).

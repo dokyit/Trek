@@ -645,6 +645,130 @@ def cmd_release(a):
     return d
 
 
+POSTHOG_KEY_FILE = HOME / ".trek-bench" / "posthog-personal.key"
+POSTHOG_PROJECT_FILE = HOME / ".trek-bench" / "posthog-project"
+
+
+def asset_kind(name):
+    """(kind, platform) of a release asset: installers people download, archives the updater
+    fetches, the channel manifest every update check reads; signatures are (None, None)."""
+    if name.endswith(".minisig") or name.endswith(".sig"):
+        return None, None
+    if re.fullmatch(r"(stable|beta|nightly)\.json", name):
+        return "manifest", None
+    platform = ("mac-arm64" if "darwin-aarch64" in name else "mac-intel" if "darwin-x86_64" in name
+                else "windows-x64" if ("windows" in name or name.endswith(".exe")) else "other")
+    if name.endswith(".dmg") or name.endswith(".exe") or name.endswith(".msi"):
+        return "installer", platform
+    if name.endswith(".tar.gz") or name.endswith(".zip"):
+        return "update", platform
+    return "other", platform
+
+
+def posthog_installs(timeout=30):
+    """Unique and active installs from PostHog's query API, with the personal key in
+    ~/.trek-bench/posthog-personal.key. None (and why) without one."""
+    if not POSTHOG_KEY_FILE.exists():
+        return None, f"no PostHog personal key in {POSTHOG_KEY_FILE}"
+    if OFFLINE:
+        return None, "offline"
+    import urllib.request
+    import urllib.error
+    key = POSTHOG_KEY_FILE.read_text().strip()
+    ingest = os.environ.get("TREK_POSTHOG_HOST") or "https://us.i.posthog.com"
+    host = os.environ.get("TREK_POSTHOG_APP_HOST") or ingest.replace(".i.posthog.com", ".posthog.com")
+    project = (os.environ.get("TREK_POSTHOG_PROJECT")
+               or (POSTHOG_PROJECT_FILE.read_text().strip() if POSTHOG_PROJECT_FILE.exists() else "@current"))
+    def query(hogql):
+        body = json.dumps({"query": {"kind": "HogQLQuery", "query": hogql}}).encode()
+        req = urllib.request.Request(f"{host.rstrip('/')}/api/projects/{project}/query/", data=body, method="POST",
+                                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode()).get("results") or []
+    try:
+        row = (query("SELECT uniq(distinct_id), uniqIf(distinct_id, timestamp > now() - INTERVAL 7 DAY), "
+                     "uniqIf(distinct_id, timestamp > now() - INTERVAL 30 DAY), countIf(event = 'install') "
+                     "FROM events WHERE event IN ('install', 'app_opened')") or [[0, 0, 0, 0]])[0]
+        by_os = query("SELECT properties.$os, uniq(distinct_id) FROM events WHERE event IN ('install', 'app_opened') "
+                      "AND timestamp > now() - INTERVAL 30 DAY GROUP BY 1 ORDER BY 2 DESC")
+    except urllib.error.HTTPError as e:
+        return None, f"PostHog answered {e.code} ({host}, project {project})"
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, f"PostHog: {e}"
+    return {"host": host, "project": project, "installs_seen": row[0], "active_7d": row[1], "active_30d": row[2],
+            "install_events": row[3], "active_30d_by_os": {str(o or "?"): n for o, n in by_os}}, None
+
+
+def cmd_downloads(a):
+    """Release downloads per version and platform from GitHub, totals, and PostHog installs if a key is there."""
+    slug = a.repo
+    d = {"repo": slug}
+    if not gh_ok():
+        d["github"] = "offline" if OFFLINE else "gh not installed"
+        releases = []
+    else:
+        rc, out = run(["gh", "api", "--paginate", f"repos/{slug}/releases?per_page=100", "--jq",
+                       ".[] | {tag: .tag_name, published: .published_at, pre: .prerelease, draft: .draft, "
+                       "assets: [.assets[] | {name, n: .download_count}]}"], cwd=str(ROOT), timeout=a.timeout)
+        releases = []
+        if rc != 0:
+            d["github"] = out.strip().splitlines()[-1][:200] if out.strip() else f"gh exit {rc}"
+        else:
+            for line in out.splitlines():
+                try:
+                    releases.append(json.loads(line))
+                except ValueError:
+                    pass
+    totals = {"installer": {}, "update": {}, "other": {}}
+    manifest_total = 0
+    versions = []
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        row = {"tag": rel["tag"], "published": (rel.get("published") or "")[:10], "installers": {}, "updates": {},
+               "manifest_reads": 0}
+        if rel.get("pre"):
+            row["prerelease"] = True
+        for asset in rel.get("assets", []):
+            kind, platform = asset_kind(asset["name"])
+            if kind is None:
+                continue
+            if kind == "manifest":
+                row["manifest_reads"] += asset["n"]
+                manifest_total += asset["n"]
+                continue
+            bucket = row["installers"] if kind == "installer" else row["updates"] if kind == "update" else row.setdefault("other", {})
+            bucket[platform] = bucket.get(platform, 0) + asset["n"]
+            totals[kind][platform] = totals[kind].get(platform, 0) + asset["n"]
+        versions.append(row)
+    shown = versions if a.all else versions[:a.n]
+    d["versions"] = shown
+    d["totals"] = {"installers": totals["installer"], "installers_all": sum(totals["installer"].values()),
+                   "updates": totals["update"], "updates_all": sum(totals["update"].values()),
+                   "manifest_reads": manifest_total, "releases": len(versions)}
+    ph, why = posthog_installs()
+    d["posthog"] = ph if ph else why
+    fmt = lambda b: " ".join(f"{k}={v}" for k, v in sorted(b.items())) or "-"
+    text = [f"repo {slug} ({len(versions)} releases; installers = .dmg/.exe, updates = archives the updater fetched)"]
+    for r in shown:
+        text.append(f"{r['tag']:<22} {r['published']}  installers {fmt(r['installers'])}  updates {fmt(r['updates'])}"
+                    f"  manifest {r['manifest_reads']}" + ("  (pre)" if r.get("prerelease") else ""))
+    if len(versions) > len(shown):
+        text.append(f"... {len(versions) - len(shown)} older (--all)")
+    t = d["totals"]
+    text.append(f"total installers {t['installers_all']} ({fmt(t['installers'])})")
+    text.append(f"total updates {t['updates_all']} ({fmt(t['updates'])})  manifest reads {t['manifest_reads']}")
+    if "github" in d:
+        text.append(f"github {d['github']}")
+    if ph:
+        text.append(f"posthog installs seen {ph['installs_seen']}  active 7d {ph['active_7d']}  active 30d {ph['active_30d']}"
+                    f"  install events {ph['install_events']}  30d by os {fmt(ph['active_30d_by_os'])}")
+    else:
+        text.append(f"posthog {why}")
+    d["_text"] = text
+    return d
+
+
 def cmd_phone(a):
     """iPhone app update state via ios/scripts/phone-update.sh --status (changes nothing)."""
     script = ROOT / "ios" / "scripts" / "phone-update.sh"
@@ -966,6 +1090,431 @@ def emit(data, as_json):
         print("\n".join(data["_text"]) if "_text" in data else "\n".join(render(data)))
 
 
+# ---------------------------------------------------------------- perf
+
+PERF_WHAT = ("launch", "idle", "stream", "long", "checkpoint")
+# The same settings as verify-trek's isolated profile: the mock agent only, nothing imported.
+PERF_SETTINGS = """[general]
+default_agent = "direct:mock"
+
+[onboarding]
+completed = true
+version = 2
+
+[import]
+claude_code = false
+codex = false
+opencode = false
+
+[notifications]
+mode = "off"
+dock_badge = false
+menu_bar_icon = false
+
+[updates]
+auto_check = false
+auto_download = false
+"""
+
+
+def median(values):
+    values = sorted(v for v in values if v is not None)
+    return values[(len(values) - 1) // 2] if values else None
+
+
+class PerfTrek:
+    """One isolated Trek: a throwaway data folder, the mock agent, driven through the shots harness."""
+
+    def __init__(self, binary, work, name, seed=None, force_active=False, size="1280x820", poll_ms=None):
+        self.binary = binary
+        self.dir = Path(work) / name
+        self.data = self.dir / "data"
+        self.shot = self.dir / "shot"
+        if self.dir.exists():
+            shutil.rmtree(self.dir)
+        self.shot.mkdir(parents=True)
+        if seed:
+            shutil.copytree(seed, self.data)
+        else:
+            self.data.mkdir(parents=True)
+        (self.data / "settings.toml").write_text(PERF_SETTINGS)
+        self.env = {**os.environ, "TREK_DATA_DIR": str(self.data), "TREK_SHOT_DIR": str(self.shot), "TREK_PERF": "1",
+                    "TREK_MOCK_AGENT": "1", "TREK_BACKGROUND": "1", "TREK_WINDOW_SIZE": size,
+                    "RUST_LOG": "warn,trek=info"}
+        # 60 Hz of frame requests behind other windows: for frame times, never for idle numbers.
+        if force_active:
+            self.env["TREK_FORCE_ACTIVE"] = "1"
+        # The harness looks for commands every 300 ms: slower when counting Trek's own wakeups.
+        if poll_ms:
+            self.env["TREK_SHOT_POLL_MS"] = str(poll_ms)
+        self.spawned_ms = None
+        self.proc = None
+
+    def start(self):
+        self.spawned_ms = time.time() * 1000
+        self.proc = subprocess.Popen([str(self.binary)], cwd=str(self.dir), env=self.env, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return self
+
+    def lines(self):
+        """The `perf:` lines logged so far, each as a dict with its kind."""
+        out = []
+        for log in sorted((self.data / "logs").glob("trek-*.log")):
+            for line in strip_ansi(log.read_text(errors="replace")).splitlines():
+                m = re.search(r"\sperf: (\w+)(.*)$", line)
+                if m:
+                    out.append({"kind": m.group(1), **dict(re.findall(r"(\w+)=(\S+)", m.group(2)))})
+        return out
+
+    def wait_line(self, kind, timeout=120, label=None):
+        end = time.time() + timeout
+        while time.time() < end:
+            hits = [l for l in self.lines() if l["kind"] == kind and (label is None or l.get("label") == label)]
+            if hits:
+                return hits[-1]
+            if self.proc.poll() is not None:
+                raise CliError(f"Trek exited ({self.proc.returncode}) before logging perf: {kind}; see {self.data}/logs")
+            time.sleep(0.05)
+        raise CliError(f"no perf: {kind} within {timeout}s; see {self.data}/logs")
+
+    def batch(self, lines, timeout=600):
+        done = self.shot / "done"
+        done.unlink(missing_ok=True)
+        tmp = self.shot / ".cmd.tmp"
+        tmp.write_text("\n".join(lines) + "\n")
+        tmp.rename(self.shot / "cmd")
+        end = time.time() + timeout
+        while not done.exists():
+            if self.proc.poll() is not None:
+                raise CliError(f"Trek exited ({self.proc.returncode}) mid-batch; see {self.data}/logs")
+            if time.time() > end:
+                raise CliError(f"batch timed out: {lines}")
+            time.sleep(0.1)
+        said = done.read_text().strip()
+        if said != "ok":
+            raise CliError(f"batch failed: {said}")
+
+    def sample(self):
+        """(RSS in MB, CPU seconds so far), as `ps` has them."""
+        rc, out = run(["ps", "-o", "rss=,cputime=", "-p", str(self.proc.pid)])
+        if rc != 0 or not out.strip():
+            raise CliError("Trek isn't running to sample")
+        rss, cpu = out.split()
+        secs = 0.0
+        for part in cpu.split(":"):
+            secs = secs * 60 + float(part)
+        return int(rss) / 1024, secs
+
+    def footprint(self):
+        """Physical footprint in MB, what Activity Monitor calls Memory (GPU memory included)."""
+        rc, out = run(["footprint", str(self.proc.pid)], timeout=60)
+        m = re.search(r"phys_footprint:\s*([\d.]+)\s*(KB|MB|GB)", out) or re.search(r"Footprint:\s*([\d.]+)\s*(KB|MB|GB)", out)
+        if rc != 0 or not m:
+            return None
+        return float(m.group(1)) * {"KB": 1 / 1024, "MB": 1, "GB": 1024}[m.group(2)]
+
+    def over(self, secs):
+        """Average CPU (% of one core) and context switches a second over `secs`, Trek left alone."""
+        _, before = self.sample()
+        rc, out = run(["top", "-l", "2", "-s", str(int(secs)), "-pid", str(self.proc.pid), "-stats", "pid,csw"], timeout=secs + 60)
+        _, after = self.sample()
+        rows = [l.split() for l in out.splitlines() if l.strip().startswith(str(self.proc.pid))]
+        switches = None
+        if rc == 0 and len(rows) >= 2:
+            switches = (float(rows[-1][1].rstrip("+-")) - float(rows[0][1].rstrip("+-"))) / secs
+        return (after - before) / secs * 100, switches
+
+    def stop(self):
+        if not self.proc or self.proc.poll() is not None:
+            return
+        try:
+            (self.shot / ".cmd.tmp").write_text("quit\n")
+            (self.shot / ".cmd.tmp").rename(self.shot / "cmd")
+            self.proc.wait(timeout=20)
+        except (OSError, subprocess.TimeoutExpired):
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *_):
+        self.stop()
+
+
+def perf_seed(seed_bin, work, threads, long_rounds, memo={}):
+    """A data folder of `threads` threads made by trek-core's perf_seed; None for an empty one."""
+    if not threads:
+        return None
+    key = (threads, long_rounds)
+    if key not in memo:
+        seed = Path(work) / f"seed-{threads}-{long_rounds}"
+        env = {**os.environ, "TREK_DATA_DIR": str(seed), "SEED_THREADS": str(threads), "SEED_LONG": str(long_rounds)}
+        rc, out = run([str(seed_bin)], env=env, timeout=600)
+        if rc != 0:
+            raise CliError(f"perf_seed: {out.strip()[-300:]}")
+        memo[key] = seed
+    return memo[key]
+
+
+def perf_launch(a, trek_bin, seed_bin, work, say):
+    """Launch to the first painted frame of the main window, by spawn time and the app's own log."""
+    out = {}
+    for n in a.thread_counts:
+        seed = perf_seed(seed_bin, work, n, 4)
+        warm = []
+        # The first launch of a new binary path pays for the system's first look at it: not warm.
+        for run_ix in range(a.runs + 1):
+            with PerfTrek(trek_bin, work, f"warm-{n}", seed) as t:
+                s = t.wait_line("startup")
+                took = float(s["at"]) - t.spawned_ms
+                if run_ix:
+                    warm.append(took)
+                last = s
+        out[f"warm_{n}_threads_ms"] = round(median(warm))
+        out[f"warm_{n}_threads_runs"] = [round(w) for w in warm]
+        out[f"warm_{n}_threads_phases_ms"] = {k: float(v) for k, v in last.items() if k not in ("kind", "at")}
+        say(f"launch warm, {n} threads: {out[f'warm_{n}_threads_ms']} ms (runs {out[f'warm_{n}_threads_runs']})")
+    # Cold: Trek and its data on a volume of their own, unmounted and mounted again before each
+    # run, so none of their pages are left in the file cache. (No `purge` without root; system
+    # libraries stay cached, as they do on any Mac that has been up a while.)
+    if IS_MAC:
+        n = max(a.thread_counts)
+        seed = perf_seed(seed_bin, work, n, 4)
+        image, mount = Path(work) / "cold.sparseimage", Path(work) / "cold"
+        attach = ["hdiutil", "attach", str(image), "-nobrowse", "-noautoopen", "-mountpoint", str(mount), "-quiet"]
+        detach = ["hdiutil", "detach", str(mount), "-force", "-quiet"]
+        rc, said = run(["hdiutil", "create", "-size", "2g", "-fs", "APFS", "-type", "SPARSE", "-volname", "TrekPerfCold", "-quiet", str(image)], timeout=120)
+        if rc == 0 and run(attach, timeout=120)[0] == 0:
+            shutil.copy2(trek_bin, mount / "trek")
+            cold = []
+            try:
+                if seed:
+                    shutil.copytree(seed, mount / "seed")
+                for _ in range(a.cold_runs):
+                    run(detach, timeout=120)
+                    if run(attach, timeout=120)[0] != 0:
+                        break
+                    with PerfTrek(mount / "trek", mount, "cold", mount / "seed" if seed else None) as t:
+                        s = t.wait_line("startup")
+                        cold.append(float(s["at"]) - t.spawned_ms)
+            finally:
+                run(detach, timeout=120)
+            out[f"cold_{n}_threads_ms"] = round(median(cold)) if cold else None
+            out[f"cold_{n}_threads_runs"] = [round(c) for c in cold]
+            say(f"launch cold, {n} threads: {out[f'cold_{n}_threads_ms']} ms (runs {out[f'cold_{n}_threads_runs']})")
+        else:
+            say(f"launch cold: no volume ({said.strip()[-200:]})")
+    return out
+
+
+def perf_idle(a, trek_bin, seed_bin, work, say):
+    """RSS, footprint, CPU and wakeups of a Trek left alone, with 0, 10 and 100 threads."""
+    out = {}
+    for n in a.thread_counts:
+        seed = perf_seed(seed_bin, work, n, 4)
+        with PerfTrek(trek_bin, work, f"idle-{n}", seed, poll_ms=5000) as t:
+            t.wait_line("startup")
+            # Past the warm-up pass 10 s after launch.
+            time.sleep(a.settle)
+            rss, _ = t.sample()
+            foot = t.footprint()
+            cpu, switches = t.over(a.idle_secs)
+            rss_after, _ = t.sample()
+        out[f"{n}_threads"] = {"rss_mb": round(rss), "footprint_mb": foot and round(foot), "cpu_percent": round(cpu, 2),
+                               "switches_per_s": switches if switches is None else round(switches, 1),
+                               "rss_after_mb": round(rss_after), "secs": a.idle_secs}
+        say(f"idle, {n} threads: RSS {round(rss)} MB, footprint {foot and round(foot)} MB, CPU {cpu:.2f}% over {a.idle_secs}s, {out[f'{n}_threads']['switches_per_s']} context switches/s")
+    # A window behind others isn't drawn after its first frame: memory with it drawn, as in front.
+    n = max(a.thread_counts)
+    with PerfTrek(trek_bin, work, "idle-drawn", perf_seed(seed_bin, work, n, 4), force_active=True) as t:
+        t.wait_line("startup")
+        time.sleep(a.settle)
+        foot = t.footprint()
+    out["drawn"] = {"threads": n, "footprint_mb": foot and round(foot)}
+    say(f"idle, {n} threads, the window drawn as in front: footprint {foot and round(foot)} MB")
+    # The same, on screen: macOS runs a window's display link only while it can be seen.
+    if a.front:
+        n = max(a.thread_counts)
+        with PerfTrek(trek_bin, work, "idle-front", perf_seed(seed_bin, work, n, 4), size="640x420") as t:
+            t.wait_line("startup")
+            time.sleep(a.settle)
+            t.batch(["perf front"], timeout=30)
+            visible = t.wait_line("front")["visible"] == "true"
+            cpu, switches = t.over(a.front_secs)
+        out["on_screen"] = {"threads": n, "visible": visible, "cpu_percent": round(cpu, 2), "secs": a.front_secs,
+                            "switches_per_s": switches if switches is None else round(switches, 1)}
+        say(f"idle on screen, {n} threads: visible {visible}, CPU {cpu:.2f}% over {a.front_secs}s, {out['on_screen']['switches_per_s']} context switches/s")
+    return out
+
+
+def perf_stream(a, trek_bin, seed_bin, work, say):
+    """A long mock answer streaming in the thread on screen: RSS, CPU and frame times."""
+    seed = perf_seed(seed_bin, work, 100, 4)
+    with PerfTrek(trek_bin, work, "stream", seed, force_active=True) as t:
+        t.wait_line("startup")
+        time.sleep(a.settle)
+        rss_start, cpu_start = t.sample()
+        t.batch(["pace 1", f"route project:{seed}/projects/atlas-api", f"send mock:stream {a.stream_secs}s", "wait 1000"], timeout=120)
+        began = time.time()
+        rss_peak = rss_start
+        while time.time() - began < a.stream_secs - 10:
+            time.sleep(5)
+            rss_peak = max(rss_peak, t.sample()[0])
+        t.batch(["perf frames 3000 stream-late"], timeout=60)
+        frames = t.wait_line("frames", label="stream-late")
+        rss_end, cpu_end = t.sample()
+        rss_peak = max(rss_peak, rss_end)
+        took = time.time() - began
+        t.batch([f"wait idle {(a.stream_secs + 120) * 1000}", "wait 500"], timeout=a.stream_secs + 180)
+        time.sleep(a.settle)
+        rss_after, _ = t.sample()
+    out = {"rss_start_mb": round(rss_start), "rss_peak_mb": round(rss_peak), "rss_after_settling_mb": round(rss_after),
+           "cpu_percent": round((cpu_end - cpu_start) / took * 100, 1), "secs": round(took),
+           "frame_p50_ms": float(frames["frame_p50"]), "frame_p95_ms": float(frames["frame_p95"]),
+           "frames_in_3s": int(frames["frames"]), "lag_p95_ms": float(frames["lag_p95"])}
+    say(f"stream, {a.stream_secs}s: RSS {out['rss_start_mb']} to {out['rss_peak_mb']} MB, CPU {out['cpu_percent']}%, frames p50 {out['frame_p50_ms']} / p95 {out['frame_p95_ms']} ms")
+    return out
+
+
+def perf_long(a, trek_bin, seed_bin, work, say):
+    """Opening and scrolling a thread of `--long-items` items, and what it keeps in memory."""
+    rounds = max(a.long_items // 5, 1)
+    seed = perf_seed(seed_bin, work, 1, rounds)
+    with PerfTrek(trek_bin, work, "long", seed, force_active=True) as t:
+        t.wait_line("startup")
+        time.sleep(a.settle)
+        rss_before, _ = t.sample()
+        t.batch(["perf open Long transcript"], timeout=300)
+        opened = t.wait_line("open")
+        rss_open, _ = t.sample()
+        t.batch(["wait 2000", f"perf scroll answer#{rounds * 5 - 2} -100 300 transcript-up"], timeout=300)
+        s = t.wait_line("scroll", label="transcript-up")
+        rss_scrolled, _ = t.sample()
+        # A new answer streaming at the end of all that history.
+        t.batch(["pace 1", "send mock:stream 20s", "wait 8000", "perf frames 3000 long-stream", "wait idle 60000"], timeout=120)
+        f = t.wait_line("frames", label="long-stream")
+    out = {"items": rounds * 5, "loaded_ms": float(opened["loaded"]), "first_paint_ms": float(opened["painted"]),
+           "rss_before_mb": round(rss_before), "rss_opened_mb": round(rss_open), "rss_scrolled_mb": round(rss_scrolled),
+           "scroll_frame_p50_ms": float(s["frame_p50"]), "scroll_frame_p95_ms": float(s["frame_p95"]), "scroll_frames": int(s["frames"]),
+           "scroll_latency_p50_ms": float(s["latency_p50"]), "scroll_latency_p95_ms": float(s["latency_p95"]), "scroll_unpainted": int(s["unpainted"]),
+           "stream_frame_p50_ms": float(f["frame_p50"]), "stream_frame_p95_ms": float(f["frame_p95"]), "stream_lag_p95_ms": float(f["lag_p95"]), "stream_frames_in_3s": int(f["frames"])}
+    say(f"long thread, {out['items']} items: loaded {out['loaded_ms']} ms, painted {out['first_paint_ms']} ms, RSS {out['rss_before_mb']} to {out['rss_opened_mb']} to {out['rss_scrolled_mb']} MB, scroll p50 {out['scroll_frame_p50_ms']} / p95 {out['scroll_frame_p95_ms']} ms, streaming p50 {out['stream_frame_p50_ms']} / p95 {out['stream_frame_p95_ms']} ms")
+    return out
+
+
+def perf_big_repo(work, files):
+    """A git repo of `files` small files, committed, for checkpoints to read."""
+    repo = Path(work) / f"repo-{files}"
+    repo.mkdir(parents=True)
+    body = "// A source file of about the size real ones are.\n" * 80
+    for i in range(files):
+        d = repo / f"pkg{i % 100:02}" / f"mod{i % 1000:03}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"file{i}.rs").write_text(f"// {i}\n{body}")
+    g = ["git", "-c", "user.name=perf", "-c", "user.email=perf@example.invalid", "-c", "commit.gpgSign=false"]
+    for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-qm", "seed"]):
+        rc, said = run([*g, *args], cwd=str(repo), timeout=1800)
+        if rc != 0:
+            raise CliError(f"git {args[0]}: {said.strip()[-200:]}")
+    return repo
+
+
+def perf_checkpoint(a, trek_bin, seed_bin, work, say):
+    """What a turn's file checkpoint costs (off the main thread), and how long the agent waits for it."""
+    ck_bin = Path(seed_bin).parent / "perf_checkpoint"
+    out = {}
+    big = Path(a.big_repo) if a.big_repo else perf_big_repo(work, a.big_repo_files)
+    # This repo as a clone of its own: a turn leaves checkpoint refs in the repo it runs in.
+    this = Path(work) / "this-repo"
+    rc, said = run(["git", "clone", "-q", "--shared", str(ROOT), str(this)], timeout=600)
+    if rc != 0:
+        raise CliError(f"git clone: {said.strip()[-200:]}")
+    for name, repo in (("this repo", this), ("big repo", big)):
+        rc, said = run([str(ck_bin), str(repo), str(a.runs)], timeout=1800)
+        if rc != 0:
+            raise CliError(f"perf_checkpoint: {said.strip()[-300:]}")
+        d = json.loads(said.strip().splitlines()[-1])
+        # The first token as Trek's transcript sees it, with the mock agent, which has no model to
+        # wait for. The first turn starts its session too; after that, what's left is how long the
+        # message waited for the checkpoint (each run a few turns, the medians reported).
+        with PerfTrek(trek_bin, work, "first-token") as t:
+            t.wait_line("startup")
+            lines = [f"route project:{repo}", "send mock:stream 2s", "wait idle 60000"]
+            for _ in range(a.runs):
+                # Past the checkpoint that ended the turn before.
+                lines += [f"wait {max(5000, d['first_ms'] * 2)}", "send mock:stream 2s", "wait idle 60000"]
+            t.batch(lines, timeout=(a.runs + 1) * 90)
+            tokens = [float(l["ms"]) for l in t.lines() if l["kind"] == "first_token"]
+        d["first_token_new_session_ms"] = tokens[0]
+        d["first_token_ms"] = median(tokens[1:])
+        d["first_token_runs_ms"] = tokens[1:]
+        out[name] = d
+        failed = f" (failed: {d['failed']})" if d.get("failed") else ""
+        say(f"checkpoint, {name}: {d['files']} files, first {d['first_ms']} ms, then p50 {d['p50_ms']} ms{failed}; first token after {d['first_token_ms']} ms (runs {tokens[1:]}), {d['first_token_new_session_ms']} ms with a new session")
+    return out
+
+
+def cmd_perf(a):
+    """Trek's launch, memory, CPU, long-thread and checkpoint numbers, measured on this machine (docs/PERFORMANCE.md)."""
+    what = list(a.what) or list(PERF_WHAT)
+    unknown = [w for w in what if w not in PERF_WHAT]
+    if unknown:
+        raise CliError(f"unknown measurement {unknown[0]} (one of: {' '.join(PERF_WHAT)})")
+    a.thread_counts = [int(n) for n in a.threads.split(",")]
+    target = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target")
+    builds = []
+    if not a.bin:
+        builds.append(["cargo", "build", "--release", "-p", "trek-app", "--features", "shots", "--locked"])
+    if not a.tools:
+        builds.append(["cargo", "build", "--release", "-p", "trek-core", "--example", "perf_seed", "--example", "perf_checkpoint", "--locked"])
+    if a.dry_run:
+        return {"what": what, "builds": [shlex.join(b) for b in builds], "threads": a.thread_counts, "runs": a.runs,
+                "_text": [f"would build: {shlex.join(b)}" for b in builds] + [f"would measure: {' '.join(what)}"]}
+    for cmd in builds:
+        rc, out = run(cmd, cwd=str(ROOT), timeout=a.timeout)
+        if rc != 0:
+            raise CliError(f"{shlex.join(cmd)} failed: {out.strip()[-400:]}")
+    if a.bin and not Path(a.bin).exists():
+        raise CliError(f"no Trek at {a.bin}")
+    work = Path(tempfile.mkdtemp(prefix="trek-perf-"))
+    # Copied out: another build in this target folder may replace them mid-run.
+    trek_bin = work / "trek"
+    shutil.copy2(a.bin or target / "release" / "trek", trek_bin)
+    tools = work / "tools"
+    tools.mkdir()
+    for tool in ("perf_seed", "perf_checkpoint"):
+        src = Path(a.tools or target / "release" / "examples") / tool
+        if src.exists():
+            shutil.copy2(src, tools / tool)
+    seed_bin = tools / "perf_seed"
+    say = (lambda s: print(s, file=sys.stderr, flush=True)) if getattr(a, "json", False) else (lambda s: print(s, flush=True))
+    results = {"date": time.strftime("%Y-%m-%d %H:%M"), "git": git("rev-parse", "--short", "HEAD"),
+               "machine": {"model": out_of(["sysctl", "-n", "hw.model"]), "cpu": out_of(["sysctl", "-n", "machdep.cpu.brand_string"]),
+                           "cores": out_of(["sysctl", "-n", "hw.ncpu"]), "memory_gb": round(int(out_of(["sysctl", "-n", "hw.memsize"]) or 0) / 2**30),
+                           "macos": out_of(["sw_vers", "-productVersion"]), "load": os.getloadavg()[0]},
+               "binary": {"arch": out_of(["lipo", "-archs", str(trek_bin)]), "mb": round(trek_bin.stat().st_size / 2**20)}}
+    measure = {"launch": perf_launch, "idle": perf_idle, "stream": perf_stream, "long": perf_long, "checkpoint": perf_checkpoint}
+    say(f"Trek {results['binary']['arch']}, {results['binary']['mb']} MB, load {results['machine']['load']:.0f} on {results['machine']['cores']} cores, in {work}")
+    try:
+        for w in what:
+            results[w] = measure[w](a, trek_bin, seed_bin, work, say)
+    finally:
+        if a.keep:
+            say(f"kept {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+    results["load_after"] = os.getloadavg()[0]
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(json.dumps(results, indent=2) + "\n")
+    return {**results, "_text": [f"load {results['machine']['load']:.0f} before, {results['load_after']:.0f} after"] + ([f"wrote {a.out}"] if a.out else [])}
+
+
 # ---------------------------------------------------------------- CLI
 
 COMMANDS = {}
@@ -1017,6 +1566,13 @@ def build_parser():
     s.add_argument("--fast", action="store_true", help="skip per-worktree git status and du")
     add("disk", cmd_disk, epilog="Prints levers; never deletes anything itself.")
     add("release", cmd_release, epilog="Prints the dispatch line; never dispatches.")
+    s = add("downloads", cmd_downloads, epilog="Replaces: gh api repos/dokyit/Trek/releases | jq '.[].assets[].download_count'. "
+            f"PostHog installs need a personal API key (phx_...) in {POSTHOG_KEY_FILE}; project id in {POSTHOG_PROJECT_FILE} "
+            "or TREK_POSTHOG_PROJECT (default @current).")
+    s.add_argument("n", nargs="?", type=int, default=10, help="versions shown, newest first (default 10)")
+    s.add_argument("--all", action="store_true", help="every version")
+    s.add_argument("--repo", default="dokyit/Trek", help="owner/name (default dokyit/Trek)")
+    s.add_argument("--timeout", type=int, default=60)
     s = add("phone", cmd_phone, epilog="Runs ios/scripts/phone-update.sh --status (read-only).")
     s.add_argument("--timeout", type=int, default=90)
     s = add("memory", cmd_memory, epilog="Examples: agent-cli memory; agent-cli memory release; agent-cli memory disk --list")
@@ -1049,13 +1605,33 @@ def build_parser():
     s.add_argument("n", nargs="?", type=int, default=8, help="non-booted devices shown")
     s = add("dock", cmd_dock, epilog="Replaces: lsappinfo list/info, defaults read com.apple.dock recent-apps. An extra app record names the process that registered as a second Trek.")
     s.add_argument("--clear", action="store_true", help="take stale Trek tiles out of the Dock's recent apps and restart the Dock")
+    s = add("perf", cmd_perf, epilog="Isolated Trek only (throwaway data folder, mock agent). Example: agent-cli perf launch idle --runs 5 --out dist/perf/mac.json")
+    s.add_argument("what", nargs="*", help=f"some of: {' '.join(PERF_WHAT)} (default all)")
+    s.add_argument("--bin", help="a Trek built with --features shots (default: build it, release, in this checkout)")
+    s.add_argument("--tools", help="folder holding the perf_seed and perf_checkpoint examples (default: build them)")
+    s.add_argument("--threads", default="0,10,100", help="thread counts for launch and idle (default 0,10,100)")
+    s.add_argument("--runs", type=int, default=5, help="warm launches and checkpoints; medians are reported (default 5)")
+    s.add_argument("--cold-runs", type=int, default=3, help="cold launches (default 3)")
+    s.add_argument("--settle", type=int, default=25, help="seconds Trek settles before an idle or stream sample (default 25)")
+    s.add_argument("--idle-secs", type=int, default=60, help="seconds of idle CPU (default 60)")
+    s.add_argument("--front", action="store_true", help="idle also on screen: a small Trek window above your others for --front-secs, without the keyboard")
+    s.add_argument("--front-secs", type=int, default=20, help="seconds of on-screen idle (default 20)")
+    s.add_argument("--stream-secs", type=int, default=120, help="seconds of the streamed answer (default 120)")
+    s.add_argument("--long-items", type=int, default=10000, help="items in the long thread (default 10000)")
+    s.add_argument("--big-repo-files", type=int, default=100000, help="files in the repo checkpoints are also timed on (default 100000)")
+    s.add_argument("--big-repo", help="time checkpoints on this repo instead of making one")
+    s.add_argument("--out", help="write the results here as JSON too")
+    s.add_argument("--keep", action="store_true", help="keep the scratch folder")
+    s.add_argument("--dry-run", action="store_true", help="print what would be built and measured, run nothing")
+    s.add_argument("--timeout", type=int, default=3600)
     return p
 
 
 SELFTEST_ARGS = {
     "dock": [],
+    "perf": ["--dry-run"],
     "status": [], "ci": ["latest"], "crates": [], "feature": ["video"], "where": ["--defs", "main", "--max", "3"],
-    "logs": ["5"], "worktrees": ["--fast"], "disk": [], "release": [], "phone": [], "memory": [], "tasks": ["3"],
+    "logs": ["5"], "worktrees": ["--fast"], "disk": [], "release": [], "downloads": ["3"], "phone": [], "memory": [], "tasks": ["3"],
     "digest": ["-"], "test": ["--dry-run", "-p", "trek-time"], "check": ["--dry-run", "-p", "trek-time"],
     "ios-build": ["--dry-run"], "sims": ["2"],
 }
@@ -1096,6 +1672,12 @@ def selftest(as_json, online):
             results.append({"cmd": f"{name} {' '.join(variant)}", "ok": ok, "s": round(time.time() - t0, 2), **({"why": why} if not ok else {})})
     unit = extract_errors(DIGEST_SAMPLE)
     results.append({"cmd": "unit extract_errors", "ok": bool(unit) and unit[0].startswith("error[E0425]") and "\x1b" not in unit[0]})
+    kinds = [asset_kind(n) for n in ("stable.json", "Trek-0.4.40-darwin-aarch64.dmg", "Trek-0.4.40-darwin-aarch64.app.tar.gz",
+                                     "Trek-0.4.40-darwin-x86_64.app.tar.gz", "Trek-Setup-x86_64.exe",
+                                     "Trek-0.4.40-windows-x86_64.zip", "Trek-0.4.40-windows-x86_64.zip.minisig")]
+    results.append({"cmd": "unit asset_kind", "ok": kinds == [("manifest", None), ("installer", "mac-arm64"), ("update", "mac-arm64"),
+                                                              ("update", "mac-intel"), ("installer", "windows-x64"),
+                                                              ("update", "windows-x64"), (None, None)]})
     if missing:
         results.append({"cmd": "selftest covers " + ",".join(missing), "ok": False})
     passed = all(r["ok"] for r in results)

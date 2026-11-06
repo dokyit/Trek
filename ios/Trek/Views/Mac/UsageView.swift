@@ -117,18 +117,21 @@ private struct ProviderCard: View {
     var provider: ProviderUsage
     var link: HostLink?
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                AgentGlyph(provider.agent, size: 26)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(provider.agent.name).font(.ui(.headline))
-                    if let plan = provider.plan {
-                        Text(plan).font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+            BesideOrOver(spacing: 10) {
+                HStack(spacing: 10) {
+                    AgentGlyph(provider.agent, size: 26)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(provider.agent.name).font(.ui(.headline))
+                        if let plan = provider.plan {
+                            Text(plan).font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+                        }
                     }
                 }
-                Spacer()
+                if !typeSize.isAccessibilitySize { Spacer() }
                 if let worst = provider.limits.map(\.percent).max() {
                     let left = Int(max(0, 100 - worst).rounded())
                     Text("\(left)% left")
@@ -167,20 +170,23 @@ private struct ProviderCard: View {
 /// "5-hour limit · 42%", its bar, "Resets in 2h 10m".
 private struct LimitRow: View {
     var limit: UsageLimit
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(limit.label).font(.ui(.subheadline).weight(.medium))
-                if let window = limit.window {
-                    Text(window)
-                        .font(.ui(.caption2).weight(.semibold))
-                        .foregroundStyle(Trek.muted)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Trek.foreground.opacity(0.07), in: Capsule())
+            BesideOrOver(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(limit.label).font(.ui(.subheadline).weight(.medium))
+                    if let window = limit.window {
+                        Text(window)
+                            .font(.ui(.caption2).weight(.semibold))
+                            .foregroundStyle(Trek.muted)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Trek.foreground.opacity(0.07), in: Capsule())
+                    }
                 }
-                Spacer()
+                if !typeSize.isAccessibilitySize { Spacer() }
                 Text("\(Int(max(0, 100 - limit.percent).rounded()))% left")
                     .font(.ui(.subheadline).monospacedDigit())
                     .foregroundStyle(Trek.muted)

@@ -155,7 +155,7 @@ fn a_card_partly_scrolled_away_shows_only_what_the_transcript_shows() {
     run(async |cx| {
         let _log = fake_web(true).unwrap();
         let trek = open(cx);
-        trek.window(cx, |window, _| window.resize(size(px(900.), px(560.))));
+        cx.simulate_window_resize(trek.window, size(px(900.), px(560.)));
         answered(&trek, cx, &answer(PAGE), true);
         let card = one(&trek, cx);
         let (body, mask) = (card.body.unwrap(), card.mask.unwrap());
@@ -361,5 +361,29 @@ fn a_cards_send_goes_to_its_thread_and_copy_reaches_the_clipboard() {
             after.last().map(|t| t.trim()),
             Some("Resolve src/main.rs: keep mine")
         );
+    });
+}
+
+#[test]
+fn a_cards_send_waits_while_its_thread_asks_for_a_secret() {
+    run(async |cx| {
+        let _log = fake_web(true).unwrap();
+        let trek = open(cx);
+        let id = answered(&trek, cx, &answer(PAGE), true);
+        let (tx, _rx) = async_channel::bounded(1);
+        trek.update(cx, |ws, cx| {
+            ws.ask_for_secret(&id, "GITHUB_TOKEN", "To open the pull request.", tx, cx)
+        });
+        assert!(one(&trek, cx).has_view);
+        trek.window(cx, |window, cx| {
+            trek_app::artifact::post(
+                window,
+                r#"{"n":"{nonce}","t":"send","text":"ghp_typed-in-the-page"}"#,
+                cx,
+            )
+        });
+        settle(&trek, cx);
+        let items = format!("{:?}", trek.items(cx, &id));
+        assert!(!items.contains("ghp_typed-in-the-page"), "{items}");
     });
 }

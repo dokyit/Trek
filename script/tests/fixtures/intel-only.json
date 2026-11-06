@@ -1,0 +1,12 @@
+{
+  "version": "0.4.0",
+  "notes": "- The Intel build's own copy of the notes.",
+  "pub_date": "2026-10-10T01:09:09Z",
+  "platforms": {
+    "darwin-x86_64": {
+      "url": "https://github.com/dokyit/Trek/releases/download/v0.4.0/Trek-0.4.0-darwin-x86_64.app.tar.gz",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "signature": "untrusted comment: signature from minisign secret key\nRUTestIntelSignatureLine==\ntrusted comment: Trek 0.4.0 darwin-x86_64\nSW50ZWxDb21tZW50"
+    }
+  }
+}

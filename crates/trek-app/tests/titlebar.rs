@@ -122,7 +122,12 @@ fn macos_keeps_its_system_menus_and_title_bar() {
             menus.first().map(|m| m.name.to_string()),
             Some("Trek".to_string())
         );
-        assert_eq!(menus.len(), 5);
+        // And Help last, where macOS puts it (Send feedback… lives there).
+        assert_eq!(menus.len(), 6);
+        assert_eq!(
+            menus.last().map(|m| m.name.to_string()),
+            Some("Help".to_string())
+        );
     });
 }
 

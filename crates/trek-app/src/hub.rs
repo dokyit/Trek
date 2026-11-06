@@ -18,6 +18,7 @@
 
 use crate::assets::Lucide;
 use crate::composer::look;
+use crate::scale::{radius, text};
 use crate::workspace::{
     GitInfo, LineageRow, PanelTool, Route, Scope, TaskState, Workspace, WorkspaceEvent,
 };
@@ -197,7 +198,8 @@ fn subject(ws: &Workspace, scope: &Scope) -> Option<Subject> {
     };
     match scope {
         Scope::Main => match &ws.route {
-            Route::Thread(id) => of_thread(id),
+            // In a split the left pane's, whichever pane the route is on.
+            Route::Thread(_) => ws.thread_id_in(scope).and_then(of_thread),
             Route::Draft { project } => Some(Subject {
                 thread: None,
                 folder: project.clone(),
@@ -209,6 +211,7 @@ fn subject(ws: &Workspace, scope: &Scope) -> Option<Subject> {
             _ => None,
         },
         Scope::Thread(id) => of_thread(id),
+        Scope::Beside => ws.thread_id_in(scope).and_then(of_thread),
         Scope::Ide | Scope::Side => None,
     }
 }
@@ -328,7 +331,7 @@ fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
     let context = live.and_then(|l| l.context);
     let usage = thread
         .as_ref()
-        .and_then(|t| ws.usage_focus_for(t.agent.clone(), t.model.clone()));
+        .and_then(|t| ws.usage_focus_on(t.agent.clone(), t.model.clone(), t.account.as_deref()));
     let agents = thread
         .as_ref()
         .map(|t| {
@@ -718,7 +721,7 @@ fn header(text: &'static str, cx: &App) -> Div {
         .px(px(9.))
         .pt(px(7.))
         .pb(px(3.))
-        .text_size(px(11.5))
+        .text_size(px(text::LABEL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(cx.theme().muted_foreground)
         .child(text)
@@ -742,7 +745,7 @@ fn label(text: impl Into<SharedString>) -> Div {
 fn trailing(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
         .flex_none()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
 }
@@ -779,8 +782,8 @@ fn plain_row(id: impl Into<ElementId>) -> Stateful<Div> {
         .px(px(9.))
         .min_h(px(28.))
         .gap(px(8.))
-        .rounded(px(crate::fluent::control(7.)))
-        .text_size(px(13.))
+        .rounded(px(crate::fluent::control(radius::BUTTON)))
+        .text_size(px(text::BODY))
 }
 
 /// A row in an unfolded menu, set in under its row.
@@ -1033,7 +1036,7 @@ fn card(
                                 .pl(px(31.))
                                 .pr(px(9.))
                                 .py(px(4.))
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .text_color(theme.muted_foreground)
                                 .child(why),
                         );
@@ -1088,7 +1091,7 @@ fn card(
         let counts = h_flex()
             .flex_none()
             .gap(px(6.))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(theme.muted_foreground)
             .when(g.behind > 0, |el| el.child(format!("↓{}", g.behind)))
             .when(g.ahead > 0, |el| el.child(format!("↑{}", g.ahead)));
@@ -1190,7 +1193,7 @@ fn card(
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(hue)
                         .child(state),
                 )
@@ -1219,7 +1222,7 @@ fn card(
                         h_flex()
                             .flex_none()
                             .gap(px(5.))
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .child(div().text_color(crate::palette::emerald(cx)).child(p))
                             .child(div().text_color(crate::palette::red(cx)).child(m)),
                     ),
@@ -1306,7 +1309,7 @@ fn card(
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(tint)
                             .child(format!("{left:.0}% left{resets}")),
                     )
@@ -1467,7 +1470,7 @@ fn card(
                             .py(px(3.))
                             .child(
                                 div()
-                                    .text_size(px(11.5))
+                                    .text_size(px(text::LABEL))
                                     .text_color(theme.muted_foreground)
                                     .child(l.label.clone()),
                             )

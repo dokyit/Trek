@@ -13,6 +13,7 @@ mod system;
 
 use crate::composer::look;
 use crate::fluent;
+use crate::scale::{radius, text};
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
@@ -350,7 +351,7 @@ impl ShareSheet {
 
 fn note(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .line_height(relative(1.45))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
@@ -376,7 +377,7 @@ fn switch_row(
                 .flex_1()
                 .min_w_0()
                 .gap(px(2.))
-                .child(div().text_size(px(13.)).child(label))
+                .child(div().text_size(px(text::BODY)).child(label))
                 .when_some(detail, |el, d| el.child(note(d, cx))),
         )
         .child(
@@ -416,7 +417,7 @@ fn choice(
         .px(px(10.))
         .py(px(7.))
         .gap(px(10.))
-        .rounded(px(fluent::control(10.)))
+        .rounded(px(fluent::control(radius::BUTTON)))
         .cursor_pointer()
         .when(chosen, |el| el.bg(fill))
         .hover(move |s| s.bg(if chosen { fill } else { hover.opacity(0.6) }))
@@ -425,7 +426,7 @@ fn choice(
             div()
                 .flex_none()
                 .size(px(28.))
-                .rounded(px(fluent::control(8.)))
+                .rounded(px(fluent::control(radius::BUTTON)))
                 .border_1()
                 .border_color(look::hairline(cx))
                 .bg(look::card_fill(cx))
@@ -440,7 +441,7 @@ fn choice(
                 .min_w_0()
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(px(text::BODY))
                         .font_weight(FontWeight::MEDIUM)
                         .child(label.into()),
                 )
@@ -551,11 +552,11 @@ impl ShareSheet {
                                         .px(px(10.))
                                         .flex()
                                         .items_center()
-                                        .rounded(px(fluent::control(8.)))
+                                        .rounded(px(fluent::control(radius::BUTTON)))
                                         .border_1()
                                         .border_color(look::hairline(cx))
                                         .bg(look::chip_fill(cx))
-                                        .text_size(px(12.5))
+                                        .text_size(px(text::BODY))
                                         .child(div().truncate().child(g.url.clone())),
                                 )
                                 .child(
@@ -625,7 +626,7 @@ impl ShareSheet {
                         .id("share-error")
                         .test_support()
                         .pt(px(8.))
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .line_height(relative(1.45))
                         .text_color(crate::palette::red(cx))
                         .child(why),
@@ -788,7 +789,7 @@ impl Render for ShareSheet {
                     .gap(px(4.))
                     .child(
                         div()
-                            .text_size(px(16.))
+                            .text_size(px(text::HEADING))
                             .font_semibold()
                             .line_clamp(2)
                             .child(format!("Share “{title}”")),

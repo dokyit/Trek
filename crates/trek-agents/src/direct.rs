@@ -1,20 +1,30 @@
-//! Direct providers (API keys and local servers). Phase 2 provides full native agent tool
-//! execution (read_file, edit_file, write_file, bash) with HandHolding permission gates and
-//! streaming tool-call accumulation, including fallback XML tool-call parsing for fine-tuned models.
+//! Direct providers (API keys and local servers): Trek's own agent loop. A model request and what
+//! comes back (`openai_turn`, `anthropic_turn`), its failures told apart (`failure`), tool calls
+//! made sense of however a model sent them (`repair`), and the tools themselves with their
+//! HandHolding permission gates (`execute_tool`, `edit`, `search`, `web`, `executor`).
 
+pub mod edit;
 pub mod executor;
+pub mod failure;
+pub mod mcp;
+pub mod repair;
 pub mod script;
+pub mod search;
+pub mod web;
 
+use crate::rules::Ruling;
 use crate::{AgentEvent, Billing, Command, Decision, SessionConfig, load_image};
 use anyhow::{Context as _, Result, bail};
 use executor::{ExecutorGone, LocalExecutor, ToolExecutor};
+use failure::{FailureKind, RequestFailure};
 use futures::StreamExt;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use trek_core::catalog::{DirectProvider, ModelInfo, Wire, direct_provider};
+use trek_core::catalog::{DirectProvider, ModelCaps, ModelInfo, Wire, direct_provider};
+use trek_core::permission_rules::{self, Call, PermissionRule, RuleKind};
 use trek_core::settings::secrets;
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
 
@@ -36,7 +46,8 @@ pub struct DirectOptions {
     pub script_log_dir: Option<PathBuf>,
     /// Model requests one prompt may take before the answer is cut off.
     pub max_turns: u32,
-    /// How long one `bash` command may run (`None`: as long as it takes).
+    /// How long one `bash` command may run unless the model says otherwise (`None`: as long as it
+    /// takes).
     pub command_timeout: Option<Duration>,
     /// No new model request, and no further tool call, after this: the one running finishes.
     pub deadline: Option<Instant>,
@@ -60,8 +71,10 @@ impl Default for DirectOptions {
             base_url: None,
             executor: Arc::new(LocalExecutor),
             script_log_dir: None,
-            max_turns: 30,
-            command_timeout: None,
+            // The real guards are `LoopGuard` and the report at the end: 30 cut off five of six real
+            // sub-agents mid-work, with nothing to show for it.
+            max_turns: 200,
+            command_timeout: Some(Duration::from_secs(300)),
             deadline: None,
             system_prompt: None,
             observer: None,
@@ -80,6 +93,8 @@ pub enum Stop {
     MaxTurns,
     /// `DirectOptions::deadline` passed.
     TimeLimit,
+    /// The model kept making the same calls and getting the same results.
+    Stuck,
     /// A request or the executor failed, or the turn was stopped.
     Error(String),
 }
@@ -112,44 +127,166 @@ pub trait Observer: Send + Sync {
     fn stopped(&self, _why: &Stop) {}
 }
 
-/// The error for a failed request: a usage limit for a 429 (said with `AgentEvent::LimitReached`),
-/// else `message` as it is.
+/// The error for a failed request, by what can be done about it (`failure`): one worth waiting out
+/// is sent again by the session, a usage limit with a far-off reset is said with
+/// `AgentEvent::LimitReached`.
 fn request_error(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     message: String,
 ) -> anyhow::Error {
+    let mut failed =
+        failure::classify_status(status.as_u16(), &message, failure::retry_after(headers));
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return crate::limits::LimitError(crate::limits::from_response(
-            headers,
-            message,
-            trek_core::store::now_ms(),
-        ))
-        .into();
+        let now = trek_core::store::now_ms();
+        let limit = crate::limits::from_response(headers, message, now);
+        let far = limit
+            .resets_at
+            .is_some_and(|at| at.saturating_sub(now) > failure::MAX_RETRY_AFTER.as_millis() as i64);
+        if far || failed.kind == FailureKind::Fatal {
+            return crate::limits::LimitError(limit).into();
+        }
+        failed.limit = Some(limit);
     }
-    anyhow::anyhow!(message)
+    failed.into()
 }
 
-fn system_prompt(cwd: &Path, read_only: bool, instructions: Option<&str>) -> String {
+/// Trek's prompt: short, because a weak model does worse with a long one and a strong one doesn't
+/// need it. What moves results is in the tools and their errors; this says how to use them.
+/// `environment` and `project` are read once, when the session starts, so the prefix stays the same
+/// for the provider's cache.
+fn system_prompt(
+    cwd: &Path,
+    read_only: bool,
+    environment: &str,
+    project: Option<&str>,
+    instructions: Option<&str>,
+) -> String {
     let mut p = format!(
-        "You are Trek, an autonomous coding agent working in `{}`.\n\
-         You have access to tools to inspect files, make code edits, and execute terminal commands.\n\
-         - bash: Run terminal commands (git, cargo, tests, etc.)\n\
-         - read_file: View file contents with line numbers\n\
-         - write_file: Create or overwrite files\n\
-         - edit_file: Replace precise old_str snippets with new_str\n\
-         Always examine files before editing them. Make edits minimal and correct.\n",
+        "You are Trek, an autonomous coding agent working in `{}`.\n\n\
+         Use your tools to do the work rather than describing it: read what you need, make the change, run it, read the result. Answer a plain question plainly.\n\
+         - Find things with grep, glob and list_dir rather than guessing at paths.\n\
+         - Read a file before editing it. Keep edits small and in the file's own style.\n\
+         - Each command runs in a new shell in this folder. A failed one ends with `[exit code N]`. When something fails, work out why before trying again, and don't repeat a call that didn't work.\n\
+         - Long output is cut, with the whole of it saved to a file you can read or grep.\n\
+         - Keep going until the request is done or you're truly blocked, then say briefly what you did.\n",
         cwd.display()
     );
     if read_only {
-        p.push_str("\nIMPORTANT: This session is in read-only mode. File edits and mutating commands are prohibited.\n");
+        p.push_str("\nThis session is read-only: look and report, but change nothing. bash runs only commands that just read (git status, git log, git diff, ls, cat, grep and the like).\n");
+    }
+    if !environment.is_empty() {
+        p.push('\n');
+        p.push_str(environment);
+        p.push('\n');
+    }
+    if let Some(project) = project {
+        p.push('\n');
+        p.push_str(project);
+        p.push('\n');
     }
     if let Some(extra) = instructions {
-        p.push_str("\n");
+        p.push('\n');
         p.push_str(extra);
-        p.push_str("\n");
+        p.push('\n');
     }
     p
+}
+
+/// The facts a model can't work out without spending a call on each: the date, the OS, the shell
+/// it's writing commands for, the branch.
+async fn environment(exec: &dyn ToolExecutor, cwd: &Path) -> String {
+    let limit = Some(Duration::from_secs(3));
+    let os = if exec.is_local() {
+        match std::env::consts::OS {
+            "macos" => "macOS".to_string(),
+            "windows" => "Windows".to_string(),
+            "linux" => "Linux".to_string(),
+            other => other.to_string(),
+        }
+    } else {
+        exec.exec("uname -s", cwd, limit)
+            .await
+            .ok()
+            .filter(|r| r.success())
+            .map(|r| r.stdout.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Linux".to_string())
+    };
+    let shell = if exec.is_local() && cfg!(windows) {
+        "cmd.exe (bash syntax won't work)"
+    } else {
+        "bash"
+    };
+    let mut out = format!(
+        "Today's date: {}\nOS: {os}\nShell: {shell}",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
+    let branch = exec
+        .exec("git rev-parse --abbrev-ref HEAD", cwd, limit)
+        .await
+        .ok()
+        .filter(|r| r.success())
+        .map(|r| r.stdout.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(branch) = branch {
+        out.push_str(&format!("\nGit branch: {branch}"));
+    }
+    out
+}
+
+/// The project's own instructions for agents: `AGENTS.md`, else `CLAUDE.md`, in the folder and in
+/// each one up to the repository's root, outermost first.
+async fn project_instructions(exec: &dyn ToolExecutor, cwd: &Path) -> Option<String> {
+    const EACH: usize = 16_000;
+    let root = exec
+        .exec(
+            "git rev-parse --show-toplevel",
+            cwd,
+            Some(Duration::from_secs(3)),
+        )
+        .await
+        .ok()
+        .filter(|r| r.success())
+        .map(|r| PathBuf::from(r.stdout.trim()));
+    let mut dirs = vec![cwd.to_path_buf()];
+    if let Some(root) = &root {
+        let mut upward = Vec::new();
+        let mut at = Some(cwd);
+        let mut reached = false;
+        while let Some(dir) = at {
+            upward.push(dir.to_path_buf());
+            if dir == root {
+                reached = true;
+                break;
+            }
+            at = dir.parent();
+        }
+        if reached {
+            dirs = upward;
+            dirs.reverse();
+        }
+    }
+    let mut found = Vec::new();
+    for dir in &dirs {
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            let path = dir.join(name);
+            let Ok(Some(bytes)) = exec.read(&path).await else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            if text.trim().is_empty() {
+                continue;
+            }
+            found.push(format!(
+                "Project instructions from {}:\n{}",
+                path.display(),
+                clip_chars(text.trim(), EACH)
+            ));
+            break;
+        }
+    }
+    (!found.is_empty()).then(|| found.join("\n\n"))
 }
 
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -159,105 +296,145 @@ fn next_id() -> String {
     format!("{}_{c}", trek_core::store::now_ms())
 }
 
-/// The tools a session offers: the four built in, then `script` when it's on (see `script`).
-fn tool_defs(script: bool) -> Vec<Value> {
-    let mut tools = direct_tools();
-    if script {
+/// The tools a session offers: what a read-only session can't use isn't on offer, and `web_fetch`
+/// is only for sessions on this machine (a benchmark's sandbox has no business on the web through
+/// a side door). Then `script`, when it's on (see `script`).
+fn tool_defs(script: bool, local: bool, read_only: bool) -> Vec<Value> {
+    let mut tools: Vec<Value> = direct_tools()
+        .into_iter()
+        .filter(|t| {
+            let name = t["function"]["name"].as_str().unwrap_or_default();
+            match name {
+                "write_file" | "edit_file" => !read_only,
+                "web_fetch" => local,
+                _ => true,
+            }
+        })
+        .collect();
+    if script && !read_only {
         tools.push(script::tool_def());
     }
     tools
 }
 
+fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required
+            }
+        }
+    })
+}
+
 fn direct_tools() -> Vec<Value> {
     vec![
-        json!({
-            "type": "function",
-            "function": {
-                "name": "bash",
-                "description": "Run a shell command in the project directory. Use this for git, cargo, running tests, listing files, etc.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The command line string to execute."
-                        }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read the contents of a file in the workspace. Returns the file content with line numbers.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The relative or absolute file path to read."
-                        },
-                        "start_line": {
-                            "type": "integer",
-                            "description": "Optional 1-based start line number."
-                        },
-                        "end_line": {
-                            "type": "integer",
-                            "description": "Optional 1-based end line number."
-                        }
-                    },
-                    "required": ["path"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Create a new file or completely overwrite an existing file with the specified content.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The file path to write to."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The complete text content to write."
-                        }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        }),
-        json!({
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "Replace a specific snippet of text (old_str) with new text (new_str) in an existing file. old_str must uniquely appear in the file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "The path to the file to edit."
-                        },
-                        "old_str": {
-                            "type": "string",
-                            "description": "The exact existing text to replace."
-                        },
-                        "new_str": {
-                            "type": "string",
-                            "description": "The replacement text."
-                        }
-                    },
-                    "required": ["path", "old_str", "new_str"]
-                }
-            }
-        }),
+        tool(
+            "bash",
+            "Run a shell command in the project folder and get its output. Each call is a new shell: cd doesn't carry over. A failed command ends with [exit code N]. Commands stop after 300 seconds unless timeout_s says otherwise.",
+            json!({
+                "command": { "type": "string", "description": "The command line to run." },
+                "timeout_s": { "type": "integer", "description": "Seconds it may run, up to 3600. Set it for long builds and test runs." },
+                "background": { "type": "boolean", "description": "Start it and return at once, with where its output goes. For servers and watchers." }
+            }),
+            &["command"],
+        ),
+        tool(
+            "read_file",
+            "Read a text file, with line numbers. Up to 2000 lines at a time: the end says how to read on.",
+            json!({
+                "path": { "type": "string", "description": "The file, relative to the project folder or absolute." },
+                "start_line": { "type": "integer", "description": "First line to read, from 1." },
+                "end_line": { "type": "integer", "description": "Last line to read." }
+            }),
+            &["path"],
+        ),
+        tool(
+            "write_file",
+            "Create a file, or replace all of one. For a change to an existing file, use edit_file.",
+            json!({
+                "path": { "type": "string", "description": "The file to write." },
+                "content": { "type": "string", "description": "All of its new text." }
+            }),
+            &["path", "content"],
+        ),
+        tool(
+            "edit_file",
+            "Replace text in a file. old_str must match one place, so include enough lines to pick it out. The result shows the lines around the change.",
+            json!({
+                "path": { "type": "string", "description": "The file to edit." },
+                "old_str": { "type": "string", "description": "The text to replace, copied from the file without line numbers." },
+                "new_str": { "type": "string", "description": "What to put there." },
+                "replace_all": { "type": "boolean", "description": "Replace every place old_str matches." }
+            }),
+            &["path", "old_str", "new_str"],
+        ),
+        tool(
+            "grep",
+            "Search file contents with a regular expression. Returns path:line:text, skipping what git ignores.",
+            json!({
+                "pattern": { "type": "string", "description": "The regular expression." },
+                "path": { "type": "string", "description": "Folder or file to search. Default: the project folder." },
+                "glob": { "type": "string", "description": "Only files matching this, such as *.rs." },
+                "case_insensitive": { "type": "boolean" }
+            }),
+            &["pattern"],
+        ),
+        tool(
+            "glob",
+            "Find files by name, most recently changed first, skipping what git ignores.",
+            json!({
+                "pattern": { "type": "string", "description": "A pattern such as *.rs or src/**/*.ts." },
+                "path": { "type": "string", "description": "Folder to search. Default: the project folder." }
+            }),
+            &["pattern"],
+        ),
+        tool(
+            "list_dir",
+            "List what's in a folder, folders first.",
+            json!({
+                "path": { "type": "string", "description": "The folder. Default: the project folder." }
+            }),
+            &[],
+        ),
+        tool(
+            "web_fetch",
+            "Get a web page or text file as text, for documentation and the like.",
+            json!({
+                "url": { "type": "string", "description": "The http or https address." }
+            }),
+            &["url"],
+        ),
+    ]
+}
+
+/// The two tools every MCP server's tools are reached through, so dozens of schemas don't ride
+/// along on every request.
+fn mcp_tools() -> Vec<Value> {
+    vec![
+        tool(
+            "mcp_list",
+            "List the tools on the MCP servers, or with server set, what each of that server's tools does and takes.",
+            json!({
+                "server": { "type": "string", "description": "A server's name. Leave out to list them all." }
+            }),
+            &[],
+        ),
+        tool(
+            "mcp_call",
+            "Run a tool on an MCP server.",
+            json!({
+                "server": { "type": "string", "description": "The server's name." },
+                "tool": { "type": "string", "description": "The tool's name." },
+                "arguments": { "type": "object", "description": "What the tool takes." }
+            }),
+            &["server", "tool"],
+        ),
     ]
 }
 
@@ -379,6 +556,12 @@ impl Trail {
         self.steps.clear();
     }
 
+    /// A message that reached the model part way through an answer.
+    fn steer(&mut self, text: &str) {
+        self.prompt
+            .push_str(&format!("\n\nThe user then added:\n{}", text.trim()));
+    }
+
     fn step(&mut self, name: &str, args: &str, ok: bool, output: &str) {
         let (_, detail) = tool_display(name, args);
         self.steps.push_back((
@@ -395,9 +578,9 @@ impl Trail {
     }
 
     /// The orientation a fresh context gets in its system prompt: where the transcript is (and
-    /// how to search it), the session's first message, the current request, what was done in it
-    /// lately and the model's last words.
-    fn orientation(&self, transcript: Option<&Path>) -> String {
+    /// how to search it), the session's first message, the current request, the model's own notes
+    /// when it managed to write them, what was done lately and its last words.
+    fn orientation(&self, transcript: Option<&Path>, notes: Option<&str>) -> String {
         let mut out = format!(
             "<fresh-context>\nYour context window filled up, so this session went on in a fresh one{}. ",
             if self.fresh > 1 {
@@ -424,10 +607,19 @@ impl Trail {
                 clip_chars(first, 1_500)
             ));
         }
-        out.push_str(&format!(
-            "\n\nThe request you're answering:\n{}",
-            clip_chars(&self.prompt, 1_500)
-        ));
+        if !self.prompt.is_empty() {
+            out.push_str(&format!(
+                "\n\nThe request you're answering:\n{}",
+                // Whole, or near enough: a brief cut off half way sends the work off in the wrong
+                // direction, and real ones run to a few thousand characters.
+                clip_chars(&self.prompt, 12_000)
+            ));
+        }
+        if let Some(notes) = notes {
+            out.push_str(&format!(
+                "\n\nThe notes you wrote for yourself just now:\n{notes}"
+            ));
+        }
         if !self.steps.is_empty() {
             // Cut short without a word, an output reads as all there was: a model once took a
             // file's first line for the file and re-read everything.
@@ -484,6 +676,12 @@ pub struct TurnResponse {
     /// OpenRouter's `reasoning_details` parts, kept to echo back with the next request: some
     /// providers route a turn through a model that wants its own thinking returned.
     pub reasoning_details: Vec<Value>,
+    /// Reasoning as plain text, and the field it came in, for a provider that sends no details
+    /// and wants it back on a tool call (DeepSeek's `reasoning_content`).
+    pub reasoning: Option<(&'static str, String)>,
+    /// Why the answer ended, as the provider said (`stop`, `tool_calls`, `length`). `length` is
+    /// the same for Anthropic's `max_tokens`.
+    pub finish: Option<String>,
     pub tool_calls: Vec<AccumulatedToolCall>,
     /// What the request used and cost, when the provider said (also sent as `AgentEvent::Usage`).
     pub usage: Option<(TokenUsage, Option<UsageCost>)>,
@@ -557,6 +755,109 @@ pub fn endpoint(provider: &DirectProvider, base_url: Option<&str>) -> String {
     }
 }
 
+/// What Trek knows about the model in use: its window and what it can take, from the provider's
+/// model list (kept on disk by the app, fetched here when a session starts without one, as
+/// `trek-bench` does), else the catalog's guess by its name. Asked before every request, so the
+/// answer is kept until the model changes or the list is fetched again.
+#[derive(Default)]
+struct ModelFacts {
+    known: Option<(
+        String,
+        Option<std::time::SystemTime>,
+        u64,
+        Option<ModelCaps>,
+    )>,
+    fetched: Vec<ModelInfo>,
+}
+
+impl ModelFacts {
+    fn of(
+        &mut self,
+        provider_id: &str,
+        window: Option<u64>,
+        model: &str,
+    ) -> (u64, Option<ModelCaps>) {
+        let stamp = cached_direct_models_stamp(provider_id);
+        if let Some((m, s, w, caps)) = &self.known {
+            if m == model && *s == stamp {
+                return (*w, caps.clone());
+            }
+        }
+        let listed = if self.fetched.is_empty() {
+            cached_direct_models(provider_id)
+                .into_iter()
+                .find(|m| m.id == model)
+        } else {
+            self.fetched.iter().find(|m| m.id == model).cloned()
+        };
+        let context = listed.as_ref().and_then(|m| m.context);
+        let caps = listed.and_then(|m| m.caps);
+        let window = window
+            .or(context)
+            .unwrap_or_else(|| trek_core::catalog::context_window(model));
+        self.known = Some((model.to_string(), stamp, window, caps.clone()));
+        (window, caps)
+    }
+}
+
+/// What goes into one model request.
+struct TurnRequest<'a> {
+    client: &'a reqwest::Client,
+    agent: &'a AgentId,
+    provider: &'a DirectProvider,
+    url: &'a str,
+    key: Option<&'a str>,
+    model: &'a str,
+    effort: Effort,
+    system: &'a str,
+    history: &'a [Value],
+    tools: &'a [Value],
+    /// An answer in words only: the model is told it can't call anything (the tools stay in the
+    /// request: providers refuse a history of tool calls with none declared).
+    no_tools: bool,
+    /// Most tokens the answer may use, when known.
+    max_output: Option<u64>,
+    caps: Option<&'a ModelCaps>,
+    session_id: &'a str,
+}
+
+/// Sends `req`. Text it had streamed before failing is left in `partial`.
+#[allow(clippy::too_many_arguments)]
+async fn send_turn(
+    req: &TurnRequest<'_>,
+    thread: &mut Thread,
+    quirks: &mut Quirks,
+    partial: &mut String,
+    events: &async_channel::Sender<AgentEvent>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<TurnResponse> {
+    match req.provider.wire {
+        Wire::Anthropic => {
+            anthropic_turn(req, thread, partial, events, commands, kept, shutdown).await
+        }
+        _ => openai_turn(req, quirks, partial, events, commands, kept, shutdown).await,
+    }
+}
+
+/// Past this share of the window, old tool output is cut down to make room (`elide_old_outputs`).
+const ELIDE_AT: f64 = 0.6;
+/// What's kept whole by that: the latest outputs, up to this share of the window.
+const ELIDE_KEEPS: f64 = 0.3;
+/// A context smaller than this isn't worth a request to summarize.
+const SUMMARY_MIN_WINDOW: u64 = 32_000;
+/// How long a run of the same answer may be cut by the output limit before giving up on it.
+const MAX_CUT_OFFS: u32 = 3;
+/// How many empty answers in a row are asked for again.
+const MAX_EMPTY: u32 = 2;
+
+const SUMMARY_PROMPT: &str = "Your context is nearly full and is about to be cleared. Write the notes you'll need to carry on without it. Don't call any tools. Cover the goal and any constraints the user gave; what is done, and which files changed; what you found out that the files won't show; what you were in the middle of and the exact next steps. Be specific: paths, names, commands, error messages. At most 400 words.";
+const CUT_OFF_PROMPT: &str = "Your answer was cut off by the output limit. Continue from exactly where it stopped, without repeating anything.";
+const NUDGE_PROMPT: &str = "You ended your turn without calling a tool, but your last words say there's more to do. If there is, call the tool now. If the work is finished, say so in a sentence.";
+const REPORT_PROMPT: &str = "You've reached the limit of tool rounds for this answer. Don't call any more tools. Say briefly what you finished, what's left, and anything the user should know.";
+const STUCK_PROMPT: &str = "You've been repeating the same calls with the same results, so the tools are stopped for this answer. Don't call any more. Say briefly what you tried, what's blocking you, and what you'd need to get past it.";
+
 /// A session with `provider`, its requests sent to `url` (the messages endpoint for Anthropic,
 /// the base URL for the OpenAI wire).
 async fn session(
@@ -575,7 +876,12 @@ async fn session(
         }
     };
     let past_deadline = || options.deadline.is_some_and(|d| Instant::now() >= d);
-    let mut tools = tool_defs(config.script);
+    let local = options.executor.is_local();
+    let mut tools = tool_defs(config.script, local, config.read_only);
+    let hub = mcp::McpHub::new(config.mcp_servers.clone());
+    if !hub.is_empty() {
+        tools.extend(mcp_tools());
+    }
     // A session with earlier context to look back on searches the thread's transcript.
     let mut searchable = false;
     if config.recap.is_some() && config.transcript.is_some() {
@@ -588,6 +894,8 @@ async fn session(
     let mut hand_holding = config.hand_holding;
     let mut allowed_for_session = HashSet::new();
     let client = reqwest::Client::new();
+    // Keeps one conversation on one upstream where the router can: its prompt cache is there.
+    let session_id = format!("trek-{}", next_id());
     events
         .send(AgentEvent::Started {
             native_id: config.resume.clone().unwrap_or_default(),
@@ -602,6 +910,19 @@ async fn session(
         }))
         .await?;
 
+    let mut facts = ModelFacts::default();
+    // No list on disk (`trek-bench`, on a machine that never ran the app): OpenRouter says for free.
+    if provider.id == "openrouter"
+        && url == provider.base_url
+        && !trek_core::paths::isolated()
+        && cached_direct_models(provider.id).is_empty()
+    {
+        facts.fetched = direct_provider_models(provider.id, key.clone())
+            .await
+            .unwrap_or_default();
+        cache_direct_models(provider.id, &facts.fetched);
+    }
+
     let base_system = match &options.system_prompt {
         Some(own) => {
             let mut p = own.clone();
@@ -612,11 +933,27 @@ async fn session(
             }
             p
         }
-        None => system_prompt(
-            &config.cwd,
-            config.read_only,
-            config.instructions.as_deref(),
-        ),
+        None => {
+            let exec = options.executor.as_ref();
+            let (environment, project) = tokio::join!(
+                environment(exec, &config.cwd),
+                project_instructions(exec, &config.cwd)
+            );
+            let mut prompt = system_prompt(
+                &config.cwd,
+                config.read_only,
+                &environment,
+                project.as_deref(),
+                config.instructions.as_deref(),
+            );
+            if !hub.is_empty() {
+                prompt.push_str(&format!(
+                    "\nMore tools are on these MCP servers: {}. mcp_list says what each has, and mcp_call runs one.\n",
+                    hub.names().join(", ")
+                ));
+            }
+            prompt
+        }
     };
     let mut system = base_system.clone();
     let mut history: Vec<Value> = Vec::new();
@@ -627,33 +964,18 @@ async fn session(
         } || std::env::var_os("TREK_NO_MESSAGE_THREADS").is_some(),
         ..Thread::default()
     };
+    let mut quirks = Quirks::default();
+    let mut quirks_model = model.clone();
     let mut kept = VecDeque::new();
     let mut shutdown = false;
+    // Process groups of commands the model left running: ended with the session.
+    let mut background = BackgroundGroups {
+        groups: Vec::new(),
+        local,
+    };
     // How full the context is: tokens in it at the last usage report, and `history`'s length
     // then (what came after is estimated).
     let mut used: Option<(u64, usize)> = None;
-    // The window is asked for before every request and after every usage report, and the
-    // provider's model list can be large (OpenRouter's), so the answer is kept until the model
-    // changes or the list is fetched again (its file's time changes).
-    let mut window_known: Option<(String, Option<std::time::SystemTime>, u64)> = None;
-    let mut window_of = |model: &str| {
-        if let Some(window) = options.context_window {
-            return window;
-        }
-        let stamp = cached_direct_models_stamp(provider.id);
-        if let Some((m, s, window)) = &window_known {
-            if m == model && *s == stamp {
-                return *window;
-            }
-        }
-        let window = cached_direct_models(provider.id)
-            .into_iter()
-            .find(|m| m.id == model)
-            .and_then(|m| m.context)
-            .unwrap_or_else(|| trek_core::catalog::context_window(model));
-        window_known = Some((model.to_string(), stamp, window));
-        window
-    };
     let mut trail = Trail::default();
 
     loop {
@@ -669,50 +991,201 @@ async fn session(
                 let mut next = Some((text, images));
                 let mut error = None;
                 while let Some((text, images)) = next.take() {
-                    let (message, skipped) = user_message(provider.wire, &text, &images);
-                    for e in skipped {
+                    let (_, caps) = facts.of(provider.id, options.context_window, &model);
+                    // Asked to compact: the model's notes and a fresh context, with no message of
+                    // the user's to answer after.
+                    let compacting = text.trim() == "/compact" && images.is_empty();
+                    if compacting && history.is_empty() {
                         events
-                            .send(AgentEvent::Notice(format!("Image left out: {e}")))
+                            .send(AgentEvent::Notice(
+                                "Nothing to compact yet: send a message first.".to_string(),
+                            ))
                             .await?;
+                        observe(&|o| o.stopped(&Stop::EndTurn));
+                        continue;
                     }
-                    // Where this message starts in `history`: a failed first request takes it back
-                    // out, so the next message doesn't carry one that was never answered.
+                    // Where this message starts in `history`: a request refused outright takes it
+                    // back out, so the next message doesn't carry one that can never be sent.
                     let mut turn_start = history.len();
-                    history.push(message);
-                    trail.prompt(&text);
+                    if !compacting {
+                        let (message, skipped) =
+                            user_message(provider.wire, &text, &images, caps.as_ref());
+                        for e in skipped {
+                            events
+                                .send(AgentEvent::Notice(format!("Image left out: {e}")))
+                                .await?;
+                        }
+                        history.push(message);
+                        trail.prompt(&text);
+                    }
 
                     // Multi-turn agent loop for tool calls
                     let mut turn_count = 0;
                     let mut turn_error = None;
                     let mut why = None;
+                    let mut guard = LoopGuard::default();
+                    let mut empty_answers = 0u32;
+                    let mut cut_offs = 0u32;
+                    let mut nudged = false;
+                    let mut overflowed = false;
+                    let mut force_fresh = compacting;
+                    let mut refused_history = false;
+                    let mut whole_output = false;
                     while turn_count < options.max_turns {
                         if past_deadline() {
                             why = Some(Stop::TimeLimit);
                             break;
                         }
+                        // What one model turned out not to take says nothing about the next.
+                        if quirks_model != model {
+                            quirks.forget_model();
+                            quirks_model.clone_from(&model);
+                        }
+                        let (window, caps) = facts.of(provider.id, options.context_window, &model);
+                        let estimate_now =
+                            |history: &[Value], tools: &[Value], system: &str, used| match used {
+                                Some((tokens, at)) if at <= history.len() => {
+                                    tokens + estimate_tokens_of("", &history[at..])
+                                }
+                                _ => {
+                                    estimate_tokens_of(system, tools)
+                                        + estimate_tokens_of("", history)
+                                }
+                            };
+                        let mut estimate = estimate_now(&history, &tools, &system, used);
+                        // First make room cheaply, by cutting down old tool output.
+                        if estimate as f64 > ELIDE_AT * window as f64
+                            && elide_old_outputs(&mut history, window, &model)
+                        {
+                            used = None;
+                            estimate = estimate_now(&history, &tools, &system, used);
+                        }
                         // Near the context window's end: go on in a fresh context, oriented by the
-                        // trail, with the transcript to search for anything exact.
-                        let window = window_of(&model);
-                        let estimate = match used {
-                            Some((tokens, at)) if at <= history.len() => {
-                                tokens + estimate_tokens_of("", &history[at..])
-                            }
-                            _ => {
-                                estimate_tokens_of(&system, &tools)
-                                    + estimate_tokens_of("", &history)
-                            }
-                        };
+                        // model's own notes and the trail, with the transcript to search for
+                        // anything exact.
                         // Only when going on afresh frees room: a fresh context still holds the
                         // system prompt, the tools and an orientation (about 2,000 tokens).
                         let fresh_floor = estimate_tokens_of(&base_system, &tools) + 2_000;
-                        if history.len() > 1
-                            && estimate as f64 > CONTINUE_AT * window as f64
-                            && fresh_floor < window / 2
+                        if force_fresh
+                            || (history.len() > 1
+                                && estimate as f64 > CONTINUE_AT * window as f64
+                                && fresh_floor < window / 2)
                         {
+                            let mut notes = None;
+                            let mut notes_failed = None;
+                            if (compacting || (!force_fresh && window >= SUMMARY_MIN_WINDOW))
+                                && estimate < window
+                                && !past_deadline()
+                            {
+                                let mut asked = history.clone();
+                                asked.push(json!({ "role": "user", "content": SUMMARY_PROMPT }));
+                                requests += 1;
+                                let n = requests;
+                                observe(&|o| o.request_start(n));
+                                let sent = Instant::now();
+                                // Not for the screen: it's the model talking to itself.
+                                let (sink, _keep) = async_channel::unbounded();
+                                let mut own_thread = Thread {
+                                    off: true,
+                                    ..Thread::default()
+                                };
+                                let mut partial = String::new();
+                                let answer = send_turn(
+                                    &TurnRequest {
+                                        client: &client,
+                                        agent: &config.agent,
+                                        provider,
+                                        url,
+                                        key: key.as_deref(),
+                                        model: &model,
+                                        effort: Effort::Off,
+                                        system: &system,
+                                        history: &asked,
+                                        tools: &tools,
+                                        no_tools: true,
+                                        max_output: Some(4_000),
+                                        caps: caps.as_ref(),
+                                        session_id: &session_id,
+                                    },
+                                    &mut own_thread,
+                                    &mut quirks,
+                                    &mut partial,
+                                    &sink,
+                                    &commands,
+                                    &mut kept,
+                                    &mut shutdown,
+                                )
+                                .await;
+                                match &answer {
+                                    Ok(resp) => {
+                                        let (tokens, cost) = match &resp.usage {
+                                            Some((t, c)) => (Some(t), *c),
+                                            None => (None, None),
+                                        };
+                                        observe(&|o| {
+                                            o.request_end(n, tokens, cost, sent.elapsed(), None)
+                                        });
+                                        if let Some((tokens, cost)) = resp.usage {
+                                            events
+                                                .send(AgentEvent::Usage {
+                                                    model: Some(model.clone()),
+                                                    tokens,
+                                                    cost,
+                                                })
+                                                .await?;
+                                        }
+                                        notes = Some(resp.text.trim().to_string())
+                                            .filter(|t| !t.is_empty());
+                                        if notes.is_none() {
+                                            notes_failed =
+                                                Some("the model wrote no notes".to_string());
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let message = format!("{e:#}");
+                                        observe(&|o| {
+                                            o.request_end(
+                                                n,
+                                                None,
+                                                None,
+                                                sent.elapsed(),
+                                                Some(&message),
+                                            )
+                                        });
+                                        // A Stop while it wrote its notes is a Stop.
+                                        if is_stop(e) {
+                                            turn_error.get_or_insert(message);
+                                            break;
+                                        }
+                                        notes_failed = Some(message);
+                                    }
+                                }
+                                if shutdown {
+                                    break;
+                                }
+                            }
+                            // Asked to compact and the notes didn't come: the context stays as it
+                            // was, rather than going with nothing to carry on from.
+                            if compacting {
+                                if let Some(why) = notes_failed.take().or_else(|| {
+                                    (estimate >= window || past_deadline())
+                                        .then(|| "the context is too full to summarize".to_string())
+                                }) {
+                                    turn_error.get_or_insert(format!(
+                                        "Couldn't compact: {why}. The conversation is as it was."
+                                    ));
+                                    break;
+                                }
+                            }
                             trail.fresh += 1;
+                            if compacting {
+                                // There's no request in progress: what comes next is new.
+                                trail.prompt.clear();
+                                trail.steps.clear();
+                            }
                             system = format!(
                                 "{base_system}\n\n{}",
-                                trail.orientation(config.transcript.as_deref())
+                                trail.orientation(config.transcript.as_deref(), notes.as_deref())
                             );
                             // At the start of an answer the message itself carries on; mid-answer,
                             // a line saying to.
@@ -720,19 +1193,40 @@ async fn session(
                                 .then(|| history.pop())
                                 .flatten();
                             history.clear();
-                            history.push(carried.unwrap_or_else(
-                                || json!({ "role": "user", "content": CONTINUE_MESSAGE }),
-                            ));
+                            if !compacting {
+                                history.push(carried.unwrap_or_else(
+                                    || json!({ "role": "user", "content": CONTINUE_MESSAGE }),
+                                ));
+                            }
                             turn_start = 0;
                             if !searchable && config.transcript.is_some() {
                                 tools.extend(transcript_tools());
                                 searchable = true;
                             }
                             used = None;
+                            force_fresh = false;
+                            if compacting {
+                                events
+                                    .send(AgentEvent::Context {
+                                        used: estimate_tokens_of(&system, &tools),
+                                        window,
+                                    })
+                                    .await?;
+                                why = Some(Stop::EndTurn);
+                                break;
+                            }
+                            let why_fresh = if refused_history {
+                                "The provider refused the conversation as it stood".to_string()
+                            } else {
+                                format!(
+                                    "The context was {}% full",
+                                    (estimate * 100 / window.max(1)).min(100)
+                                )
+                            };
+                            refused_history = false;
                             events
                                 .send(AgentEvent::Notice(format!(
-                                    "The context was {}% full, so this answer goes on in a fresh one{}.",
-                                    (estimate * 100 / window.max(1)).min(100),
+                                    "{why_fresh}, so this answer goes on in a fresh one{}.",
                                     if config.transcript.is_some() {
                                         ": the earlier conversation stays searchable in the transcript"
                                     } else {
@@ -740,121 +1234,201 @@ async fn session(
                                     }
                                 )))
                                 .await?;
+                            estimate = estimate_now(&history, &tools, &system, used);
                         }
                         turn_count += 1;
-                        requests += 1;
-                        let n = requests;
-                        observe(&|o| o.request_start(n));
-                        let sent = Instant::now();
-                        let result = match provider.wire {
-                            Wire::Anthropic => {
-                                anthropic_turn(
-                                    &client,
+                        let max_output =
+                            output_limit(provider, caps.as_ref(), window, estimate, whole_output);
+                        let (mut attempt, mut limit_seen) = (0u32, None);
+                        let mut partial = String::new();
+                        let result = loop {
+                            attempt += 1;
+                            requests += 1;
+                            let n = requests;
+                            observe(&|o| o.request_start(n));
+                            let sent = Instant::now();
+                            partial.clear();
+                            let result = send_turn(
+                                &TurnRequest {
+                                    client: &client,
+                                    agent: &config.agent,
+                                    provider,
                                     url,
-                                    key.as_deref().unwrap_or_default(),
-                                    &model,
+                                    key: key.as_deref(),
+                                    model: &model,
                                     effort,
-                                    &system,
-                                    &history,
-                                    &tools,
-                                    &mut thread,
-                                    &events,
-                                    &commands,
-                                    &mut kept,
-                                    &mut shutdown,
-                                )
-                                .await
-                            }
-                            _ => {
-                                let usage = REPORTS_USAGE.contains(&provider.id)
-                                    || direct_provider(provider.id).is_none();
-                                openai_turn(
-                                    &client,
-                                    &config.agent,
-                                    url,
-                                    key.as_deref(),
-                                    provider.local,
-                                    usage,
-                                    &model,
-                                    effort,
-                                    &system,
-                                    &history,
-                                    &tools,
-                                    &events,
-                                    &commands,
-                                    &mut kept,
-                                    &mut shutdown,
-                                )
-                                .await
-                            }
-                        };
-                        let elapsed = sent.elapsed();
-                        match &result {
-                            Ok(resp) => {
-                                let (tokens, cost) = match &resp.usage {
-                                    Some((t, c)) => (Some(t), *c),
-                                    None => (None, None),
-                                };
-                                observe(&|o| o.request_end(n, tokens, cost, elapsed, None));
-                                if !resp.text.is_empty() {
-                                    observe(&|o| o.text(&resp.text));
+                                    system: &system,
+                                    history: &history,
+                                    tools: &tools,
+                                    no_tools: false,
+                                    max_output,
+                                    caps: caps.as_ref(),
+                                    session_id: &session_id,
+                                },
+                                &mut thread,
+                                &mut quirks,
+                                &mut partial,
+                                &events,
+                                &commands,
+                                &mut kept,
+                                &mut shutdown,
+                            )
+                            .await;
+                            let elapsed = sent.elapsed();
+                            match &result {
+                                Ok(resp) => {
+                                    let (tokens, cost) = match &resp.usage {
+                                        Some((t, c)) => (Some(t), *c),
+                                        None => (None, None),
+                                    };
+                                    observe(&|o| o.request_end(n, tokens, cost, elapsed, None));
+                                    if !resp.text.is_empty() {
+                                        observe(&|o| o.text(&resp.text));
+                                    }
+                                }
+                                Err(e) => {
+                                    let message = format!("{e:#}");
+                                    observe(&|o| {
+                                        o.request_end(n, None, None, elapsed, Some(&message))
+                                    });
                                 }
                             }
-                            Err(e) => {
-                                let e = format!("{e:#}");
-                                observe(&|o| o.request_end(n, None, None, elapsed, Some(&e)));
+                            let Err(e) = &result else { break result };
+                            let Some(failed) = e.downcast_ref::<RequestFailure>() else {
+                                break result;
+                            };
+                            if failed.limit.is_some() {
+                                limit_seen = failed.limit.clone();
                             }
-                        }
+                            if !failed.is_retryable()
+                                || attempt >= failure::MAX_ATTEMPTS
+                                || past_deadline()
+                            {
+                                break result;
+                            }
+                            let wait = failure::backoff(attempt, failed.retry_after);
+                            // A blip passes unmentioned; past that, say what's going on.
+                            if attempt >= 2 {
+                                events
+                                    .send(AgentEvent::Notice(format!(
+                                        "{}. Trying again in {} seconds (attempt {} of {}).",
+                                        clip_chars(failed.message.trim_end_matches('.'), 200),
+                                        wait.as_secs().max(1),
+                                        attempt + 1,
+                                        failure::MAX_ATTEMPTS
+                                    )))
+                                    .await?;
+                            }
+                            let wait = if cfg!(test) { wait / 500 } else { wait };
+                            if let Err(stopped) = until_stopped(
+                                tokio::time::sleep(wait),
+                                &commands,
+                                &mut kept,
+                                &mut shutdown,
+                            )
+                            .await
+                            {
+                                break Err(stopped);
+                            }
+                        };
                         match result {
-                            Ok(resp) => {
+                            Ok(mut resp) => {
                                 let anthropic = resp.content.is_some();
+                                let cut_off = resp.finish.as_deref() == Some("length");
                                 let in_context = resp.usage.as_ref().map(|(t, _)| {
                                     t.input + t.cache_read + t.cache_write + t.output
                                 });
+                                if let Some(tokens) = in_context {
+                                    events
+                                        .send(AgentEvent::Context {
+                                            used: tokens,
+                                            window,
+                                        })
+                                        .await?;
+                                }
+                                // Nothing said and nothing called: the model or its route had a
+                                // bad moment. It's asked again; to the model an empty message in
+                                // its history means nothing, and some providers refuse one.
+                                if resp.text.trim().is_empty() && resp.tool_calls.is_empty() {
+                                    whole_output |= cut_off;
+                                    empty_answers += 1;
+                                    if empty_answers <= MAX_EMPTY {
+                                        continue;
+                                    }
+                                    let message = if cut_off {
+                                        "The model used its whole output limit on reasoning and wrote nothing. Try a lower effort."
+                                    } else {
+                                        "The model returned an empty answer."
+                                    };
+                                    turn_error.get_or_insert_with(|| message.to_string());
+                                    break;
+                                }
+                                empty_answers = 0;
                                 if !resp.text.trim().is_empty() {
                                     trail.said = resp.text.clone();
                                 }
+                                // A server's tool called by its own name, as a note may have said to.
+                                if !hub.is_empty() {
+                                    if let Err(stopped) = until_stopped(
+                                        route_to_servers(&mut resp.tool_calls, &tools, &hub),
+                                        &commands,
+                                        &mut kept,
+                                        &mut shutdown,
+                                    )
+                                    .await
+                                    {
+                                        turn_error.get_or_insert_with(|| format!("{stopped:#}"));
+                                        break;
+                                    }
+                                }
+                                let problems = prepare_calls(&mut resp.tool_calls, &tools, cut_off);
                                 match resp.content {
                                     Some(content) => history.push(content),
                                     None if resp.tool_calls.is_empty() => history
                                         .push(json!({ "role": "assistant", "content": resp.text })),
-                                    None => {
-                                        let tool_calls_json: Vec<Value> = resp
-                                            .tool_calls
-                                            .iter()
-                                            .map(|c| {
-                                                json!({
-                                                    "id": c.id,
-                                                    "type": "function",
-                                                    "function": {
-                                                        "name": c.name,
-                                                        "arguments": c.arguments
-                                                    }
-                                                })
-                                            })
-                                            .collect();
-                                        let mut message = json!({
-                                            "role": "assistant",
-                                            "content": if resp.text.is_empty() { Value::Null } else { Value::String(resp.text.clone()) },
-                                            "tool_calls": tool_calls_json
-                                        });
-                                        if !resp.reasoning_details.is_empty() {
-                                            message["reasoning_details"] =
-                                                json!(resp.reasoning_details);
-                                        }
-                                        history.push(message);
-                                    }
+                                    None => history.push(assistant_tool_message(&resp)),
                                 }
                                 if let Some(tokens) = in_context {
                                     used = Some((tokens, history.len()));
-                                    events
-                                        .send(AgentEvent::Context {
-                                            used: tokens,
-                                            window: window_of(&model),
+                                }
+                                cut_offs = if cut_off { cut_offs + 1 } else { 0 };
+                                if cut_offs > MAX_CUT_OFFS {
+                                    // The answer's calls are in history, and providers refuse a
+                                    // call left unanswered.
+                                    let results = resp
+                                        .tool_calls
+                                        .iter()
+                                        .map(|c| {
+                                            (
+                                                c.id.clone(),
+                                                "Not run: the answer kept hitting its output limit"
+                                                    .to_string(),
+                                                false,
+                                            )
                                         })
-                                        .await?;
+                                        .collect();
+                                    push_tool_results(&mut history, anthropic, results);
+                                    turn_error.get_or_insert_with(|| {
+                                        "The model keeps hitting its output limit, so the answer stopped here.".to_string()
+                                    });
+                                    break;
                                 }
                                 if resp.tool_calls.is_empty() {
+                                    if cut_off {
+                                        history.push(
+                                            json!({ "role": "user", "content": CUT_OFF_PROMPT }),
+                                        );
+                                        continue;
+                                    }
+                                    // Weaker models announce the next step and stop. Once per
+                                    // answer, and only part way through work.
+                                    if !nudged && turn_count > 1 && announces_more(&resp.text) {
+                                        nudged = true;
+                                        history.push(
+                                            json!({ "role": "user", "content": NUDGE_PROMPT }),
+                                        );
+                                        continue;
+                                    }
                                     why = Some(Stop::EndTurn);
                                     break;
                                 }
@@ -864,7 +1438,17 @@ async fn session(
                                 let mut results = Vec::new();
                                 let mut stopped = None;
                                 let mut timed_out = false;
+                                let mut stuck = false;
                                 for (i, call) in resp.tool_calls.iter().enumerate() {
+                                    // An access level changed while the model was writing, or
+                                    // while the last tool ran, holds from this call on.
+                                    apply_settings(
+                                        &mut kept,
+                                        &mut model,
+                                        &mut effort,
+                                        &mut hand_holding,
+                                        &mut history,
+                                    );
                                     let (title, detail) = tool_display(&call.name, &call.arguments);
                                     events
                                         .send(AgentEvent::ToolStarted {
@@ -881,9 +1465,12 @@ async fn session(
                                         observe(&|o| o.tool_call(&call.name, &args));
                                     }
 
-                                    let ran = match config.transcript.as_deref() {
+                                    let ran = match (&problems[i], config.transcript.as_deref()) {
+                                        // A call that can't be run as it stands: told why, and the
+                                        // model calls it again.
+                                        (Some(problem), _) => Ok((problem.clone(), false, None)),
                                         // Reading the thread's own transcript asks nothing.
-                                        Some(path)
+                                        (None, Some(path))
                                             if searchable
                                                 && (call.name == "transcript_search"
                                                     || call.name == "transcript_read") =>
@@ -903,6 +1490,8 @@ async fn session(
                                                 &mut allowed_for_session,
                                                 &options,
                                                 config.script,
+                                                &hub,
+                                                &mut background.groups,
                                                 &events,
                                                 &commands,
                                                 &mut kept,
@@ -911,7 +1500,7 @@ async fn session(
                                             .await
                                         }
                                     };
-                                    let (output, ok, lines, stop) = match ran {
+                                    let (mut output, ok, lines, stop) = match ran {
                                         Ok((output, ok, lines)) => (output, ok, lines, None),
                                         // A Stop (or shutdown) while the tool ran or waited for
                                         // permission: it ends this turn, not the session.
@@ -937,6 +1526,18 @@ async fn session(
                                             ok,
                                         })
                                         .await?;
+                                    // The same call with the same result, again and again: said to
+                                    // the model first, then stopped.
+                                    let repeats =
+                                        guard.record(&call.name, &call.arguments, &output);
+                                    if repeats >= LoopGuard::STOP_AT {
+                                        stuck = true;
+                                    } else if repeats >= LoopGuard::WARN_AT {
+                                        output.push_str(&format!(
+                                            "\n\n[You've made this same call {repeats} times and got the same result each time. It won't change by itself: try something different, or say what's blocking you.]"
+                                        ));
+                                    }
+                                    let declined = output.starts_with("Permission denied by user");
                                     results.push((call.id.clone(), output, ok));
 
                                     if let Some(e) = stop {
@@ -948,6 +1549,50 @@ async fn session(
                                             ));
                                         }
                                         stopped = Some(e);
+                                        break;
+                                    }
+                                    // The user declined this call and said something: what they said
+                                    // reaches the model before anything else of this answer runs.
+                                    // The app sends the "no" and then the words: they may still be on
+                                    // their way.
+                                    let mut stop_now = false;
+                                    if declined {
+                                        while let Ok(cmd) = commands.try_recv() {
+                                            match cmd {
+                                                Command::Interrupt => {
+                                                    stop_now = true;
+                                                    break;
+                                                }
+                                                Command::Shutdown => {
+                                                    shutdown = true;
+                                                    stop_now = true;
+                                                    break;
+                                                }
+                                                other => kept.push_back(other),
+                                            }
+                                        }
+                                    }
+                                    if stop_now {
+                                        for rest in &resp.tool_calls[i + 1..] {
+                                            results.push((
+                                                rest.id.clone(),
+                                                "Not run: the turn was stopped".to_string(),
+                                                false,
+                                            ));
+                                        }
+                                        stopped = Some(anyhow::anyhow!("Interrupted"));
+                                        break;
+                                    }
+                                    let replied = declined
+                                        && kept.iter().any(|c| matches!(c, Command::Prompt { .. }));
+                                    if replied && i + 1 < resp.tool_calls.len() {
+                                        for rest in &resp.tool_calls[i + 1..] {
+                                            results.push((
+                                                rest.id.clone(),
+                                                "Not run: the user declined the call before it and replied".to_string(),
+                                                false,
+                                            ));
+                                        }
                                         break;
                                     }
                                     // Past the time limit, the call that ran is the last.
@@ -964,6 +1609,24 @@ async fn session(
                                     }
                                 }
                                 push_tool_results(&mut history, anthropic, results);
+                                // Pictures a tool took (a browser's or a phone's screen).
+                                let images = hub.take_images();
+                                if !images.is_empty() {
+                                    if sees_images(provider, caps.as_ref()) {
+                                        let (usable, left_out) = usable_images(images);
+                                        forget_old_tool_images(&mut history);
+                                        history.push(tool_images_message(
+                                            provider.wire,
+                                            usable,
+                                            left_out,
+                                        ));
+                                    } else {
+                                        history.push(json!({
+                                            "role": "user",
+                                            "content": "A tool returned an image, but this model can't see images."
+                                        }));
+                                    }
+                                }
                                 if let Some(e) = stopped {
                                     turn_error.get_or_insert_with(|| format!("{e:#}"));
                                     break;
@@ -975,28 +1638,200 @@ async fn session(
                                     why = Some(Stop::TimeLimit);
                                     break;
                                 }
-                                if turn_count >= options.max_turns {
-                                    // The runaway guard ends the loop next check; say so, or the
-                                    // answer looks like it just stopped mid-work.
-                                    events.send(AgentEvent::Notice(format!(
-                                        "Stopped at {} tool-call rounds in one answer — send a message and it picks up where it left off.",
-                                        options.max_turns
-                                    ))).await?;
-                                    why = Some(Stop::MaxTurns);
+                                if stuck {
+                                    why = Some(Stop::Stuck);
                                     break;
+                                }
+                                // A message sent while the tools ran reaches the model now, not
+                                // after it has finished all it planned.
+                                apply_settings(
+                                    &mut kept,
+                                    &mut model,
+                                    &mut effort,
+                                    &mut hand_holding,
+                                    &mut history,
+                                );
+                                while let Some(pos) = kept
+                                    .iter()
+                                    .position(|c| matches!(c, Command::Prompt { .. }))
+                                {
+                                    let Some(Command::Prompt { text, images }) = kept.remove(pos)
+                                    else {
+                                        continue;
+                                    };
+                                    let (message, skipped) =
+                                        user_message(provider.wire, &text, &images, caps.as_ref());
+                                    for e in skipped {
+                                        events
+                                            .send(AgentEvent::Notice(format!(
+                                                "Image left out: {e}"
+                                            )))
+                                            .await?;
+                                    }
+                                    history.push(message);
+                                    trail.steer(&text);
                                 }
                             }
                             Err(e) => {
-                                // Only the message itself: once tools have run, the history ends
-                                // with their results, a whole exchange to keep.
-                                if history.len() == turn_start + 1 {
+                                let interrupted = e.downcast_ref::<RequestFailure>().is_none();
+                                let failed = e.downcast_ref::<RequestFailure>().cloned();
+                                if let Some(failed) = &failed {
+                                    // Too big for the window: make room and send it again, once.
+                                    if failed.kind == FailureKind::ContextOverflow
+                                        && !overflowed
+                                        && history.len() > 1
+                                    {
+                                        overflowed = true;
+                                        force_fresh = true;
+                                        turn_count -= 1;
+                                        continue;
+                                    }
+                                    // Something in the conversation the provider will never
+                                    // accept: every later request would fail on it. Once, as for
+                                    // an overflow, and the transcript still has it all.
+                                    if failed.kind == FailureKind::Refused
+                                        && !overflowed
+                                        && history.len() > 1
+                                        && failure::blames_history(&failed.message)
+                                    {
+                                        overflowed = true;
+                                        force_fresh = true;
+                                        refused_history = true;
+                                        turn_count -= 1;
+                                        continue;
+                                    }
+                                }
+                                // Only if the limit is why this ended: not a Stop while waiting one
+                                // out, and not a different failure after it.
+                                let ended_by_limit =
+                                    failed.as_ref().is_some_and(|f| f.is_retryable());
+                                if let Some(limit) = limit_seen.filter(|_| ended_by_limit) {
+                                    events.send(limit.event()).await?;
+                                } else if let Some(crate::limits::LimitError(limit)) =
+                                    e.downcast_ref()
+                                {
+                                    events.send(limit.clone().event()).await?;
+                                }
+                                // What the provider will refuse every time (too big, not allowed)
+                                // comes back out, or every later request would fail on it too. One
+                                // that failed for the moment stays, for "continue" to go on from.
+                                let refused = failed.as_ref().is_some_and(|f| !f.is_retryable())
+                                    || e.downcast_ref::<crate::limits::LimitError>().is_none()
+                                        && failed.is_none()
+                                        && !is_stop(&e);
+                                if refused && history.len() == turn_start + 1 {
                                     history.pop();
                                 }
-                                if let Some(crate::limits::LimitError(limit)) = e.downcast_ref() {
-                                    events.send(limit.clone().event()).await?;
+                                // Words already on the screen when a Stop came stay in the
+                                // conversation: the next message may well be about them.
+                                if interrupted && is_stop(&e) && !partial.trim().is_empty() {
+                                    history.push(
+                                        json!({ "role": "assistant", "content": partial.clone() }),
+                                    );
                                 }
                                 turn_error.get_or_insert_with(|| format!("{e:#}"));
                                 break;
+                            }
+                        }
+                    }
+                    if why.is_none()
+                        && turn_error.is_none()
+                        && !shutdown
+                        && turn_count >= options.max_turns
+                    {
+                        // The runaway guard; say so, or the answer looks like it just stopped
+                        // mid-work.
+                        events.send(AgentEvent::Notice(format!(
+                            "Stopped at {} tool-call rounds in one answer. Send a message and it picks up where it left off.",
+                            options.max_turns
+                        ))).await?;
+                        why = Some(Stop::MaxTurns);
+                    }
+                    // Ended by a guard rather than by the model: it still gets to say where
+                    // things stand, or whoever asked gets no report at all.
+                    let report = match why {
+                        Some(Stop::MaxTurns) => Some(REPORT_PROMPT),
+                        Some(Stop::Stuck) => Some(STUCK_PROMPT),
+                        _ => None,
+                    };
+                    if let Some(prompt) = report.filter(|_| !past_deadline()) {
+                        if why == Some(Stop::Stuck) {
+                            events.send(AgentEvent::Notice(
+                                "Stopped: the model kept making the same calls and getting the same results.".to_string(),
+                            )).await?;
+                        }
+                        let (window, caps) = facts.of(provider.id, options.context_window, &model);
+                        history.push(json!({ "role": "user", "content": prompt }));
+                        let estimate = match used {
+                            Some((tokens, at)) if at <= history.len() => {
+                                tokens + estimate_tokens_of("", &history[at..])
+                            }
+                            _ => {
+                                estimate_tokens_of(&system, &tools)
+                                    + estimate_tokens_of("", &history)
+                            }
+                        };
+                        requests += 1;
+                        let n = requests;
+                        observe(&|o| o.request_start(n));
+                        let sent = Instant::now();
+                        let mut own_thread = Thread {
+                            off: true,
+                            ..Thread::default()
+                        };
+                        let mut partial = String::new();
+                        let answer = send_turn(
+                            &TurnRequest {
+                                client: &client,
+                                agent: &config.agent,
+                                provider,
+                                url,
+                                key: key.as_deref(),
+                                model: &model,
+                                effort,
+                                system: &system,
+                                history: &history,
+                                tools: &tools,
+                                no_tools: true,
+                                max_output: output_limit(
+                                    provider,
+                                    caps.as_ref(),
+                                    window,
+                                    estimate,
+                                    false,
+                                ),
+                                caps: caps.as_ref(),
+                                session_id: &session_id,
+                            },
+                            &mut own_thread,
+                            &mut quirks,
+                            &mut partial,
+                            &events,
+                            &commands,
+                            &mut kept,
+                            &mut shutdown,
+                        )
+                        .await;
+                        match answer {
+                            Ok(resp) if !resp.text.trim().is_empty() => {
+                                let (tokens, cost) = match &resp.usage {
+                                    Some((t, c)) => (Some(t), *c),
+                                    None => (None, None),
+                                };
+                                observe(&|o| o.request_end(n, tokens, cost, sent.elapsed(), None));
+                                observe(&|o| o.text(&resp.text));
+                                history.push(json!({ "role": "assistant", "content": resp.text }));
+                            }
+                            Ok(_) => {
+                                observe(&|o| o.request_end(n, None, None, sent.elapsed(), None));
+                                history.pop();
+                            }
+                            Err(e) => {
+                                let e = format!("{e:#}");
+                                observe(&|o| {
+                                    o.request_end(n, None, None, sent.elapsed(), Some(&e))
+                                });
+                                history.pop();
                             }
                         }
                     }
@@ -1020,6 +1855,9 @@ async fn session(
                                 model: m,
                                 effort: e,
                             } => {
+                                if m != model {
+                                    strip_reasoning(&mut history);
+                                }
                                 model = m;
                                 effort = e;
                             }
@@ -1049,6 +1887,9 @@ async fn session(
                 model: m,
                 effort: e,
             } => {
+                if m != model {
+                    strip_reasoning(&mut history);
+                }
                 model = m;
                 effort = e;
             }
@@ -1062,7 +1903,484 @@ async fn session(
             | Command::StopTask { .. } => {}
         }
     }
+    // Servers and watchers the model started end with the session rather than outliving it. Here
+    // only for a sandbox, which has no other way in; on this machine `BackgroundGroups` does it,
+    // however the session ends.
+    if !local && !background.groups.is_empty() {
+        let groups: Vec<String> = background.groups.iter().map(|g| format!("-{g}")).collect();
+        let _ = options
+            .executor
+            .exec(
+                &format!("kill -- {} 2>/dev/null", groups.join(" ")),
+                &config.cwd,
+                Some(Duration::from_secs(5)),
+            )
+            .await;
+    }
     Ok(())
+}
+
+/// Process groups a session's commands left running. Dropped, it ends those on this machine: a
+/// session can end by a panic or by the app going away mid-turn as well as by being told to.
+struct BackgroundGroups {
+    groups: Vec<i32>,
+    local: bool,
+}
+
+impl Drop for BackgroundGroups {
+    fn drop(&mut self) {
+        if !self.local {
+            return;
+        }
+        for group in &self.groups {
+            #[cfg(unix)]
+            crate::signal_group(*group, libc::SIGTERM);
+            trek_core::procs::unregister(*group);
+        }
+    }
+}
+
+/// Whether `e` is a Stop (or shutdown) rather than a failure.
+fn is_stop(e: &anyhow::Error) -> bool {
+    e.to_string() == "Interrupted"
+}
+
+/// Settings that arrived while an answer was going (a model, an effort, an access level) applied
+/// now. What else is in `kept` stays there, in order.
+fn apply_settings(
+    kept: &mut VecDeque<Command>,
+    model: &mut String,
+    effort: &mut Effort,
+    hand_holding: &mut HandHolding,
+    history: &mut [Value],
+) {
+    let mut others = VecDeque::with_capacity(kept.len());
+    while let Some(cmd) = kept.pop_front() {
+        match cmd {
+            Command::SetModel {
+                model: m,
+                effort: e,
+            } => {
+                if m != *model {
+                    strip_reasoning(history);
+                }
+                *model = m;
+                *effort = e;
+            }
+            Command::SetModes { effort: e, .. } => *effort = e,
+            Command::SetHandHolding(h) => *hand_holding = h,
+            other => others.push_back(other),
+        }
+    }
+    *kept = others;
+}
+
+/// Reasoning is a model's own: another model can't read it, and providers refuse some of what they
+/// didn't sign.
+fn strip_reasoning(history: &mut [Value]) {
+    for message in history {
+        if let Some(fields) = message.as_object_mut() {
+            fields.remove("reasoning_details");
+            fields.remove("reasoning");
+            fields.remove("reasoning_content");
+        }
+        if let Some(blocks) = message["content"].as_array_mut() {
+            blocks.retain(|b| b["type"] != "thinking" && b["type"] != "redacted_thinking");
+        }
+    }
+}
+
+/// `resp`'s assistant message on the OpenAI wire: `content` null without text, the calls as they
+/// were made sense of, and the reasoning the way it came (`reasoning_details` whole, and the plain
+/// field it arrived in), since some models refuse a history that has lost it.
+fn assistant_tool_message(resp: &TurnResponse) -> Value {
+    let tool_calls: Vec<Value> = resp
+        .tool_calls
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "type": "function",
+                "function": { "name": c.name, "arguments": c.arguments }
+            })
+        })
+        .collect();
+    let mut message = json!({
+        "role": "assistant",
+        "content": if resp.text.trim().is_empty() { Value::Null } else { Value::String(resp.text.clone()) },
+        "tool_calls": tool_calls
+    });
+    if !resp.reasoning_details.is_empty() {
+        message["reasoning_details"] = json!(resp.reasoning_details);
+    }
+    // OpenRouter sends both forms of the same text; the details are what it wants back.
+    if let (true, Some((field, text))) = (resp.reasoning_details.is_empty(), &resp.reasoning) {
+        message[*field] = json!(text);
+    }
+    message
+}
+
+/// Calls made ready to run: names repaired, arguments parsed and fitted to the tool's schema and
+/// written back as valid JSON (history must never echo what a provider would refuse to parse).
+/// Each gets `None`, or what to tell the model instead of running it.
+fn prepare_calls(
+    calls: &mut [AccumulatedToolCall],
+    tools: &[Value],
+    cut_off: bool,
+) -> Vec<Option<String>> {
+    let known: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    calls
+        .iter_mut()
+        .map(|call| {
+            let raw = std::mem::take(&mut call.arguments);
+            let Some(name) = repair::repair_tool_name(&call.name, &known) else {
+                call.arguments = match repair::parse_args(&raw).value() {
+                    Some(v) => v.to_string(),
+                    None => "{}".to_string(),
+                };
+                let problem = if call.name.trim().is_empty() {
+                    format!(
+                        "Error: this tool call has no name. Available tools: {}",
+                        known.join(", ")
+                    )
+                } else {
+                    format!(
+                        "Error: tool '{}' does not exist. Available tools: {}",
+                        call.name,
+                        known.join(", ")
+                    )
+                };
+                // The name goes back in history, and providers refuse one outside these characters.
+                let safe: String = call
+                    .name
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .take(64)
+                    .collect();
+                call.name = if safe.is_empty() {
+                    "unknown_tool".to_string()
+                } else {
+                    safe
+                };
+                return Some(problem);
+            };
+            call.name = name;
+            let parsed = repair::parse_args(&raw);
+            let args = match parsed {
+                // Hitting the limit, anything repaired was finished by a guess.
+                repair::Args::Repaired(_) if cut_off => None,
+                repair::Args::Clean(v) | repair::Args::Repaired(v) => Some(v),
+                repair::Args::Truncated | repair::Args::Invalid(_) => None,
+            };
+            let Some(mut args) = args else {
+                call.arguments = "{}".to_string();
+                return Some(match repair::parse_args(&raw) {
+                    repair::Args::Invalid(why) if !cut_off => {
+                        repair::invalid_args_message(&call.name, &raw, &why)
+                    }
+                    _ => repair::truncated_args_message(&call.name),
+                });
+            };
+            let schema = tools
+                .iter()
+                .find(|t| t["function"]["name"] == call.name.as_str())
+                .map(|t| &t["function"]["parameters"]);
+            let mut problem = None;
+            if let Some(schema) = schema {
+                repair::coerce_args(&call.name, &mut args, schema);
+                let missing = repair::missing_required(&args, schema);
+                if !missing.is_empty() {
+                    problem = Some(format!(
+                        "Error: this call to {} was not run because it's missing {}. Call it again with {}.",
+                        call.name,
+                        missing.join(" and "),
+                        if missing.len() == 1 { "it" } else { "them" }
+                    ));
+                }
+            }
+            call.arguments = args.to_string();
+            problem
+        })
+        .collect()
+}
+
+/// Calls to a tool a session's servers have, by that tool's own name (Trek's notes tell agents to
+/// call `watch_video`), turned into the `mcp_call` that runs it. A server's own name comes before
+/// any guess at what a name was meant to be. Arguments that can't be read are left for
+/// `prepare_calls` to report: wrapping them would turn half a call into a clean one.
+async fn route_to_servers(calls: &mut [AccumulatedToolCall], tools: &[Value], hub: &mcp::McpHub) {
+    let known: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    for call in calls {
+        if known.contains(&call.name.as_str()) {
+            continue;
+        }
+        let Some(arguments) = repair::parse_args(&call.arguments).value().cloned() else {
+            continue;
+        };
+        let Some(server) = hub.find(&call.name).await else {
+            continue;
+        };
+        call.arguments =
+            json!({ "server": server, "tool": call.name, "arguments": arguments }).to_string();
+        call.name = "mcp_call".to_string();
+    }
+}
+
+/// Whether to send this model pictures: where its list says it can see them, or a vendor whose
+/// models can. Anything else would be refused outright.
+fn sees_images(provider: &DirectProvider, caps: Option<&ModelCaps>) -> bool {
+    match caps.and_then(|c| c.images) {
+        Some(known) => known,
+        None => matches!(provider.id, "anthropic" | "openai" | "google"),
+    }
+}
+
+const TOOL_IMAGES_NOTE: &str = "The images the tool calls above returned:";
+/// Providers refuse an image over about 5 MB, which is this much base64.
+const MAX_TOOL_IMAGE: usize = 6_500_000;
+/// Most images kept from one round of calls.
+const MAX_TOOL_IMAGES: usize = 4;
+
+/// The images a provider will take, in a kind it reads and a size it allows, and how many are left
+/// out. Sent anyway, one refused image would fail every later request too.
+fn usable_images(images: Vec<mcp::ToolImage>) -> (Vec<mcp::ToolImage>, usize) {
+    let total = images.len();
+    let usable: Vec<mcp::ToolImage> = images
+        .into_iter()
+        .filter(|(kind, data)| {
+            matches!(
+                kind.as_str(),
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            ) && data.len() <= MAX_TOOL_IMAGE
+        })
+        .take(MAX_TOOL_IMAGES)
+        .collect();
+    let left_out = total - usable.len();
+    (usable, left_out)
+}
+
+/// Pictures from earlier tool calls, gone from the conversation: only the latest screen matters,
+/// each costs as much as a page of text, and providers cap how many one request may hold.
+fn forget_old_tool_images(history: &mut [Value]) {
+    for message in history.iter_mut() {
+        let from_tools = message["content"]
+            .as_array()
+            .and_then(|parts| parts.first())
+            .is_some_and(|part| part["text"] == TOOL_IMAGES_NOTE);
+        if from_tools {
+            message["content"] =
+                json!("[Images from earlier tool calls were removed to save context.]");
+        }
+    }
+}
+
+/// Pictures from tool calls, as a user message: a tool's result can only hold text on most wires.
+fn tool_images_message(wire: Wire, images: Vec<mcp::ToolImage>, left_out: usize) -> Value {
+    let note = json!({ "type": "text", "text": TOOL_IMAGES_NOTE });
+    let mut parts: Vec<Value> = std::iter::once(note)
+        .chain(images.into_iter().map(|(kind, data)| match wire {
+            Wire::Anthropic => json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": kind, "data": data }
+            }),
+            _ => json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{kind};base64,{data}") }
+            }),
+        }))
+        .collect();
+    if left_out > 0 {
+        parts.push(json!({
+            "type": "text",
+            "text": format!("{left_out} more couldn't be included: too large, too many, or of a kind this model doesn't read.")
+        }));
+    }
+    json!({ "role": "user", "content": parts })
+}
+
+/// Whether `text`, an answer with no tool call in it, ends by promising more.
+fn announces_more(text: &str) -> bool {
+    let Some(last) = text.lines().rev().map(str::trim).find(|l| !l.is_empty()) else {
+        return false;
+    };
+    let line = last.to_lowercase();
+    if line.starts_with("let me know") {
+        return false;
+    }
+    line.ends_with(':')
+        || [
+            "let me ",
+            "i'll ",
+            "i will ",
+            "now i'll ",
+            "now i will ",
+            "now let me ",
+            "next, i",
+            "next i",
+            "i'm going to ",
+            "i am going to ",
+        ]
+        .iter()
+        .any(|start| line.starts_with(start))
+}
+
+/// Notices a model making the same call over and over and getting the same answer.
+#[derive(Default)]
+struct LoopGuard {
+    recent: VecDeque<u64>,
+}
+
+impl LoopGuard {
+    /// How far back a repeat counts.
+    const WINDOW: usize = 16;
+    const WARN_AT: usize = 4;
+    const STOP_AT: usize = 8;
+
+    /// Takes in a finished call: how many of the last few calls were this very one, it included.
+    fn record(&mut self, name: &str, args: &str, output: &str) -> usize {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut hasher);
+        args.hash(&mut hasher);
+        output.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.recent.push_back(hash);
+        while self.recent.len() > Self::WINDOW {
+            self.recent.pop_front();
+        }
+        self.recent.iter().filter(|h| **h == hash).count()
+    }
+}
+
+/// Old tool output cut down to its first lines, and old reasoning dropped, when that frees enough
+/// to be worth changing what the provider has cached (a tenth of the window): the latest outputs
+/// stay whole. Whether anything changed.
+fn elide_old_outputs(history: &mut [Value], window: u64, model: &str) -> bool {
+    const STUB_ABOVE: usize = 1_000;
+    const STUB_KEEPS: usize = 300;
+    let keep_chars = (window as f64 * ELIDE_KEEPS * 4.0) as usize;
+    let needed = (window as f64 * 0.1 * 4.0) as usize;
+    // Where "the latest" starts, walking back from the end.
+    let mut seen = 0usize;
+    let mut cutoff = 0usize;
+    for (i, message) in history.iter().enumerate().rev() {
+        seen += estimate_chars(message);
+        if seen > keep_chars {
+            cutoff = i + 1;
+            break;
+        }
+    }
+    let output_of = |m: &Value| -> Vec<usize> {
+        if m["role"] == "tool" {
+            return vec![m["content"].as_str().map_or(0, str::len)];
+        }
+        m["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|b| b["type"] == "tool_result")
+            .map(|b| b["content"].as_str().map_or(0, str::len))
+            .collect()
+    };
+    let mut freeable = 0usize;
+    for message in &history[..cutoff] {
+        freeable += output_of(message)
+            .iter()
+            .filter(|n| **n > STUB_ABOVE)
+            .map(|n| n - STUB_KEEPS)
+            .sum::<usize>();
+    }
+    // Reasoning from before the latest message: some models refuse a history without theirs
+    // however old, so theirs stays.
+    let keeps_reasoning = ["deepseek", "kimi", "moonshot"]
+        .iter()
+        .any(|m| model.to_lowercase().contains(m));
+    let last_user = history
+        .iter()
+        .rposition(|m| m["role"] == "user" && m["content"].is_string())
+        .unwrap_or(0);
+    if !keeps_reasoning {
+        for message in &history[..last_user] {
+            for field in ["reasoning_details", "reasoning", "reasoning_content"] {
+                freeable += message.get(field).map_or(0, estimate_chars);
+            }
+        }
+    }
+    if freeable < needed {
+        return false;
+    }
+    let stub = |text: &str| -> String {
+        format!(
+            "{}\n[… {} bytes of this output were removed to save context. Run the call again if you need them.]",
+            clip_chars(text, STUB_KEEPS),
+            text.len().saturating_sub(STUB_KEEPS)
+        )
+    };
+    for message in &mut history[..cutoff] {
+        if message["role"] == "tool" {
+            let text = message["content"].as_str().unwrap_or_default();
+            if text.len() > STUB_ABOVE {
+                message["content"] = json!(stub(text));
+            }
+        } else if let Some(blocks) = message["content"].as_array_mut() {
+            for block in blocks.iter_mut().filter(|b| b["type"] == "tool_result") {
+                let text = block["content"].as_str().unwrap_or_default();
+                if text.len() > STUB_ABOVE {
+                    block["content"] = json!(stub(text));
+                }
+            }
+        }
+    }
+    if !keeps_reasoning {
+        for message in &mut history[..last_user] {
+            if let Some(fields) = message.as_object_mut() {
+                fields.remove("reasoning_details");
+                fields.remove("reasoning");
+                fields.remove("reasoning_content");
+            }
+        }
+    }
+    true
+}
+
+/// Most tokens to let an answer use: what the model allows, and what's left of its window. Without
+/// a limit OpenRouter reserves the model's whole maximum against the account's credit and refuses
+/// requests it could easily afford. `whole_output`: the last answer spent its limit on reasoning.
+/// Only sent where it's safe to: other providers refuse a limit above their own, which isn't known.
+fn output_limit(
+    provider: &DirectProvider,
+    caps: Option<&ModelCaps>,
+    window: u64,
+    estimate: u64,
+    whole_output: bool,
+) -> Option<u64> {
+    const USUAL: u64 = 32_000;
+    const MOST: u64 = 64_000;
+    const LEAST: u64 = 1_024;
+    let model_max = caps.and_then(|c| c.max_output);
+    if provider.local || (model_max.is_none() && provider.id != "openrouter") {
+        return None;
+    }
+    let limit = match (model_max, whole_output) {
+        (Some(max), true) => max,
+        (Some(max), false) => max.min(MOST),
+        (None, true) => MOST,
+        (None, false) => USUAL,
+    };
+    let room = window.saturating_sub(estimate).saturating_sub(LEAST);
+    Some(limit.min(room.max(LEAST)))
 }
 
 /// The results of one answer's tool calls, `(id, output, ok)`, in the shape the wire wants:
@@ -1103,7 +2421,6 @@ fn is_safe_command(cmd: &str) -> bool {
         "git show",
         "git branch",
         "cargo check",
-        "cargo test",
         "cargo clippy",
         "ls",
         "cat",
@@ -1136,6 +2453,10 @@ fn is_safe_command(cmd: &str) -> bool {
     let short = |a: &str, letters: &str| {
         a.starts_with('-') && !a.starts_with("--") && a.chars().skip(1).any(|c| letters.contains(c))
     };
+    // The shell expands these into flags the checks below never see: `find . ${x:--delete}`.
+    if *prefix != "echo" && args.iter().any(|a| a.contains(['$', '{'])) {
+        return false;
+    }
     !args.iter().any(|a| {
         let a = a.as_str();
         match *prefix {
@@ -1173,10 +2494,18 @@ fn is_safe_command(cmd: &str) -> bool {
             }
             "git diff" | "git log" | "git show" => a.starts_with("--output"),
             "rg" => a.starts_with("--pre"),
-            "cargo check" | "cargo test" | "cargo clippy" => a == "--fix",
+            "cargo check" | "cargo clippy" => a == "--fix",
+            // Follows forever.
+            "tail" => short(a, "fF") || a.starts_with("--follow") || a == "--retry",
             _ => false,
         }
     })
+}
+
+/// Whether a read-only session may run `cmd`: what Auto would run unasked, less the builds, which
+/// run the project's own code.
+fn is_read_only_command(cmd: &str) -> bool {
+    !cmd.trim_start().starts_with("cargo") && is_safe_command(cmd)
 }
 
 fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
@@ -1210,6 +2539,34 @@ fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
                 .unwrap_or(args_json);
             ("Edit", path.to_string())
         }
+        "grep" => (
+            "Search",
+            parsed["pattern"].as_str().unwrap_or(args_json).to_string(),
+        ),
+        "glob" => (
+            "Find files",
+            parsed["pattern"].as_str().unwrap_or(args_json).to_string(),
+        ),
+        "list_dir" => ("List", parsed["path"].as_str().unwrap_or(".").to_string()),
+        "web_fetch" => (
+            "Fetch",
+            parsed["url"].as_str().unwrap_or(args_json).to_string(),
+        ),
+        "mcp_list" => (
+            "List tools",
+            parsed["server"]
+                .as_str()
+                .unwrap_or("all servers")
+                .to_string(),
+        ),
+        "mcp_call" => (
+            "Use tool",
+            format!(
+                "{} {}",
+                parsed["server"].as_str().unwrap_or_default(),
+                parsed["tool"].as_str().unwrap_or_default()
+            ),
+        ),
         // The model's own few words on what the program does, else its first line.
         "script" => {
             let described = parsed["description"]
@@ -1240,9 +2597,11 @@ fn tool_display(name: &str, args_json: &str) -> (&'static str, String) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ask_permission(
     title: &str,
     detail: &str,
+    call: Option<Call>,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
@@ -1255,6 +2614,7 @@ async fn ask_permission(
             title: title.to_string(),
             detail: detail.to_string(),
             prompt: None,
+            call,
         })
         .await?;
 
@@ -1280,6 +2640,12 @@ async fn ask_permission(
             Command::Shutdown => {
                 *shutdown = true;
                 break Err("Shutdown");
+            }
+            // A message while the card is up is the user's answer to it: no, and why. (Trek's
+            // queue key holds a message back in the app, so one that arrives here was sent.)
+            prompt @ Command::Prompt { .. } => {
+                later.push(prompt);
+                break Ok(Decision::Deny);
             }
             other => later.push(other),
         }
@@ -1316,22 +2682,17 @@ fn edit_permission(
     (ask, key)
 }
 
-/// Whether `tool` (`bash`, `write_file` or `edit_file`) may go ahead on `target` (the command,
-/// or the path): asks the user when `hand_holding` says to, and remembers "allow for the
-/// session". `Ok(false)`: denied.
-#[allow(clippy::too_many_arguments)]
-async fn permitted(
+/// Whether a thread's level, by itself, asks before `tool` (`bash`, `mcp`, `web_fetch`,
+/// `write_file` or `edit_file`) acts on `target`: and the card's title, and the key "allow for the
+/// session" is remembered under.
+fn level_asks(
     tool: &str,
     target: &str,
     cwd: &Path,
     hand_holding: HandHolding,
-    allowed_for_session: &mut HashSet<String>,
-    events: &async_channel::Sender<AgentEvent>,
-    commands: &async_channel::Receiver<Command>,
-    kept: &mut VecDeque<Command>,
-    shutdown: &mut bool,
-) -> Result<bool> {
-    let (need_ask, title, session_key) = match tool {
+    allowed_for_session: &HashSet<String>,
+) -> (bool, &'static str, String) {
+    match tool {
         "bash" => {
             let need_ask = match hand_holding {
                 HandHolding::FullAccess => false,
@@ -1344,6 +2705,34 @@ async fn permitted(
             };
             (need_ask, "Run command", target.to_string())
         }
+        // A tool on an MCP server that doesn't say it only reads (those don't come here below
+        // Supervised). Auto trusts Trek's own servers, which have approvals of their own, and asks
+        // about the rest, as it does for an ACP agent.
+        "mcp" => {
+            let server = target.split(' ').next().unwrap_or_default();
+            let need_ask = match hand_holding {
+                HandHolding::FullAccess => false,
+                HandHolding::Auto => {
+                    !crate::is_trek_server(server) && !allowed_for_session.contains(target)
+                }
+                HandHolding::AutoAcceptEdits | HandHolding::Supervised => {
+                    !allowed_for_session.contains(target)
+                }
+            };
+            (need_ask, "Use tool", target.to_string())
+        }
+        // Public pages are like reading a file. An address inside this network isn't, and
+        // Supervised asks about everything; an allowance covers the one address.
+        "web_fetch" => {
+            let need_ask = match hand_holding {
+                HandHolding::FullAccess => false,
+                HandHolding::Supervised => !allowed_for_session.contains(target),
+                HandHolding::Auto | HandHolding::AutoAcceptEdits => {
+                    web::is_private(target) && !allowed_for_session.contains(target)
+                }
+            };
+            (need_ask, "Fetch page", target.to_string())
+        }
         _ => {
             let (need_ask, key) =
                 edit_permission(tool, hand_holding, target, cwd, allowed_for_session);
@@ -1354,18 +2743,107 @@ async fn permitted(
             };
             (need_ask, title, key)
         }
+    }
+}
+
+/// Whether a Direct session at `level` would ask about `call` with no rule to go by, nothing
+/// allowed for the session yet: the Settings page's rule tester shows this.
+pub fn level_would_ask(call: &Call, cwd: &Path, level: HandHolding) -> bool {
+    let tool = match call.kind {
+        RuleKind::Command => "bash",
+        RuleKind::Edit => "write_file",
+        RuleKind::Fetch => "web_fetch",
+        RuleKind::Tool => "mcp",
+    };
+    level_asks(tool, &call.target, cwd, level, &HashSet::new()).0
+}
+
+/// The answer to `permitted`.
+#[derive(Debug, PartialEq)]
+enum Permit {
+    Go,
+    /// No: what the model is told.
+    No(String),
+}
+
+/// Whether a rule has something to say that a session's own leave to skip asking mustn't get
+/// round: a deny or an ask, in a read-only session whose reads don't ask.
+fn rule_speaks(tool: &str, target: &str, cwd: &Path) -> bool {
+    let call = crate::rules::direct_call(tool, target);
+    matches!(
+        crate::rules::ruling(&permission_rules::current(), &[call], cwd, false),
+        Ruling::Refuse { .. } | Ruling::Ask
+    )
+}
+
+/// Whether `tool` (`bash`, `write_file` or `edit_file`) may go ahead on `target` (the command,
+/// or the path): the user's rules first, whatever the level; then asks the user when
+/// `hand_holding` says to, and remembers "allow for the session".
+#[allow(clippy::too_many_arguments)]
+async fn permitted(
+    tool: &str,
+    target: &str,
+    cwd: &Path,
+    hand_holding: HandHolding,
+    allowed_for_session: &mut HashSet<String>,
+    events: &async_channel::Sender<AgentEvent>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<Permit> {
+    permitted_under(
+        &permission_rules::current(),
+        tool,
+        target,
+        cwd,
+        hand_holding,
+        allowed_for_session,
+        events,
+        commands,
+        kept,
+        shutdown,
+    )
+    .await
+}
+
+/// `permitted`, by `rules`.
+#[allow(clippy::too_many_arguments)]
+async fn permitted_under(
+    rules: &[PermissionRule],
+    tool: &str,
+    target: &str,
+    cwd: &Path,
+    hand_holding: HandHolding,
+    allowed_for_session: &mut HashSet<String>,
+    events: &async_channel::Sender<AgentEvent>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<Permit> {
+    let call = crate::rules::direct_call(tool, target);
+    let (level_ask, title, session_key) =
+        level_asks(tool, target, cwd, hand_holding, allowed_for_session);
+    let need_ask = match crate::rules::ruling(rules, std::slice::from_ref(&call), cwd, true) {
+        Ruling::Refuse { message, note } => {
+            events.send(AgentEvent::Notice(note)).await?;
+            return Ok(Permit::No(message));
+        }
+        Ruling::Allow => false,
+        // Every time: "allow for the session" doesn't get past a rule that says to ask.
+        Ruling::Ask => true,
+        Ruling::Level => level_ask,
     };
     if !need_ask {
-        return Ok(true);
+        return Ok(Permit::Go);
     }
     Ok(
-        match ask_permission(title, target, events, commands, kept, shutdown).await? {
-            Decision::Allow => true,
+        match ask_permission(title, target, Some(call), events, commands, kept, shutdown).await? {
+            Decision::Allow => Permit::Go,
             Decision::AllowForSession => {
                 allowed_for_session.insert(session_key);
-                true
+                Permit::Go
             }
-            Decision::Deny => false,
+            Decision::Deny => Permit::No("Permission denied by user".into()),
         },
     )
 }
@@ -1379,78 +2857,77 @@ async fn execute_tool(
     allowed_for_session: &mut HashSet<String>,
     options: &DirectOptions,
     script: bool,
+    hub: &mcp::McpHub,
+    background: &mut Vec<i32>,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<(String, bool, Option<(u32, u32)>)> {
     let exec = options.executor.as_ref();
+    // Valid JSON, and already fitted to the tool's schema (`prepare_calls`).
+    let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+    let text_of = |key: &str| parsed.get(key).and_then(Value::as_str).unwrap_or_default();
     match name {
         "bash" => {
-            if read_only {
+            let command = text_of("command").trim();
+            if command.is_empty() {
+                return Ok(("Error: empty command".into(), false, None));
+            }
+            // Read-only sessions can still look around: what can't change anything runs.
+            if read_only && !is_read_only_command(command) {
                 return Ok((
-                    "Permission denied: commands are disabled in read-only mode".into(),
+                    "Not run: this session is read-only, so bash only runs single commands that just read (git status, git log, git diff, git show, ls, cat, head, tail, grep, rg, find, wc, stat, file, which, pwd, echo), with no pipes or redirects. Use read_file, grep, glob and list_dir for the rest.".into(),
                     false,
                     None,
                 ));
             }
-            let parsed: Value =
-                serde_json::from_str(args_json).unwrap_or_else(|_| json!({ "command": args_json }));
-            let command = parsed
-                .get("command")
-                .and_then(|c| c.as_str())
-                .unwrap_or(args_json)
-                .trim();
-            if command.is_empty() {
-                return Ok(("Error: empty command".into(), false, None));
-            }
-            if !permitted(
-                "bash",
-                command,
-                cwd,
-                hand_holding,
-                allowed_for_session,
-                events,
-                commands,
-                kept,
-                shutdown,
-            )
-            .await?
+            let asks = !read_only
+                || hand_holding == HandHolding::Supervised
+                || rule_speaks("bash", command, cwd);
+            if asks
+                && let Permit::No(why) = permitted(
+                    "bash",
+                    command,
+                    cwd,
+                    hand_holding,
+                    allowed_for_session,
+                    events,
+                    commands,
+                    kept,
+                    shutdown,
+                )
+                .await?
             {
-                return Ok(("Permission denied by user".into(), false, None));
+                return Ok((why, false, None));
             }
-            let (out, ok) = run_bash_command(
-                exec,
-                command,
-                cwd,
-                options.command_timeout,
-                commands,
-                kept,
-                shutdown,
-            )
-            .await?;
+            if !read_only && parsed["background"].as_bool() == Some(true) {
+                let (out, ok) =
+                    start_in_background(exec, command, cwd, background, commands, kept, shutdown)
+                        .await?;
+                return Ok((out, ok, None));
+            }
+            let timeout = parsed["timeout_s"]
+                .as_u64()
+                .map(|s| Duration::from_secs(s.clamp(1, MAX_COMMAND_TIMEOUT_S)))
+                .or(options.command_timeout);
+            // A limit the session has to keep holds for the command too.
+            let timeout = match (timeout, options.deadline) {
+                (Some(limit), Some(deadline)) => {
+                    Some(limit.min(deadline.saturating_duration_since(Instant::now())))
+                }
+                (limit, _) => limit,
+            };
+            let (out, ok) =
+                run_bash_command(exec, command, cwd, timeout, commands, kept, shutdown).await?;
             Ok((out, ok, None))
         }
         "read_file" => {
-            let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
-            let path_str = parsed
-                .get("path")
-                .and_then(|p| p.as_str())
-                .unwrap_or_default();
-            if path_str.is_empty() {
-                return Ok(("Error: path parameter is required".into(), false, None));
-            }
-            let start = parsed
-                .get("start_line")
-                .and_then(|s| s.as_u64())
-                .map(|s| s as usize);
-            let end = parsed
-                .get("end_line")
-                .and_then(|e| e.as_u64())
-                .map(|e| e as usize);
+            let start = parsed["start_line"].as_u64().map(|s| s as usize);
+            let end = parsed["end_line"].as_u64().map(|e| e as usize);
             let (out, ok) = run_read_file(
                 exec,
-                path_str,
+                text_of("path"),
                 start,
                 end,
                 cwd,
@@ -1471,19 +2948,8 @@ async fn execute_tool(
                     None,
                 ));
             }
-            let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
-            let path_str = parsed
-                .get("path")
-                .and_then(|p| p.as_str())
-                .unwrap_or_default();
-            let content = parsed
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or_default();
-            if path_str.is_empty() {
-                return Ok(("Error: path parameter is required".into(), false, None));
-            }
-            if !permitted(
+            let path_str = text_of("path");
+            if let Permit::No(why) = permitted(
                 "write_file",
                 path_str,
                 cwd,
@@ -1496,12 +2962,12 @@ async fn execute_tool(
             )
             .await?
             {
-                return Ok(("Permission denied by user".into(), false, None));
+                return Ok((why, false, None));
             }
             run_write_file(
                 exec,
                 path_str,
-                content,
+                text_of("content"),
                 cwd,
                 &mut Waiting {
                     commands,
@@ -1519,27 +2985,15 @@ async fn execute_tool(
                     None,
                 ));
             }
-            let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
-            let path_str = parsed
-                .get("path")
-                .and_then(|p| p.as_str())
-                .unwrap_or_default();
-            let old_str = parsed
-                .get("old_str")
-                .and_then(|o| o.as_str())
-                .unwrap_or_default();
-            let new_str = parsed
-                .get("new_str")
-                .and_then(|n| n.as_str())
-                .unwrap_or_default();
-            if path_str.is_empty() || old_str.is_empty() {
+            let path_str = text_of("path");
+            if text_of("old_str").is_empty() {
                 return Ok((
-                    "Error: path and old_str parameters are required".into(),
+                    "Error: old_str is empty. To create a file or replace all of one, use write_file.".into(),
                     false,
                     None,
                 ));
             }
-            if !permitted(
+            if let Permit::No(why) = permitted(
                 "edit_file",
                 path_str,
                 cwd,
@@ -1552,13 +3006,14 @@ async fn execute_tool(
             )
             .await?
             {
-                return Ok(("Permission denied by user".into(), false, None));
+                return Ok((why, false, None));
             }
             run_edit_file(
                 exec,
                 path_str,
-                old_str,
-                new_str,
+                text_of("old_str"),
+                text_of("new_str"),
+                parsed["replace_all"].as_bool() == Some(true),
                 cwd,
                 &mut Waiting {
                     commands,
@@ -1568,9 +3023,133 @@ async fn execute_tool(
             )
             .await
         }
-        // The fifth tool, when it's on (see `script`): a program whose calls run on the same
-        // executor. Its approvals are asked here while it waits; a Stop drops it like it does a
-        // command, and the calls it has in flight with it.
+        "grep" | "glob" | "list_dir" => {
+            let mut waiting = Waiting {
+                commands,
+                kept: &mut *kept,
+                shutdown: &mut *shutdown,
+            };
+            let (out, ok) = run_search(exec, name, &parsed, cwd, &mut waiting).await?;
+            Ok((out, ok, None))
+        }
+        "web_fetch" => {
+            let url = text_of("url").trim();
+            if let Permit::No(why) = permitted(
+                "web_fetch",
+                url,
+                cwd,
+                hand_holding,
+                allowed_for_session,
+                events,
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?
+            {
+                return Ok((why, false, None));
+            }
+            // Every hop of a redirect answers to the user's rules, as the address asked for did.
+            let rules = permission_rules::current();
+            let cwd_owned = cwd.to_path_buf();
+            let hop_allowed: web::HopCheck = std::sync::Arc::new(move |hop: &str| {
+                let call = crate::rules::direct_call("web_fetch", hop);
+                matches!(
+                    crate::rules::ruling(&rules, &[call], &cwd_owned, true),
+                    Ruling::Allow | Ruling::Level
+                )
+            });
+            let fetched =
+                until_stopped(web::fetch(url, hop_allowed), commands, kept, shutdown).await?;
+            let (text, ok) = match fetched {
+                Ok(text) => (text, true),
+                Err(message) => (message, false),
+            };
+            let mut waiting = Waiting {
+                commands,
+                kept: &mut *kept,
+                shutdown: &mut *shutdown,
+            };
+            Ok((fit_output(exec, text, false, &mut waiting).await?, ok, None))
+        }
+        "mcp_list" => {
+            let server = parsed["server"].as_str();
+            let (text, ok) = until_stopped(hub.listing(server), commands, kept, shutdown).await?;
+            let mut waiting = Waiting {
+                commands,
+                kept: &mut *kept,
+                shutdown: &mut *shutdown,
+            };
+            Ok((fit_output(exec, text, false, &mut waiting).await?, ok, None))
+        }
+        "mcp_call" => {
+            let (server, tool_name) = (text_of("server"), text_of("tool"));
+            let arguments = match &parsed["arguments"] {
+                Value::Null => json!({}),
+                Value::String(raw) => match repair::parse_args(raw).value() {
+                    Some(v) => v.clone(),
+                    None => {
+                        return Ok((
+                            "Error: arguments must be a JSON object.".to_string(),
+                            false,
+                            None,
+                        ));
+                    }
+                },
+                other => other.clone(),
+            };
+            let found =
+                until_stopped(hub.tool(server, tool_name), commands, kept, shutdown).await?;
+            let info = match found {
+                Ok(info) => info,
+                Err(message) => return Ok((message, false, None)),
+            };
+            if read_only && !info.read_only {
+                return Ok((
+                    format!(
+                        "Not run: this session is read-only, and {server} doesn't say that {tool_name} only reads."
+                    ),
+                    false,
+                    None,
+                ));
+            }
+            let target = format!("{server} {tool_name}");
+            let asks = !info.read_only
+                || hand_holding == HandHolding::Supervised
+                || rule_speaks("mcp", &target, cwd);
+            if asks
+                && let Permit::No(why) = permitted(
+                    "mcp",
+                    &target,
+                    cwd,
+                    hand_holding,
+                    allowed_for_session,
+                    events,
+                    commands,
+                    kept,
+                    shutdown,
+                )
+                .await?
+            {
+                return Ok((why, false, None));
+            }
+            let (text, ok) = until_stopped(
+                hub.call(server, tool_name, arguments),
+                commands,
+                kept,
+                shutdown,
+            )
+            .await?;
+            let mut waiting = Waiting {
+                commands,
+                kept: &mut *kept,
+                shutdown: &mut *shutdown,
+            };
+            Ok((fit_output(exec, text, false, &mut waiting).await?, ok, None))
+        }
+        // A tool the session has on offer: a program whose calls run on the same executor. Its
+        // approvals are asked here while it waits; a Stop drops it like it does a command, and the
+        // calls it has in flight with it.
         "script" if script => {
             if read_only {
                 return Ok((
@@ -1579,7 +3158,6 @@ async fn execute_tool(
                     None,
                 ));
             }
-            let parsed: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
             let code = parsed["code"].as_str().unwrap_or_default();
             if code.trim().is_empty() {
                 return Ok(("Error: code parameter is required".into(), false, None));
@@ -1589,7 +3167,7 @@ async fn execute_tool(
                 options.executor.clone(),
                 cwd.to_path_buf(),
                 options.command_timeout,
-                hand_holding != HandHolding::FullAccess,
+                hand_holding != HandHolding::FullAccess || !permission_rules::current().is_empty(),
                 options.deadline,
                 to_session,
             ));
@@ -1617,7 +3195,7 @@ async fn execute_tool(
                                 return Err(ExecutorGone(reason).into());
                             }
                         };
-                        let ok = permitted(
+                        let answer = permitted(
                             ask.tool,
                             &ask.target,
                             cwd,
@@ -1629,7 +3207,7 @@ async fn execute_tool(
                             shutdown,
                         )
                         .await?;
-                        let _ = ask.reply.send(ok);
+                        let _ = ask.reply.send(answer == Permit::Go);
                     }
                     cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
                 }
@@ -1641,9 +3219,7 @@ async fn execute_tool(
             Ok((result.to_model_text(), ok, None))
         }
         unknown => Ok((
-            format!(
-                "Unknown tool: {unknown}. Available tools: bash, read_file, write_file, edit_file"
-            ),
+            format!("Error: tool '{unknown}' does not exist in this session."),
             false,
             None,
         )),
@@ -1668,8 +3244,57 @@ async fn until_stopped<T>(
     }
 }
 
-/// Most of a command's output the model is told, in bytes.
-const MAX_OUT: usize = 50_000;
+/// Most of a tool's output the model is told, in bytes. The rest is saved where it can look.
+const MAX_OUT: usize = 30_000;
+/// Longest a command may ask to run for.
+const MAX_COMMAND_TIMEOUT_S: u64 = 3_600;
+
+/// `text`, or if it's too long, its start and end around a note saying where all of it is. A
+/// command's end matters most (that's where the build error is); a listing's or a page's, its start.
+async fn fit_output(
+    exec: &dyn ToolExecutor,
+    text: String,
+    keep_end: bool,
+    waiting: &mut Waiting<'_>,
+) -> Result<String> {
+    if text.len() <= MAX_OUT {
+        return Ok(text);
+    }
+    let (head, tail) = if keep_end {
+        (MAX_OUT / 5, MAX_OUT * 4 / 5)
+    } else {
+        (MAX_OUT * 4 / 5, MAX_OUT / 5)
+    };
+    let mut head_end = head;
+    while !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = text.len() - tail;
+    while !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let path = exec
+        .temp_dir()
+        .join("trek-output")
+        .join(format!("{}.txt", next_id()));
+    // The file outlives the session's secrets: what a command printed of one doesn't go in it.
+    let mut kept_text = text.clone();
+    trek_core::session_secrets::scrub_string(&mut kept_text, &trek_core::session_secrets::known());
+    let saved = waiting.on(exec.write(&path, kept_text.as_bytes())).await?;
+    let cut = tail_start - head_end;
+    let note = match saved {
+        Ok(()) => format!(
+            "[… {cut} bytes cut here. All of it is in {}: read_file pages through it and grep searches it.]",
+            path.display()
+        ),
+        Err(_) => format!("[… {cut} bytes cut here.]"),
+    };
+    Ok(format!(
+        "{}\n\n{note}\n\n{}",
+        &text[..head_end],
+        &text[tail_start..]
+    ))
+}
 
 async fn run_bash_command(
     exec: &dyn ToolExecutor,
@@ -1689,35 +3314,114 @@ async fn run_bash_command(
     let ok = ran.success();
     let mut out = ran.stdout;
     if !ran.stderr.is_empty() {
-        if !out.is_empty() {
+        if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
         out.push_str(&ran.stderr);
     }
-    if out.len() > MAX_OUT {
-        let mut cut = MAX_OUT;
-        while !out.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.truncate(cut);
-        out.push_str("\n... [output truncated]");
-    }
-    if ran.timed_out {
-        if !out.is_empty() {
+    let mut waiting = Waiting {
+        commands,
+        kept,
+        shutdown,
+    };
+    let mut out = fit_output(exec, out, true, &mut waiting).await?;
+    let mut ending = |line: String| {
+        if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
-        out.push_str(&match timeout {
+        out.push_str(&line);
+    };
+    if ran.timed_out {
+        ending(match timeout {
             Some(limit) => format!(
-                "[Command timed out after {} seconds and was stopped]",
+                "[Command timed out after {} seconds and was stopped. If it needs longer, run it again with a larger timeout_s (up to {MAX_COMMAND_TIMEOUT_S}), or with background set to true.]",
                 limit.as_secs()
             ),
             None => "[Command timed out and was stopped]".to_string(),
         });
+    } else {
+        // Without this a failure can read as success: `which x` says nothing at all.
+        match ran.exit_code {
+            Some(0) => {}
+            Some(code) => ending(format!("[exit code {code}]")),
+            None => ending("[ended by a signal]".to_string()),
+        }
     }
     if out.trim().is_empty() {
         out = "(Command finished with no output)".to_string();
     }
     Ok((out, ok))
+}
+
+/// Starts `command` and doesn't wait for it: its output goes to a file, and it stays running until
+/// the model stops it or the session ends.
+async fn start_in_background(
+    exec: &dyn ToolExecutor,
+    command: &str,
+    cwd: &Path,
+    background: &mut Vec<i32>,
+    commands: &async_channel::Receiver<Command>,
+    kept: &mut VecDeque<Command>,
+    shutdown: &mut bool,
+) -> Result<(String, bool)> {
+    let log = exec
+        .temp_dir()
+        .join("trek-output")
+        .join(format!("background-{}.log", next_id()));
+    let shown = log.display().to_string();
+    let mut waiting = Waiting {
+        commands,
+        kept,
+        shutdown,
+    };
+    if let Err(e) = waiting.on(exec.write(&log, b"")).await? {
+        return Ok((format!("Failed to start in the background: {e:#}"), false));
+    }
+    let windows = exec.is_local() && cfg!(windows);
+    let wrapped = if windows {
+        format!("start \"\" /b cmd /c \"{command} > \"{shown}\" 2>&1\"")
+    } else {
+        format!(
+            "( {command}\n) > {} 2>&1 < /dev/null &\necho \"$$\"",
+            search::quote(&shown)
+        )
+    };
+    let ran = match waiting
+        .on(exec.exec(&wrapped, cwd, Some(Duration::from_secs(10))))
+        .await?
+    {
+        Ok(ran) => ran,
+        Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => return Err(e),
+        Err(e) => return Ok((format!("Failed to start in the background: {e:#}"), false)),
+    };
+    if !ran.success() {
+        return Ok((
+            format!(
+                "Failed to start in the background: {}{}",
+                ran.stdout, ran.stderr
+            ),
+            false,
+        ));
+    }
+    let Some(group) = ran.stdout.trim().parse::<i32>().ok() else {
+        return Ok((
+            format!(
+                "Started in the background. Its output goes to {shown}: read it with read_file."
+            ),
+            true,
+        ));
+    };
+    background.push(group);
+    // Trek ending, or a later launch finding it left over, ends it too.
+    if exec.is_local() {
+        trek_core::procs::register(group);
+    }
+    Ok((
+        format!(
+            "Started in the background as process group {group}. Its output goes to {shown}: read it with read_file. To stop it: kill -- -{group}"
+        ),
+        true,
+    ))
 }
 
 /// A tool's way to hear a Stop while it waits on the executor (see `until_stopped`): a read or
@@ -1752,13 +3456,23 @@ async fn read_text(
     waiting: &mut Waiting<'_>,
 ) -> Result<std::result::Result<String, String>> {
     match waiting.on(exec.read(path)).await? {
-        Ok(Some(bytes)) => Ok(String::from_utf8(bytes)
-            .map_err(|_| format!("Error reading {path_str}: stream did not contain valid UTF-8"))),
+        Ok(Some(bytes)) => Ok(String::from_utf8(bytes).map_err(|_| {
+            format!(
+                "Error reading {path_str}: stream did not contain valid UTF-8. It's a binary file, so use a command that understands its format."
+            )
+        })),
         Ok(None) => Ok(Err(format!("File not found: {path_str}"))),
         Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => Err(e),
         Err(e) => Ok(Err(format!("Error reading {path_str}: {e:#}"))),
     }
 }
+
+/// Most lines one `read_file` returns.
+const READ_LINES: usize = 2_000;
+/// Most bytes it returns, whatever the lines.
+const READ_BYTES: usize = 50_000;
+/// A longer line is cut: one minified line can fill a context by itself.
+const READ_LINE: usize = 2_000;
 
 async fn run_read_file(
     exec: &dyn ToolExecutor,
@@ -1769,8 +3483,17 @@ async fn run_read_file(
     waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool)> {
     let path = tool_path(path_str, cwd);
+    // Models read folders all the time. It isn't worth an error to say what they wanted to know.
+    if exec.is_local() && path.is_dir() {
+        let (listing, ok) = list_folder(exec, &path, path_str, cwd, waiting).await?;
+        return Ok((format!("{path_str} is a folder. It holds:\n{listing}"), ok));
+    }
     let content = match read_text(exec, &path, path_str, waiting).await? {
         Ok(c) => c,
+        Err(message) if message.to_lowercase().contains("is a directory") => {
+            let (listing, ok) = list_folder(exec, &path, path_str, cwd, waiting).await?;
+            return Ok((format!("{path_str} is a folder. It holds:\n{listing}"), ok));
+        }
         Err(message) => return Ok((message, false)),
     };
     let lines: Vec<&str> = content.lines().collect();
@@ -1800,10 +3523,152 @@ async fn run_read_file(
         ));
     }
     let mut out = String::new();
+    let mut shown_to = start;
+    let mut clipped = false;
     for (idx, line) in lines[start..end].iter().enumerate() {
-        out.push_str(&format!("{:4} | {}\n", start + idx + 1, line));
+        if idx == READ_LINES || out.len() >= READ_BYTES {
+            break;
+        }
+        let number = start + idx + 1;
+        if line.len() > READ_LINE {
+            clipped = true;
+            out.push_str(&format!("{number:4} | {}\n", clip_chars(line, READ_LINE)));
+        } else {
+            out.push_str(&format!("{number:4} | {line}\n"));
+        }
+        shown_to = number;
+    }
+    if shown_to < end {
+        out.push_str(&format!(
+            "(Showing lines {}-{shown_to} of {}. To read on, call read_file with start_line {}.)\n",
+            start + 1,
+            lines.len(),
+            shown_to + 1
+        ));
+    } else if end == lines.len() && start > 0 {
+        out.push_str(&format!("(End of file: {} lines.)\n", lines.len()));
+    } else if end < lines.len() {
+        out.push_str(&format!("(The file has {} lines.)\n", lines.len()));
+    }
+    if clipped {
+        out.push_str("(Lines ending in … were cut. Use grep or bash to see the rest of them.)\n");
     }
     Ok((out, true))
+}
+
+/// What's in a folder, for `read_file` on one and for `list_dir`.
+async fn list_folder(
+    exec: &dyn ToolExecutor,
+    path: &Path,
+    path_str: &str,
+    cwd: &Path,
+    waiting: &mut Waiting<'_>,
+) -> Result<(String, bool)> {
+    let (listing, ok) = if exec.is_local() {
+        let path = path.to_path_buf();
+        match waiting
+            .on(tokio::task::spawn_blocking(move || search::list(&path)))
+            .await?
+        {
+            Ok(Ok(text)) => (text, true),
+            Ok(Err(message)) => (message, false),
+            Err(e) => (format!("Error listing {path_str}: {e}"), false),
+        }
+    } else {
+        let command = search::list_command(&path.display().to_string());
+        remote_listing(exec, &command, cwd, "(Empty folder)", waiting).await?
+    };
+    Ok((listing, ok))
+}
+
+/// A search's command run in a sandbox: its lines, `empty` when there are none.
+async fn remote_listing(
+    exec: &dyn ToolExecutor,
+    command: &str,
+    cwd: &Path,
+    empty: &str,
+    waiting: &mut Waiting<'_>,
+) -> Result<(String, bool)> {
+    let ran = match waiting
+        .on(exec.exec(command, cwd, Some(Duration::from_secs(60))))
+        .await?
+    {
+        Ok(ran) => ran,
+        Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => return Err(e),
+        Err(e) => return Ok((format!("Error: {e:#}"), false)),
+    };
+    if ran.stdout.trim().is_empty() {
+        return Ok(if ran.stderr.trim().is_empty() {
+            (empty.to_string(), true)
+        } else {
+            (format!("Error: {}", ran.stderr.trim()), false)
+        });
+    }
+    let lines = ran.stdout.lines().count();
+    let mut out = ran.stdout;
+    if lines > search::MAX_RESULTS {
+        out.push_str("(There are more: narrow it down.)\n");
+    }
+    Ok((out, true))
+}
+
+/// `grep`, `glob` or `list_dir`.
+async fn run_search(
+    exec: &dyn ToolExecutor,
+    tool: &str,
+    args: &Value,
+    cwd: &Path,
+    waiting: &mut Waiting<'_>,
+) -> Result<(String, bool)> {
+    let path_str = args["path"].as_str().unwrap_or(".").trim();
+    let root = match path_str {
+        "" | "." => cwd.to_path_buf(),
+        given => tool_path(given, cwd),
+    };
+    let pattern = args["pattern"].as_str().unwrap_or_default().to_string();
+    if tool != "list_dir" && pattern.is_empty() {
+        return Ok((format!("Error: {tool} needs a pattern."), false));
+    }
+    if exec.is_local() && !root.exists() {
+        return Ok((format!("Error: {path_str} doesn't exist."), false));
+    }
+    if tool == "list_dir" {
+        return list_folder(exec, &root, path_str, cwd, waiting).await;
+    }
+    let glob_filter = args["glob"].as_str().map(str::to_string);
+    let case_insensitive = args["case_insensitive"].as_bool() == Some(true);
+    let (out, ok) = if exec.is_local() {
+        let tool = tool.to_string();
+        let done = waiting
+            .on(tokio::task::spawn_blocking(move || {
+                if tool == "grep" {
+                    search::grep(&root, &pattern, glob_filter.as_deref(), case_insensitive)
+                } else {
+                    search::glob(&root, &pattern)
+                }
+            }))
+            .await?;
+        match done {
+            Ok(Ok(text)) => (text, true),
+            Ok(Err(message)) => (message, false),
+            Err(e) => (format!("Error: the search failed: {e}"), false),
+        }
+    } else {
+        let root = root.display().to_string();
+        let (command, empty) = if tool == "grep" {
+            (
+                search::grep_command(&root, &pattern, glob_filter.as_deref(), case_insensitive),
+                "No matches.".to_string(),
+            )
+        } else {
+            (
+                search::glob_command(&root, &pattern),
+                format!("No files match {pattern}."),
+            )
+        };
+        remote_listing(exec, &command, cwd, &empty, waiting).await?
+    };
+    Ok((fit_output(exec, out, false, waiting).await?, ok))
 }
 
 async fn run_write_file(
@@ -1831,43 +3696,56 @@ async fn run_edit_file(
     path_str: &str,
     old_str: &str,
     new_str: &str,
+    replace_all: bool,
     cwd: &Path,
     waiting: &mut Waiting<'_>,
 ) -> Result<(String, bool, Option<(u32, u32)>)> {
+    if old_str == new_str {
+        return Ok((
+            "Error: old_str and new_str are the same, so there's nothing to change.".to_string(),
+            false,
+            None,
+        ));
+    }
     let path = tool_path(path_str, cwd);
     let content = match read_text(exec, &path, path_str, waiting).await? {
         Ok(c) => c,
         Err(message) => return Ok((message, false, None)),
     };
-    let count = content.matches(old_str).count();
-    if count == 0 {
-        return Ok((
-            format!(
-                "Error: old_str was not found in {path_str}. Please provide the exact text to match."
-            ),
-            false,
-            None,
-        ));
-    }
-    if count > 1 {
-        return Ok((
-            format!(
-                "Error: old_str matched {count} times in {path_str}. Please provide more surrounding context to uniquely identify the location."
-            ),
-            false,
-            None,
-        ));
-    }
-    let updated = content.replacen(old_str, new_str, 1);
+    let found = match edit::locate(path_str, &content, old_str, new_str, replace_all) {
+        edit::Outcome::Found(found) => found,
+        edit::Outcome::Ambiguous { count, lines } => {
+            let places: Vec<String> = lines.iter().map(usize::to_string).collect();
+            return Ok((
+                format!(
+                    "Error: old_str matched {count} times in {path_str} (lines {}). Add the lines around it so it matches one place, or set replace_all to true.",
+                    places.join(", ")
+                ),
+                false,
+                None,
+            ));
+        }
+        edit::Outcome::NotFound(message) => return Ok((message, false, None)),
+    };
+    let updated = edit::apply(&content, &found);
     match waiting.on(exec.write(&path, updated.as_bytes())).await? {
         Ok(()) => {
-            let removed = old_str.lines().count() as u32;
-            let added = new_str.lines().count() as u32;
-            Ok((
-                format!("Successfully edited {path_str}"),
-                true,
-                Some((added, removed)),
-            ))
+            let places = found.ranges.len() as u32;
+            let removed = old_str.lines().count() as u32 * places;
+            let added = new_str.lines().count() as u32 * places;
+            let mut message = format!("Successfully edited {path_str}");
+            if places > 1 {
+                message.push_str(&format!(" ({places} places)"));
+            }
+            if let Some(how) = found.how {
+                message.push_str(&format!(
+                    ". old_str only matched after allowing for {how}: check the result"
+                ));
+            }
+            let (first, _) = found.ranges[0];
+            message.push_str(":\n");
+            message.push_str(&edit::snippet(&updated, first, found.replacements[0].len()));
+            Ok((message, true, Some((added, removed))))
         }
         Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => Err(e),
         Err(e) => Ok((
@@ -1876,73 +3754,6 @@ async fn run_edit_file(
             None,
         )),
     }
-}
-
-pub fn parse_xml_tool_calls(text: &str) -> (Vec<AccumulatedToolCall>, String) {
-    let mut calls = Vec::new();
-    let mut cleaned = String::new();
-    let mut rest = text;
-
-    while let Some(start_idx) = rest.find("<tool_call>") {
-        cleaned.push_str(&rest[..start_idx]);
-        let after_start = &rest[start_idx + "<tool_call>".len()..];
-        let Some(end_idx) = after_start.find("</tool_call>") else {
-            cleaned.push_str(&rest[start_idx..]);
-            rest = "";
-            break;
-        };
-        let body = after_start[..end_idx].trim();
-        rest = &after_start[end_idx + "</tool_call>".len()..];
-
-        if let Some(after_func) = body.strip_prefix("<function=") {
-            let (name, args_part) = if let Some(bracket_end) = after_func.find('>') {
-                let name = after_func[..bracket_end].trim();
-                let remaining = after_func[bracket_end + 1..].trim();
-                let args = remaining
-                    .strip_suffix("</function>")
-                    .unwrap_or(remaining)
-                    .trim();
-                (name, args)
-            } else {
-                ("", "")
-            };
-            if !name.is_empty() {
-                let formatted_args = if !args_part.starts_with('{') {
-                    if name == "bash" {
-                        json!({ "command": args_part }).to_string()
-                    } else {
-                        json!({ "path": args_part }).to_string()
-                    }
-                } else {
-                    args_part.to_string()
-                };
-                calls.push(AccumulatedToolCall {
-                    id: format!("call_xml_{}", next_id()),
-                    name: name.to_string(),
-                    arguments: formatted_args,
-                });
-                continue;
-            }
-        }
-
-        if let Ok(v) = serde_json::from_str::<Value>(body) {
-            if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
-                let args_str = match v.get("arguments") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => other.to_string(),
-                    None => "{}".to_string(),
-                };
-                calls.push(AccumulatedToolCall {
-                    id: format!("call_xml_{}", next_id()),
-                    name: name.to_string(),
-                    arguments: args_str,
-                });
-                continue;
-            }
-        }
-    }
-    cleaned.push_str(rest);
-    (calls, cleaned.trim().to_string())
 }
 
 /// OpenAI-style providers known to take `stream_options.include_usage` (a final chunk with the
@@ -2006,9 +3817,22 @@ fn openai_usage(v: &Value) -> Option<(TokenUsage, Option<f64>)> {
 /// A user message for `wire`. Without images the content is a plain string; with images it's
 /// Anthropic image blocks before the text, or OpenAI `image_url` data URLs after it.
 /// Unreadable images are skipped and reported.
-fn user_message(wire: Wire, text: &str, images: &[PathBuf]) -> (Value, Vec<String>) {
+fn user_message(
+    wire: Wire,
+    text: &str,
+    images: &[PathBuf],
+    caps: Option<&ModelCaps>,
+) -> (Value, Vec<String>) {
     let mut errors = Vec::new();
     let mut loaded = Vec::new();
+    // Sent anyway, the whole request would be refused or the picture silently ignored.
+    if !images.is_empty() && caps.and_then(|c| c.images) == Some(false) {
+        let names: Vec<String> = images
+            .iter()
+            .map(|p| format!("{}: this model can't see images", p.display()))
+            .collect();
+        return (json!({ "role": "user", "content": text }), names);
+    }
     for path in images {
         match load_image(path) {
             Ok(img) => loaded.push(img),
@@ -2094,8 +3918,31 @@ async fn send_request(
     tokio::pin!(sleep);
     loop {
         tokio::select! {
-            response = &mut send => return Ok(response?),
-            _ = &mut sleep => bail!("Timed out waiting for response headers after {} seconds", timeout.as_secs()),
+            response = &mut send => {
+                return response.map_err(|e| {
+                    // A server on this machine that isn't running won't start by being asked again.
+                    let here = e
+                        .url()
+                        .and_then(|u| u.host_str())
+                        .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "[::1]");
+                    if e.is_connect() && here {
+                        return RequestFailure {
+                            kind: FailureKind::Fatal,
+                            message: format!("Nothing is answering at {}. Is the server running?", e.url().map_or("", |u| u.as_str())),
+                            retry_after: None,
+                            limit: None,
+                        }
+                        .into();
+                    }
+                    RequestFailure::transient(format!("Couldn't reach the provider: {e}")).into()
+                });
+            }
+            _ = &mut sleep => {
+                return Err(RequestFailure::transient(format!(
+                    "Timed out waiting for response headers after {} seconds",
+                    timeout.as_secs()
+                )).into());
+            }
             cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
         }
     }
@@ -2305,26 +4152,28 @@ fn anthropic_body(
 }
 
 async fn anthropic_turn(
-    client: &reqwest::Client,
-    url: &str,
-    key: &str,
-    model: &str,
-    effort: Effort,
-    system: &str,
-    history: &[Value],
-    tools: &[Value],
+    req: &TurnRequest<'_>,
     thread: &mut Thread,
+    partial: &mut String,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<TurnResponse> {
+    let (model, effort, system, history, tools) =
+        (req.model, req.effort, req.system, req.history, req.tools);
     let fixed = fixed_fields(model, effort, system, tools);
     let mut request = thread.request(fixed, history, Instant::now());
     // Once: a thread the server lost is replayed as a new one; a thread it refuses, left out.
     let mut retried = false;
     let resp = loop {
-        let body = anthropic_body(model, effort, system, history, tools, &request);
+        let mut body = anthropic_body(model, effort, system, history, tools, &request);
+        if req.no_tools {
+            body["tool_choice"] = json!({ "type": "none" });
+        }
+        if let Some(limit) = req.max_output {
+            body["max_tokens"] = json!(limit);
+        }
         let mut betas = Vec::new();
         if body.get("fallbacks").is_some() {
             betas.push(FALLBACK_BETA);
@@ -2332,21 +4181,24 @@ async fn anthropic_turn(
         if request != ThreadRequest::None {
             betas.push(THREADS_BETA);
         }
-        let mut req = client
-            .post(url)
-            .header("x-api-key", key)
+        let mut post = req
+            .client
+            .post(req.url)
+            .header("x-api-key", req.key.unwrap_or_default())
             .header("anthropic-version", "2023-06-01")
             .json(&body);
         if !betas.is_empty() {
-            req = req.header("anthropic-beta", betas.join(","));
+            post = post.header("anthropic-beta", betas.join(","));
         }
-        let resp = send_request(req, commands, kept, shutdown, Duration::from_secs(60)).await?;
+        let resp = send_request(post, commands, kept, shutdown, HEADERS_WAIT).await?;
         if resp.status().is_success() {
             break resp;
         }
         let status = resp.status();
         let headers = resp.headers().clone();
-        let text = resp.text().await.unwrap_or_default();
+        let text = until_stopped(resp.text(), commands, kept, shutdown)
+            .await?
+            .unwrap_or_default();
         let error = serde_json::from_str::<Value>(&text).ok();
         let code = error
             .as_ref()
@@ -2377,8 +4229,6 @@ async fn anthropic_turn(
             format!("Anthropic API {status}: {msg}"),
         ));
     };
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
     let mut blocks: Vec<Value> = Vec::new();
     // A tool call's input, streamed as pieces of JSON, by block index.
     let mut inputs: HashMap<usize, String> = HashMap::new();
@@ -2389,57 +4239,116 @@ async fn anthropic_turn(
     let mut long_writes = 0;
     let mut id = None;
     let mut fell_back = false;
-    loop {
-        tokio::select! {
-            chunk = stream.next() => {
-                let Some(chunk) = chunk else { break };
-                buf.extend_from_slice(&chunk?);
-                for data in sse_events(&mut buf) {
-                    let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
-                    anthropic_usage(&v, &mut usage, &mut long_writes);
-                    match v["type"].as_str() {
-                        Some("message_start") => id = v["message"]["id"].as_str().map(String::from),
-                        Some("content_block_start") => blocks.push(v["content_block"].clone()),
-                        Some("content_block_delta") => {
-                            let i = v["index"].as_u64().unwrap_or(0) as usize;
-                            let d = &v["delta"];
-                            match d["type"].as_str() {
-                                Some("text_delta") => {
-                                    let t = d["text"].as_str().unwrap_or_default();
-                                    text.push_str(t);
-                                    append(&mut blocks, i, "text", t);
-                                    events.send(AgentEvent::TextDelta(t.into())).await?;
-                                }
-                                Some("thinking_delta") => {
-                                    let t = d["thinking"].as_str().unwrap_or_default();
-                                    append(&mut blocks, i, "thinking", t);
-                                    events.send(AgentEvent::ReasoningDelta(t.into())).await?;
-                                }
-                                Some("signature_delta") => append(&mut blocks, i, "signature", d["signature"].as_str().unwrap_or_default()),
-                                Some("input_json_delta") => inputs.entry(i).or_default().push_str(d["partial_json"].as_str().unwrap_or_default()),
-                                _ => {}
+    let streamed: Result<()> = async {
+        let mut stream = resp.bytes_stream();
+        let mut buf = Vec::new();
+        let idle = tokio::time::sleep(STREAM_IDLE);
+        tokio::pin!(idle);
+        let mut ended = false;
+        loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            buf.extend_from_slice(&bytes);
+                            idle.as_mut().reset(tokio::time::Instant::now() + STREAM_IDLE);
+                        }
+                        Some(Err(e)) => {
+                            return Err(RequestFailure::transient(format!(
+                                "The connection dropped while the answer was coming: {e}"
+                            )).into());
+                        }
+                        None => {
+                            ended = true;
+                            if !buf.is_empty() {
+                                buf.extend_from_slice(b"\n\n");
                             }
                         }
-                        Some("message_delta") => {
-                            stop_reason = v["delta"]["stop_reason"].as_str().map(String::from);
-                            // A fallback model's answer: the thread keeps one model, so the
-                            // server doesn't store it.
-                            fell_back |= v["usage"]["iterations"].as_array().is_some_and(|its| {
-                                its.iter().any(|it| it["type"] == "fallback_message" || it.get("fallback_message").is_some())
-                            });
-                        }
-                        Some("message_stop") => terminal = true,
-                        Some("error") => bail!("{}", v["error"]["message"].as_str().unwrap_or("stream error")),
-                        _ => {}
                     }
                 }
+                _ = &mut idle => {
+                    return Err(RequestFailure::transient(format!(
+                        "The provider sent nothing for {} seconds",
+                        STREAM_IDLE.as_secs()
+                    )).into());
+                }
+                cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
             }
-            cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
+            for data in sse_events(&mut buf) {
+                let Ok(v) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                anthropic_usage(&v, &mut usage, &mut long_writes);
+                match v["type"].as_str() {
+                    Some("message_start") => id = v["message"]["id"].as_str().map(String::from),
+                    Some("content_block_start") => blocks.push(v["content_block"].clone()),
+                    Some("content_block_delta") => {
+                        let i = v["index"].as_u64().unwrap_or(0) as usize;
+                        let d = &v["delta"];
+                        match d["type"].as_str() {
+                            Some("text_delta") => {
+                                let t = d["text"].as_str().unwrap_or_default();
+                                text.push_str(t);
+                                append(&mut blocks, i, "text", t);
+                                events.send(AgentEvent::TextDelta(t.into())).await?;
+                            }
+                            Some("thinking_delta") => {
+                                let t = d["thinking"].as_str().unwrap_or_default();
+                                append(&mut blocks, i, "thinking", t);
+                                events.send(AgentEvent::ReasoningDelta(t.into())).await?;
+                            }
+                            Some("signature_delta") => append(
+                                &mut blocks,
+                                i,
+                                "signature",
+                                d["signature"].as_str().unwrap_or_default(),
+                            ),
+                            Some("input_json_delta") => inputs
+                                .entry(i)
+                                .or_default()
+                                .push_str(d["partial_json"].as_str().unwrap_or_default()),
+                            _ => {}
+                        }
+                    }
+                    Some("message_delta") => {
+                        stop_reason = v["delta"]["stop_reason"].as_str().map(String::from);
+                        // A fallback model's answer: the thread keeps one model, so the
+                        // server doesn't store it.
+                        fell_back |= v["usage"]["iterations"].as_array().is_some_and(|its| {
+                            its.iter().any(|it| {
+                                it["type"] == "fallback_message"
+                                    || it.get("fallback_message").is_some()
+                            })
+                        });
+                    }
+                    Some("message_stop") => terminal = true,
+                    Some("error") => return Err(failure::classify_stream_error(&v["error"]).into()),
+                    _ => {}
+                }
+            }
+            if ended || terminal {
+                return Ok(());
+            }
         }
+    }
+    .await;
+    if let Err(e) = streamed {
+        thread.forget();
+        partial.clone_from(&text);
+        if !text.is_empty() && !is_stop(&e) {
+            events.send(AgentEvent::TextDone(text.clone())).await?;
+        }
+        return Err(e);
     }
     if !terminal {
         thread.forget();
-        bail!("The connection closed before the answer finished");
+        partial.clone_from(&text);
+        if !text.is_empty() {
+            events.send(AgentEvent::TextDone(text.clone())).await?;
+        }
+        return Err(
+            RequestFailure::transient("The connection closed before the answer finished").into(),
+        );
     }
     let mut reported = None;
     if !usage.is_empty() {
@@ -2462,7 +4371,13 @@ async fn anthropic_turn(
     if stop_reason.as_deref() == Some("refusal") {
         // The server may hold the refused turn, which a continue can't take back.
         thread.forget();
-        bail!("The model declined this request.");
+        return Err(RequestFailure {
+            kind: FailureKind::Fatal,
+            message: "The model declined this request.".to_string(),
+            retry_after: None,
+            limit: None,
+        }
+        .into());
     }
     events.send(AgentEvent::TextDone(text.clone())).await?;
     let mut tool_calls = Vec::new();
@@ -2470,15 +4385,23 @@ async fn anthropic_turn(
         if block["type"] != "tool_use" {
             continue;
         }
-        // Sent back as an object, as the API gave it; the tool takes it as JSON text.
-        if let Some(input) = inputs.get(&i).filter(|s| !s.trim().is_empty()) {
-            block["input"] = serde_json::from_str(input).unwrap_or_else(|_| json!({}));
+        // Sent back as an object, as the API gave it; the tool takes it as JSON text. What can't
+        // be read goes back as an empty object, and the session tells the model what happened.
+        let raw = inputs.get(&i).filter(|s| !s.trim().is_empty()).cloned();
+        if let Some(input) = &raw {
+            block["input"] = repair::parse_args(input)
+                .value()
+                .cloned()
+                .unwrap_or_else(|| json!({}));
         }
         tool_calls.push(AccumulatedToolCall {
             id: block["id"].as_str().unwrap_or_default().to_string(),
             name: block["name"].as_str().unwrap_or_default().to_string(),
-            arguments: block["input"].to_string(),
+            arguments: raw.unwrap_or_else(|| block["input"].to_string()),
         });
+    }
+    if req.no_tools {
+        tool_calls.clear();
     }
     let answer = json!({ "role": "assistant", "content": blocks });
     if request != ThreadRequest::None {
@@ -2494,6 +4417,11 @@ async fn anthropic_turn(
         text,
         content: Some(answer),
         reasoning_details: vec![],
+        reasoning: None,
+        finish: stop_reason.map(|r| match r.as_str() {
+            "max_tokens" | "model_context_window_exceeded" => "length".to_string(),
+            _ => r,
+        }),
         tool_calls,
         usage: reported,
     })
@@ -2539,205 +4467,650 @@ fn append(blocks: &mut [Value], index: usize, field: &str, s: &str) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-/// The error for a failed request whose body is `text`: the message the API gave, else the text.
-fn response_error(
-    status: reqwest::StatusCode,
-    headers: &reqwest::header::HeaderMap,
-    text: String,
-) -> anyhow::Error {
-    let msg = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|v| v["error"]["message"].as_str().map(String::from))
-        .unwrap_or(text);
-    request_error(status, headers, format!("{status}: {msg}"))
+/// The message in a failed response's body, else the body.
+fn error_message(text: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(text).ok();
+    let error = parsed.as_ref().map(|v| &v["error"]);
+    let message = error.and_then(|e| e["message"].as_str().or(e.as_str()));
+    // OpenRouter puts what the upstream really said under `metadata`, and "Provider returned
+    // error" on top of it.
+    let raw = error.and_then(|e| e["metadata"]["raw"].as_str());
+    match (message, raw) {
+        (Some(message), Some(raw)) if message != raw => format!("{message}: {raw}"),
+        (Some(message), _) => message.to_string(),
+        _ => text.to_string(),
+    }
+}
+
+/// How long a provider may take to start answering. A cold local model or a queued route is slow,
+/// not broken.
+const HEADERS_WAIT: Duration = Duration::from_secs(300);
+/// How long a stream may go quiet before it's given up on. OpenRouter's keep-alive comments count
+/// as life; a model thinking in silence for this long has stalled.
+const STREAM_IDLE: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(300)
+};
+/// How long to wait for the rest of a stream (its usage, its end) after the answer finished.
+const AFTER_FINISH: Duration = Duration::from_secs(5);
+
+/// What a provider turned out not to take, learned from its errors and remembered for the rest of
+/// the session, so one refusal doesn't become one refused request per round.
+#[derive(Default)]
+struct Quirks {
+    no_reasoning: bool,
+    no_output_limit: bool,
+    /// It wants `max_completion_tokens`, not `max_tokens`.
+    completion_field: bool,
+    no_routing: bool,
+    no_stream_options: bool,
+    no_tools: bool,
+    no_session_id: bool,
+    no_cache_key: bool,
+    /// All the credit will cover (OpenRouter: "can only afford N").
+    afford: Option<u64>,
+    /// It refuses reasoning sent back to it, though it sent it.
+    no_reasoning_echo: bool,
+    /// Tool call ids handed out so far: one never repeats in a conversation.
+    seen_ids: HashSet<String>,
+}
+
+impl Quirks {
+    /// Another model is in use: what was learned about this one no longer holds. What's about
+    /// the account and the conversation stays.
+    fn forget_model(&mut self) {
+        *self = Quirks {
+            afford: self.afford,
+            no_session_id: self.no_session_id,
+            no_cache_key: self.no_cache_key,
+            seen_ids: std::mem::take(&mut self.seen_ids),
+            ..Quirks::default()
+        };
+    }
+
+    /// Whether what a provider refused can be fixed by changing `body`, and if so does it. Anything
+    /// else is left to fail with its own message: sending the same conversation without its tools,
+    /// or without some part nobody can name, gets a confident answer to the wrong question.
+    fn adapt(&mut self, status: u16, message: &str, body: &mut Value) -> bool {
+        let m = message.to_lowercase();
+        if failure::is_context_overflow(&m) {
+            return false;
+        }
+        let Some(object) = body.as_object_mut() else {
+            return false;
+        };
+        if status == 402 {
+            let afford = m
+                .split("can only afford")
+                .nth(1)
+                .and_then(|rest| {
+                    let digits: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    digits.parse::<u64>().ok()
+                })
+                .filter(|n| *n >= 256);
+            let Some(afford) = afford else { return false };
+            // A little under: the estimate behind that figure moves as other requests settle.
+            let limit = afford - afford / 10;
+            self.afford = Some(limit);
+            let field = if object.contains_key("max_completion_tokens") {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
+            if object.get(field).and_then(Value::as_u64) == Some(limit) {
+                return false;
+            }
+            object.insert(field.to_string(), json!(limit));
+            return true;
+        }
+        if !matches!(status, 400 | 404 | 422) {
+            return false;
+        }
+        let mentions = |words: &[&str]| words.iter().any(|w| m.contains(w));
+        if (object.contains_key("reasoning") || object.contains_key("reasoning_effort"))
+            && mentions(&["reasoning", "thinking"])
+        {
+            object.remove("reasoning");
+            object.remove("reasoning_effort");
+            self.no_reasoning = true;
+            return true;
+        }
+        // Still about reasoning, and it isn't the setting: it's what's being sent back.
+        if !self.no_reasoning_echo && mentions(&["reasoning", "thinking"]) {
+            let mut stripped = false;
+            for message in object
+                .get_mut("messages")
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(fields) = message.as_object_mut() {
+                    for field in ["reasoning_details", "reasoning", "reasoning_content"] {
+                        stripped |= fields.remove(field).is_some();
+                    }
+                }
+            }
+            if stripped {
+                self.no_reasoning_echo = true;
+                return true;
+            }
+        }
+        if object.contains_key("provider")
+            && (status == 404 || mentions(&["no endpoints", "require_parameters"]))
+        {
+            object.remove("provider");
+            self.no_routing = true;
+            return true;
+        }
+        if object.contains_key("max_tokens") && m.contains("max_completion_tokens") {
+            if let Some(limit) = object.remove("max_tokens") {
+                object.insert("max_completion_tokens".to_string(), limit);
+            }
+            self.completion_field = true;
+            return true;
+        }
+        if (object.contains_key("max_tokens") || object.contains_key("max_completion_tokens"))
+            && mentions(&[
+                "max_tokens",
+                "max_completion_tokens",
+                "maximum output",
+                "output tokens",
+            ])
+        {
+            object.remove("max_tokens");
+            object.remove("max_completion_tokens");
+            self.no_output_limit = true;
+            return true;
+        }
+        if object.contains_key("stream_options") && m.contains("stream_options") {
+            object.remove("stream_options");
+            self.no_stream_options = true;
+            return true;
+        }
+        if object.contains_key("session_id") && m.contains("session_id") {
+            object.remove("session_id");
+            self.no_session_id = true;
+            return true;
+        }
+        if object.contains_key("prompt_cache_key") && m.contains("prompt_cache_key") {
+            object.remove("prompt_cache_key");
+            self.no_cache_key = true;
+            return true;
+        }
+        // About the setting that keeps a summary or a report to words, not the tools themselves.
+        if object.contains_key("tool_choice") && m.contains("tool_choice") {
+            object.remove("tool_choice");
+            return true;
+        }
+        if object.contains_key("tools") && failure::says_no_tools(&m) {
+            object.remove("tools");
+            object.remove("tool_choice");
+            self.no_tools = true;
+            return true;
+        }
+        false
+    }
+}
+
+/// The reasoning setting for OpenRouter, as this model takes it: the nearest level it offers at or
+/// above what was asked (`none` for Off, where it can be turned off), nothing for a model without
+/// reasoning. With no facts about the model, the three levels every reasoning model takes.
+fn reasoning_level(effort: Effort, caps: Option<&ModelCaps>) -> Option<String> {
+    if let Some(caps) = caps {
+        if caps.reasoning == Some(false) {
+            return None;
+        }
+        if !caps.efforts.is_empty() {
+            if effort == Effort::Off {
+                return caps
+                    .efforts
+                    .iter()
+                    .find(|e| *e == "none")
+                    .map(|e| e.to_string());
+            }
+            const ORDER: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+            let rank = |name: &str| ORDER.iter().position(|o| *o == name);
+            let want = rank(effort.as_str()).unwrap_or(2);
+            let mut offered: Vec<(usize, &String)> = caps
+                .efforts
+                .iter()
+                .filter_map(|e| rank(e).map(|r| (r, e)))
+                .collect();
+            offered.sort();
+            return offered
+                .iter()
+                .find(|(r, _)| *r >= want)
+                .or_else(|| offered.last())
+                .map(|(_, e)| e.to_string());
+        }
+    }
+    (effort != Effort::Off).then(|| {
+        effort
+            .clamp_to(&[Effort::Low, Effort::Medium, Effort::High])
+            .as_str()
+            .to_string()
+    })
+}
+
+/// `text` as a content part the provider may cache up to.
+fn cached_part(text: &str) -> Value {
+    json!([{ "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }])
+}
+
+/// The request for `req`, shaped for its provider and for what it's been found not to take.
+fn openai_body(req: &TurnRequest<'_>, quirks: &Quirks) -> Value {
+    let openrouter = req.provider.id == "openrouter";
+    // Only these take explicit breakpoints; on the others they cost more than they save.
+    let breakpoints =
+        openrouter && (req.model.starts_with("anthropic/") || req.model.starts_with("qwen/"));
+    let mut messages: Vec<Value> = Vec::with_capacity(req.history.len() + 1);
+    messages.push(if breakpoints {
+        json!({ "role": "system", "content": cached_part(req.system) })
+    } else {
+        json!({ "role": "system", "content": req.system })
+    });
+    for message in req.history {
+        let role = message["role"].as_str().unwrap_or_default();
+        // Some providers refuse an empty assistant message.
+        if role == "assistant"
+            && message.get("tool_calls").is_none()
+            && message["content"]
+                .as_str()
+                .is_some_and(|c| c.trim().is_empty())
+        {
+            continue;
+        }
+        // And some refuse two user messages in a row, which a message left by a failed request,
+        // or sent while a turn ran, can make.
+        if role == "user" {
+            if let (Some(text), Some(last)) = (message["content"].as_str(), messages.last_mut()) {
+                if last["role"] == "user" {
+                    if let Some(before) = last["content"].as_str() {
+                        last["content"] = json!(format!("{before}\n\n{text}"));
+                        continue;
+                    }
+                }
+            }
+        }
+        let mut message = message.clone();
+        if quirks.no_reasoning_echo {
+            if let Some(fields) = message.as_object_mut() {
+                for field in ["reasoning_details", "reasoning", "reasoning_content"] {
+                    fields.remove(field);
+                }
+            }
+        }
+        // DeepSeek's own API refuses a tool call whose message has no `reasoning_content` while
+        // thinking is on, even from before thinking was. Any text does.
+        if req.provider.id == "deepseek"
+            && role == "assistant"
+            && message.get("tool_calls").is_some()
+            && message.get("reasoning_content").is_none()
+        {
+            message["reasoning_content"] = json!(" ");
+        }
+        messages.push(message);
+    }
+    if breakpoints {
+        if let Some(last) = messages.last_mut() {
+            if let Some(text) = last["content"].as_str().map(str::to_string) {
+                last["content"] = cached_part(&text);
+            }
+        }
+    }
+    let mut body = json!({
+        "model": req.model,
+        "messages": messages,
+        "stream": true
+    });
+    if !quirks.no_tools {
+        body["tools"] = json!(req.tools);
+        if req.no_tools {
+            body["tool_choice"] = json!("none");
+        }
+    }
+    let reports_usage =
+        REPORTS_USAGE.contains(&req.provider.id) || direct_provider(req.provider.id).is_none();
+    if reports_usage && !quirks.no_stream_options {
+        body["stream_options"] = json!({ "include_usage": true });
+    }
+    if !req.provider.local && !quirks.no_reasoning {
+        if openrouter {
+            // OpenRouter's unified switch; a raw `reasoning_effort` only reaches providers
+            // that take it themselves, others ignore or reject it.
+            if let Some(level) = reasoning_level(req.effort, req.caps) {
+                body["reasoning"] = json!({ "effort": level });
+            }
+        } else if req.effort != Effort::Off && req.caps.and_then(|c| c.reasoning) != Some(false) {
+            let e = req
+                .effort
+                .clamp_to(&[Effort::Low, Effort::Medium, Effort::High]);
+            body["reasoning_effort"] = json!(e.as_str());
+        }
+    }
+    if let Some(limit) = req.max_output.filter(|_| !quirks.no_output_limit) {
+        let limit = quirks.afford.map_or(limit, |a| limit.min(a));
+        let field = if req.provider.id == "openai" || quirks.completion_field {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        body[field] = json!(limit);
+    }
+    if openrouter {
+        if !quirks.no_session_id {
+            body["session_id"] = json!(clip_chars(req.session_id, 256));
+        }
+        // Only routes that honour everything in the request: a route that drops `tools` or
+        // `reasoning` without saying is how a model comes to look broken.
+        if !quirks.no_routing {
+            body["provider"] = json!({ "require_parameters": true });
+        }
+    }
+    if req.provider.id == "openai" && !quirks.no_cache_key {
+        body["prompt_cache_key"] = json!(clip_chars(req.session_id, 64));
+    }
+    body
+}
+
+fn openai_post(req: &TurnRequest<'_>, body: &Value) -> reqwest::RequestBuilder {
+    let mut post = req
+        .client
+        .post(format!("{}/chat/completions", req.url))
+        .json(body);
+    if let Some(key) = req.key {
+        post = post.bearer_auth(key);
+    }
+    if req.provider.id == "openrouter" {
+        post = post
+            .header("HTTP-Referer", "https://github.com/dokyit/Trek")
+            .header("X-OpenRouter-Title", "Trek")
+            .header("X-Title", "Trek");
+    }
+    post
+}
+
+/// OpenRouter's reasoning deltas put back together: a part arrives in pieces carrying its `index`,
+/// and the whole is what must be echoed, unchanged in type and order.
+fn merge_reasoning_details(parts: Vec<Value>) -> Vec<Value> {
+    let mut merged: Vec<Value> = Vec::new();
+    for part in parts {
+        let same = match part.get("index") {
+            Some(index) => merged
+                .iter()
+                .rposition(|m| m.get("index") == Some(index) && m["type"] == part["type"]),
+            None => merged
+                .last()
+                .filter(|m| m.get("index").is_none() && m["type"] == part["type"])
+                .map(|_| merged.len() - 1),
+        };
+        let Some(at) = same else {
+            merged.push(part);
+            continue;
+        };
+        let target = &mut merged[at];
+        let Some(fields) = part.as_object() else {
+            continue;
+        };
+        for (key, value) in fields {
+            match (key.as_str(), value) {
+                ("text" | "summary" | "data", Value::String(piece)) => {
+                    let joined = format!(
+                        "{}{piece}",
+                        target[key.as_str()].as_str().unwrap_or_default()
+                    );
+                    target[key.as_str()] = json!(joined);
+                }
+                (_, Value::Null) => {}
+                _ => target[key.as_str()] = value.clone(),
+            }
+        }
+    }
+    merged
 }
 
 async fn openai_turn(
-    client: &reqwest::Client,
-    agent: &AgentId,
-    base_url: &str,
-    key: Option<&str>,
-    local: bool,
-    include_usage: bool,
-    model: &str,
-    effort: Effort,
-    system: &str,
-    history: &[Value],
-    tools: &[Value],
+    req: &TurnRequest<'_>,
+    quirks: &mut Quirks,
+    partial: &mut String,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
 ) -> Result<TurnResponse> {
-    let mut messages = vec![json!({ "role": "system", "content": system })];
-    messages.extend(history.iter().cloned());
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-        "stream": true
-    });
-    if include_usage {
-        body["stream_options"] = json!({ "include_usage": true });
-    }
-    if !local && effort != Effort::Off {
-        let e = effort.clamp_to(&[Effort::Low, Effort::Medium, Effort::High]);
-        if matches!(agent, AgentId::Direct(p) if p == "openrouter") {
-            // OpenRouter's unified switch; a raw `reasoning_effort` only reaches providers
-            // that take it themselves, others ignore or reject it.
-            body["reasoning"] = json!({ "effort": e.as_str() });
-        } else {
-            body["reasoning_effort"] = json!(e.as_str());
-        }
-    }
-    let mut req = client
-        .post(format!("{base_url}/chat/completions"))
-        .json(&body);
-    if let Some(k) = key {
-        req = req.bearer_auth(k);
-    }
-    let resp = send_request(req, commands, kept, shutdown, Duration::from_secs(60)).await?;
-    let status = resp.status();
-    let resp = if status == reqwest::StatusCode::BAD_REQUEST
-        || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
-    {
-        let headers = resp.headers().clone();
-        let text = resp.text().await.unwrap_or_default();
-        // A model that takes no reasoning effort says so by name: send the request again
-        // without it. Any other 400 may be the tools: send it again without those.
-        let object = body.as_object_mut().unwrap();
-        let sent_effort =
-            object.contains_key("reasoning_effort") || object.contains_key("reasoning");
-        let retried = if sent_effort && text.to_lowercase().contains("reasoning") {
-            object.remove("reasoning_effort");
-            object.remove("reasoning");
-            true
-        } else if status == reqwest::StatusCode::BAD_REQUEST {
-            object.remove("tools").is_some()
-        } else {
-            false
-        };
-        let mut retry_resp = None;
-        if retried {
-            let mut retry_req = client
-                .post(format!("{base_url}/chat/completions"))
-                .json(&body);
-            if let Some(k) = key {
-                retry_req = retry_req.bearer_auth(k);
-            }
-            let r =
-                send_request(retry_req, commands, kept, shutdown, Duration::from_secs(60)).await?;
-            if r.status().is_success() {
-                retry_resp = Some(r);
-            }
-        }
-        match retry_resp {
-            Some(r) => r,
-            None => return Err(response_error(status, &headers, text)),
-        }
-    } else {
-        resp
-    };
-
-    if !resp.status().is_success() {
+    let model = req.model;
+    let mut body = openai_body(req, quirks);
+    let mut tries = 0;
+    let resp = loop {
+        let resp = send_request(
+            openai_post(req, &body),
+            commands,
+            kept,
+            shutdown,
+            HEADERS_WAIT,
+        )
+        .await?;
         let status = resp.status();
+        if status.is_success() {
+            break resp;
+        }
         let headers = resp.headers().clone();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(response_error(status, &headers, text));
-    }
-    let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
+        let text = until_stopped(resp.text(), commands, kept, shutdown)
+            .await?
+            .unwrap_or_default();
+        let message = error_message(&text);
+        tries += 1;
+        let had_tools = !quirks.no_tools;
+        if tries < 6 && quirks.adapt(status.as_u16(), &message, &mut body) {
+            if had_tools && quirks.no_tools {
+                events
+                    .send(AgentEvent::Notice(
+                        "This model can't use tools, so it can only answer in words.".to_string(),
+                    ))
+                    .await?;
+            }
+            continue;
+        }
+        return Err(request_error(
+            status,
+            &headers,
+            format!("{status}: {message}"),
+        ));
+    };
     let mut text = String::new();
     let mut tool_calls: Vec<AccumulatedToolCall> = Vec::new();
-    let mut reasoning_details: Vec<Value> = Vec::new();
+    let mut details: Vec<Value> = Vec::new();
+    let mut plain_reasoning: Option<(&'static str, String)> = None;
     let mut usage = None;
     let mut terminal = false;
-    loop {
-        tokio::select! {
-            chunk = stream.next() => {
-                let Some(chunk) = chunk else { break };
-                buf.extend_from_slice(&chunk?);
-                for data in sse_events(&mut buf) {
-                    if data == "[DONE]" {
+    let mut finish: Option<String> = None;
+    let streamed: Result<()> = async {
+        let mut stream = resp.bytes_stream();
+        let mut buf = Vec::new();
+        let idle = tokio::time::sleep(STREAM_IDLE);
+        tokio::pin!(idle);
+        let mut ended = false;
+        'stream: loop {
+            tokio::select! {
+                chunk = stream.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            buf.extend_from_slice(&bytes);
+                            let quiet = if terminal { AFTER_FINISH } else { STREAM_IDLE };
+                            idle.as_mut().reset(tokio::time::Instant::now() + quiet);
+                        }
+                        Some(Err(e)) => {
+                            return Err(RequestFailure::transient(format!(
+                                "The connection dropped while the answer was coming: {e}"
+                            )).into());
+                        }
+                        None => {
+                            ended = true;
+                            // A last event with no blank line after it is still an event.
+                            if !buf.is_empty() {
+                                buf.extend_from_slice(b"\n\n");
+                            }
+                        }
+                    }
+                }
+                _ = &mut idle => {
+                    if terminal {
+                        break 'stream;
+                    }
+                    return Err(RequestFailure::transient(format!(
+                        "The provider sent nothing for {} seconds",
+                        STREAM_IDLE.as_secs()
+                    )).into());
+                }
+                cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
+            }
+            for data in sse_events(&mut buf) {
+                if data == "[DONE]" {
+                    terminal = true;
+                    break 'stream;
+                }
+                let Ok(v) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                // A mid-stream `{"error": …}` frame carries no choices: without this it is
+                // skipped and the real reason dies as "connection closed early".
+                let error = v.get("error").or_else(|| v["choices"][0].get("error"));
+                if let Some(e) = error.filter(|e| !e.is_null()) {
+                    return Err(failure::classify_stream_error(e).into());
+                }
+                usage = openai_usage(&v).or(usage);
+                for choice in v["choices"].as_array().into_iter().flatten() {
+                    if !choice["finish_reason"].is_null() {
                         terminal = true;
-                        continue;
+                        idle.as_mut()
+                            .reset(tokio::time::Instant::now() + AFTER_FINISH);
                     }
-                    let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
-                    // A mid-stream `{"error": …}` frame carries no choices: without this it is
-                    // skipped and the real reason dies as "connection closed early".
-                    if let Some(e) = v.get("error") {
-                        let msg = e["message"].as_str().unwrap_or("the provider reported an error");
-                        bail!("{msg}");
+                    if let Some(f) = choice["finish_reason"].as_str() {
+                        finish = Some(match f {
+                            "model_context_window_exceeded" => "length".to_string(),
+                            other => other.to_string(),
+                        });
                     }
-                    usage = openai_usage(&v).or(usage);
-                    terminal |= v["choices"].as_array().into_iter().flatten().any(|c| !c["finish_reason"].is_null());
-                    let d = &v["choices"][0]["delta"];
-                    if let Some(details) = d.get("reasoning_details").and_then(|r| r.as_array()) {
-                        reasoning_details.extend(details.iter().cloned());
+                }
+                let d = &v["choices"][0]["delta"];
+                if let Some(parts) = d.get("reasoning_details").and_then(|r| r.as_array()) {
+                    details.extend(parts.iter().cloned());
+                }
+                // Kept in the field it came in: that's the field its provider wants back.
+                for field in ["reasoning_content", "reasoning"] {
+                    if let Some(piece) = d[field].as_str().filter(|s| !s.is_empty()) {
+                        match &mut plain_reasoning {
+                            Some((_, all)) => all.push_str(piece),
+                            None => plain_reasoning = Some((field, piece.to_string())),
+                        }
+                        break;
                     }
-                    if let Some(r) = reasoning_text(d) {
-                        events.send(AgentEvent::ReasoningDelta(r)).await?;
-                    }
-                    // Empty content deltas say nothing but still break a reasoning span on the
-                    // other end of this channel (MiMo sends one between reasoning deltas), and a
-                    // few providers send content parts, not a string.
-                    if let Some(t) = content_text(d).filter(|t| !t.is_empty()) {
-                        text.push_str(&t);
-                        events.send(AgentEvent::TextDelta(t)).await?;
-                    }
-                    if let Some(calls) = d.get("tool_calls").and_then(|t| t.as_array()) {
-                        for (pos, call) in calls.iter().enumerate() {
-                            // `index` missing: a single-call chunk is pos 0; several in one chunk
-                            // keep their order rather than all merging into slot 0. A call with
-                            // an id other than the one in that slot is a new call (one per chunk,
-                            // each without an index), so it opens a slot of its own.
-                            let mut idx = call.get("index").and_then(|i| i.as_u64()).map(|i| i as usize).unwrap_or(pos);
-                            if call.get("index").is_none() {
-                                let id = call.get("id").and_then(|i| i.as_str()).unwrap_or_default();
-                                if !id.is_empty()
-                                    && tool_calls
-                                        .get(idx)
-                                        .is_some_and(|t| !t.id.is_empty() && !t.id.ends_with(id))
-                                {
-                                    idx = tool_calls.len();
+                }
+                if let Some(r) = reasoning_text(d) {
+                    events.send(AgentEvent::ReasoningDelta(r)).await?;
+                }
+                // Empty content deltas say nothing but still break a reasoning span on the
+                // other end of this channel (MiMo sends one between reasoning deltas), and a
+                // few providers send content parts, not a string.
+                if let Some(t) = content_text(d).filter(|t| !t.is_empty()) {
+                    text.push_str(&t);
+                    events.send(AgentEvent::TextDelta(t)).await?;
+                }
+                if let Some(calls) = d.get("tool_calls").and_then(|t| t.as_array()) {
+                    for (pos, call) in calls.iter().enumerate() {
+                        // `index` missing: a single-call chunk is pos 0; several in one chunk
+                        // keep their order rather than all merging into slot 0. A call with
+                        // an id other than the one in that slot is a new call (one per chunk,
+                        // each without an index), so it opens a slot of its own.
+                        let mut idx = call
+                            .get("index")
+                            .and_then(|i| i.as_u64())
+                            .map(|i| i as usize)
+                            .unwrap_or(pos);
+                        if call.get("index").is_none() {
+                            let id = call.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+                            if !id.is_empty()
+                                && tool_calls
+                                    .get(idx)
+                                    .is_some_and(|t| !t.id.is_empty() && !t.id.ends_with(id))
+                            {
+                                idx = tool_calls.len();
+                            }
+                        }
+                        if tool_calls.len() <= idx {
+                            tool_calls.resize_with(idx + 1, AccumulatedToolCall::default);
+                        }
+                        // id and name may stream in pieces or repeat whole each chunk:
+                        // `ends_with` takes either without doubling the repeat.
+                        if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
+                            if !tool_calls[idx].id.ends_with(id) {
+                                tool_calls[idx].id.push_str(id);
+                            }
+                        }
+                        if let Some(f) = call.get("function") {
+                            if let Some(n) = f.get("name").and_then(|n| n.as_str()) {
+                                if !tool_calls[idx].name.ends_with(n) {
+                                    tool_calls[idx].name.push_str(n);
                                 }
                             }
-                            if tool_calls.len() <= idx {
-                                tool_calls.resize_with(idx + 1, AccumulatedToolCall::default);
-                            }
-                            // id and name may stream in pieces or repeat whole each chunk:
-                            // `ends_with` takes either without doubling the repeat.
-                            if let Some(id) = call.get("id").and_then(|i| i.as_str()) {
-                                if !tool_calls[idx].id.ends_with(id) {
-                                    tool_calls[idx].id.push_str(id);
+                            // Text, or for a few providers the object itself.
+                            match f.get("arguments") {
+                                Some(Value::String(a)) => tool_calls[idx].arguments.push_str(a),
+                                Some(a @ Value::Object(_)) => {
+                                    tool_calls[idx].arguments = a.to_string();
                                 }
-                            }
-                            if let Some(f) = call.get("function") {
-                                if let Some(n) = f.get("name").and_then(|n| n.as_str()) {
-                                    if !tool_calls[idx].name.ends_with(n) {
-                                        tool_calls[idx].name.push_str(n);
-                                    }
-                                }
-                                if let Some(a) = f.get("arguments").and_then(|a| a.as_str()) {
-                                    tool_calls[idx].arguments.push_str(a);
-                                }
+                                _ => {}
                             }
                         }
                     }
                 }
             }
-            cmd = commands.recv() => keep_command(cmd, kept, shutdown)?,
+            if ended {
+                break;
+            }
         }
+        Ok(())
     }
-    if !terminal {
-        bail!("The connection closed before the answer finished");
+    .await;
+    if let Err(e) = streamed {
+        partial.clone_from(&text);
+        // What's on the screen is closed off, so a retry starts a message of its own rather than
+        // running on from the middle of a sentence.
+        if !text.is_empty() && !is_stop(&e) {
+            events.send(AgentEvent::TextDone(text.clone())).await?;
+        }
+        return Err(e);
+    }
+    let failed_finish = match finish.as_deref() {
+        Some("error") => Some(RequestFailure::transient("The provider reported an error")),
+        Some("content_filter" | "safety" | "prohibited_content") => Some(RequestFailure {
+            kind: FailureKind::Fatal,
+            message: "The provider's content filter stopped this answer.".to_string(),
+            retry_after: None,
+            limit: None,
+        }),
+        _ if !terminal => Some(RequestFailure::transient(
+            "The connection closed before the answer finished",
+        )),
+        _ => None,
+    };
+    if let Some(failed) = failed_finish {
+        partial.clone_from(&text);
+        if !text.is_empty() {
+            events.send(AgentEvent::TextDone(text.clone())).await?;
+        }
+        return Err(failed.into());
     }
     let mut request_usage = None;
     if let Some((tokens, reported)) = usage {
         let cost = match reported {
             Some(usd) => Some(UsageCost::reported(usd)),
-            None => trek_core::pricing::request(model, agent, &tokens, 0, false),
+            None => trek_core::pricing::request(model, req.agent, &tokens, 0, false),
         };
         request_usage = Some((tokens, cost));
         events
@@ -2749,27 +5122,44 @@ async fn openai_turn(
             .await?;
     }
 
-    // Fallback: if no native tool calls accumulated, check if text has XML tool calls
-    if tool_calls.is_empty() && text.contains("<tool_call>") {
-        let (extracted, cleaned) = parse_xml_tool_calls(&text);
-        if !extracted.is_empty() {
-            tool_calls = extracted;
+    // A slot opened by an index that was skipped holds nothing to run.
+    tool_calls.retain(|c| !(c.name.is_empty() && c.arguments.trim().is_empty()));
+    if req.no_tools {
+        tool_calls.clear();
+    }
+    // No structured calls: some families write theirs as text, when their route's template doesn't
+    // turn them into calls.
+    if tool_calls.is_empty() && !req.no_tools && !text.is_empty() {
+        let known: Vec<&str> = req
+            .tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        let (found, cleaned) = repair::parse_text_calls(&text, &known);
+        if !found.is_empty() {
+            tool_calls = found
+                .into_iter()
+                .map(|(name, arguments)| AccumulatedToolCall {
+                    id: String::new(),
+                    name,
+                    arguments,
+                })
+                .collect();
             text = cleaned;
         }
     }
-
-    for (i, call) in tool_calls.iter_mut().enumerate() {
-        if call.id.is_empty() {
-            call.id = format!("call_{}_{}", i, next_id());
-        }
-    }
+    repair::normalize_ids(&mut tool_calls, &mut quirks.seen_ids, |i| {
+        format!("call_{i}_{}", next_id())
+    });
 
     events.send(AgentEvent::TextDone(text.clone())).await?;
     Ok(TurnResponse {
         text,
         content: None,
         tool_calls,
-        reasoning_details,
+        reasoning_details: merge_reasoning_details(details),
+        reasoning: plain_reasoning,
+        finish,
         usage: request_usage,
     })
 }
@@ -2787,8 +5177,9 @@ pub async fn direct_provider_models(
         return Ok(vec![]);
     }
 
+    // OpenRouter's list is a large download.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
         .build()?;
 
     if provider.id == "ollama" {
@@ -2810,6 +5201,7 @@ pub async fn direct_provider_models(
                     tier: 0,
                     fast: None,
                     context: None,
+                    caps: None,
                 })
             })
             .collect();
@@ -2842,10 +5234,42 @@ pub async fn direct_provider_models(
     Ok(parse_direct_models(&v))
 }
 
+/// What a provider's model list says a model can take. `None` when it says nothing, as most do.
+fn model_caps(m: &Value) -> Option<ModelCaps> {
+    let parameters = m["supported_parameters"].as_array();
+    let takes = |name: &str| parameters.map(|p| p.iter().any(|v| v == name));
+    let caps = ModelCaps {
+        // OpenRouter's, then Anthropic's and Gemini's own lists.
+        max_output: m["top_provider"]["max_completion_tokens"]
+            .as_u64()
+            .or_else(|| m["max_tokens"].as_u64())
+            .or_else(|| m["outputTokenLimit"].as_u64())
+            .filter(|n| *n > 0),
+        tools: takes("tools"),
+        reasoning: takes("reasoning"),
+        efforts: m["reasoning"]["supported_efforts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect(),
+        images: m["architecture"]["input_modalities"]
+            .as_array()
+            .map(|a| a.iter().any(|v| v == "image")),
+    };
+    (caps != ModelCaps::default()).then_some(caps)
+}
+
 pub(crate) fn parse_direct_models(v: &Value) -> Vec<ModelInfo> {
     let mut models = Vec::new();
     let items = v["data"].as_array().or_else(|| v["models"].as_array());
     for m in items.into_iter().flatten() {
+        let caps = model_caps(m);
+        // Every request has tools in it, so a model that takes none could only fail.
+        if caps.as_ref().and_then(|c| c.tools) == Some(false) {
+            continue;
+        }
         if let Some(raw_id) = m["id"].as_str().or_else(|| m["name"].as_str()) {
             let id = raw_id.strip_prefix("models/").unwrap_or(raw_id).to_string();
             let name = m["display_name"]
@@ -2867,6 +5291,7 @@ pub(crate) fn parse_direct_models(v: &Value) -> Vec<ModelInfo> {
                     .find_map(|k| m[*k].as_u64())
                     .or_else(|| m["top_provider"]["context_length"].as_u64())
                     .filter(|n| *n > 0),
+                caps,
             });
         }
     }
@@ -2927,6 +5352,152 @@ pub fn load_all_cached_direct_models() -> HashMap<String, Vec<ModelInfo>> {
 mod tests {
     use super::*;
 
+    /// One request as these tests want to make it: the parts that vary, the rest from defaults.
+    #[allow(clippy::too_many_arguments)]
+    async fn openai_turn(
+        client: &reqwest::Client,
+        agent: &AgentId,
+        base_url: &str,
+        key: Option<&str>,
+        local: bool,
+        _include_usage: bool,
+        model: &str,
+        effort: Effort,
+        system: &str,
+        history: &[Value],
+        tools: &[Value],
+        events: &async_channel::Sender<AgentEvent>,
+        commands: &async_channel::Receiver<Command>,
+        kept: &mut VecDeque<Command>,
+        shutdown: &mut bool,
+    ) -> Result<TurnResponse> {
+        let id = match agent {
+            AgentId::Direct(p) if p == "openai" => "openai",
+            AgentId::Direct(p) if p == "openrouter" => "openrouter",
+            AgentId::Direct(p) if p == "deepseek" => "deepseek",
+            _ => "local",
+        };
+        let provider = DirectProvider {
+            id,
+            name: "test",
+            base_url: "",
+            wire: Wire::OpenAiChat,
+            env_key: None,
+            local,
+        };
+        super::openai_turn(
+            &TurnRequest {
+                client,
+                agent,
+                provider: &provider,
+                url: base_url,
+                key,
+                model,
+                effort,
+                system,
+                history,
+                tools,
+                no_tools: false,
+                max_output: None,
+                caps: None,
+                session_id: "test",
+            },
+            &mut Quirks::default(),
+            &mut String::new(),
+            events,
+            commands,
+            kept,
+            shutdown,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn anthropic_turn(
+        client: &reqwest::Client,
+        url: &str,
+        key: &str,
+        model: &str,
+        effort: Effort,
+        system: &str,
+        history: &[Value],
+        tools: &[Value],
+        thread: &mut Thread,
+        events: &async_channel::Sender<AgentEvent>,
+        commands: &async_channel::Receiver<Command>,
+        kept: &mut VecDeque<Command>,
+        shutdown: &mut bool,
+    ) -> Result<TurnResponse> {
+        let agent = AgentId::Direct("anthropic".into());
+        let provider = DirectProvider {
+            id: "anthropic",
+            name: "test",
+            base_url: "",
+            wire: Wire::Anthropic,
+            env_key: None,
+            local: false,
+        };
+        super::anthropic_turn(
+            &TurnRequest {
+                client,
+                agent: &agent,
+                provider: &provider,
+                url,
+                key: Some(key),
+                model,
+                effort,
+                system,
+                history,
+                tools,
+                no_tools: false,
+                max_output: None,
+                caps: None,
+                session_id: "test",
+            },
+            thread,
+            &mut String::new(),
+            events,
+            commands,
+            kept,
+            shutdown,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_tool(
+        name: &str,
+        args_json: &str,
+        cwd: &Path,
+        read_only: bool,
+        hand_holding: HandHolding,
+        allowed_for_session: &mut HashSet<String>,
+        options: &DirectOptions,
+        script: bool,
+        events: &async_channel::Sender<AgentEvent>,
+        commands: &async_channel::Receiver<Command>,
+        kept: &mut VecDeque<Command>,
+        shutdown: &mut bool,
+    ) -> Result<(String, bool, Option<(u32, u32)>)> {
+        super::execute_tool(
+            name,
+            args_json,
+            cwd,
+            read_only,
+            hand_holding,
+            allowed_for_session,
+            options,
+            script,
+            &mcp::McpHub::new(Vec::new()),
+            &mut Vec::new(),
+            events,
+            commands,
+            kept,
+            shutdown,
+        )
+        .await
+    }
+
     async fn read_request_head(socket: &mut tokio::net::TcpStream) {
         use tokio::io::AsyncReadExt as _;
         let mut head = vec![];
@@ -2960,19 +5531,31 @@ mod tests {
     fn a_429_is_a_limit_and_other_failures_are_not() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("retry-after", "30".parse().unwrap());
+        // A short wait is waited out, with the limit kept in case the tries run out.
         let e = request_error(
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             &headers,
             "429 Too Many Requests: Rate limit exceeded".into(),
         );
-        let Some(crate::limits::LimitError(limit)) = e.downcast_ref() else {
-            panic!("{e:#}")
-        };
+        let failed = e.downcast_ref::<RequestFailure>().expect("a failure");
+        assert!(failed.is_retryable());
+        assert_eq!(failed.retry_after, Some(Duration::from_secs(30)));
         assert!(
-            limit
-                .resets_at
+            failed
+                .limit
+                .as_ref()
+                .and_then(|l| l.resets_at)
                 .is_some_and(|at| (at - trek_core::store::now_ms() - 30_000).abs() < 5_000)
         );
+        // A long one is a usage limit, said at once.
+        let mut far = reqwest::header::HeaderMap::new();
+        far.insert("retry-after", "3600".parse().unwrap());
+        let e = request_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            &far,
+            "429 Too Many Requests: Rate limit exceeded".into(),
+        );
+        assert!(e.downcast_ref::<crate::limits::LimitError>().is_some());
         assert_eq!(
             format!("{e:#}"),
             "429 Too Many Requests: Rate limit exceeded"
@@ -3381,11 +5964,11 @@ mod tests {
 
     #[test]
     fn parses_xml_tool_calls_format() {
-        let text = "I will check git status.\n<tool_call>\n<function=bash>\n{\"command\": \"git status\"} \n</tool_call>\nDone.";
-        let (calls, cleaned) = parse_xml_tool_calls(text);
+        let text = "I will check git status.\n<tool_call>\n<function=bash>\n{\"command\": \"git status\"} \n</tool_call>\n";
+        let (calls, cleaned) = repair::parse_text_calls(text, &["bash"]);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "bash");
-        assert!(calls[0].arguments.contains("git status"));
+        assert_eq!(calls[0].0, "bash");
+        assert!(calls[0].1.contains("git status"));
         assert!(!cleaned.contains("<tool_call>"));
         assert!(cleaned.contains("I will check git status."));
     }
@@ -3489,6 +6072,194 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    /// `permitted_under` for `tool` on `target` with nobody to answer: what it says, and whether it
+    /// asked.
+    async fn rule_outcome(
+        rules: &[PermissionRule],
+        tool: &str,
+        target: &str,
+        level: HandHolding,
+        allowed: &[&str],
+    ) -> (Option<Permit>, Vec<AgentEvent>) {
+        let (events, seen) = async_channel::unbounded();
+        let (_keep, commands) = async_channel::unbounded();
+        let mut allowed: HashSet<String> = allowed.iter().map(|a| a.to_string()).collect();
+        let mut kept = VecDeque::new();
+        let mut shutdown = false;
+        let cwd = std::env::temp_dir().join("trek_rule_outcome");
+        let run = permitted_under(
+            rules,
+            tool,
+            target,
+            &cwd,
+            level,
+            &mut allowed,
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        );
+        // Asking waits for an answer nobody gives: the card is what's being looked for.
+        let answer = tokio::time::timeout(Duration::from_millis(50), run)
+            .await
+            .ok()
+            .map(|r| r.unwrap());
+        drop(events);
+        let mut out = vec![];
+        while let Ok(e) = seen.recv().await {
+            out.push(e);
+        }
+        (answer, out)
+    }
+
+    fn command_rule(
+        pattern: &str,
+        action: trek_core::permission_rules::RuleAction,
+    ) -> PermissionRule {
+        PermissionRule::new(RuleKind::Command, pattern, action)
+    }
+
+    #[tokio::test]
+    async fn a_deny_rule_holds_at_every_level_and_tells_both_the_model_and_the_user() {
+        use trek_core::permission_rules::RuleAction::Deny;
+        for level in HandHolding::ALL {
+            for line in ["rm x", "echo y; rm x", "FOO=1 \\rm x", "/bin/rm x", "$X y"] {
+                let (answer, events) =
+                    rule_outcome(&[command_rule("rm", Deny)], "bash", line, level, &[]).await;
+                let Some(Permit::No(why)) = answer else {
+                    panic!("{level:?} {line}: {answer:?}");
+                };
+                assert!(why.contains("Deny command `rm`"), "{why}");
+                assert!(
+                    matches!(&events[..], [AgentEvent::Notice(n)] if n.contains("Deny command `rm`")),
+                    "{events:?}"
+                );
+            }
+        }
+        // "Allow for the session" doesn't get past it either.
+        let (answer, _) = rule_outcome(
+            &[command_rule("rm", Deny)],
+            "bash",
+            "rm x",
+            HandHolding::Supervised,
+            &["rm x"],
+        )
+        .await;
+        assert!(matches!(answer, Some(Permit::No(_))));
+    }
+
+    #[tokio::test]
+    async fn an_ask_rule_asks_at_full_access_and_past_a_session_allowance() {
+        use trek_core::permission_rules::RuleAction::Ask;
+        for (level, allowed) in [
+            (HandHolding::FullAccess, vec![]),
+            (HandHolding::Supervised, vec!["git push"]),
+            (HandHolding::Auto, vec!["git push"]),
+        ] {
+            let (answer, events) = rule_outcome(
+                &[command_rule("git push", Ask)],
+                "bash",
+                "git push",
+                level,
+                &allowed,
+            )
+            .await;
+            assert_eq!(answer, None, "{level:?}: still waiting for the answer");
+            assert!(
+                matches!(
+                    &events[..],
+                    [AgentEvent::PermissionRequest { title, call: Some(c), .. }]
+                        if title == "Run command" && c.target == "git push"
+                ),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_allow_rule_skips_the_card_only_for_what_it_covers() {
+        use trek_core::permission_rules::RuleAction::Allow;
+        let rules = [command_rule("git push", Allow)];
+        let (answer, events) = rule_outcome(
+            &rules,
+            "bash",
+            "git push origin",
+            HandHolding::Supervised,
+            &[],
+        )
+        .await;
+        assert_eq!(answer, Some(Permit::Go));
+        assert!(events.is_empty(), "{events:?}");
+        for line in ["git push; rm x", "git push $(rm x)", "git pull"] {
+            let (answer, events) =
+                rule_outcome(&rules, "bash", line, HandHolding::Supervised, &[]).await;
+            assert_eq!(answer, None, "{line}");
+            assert!(matches!(
+                &events[..],
+                [AgentEvent::PermissionRequest { .. }]
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn rules_read_the_other_tools_too() {
+        use trek_core::permission_rules::RuleAction::{Allow, Deny};
+        let (answer, _) = rule_outcome(
+            &[PermissionRule::new(RuleKind::Edit, "*.lock", Deny)],
+            "write_file",
+            "Cargo.lock",
+            HandHolding::FullAccess,
+            &[],
+        )
+        .await;
+        assert!(matches!(answer, Some(Permit::No(_))));
+        let (answer, _) = rule_outcome(
+            &[PermissionRule::new(RuleKind::Edit, "~/.ssh/**", Allow)],
+            "edit_file",
+            "src/a.rs",
+            HandHolding::FullAccess,
+            &[],
+        )
+        .await;
+        assert_eq!(answer, Some(Permit::Go), "no rule: the level's");
+        let (answer, _) = rule_outcome(
+            &[PermissionRule::new(RuleKind::Fetch, "evil.com", Deny)],
+            "web_fetch",
+            "https://a.evil.com/x",
+            HandHolding::FullAccess,
+            &[],
+        )
+        .await;
+        assert!(matches!(answer, Some(Permit::No(_))));
+        let (answer, _) = rule_outcome(
+            &[PermissionRule::new(RuleKind::Tool, "mcp__github__*", Deny)],
+            "mcp",
+            "github create_issue",
+            HandHolding::FullAccess,
+            &[],
+        )
+        .await;
+        assert!(matches!(answer, Some(Permit::No(_))));
+    }
+
+    #[test]
+    fn the_testers_level_column_is_what_the_session_does() {
+        let cwd = std::env::temp_dir();
+        let ask = |call: Call, level| level_would_ask(&call, &cwd, level);
+        let ls = || Call::command("bash", "ls -la");
+        let rm = || Call::command("bash", "rm x");
+        assert!(ask(ls(), HandHolding::Supervised));
+        assert!(!ask(ls(), HandHolding::Auto));
+        assert!(ask(rm(), HandHolding::Auto));
+        assert!(!ask(rm(), HandHolding::FullAccess));
+        assert!(ask(Call::edit("Write", "a.rs"), HandHolding::Supervised));
+        assert!(!ask(Call::edit("Write", "a.rs"), HandHolding::Auto));
+        assert!(ask(
+            Call::edit("Write", "/elsewhere/a.rs"),
+            HandHolding::Auto
+        ));
+    }
+
     #[test]
     fn safe_command_checks() {
         assert!(is_safe_command("git status"));
@@ -3557,7 +6328,19 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["bash", "read_file", "write_file", "edit_file"]);
+        assert_eq!(
+            names,
+            [
+                "bash",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "grep",
+                "glob",
+                "list_dir",
+                "web_fetch"
+            ]
+        );
         assert_eq!(
             body["tools"][1]["input_schema"]["required"],
             json!(["path"])
@@ -3568,7 +6351,8 @@ mod tests {
         // Cached: the tools and system prompt, and the conversation so far.
         assert_eq!(body["system"][0]["text"], "sys");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(body["tools"][3]["cache_control"]["type"], "ephemeral");
+        let last = direct_tools().len() - 1;
+        assert_eq!(body["tools"][last]["cache_control"]["type"], "ephemeral");
         assert!(body["tools"][0].get("cache_control").is_none());
         let history = [
             json!({ "role": "user", "content": "hi" }),
@@ -3990,7 +6774,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_message_sent_while_a_command_runs_waits_for_it() {
+    async fn a_message_sent_while_a_command_runs_reaches_the_next_request() {
         let s = TestSession::start(
             "ollama",
             HandHolding::FullAccess,
@@ -4014,9 +6798,12 @@ mod tests {
         let (output, ok) = s.tool_finished().await;
         assert!(ok && output.contains("finished"), "{output}");
         assert_eq!(s.turn_complete().await, None);
-        let messages = s.body(2)["messages"].as_array().unwrap().clone();
+        // It reaches the model on the very next request, after the tool's result.
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
         assert_tool_calls_answered(&messages);
         assert_eq!(user_texts(&messages), ["one", "steer"]);
+        assert_eq!(messages.last().unwrap()["content"], "steer");
+        assert_eq!(s.bodies.lock().unwrap().len(), 2);
         s.finish().await;
     }
 
@@ -4026,19 +6813,19 @@ mod tests {
             "ollama",
             HandHolding::FullAccess,
             vec![
-                (500, "boom".into()),
+                (400, "boom".into()),
                 openai_tool_call("call_1", "read_file", json!({ "path": "missing.txt" })),
-                (500, "boom".into()),
+                (400, "boom".into()),
                 openai_text("ok"),
             ],
         )
         .await;
-        // A first request that fails takes its message back out.
+        // A first request that's refused takes its message back out.
         s.prompt("zero").await;
-        assert!(s.turn_complete().await.is_some_and(|e| e.contains("500")));
+        assert!(s.turn_complete().await.is_some_and(|e| e.contains("400")));
         // One that fails after a tool ran keeps the call and its result.
         s.prompt("one").await;
-        assert!(s.turn_complete().await.is_some_and(|e| e.contains("500")));
+        assert!(s.turn_complete().await.is_some_and(|e| e.contains("400")));
         s.prompt("two").await;
         assert_eq!(s.turn_complete().await, None);
         let messages = s.body(3)["messages"].as_array().unwrap().clone();
@@ -4072,7 +6859,10 @@ mod tests {
         let (output, ok) = s.tool_finished().await;
         assert!(ok && output.contains("hello from notes"), "{output}");
         assert_eq!(s.turn_complete().await, None);
-        assert!(s.body(0)["tools"].as_array().is_some_and(|t| t.len() == 4));
+        assert_eq!(
+            s.body(0)["tools"].as_array().map(Vec::len),
+            Some(direct_tools().len())
+        );
         let messages = s.body(1)["messages"].as_array().unwrap().clone();
         assert_eq!(messages.len(), 3, "{messages:#?}");
         assert_eq!(
@@ -4160,7 +6950,10 @@ mod tests {
             first["system"][0]["text"].as_str().map(|t| t.is_empty()),
             Some(false)
         );
-        assert_eq!(first["tools"].as_array().map(|t| t.len()), Some(4));
+        assert_eq!(
+            first["tools"].as_array().map(|t| t.len()),
+            Some(direct_tools().len())
+        );
         assert_eq!(first["messages"].as_array().map(|m| m.len()), Some(1));
         assert!(first["messages"][0].to_string().contains("read it"));
         assert!(!first["messages"][0].to_string().contains("cache_control"));
@@ -4345,7 +7138,8 @@ mod tests {
             "no breakpoint of its own"
         );
         assert_eq!(create["system"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(create["tools"][3]["cache_control"]["type"], "ephemeral");
+        let last = direct_tools().len() - 1;
+        assert_eq!(create["tools"][last]["cache_control"]["type"], "ephemeral");
         let go_on = anthropic_body(
             "claude-sonnet-4-5",
             Effort::Medium,
@@ -4372,35 +7166,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thirty_tool_rounds_say_why_the_answer_stopped() {
-        let s = TestSession::start(
+    async fn the_round_limit_says_why_and_asks_for_a_report() {
+        let mut script: Vec<(u16, String)> = (0..5)
+            .map(|i| {
+                openai_tool_call(
+                    &format!("call_{i}"),
+                    "bash",
+                    json!({ "command": format!("echo {i}") }),
+                )
+            })
+            .collect();
+        script.push(openai_text("Did five of them. The rest is left."));
+        let s = TestSession::start_configured(
             "ollama",
             HandHolding::FullAccess,
-            (0..30)
-                .map(|i| {
-                    openai_tool_call(
-                        &format!("call_{i}"),
-                        "read_file",
-                        json!({ "path": "notes.txt" }),
-                    )
-                })
-                .collect(),
+            script,
+            DirectOptions {
+                max_turns: 5,
+                ..Default::default()
+            },
+            |_| {},
         )
         .await;
-        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
-        s.prompt("keep reading").await;
+        s.prompt("keep going").await;
         let notice = s
             .until(|e| match e {
                 AgentEvent::Notice(text) => Some(text.clone()),
                 _ => None,
             })
             .await;
-        assert!(notice.contains("30 tool-call rounds"), "{notice}");
+        assert!(notice.contains("5 tool-call rounds"), "{notice}");
         assert_eq!(s.turn_complete().await, None);
-        assert_eq!(s.bodies.lock().unwrap().len(), 30);
-        let messages = s.body(29)["messages"].as_array().unwrap().clone();
+        // One more request, for the report: tools off, and the history still whole.
+        assert_eq!(s.bodies.lock().unwrap().len(), 6);
+        let last = s.body(5);
+        assert_eq!(last["tool_choice"], "none");
+        let messages = last["messages"].as_array().unwrap().clone();
         assert_tool_calls_answered(&messages);
+        assert!(
+            user_texts(&messages)
+                .last()
+                .unwrap()
+                .contains("limit of tool rounds")
+        );
         s.finish().await;
+    }
+
+    /// A message sent while a card is up is the answer to it.
+    #[tokio::test]
+    async fn a_message_while_a_card_is_up_declines_it_and_is_kept() {
+        let (tx, commands) = async_channel::unbounded();
+        let (events, rx) = async_channel::unbounded();
+        let task = tokio::spawn(async move {
+            let (mut kept, mut shutdown) = (VecDeque::new(), false);
+            let decision = ask_permission(
+                "Run command",
+                "ls",
+                None,
+                &events,
+                &commands,
+                &mut kept,
+                &mut shutdown,
+            )
+            .await;
+            (decision, kept)
+        });
+        let Ok(AgentEvent::PermissionRequest { .. }) = rx.recv().await else {
+            panic!("no permission request")
+        };
+        tx.send(Command::Prompt {
+            text: "no, use git status".into(),
+            images: vec![],
+        })
+        .await
+        .unwrap();
+        let (decision, kept) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the card never closed")
+            .unwrap();
+        assert_eq!(decision.unwrap(), Decision::Deny);
+        assert!(
+            matches!(kept.front(), Some(Command::Prompt { text, .. }) if text == "no, use git status")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4416,6 +7263,7 @@ mod tests {
             let decision = ask_permission(
                 "Run command",
                 "ls",
+                None,
                 &events,
                 &commands,
                 &mut kept,
@@ -4518,9 +7366,10 @@ mod tests {
         .await
         .unwrap();
         assert!(ok);
-        assert!(out.ends_with("\n... [output truncated]"));
+        assert!(out.contains("bytes cut here"), "{}", &out[..100]);
         assert!(out.starts_with("a✓✓"));
-        assert!(out.len() < 50_100);
+        assert!(out.ends_with("✓"));
+        assert!(out.len() < MAX_OUT + 300);
     }
 
     #[test]
@@ -4965,7 +7814,7 @@ mod tests {
         assert_eq!(
             (out.as_str(), ok),
             (
-                "partial\n[Command timed out after 7 seconds and was stopped]",
+                "partial\n[Command timed out after 7 seconds and was stopped. If it needs longer, run it again with a larger timeout_s (up to 3600), or with background set to true.]",
                 false
             )
         );
@@ -4981,7 +7830,7 @@ mod tests {
         assert!(e.downcast_ref::<ExecutorGone>().is_some());
         // The script tool isn't offered without a host.
         let (out, ok, _) = tool("script", json!({ "code": "1" })).await.unwrap();
-        assert!(!ok && out.starts_with("Unknown tool: script"), "{out}");
+        assert!(!ok && out.contains("'script' does not exist"), "{out}");
 
         assert_eq!(
             memory.files.lock().unwrap()[Path::new("/sandbox/app/a.txt")],
@@ -5145,9 +7994,9 @@ mod tests {
         );
         assert_eq!(s.turn_complete().await, None);
 
-        // The first request: the plain prompt, the four tools.
+        // The first request: the plain prompt, the tools.
         assert_eq!(
-            tool_names(&s.body(0)),
+            tool_names(&s.body(0))[..4],
             ["bash", "read_file", "write_file", "edit_file"]
         );
         // The second starts afresh: system prompt and orientation, then a line to carry on.
@@ -5175,6 +8024,10 @@ mod tests {
                 "read_file",
                 "write_file",
                 "edit_file",
+                "grep",
+                "glob",
+                "list_dir",
+                "web_fetch",
                 "transcript_search",
                 "transcript_read"
             ]
@@ -5231,7 +8084,11 @@ mod tests {
                 && system.contains("Nothing from before is kept where you can search it"),
             "{system}"
         );
-        assert_eq!(tool_names(&fresh).len(), 4, "no transcript to search");
+        assert_eq!(
+            tool_names(&fresh).len(),
+            direct_tools().len(),
+            "no transcript to search"
+        );
         s.finish().await;
     }
 
@@ -5252,7 +8109,7 @@ mod tests {
         .await;
         s.prompt("again").await;
         assert_eq!(s.turn_complete().await, None);
-        assert_eq!(tool_names(&s.body(0)).len(), 6);
+        assert_eq!(tool_names(&s.body(0)).len(), direct_tools().len() + 2);
         s.finish().await;
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
     }
@@ -5342,7 +8199,10 @@ mod tests {
                 "stopped EndTurn",
             ]
         );
-        assert_eq!(s.body(0)["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            s.body(0)["tools"].as_array().unwrap().len(),
+            direct_tools().len()
+        );
         s.finish().await;
     }
 
@@ -5444,8 +8304,8 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
         );
         // The four tools stay, and the script comes after them.
         let tools = s.body(0)["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 5);
-        assert_eq!(tools[4]["function"]["name"], "script");
+        assert_eq!(tools.len(), direct_tools().len() + 1);
+        assert_eq!(tools.last().unwrap()["function"]["name"], "script");
         // The system prompt given replaces Trek's.
         assert_eq!(
             s.body(0)["messages"][0]["content"],
@@ -5492,8 +8352,11 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
         assert!(!out.contains("wrote"), "{out}");
         assert_eq!(s.turn_complete().await, None);
         assert!(!s.cwd.join("x.txt").exists());
-        // On, the script is offered beside the four.
-        assert_eq!(s.body(0)["tools"].as_array().unwrap().len(), 5);
+        // On, the script is offered beside the others.
+        assert_eq!(
+            s.body(0)["tools"].as_array().unwrap().len(),
+            direct_tools().len() + 1
+        );
         s.finish().await;
     }
 
@@ -5703,5 +8566,1975 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
                 "https://proxy.example/v1/messages"
             );
         }
+    }
+
+    fn anthropic_tool(id: &str, name: &str, input: Value) -> String {
+        format!(
+            "data: {}\n\ndata: {}\n\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"tool_use\"}}}}\n\ndata: {{\"type\":\"message_stop\"}}\n\n",
+            json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": id, "name": name, "input": {} } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": input.to_string() } }),
+        )
+    }
+
+    /// A call whose arguments are `raw` exactly, as the stream gave them.
+    fn raw_tool_call(id: &str, name: &str, raw: &str, finish: &str) -> (u16, String) {
+        let call = json!({ "index": 0, "id": id, "type": "function", "function": { "name": name, "arguments": raw } });
+        (
+            200,
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({ "choices": [{ "delta": { "tool_calls": [call] }, "finish_reason": finish }] })
+            ),
+        )
+    }
+
+    fn finish_with(text: &str, finish: &str) -> (u16, String) {
+        (
+            200,
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({ "choices": [{ "delta": { "content": text }, "finish_reason": finish }] })
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_tried_again_until_it_works() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                (500, "boom".into()),
+                (503, "busy".into()),
+                openai_text("worked"),
+            ],
+        )
+        .await;
+        s.prompt("hello").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 3);
+        // The same request each time.
+        assert_eq!(s.body(0)["messages"], s.body(2)["messages"]);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn an_error_inside_the_stream_is_tried_again() {
+        let s = TestSession::start(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                (
+                    200,
+                    "data: {\"error\":{\"code\":502,\"message\":\"Provider returned error\"},\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}]}\n\n".into(),
+                ),
+                finish_with("partial", "error"),
+                (200, "data: {\"choices\":[{\"delta\":{\"content\":\"cut\"}}]}\n\n".into()),
+                openai_text("worked"),
+            ],
+        )
+        .await;
+        s.prompt("hello").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 4);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_goes_quiet_is_given_up_on_and_tried_again() {
+        // Headers, then silence on an open connection.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keep = held.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"hm\"}}]}\n\n",
+            )
+            .await
+            .unwrap();
+            keep.lock().unwrap().push(socket);
+        });
+        let client = reqwest::Client::new();
+        let (_tx, commands) = async_channel::unbounded();
+        let (events, _rx) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let e = openai_turn(
+            &client,
+            &AgentId::Direct("local".into()),
+            &format!("http://{addr}"),
+            None,
+            true,
+            false,
+            "m",
+            Effort::Off,
+            "sys",
+            &[],
+            &direct_tools(),
+            &events,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap_err();
+        let failed = e.downcast_ref::<RequestFailure>().expect("a failure");
+        assert!(failed.is_retryable(), "{failed}");
+        assert!(failed.message.contains("sent nothing"), "{failed}");
+    }
+
+    #[tokio::test]
+    async fn a_400_about_something_else_keeps_the_tools_and_fails() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![(
+                400,
+                "{\"error\":{\"message\":\"messages: bad history\"}}".into(),
+            )],
+        )
+        .await;
+        s.prompt("hello").await;
+        let error = s.turn_complete().await.unwrap();
+        assert!(error.contains("bad history"), "{error}");
+        assert_eq!(s.bodies.lock().unwrap().len(), 1);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_model_without_tools_says_so_and_the_tools_go() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                (
+                    400,
+                    "{\"error\":{\"message\":\"registry.ollama.ai/x does not support tools\"}}"
+                        .into(),
+                ),
+                openai_text("words only"),
+                openai_text("still words"),
+            ],
+        )
+        .await;
+        s.prompt("hello").await;
+        let notice = s
+            .until(|e| match e {
+                AgentEvent::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .await;
+        assert!(notice.contains("can't use tools"), "{notice}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(s.body(1).get("tools").is_none());
+        // Remembered: no refused request per round.
+        s.prompt("again").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 3);
+        assert!(s.body(2).get("tools").is_none());
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_full_context_refused_by_the_provider_goes_on_fresh() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call("call_1", "bash", json!({ "command": "echo hi" })),
+                (400, "{\"error\":{\"message\":\"This model's maximum context length is 8192 tokens\"}}".into()),
+                openai_text("carried on"),
+            ],
+        )
+        .await;
+        s.prompt("start").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 3);
+        let fresh = s.body(2);
+        let messages = fresh["messages"].as_array().unwrap();
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("<fresh-context>")
+        );
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_call_cut_off_by_the_limit_is_not_run() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                raw_tool_call(
+                    "call_1",
+                    "write_file",
+                    r#"{"path":"cut.txt","content":"half of a fi"#,
+                    "length",
+                ),
+                openai_text("smaller then"),
+            ],
+        )
+        .await;
+        s.prompt("write it").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("cut off"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(!s.cwd.join("cut.txt").exists());
+        // History never echoes what a provider couldn't parse.
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        let call = &messages[2]["tool_calls"][0]["function"];
+        assert_eq!(call["arguments"], "{}");
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn an_answer_cut_off_by_the_limit_is_asked_to_go_on() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![finish_with("first ha", "length"), openai_text("lf.")],
+        )
+        .await;
+        s.prompt("tell me").await;
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_eq!(messages[2]["content"], "first ha");
+        assert_eq!(messages[3]["content"], CUT_OFF_PROMPT);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn an_empty_answer_is_asked_for_again_then_reported() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                finish_with("", "stop"),
+                openai_text("there"),
+                finish_with("", "stop"),
+                finish_with("", "stop"),
+                finish_with("", "stop"),
+            ],
+        )
+        .await;
+        s.prompt("one").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 2);
+        s.prompt("two").await;
+        let error = s.turn_complete().await.unwrap();
+        assert!(error.contains("empty answer"), "{error}");
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn arguments_with_a_second_value_after_them_still_run() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                raw_tool_call(
+                    "call_1",
+                    "read_file",
+                    r#"{"path":"notes.txt"}{}"#,
+                    "tool_calls",
+                ),
+                openai_text("read"),
+            ],
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("read").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("hello from notes"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_eq!(
+            messages[2]["tool_calls"][0]["function"]["arguments"],
+            r#"{"path":"notes.txt"}"#
+        );
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn arguments_that_arent_json_never_become_a_command() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                raw_tool_call("call_1", "bash", "touch owned}", "tool_calls"),
+                openai_text("sorry"),
+            ],
+        )
+        .await;
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("aren't valid JSON"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(!s.cwd.join("owned").exists());
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_missing_field_is_named_and_nothing_is_written() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                raw_tool_call(
+                    "call_1",
+                    "write_file",
+                    r#"{"path":"keep.txt"}"#,
+                    "tool_calls",
+                ),
+                raw_tool_call(
+                    "call_2",
+                    "edit_file",
+                    r#"{"path":"keep.txt","old_str":"precious"}"#,
+                    "tool_calls",
+                ),
+                openai_text("ok"),
+            ],
+        )
+        .await;
+        std::fs::write(s.cwd.join("keep.txt"), "precious").unwrap();
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("missing content"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("missing new_str"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(
+            std::fs::read_to_string(s.cwd.join("keep.txt")).unwrap(),
+            "precious"
+        );
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn other_harnesses_names_for_tools_and_fields_work() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                raw_tool_call(
+                    "call_1",
+                    "Read",
+                    r#"{"file_path":"notes.txt","start_line":"1"}"#,
+                    "tool_calls",
+                ),
+                raw_tool_call("call_2", "launch_rocket", "{}", "tool_calls"),
+                openai_text("done"),
+            ],
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("hello from notes"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(
+            !ok && output.contains("does not exist") && output.contains("read_file"),
+            "{output}"
+        );
+        assert_eq!(s.turn_complete().await, None);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_call_written_as_text_runs() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_text("Looking.\n<function=read_file><parameter=path>notes.txt</parameter></function>"),
+                openai_text("done"),
+            ],
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("hello from notes"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_eq!(messages[2]["content"], "Looking.");
+        assert_tool_calls_answered(&messages);
+        s.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_command_says_its_exit_code() {
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let run = |command: &'static str, kept: &mut VecDeque<Command>, shutdown: &mut bool| {
+            let commands = commands.clone();
+            let mut kept_here = std::mem::take(kept);
+            let mut shutdown_here = *shutdown;
+            async move {
+                let out = run_bash_command(
+                    &LocalExecutor,
+                    command,
+                    Path::new("."),
+                    None,
+                    &commands,
+                    &mut kept_here,
+                    &mut shutdown_here,
+                )
+                .await
+                .unwrap();
+                out
+            }
+        };
+        let (out, ok) = run("exit 3", &mut kept, &mut shutdown).await;
+        assert!(!ok);
+        assert_eq!(out, "[exit code 3]");
+        let (out, ok) = run("echo hi; false", &mut kept, &mut shutdown).await;
+        assert!(!ok);
+        assert_eq!(out, "hi\n[exit code 1]");
+        let (out, ok) = run("true", &mut kept, &mut shutdown).await;
+        assert!(ok);
+        assert_eq!(out, "(Command finished with no output)");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn long_output_keeps_its_end_and_saves_the_whole() {
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let (out, ok) = run_bash_command(
+            &LocalExecutor,
+            "seq 1 40000; echo 'error: the real failure' >&2; exit 1",
+            Path::new("."),
+            None,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(!ok);
+        assert!(out.starts_with("1\n2\n"), "{}", &out[..20]);
+        assert!(
+            out.contains("error: the real failure\n[exit code 1]"),
+            "{}",
+            &out[out.len() - 200..]
+        );
+        let path = out
+            .split("All of it is in ")
+            .nth(1)
+            .and_then(|r| r.split(": read_file").next())
+            .expect("a path");
+        let saved = std::fs::read_to_string(path).unwrap();
+        assert!(saved.contains("\n20000\n"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn something_left_running_doesnt_hold_the_answer() {
+        let started = Instant::now();
+        let ran = LocalExecutor
+            .exec("sleep 30 & echo started", Path::new("."), None)
+            .await
+            .unwrap();
+        assert!(ran.success());
+        assert_eq!(ran.stdout, "started\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn commands_get_the_login_path_and_bash() {
+        let ran = LocalExecutor
+            .exec(
+                "echo \"$PATH\"; echo \"${BASH_VERSION:+bash}\"",
+                Path::new("."),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut lines = ran.stdout.lines();
+        assert_eq!(lines.next(), Some(trek_core::detect::login_path()));
+        assert_eq!(lines.next(), Some("bash"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_model_can_start_something_in_the_background_and_set_a_timeout() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "bash",
+                    json!({ "command": "echo from-background; sleep 30", "background": true }),
+                ),
+                openai_tool_call(
+                    "call_2",
+                    "bash",
+                    json!({ "command": "sleep 30", "timeout_s": 1 }),
+                ),
+                openai_text("ok"),
+            ],
+        )
+        .await;
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("process group"), "{output}");
+        let log = output
+            .split("output goes to ")
+            .nth(1)
+            .and_then(|r| r.split(": read it").next())
+            .expect("a log path")
+            .to_string();
+        let (output, ok) = s.tool_finished().await;
+        assert!(
+            !ok && output.contains("timed out after 1 seconds"),
+            "{output}"
+        );
+        assert_eq!(s.turn_complete().await, None);
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("from-background")
+        );
+        let group: i32 = s.body(1)["messages"][3]["content"]
+            .as_str()
+            .and_then(|o| o.split("process group ").nth(1))
+            .and_then(|r| r.split('.').next())
+            .and_then(|g| g.parse().ok())
+            .expect("a group");
+        s.finish().await;
+        // Ended with the session.
+        let alive = unsafe { libc::kill(-group, 0) } == 0;
+        assert!(!alive, "group {group} outlived the session");
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[tokio::test]
+    async fn read_file_pages_through_a_long_file_and_lists_a_folder() {
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let dir = std::env::temp_dir().join(format!("trek_read_{}", next_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body: String = (1..=3000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("long.txt"), body).unwrap();
+        std::fs::write(dir.join("wide.txt"), "x".repeat(10_000)).unwrap();
+        let mut waiting = Waiting {
+            commands: &commands,
+            kept: &mut kept,
+            shutdown: &mut shutdown,
+        };
+        let (out, ok) = run_read_file(&LocalExecutor, "long.txt", None, None, &dir, &mut waiting)
+            .await
+            .unwrap();
+        assert!(ok);
+        assert!(
+            out.contains("2000 | line 2000"),
+            "{}",
+            &out[out.len() - 200..]
+        );
+        assert!(!out.contains("2001 | line"));
+        assert!(
+            out.contains("Showing lines 1-2000 of 3000"),
+            "{}",
+            &out[out.len() - 200..]
+        );
+        assert!(out.contains("start_line 2001"));
+        let (out, _) = run_read_file(
+            &LocalExecutor,
+            "long.txt",
+            Some(2990),
+            None,
+            &dir,
+            &mut waiting,
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.contains("3000 | line 3000") && out.contains("End of file: 3000 lines"),
+            "{out}"
+        );
+        let (out, _) = run_read_file(&LocalExecutor, "wide.txt", None, None, &dir, &mut waiting)
+            .await
+            .unwrap();
+        assert!(out.len() < READ_LINE + 200, "{}", out.len());
+        assert!(out.contains("were cut"), "{out}");
+        let (out, ok) = run_read_file(&LocalExecutor, ".", None, None, &dir, &mut waiting)
+            .await
+            .unwrap();
+        assert!(
+            ok && out.contains("long.txt") && out.contains("It holds"),
+            "{out}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edits_forgive_what_models_get_wrong_and_say_so() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "edit_file",
+                    json!({ "path": "a.rs", "old_str": "let a = 1;", "new_str": "let a = 2;" }),
+                ),
+                openai_tool_call(
+                    "call_2",
+                    "edit_file",
+                    json!({ "path": "a.rs", "old_str": "nope", "new_str": "x" }),
+                ),
+                openai_tool_call(
+                    "call_3",
+                    "edit_file",
+                    json!({ "path": "b.txt", "old_str": "x", "new_str": "y", "replace_all": true }),
+                ),
+                openai_text("ok"),
+            ],
+        )
+        .await;
+        std::fs::write(s.cwd.join("a.rs"), "fn f() {\n    let a = 1;   \n}\n").unwrap();
+        std::fs::write(s.cwd.join("b.txt"), "x x\n").unwrap();
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok, "{output}");
+        assert!(
+            output.contains("let a = 2;") && output.contains("|"),
+            "{output}"
+        );
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("not found"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("2 places"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(
+            std::fs::read_to_string(s.cwd.join("b.txt")).unwrap(),
+            "y y\n"
+        );
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn search_tools_work_read_only_and_writes_arent_on_offer() {
+        let s = TestSession::start_configured(
+            "ollama",
+            HandHolding::Auto,
+            vec![
+                openai_tool_call("call_1", "grep", json!({ "pattern": "needle" })),
+                openai_tool_call("call_2", "glob", json!({ "pattern": "*.txt" })),
+                openai_tool_call("call_3", "list_dir", json!({})),
+                openai_tool_call("call_4", "bash", json!({ "command": "ls" })),
+                openai_tool_call("call_5", "bash", json!({ "command": "touch nope" })),
+                openai_text("found it"),
+            ],
+            DirectOptions::default(),
+            |c| c.read_only = true,
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "a needle here\n").unwrap();
+        s.prompt("find it").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(
+            ok && output.contains("notes.txt:1:a needle here"),
+            "{output}"
+        );
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("notes.txt"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("notes.txt"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("notes.txt"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("read-only"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(!s.cwd.join("nope").exists());
+        let names = tool_names(&s.body(0));
+        assert!(names.contains(&"grep".to_string()));
+        assert!(
+            !names.contains(&"write_file".to_string()) && !names.contains(&"edit_file".to_string())
+        );
+        s.finish().await;
+    }
+
+    #[test]
+    fn shell_expansion_cant_smuggle_a_flag_past_the_check() {
+        for command in [
+            "find . ${x:--delete}",
+            "find . {-delete,}",
+            "git diff ${x:---output=a.rs}",
+            "cat $HOME/.ssh/id_rsa",
+        ] {
+            assert!(!is_safe_command(command), "{command}");
+            assert!(!is_read_only_command(command), "{command}");
+        }
+        assert!(is_safe_command("echo $HOME"));
+        assert!(is_safe_command("find . -name a.rs"));
+    }
+
+    #[tokio::test]
+    async fn the_fourth_cut_off_in_a_row_leaves_the_history_valid() {
+        let cut = || {
+            raw_tool_call(
+                "c",
+                "write_file",
+                r#"{"path":"big.txt","content":"half of"#,
+                "length",
+            )
+        };
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![cut(), cut(), cut(), cut(), openai_text("next one works")],
+        )
+        .await;
+        s.prompt("write it").await;
+        let error = s.turn_complete().await.unwrap();
+        assert!(error.contains("output limit"), "{error}");
+        // The session goes on: what's in history is something a provider can read.
+        s.prompt("smaller then").await;
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(4)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_conversation_the_provider_refuses_goes_on_fresh_once() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call("c1", "bash", json!({ "command": "echo hi" })),
+                (
+                    400,
+                    "{\"error\":{\"message\":\"messages.3: image too large\"}}".into(),
+                ),
+                openai_text("carried on"),
+                openai_text("and the next"),
+            ],
+        )
+        .await;
+        s.prompt("go").await;
+        let notice = s
+            .until(|e| match e {
+                AgentEvent::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .await;
+        assert!(notice.contains("refused the conversation"), "{notice}");
+        assert_eq!(s.turn_complete().await, None);
+        let fresh = s.body(2);
+        assert!(
+            fresh["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("<fresh-context>")
+        );
+        s.prompt("more").await;
+        assert_eq!(s.turn_complete().await, None);
+        s.finish().await;
+    }
+
+    #[test]
+    fn invalid_names_dont_go_back_in_history() {
+        let tools = tool_defs(false, true, false);
+        let mut calls = vec![
+            AccumulatedToolCall {
+                id: "1".into(),
+                name: "repo_browser.print_tree".into(),
+                arguments: "{}".into(),
+            },
+            AccumulatedToolCall {
+                id: "2".into(),
+                name: "".into(),
+                arguments: "{}".into(),
+            },
+        ];
+        let problems = prepare_calls(&mut calls, &tools, false);
+        assert_eq!(calls[0].name, "repo_browser_print_tree");
+        assert_eq!(calls[1].name, "unknown_tool");
+        assert!(
+            problems[0]
+                .as_ref()
+                .unwrap()
+                .contains("repo_browser.print_tree")
+        );
+        assert!(problems[1].as_ref().unwrap().contains("no name"));
+    }
+
+    #[test]
+    fn only_usable_images_go_to_a_provider_and_old_ones_go_away() {
+        let (usable, left_out) = usable_images(vec![
+            ("image/png".into(), "aGk=".into()),
+            ("image/svg+xml".into(), "aGk=".into()),
+            ("image/png".into(), "x".repeat(MAX_TOOL_IMAGE + 1)),
+        ]);
+        assert_eq!(usable.len(), 1);
+        assert_eq!(left_out, 2);
+        let message = tool_images_message(Wire::OpenAiChat, usable, left_out);
+        assert_eq!(message["content"][1]["type"], "image_url");
+        assert!(
+            message["content"][2]["text"]
+                .as_str()
+                .unwrap()
+                .contains("2 more")
+        );
+        let mut history = vec![
+            message,
+            json!({ "role": "user", "content": [{ "type": "text", "text": "mine" }, { "type": "image_url", "image_url": { "url": "x" } }] }),
+        ];
+        forget_old_tool_images(&mut history);
+        assert!(history[0]["content"].as_str().unwrap().contains("removed"));
+        assert!(
+            history[1]["content"].is_array(),
+            "the user's own picture stays"
+        );
+    }
+
+    #[test]
+    fn what_one_model_refused_is_forgotten_for_the_next() {
+        let mut quirks = Quirks {
+            no_tools: true,
+            no_reasoning: true,
+            afford: Some(100),
+            ..Quirks::default()
+        };
+        quirks.seen_ids.insert("a".into());
+        quirks.forget_model();
+        assert!(!quirks.no_tools && !quirks.no_reasoning);
+        assert_eq!(quirks.afford, Some(100));
+        assert!(quirks.seen_ids.contains("a"));
+    }
+
+    #[test]
+    fn a_complaint_about_tool_choice_leaves_the_tools() {
+        let mut quirks = Quirks::default();
+        let mut body = json!({ "tools": [1], "tool_choice": "none", "messages": [] });
+        assert!(quirks.adapt(400, "tool_choice is not supported by this model", &mut body));
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tools").is_some());
+        assert!(!quirks.no_tools);
+    }
+
+    #[test]
+    fn a_provider_that_refuses_its_own_reasoning_stops_getting_it() {
+        let mut quirks = Quirks::default();
+        let mut body = json!({
+            "reasoning_effort": "high",
+            "messages": [{ "role": "assistant", "reasoning_content": "x", "tool_calls": [] }]
+        });
+        let message = "reasoning_content is not allowed here";
+        assert!(quirks.adapt(400, message, &mut body));
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body["messages"][0].get("reasoning_content").is_some());
+        assert!(quirks.adapt(400, message, &mut body));
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+        assert!(quirks.no_reasoning_echo);
+        assert!(!quirks.adapt(400, message, &mut body));
+    }
+
+    #[tokio::test]
+    async fn arguments_sent_as_an_object_are_read() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                (
+                    200,
+                    format!(
+                        "data: {}\n\ndata: [DONE]\n\n",
+                        json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "c", "function": { "name": "read_file", "arguments": { "path": "notes.txt" } } }] }, "finish_reason": "tool_calls" }] })
+                    ),
+                ),
+                openai_text("ok"),
+            ],
+        )
+        .await;
+        std::fs::write(s.cwd.join("notes.txt"), "hello from notes").unwrap();
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("hello from notes"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        s.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reading_something_that_isnt_a_file_says_so_and_doesnt_hang() {
+        let e = LocalExecutor
+            .read(Path::new("/dev/zero"))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("regular file"), "{e}");
+        assert!(
+            LocalExecutor
+                .read(Path::new("/definitely/not/here"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_only_commands_exclude_builds_and_follows() {
+        assert!(is_read_only_command("git status"));
+        assert!(is_read_only_command("ls -la"));
+        assert!(!is_read_only_command("cargo check"));
+        assert!(!is_read_only_command("rm x"));
+        assert!(!is_safe_command("cargo test"));
+        assert!(!is_safe_command("tail -f log"));
+        assert!(is_safe_command("tail -n 5 log"));
+    }
+
+    #[tokio::test]
+    async fn the_same_call_again_and_again_is_warned_about_then_stopped() {
+        let mut script: Vec<(u16, String)> = (0..LoopGuard::STOP_AT)
+            .map(|i| {
+                openai_tool_call(
+                    &format!("call_{i}"),
+                    "read_file",
+                    json!({ "path": "notes.txt" }),
+                )
+            })
+            .collect();
+        script.push(openai_text("I was stuck on notes.txt."));
+        let s = TestSession::start("ollama", HandHolding::FullAccess, script).await;
+        std::fs::write(s.cwd.join("notes.txt"), "same").unwrap();
+        s.prompt("go").await;
+        let notice = s
+            .until(|e| match e {
+                AgentEvent::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .await;
+        assert!(notice.contains("same calls"), "{notice}");
+        assert_eq!(s.turn_complete().await, None);
+        let bodies = s.bodies.lock().unwrap().len();
+        assert_eq!(bodies, LoopGuard::STOP_AT + 1);
+        let messages = s.body(bodies - 1)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        let tool_outputs: Vec<&str> = messages
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .filter_map(|m| m["content"].as_str())
+            .collect();
+        assert!(!tool_outputs[0].contains("same call"));
+        assert!(tool_outputs[LoopGuard::WARN_AT - 1].contains("same call 4 times"));
+        assert_eq!(s.body(bodies - 1)["tool_choice"], "none");
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_servers_tools_are_reached_through_two_small_tools() {
+        let server = crate::McpServer::stdio(
+            "fake",
+            trek_test_fixtures::bin("fake-mcp").display().to_string(),
+            vec!["tools".into()],
+            vec![],
+        );
+        let s = TestSession::start_configured(
+            "anthropic",
+            HandHolding::FullAccess,
+            vec![
+                (200, anthropic_tool("t1", "mcp_list", json!({ "server": "fake" }))),
+                (200, anthropic_tool("t2", "mcp_call", json!({ "server": "fake", "tool": "echo", "arguments": { "text": "hello" } }))),
+                // By its own name, as Trek's notes say to call `watch_video`.
+                (200, anthropic_tool("t3", "picture", json!({}))),
+                (200, ANTHROPIC_TEXT.to_string()),
+            ],
+            DirectOptions::default(),
+            |c| c.mcp_servers = vec![server],
+        )
+        .await;
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("echo"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output == "hello", "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("[image]"), "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        let body = s.body(0);
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"mcp_list") && names.contains(&"mcp_call"),
+            "{names:?}"
+        );
+        assert!(!names.contains(&"echo"), "{names:?}");
+        assert!(
+            body["system"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("MCP servers: fake")
+        );
+        // The picture went to the model.
+        let last = s.body(3);
+        let messages = last["messages"].as_array().unwrap();
+        let parts = messages.last().unwrap()["content"].as_array().unwrap();
+        assert_eq!(parts[1]["type"], "image");
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn read_only_sessions_only_run_tools_that_say_they_only_read() {
+        let server = crate::McpServer::stdio(
+            "fake",
+            trek_test_fixtures::bin("fake-mcp").display().to_string(),
+            vec!["ok".into()],
+            vec![],
+        );
+        let s = TestSession::start_configured(
+            "ollama",
+            HandHolding::Auto,
+            vec![
+                openai_tool_call(
+                    "c1",
+                    "mcp_call",
+                    json!({ "server": "fake", "tool": "echo", "arguments": { "text": "x" } }),
+                ),
+                openai_tool_call(
+                    "c2",
+                    "mcp_call",
+                    json!({ "server": "fake", "tool": "get_time" }),
+                ),
+                openai_text("ok"),
+            ],
+            DirectOptions::default(),
+            |c| {
+                c.read_only = true;
+                c.mcp_servers = vec![server];
+            },
+        )
+        .await;
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(!ok && output.contains("read-only"), "{output}");
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok, "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        s.finish().await;
+    }
+
+    /// Every request carries this, so what it costs is decided here. A weak model does worse with
+    /// a long prompt and a long tool list: docs/PROMPT_BUDGET.md has what each piece is for.
+    #[test]
+    fn the_harness_prompt_stays_small() {
+        let prompt = system_prompt(
+            Path::new("/Users/someone/project"),
+            false,
+            "Today's date: 2026-11-05\nOS: macOS\nShell: bash\nGit branch: main",
+            None,
+            None,
+        );
+        let tools = serde_json::to_string(&tool_defs(false, true, false)).unwrap();
+        let tokens = |text: &str| text.len() / 4;
+        println!(
+            "system {} tools {} mcp {}",
+            tokens(&prompt),
+            tokens(&tools),
+            tokens(&serde_json::to_string(&mcp_tools()).unwrap())
+        );
+        assert!(tokens(&prompt) <= 300, "{}", tokens(&prompt));
+        assert!(tokens(&tools) <= 900, "{}", tokens(&tools));
+    }
+
+    /// Two calls in one answer; the first is declined with a reply, the way the app sends it: the
+    /// "no", then the words. The second doesn't run, and the words reach the model next.
+    #[tokio::test]
+    async fn a_reply_that_declines_a_call_stops_the_rest_of_the_answer() {
+        let two = {
+            let calls = json!([
+                { "index": 0, "id": "c1", "function": { "name": "bash", "arguments": "{\"command\":\"touch first\"}" } },
+                { "index": 1, "id": "c2", "function": { "name": "bash", "arguments": "{\"command\":\"touch second\"}" } }
+            ]);
+            (
+                200,
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({ "choices": [{ "delta": { "tool_calls": calls }, "finish_reason": "tool_calls" }] })
+                ),
+            )
+        };
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::Supervised,
+            vec![two, openai_text("Understood.")],
+        )
+        .await;
+        s.prompt("make two files").await;
+        let request_id = s
+            .until(|e| match e {
+                AgentEvent::PermissionRequest { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .await;
+        s.send(Command::Respond {
+            request_id,
+            decision: Decision::Deny,
+        })
+        .await;
+        s.prompt("no, don't make files").await;
+        let (first, _) = s.tool_finished().await;
+        assert!(first.contains("denied"), "{first}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(!s.cwd.join("second").exists());
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        // Not run either way: skipped when the words were already there, declined by them when
+        // they came while its own card was up.
+        let second = messages
+            .iter()
+            .find(|m| m["tool_call_id"] == "c2")
+            .and_then(|m| m["content"].as_str())
+            .unwrap();
+        assert!(
+            second.contains("declined the call before it") || second.contains("denied"),
+            "{second}"
+        );
+        assert_eq!(messages.last().unwrap()["content"], "no, don't make files");
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_compact_whose_notes_fail_leaves_the_conversation_as_it_was() {
+        let s = TestSession::start_configured(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                openai_text("Hello."),
+                (400, "{\"error\":{\"message\":\"out of credit\"}}".into()),
+                openai_text("Still here."),
+            ],
+            DirectOptions {
+                context_window: Some(40_000),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        s.prompt("hi").await;
+        assert_eq!(s.turn_complete().await, None);
+        s.prompt("/compact").await;
+        let error = s.turn_complete().await.unwrap();
+        assert!(
+            error.contains("Couldn't compact") && error.contains("as it was"),
+            "{error}"
+        );
+        s.prompt("next").await;
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(2)["messages"].as_array().unwrap().clone();
+        assert_eq!(user_texts(&messages), ["hi", "next"]);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn at_auto_a_tool_on_someone_elses_server_that_may_change_things_asks() {
+        let server = crate::McpServer::stdio(
+            "fake",
+            trek_test_fixtures::bin("fake-mcp").display().to_string(),
+            vec!["ok".into()],
+            vec![],
+        );
+        let s = TestSession::start_configured(
+            "ollama",
+            HandHolding::Auto,
+            vec![
+                openai_tool_call(
+                    "c1",
+                    "mcp_call",
+                    json!({ "server": "fake", "tool": "get_time" }),
+                ),
+                openai_tool_call(
+                    "c2",
+                    "mcp_call",
+                    json!({ "server": "fake", "tool": "echo", "arguments": { "text": "x" } }),
+                ),
+                openai_text("ok"),
+            ],
+            DirectOptions::default(),
+            |c| c.mcp_servers = vec![server],
+        )
+        .await;
+        s.prompt("go").await;
+        // A tool that says it only reads: unasked.
+        let (_, ok) = s.tool_finished().await;
+        assert!(ok);
+        // One that doesn't: asked.
+        let request_id = s
+            .until(|e| match e {
+                AgentEvent::PermissionRequest {
+                    request_id, detail, ..
+                } => {
+                    assert!(detail.contains("fake echo"), "{detail}");
+                    Some(request_id.clone())
+                }
+                _ => None,
+            })
+            .await;
+        s.send(Command::Respond {
+            request_id,
+            decision: Decision::Allow,
+        })
+        .await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output == "x", "{output}");
+        assert_eq!(s.turn_complete().await, None);
+        assert!(crate::is_trek_server("trek-browser"));
+        assert!(!crate::is_trek_server("fake"));
+        s.finish().await;
+    }
+
+    #[test]
+    fn calls_that_vary_arent_a_loop() {
+        let mut guard = LoopGuard::default();
+        assert_eq!(guard.record("bash", "a", "x"), 1);
+        assert_eq!(guard.record("bash", "a", "x"), 2);
+        assert_eq!(guard.record("bash", "a", "y"), 1, "a new result");
+        assert_eq!(guard.record("bash", "b", "x"), 1, "new arguments");
+    }
+
+    #[tokio::test]
+    async fn a_promise_with_no_call_is_nudged_once() {
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call("call_1", "bash", json!({ "command": "echo hi" })),
+                openai_text("Now let me fix the failing test:"),
+                openai_tool_call("call_2", "bash", json!({ "command": "echo fixed" })),
+                openai_text("All done. Let me know if you want more."),
+            ],
+        )
+        .await;
+        s.prompt("go").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 4);
+        let messages = s.body(2)["messages"].as_array().unwrap().clone();
+        assert_eq!(messages.last().unwrap()["content"], NUDGE_PROMPT);
+        s.finish().await;
+    }
+
+    #[test]
+    fn promises_are_told_from_endings() {
+        assert!(announces_more("Let me check the file."));
+        assert!(announces_more("Here's what's next:"));
+        assert!(announces_more("Done with that.\n\nI'll now run the tests."));
+        assert!(!announces_more("All done."));
+        assert!(!announces_more("Let me know if you need anything."));
+        assert!(!announces_more(""));
+    }
+
+    #[tokio::test]
+    async fn openrouter_requests_say_what_they_need() {
+        let s = TestSession::start_configured(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![openai_text("hi")],
+            DirectOptions {
+                context_window: Some(100_000),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        s.prompt("hello").await;
+        assert_eq!(s.turn_complete().await, None);
+        let body = s.body(0);
+        assert_eq!(body["provider"]["require_parameters"], true);
+        assert!(
+            body["session_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty() && id.len() <= 256)
+        );
+        // An output limit, so OpenRouter doesn't reserve the model's whole maximum.
+        assert_eq!(body["max_tokens"], 32_000);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert!(body.get("temperature").is_none() && body.get("top_p").is_none());
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn the_session_id_stays_the_same_and_the_prefix_too() {
+        let s = TestSession::start(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call("call_1", "bash", json!({ "command": "echo hi" })),
+                openai_text("hi"),
+            ],
+        )
+        .await;
+        s.prompt("hello").await;
+        assert_eq!(s.turn_complete().await, None);
+        let (a, b) = (s.body(0), s.body(1));
+        assert_eq!(a["session_id"], b["session_id"]);
+        assert_eq!(a["messages"][0], b["messages"][0]);
+        assert_eq!(a["tools"], b["tools"]);
+        s.finish().await;
+    }
+
+    #[test]
+    fn other_providers_get_a_limit_only_when_theirs_is_known() {
+        let provider = |id: &'static str, local: bool| DirectProvider {
+            id,
+            name: "t",
+            base_url: "",
+            wire: Wire::OpenAiChat,
+            env_key: None,
+            local,
+        };
+        let known = ModelCaps {
+            max_output: Some(8_192),
+            ..Default::default()
+        };
+        assert_eq!(
+            output_limit(&provider("groq", false), None, 100_000, 0, false),
+            None
+        );
+        assert_eq!(
+            output_limit(&provider("ollama", true), Some(&known), 100_000, 0, false),
+            None
+        );
+        assert_eq!(
+            output_limit(&provider("groq", false), Some(&known), 100_000, 0, false),
+            Some(8_192)
+        );
+        // What's left of the window, and never so little that nothing can be said.
+        assert_eq!(
+            output_limit(&provider("openrouter", false), None, 100_000, 90_000, false),
+            Some(8_976)
+        );
+        assert_eq!(
+            output_limit(&provider("openrouter", false), None, 100_000, 99_900, false),
+            Some(1_024)
+        );
+    }
+
+    #[tokio::test]
+    async fn too_little_credit_for_the_limit_lowers_the_limit() {
+        let s = TestSession::start(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                (402, "{\"error\":{\"message\":\"You requested up to 32000 tokens, but can only afford 18354\"}}".into()),
+                openai_text("hi"),
+                openai_text("again"),
+            ],
+        )
+        .await;
+        s.prompt("hello").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.body(1)["max_tokens"], 16_519);
+        s.prompt("next").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.body(2)["max_tokens"], 16_519);
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn no_routes_for_the_request_drops_the_routing_rule() {
+        let s = TestSession::start(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                (404, "{\"error\":{\"message\":\"No endpoints found that can handle the requested parameters\"}}".into()),
+                openai_text("hi"),
+            ],
+        )
+        .await;
+        s.prompt("hello").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert!(s.body(1).get("provider").is_none());
+        s.finish().await;
+    }
+
+    #[test]
+    fn reasoning_levels_come_from_what_the_model_offers() {
+        let offers = |efforts: &[&str]| ModelCaps {
+            reasoning: Some(true),
+            efforts: efforts.iter().map(|e| e.to_string()).collect(),
+            ..Default::default()
+        };
+        let flash = offers(&["xhigh", "high", "none"]);
+        let level = |e, c: &ModelCaps| reasoning_level(e, Some(c));
+        assert_eq!(level(Effort::Low, &flash).as_deref(), Some("high"));
+        assert_eq!(level(Effort::Max, &flash).as_deref(), Some("xhigh"));
+        assert_eq!(level(Effort::Off, &flash).as_deref(), Some("none"));
+        let cant_stop = offers(&["low", "high"]);
+        assert_eq!(level(Effort::Off, &cant_stop), None);
+        let none = ModelCaps {
+            reasoning: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(level(Effort::High, &none), None);
+        // Nothing known: the three everyone takes.
+        assert_eq!(reasoning_level(Effort::Max, None).as_deref(), Some("high"));
+        assert_eq!(reasoning_level(Effort::Off, None), None);
+    }
+
+    #[test]
+    fn the_model_list_keeps_what_models_can_do_and_leaves_out_what_cant_use_tools() {
+        let list = json!({ "data": [
+            {
+                "id": "deepseek/deepseek-v4-flash",
+                "name": "DeepSeek V4 Flash",
+                "context_length": 1_048_576,
+                "supported_parameters": ["tools", "reasoning", "max_tokens"],
+                "top_provider": { "max_completion_tokens": 131_072 },
+                "architecture": { "input_modalities": ["text"] },
+                "reasoning": { "supported_efforts": ["xhigh", "high", "none"] }
+            },
+            {
+                "id": "vendor/vision",
+                "supported_parameters": ["tools"],
+                "architecture": { "input_modalities": ["text", "image"] }
+            },
+            {
+                "id": "tencent/no-tools",
+                "supported_parameters": ["max_tokens"]
+            },
+            { "id": "plain" }
+        ]});
+        let models = parse_direct_models(&list);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["deepseek/deepseek-v4-flash", "vendor/vision", "plain"]
+        );
+        let flash = models[0].caps.as_ref().unwrap();
+        assert_eq!(flash.max_output, Some(131_072));
+        assert_eq!(flash.tools, Some(true));
+        assert_eq!(flash.reasoning, Some(true));
+        assert_eq!(flash.images, Some(false));
+        assert_eq!(flash.efforts, ["xhigh", "high", "none"]);
+        let vision = models[1].caps.as_ref().unwrap();
+        assert_eq!(vision.images, Some(true));
+        assert_eq!(vision.reasoning, Some(false));
+        assert_eq!(models[2].caps, None);
+    }
+
+    #[test]
+    fn images_arent_sent_to_a_model_that_cant_see() {
+        let blind = ModelCaps {
+            images: Some(false),
+            ..Default::default()
+        };
+        let path = PathBuf::from("/tmp/a.png");
+        let (message, skipped) = user_message(
+            Wire::OpenAiChat,
+            "look",
+            std::slice::from_ref(&path),
+            Some(&blind),
+        );
+        assert_eq!(message["content"], "look");
+        assert!(skipped[0].contains("can't see images"), "{skipped:?}");
+    }
+
+    #[test]
+    fn reasoning_pieces_are_put_back_together() {
+        let merged = merge_reasoning_details(vec![
+            json!({ "type": "reasoning.text", "index": 0, "text": "one " }),
+            json!({ "type": "reasoning.text", "index": 0, "text": "two", "signature": "sig" }),
+            json!({ "type": "reasoning.encrypted", "index": 1, "data": "abc" }),
+            json!({ "type": "reasoning.encrypted", "index": 1, "data": "def" }),
+            json!({ "type": "reasoning.summary", "summary": "a" }),
+            json!({ "type": "reasoning.summary", "summary": "b" }),
+        ]);
+        assert_eq!(
+            merged,
+            vec![
+                json!({ "type": "reasoning.text", "index": 0, "text": "one two", "signature": "sig" }),
+                json!({ "type": "reasoning.encrypted", "index": 1, "data": "abcdef" }),
+                json!({ "type": "reasoning.summary", "summary": "ab" }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_reasoning_goes_back_in_the_field_it_came_in() {
+        let call = json!({ "index": 0, "id": "c1", "function": { "name": "bash", "arguments": "{\"command\":\"echo hi\"}" } });
+        let s = TestSession::start(
+            "deepseek",
+            HandHolding::FullAccess,
+            vec![
+                (
+                    200,
+                    format!(
+                        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                        json!({ "choices": [{ "delta": { "reasoning_content": "thinking" } }] }),
+                        json!({ "choices": [{ "delta": { "tool_calls": [call] }, "finish_reason": "tool_calls" }] }),
+                    ),
+                ),
+                openai_text("done"),
+            ],
+        )
+        .await;
+        s.prompt("go").await;
+        assert_eq!(s.turn_complete().await, None);
+        let messages = s.body(1)["messages"].as_array().unwrap().clone();
+        assert_eq!(messages[2]["reasoning_content"], "thinking");
+        s.finish().await;
+    }
+
+    #[test]
+    fn deepseek_gets_reasoning_on_every_tool_call_and_empty_messages_go() {
+        let provider = DirectProvider {
+            id: "deepseek",
+            name: "t",
+            base_url: "",
+            wire: Wire::OpenAiChat,
+            env_key: None,
+            local: false,
+        };
+        let agent = AgentId::Direct("deepseek".into());
+        let client = reqwest::Client::new();
+        let history = [
+            json!({ "role": "user", "content": "a" }),
+            json!({ "role": "assistant", "content": "  " }),
+            json!({ "role": "user", "content": "b" }),
+            json!({ "role": "assistant", "content": null, "tool_calls": [{ "id": "x", "type": "function", "function": { "name": "bash", "arguments": "{}" } }] }),
+            json!({ "role": "tool", "tool_call_id": "x", "content": "out" }),
+        ];
+        let body = openai_body(
+            &TurnRequest {
+                client: &client,
+                agent: &agent,
+                provider: &provider,
+                url: "",
+                key: None,
+                model: "deepseek-v4",
+                effort: Effort::High,
+                system: "sys",
+                history: &history,
+                tools: &[],
+                no_tools: false,
+                max_output: None,
+                caps: None,
+                session_id: "s",
+            },
+            &Quirks::default(),
+        );
+        let messages = body["messages"].as_array().unwrap();
+        // Empty assistant message gone, and the two user messages made one.
+        assert_eq!(messages[1]["content"], "a\n\nb");
+        assert_eq!(messages[2]["reasoning_content"], " ");
+        assert_eq!(messages.len(), 4);
+    }
+
+    #[test]
+    fn breakpoints_are_only_for_models_that_use_them() {
+        let provider = DirectProvider {
+            id: "openrouter",
+            name: "t",
+            base_url: "",
+            wire: Wire::OpenAiChat,
+            env_key: None,
+            local: false,
+        };
+        let agent = AgentId::Direct("openrouter".into());
+        let client = reqwest::Client::new();
+        let history = [json!({ "role": "user", "content": "hi" })];
+        let body_for = |model: &'static str| {
+            openai_body(
+                &TurnRequest {
+                    client: &client,
+                    agent: &agent,
+                    provider: &provider,
+                    url: "",
+                    key: None,
+                    model,
+                    effort: Effort::Off,
+                    system: "sys",
+                    history: &history,
+                    tools: &[],
+                    no_tools: false,
+                    max_output: None,
+                    caps: None,
+                    session_id: "s",
+                },
+                &Quirks::default(),
+            )
+        };
+        let claude = body_for("anthropic/claude-sonnet-5");
+        assert_eq!(
+            claude["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            claude["messages"][1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        let other = body_for("deepseek/deepseek-v4-flash");
+        assert_eq!(other["messages"][0]["content"], "sys");
+        assert_eq!(other["messages"][1]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn the_system_prompt_says_where_it_is_and_reads_the_projects_instructions() {
+        let s =
+            TestSession::start("ollama", HandHolding::FullAccess, vec![openai_text("hi")]).await;
+        std::fs::write(s.cwd.join("AGENTS.md"), "Always use tabs.").unwrap();
+        s.prompt("hello").await;
+        assert_eq!(s.turn_complete().await, None);
+        let system = s.body(0)["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            system.contains("Today's date:") && system.contains("OS:"),
+            "{system}"
+        );
+        assert!(system.contains("[exit code N]"), "{system}");
+        // Read when the session starts, which here is before the file was written.
+        s.finish().await;
+
+        let dir = std::env::temp_dir().join(format!("trek_notes_{}", next_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "Always use tabs.").unwrap();
+        std::fs::write(dir.join("CLAUDE.md"), "Not this one.").unwrap();
+        let notes = project_instructions(&LocalExecutor, &dir).await.unwrap();
+        assert!(
+            notes.contains("Always use tabs.") && !notes.contains("Not this one."),
+            "{notes}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_output_is_cut_down_before_the_context_fills() {
+        let big = "x".repeat(60_000);
+        let s = TestSession::start_configured(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                using(
+                    100,
+                    openai_tool_call(
+                        "call_1",
+                        "bash",
+                        json!({ "command": format!("printf '%s' {big}") }),
+                    ),
+                ),
+                using(
+                    100,
+                    openai_tool_call("call_2", "bash", json!({ "command": "echo two" })),
+                ),
+                openai_tool_call(
+                    "call_3",
+                    "bash",
+                    json!({ "command": format!("printf '%s' {}", "y".repeat(40_000)) }),
+                ),
+                openai_tool_call("call_4", "bash", json!({ "command": "echo four" })),
+                openai_text("done"),
+            ],
+            DirectOptions {
+                context_window: Some(30_000),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        s.prompt("go").await;
+        assert_eq!(s.turn_complete().await, None);
+        let last = s.bodies.lock().unwrap().len() - 1;
+        let messages = s.body(last)["messages"].as_array().unwrap().clone();
+        assert_tool_calls_answered(&messages);
+        s.finish().await;
+    }
+
+    #[test]
+    fn eliding_keeps_the_latest_and_doesnt_bother_for_little() {
+        let long = "a ".repeat(20_000);
+        let mut history = vec![
+            json!({ "role": "user", "content": "go" }),
+            json!({ "role": "tool", "tool_call_id": "1", "content": long }),
+            json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "2", "content": "b ".repeat(20_000) }] }),
+            json!({ "role": "tool", "tool_call_id": "3", "content": "c ".repeat(10_000) }),
+        ];
+        assert!(elide_old_outputs(&mut history, 20_000, "m"));
+        let first = history[1]["content"].as_str().unwrap();
+        assert!(
+            first.len() < 1_000 && first.contains("removed to save context"),
+            "{first}"
+        );
+        let second = history[2]["content"][0]["content"].as_str().unwrap();
+        assert!(second.len() < 1_000, "{}", second.len());
+        assert_eq!(
+            history[3]["content"].as_str().unwrap().len(),
+            20_000,
+            "the latest stays"
+        );
+        // Done again, there's nothing left worth changing the cache for.
+        assert!(!elide_old_outputs(&mut history, 20_000, "m"));
+    }
+
+    #[test]
+    fn eliding_leaves_reasoning_some_models_insist_on() {
+        let with_reasoning = || {
+            vec![
+                json!({ "role": "user", "content": "a" }),
+                json!({ "role": "assistant", "content": "x", "reasoning_details": [{ "type": "reasoning.text", "text": "r ".repeat(20_000) }] }),
+                json!({ "role": "user", "content": "b" }),
+            ]
+        };
+        let mut history = with_reasoning();
+        assert!(elide_old_outputs(&mut history, 20_000, "vendor/some-model"));
+        assert!(history[1].get("reasoning_details").is_none());
+        let mut history = with_reasoning();
+        elide_old_outputs(&mut history, 20_000, "deepseek/deepseek-v4-flash");
+        assert!(history[1].get("reasoning_details").is_some());
+    }
+
+    #[test]
+    fn switching_models_drops_the_last_ones_reasoning() {
+        let mut history = vec![
+            json!({ "role": "assistant", "content": null, "reasoning_details": [1], "reasoning_content": "x" }),
+            json!({ "role": "assistant", "content": [{ "type": "thinking", "thinking": "t" }, { "type": "text", "text": "hi" }] }),
+        ];
+        strip_reasoning(&mut history);
+        assert!(history[0].get("reasoning_details").is_none());
+        assert!(history[0].get("reasoning_content").is_none());
+        assert_eq!(history[1]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stop_keeps_the_message_and_what_was_said_of_the_answer() {
+        // The stream starts, then stays open: only a Stop ends it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = bodies.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 65536];
+                loop {
+                    let n = tokio::io::AsyncReadExt::read(&mut socket, &mut buf)
+                        .await
+                        .unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(at) = text.find("\r\n\r\n") {
+                        let length: usize = text
+                            .lines()
+                            .find_map(|l| {
+                                l.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= at + 4 + length {
+                            seen.lock().unwrap().push(text[at + 4..].to_string());
+                            break;
+                        }
+                    }
+                }
+                let first = seen.lock().unwrap().len() == 1;
+                let reply = if first {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"So far \"}}]}\n\n".to_string()
+                } else {
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_string()
+                };
+                let head = if first {
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n".to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        reply.len()
+                    )
+                };
+                tokio::io::AsyncWriteExt::write_all(
+                    &mut socket,
+                    format!("{head}{reply}").as_bytes(),
+                )
+                .await
+                .unwrap();
+                held.push(socket);
+            }
+        });
+        let cwd = std::env::temp_dir().join(format!("trek_test_stop_{}", next_id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = SessionConfig {
+            agent: AgentId::Direct("ollama".into()),
+            cwd: cwd.clone(),
+            model: Some("m".into()),
+            effort: Effort::Off,
+            hand_holding: HandHolding::FullAccess,
+            plan: false,
+            read_only: false,
+            resume: None,
+            resume_at: None,
+            fork: false,
+            recap: None,
+            fast: None,
+            mcp_servers: vec![],
+            instructions: None,
+            read_dirs: vec![],
+            script: false,
+            transcript: None,
+        };
+        let (tx, commands) = async_channel::unbounded();
+        let (events, rx) = async_channel::unbounded();
+        let provider = *direct_provider("ollama").unwrap();
+        let url = format!("http://{addr}");
+        let task = tokio::spawn(async move {
+            session(
+                config,
+                &provider,
+                &url,
+                None,
+                DirectOptions::default(),
+                commands,
+                events,
+            )
+            .await
+        });
+        tx.send(Command::Prompt {
+            text: "first".into(),
+            images: vec![],
+        })
+        .await
+        .unwrap();
+        loop {
+            if matches!(rx.recv().await.unwrap(), AgentEvent::TextDelta(_)) {
+                break;
+            }
+        }
+        tx.send(Command::Interrupt).await.unwrap();
+        loop {
+            if let AgentEvent::TurnComplete { error } = rx.recv().await.unwrap() {
+                assert_eq!(error.as_deref(), Some("Interrupted"));
+                break;
+            }
+        }
+        tx.send(Command::Prompt {
+            text: "second".into(),
+            images: vec![],
+        })
+        .await
+        .unwrap();
+        loop {
+            if let AgentEvent::TurnComplete { error } = rx.recv().await.unwrap() {
+                assert_eq!(error, None);
+                break;
+            }
+        }
+        let second: Value = serde_json::from_str(&bodies.lock().unwrap()[1]).unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["content"], "first");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "So far ");
+        assert_eq!(messages[3]["content"], "second");
+        tx.send(Command::Shutdown).await.unwrap();
+        let _ = task.await;
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[tokio::test]
+    async fn compact_writes_notes_and_starts_fresh_with_nothing_more_to_answer() {
+        let s = TestSession::start_configured(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                openai_text("Hello."),
+                openai_text("Notes: we said hello."),
+                openai_text("Hello again."),
+            ],
+            DirectOptions {
+                context_window: Some(40_000),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        // Nothing to compact yet: no request, and it says so.
+        s.prompt("/compact").await;
+        assert_eq!(s.turn_complete().await, None);
+        assert_eq!(s.bodies.lock().unwrap().len(), 0);
+        s.prompt("hi").await;
+        assert_eq!(s.turn_complete().await, None);
+        s.prompt("/compact").await;
+        let used = s
+            .until(|e| match e {
+                AgentEvent::Context { used, .. } => Some(*used),
+                _ => None,
+            })
+            .await;
+        assert!(used > 0);
+        assert_eq!(s.turn_complete().await, None);
+        let asked = s.body(1);
+        assert_eq!(asked["tool_choice"], "none");
+        // The next message goes alone, with the notes in the system prompt.
+        s.prompt("next").await;
+        assert_eq!(s.turn_complete().await, None);
+        let fresh = s.body(2);
+        let messages = fresh["messages"].as_array().unwrap();
+        assert_eq!(user_texts(messages), ["next"]);
+        let system = messages[0]["content"].as_str().unwrap();
+        assert!(system.contains("Notes: we said hello."), "{system}");
+        assert!(!system.contains("The request you're answering"), "{system}");
+        s.finish().await;
+    }
+
+    #[tokio::test]
+    async fn a_nearly_full_context_writes_notes_for_itself() {
+        let s = TestSession::start_configured(
+            "openrouter",
+            HandHolding::FullAccess,
+            vec![
+                using(
+                    38_000,
+                    openai_tool_call("call_1", "bash", json!({ "command": "echo hi" })),
+                ),
+                using(38_200, openai_text("My notes: fixing the parser in a.rs.")),
+                using(500, openai_text("Carried on.")),
+            ],
+            DirectOptions {
+                context_window: Some(40_000),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        s.prompt("do the work").await;
+        assert_eq!(s.turn_complete().await, None);
+        let asked = s.body(1);
+        assert_eq!(asked["tool_choice"], "none");
+        let asked_messages = asked["messages"].as_array().unwrap();
+        assert_eq!(asked_messages.last().unwrap()["content"], SUMMARY_PROMPT);
+        let fresh = s.body(2);
+        let system = fresh["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            system.contains("My notes: fixing the parser in a.rs."),
+            "{system}"
+        );
+        assert_eq!(
+            user_texts(fresh["messages"].as_array().unwrap()),
+            [CONTINUE_MESSAGE]
+        );
+        s.finish().await;
     }
 }

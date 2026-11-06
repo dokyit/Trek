@@ -40,6 +40,27 @@ a free Apple ID installs only three apps on a phone, so it isn't an app of its o
 Its HTTP parsing tests run on a simulator: `xcodebuild test -project TrekDriver/TrekDriver.xcodeproj
 -scheme TrekDriver -destination 'platform=iOS Simulator,name=iPhone 17'`.
 
+## Live Activity
+
+`ios/TrekActivity` is a WidgetKit extension that draws the thread at work and what waits on you, on
+the Lock Screen and in the Dynamic Island, with Allow and Deny for an approval (`TurnActivities` keeps
+it up to date; `ios/TrekShared` is compiled into both). It has no push: while iOS has the app stopped
+the card can't change, and past its stale date it says when it last heard from the Mac.
+
+An extension needs an app id and a profile of its own, and a free Apple ID counts it as one of its
+three apps. So the `Trek` scheme doesn't depend on it: `scripts/embed-activity.sh` builds it and adds
+it to a built `Trek.app`, and `install-device.sh` and `phone-update.sh` install without it if it won't
+build or the phone refuses (`ACTIVITY=0` leaves it out). In a simulator:
+
+```sh
+sh ios/scripts/embed-activity.sh /tmp/trek-ios-dd/Build/Products/Debug-iphonesimulator/Trek.app /tmp/trek-ios-dd \
+  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO
+```
+
+`-TrekDemoAsk YES` makes the demo Mac ask for something harmless, for Allow and Deny;
+`-TrekDemoCutShort YES` (`waiting`, `failed`, `failing`) gives it a turn cut off when Trek closed, on
+`t-worktree`.
+
 ## Demo mode
 
 Tap **Explore the demo** on the pairing screen (or launch with `-TrekDemo YES`). `MockHost` plays a
@@ -55,6 +76,8 @@ with `-TrekSheet background-output` its output open from the strip), `-TrekTab b
 out a chat folder's branch: `t-chat`, `t-waiting`; `t-quiz` asks five questions at once),
 `-TrekDemoPC YES` (a second demo machine, a Windows PC), `-TrekDemoRelease newer` (the update card),
 `-TrekDemoOffline demo-pc` (debug builds: that machine can't be reached, its banner over the threads),
+`-TrekDemoConnection identity|refused|connecting|offline` (debug builds: the demo Mac's own banner),
+`-TrekDemoEmpty none|quiet` (a Mac with no threads and no notes, or with everything settled),
 `-TrekGallery YES` (debug builds: chips, tables, status pills, the hiker and the effort picker on
 one page), `-TrekExpand YES` (open all tool groups), `-TrekReset YES` (forget
 the paired Mac), `-TrekLink '<trek://pair… link>'` (open the pairing confirmation for it).
@@ -65,7 +88,9 @@ the paired Mac), `-TrekLink '<trek://pair… link>'` (open the pairing confirmat
 Measuring the transcript's scrolling: `-TrekBigThread 5000` adds a long thread (`t-big`), as uneven
 as a real one with `-TrekBigRich YES`; `-TrekFixture <path>` serves a real thread's items as
 `t-fixture` (exported read-only by `ios/scripts/export-thread.py`; a relative path is in the app's
-own folder); `-TrekScrollProbe YES` logs each frame to `Library/Caches/scroll-probe.tsv`, and
+own folder); `-TrekDemoStream YES` writes long answers into the opened thread, one after another
+(`ios/scripts/stream-run.sh` measures the list while it does, through Trek Driver);
+`-TrekScrollProbe YES` logs each frame to `Library/Caches/scroll-probe.tsv`, and
 `-TrekAutoScroll <n>` (debug builds) scrolls up by itself, for an iPhone where swipes can't be
 scripted. `ios/scripts/scroll-run.sh` swipes up a simulator with AXe, recording it, and
 `ios/scripts/scroll-probe.py` reads the probe for jumps and blank frames.

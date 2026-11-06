@@ -11,6 +11,7 @@ use super::{Device, Family, SimulatorPanel, pretty_runtime, run_simctl};
 use crate::assets::Lucide;
 use crate::composer::look;
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::WorkspaceEvent;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::Confirm as Enter;
@@ -664,10 +665,15 @@ impl SimulatorPanel {
             .px_6()
             .gap_2()
             .text_center()
-            .child(div().text_sm().font_medium().child("No simulators yet"))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::LABEL))
+                    .font_medium()
+                    .child("No simulators yet"),
+            )
+            .child(
+                div()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .child("Add an iPhone, an iPad or any device Xcode has a runtime for."),
             )
@@ -727,12 +733,15 @@ pub(super) fn menu_entries(
 // Pieces of both sheets
 
 fn title(text: &'static str) -> Div {
-    div().text_size(px(16.)).font_semibold().child(text)
+    div()
+        .text_size(px(text::HEADING))
+        .font_semibold()
+        .child(text)
 }
 
 fn note(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .line_height(relative(1.5))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
@@ -740,7 +749,7 @@ fn note(text: impl Into<SharedString>, cx: &App) -> Div {
 
 fn label(text: &'static str, cx: &App) -> Div {
     div()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .text_color(cx.theme().muted_foreground)
         .child(text)
 }
@@ -750,7 +759,7 @@ fn error_line(id: &'static str, text: String, cx: &App) -> AnyElement {
         .id(id)
         .test_support()
         .gap(px(6.))
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .text_color(crate::palette::red(cx))
         .child(Icon::new(IconName::CircleAlert).xsmall())
         .child(div().flex_1().min_w_0().child(text))
@@ -762,7 +771,7 @@ fn list_card(id: &'static str, cx: &App) -> Stateful<Div> {
     v_flex()
         .id(id)
         .p(px(4.))
-        .rounded(px(fluent::surface(12.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .border_1()
         .border_color(look::hairline(cx))
         .bg(look::card_fill(cx))
@@ -974,7 +983,7 @@ impl AddSheet {
             )
         } else {
             div()
-                .text_size(px(13.))
+                .text_size(px(text::BODY))
                 .child(runtimes.first().map(|r| r.name.clone()).unwrap_or_default())
                 .into_any_element()
         };
@@ -1039,12 +1048,12 @@ impl AddSheet {
             .test_support()
             .p(px(14.))
             .gap(px(8.))
-            .rounded(px(fluent::surface(12.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .bg(look::chip_fill(cx))
             .child(
                 h_flex()
                     .gap(px(8.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .child(
                         Icon::new(Lucide::Download)
                             .small()
@@ -1068,12 +1077,12 @@ impl AddSheet {
                 div()
                     .px(px(8.))
                     .py(px(5.))
-                    .rounded(px(fluent::control(7.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .bg(look::card_fill(cx))
                     .border_1()
                     .border_color(look::hairline(cx))
                     .font_family(theme.mono_font_family.clone())
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .child(platform.download_command()),
             )
             .when(downloading, |el| {
@@ -1353,7 +1362,7 @@ impl ManageSheet {
         let udid = d.udid.clone();
         let state = h_flex()
             .gap(px(5.))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(muted)
             .child(d.runtime.clone())
             .child("·")
@@ -1374,7 +1383,7 @@ impl ManageSheet {
                 .child(Input::new(input).small())
                 .into_any_element(),
             None => div()
-                .text_size(px(13.))
+                .text_size(px(text::BODY))
                 .truncate()
                 .child(d.name.clone())
                 .into_any_element(),
@@ -1382,7 +1391,7 @@ impl ManageSheet {
         let actions: AnyElement = if let Some(label) = pending {
             h_flex()
                 .gap(px(6.))
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(muted)
                 .child(Spinner::new().xsmall())
                 .child(label)
@@ -1549,7 +1558,7 @@ impl ManageSheet {
             .test_support()
             .px(px(9.))
             .py(px(6.))
-            .rounded(px(fluent::control(7.)))
+            .rounded(px(fluent::control(radius::BUTTON)))
             .when(confirming.is_some(), |el| el.bg(fill))
             .hover(move |s| s.bg(fill))
             .child(
@@ -1602,7 +1611,7 @@ impl Render for ManageSheet {
                     .px(px(9.))
                     .pt(px(6.))
                     .pb(px(2.))
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .font_medium()
                     .text_color(theme.muted_foreground)
                     .child(family.label()),

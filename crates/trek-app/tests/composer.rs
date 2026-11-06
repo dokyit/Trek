@@ -267,6 +267,7 @@ fn a_models_own_efforts_replace_the_shared_ones() {
                 tier: 0,
                 fast: None,
                 context: None,
+                caps: None,
             };
             ws.acp_info.insert(
                 "opencode".into(),

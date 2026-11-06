@@ -16,6 +16,7 @@ pub mod terminal;
 pub mod terminal_links;
 
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use crate::workspace::{PanelTool, Workspace};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -56,7 +57,7 @@ pub fn empty(text: impl Into<SharedString>, cx: &App) -> Div {
         .items_center()
         .justify_center()
         .px_6()
-        .text_sm()
+        .text_size(to_rems(text::LABEL))
         .text_center()
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
@@ -164,6 +165,7 @@ impl RightPanel {
                 return;
             }
         }
+        crate::privacy::count_tool(tool);
         let ws = self.workspace.clone();
         let view = match tool {
             PanelTool::Git => View::Git(cx.new(|cx| git::GitPanel::new(ws, window, cx))),
@@ -227,7 +229,10 @@ impl RightPanel {
             view: View::Git(g), ..
         }) = self.active_tab()
         {
-            g.update(cx, |g, cx| g.show_turn(thread, end, path, cx));
+            g.update(cx, |g, cx| {
+                g.show_turn(thread, end, path, cx);
+                g.focus_diff(window, cx);
+            });
         }
     }
 
@@ -436,6 +441,15 @@ impl RightPanel {
         }
     }
 
+    /// The Git tool, while it's the tab on show.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn git_panel(&self) -> Option<Entity<git::GitPanel>> {
+        match self.active_tab().map(|t| &t.view) {
+            Some(View::Git(g)) => Some(g.clone()),
+            _ => None,
+        }
+    }
+
     /// The Git tool's diff scroll offset, while it's the tab on show.
     #[cfg(any(test, feature = "test-support"))]
     pub fn git_diff_offset(&self, cx: &App) -> Option<Point<Pixels>> {
@@ -506,9 +520,9 @@ impl RightPanel {
                     .gap(px(12.))
                     .px(px(14.))
                     .h(px(34.))
-                    .rounded(px(fluent::control(10.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .cursor_pointer()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .hover(|s| s.bg(theme.foreground.opacity(0.08)))
                     .child(tool_icon(tool).small().text_color(theme.muted_foreground))
                     .child(tool.label())
@@ -534,7 +548,7 @@ impl RightPanel {
                 .gap(px(10.))
                 .px(px(10.))
                 .py(px(9.))
-                .rounded(px(fluent::control(10.)))
+                .rounded(px(fluent::control(radius::BUTTON)))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.foreground.opacity(0.06)))
                 .child(
@@ -544,7 +558,7 @@ impl RightPanel {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(fluent::control(7.)))
+                        .rounded(px(fluent::control(radius::BUTTON)))
                         .bg(theme.foreground.opacity(0.06))
                         .child(tool_icon(tool).small().text_color(theme.muted_foreground)),
                 )
@@ -554,14 +568,14 @@ impl RightPanel {
                         .gap(px(1.))
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(to_rems(text::LABEL))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground)
                                 .child(tool.label()),
                         )
                         .child(
                             div()
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(theme.muted_foreground)
                                 .child(tool_blurb(tool)),
                         ),
@@ -583,7 +597,7 @@ impl RightPanel {
                     .child(
                         div()
                             .px(px(10.))
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child("Open a tool"),
                     )
@@ -640,10 +654,10 @@ impl Render for RightPanel {
                     .pl(px(if icon_only { 8. } else { 10. }))
                     .pr(px(if icon_only { 8. } else { 4. }))
                     .gap(px(6.))
-                    .rounded(px(fluent::control(8.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .flex_none()
                     .cursor_pointer()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .when(is_active, |el| el.bg(theme.foreground.opacity(0.08)))
                     .when(!is_active, |el| {
                         el.text_color(theme.muted_foreground)
@@ -664,7 +678,7 @@ impl Render for RightPanel {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded(px(4.))
+                                .rounded(px(radius::TAG))
                                 .when(!is_active, |el| {
                                     el.invisible().group_hover("panel-tab", |s| s.visible())
                                 })

@@ -47,7 +47,7 @@ struct CodeBlockView: View {
             .padding(.leading, 12)
             .padding(.trailing, 4)
             Rectangle().fill(Trek.border).frame(height: 0.5)
-            ScrollView(.horizontal, showsIndicators: false) {
+            SidewaysScroll {
                 Text(code)
                     .scaledFont(size * 0.8, design: .monospaced)
                     .foregroundStyle(Trek.foreground)

@@ -5,6 +5,7 @@
 use super::IdeWorkbench;
 use crate::fluent::PillExt as _;
 use crate::panels::terminal::{Job, TerminalPanel, TitleChanged};
+use crate::scale::{radius, text};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -266,7 +267,7 @@ impl IdeWorkbench {
                     .gap(px(5.))
                     .items_center()
                     .cursor_pointer()
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(if on {
                         theme.foreground
@@ -281,7 +282,7 @@ impl IdeWorkbench {
                                 .px(px(5.))
                                 .rounded_pill()
                                 .bg(theme.foreground.opacity(0.1))
-                                .text_size(px(10.))
+                                .text_size(px(text::META))
                                 .child(count.to_string()),
                         )
                     })
@@ -396,7 +397,7 @@ impl IdeWorkbench {
                                 .h(px(24.))
                                 .px(px(10.))
                                 .gap(px(6.))
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .cursor_pointer()
                                 .when(on, |el| el.bg(theme.list_active))
                                 .when(!on, |el| {
@@ -464,12 +465,12 @@ impl IdeWorkbench {
                     .h(px(22.))
                     .px(px(12.))
                     .gap(px(6.))
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .child(crate::file_icon::badge(&name, px(13.), cx))
                     .child(name)
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .child(dir),
                     )
@@ -478,7 +479,7 @@ impl IdeWorkbench {
                             .px(px(5.))
                             .rounded_pill()
                             .bg(theme.foreground.opacity(0.08))
-                            .text_size(px(10.))
+                            .text_size(px(text::META))
                             .child(diags.len().to_string()),
                     ),
             );
@@ -505,7 +506,7 @@ impl IdeWorkbench {
                             .pl(px(32.))
                             .pr(px(12.))
                             .gap(px(8.))
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.list_hover))
                             .child(Icon::new(icon).size(px(13.)).text_color(color))
@@ -517,7 +518,7 @@ impl IdeWorkbench {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.5))
+                                    .text_size(px(text::LABEL))
                                     .text_color(theme.muted_foreground)
                                     .child(format!("[Ln {line}, Col {col}]")),
                             )
@@ -530,8 +531,8 @@ impl IdeWorkbench {
                                     .px(px(7.))
                                     .gap(px(4.))
                                     .items_center()
-                                    .rounded(px(4.))
-                                    .text_size(px(11.5))
+                                    .rounded(px(radius::TAG))
+                                    .text_size(px(text::LABEL))
                                     .text_color(theme.muted_foreground)
                                     .group_hover(group, |s| s.text_color(ember))
                                     .hover(|s| s.bg(ember.opacity(0.12)))
@@ -706,7 +707,7 @@ impl IdeWorkbench {
                     .min_h_0()
                     .px(px(14.))
                     .py(px(4.))
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .child(body),
             )
             .into_any_element()
@@ -750,7 +751,7 @@ impl IdeWorkbench {
                         .h(px(26.))
                         .px(px(12.))
                         .gap(px(8.))
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .hover(|s| s.bg(theme.list_hover))
                         .child(
                             gpui_kit::component::spinner::Spinner::new()

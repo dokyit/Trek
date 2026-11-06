@@ -15,7 +15,7 @@
 //! `send <prompt>`, `attach <image>` (into the main composer's outbox), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
 //! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
-//! `range today|week|all` (Basecamp's), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
+//! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
 //! `editor on|off|root|view|panel|chat|ai|open …` (Trek IDE; see `run`), `terminal feed <text>|link <n>`
@@ -60,7 +60,8 @@
 //! timer, `lag_`), `perf scroll <element id> <px> <steps> <label>`
 //! (a wheel step of `px` over that element each 60 Hz frame, each step timed to its paint),
 //! `perf type <count> <label>` (`count` characters typed one at a time into the focused field,
-//! each timed to its paint) and `perf mark <label>`.
+//! each timed to its paint), `perf open <title>` (the thread with this in its title opens: until its
+//! history is loaded, and the frame that shows it) and `perf mark <label>`.
 //! Lines starting with `#` are comments.
 
 use crate::workspace::{PanelTool, Route, SettingsPage, Workspace};
@@ -83,11 +84,16 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     // Weak between batches: this loop outlives the app's own wind-down, and a handle it held
     // would be one left when GPUI drops its entities (the leak detector panics on that).
     let workspace = workspace.downgrade();
+    // Idle measurements look for commands less often, to count Trek's wakeups and not these.
+    let poll = std::env::var("TREK_SHOT_POLL_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(300);
     cx.spawn(async move |cx| {
         let mut recording: Option<Recording> = None;
         loop {
             cx.background_executor()
-                .timer(Duration::from_millis(300))
+                .timer(Duration::from_millis(poll))
                 .await;
             let cmd = dir.join("cmd");
             let Ok(text) = std::fs::read_to_string(&cmd) else {
@@ -1131,8 +1137,67 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                 ms(latency.iter().sum::<Duration>() / latency.len().max(1) as u32)
             );
         }
+        // The thread with this in its title opens, as a click on it does: how long until its
+        // history is in memory, and until the frame showing it is painted.
+        Some("open") => {
+            let wanted = args[1..].join(" ").to_lowercase();
+            let began = Instant::now();
+            let id = cx.update(|cx| {
+                ws.update(cx, |ws, cx| {
+                    let id = ws
+                        .threads
+                        .iter()
+                        .find(|t| t.title.to_lowercase().contains(&wanted))
+                        .map(|t| t.id.clone())?;
+                    ws.navigate(Route::Thread(id.clone()), cx);
+                    Some(id)
+                })
+            });
+            let id = id.ok_or_else(|| anyhow::anyhow!("perf open: no title has {wanted:?}"))?;
+            let items = loop {
+                let loaded = cx.update(|cx| {
+                    let ws = ws.read(cx);
+                    let live = ws.live.get(&id).filter(|l| l.loaded);
+                    live.map(|l| l.items.len())
+                });
+                if let Some(items) = loaded {
+                    break items;
+                }
+                anyhow::ensure!(
+                    began.elapsed() < Duration::from_secs(120),
+                    "perf open: its history didn't load"
+                );
+                cx.background_executor()
+                    .timer(Duration::from_millis(1))
+                    .await;
+            };
+            let loaded = began.elapsed();
+            let (tx, rx) = crate::perf::next_frame();
+            let frame = painted_within(tx, rx, Duration::from_secs(5), cx).await;
+            tracing::info!(
+                "perf: open items={items} loaded={} painted={}",
+                ms(loaded),
+                ms(frame.map_or(began.elapsed(), |f| f
+                    .painted
+                    .saturating_duration_since(began)))
+            );
+        }
+        // Above other apps' windows, without the keyboard: macOS takes a moment to say whether
+        // it's visible, and the display link runs only if it is.
+        Some("front") => {
+            main.update(cx, |_, window, _| {
+                crate::system::order_front_quietly(window)
+            })?;
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let visible = main.update(cx, |_, window, _| {
+                crate::system::order_front_quietly(window)
+            })?;
+            tracing::info!("perf: front visible={visible}");
+        }
         _ => anyhow::bail!(
-            "perf frames <ms> <label> | scroll <element id> <px> <steps> <label> | type <count> <label> | mark <label>"
+            "perf frames <ms> <label> | scroll <element id> <px> <steps> <label> | type <count> <label> | open <title> | front | mark <label>"
         ),
     }
     Ok(())
@@ -1166,6 +1231,10 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     // bar icon drive it.
     if verb == "background-use" {
         let b = ws.read(cx).background_use.clone();
+        if arg == "stop" {
+            crate::background_use::BackgroundUse::stop_current(&b, cx);
+            return Ok(());
+        }
         return b.update(cx, |b, cx| {
             match arg {
                 "fold" => b.set_folded(true, cx),
@@ -1174,10 +1243,15 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 "show" => b.show(cx),
                 "toggle" => b.toggle(cx),
                 "next" => b.next(cx),
-                _ => anyhow::bail!("background-use fold|unfold|hide|show|toggle|next"),
+                _ => anyhow::bail!("background-use fold|unfold|hide|show|toggle|next|stop"),
             }
             Ok(())
         });
+    }
+    if verb == "accounts-demo" {
+        usage_demo(ws, cx);
+        accounts_demo(ws, cx);
+        return Ok(());
     }
     if verb == "usage-demo" {
         usage_demo(ws, cx);
@@ -1187,9 +1261,31 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         limits_demo(ws, cx);
         return Ok(());
     }
+    if verb == "compact-demo" {
+        compact_demo(ws, cx);
+        return Ok(());
+    }
+    if verb == "update-demo" {
+        return update_demo(ws, arg, cx);
+    }
+    if verb == "resume-demo" {
+        return resume_demo(ws, arg, cx);
+    }
+    if verb == "secret-demo" {
+        return secret_demo(ws, cx);
+    }
+    if verb == "privacy-demo" {
+        return privacy_demo(ws, arg, cx);
+    }
     if verb == "pr-demo" {
         pr_demo(ws, arg, cx);
         return Ok(());
+    }
+    if verb == "import-demo" {
+        return import_demo(ws, cx);
+    }
+    if verb == "checks-demo" {
+        return checks_demo(ws, arg, cx);
     }
     if verb == "toast" {
         anyhow::ensure!(!arg.is_empty(), "toast [undo|error] <message>");
@@ -2212,6 +2308,50 @@ fn usage_demo(ws: &Entity<Workspace>, cx: &mut App) {
     });
 }
 
+/// `accounts-demo`: `usage-demo`, and a second account of Claude Code and of Codex: one signed in
+/// with its windows, one not signed in. The mock agent gets a signed-in one too, so a thread can
+/// be moved between them. No real agent is asked.
+fn accounts_demo(ws: &Entity<Workspace>, cx: &mut App) {
+    use trek_agents::{AgentStatus, UsageLimit};
+    use trek_core::AgentId;
+    ws.update(cx, |ws, cx| {
+        let now = ws.now();
+        let limit = |label: &str, window: &str, percent: f32, hours: i64| UsageLimit {
+            label: label.into(),
+            percent,
+            resets_at: Some(now + hours * 3_600_000 + 1_380_000),
+            window: window.into(),
+        };
+        let mock = AgentId::Direct("mock".into());
+        for (agent, label, signed_in) in [
+            (AgentId::ClaudeCode, "Work", true),
+            (AgentId::Codex, "Personal", false),
+            (mock.clone(), "Work", true),
+        ] {
+            let Some(id) = ws.add_account(&agent, cx) else {
+                continue;
+            };
+            ws.rename_account(&id, label, cx);
+            if signed_in {
+                ws.accounts.status.insert(
+                    id,
+                    AgentStatus {
+                        account: Some("work@example.com".into()),
+                        plan: Some("Claude Pro".into()),
+                        logged_in: true,
+                        limits: vec![
+                            limit("5-hour limit", "5h", 8., 4),
+                            limit("Weekly limit", "7d", 22., 96),
+                        ],
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        cx.notify();
+    });
+}
+
 /// `pr-demo <state>`: a PR/release card with made-up contents appended to the thread on
 /// screen (`pr_card::demo`), so its states can be shot without a real `gh`. States: open,
 /// creating, pushing, opening, fetching, checking, conflicted, resolving, resolved, ready,
@@ -2252,6 +2392,468 @@ fn pr_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) {
             appended: false,
         });
         // The composer's status chip reads the newest card: redraw it too.
+        cx.notify();
+    });
+}
+
+/// `import-demo`: a made-up home folder in the disposable data folder, with what Conductor and T3
+/// Code leave on disk (real git worktrees, a database with Conductor's tables, Claude Code
+/// sessions), which Settings › Import Threads and onboarding then offer. Bringing it over runs the
+/// real thing, on that folder alone.
+fn import_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
+    use trek_core::worktree::git;
+    let home = trek_core::paths::data_dir().join("import-demo");
+    if home.exists() {
+        std::fs::remove_dir_all(&home)?;
+    }
+    let repo = |name: &str| -> anyhow::Result<std::path::PathBuf> {
+        let path = home.join("code").join(name);
+        std::fs::create_dir_all(&path)?;
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "demo@example.com"],
+            &["config", "user.name", "Demo"],
+            &["commit", "-q", "--allow-empty", "-m", "First"],
+        ] {
+            git(&path, args)?;
+        }
+        Ok(path)
+    };
+    let worktree =
+        |repo: &std::path::Path, at: &str, branch: &str| -> anyhow::Result<std::path::PathBuf> {
+            let path = home.join(at);
+            std::fs::create_dir_all(path.parent().unwrap_or(&home))?;
+            git(
+                repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    branch,
+                    &path.to_string_lossy(),
+                ],
+            )?;
+            Ok(std::fs::canonicalize(&path)?)
+        };
+    let session = |id: &str, cwd: &std::path::Path, title: &str| -> anyhow::Result<()> {
+        let name: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let folder = home.join(".claude/projects").join(name);
+        std::fs::create_dir_all(&folder)?;
+        let line = |role: &str, text: &str| {
+            serde_json::json!({
+                "type": role, "cwd": cwd, "sessionId": id, "entrypoint": "cli",
+                "uuid": uuid::Uuid::now_v7().to_string(),
+                "timestamp": "2026-11-03T09:30:00Z",
+                "message": { "role": role, "content": text },
+            })
+            .to_string()
+        };
+        std::fs::write(
+            folder.join(format!("{id}.jsonl")),
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                line("user", title),
+                line("assistant", "Done."),
+                line("user", "And the tests"),
+                line("assistant", "They pass."),
+            ),
+        )?;
+        Ok(())
+    };
+    let acme = repo("acme-web")?;
+    let api = repo("billing-api")?;
+    let kyoto = worktree(
+        &acme,
+        "conductor/workspaces/acme-web/kyoto",
+        "tobias/refresh-tokens",
+    )?;
+    let osaka = worktree(
+        &acme,
+        "conductor/workspaces/acme-web/osaka",
+        "tobias/nav-tidy",
+    )?;
+    worktree(
+        &acme,
+        "conductor/workspaces/acme-web/nara",
+        "tobias/onboarding-copy",
+    )?;
+    let lima = worktree(
+        &api,
+        "conductor/workspaces/billing-api/lima",
+        "tobias/invoice-export",
+    )?;
+    session(
+        "9a1f6f3e-0b6f-4a9e-8d11-1a2b3c4d5e01",
+        &kyoto,
+        "Refresh the login token before it expires",
+    )?;
+    session(
+        "9a1f6f3e-0b6f-4a9e-8d11-1a2b3c4d5e02",
+        &kyoto,
+        "Add a test for the expired token path",
+    )?;
+    session(
+        "9a1f6f3e-0b6f-4a9e-8d11-1a2b3c4d5e03",
+        &lima,
+        "Export invoices as CSV",
+    )?;
+    session(
+        "9a1f6f3e-0b6f-4a9e-8d11-1a2b3c4d5e04",
+        &osaka,
+        "Tidy the navigation",
+    )?;
+    let db = trek_core::import::worktree_apps::conductor_db(&home);
+    std::fs::create_dir_all(db.parent().unwrap_or(&home))?;
+    let sql = format!(
+        "CREATE TABLE repos (id TEXT, name TEXT, default_branch TEXT, root_path TEXT, storage_version INTEGER);
+         CREATE TABLE workspaces (repository_id TEXT, directory_name TEXT, branch TEXT, state TEXT, pr_title TEXT, workspace_name TEXT, intended_target_branch TEXT, hosting_server_url TEXT);
+         CREATE TABLE sessions (agent_type TEXT, claude_session_id TEXT, is_hidden INTEGER);
+         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO repos VALUES ('a', 'acme-web', 'main', '{}', 3), ('b', 'billing-api', 'main', '{}', 3);
+         INSERT INTO workspaces VALUES
+           ('a', 'kyoto', 'tobias/refresh-tokens', 'ready', 'Refresh login tokens', NULL, 'main', NULL),
+           ('a', 'nara', 'tobias/onboarding-copy', 'ready', NULL, 'Rewrite the onboarding copy', 'main', NULL),
+           ('a', 'kobe', 'tobias/old-thing', 'archived', NULL, NULL, 'main', NULL),
+           ('b', 'tokyo', 'tobias/cloud', 'ready', NULL, NULL, 'main', 'https://cloud.example');
+         INSERT INTO sessions VALUES ('cursor', 'c1', 0);",
+        acme.display(),
+        api.display(),
+    );
+    let made = trek_core::procs::command("sqlite3")
+        .arg(&db)
+        .arg(sql)
+        .output()?;
+    anyhow::ensure!(
+        made.status.success(),
+        "sqlite3: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let t3 = repo("notes-app")?;
+    worktree(
+        &t3,
+        ".t3/worktrees/notes-app/calm-river",
+        "t3code/calm-river",
+    )?;
+    // As git writes it, so paths under it read as `~/…`.
+    let home = std::fs::canonicalize(&home)?;
+    ws.update(cx, |ws, cx| {
+        ws.worktree_apps.fixture_home = Some(home);
+        ws.worktree_apps.plans.clear();
+        ws.scan_worktree_apps(cx);
+    });
+    Ok(())
+}
+
+/// `checks-demo <state>`: the thread on screen has a pull request whose checks say `state`, from a
+/// made-up `gh` in the disposable data folder, so the real look, the row, the bar, the card and
+/// Send to agent can be seen with nothing going to GitHub. States: failed, failed-more (another
+/// check fails on the commit), again (a new commit fails, each time), pending, passing, auto (the project
+/// sends by itself), off (it doesn't), offline.
+fn checks_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
+    let dir = trek_core::paths::data_dir().join("checks-demo");
+    std::fs::create_dir_all(&dir)?;
+    let gh = dir.join("gh");
+    let arg = arg.trim();
+    // A new commit each time `again` is asked for: each is a failure of its own.
+    let fresh = format!("{:07x}", crate::pr_card::now_ms() % 0x0fff_ffff);
+    let oid_after = if arg == "again" {
+        fresh.as_str()
+    } else {
+        "c0ffee0"
+    };
+    let check = |name: &str, conclusion: &str, job: u32| {
+        serde_json::json!({
+            "__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion,
+            "detailsUrl": format!("https://github.com/acme/web/actions/runs/1001/job/{job}"),
+        })
+    };
+    let running = serde_json::json!({
+        "__typename": "CheckRun", "name": "test (macos)", "status": "IN_PROGRESS", "conclusion": "",
+        "detailsUrl": "https://github.com/acme/web/actions/runs/1002/job/3",
+    });
+    let (oid, checks) = match arg {
+        "failed-more" => (
+            "abc1234",
+            vec![
+                check("clippy", "FAILURE", 1),
+                check("test (macos)", "FAILURE", 2),
+            ],
+        ),
+        "again" => (
+            oid_after,
+            vec![
+                check("clippy", "FAILURE", 1),
+                check("test (macos)", "SUCCESS", 2),
+            ],
+        ),
+        "pending" => (oid_after, vec![running]),
+        "passing" => (
+            oid_after,
+            vec![
+                check("clippy", "SUCCESS", 1),
+                check("test (macos)", "SUCCESS", 2),
+            ],
+        ),
+        _ => (
+            "abc1234",
+            vec![
+                check("clippy", "FAILURE", 1),
+                check("test (macos)", "SUCCESS", 2),
+            ],
+        ),
+    };
+    let view = serde_json::json!({
+        "number": 128, "title": "Refresh sessions in the auth middleware",
+        "url": "https://github.com/acme/web/pull/128", "state": "OPEN",
+        "mergeable": "MERGEABLE", "mergeStateStatus": "UNSTABLE",
+        "headRefName": "feat/refresh-sessions", "baseRefName": "main", "headRefOid": oid,
+        "additions": 42, "deletions": 7, "statusCheckRollup": checks,
+        "commits": [],
+    });
+    std::fs::write(dir.join("view.json"), view.to_string())?;
+    std::fs::write(
+        dir.join("log.txt"),
+        "clippy\tRun clippy\t2026-11-05T10:00:00.1234567Z ##[group]Run cargo clippy -- -D warnings\n         clippy\tRun clippy\t2026-11-05T10:00:41.1234567Z error: this `if` has identical blocks\n         clippy\tRun clippy\t2026-11-05T10:00:41.2234567Z   --> crates/auth/src/session.rs:88:5\n         clippy\tRun clippy\t2026-11-05T10:00:41.3234567Z error: could not compile `auth` (lib)\n         clippy\tRun clippy\t2026-11-05T10:00:41.4234567Z ##[error]Process completed with exit code 101.\n",
+    )?;
+    std::fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\ndir='{}'\nif [ -e \"$dir/offline\" ]; then echo 'error connecting to api.github.com' >&2; exit 1; fi\ncase \"$1 $2\" in\n  'pr view') cat \"$dir/view.json\" ;;\n  'run view') cat \"$dir/log.txt\" ;;\n  'api rate_limit') echo '{{\"resources\":{{\"graphql\":{{\"limit\":5000,\"remaining\":4900,\"reset\":9999999999}},\"core\":{{\"limit\":5000,\"remaining\":4900,\"reset\":9999999999}}}}}}' ;;\nesac\n",
+            dir.display()
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let offline = dir.join("offline");
+    if arg == "offline" {
+        std::fs::write(&offline, "")?;
+    } else {
+        let _ = std::fs::remove_file(&offline);
+    }
+    ws.update(cx, |ws, cx| {
+        ws.pr_checks.set_gh_path(Some(gh.clone()));
+        let Some(id) = ws
+            .thread_id_in(&crate::workspace::Scope::Main)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        if matches!(arg, "auto" | "off") {
+            if let Some(project) = ws.thread(&id).and_then(|t| ws.project_dir(t)) {
+                ws.update_project_prefs(&project, |p| p.send_failed_checks = arg == "auto", cx);
+            }
+        }
+        // A card in the transcript, as `gh pr create` leaves it, the first time.
+        let url = "https://github.com/acme/web/pull/128";
+        let row = crate::pr_card::row_id(url);
+        if let Some(live) = ws.live.get_mut(&id) {
+            let has = live
+                .items
+                .iter()
+                .any(|i| matches!(i, trek_core::store::Item::Tool { id, .. } if *id == row));
+            if !has {
+                let card = crate::pr_card::Card {
+                    kind: crate::pr_card::Kind::Pr,
+                    title: "Refresh sessions in the auth middleware".into(),
+                    url: Some(url.into()),
+                    number: Some(128),
+                    head: "feat/refresh-sessions".into(),
+                    base: "main".into(),
+                    repo_dir: dir.display().to_string(),
+                    phase: crate::pr_card::Phase::Open,
+                    opened: true,
+                    created_ms: crate::pr_card::now_ms(),
+                    ..Default::default()
+                };
+                live.items.push(trek_core::store::Item::Tool {
+                    id: row.clone(),
+                    title: "Pull request".into(),
+                    detail: serde_json::to_string(&card).unwrap_or_default(),
+                    output: String::new(),
+                    status: trek_core::store::ToolStatus::Done,
+                });
+                live.revision += 1;
+                let card = card.clone();
+                ws.pr_checks_saw(&id, &row, &card, cx);
+            }
+        }
+        ws.pr_checks_look_now(&id, url, cx);
+        cx.emit(crate::workspace::WorkspaceEvent::Transcript {
+            id: id.to_string(),
+            appended: false,
+        });
+        cx.notify();
+    });
+    Ok(())
+}
+
+/// `update-demo ready|wait|later|clear`: an update staged, as this build couldn't get one any other
+/// way (a dev build can't update itself), to look at what the updater says with work running. The
+/// staged path names nothing: Install now only fails, as this isn't an app bundle anyway.
+fn update_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
+    use crate::workspace::{UpdateAction, UpdateStatus};
+    ws.update(cx, |ws, cx| {
+        ws.blocked = Some(None);
+        let staged = trek_core::paths::data_dir().join("no-such-update/Trek.app");
+        let ready = UpdateStatus::Ready {
+            version: "9.9.9".into(),
+            staged,
+        };
+        match arg.trim() {
+            "ready" => {
+                ws.updater.later = None;
+                ws.updater.status = ready;
+            }
+            "wait" => {
+                ws.updater.later = None;
+                ws.updater.status = ready;
+                ws.run_update_action(UpdateAction::Restart, cx);
+            }
+            "later" => {
+                ws.updater.status = ready;
+                ws.run_update_action(UpdateAction::Later, cx);
+            }
+            "clear" => {
+                ws.updater.later = None;
+                ws.updater.status = UpdateStatus::Idle;
+            }
+            other => anyhow::bail!("update-demo: unknown state {other:?} (ready|wait|later|clear)"),
+        }
+        cx.notify();
+        Ok(())
+    })
+}
+
+/// `secret-demo`: a secret's request card on the thread on screen, as an agent's `request_secret`
+/// would put it up (the mock has no MCP tools to call). What's typed goes to the disposable
+/// profile's own data folder.
+fn secret_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
+    ws.update(cx, |ws, cx| {
+        let Route::Thread(id) = ws.route.clone() else {
+            anyhow::bail!("secret-demo: no thread on screen");
+        };
+        let (reply, _nobody) = async_channel::bounded(1);
+        ws.ask_for_secret(
+            &id,
+            "GITHUB_TOKEN",
+            "To open the pull request for this branch.",
+            reply,
+            cx,
+        );
+        Ok(())
+    })
+}
+
+/// `privacy-demo card|feedback|nokey|failed|sent`: the card asking about usage data, which a
+/// capture run never puts up by itself, or the feedback sheet as a build with a PostHog key draws
+/// it (`feedback`), one without (`nokey`), after a failed send, or once sent. Nothing is sent: a
+/// capture run is a test profile.
+fn privacy_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
+    use crate::feedback::Stage;
+    use trek_telemetry::NotSent;
+    let main = ws
+        .read(cx)
+        .main_window
+        .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    let ws = ws.clone();
+    let arg = arg.trim().to_string();
+    main.update(cx, |_, window, cx| match arg.as_str() {
+        "" | "card" => {
+            crate::privacy::open_card(window, cx);
+            Ok(())
+        }
+        "feedback" | "nokey" | "failed" | "sent" => {
+            let sheet = crate::feedback::open(ws, window, cx);
+            sheet.update(cx, |s, cx| {
+                s.set_message(
+                    "The sidebar froze after I opened a long thread.",
+                    window,
+                    cx,
+                );
+                s.destination = match arg.as_str() {
+                    "nokey" => Err(NotSent::NoKey),
+                    _ => Ok(trek_telemetry::config::DEFAULT_HOST
+                        .trim_start_matches("https://")
+                        .to_string()),
+                };
+                s.stage = match arg.as_str() {
+                    "failed" => Stage::NotSent(NotSent::Failed("no connection".into())),
+                    "sent" => Stage::Sent,
+                    _ => Stage::Writing,
+                };
+                cx.notify();
+            });
+            Ok(())
+        }
+        _ => Err(anyhow::anyhow!(
+            "privacy-demo card|feedback|nokey|failed|sent"
+        )),
+    })?
+}
+
+/// `resume-demo resuming|failed|offered|waiting`: the thread on screen's offer in that state, for
+/// the states a mock turn passes through too fast to catch. In memory only.
+fn resume_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
+    use crate::workspace::resume::{Offer, ResumeState};
+    ws.update(cx, |ws, cx| {
+        let Route::Thread(id) = ws.route.clone() else {
+            anyhow::bail!("resume-demo: no thread on screen");
+        };
+        let (state, waiting) = match arg.trim() {
+            "resuming" => (ResumeState::Resuming, false),
+            "failed" => (
+                ResumeState::Failed("Claude Code isn't signed in.".into()),
+                false,
+            ),
+            "offered" => (ResumeState::Offered, false),
+            "waiting" => (ResumeState::Offered, true),
+            other => {
+                anyhow::bail!(
+                    "resume-demo: unknown state {other:?} (resuming|failed|offered|waiting)"
+                )
+            }
+        };
+        ws.interrupted.insert(
+            id.clone(),
+            Offer {
+                turn: trek_core::interrupted::Interrupted {
+                    thread: id,
+                    waiting,
+                    asked: waiting.then(|| "Bash npm publish --tag latest".to_string()),
+                    at: ws.now(),
+                    tries: 0,
+                },
+                state,
+            },
+        );
+        cx.notify();
+        Ok(())
+    })
+}
+
+/// `compact-demo`: the thread on screen as if it were large, billed per token and left alone
+/// long enough for its prompt cache to go: the composer's Compact chip, with no wait and no bill.
+fn compact_demo(ws: &Entity<Workspace>, cx: &mut App) {
+    ws.update(cx, |ws, cx| {
+        let Some(id) = ws
+            .thread_id_in(&crate::workspace::Scope::Main)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let live = ws.live.entry(id).or_default();
+        live.context = Some((124_000, 200_000));
+        live.billing = Some(trek_agents::Billing::Metered);
+        let later = 2 * 60 * 60 * 1_000;
+        ws.clock = crate::workspace::Clock::new(move || trek_core::store::now_ms() + later);
         cx.notify();
     });
 }
@@ -2437,6 +3039,17 @@ fn elements(window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `card`, for tests: what `control approve|deny|answer` does.
+#[cfg(any(test, feature = "test-support"))]
+pub fn control_card(
+    ws: &mut Workspace,
+    verb: &str,
+    arg: &str,
+    cx: &mut Context<Workspace>,
+) -> anyhow::Result<()> {
+    card(ws, verb, arg, cx)
+}
+
 /// `approve`, `deny`, `answer <text|n>`: the thread on screen's waiting card, through what its
 /// buttons call. `approve` allows a permission or starts a plan; `deny` is Deny, Keep planning or
 /// Skip; `answer <n>` picks option n (from 1) of every question and sends, `answer <text>` is the
@@ -2463,6 +3076,10 @@ fn card(
         ("approve", Some(Prompt::Plan(_))) => ws.approve_plan(&id, &p.request_id, cx),
         ("approve", Some(Prompt::Questions(_))) => {
             anyhow::bail!("approve: it's a question (answer <text|n>, or deny to skip)")
+        }
+        // A secret only ever goes in through its card, never a command: there's no yes to give.
+        ("approve" | "answer", Some(Prompt::Secret { .. })) => {
+            anyhow::bail!("{verb}: it's asking for a secret (type it in the card, or deny)")
         }
         ("deny", _) => ws.respond(&id, &p.request_id, Decision::Deny, cx),
         ("answer", Some(Prompt::Questions(questions))) => {

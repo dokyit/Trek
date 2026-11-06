@@ -2,6 +2,7 @@
 # Publish a Trek release on GitHub (see docs/RELEASING.md).
 #
 #   script/release.sh <version> [--channel stable|beta|nightly] [--notes FILE] [--dry-run]
+#                               [--target x86_64-apple-darwin]
 #
 # Sets the version, builds and signs Trek.app (script/bundle.sh), packs it as
 # Trek-<version>-darwin-<arch>.app.tar.gz (what the updater downloads), signs that with minisign,
@@ -11,6 +12,11 @@
 # notarized before it's archived and the disk image after it's made (script/notarize.sh). --dry-run
 # stops before git and GitHub and puts the version back afterwards; everything it built stays in
 # dist/release/<version>/.
+#
+# --target builds for that architecture instead of this Mac's, and <arch> in the names above and the
+# manifest's platform follow it. The Intel half of a release is `--target x86_64-apple-darwin
+# --dry-run`; .github/workflows/release.yml publishes what it built, adding its entry to the manifest
+# the Apple-silicon run published (script/lib/merge-manifest.py; docs/RELEASING.md, "Intel Macs").
 #
 # Channels: stable → release v<version> (marked latest); beta / nightly → the prerelease under the
 # fixed tag "beta" / "nightly", whose assets are replaced each time. Beta and nightly versions
@@ -43,15 +49,17 @@ source script/lib/notes.sh
 source "$HOME/.cargo/env" 2>/dev/null || true
 
 die() { echo "release: $*" >&2; exit 1; }
-usage() { sed -n '2,4p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,5p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
-VERSION="" CHANNEL=stable DRY=0 NOTES_FILE=""
+VERSION="" CHANNEL=stable DRY=0 NOTES_FILE="" TARGET=""
 while (( $# )); do
   case $1 in
     --channel) CHANNEL=${2:-}; shift 2 ;;
     --channel=*) CHANNEL=${1#*=}; shift ;;
     --notes) NOTES_FILE=${2:-}; shift 2 ;;
     --notes=*) NOTES_FILE=${1#*=}; shift ;;
+    --target) TARGET=${2:-}; shift 2 ;;
+    --target=*) TARGET=${1#*=}; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown option $1" ;;
@@ -67,10 +75,14 @@ case $CHANNEL in
   *) die "channel is stable, beta or nightly" ;;
 esac
 [[ -z $NOTES_FILE || -f $NOTES_FILE ]] || die "no notes file at $NOTES_FILE"
+# Only a dry run may name a target: a real run publishes this Mac's build as the release itself.
+[[ -z $TARGET ]] || (( DRY )) || die "--target goes with --dry-run: release.yml publishes that build"
+[[ -z $TARGET || $TARGET == *-apple-darwin ]] || die "--target is a Mac's ($TARGET)"
 
 REPO=${TREK_RELEASE_REPO:-dokyit/Trek}
 KEY=${TREK_MINISIGN_KEY:-$HOME/.trek-signing/minisign.key}
 ARCH=$(uname -m); [[ $ARCH == arm64 ]] && ARCH=aarch64
+[[ -n $TARGET ]] && ARCH=${TARGET%%-*}
 PLATFORM="darwin-$ARCH"
 NAME="Trek-$VERSION-$PLATFORM.app.tar.gz"
 DMG_NAME="Trek-$VERSION-$PLATFORM.dmg"
@@ -109,7 +121,8 @@ fi
 # workflow's token can't create a tag that brings in workflow-file changes); anywhere else, it's
 # taken.
 TAG_ON_HEAD=0
-if [[ -n $VERSION_TAG ]] && git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
+# (Not for --target: the same run's Apple-silicon job may have tagged this version by now.)
+if [[ -n $VERSION_TAG && -z $TARGET ]] && git rev-parse -q --verify "refs/tags/$VERSION_TAG" >/dev/null; then
   [[ $(git rev-parse "refs/tags/$VERSION_TAG^{commit}") == $(git rev-parse HEAD) ]] \
     || die "tag $VERSION_TAG already exists"
   TAG_ON_HEAD=1
@@ -119,6 +132,7 @@ LAST_NIGHTLY=$(git for-each-ref --format='%(contents:subject)' refs/tags/nightly
 # This release's own tag (on HEAD, see above) isn't an earlier release to be newer than.
 RELEASED=(${(f)"$(git tag --list 'v[0-9]*')"})
 (( TAG_ON_HEAD )) && RELEASED=(${RELEASED:#$VERSION_TAG})
+[[ -n $TARGET ]] && RELEASED=(${RELEASED:#$VERSION_TAG})
 python3 - "$CHANNEL" "$VERSION" "$CURRENT" "$LAST_NIGHTLY" "${RELEASED[@]}" <<'PY' || exit 1
 import re, sys
 channel, new, current, last_nightly, *tags = sys.argv[1:]
@@ -170,7 +184,7 @@ fi
 
 # ---------- build ----------
 # Marked as a release: only these replace themselves with newer releases.
-TREK_RELEASE_BUILD=1 script/bundle.sh
+TREK_RELEASE_BUILD=1 TREK_TARGET=$TARGET script/bundle.sh
 [[ $(trek_sign_identity) == "Trek Local Signing" || -n ${TREK_SIGN_IDENTITY:-} ]] \
   || echo "! signed with \"$(trek_sign_identity)\": fine for a dry run, refused for a real release"
 # Before the archive is made: the stapled ticket is part of what the updater downloads.

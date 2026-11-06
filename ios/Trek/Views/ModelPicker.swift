@@ -231,7 +231,7 @@ struct ModelPickerSheet: View {
             pickModel(a.key, m.id)
         } label: {
             HStack(spacing: 10) {
-                HStack(spacing: 6) {
+                BesideOrOver(spacing: 6) {
                     Text(m.label).font(.ui(.body).weight(selected ? .semibold : .regular)).foregroundStyle(Trek.foreground)
                     if isDefault {
                         Text("Default")
@@ -266,10 +266,11 @@ struct ModelPickerSheet: View {
                 Text("Effort").font(.ui(.subheadline).weight(.semibold))
                 Spacer()
                 HStack(spacing: 4) {
-                    Text("Faster")
+                    Text("Faster").fixedSize()
                     Image(systemName: "arrow.left.and.right").font(.system(size: 9, weight: .semibold))
-                    Text("Smarter")
+                    Text("Smarter").fixedSize()
                 }
+                .dynamicTypeSize(...DynamicTypeSize.xxLarge)
                 .font(.ui(.caption))
                 .foregroundStyle(Trek.muted)
             }
@@ -325,6 +326,8 @@ struct EffortPicker: View {
         }
         .padding(3)
         .background(Trek.foreground.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        // Five across the sheet: bigger than this, each is a letter or two. VoiceOver says them whole.
+        .dynamicTypeSize(...DynamicTypeSize.xLarge)
     }
 
     private struct Meter: View {

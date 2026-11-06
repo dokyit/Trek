@@ -85,6 +85,10 @@ pub const TRANSCRIPT_ONLY: &str = "transcript";
 /// The tools every agent Trek runs gets, whatever its settings: its thread's transcript.
 pub const TRANSCRIPT_TOOLS: [&str; 2] = ["transcript_search", "transcript_read"];
 
+/// Asking the user for a secret through a card: every session has it, whatever the settings say
+/// about sub-agents, so that no agent has to ask for one in chat.
+pub const SECRET_TOOL: &str = "request_secret";
+
 pub const VERSION: u64 = 1;
 
 /// How `trek-mcp computer` works: [`COMPUTER_BACKGROUND`] to act in the agent's own window behind
@@ -446,6 +450,19 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
             }),
         ),
         (
+            SECRET_TOOL,
+            "Ask the user for a token, password or API key through a private card in Trek. Use this instead of asking in chat, so the value stays out of the conversation. They type it into a masked field; Trek saves it to a private file and returns only the file's path, and you read it inside a command (`$(cat <path>)`). Never print it or write it into a tracked file. If they decline, carry on without it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "What it is, as an environment variable would be named, like GITHUB_TOKEN." },
+                    "why": { "type": "string", "description": "What you need it for, in a sentence the user can decide on." }
+                },
+                "required": ["name", "why"],
+                "additionalProperties": false
+            }),
+        ),
+        (
             "transcript_search",
             "Search this thread's whole transcript (messages, tool calls, full results, word for word) for lines matching query. Returns the latest matches with line numbers.",
             json!({
@@ -477,7 +494,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
 }
 
 /// The tools' names, as `tools` lists them.
-pub const TOOL_NAMES: [&str; 13] = [
+pub const TOOL_NAMES: [&str; 14] = [
     "list_models",
     "delegate_task",
     "task_status",
@@ -489,6 +506,7 @@ pub const TOOL_NAMES: [&str; 13] = [
     "thread_status",
     "read_thread",
     "send_to_thread",
+    SECRET_TOOL,
     "transcript_search",
     "transcript_read",
 ];

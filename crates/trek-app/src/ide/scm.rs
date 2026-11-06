@@ -11,6 +11,7 @@ use super::IdeWorkbench;
 use super::diff_view::DiffSource;
 use crate::fluent::PillExt as _;
 use crate::palette;
+use crate::scale::{text, to_rems};
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -373,7 +374,7 @@ impl ScmView {
     }
 
     /// Git's state moved: the list, the status bar and badge, the Explorer and open diffs.
-    fn git_moved(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn git_moved(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.refresh(cx);
         if let Some(root) = self.root.clone() {
             self.workspace
@@ -591,6 +592,17 @@ impl ScmView {
             None => (String::new(), file.rel.clone()),
         };
         let on = self.selected.as_ref() == Some(&(staged, file.rel.clone()));
+        // Marked viewed in its diff (`diff_review`): the name dims, a tick says why.
+        let viewed = self.state.top.as_deref().is_some_and(|top| {
+            let name = if staged {
+                format!("index:{}", file.rel)
+            } else {
+                file.rel.clone()
+            };
+            self.workspace
+                .read(cx)
+                .is_viewed(&crate::diff_review::folder_key(top), &name)
+        });
         let key = format!("{}-{}", if staged { "staged" } else { "changes" }, file.rel);
         let group = SharedString::from(format!("scm-row-{key}"));
         let busy = self.busy.is_some();
@@ -611,7 +623,7 @@ impl ScmView {
             .pl(px(18.))
             .pr(px(8.))
             .gap(px(6.))
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .cursor_pointer()
             .when(on, |el| el.bg(theme.list_active))
             .when(!on, |el| el.hover(|s| s.bg(theme.list_hover)))
@@ -625,6 +637,7 @@ impl ScmView {
                     .child(
                         div()
                             .flex_none()
+                            .when(viewed, |el| el.text_color(muted))
                             .when(file.status == 'D', |el| el.line_through())
                             .child(name),
                     )
@@ -632,10 +645,18 @@ impl ScmView {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .text_color(muted)
                             .child(dir),
-                    ),
+                    )
+                    .when(viewed, |el| {
+                        el.child(
+                            Icon::new(crate::assets::Lucide::Check)
+                                .flex_none()
+                                .size(px(12.))
+                                .text_color(palette::emerald(cx)),
+                        )
+                    }),
             )
             .child(
                 h_flex()
@@ -699,7 +720,7 @@ impl ScmView {
                 div()
                     .w(px(12.))
                     .flex_none()
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(color)
                     .child(file.status.to_string()),
@@ -794,7 +815,7 @@ impl ScmView {
             .h(px(24.))
             .px(px(8.))
             .gap(px(4.))
-            .text_size(px(11.))
+            .text_size(px(text::META))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.muted_foreground)
             .child(Icon::new(IconName::ChevronDown).size(px(11.)))
@@ -854,7 +875,7 @@ impl ScmView {
                     .px(px(5.))
                     .rounded_pill()
                     .bg(theme.foreground.opacity(0.1))
-                    .text_size(px(10.))
+                    .text_size(px(text::META))
                     .child(files.len().to_string()),
             );
         let rows: Vec<AnyElement> = files
@@ -888,7 +909,7 @@ impl Render for ScmView {
                 .gap_3()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_color(muted)
                         .child("This folder isn't a Git repository."),
                 )
@@ -926,7 +947,7 @@ impl Render for ScmView {
             .h(px(28.))
             .px(px(12.))
             .gap(px(6.))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(muted)
             .child(Icon::new(crate::assets::Lucide::GitBranch).size(px(12.)))
             .child(
@@ -1009,7 +1030,7 @@ impl Render for ScmView {
                             div()
                                 .px(px(18.))
                                 .py(px(6.))
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .text_color(muted)
                                 .child("No changes. The working tree is clean."),
                         )

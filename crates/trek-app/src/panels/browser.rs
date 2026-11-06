@@ -6,6 +6,7 @@ use super::browser_adblock::{self, AdBlocker};
 use super::browser_extensions::{self, ExtensionsEvent, ExtensionsPage};
 use crate::assets::Lucide;
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -2899,7 +2900,7 @@ impl BrowserPanel {
                     .child(busy)
                     .into_any_element(),
             ),
-            (None, Some(e)) => Some(div().text_color(theme.danger).child(e).into_any_element()),
+            (None, Some(e)) => Some(div().text_color(theme.red).child(e).into_any_element()),
             (None, None) => imported
                 .as_ref()
                 .map(|i| div().child(i.summary()).into_any_element()),
@@ -2912,7 +2913,7 @@ impl BrowserPanel {
                     .px(px(10.))
                     .pl(px(36.))
                     .pb(px(6.))
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .child(note)
                     .into_any_element(),
@@ -2954,7 +2955,7 @@ impl BrowserPanel {
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.foreground.opacity(0.08)))
                 .child(Icon::new(icon).xsmall())
@@ -2967,7 +2968,7 @@ impl BrowserPanel {
             .px(px(10.))
             .h(px(34.))
             .gap(px(10.))
-            .text_sm()
+            .text_size(to_rems(text::LABEL))
             .child(Icon::new(Lucide::ZoomIn).small().text_color(muted))
             .child(div().flex_1().child("Zoom"))
             .child(zoom_button("browser-zoom-out", Lucide::Minus, false, cx))
@@ -2979,8 +2980,8 @@ impl BrowserPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(fluent::control(6.)))
-                    .text_xs()
+                    .rounded(px(fluent::control(radius::CONTROL)))
+                    .text_size(to_rems(text::META))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.foreground.opacity(0.08)))
                     .child(format!("{:.0}%", zoom * 100.))
@@ -3009,8 +3010,8 @@ impl BrowserPanel {
                     .h(px(24.))
                     .px(px(8.))
                     .gap(px(5.))
-                    .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 6.)))
-                    .text_xs()
+                    .rounded(px(fluent::pick(fluent::THUMB_RADIUS, radius::CONTROL)))
+                    .text_size(to_rems(text::META))
                     .cursor_pointer()
                     .when(on, |el| {
                         el.bg(theme.popover)
@@ -3032,14 +3033,14 @@ impl BrowserPanel {
             .px(px(10.))
             .h(px(36.))
             .gap(px(10.))
-            .text_sm()
+            .text_size(to_rems(text::LABEL))
             .child(Icon::new(scheme_icon(scheme)).small().text_color(muted))
             .child(div().flex_1().child("Pages"))
             .child(
                 h_flex()
                     .p(px(2.))
                     .gap(px(2.))
-                    .rounded(px(fluent::control(8.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .bg(theme.foreground.opacity(0.06))
                     .child(segment("browser-scheme-auto", PageScheme::Auto, "Auto", cx))
                     .child(segment(
@@ -3216,7 +3217,7 @@ impl BrowserPanel {
             img(image)
                 .size(px(14.))
                 .flex_none()
-                .rounded(px(3.))
+                .rounded(px(radius::TAG))
                 .with_fallback(move || {
                     Icon::new(Lucide::Globe)
                         .xsmall()
@@ -3241,9 +3242,9 @@ impl BrowserPanel {
             .pl(px(10.))
             .pr(px(4.))
             .gap(px(7.))
-            .rounded(px(fluent::control(8.)))
+            .rounded(px(fluent::control(radius::BUTTON)))
             .cursor_pointer()
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .border_1()
             .when(active, |el| {
                 el.bg(theme.popover)
@@ -3286,7 +3287,7 @@ impl BrowserPanel {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(fluent::control(5.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .when(!active, |el| {
                         el.invisible().group_hover("browser-tab", |s| s.visible())
                     })
@@ -3314,8 +3315,8 @@ impl BrowserPanel {
             .h(px(28.))
             .px(px(12.))
             .gap(px(6.))
-            .rounded(px(fluent::control(14.)))
-            .text_size(px(13.))
+            .rounded(px(fluent::control(radius::FULL)))
+            .text_size(px(text::BODY))
             .border_1();
         if self.editing {
             return pill
@@ -3403,8 +3404,8 @@ impl BrowserPanel {
                         .h(px(18.))
                         .flex()
                         .items_center()
-                        .rounded(px(fluent::control(5.)))
-                        .text_xs()
+                        .rounded(px(fluent::control(radius::CONTROL)))
+                        .text_size(to_rems(text::META))
                         .text_color(muted)
                         .bg(theme.foreground.opacity(0.07))
                         .cursor_pointer()
@@ -3766,7 +3767,7 @@ pub fn progress_line(progress: f64, ember: Hsla) -> impl IntoElement {
                 .id("browser-loading-bar")
                 .h_full()
                 .w(relative(p))
-                .rounded(px(1.))
+                .rounded_full()
                 .bg(ember),
         )
 }
@@ -3781,7 +3782,7 @@ pub fn loading_line(still: bool, ember: Hsla) -> impl IntoElement {
         .absolute()
         .top_0()
         .h_full()
-        .rounded(px(1.))
+        .rounded_full()
         .bg(ember);
     let bar = if still {
         bar.left_0().w_full().opacity(0.45).into_any_element()
@@ -3983,7 +3984,7 @@ impl Render for BrowserPanel {
                 .h(px(28.))
                 .px(px(12.))
                 .gap(px(8.))
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .bg(ember.opacity(0.1))
                 .border_b_1()
                 .border_color(theme.border)

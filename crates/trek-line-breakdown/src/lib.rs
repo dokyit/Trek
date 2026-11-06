@@ -10,6 +10,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::time::Duration;
 use trek_core::file_kind::LineBreakdown;
+use trek_palette::scale::{radius, text};
 
 /// How long the pointer rests on the counts before the card opens, and lingers after leaving.
 const OPEN_DELAY: Duration = Duration::from_millis(350);
@@ -93,12 +94,12 @@ fn card(id: &str, breakdown: &LineBreakdown, cx: &App) -> Stateful<Div> {
         .px(px(12.))
         .py(px(9.))
         .gap(px(5.))
-        .rounded(px(10.))
+        .rounded(px(radius::CARD))
         .bg(theme.popover)
         .border_1()
         .border_color(theme.border)
         .shadow_lg()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .children(breakdown.rows.iter().map(|k| {
             row(
                 format!("{id}-{}", k.kind.key()),

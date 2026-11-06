@@ -134,9 +134,9 @@ mod tests {
     #[test]
     fn trek_json_keeps_the_macs_radii_and_only_windows_gets_its_own() {
         for theme in themes(&shipped_theme()) {
-            assert_eq!((theme.radius, theme.radius_lg), (Some(8), Some(14)));
+            assert_eq!((theme.radius, theme.radius_lg), (Some(8), Some(12)));
         }
-        let want = if cfg!(windows) { (4, 8) } else { (8, 14) };
+        let want = if cfg!(windows) { (4, 8) } else { (8, 12) };
         for theme in themes(&theme_json()) {
             assert_eq!(
                 (theme.radius, theme.radius_lg),

@@ -1,6 +1,7 @@
 //! Trek's engine: domain types, persistence, agent discovery, thread import and updates.
 //! Nothing in this crate depends on the UI toolkit.
 
+pub mod accounts;
 pub mod agent_update;
 pub mod artifact;
 pub mod basecamp;
@@ -13,9 +14,11 @@ pub mod elevated;
 pub mod feeds;
 pub mod file_kind;
 pub mod git;
+pub mod handover;
 pub mod hunks;
 pub mod import;
 pub mod inline_edit;
+pub mod interrupted;
 pub mod keychain;
 pub mod limit;
 pub mod lineage;
@@ -26,12 +29,14 @@ pub mod notes;
 pub mod open_in;
 pub mod orchestrate;
 pub mod paths;
+pub mod permission_rules;
 pub mod pricing;
 pub mod procs;
 pub mod registry;
 pub mod restate;
 pub mod rewind;
 pub mod session_log;
+pub mod session_secrets;
 pub mod settings;
 pub mod skills;
 pub mod store;

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::desktop::{self, AppBundle, Button, Desktop, Input, RunningApp, WindowInfo};
+use crate::desktop::{
+    self, AppBundle, Button, Desktop, Input, RunningApp, Whereabouts, WindowInfo,
+};
 use crate::keys;
 use crate::rpc::{
     self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, point_schema, text,
@@ -39,10 +41,10 @@ user keeps working in theirs. Your clicks, keys and scrolls reach only that wind
 theirs, so never ask them to keep off the mouse). Pick the window first: open_app, or screenshot with a window_id from \
 list_windows. A screenshot shows just that window, even when others cover it; x/y for click, move_mouse, drag and scroll \
 are pixels in its latest screenshot (origin top-left). Take a new screenshot after acting. Trek's own windows are off \
-limits. Work only in apps the user isn't using: one in front that they typed or pointed in within 30 seconds is theirs, \
-and acting there waits for them. While they're away (idle, or the screen locked) any app will do. Some apps (games, \
-canvases) ignore input not from the real mouse: if one doesn't respond, say so rather than retrying; the user can switch \
-computer use to work in front in Trek's settings.";
+limits. Work only in apps the user isn't using: the app in front is theirs while they're at the Mac, if only reading, and \
+acting there is refused until they switch. While they're away (screen locked or asleep, or 5 minutes idle) any app will \
+do. Some apps (games, canvases) ignore input not from the real mouse: if one doesn't respond, say so rather than \
+retrying; the user can switch computer use to work in front in Trek's settings.";
 
 /// What a screen coordinate is: macOS moves the mouse in points, Windows (per-monitor DPI aware)
 /// in pixels.
@@ -151,6 +153,10 @@ pub struct Computer {
     report: Option<Reporter>,
     /// When input was last posted behind, and how idle the user was just before (`user_idle`).
     posted: Option<(std::time::Instant, Option<Duration>)>,
+    /// The window in front when a click or key was last posted behind, and the pid of the app it
+    /// went to: a window of that app in front of it since, while the user did nothing, came up
+    /// because of that input (`put_back_in_front`).
+    front: Option<(WindowInfo, i64)>,
 }
 
 /// The window background use works in. An app with no window yet has `id` 0: keys reach it,
@@ -159,6 +165,29 @@ struct Target {
     window: WindowInfo,
     /// Window points per pixel of its latest screenshot; `None` until it has one.
     shot: Option<Mapping>,
+    /// Where it was when last looked up.
+    place: Place,
+}
+
+/// Where the window background use works in was at its last lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Place {
+    /// On screen, on a Space that's showing.
+    #[default]
+    Here,
+    /// On a Space that isn't showing: `full_screen` for an app's own full-screen Space.
+    OtherSpace { full_screen: bool },
+}
+
+impl Place {
+    /// How a sentence says where it is: "is on another Space".
+    fn said(self) -> &'static str {
+        match self {
+            Place::Here => "is on screen",
+            Place::OtherSpace { full_screen: false } => "is on another Space",
+            Place::OtherSpace { full_screen: true } => "is full screen, on a Space of its own",
+        }
+    }
 }
 
 impl Default for Computer {
@@ -182,6 +211,7 @@ impl Default for Computer {
             target: None,
             report,
             posted: None,
+            front: None,
         }
     }
 }
@@ -634,12 +664,33 @@ impl Computer {
                 fmt_num(m.scale)
             ),
             Mode::Background => format!(
-                "{} on-screen windows, front to back. In the background you work in one of them: pass its window_id to screenshot (working_in marks the one you're in). Trek's windows are off limits.{titles}",
-                list.len()
+                "{} on-screen windows, front to back. In the background you work in one of them: pass its window_id to screenshot (working_in marks the one you're in). Trek's windows are off limits.{titles}{}",
+                list.len(),
+                self.unlisted(&windows)
             ),
         };
         let lines: Vec<String> = list.iter().map(Value::to_string).collect();
         Ok(vec![text(format!("{header}\n{}", lines.join("\n")))])
+    }
+
+    /// For the window list's header: the window the agent works in, when it's open on another
+    /// Space and so not among `listed`.
+    fn unlisted(&self, listed: &[WindowInfo]) -> String {
+        let Some(t) = self.target.as_ref().filter(|t| t.window.id != 0) else {
+            return String::new();
+        };
+        if listed.iter().any(|w| w.id == t.window.id) {
+            return String::new();
+        }
+        match self.desktop.whereabouts(t.window.id) {
+            Ok(Whereabouts::OtherSpace { full_screen, .. }) => format!(
+                " The window you work in, {}'s window_id {}, {}, so it isn't listed; it's still yours.",
+                t.window.owner,
+                t.window.id,
+                Place::OtherSpace { full_screen }.said()
+            ),
+            _ => String::new(),
+        }
     }
 }
 
@@ -651,8 +702,9 @@ impl Computer {
         }
     }
 
-    /// The window being worked in, as it is now. Gone (closed, minimised, on another Space):
-    /// it's forgotten, and the agent is told to pick another.
+    /// The window being worked in, as it is now: on screen, or on another Space (still the
+    /// target; `place` says which). Closed, minimised or hidden: it's forgotten, and the agent is
+    /// told what became of it and to pick another.
     fn working_window(&mut self) -> Result<WindowInfo, String> {
         let Some(t) = &self.target else {
             return Err(NO_WINDOW.into());
@@ -664,25 +716,51 @@ impl Computer {
             ));
         }
         let (id, owner, title) = (t.window.id, t.window.owner.clone(), t.window.title.clone());
-        match self.desktop.window(id)? {
-            Some(w) if is_trek(&w) => Err(OWN_WINDOW_BEHIND.into()),
-            Some(w) => {
-                if let Some(t) = &mut self.target {
-                    t.window = w.clone();
-                }
-                Ok(w)
-            }
-            None => {
+        let (w, place) = match self.find(id)? {
+            Whereabouts::OnScreen(w) => (w, Place::Here),
+            Whereabouts::OtherSpace {
+                window,
+                full_screen,
+            } => (window, Place::OtherSpace { full_screen }),
+            other => {
                 self.target = None;
-                let title = if title.is_empty() {
-                    String::new()
-                } else {
-                    format!(" “{title}”")
-                };
-                Err(format!(
-                    "{owner}'s window{title} has closed or left the screen (minimised, or on another Space). Call list_windows and screenshot another window_id, or open_app."
-                ))
+                return Err(gone(&owner, &title, &other));
             }
+        };
+        if is_trek(&w) {
+            return Err(OWN_WINDOW_BEHIND.into());
+        }
+        if let Some(t) = &mut self.target {
+            t.window = w.clone();
+            t.place = place;
+        }
+        Ok(w)
+    }
+
+    /// Window `id`, wherever it is. One the system lists but doesn't show gets `OPENING` to come
+    /// on screen before it's taken for gone: a window just opened can be off screen for a few
+    /// seconds.
+    fn find(&self, id: i64) -> Result<Whereabouts, String> {
+        let deadline = std::time::Instant::now() + OPENING;
+        loop {
+            let found = self.desktop.whereabouts(id)?;
+            if !matches!(found, Whereabouts::NotShowing(_)) || std::time::Instant::now() >= deadline
+            {
+                return Ok(found);
+            }
+            std::thread::sleep(OPENING_POLL);
+        }
+    }
+
+    /// Where the working window is, for the end of a reply: nothing when it's on screen.
+    fn elsewhere(&self) -> String {
+        match self.target.as_ref() {
+            Some(t) if t.place != Place::Here => format!(
+                " {}'s window {}, out of the user's sight.",
+                t.window.owner,
+                t.place.said()
+            ),
+            _ => String::new(),
         }
     }
 
@@ -711,7 +789,21 @@ impl Computer {
         };
         if let Some(id) = opt_f64(args, "window_id")? {
             let id = id as i64;
-            let w = self.desktop.window(id)?.ok_or_else(|| format!("No window {id} is on screen. list_windows shows the windows there are (a minimised window, or one on another Space, isn't)."))?;
+            let found = self.find(id)?;
+            let w = match &found {
+                Whereabouts::OnScreen(w) | Whereabouts::OtherSpace { window: w, .. } => w.clone(),
+                Whereabouts::Closed => {
+                    return Err(format!(
+                        "No window {id} is open. list_windows shows the windows there are."
+                    ));
+                }
+                Whereabouts::Minimised(w) | Whereabouts::Hidden(w) | Whereabouts::NotShowing(w) => {
+                    if is_trek(w) {
+                        return Err(OWN_WINDOW_BEHIND.into());
+                    }
+                    return Err(gone(&w.owner, &w.title, &found));
+                }
+            };
             if is_trek(&w) {
                 return Err(OWN_WINDOW_BEHIND.into());
             }
@@ -719,6 +811,7 @@ impl Computer {
                 self.target = Some(Target {
                     window: w,
                     shot: None,
+                    place: Place::Here,
                 });
             }
         }
@@ -737,25 +830,35 @@ impl Computer {
         } else {
             format!(" “{}”", w.title)
         };
+        let place = self.target.as_ref().map_or(Place::Here, |t| t.place);
         match region {
             None => {
-                let shot = self.desktop.capture_window(&w, None, full_side(w.w, w.h))?;
+                let shot = self
+                    .desktop
+                    .capture_window(&w, None, full_side(w.w, w.h))
+                    .map_err(|e| unseen(&w, place, e))?;
                 let m = Mapping::from_image(w.w, w.h, shot.width, shot.height);
                 if let Some(t) = &mut self.target {
                     t.shot = Some(m);
                 }
                 let theirs = self.users_window().is_some_and(|f| f.pid == w.pid);
-                let (doing, note) = if theirs {
+                let (doing, mut note) = if theirs {
                     (
                         waiting(&w.owner),
                         format!(
-                            " {} is the app the user is using right now: clicks and keys there wait until they switch to another app (ask them, or open_app with new_window: true).",
+                            " {} is the app the user is using right now (it's in front and they're at the Mac): clicks and keys there are refused until they switch to another app or step away (ask them, or wait).",
                             w.owner
                         ),
                     )
                 } else {
                     ("Looking".to_string(), String::new())
                 };
+                if place != Place::Here {
+                    note.push_str(&format!(
+                        " The window {}, out of the user's sight: this is how it was last drawn there. Clicks, keys and scrolls go to it as usual, but some apps (browsers especially) stop drawing a window that isn't showing, so a screenshot can lag behind what you did; if nothing seems to change, say so rather than repeat it.",
+                        place.said()
+                    ));
+                }
                 self.tell(activity("screenshot", doing, &w, None, None));
                 let info = format!(
                     "Screenshot of {}'s window{title} (window_id {}), worked in the background: {}x{} px. The window is {}x{} points. \
@@ -777,7 +880,8 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
                 let region = region_points(m, x, y, rw, rh)?;
                 let shot = self
                     .desktop
-                    .capture_window(&w, Some(region), MAX_IMAGE_SIDE)?;
+                    .capture_window(&w, Some(region), MAX_IMAGE_SIDE)
+                    .map_err(|e| unseen(&w, place, e))?;
                 self.tell(activity(
                     "screenshot",
                     "Looking closer".into(),
@@ -815,7 +919,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         };
         let (w, m) = self.pointing()?;
         let (px, py) = m.to_points(x, y)?;
-        self.post(
+        let raised = self.post_watched(
             &w,
             &Input::Click {
                 x: px,
@@ -838,12 +942,13 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         };
         self.tell(activity("click", doing.into(), &w, Some((px, py)), None));
         Ok(vec![text(format!(
-            "{what} at ({}, {}) in {}'s window (window {SCREEN_UNITS} {}, {}), in the background.",
+            "{what} at ({}, {}) in {}'s window (window {SCREEN_UNITS} {}, {}), in the background.{raised}{}",
             fmt_num(x),
             fmt_num(y),
             w.owner,
             fmt_num(px),
-            fmt_num(py)
+            fmt_num(py),
+            self.elsewhere()
         ))])
     }
 
@@ -860,10 +965,11 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             None,
         ));
         Ok(vec![text(format!(
-            "Moved the pointer to ({}, {}) in {}'s window, in the background (the user's pointer stays put).",
+            "Moved the pointer to ({}, {}) in {}'s window, in the background (the user's pointer stays put).{}",
             fmt_num(x),
             fmt_num(y),
-            w.owner
+            w.owner,
+            self.elsewhere()
         ))])
     }
 
@@ -876,12 +982,13 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         self.post(&w, &Input::Drag { from: a, to: b })?;
         self.tell(activity("drag", "Dragging".into(), &w, Some(b), Some(a)));
         Ok(vec![text(format!(
-            "Dragged from ({}, {}) to ({}, {}) in {}'s window, in the background.",
+            "Dragged from ({}, {}) to ({}, {}) in {}'s window, in the background.{}",
             fmt_num(fx),
             fmt_num(fy),
             fmt_num(tx),
             fmt_num(ty),
-            w.owner
+            w.owner,
+            self.elsewhere()
         ))])
     }
 
@@ -917,10 +1024,11 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             None,
         ));
         Ok(vec![text(format!(
-            "Scrolled dx={dx} dy={dy} lines at ({}, {}) in {}'s window, in the background.",
+            "Scrolled dx={dx} dy={dy} lines at ({}, {}) in {}'s window, in the background.{}",
             fmt_num(x),
             fmt_num(y),
-            w.owner
+            w.owner,
+            self.elsewhere()
         ))])
     }
 
@@ -941,12 +1049,13 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             return Err("text is empty".into());
         }
         let w = self.keyed()?;
-        self.post(&w, &Input::Type(s.to_string()))?;
+        let raised = self.post_watched(&w, &Input::Type(s.to_string()))?;
         self.tell(activity("type", typing(s), &w, None, None));
         Ok(vec![text(format!(
-            "Typed {} characters into {}, in the background.",
+            "Typed {} characters into {}, in the background.{raised}{}",
             s.chars().count(),
-            w.owner
+            w.owner,
+            self.elsewhere()
         ))])
     }
 
@@ -954,19 +1063,20 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let combo = arg_str(args, "combo")?;
         let parsed = keys::parse(combo)?;
         let w = self.keyed()?;
-        self.post(&w, &Input::Key(parsed))?;
+        let raised = self.post_watched(&w, &Input::Key(parsed))?;
         self.tell(activity("key", format!("Pressing {combo}"), &w, None, None));
         Ok(vec![text(format!(
-            "Pressed {combo} in {}, in the background.",
-            w.owner
+            "Pressed {combo} in {}, in the background.{raised}{}",
+            w.owner,
+            self.elsewhere()
         ))])
     }
 
-    /// The window the user is at right now, when they are: the front window (not Trek's), with
-    /// input from their keyboard, pointer or trackpad in the last `IN_USE`, the screen unlocked.
-    /// `None` when they're away, or the platform can't tell.
+    /// The window the user is at right now: the front window (not Trek's), for as long as it's in
+    /// front and they're at the Mac, whether they're typing in it or only reading it. `None`
+    /// while they're away (`user_away`).
     fn users_window(&self) -> Option<WindowInfo> {
-        if self.desktop.screen_locked() || self.user_idle()? >= IN_USE {
+        if self.user_away() {
             return None;
         }
         self.desktop
@@ -974,6 +1084,15 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             .ok()
             .flatten()
             .filter(|w| !is_trek(w))
+    }
+
+    /// The user isn't at the Mac: the screen is locked, asleep or showing its screen saver, or
+    /// they've given no input for `AWAY_AFTER`. A platform that can't say how long they've been
+    /// idle counts them as there, so their front app stays theirs.
+    fn user_away(&self) -> bool {
+        self.desktop.screen_locked()
+            || self.desktop.screen_dark()
+            || self.user_idle().is_some_and(|idle| idle >= AWAY_AFTER)
     }
 
     /// How long since the user's own last input. The system's count can include the events this
@@ -1004,6 +1123,49 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         self.desktop.behind(w, input)?;
         self.posted = Some((std::time::Instant::now(), before));
         Ok(())
+    }
+
+    /// `post` a click, key or typing, which can make the app raise itself over the user's window:
+    /// what came up since the last one, and what this one brings up, is put back behind the
+    /// window the user has in front. What was put back, for the reply.
+    fn post_watched(&mut self, w: &WindowInfo, input: &Input) -> Result<String, String> {
+        let mut said = self.put_back_in_front();
+        let front = self.desktop.key_window().ok().flatten();
+        self.post(w, input)?;
+        self.front = front.map(|f| (f, w.pid));
+        std::thread::sleep(AFTER_INPUT);
+        said.push_str(&self.put_back_in_front());
+        Ok(said)
+    }
+
+    /// When a window of the app the agent works in has come in front of another app's window
+    /// that was in front at its last click or key (`self.front`), and the user has given no input
+    /// since, the agent's input raised it: the user's window goes back in front (`keep_behind`).
+    /// Nothing else is touched: apps reorder their own windows, other apps' windows come and go,
+    /// and once the user has acted, what's in front is theirs.
+    fn put_back_in_front(&mut self) -> String {
+        let (Some((front, agents)), Some((at, _))) = (self.front.clone(), self.posted) else {
+            return String::new();
+        };
+        if front.pid == agents {
+            return String::new();
+        }
+        if self.user_idle().is_some_and(|idle| idle < at.elapsed()) {
+            self.front = None;
+            return String::new();
+        }
+        let order = self.desktop.windows().unwrap_or_default();
+        let Some(first) = order
+            .first()
+            .filter(|f| f.pid == agents && f.id != front.id && !is_trek(f))
+            .cloned()
+        else {
+            return String::new();
+        };
+        if !order.iter().any(|x| x.id == front.id) {
+            return String::new();
+        }
+        self.keep_behind(&first, Some(&front)).unwrap_or_default()
     }
 
     /// Refuses to drive `w` while it belongs to the app the user is using right now: their
@@ -1101,6 +1263,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         self.target = Some(Target {
             window: w,
             shot: None,
+            place: Place::Here,
         });
     }
 
@@ -1118,6 +1281,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
                 h: 0.0,
             },
             shot: None,
+            place: Place::Here,
         });
     }
 
@@ -1168,8 +1332,10 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             .map(|p| format!(", {p}"))
             .unwrap_or_default();
         let was = format!("{} was already running (pid {}{from})", app.name, app.pid);
+        // One more window of it is no way round this: within one app, the window the agent made
+        // key would take the user's typing.
         let users = self.users_window();
-        if !new_window && let Some(front) = users.as_ref().filter(|f| f.pid == app.pid) {
+        if let Some(front) = users.as_ref().filter(|f| f.pid == app.pid) {
             self.tell(activity("waiting", waiting(&app.name), front, None, None));
             return Err(format!("{} {was}.", in_use(&app.name)));
         }
@@ -1238,7 +1404,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             None => {
                 self.work_in_windowless(&app.name, app.pid);
                 Ok(vec![text(format!(
-                    "{was}, so nothing was launched: {asked}, but no new window has appeared. Keys go to it now (cmd+n opens a window in most apps); then call list_windows and screenshot with the window's window_id.{second}"
+                    "{was}, so nothing was launched: {asked}, but no new window has appeared. {NO_WINDOW_YET}{second}"
                 ))])
             }
         }
@@ -1289,7 +1455,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             None if pid > 0 => {
                 self.work_in_windowless(name, pid);
                 Ok(vec![text(format!(
-                    "{launched}. It shows no window yet: keys go to it now (cmd+n opens a window in most apps); then call list_windows and screenshot with the window's window_id."
+                    "{launched}. It shows no window yet. {NO_WINDOW_YET}"
                 ))])
             }
             None => Err(format!(
@@ -1299,19 +1465,76 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
     }
 }
 
-/// How long the user counts as using the app in front after their last key, click or pointer
-/// movement.
-const IN_USE: Duration = Duration::from_secs(30);
+/// How long without a key, click, scroll or pointer movement from the user before they count as
+/// away from the Mac. Until then the app in front is theirs, though they may only be reading it: a
+/// long page read without touching anything is still in use. The screen says so sooner when it
+/// locks, sleeps or starts its screen saver, which the user's own settings time.
+const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// How long a window that's listed but not on screen has to come on screen before it's taken
+/// for gone (a window just opened can be off screen for a few seconds), and how often it's
+/// looked for meanwhile.
+const OPENING: Duration = Duration::from_millis(if cfg!(test) { 100 } else { 3000 });
+const OPENING_POLL: Duration = Duration::from_millis(if cfg!(test) { 1 } else { 150 });
 
 /// How long an app that was opened is watched for bringing its window forward.
 const SETTLE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 1500 });
 
-/// Said when the agent would drive the app the user is using.
+/// How long after a click or key behind the windows are looked at for one it brought forward
+/// (an app activating itself does within this; slower ones are caught at the next input).
+const AFTER_INPUT: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 250 });
+
+/// Said when the agent would drive the app the user is using. Not even in a window of its own:
+/// within one app, the window the agent clicks or types in takes the keyboard from the user's.
 fn in_use(app: &str) -> String {
     format!(
-        "{app} is the app the user is using right now; ask them whether to work in it (they switch to another app, then you go on), wait, or open a second window (open_app with new_window: true). Nothing was done."
+        "{app} is the app the user is using right now (it's in front and they're at the Mac, if only reading); ask them whether to work in it (they switch to another app, then you go on), or wait and try again. Nothing was done."
     )
 }
+
+/// Said when the window the agent worked in can't be worked in any more: what became of it.
+fn gone(owner: &str, title: &str, how: &Whereabouts) -> String {
+    let title = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" “{title}”")
+    };
+    let other =
+        "work in another window: call list_windows and screenshot another window_id, or open_app.";
+    match how {
+        Whereabouts::Minimised(_) => format!(
+            "{owner}'s window{title} is minimised. Restoring it would put it in front of the user's windows, so ask them to restore it, or {other}"
+        ),
+        Whereabouts::Hidden(_) => format!(
+            "{owner}'s window{title} is hidden, with the rest of {owner}. Showing it would put {owner} in front of the user's windows, so ask them to show it, or {other}"
+        ),
+        Whereabouts::NotShowing(_) => format!(
+            "{owner}'s window{title} isn't on screen any more: {owner} closed it or put it away. Call list_windows and screenshot another window_id, or open_app."
+        ),
+        Whereabouts::Closed | Whereabouts::OnScreen(_) | Whereabouts::OtherSpace { .. } => {
+            format!(
+                "{owner}'s window{title} has closed. Call list_windows and screenshot another window_id, or open_app."
+            )
+        }
+    }
+}
+
+/// Said when the window the agent works in couldn't be captured (`e`): on another Space that's
+/// what's in the way, and the user can bring it back.
+fn unseen(w: &WindowInfo, place: Place, e: String) -> String {
+    if place == Place::Here {
+        return e;
+    }
+    format!(
+        "{}'s window{} {} and can't be seen from here ({e}). Ask the user to bring it to the desktop they're on (or out of full screen), or work in another window: call list_windows and screenshot another window_id, or open_app.",
+        w.owner,
+        titled(w),
+        place.said()
+    )
+}
+
+/// Said when the app the agent opened shows no window: keys reach it, nothing else does.
+const NO_WINDOW_YET: &str = "Keys go to it now, to whatever it has focused: a document app may hold its Open dialog out of sight (it shows only in front), and typing or Return would go there. Press cmd+n first for a new window (in most apps; in Notes or Calendar it makes a new item instead), then call list_windows and screenshot with the window's window_id.";
 
 /// What Trek shows while the agent waits for the user's app.
 fn waiting(app: &str) -> String {
@@ -1569,7 +1792,7 @@ for finding your way.",
                         "type": "object",
                         "properties": {
                             "name": {"type": "string", "description": "Application name, bundle id or path"},
-                            "new_window": {"type": "boolean", "default": false, "description": "Ask the running app for one more window to work in (it opens a window, not another copy of the app), e.g. when the user is using its main one"},
+                            "new_window": {"type": "boolean", "default": false, "description": "Ask the running app for one more window to work in (it opens a window, not another copy of the app), so the user's own windows of it stay as they are. It presses cmd+n in the app, which in some (Notes, Calendar) makes a new item instead"},
                         },
                         "required": ["name"],
                     })
@@ -1657,6 +1880,7 @@ mod tests {
             target: None,
             report: None,
             posted: None,
+            front: None,
         }
     }
 
@@ -2864,11 +3088,15 @@ mod tests {
                 .any(|e| matches!(e, Event::Behind { .. })),
             "nothing reached the user's app"
         );
-        // Away for minutes, or the screen locked: it's fine.
+        // Away for ten minutes, the screen locked, or the screen asleep: it's fine.
         for fake in [
-            using_textedit(300),
+            using_textedit(600),
             Recording {
                 locked: true,
+                ..using_textedit(1)
+            },
+            Recording {
+                dark: true,
                 ..using_textedit(1)
             },
         ] {
@@ -2880,11 +3108,27 @@ mod tests {
             );
             c.call("type_text", &json!({"text": "hi"})).unwrap();
         }
-        // Or a window of its own: one more window of the running app (cmd+n to it, no new
-        // process), and the user's window brought back to the front.
+        // Nor in a window of its own: no cmd+n reaches the app they're typing in (the new window
+        // would take their keys).
         let fake = Recording {
             jumps_forward: true,
             ..using_textedit(5)
+        };
+        fake.opens.borrow_mut().push(textedit_window(50, 12));
+        let mut c = behind(&fake);
+        assert_eq!(
+            c.call("open_app", &json!({"name": "TextEdit", "new_window": true})),
+            Err(format!(
+                "{} TextEdit was already running (pid 50, /Applications/TextEdit.app).",
+                in_use("TextEdit")
+            ))
+        );
+        assert_eq!(fake.events(), vec![]);
+        // Once they're away it gets one: cmd+n to the app alone (no new process), and the
+        // window in front put back over the new one.
+        let fake = Recording {
+            jumps_forward: true,
+            ..using_textedit(600)
         };
         fake.opens.borrow_mut().push(textedit_window(50, 12));
         let mut c = behind(&fake);
@@ -2908,18 +3152,94 @@ mod tests {
     }
 
     #[test]
+    fn a_window_a_click_brings_forward_is_put_back_behind_the_users() {
+        // A click in Safari behind raises a window of it over the user's Notes.
+        let mut popup = textedit_window(42, 70);
+        popup.owner = "Safari".into();
+        let fake = Recording {
+            raises: true,
+            jumps_forward: true,
+            idle: Some(Duration::from_secs(300)),
+            ..behind_the_users()
+        };
+        fake.opens.borrow_mut().push(popup.clone());
+        let mut c = behind(&fake);
+        c.call("screenshot", &json!({"window_id": 7})).unwrap();
+        let said = reply(c.call("click", &json!({"x": 10, "y": 10})));
+        assert!(
+            said.contains(
+                "Safari brought its window forward; it was put back behind the user's Notes window."
+            ),
+            "{said}"
+        );
+        assert_eq!(fake.events().last(), Some(&Event::BringForward(1)));
+        assert_eq!(c.desktop.windows().unwrap()[0].owner, "Notes");
+        // The user's own doing is theirs: a window in front after their input since the agent's
+        // last click (10 s ago) is left there.
+        let fake = Recording {
+            jumps_forward: true,
+            idle: Some(Duration::from_secs(1)),
+            ..behind_the_users()
+        };
+        fake.opens.borrow_mut().push(popup);
+        *fake.opened.borrow_mut() = true;
+        let mut c = behind(&fake);
+        c.posted = Some((
+            std::time::Instant::now() - Duration::from_secs(10),
+            Some(Duration::from_secs(300)),
+        ));
+        let notes = c.desktop.windows().unwrap().into_iter().nth(1).unwrap();
+        assert_eq!(notes.id, 1, "Notes was in front");
+        c.front = Some((notes.clone(), 42));
+        assert_eq!(c.put_back_in_front(), "");
+        assert!(c.front.is_none(), "and it's theirs from then on");
+        assert!(
+            !fake
+                .events()
+                .iter()
+                .any(|e| matches!(e, Event::BringForward(_)))
+        );
+        // Had they done nothing since, it would have gone back.
+        let mut away = fake.clone();
+        away.idle = Some(Duration::from_secs(400));
+        c.desktop = Box::new(away.clone());
+        c.front = Some((notes.clone(), 42));
+        assert!(c.put_back_in_front().contains("put back"));
+        assert_eq!(fake.events(), vec![Event::BringForward(1)]);
+        // Only the agent's app is ever put back: another app's window that comes forward (the
+        // user's app reordering its own, a notice) is left where it is, the user idle or not.
+        let mut theirs = textedit_window(1, 80);
+        theirs.owner = "Notes".into();
+        let fake = Recording {
+            jumps_forward: true,
+            idle: Some(Duration::from_secs(400)),
+            ..behind_the_users()
+        };
+        fake.opens.borrow_mut().push(theirs);
+        *fake.opened.borrow_mut() = true;
+        c.desktop = Box::new(fake.clone());
+        // (The agent in Safari, or in Notes itself, where there's no one else's window to keep.)
+        for agents in [42, 1] {
+            c.front = Some((notes.clone(), agents));
+            assert_eq!(c.put_back_in_front(), "");
+        }
+        assert_eq!(fake.events(), vec![]);
+    }
+
+    #[test]
     fn the_agents_own_input_isnt_taken_for_the_users() {
         // The user is away, TextEdit in front; macOS counts the agent's keys as input.
         let fake = Recording {
             posts_count: true,
-            ..using_textedit(300)
+            ..using_textedit(600)
         };
         let mut c = behind(&fake);
         reply(c.call("open_app", &json!({"name": "TextEdit"})));
         for _ in 0..3 {
             c.call("type_text", &json!({"text": "hi"})).unwrap();
         }
-        assert!(c.user_idle().unwrap() >= Duration::from_secs(300));
+        assert!(c.user_idle().unwrap() >= Duration::from_secs(600));
+        assert!(c.user_away(), "its own typing doesn't bring the user back");
         // Input that came after the agent's is the user's.
         let mut c = behind(&using_textedit(300));
         c.posted = Some((
@@ -2945,13 +3265,268 @@ mod tests {
     fn what_the_agent_is_told_when_the_user_is_using_the_app() {
         assert_eq!(
             in_use("Touchline 27"),
-            "Touchline 27 is the app the user is using right now; ask them whether to work in it (they switch to another app, then you go on), wait, or open a second window (open_app with new_window: true). Nothing was done."
+            "Touchline 27 is the app the user is using right now (it's in front and they're at the Mac, if only reading); ask them whether to work in it (they switch to another app, then you go on), or wait and try again. Nothing was done."
         );
+        // No way round it is offered: a second window of the same app is still theirs.
+        assert!(!in_use("Safari").contains("new_window"));
+        // The rule as the agent is told it: reading counts, and away is the screen or 5 minutes.
+        assert!(BACKGROUND_INSTRUCTIONS.contains(
+            "the app in front is theirs while they're at the Mac, if only reading, and acting there is refused until they switch."
+        ));
+        assert!(BACKGROUND_INSTRUCTIONS.contains("(screen locked or asleep, or 5 minutes idle)"));
+        assert_eq!(AWAY_AFTER, Duration::from_secs(5 * 60));
+        assert!(!BACKGROUND_INSTRUCTIONS.contains("30 seconds"));
         assert_eq!(
             waiting("Touchline 27"),
             "Waiting: you're using Touchline 27"
         );
         assert!(BACKGROUND_INSTRUCTIONS.contains("Work only in apps the user isn't using"));
+    }
+
+    #[test]
+    fn reading_the_app_in_front_counts_as_using_it() {
+        // TextEdit in front, the user reading it: no key, click or movement for a while. Half a
+        // minute, four minutes, just under five: still theirs.
+        for idle in [31, 240, 299] {
+            let fake = using_textedit(idle);
+            let mut c = behind(&fake);
+            c.call("screenshot", &json!({"window_id": 11})).unwrap();
+            assert_eq!(
+                c.call("type_text", &json!({"text": "hi"})),
+                Err(in_use("TextEdit")),
+                "idle {idle} s"
+            );
+            assert!(
+                !fake
+                    .events()
+                    .iter()
+                    .any(|e| matches!(e, Event::Behind { .. })),
+                "idle {idle} s: nothing reached their app"
+            );
+        }
+        // Five minutes without input: they're away.
+        let mut c = behind(&using_textedit(300));
+        c.call("screenshot", &json!({"window_id": 11})).unwrap();
+        c.call("type_text", &json!({"text": "hi"})).unwrap();
+        // The screen saver, or the display asleep, says so at once.
+        let fake = Recording {
+            dark: true,
+            ..using_textedit(2)
+        };
+        let mut c = behind(&fake);
+        c.call("screenshot", &json!({"window_id": 11})).unwrap();
+        c.call("click", &json!({"x": 5, "y": 5})).unwrap();
+        // A platform that can't say how long they've been idle leaves the front app theirs.
+        let mut fake = using_textedit(0);
+        fake.idle = None;
+        let mut c = behind(&fake);
+        assert_eq!(
+            c.call("open_app", &json!({"name": "TextEdit"})),
+            Err(format!(
+                "{} TextEdit was already running (pid 50, /Applications/TextEdit.app).",
+                in_use("TextEdit")
+            ))
+        );
+        // Another app, behind, is fine while they read.
+        let mut c = behind(&using_textedit(240));
+        c.call("screenshot", &json!({"window_id": 7})).unwrap();
+        c.call("click", &json!({"x": 5, "y": 5})).unwrap();
+        // The screenshot of their app says why acting there waits.
+        let mut c = behind(&using_textedit(240));
+        let said = reply(c.call("screenshot", &json!({"window_id": 11})));
+        assert!(
+            said.contains("(it's in front and they're at the Mac)")
+                && said.contains("until they switch to another app or step away"),
+            "{said}"
+        );
+    }
+
+    /// Safari's window 7, on another Space now (a full-screen one with `full_screen`); the user's
+    /// Notes and Trek on the one showing.
+    fn on_another_space(full_screen: bool) -> Recording {
+        let mut fake = behind_the_users();
+        let mut windows = fake.windows.clone().unwrap();
+        let safari = windows.remove(1);
+        fake.windows = Ok(windows);
+        fake.elsewhere = vec![(
+            7,
+            Whereabouts::OtherSpace {
+                window: safari,
+                full_screen,
+            },
+        )];
+        fake
+    }
+
+    #[test]
+    fn a_window_on_another_space_is_still_the_one_worked_in() {
+        let fake = on_another_space(false);
+        let mut c = behind(&fake);
+        // It can be picked, and it's seen and worked in where it is.
+        let said = reply(c.call("screenshot", &json!({"window_id": 7})));
+        assert!(
+            said.contains("Safari's window “Docs” (window_id 7)")
+                && said.contains("The window is on another Space, out of the user's sight: this is how it was last drawn there.")
+                && said.contains("so a screenshot can lag behind what you did"),
+            "{said}"
+        );
+        assert!(!said.contains("closed"), "{said}");
+        let clicked = reply(c.call("click", &json!({"x": 100, "y": 50})));
+        assert!(
+            clicked.ends_with(" Safari's window is on another Space, out of the user's sight."),
+            "{clicked}"
+        );
+        let typed = reply(c.call("type_text", &json!({"text": "hi"})));
+        assert!(typed.contains("on another Space"), "{typed}");
+        assert_eq!(
+            fake.events()[1..],
+            [
+                Event::Behind {
+                    window: 7,
+                    input: Input::Click {
+                        x: 100.0,
+                        y: 50.0,
+                        button: Button::Left,
+                        count: 1
+                    }
+                },
+                Event::Behind {
+                    window: 7,
+                    input: Input::Type("hi".into())
+                },
+            ]
+        );
+        // It isn't in the on-screen list, and the list says where it is.
+        let listed = reply(c.call("list_windows", &json!({})));
+        assert!(
+            listed.contains("The window you work in, Safari's window_id 7, is on another Space, so it isn't listed; it's still yours."),
+            "{listed}"
+        );
+        // A full-screen Space says so.
+        let mut c = behind(&on_another_space(true));
+        let said = reply(c.call("screenshot", &json!({"window_id": 7})));
+        assert!(
+            said.contains(
+                "The window is full screen, on a Space of its own, out of the user's sight"
+            ),
+            "{said}"
+        );
+        // It was on screen when picked, then the user moved it to another Space: still the one.
+        let mut c = behind(&behind_the_users());
+        c.call("screenshot", &json!({"window_id": 7})).unwrap();
+        let moved = on_another_space(true);
+        c.desktop = Box::new(moved.clone());
+        let scrolled = reply(c.call("scroll", &json!({"x": 10, "y": 10, "dy": 2})));
+        assert!(
+            scrolled.contains("Safari's window is full screen, on a Space of its own"),
+            "{scrolled}"
+        );
+        assert!(matches!(
+            moved.events()[..],
+            [Event::Behind { window: 7, .. }]
+        ));
+        // Back on the Space showing: nothing more is said.
+        c.desktop = Box::new(behind_the_users());
+        let clicked = reply(c.call("click", &json!({"x": 10, "y": 10})));
+        assert!(clicked.ends_with("in the background."), "{clicked}");
+    }
+
+    #[test]
+    fn a_window_on_another_space_that_cant_be_seen_says_so() {
+        let fake = Recording {
+            blind_off_space: true,
+            ..on_another_space(true)
+        };
+        let mut c = behind(&fake);
+        let err = c.call("screenshot", &json!({"window_id": 7})).unwrap_err();
+        assert!(
+            err.starts_with("Safari's window “Docs” is full screen, on a Space of its own and can't be seen from here")
+                && err.contains("Ask the user to bring it to the desktop they're on (or out of full screen), or work in another window"),
+            "{err}"
+        );
+        assert!(!err.contains("closed"), "{err}");
+        // It's still the window: what's true is said again, not "pick a window".
+        let err = c.call("screenshot", &json!({})).unwrap_err();
+        assert!(err.contains("can't be seen from here"), "{err}");
+        assert_eq!(c.target.as_ref().map(|t| t.window.id), Some(7));
+        assert!(
+            !fake
+                .events()
+                .iter()
+                .any(|e| matches!(e, Event::Behind { .. }))
+        );
+    }
+
+    #[test]
+    fn a_window_just_opened_gets_a_moment_to_come_on_screen() {
+        // TextEdit's new window, listed but not on screen for its first few lookups.
+        let fake = behind_the_users();
+        fake.opening.borrow_mut().push((textedit_window(50, 11), 3));
+        let mut c = behind(&fake);
+        let said = reply(c.call("screenshot", &json!({"window_id": 11})));
+        assert!(
+            said.contains("TextEdit's window “Untitled” (window_id 11)"),
+            "{said}"
+        );
+        assert!(!said.contains("another Space"), "{said}");
+        c.call("type_text", &json!({"text": "x"})).unwrap();
+        // One that never shows within the grace is let go, said as it is.
+        let fake = behind_the_users();
+        fake.opening
+            .borrow_mut()
+            .push((textedit_window(50, 11), u32::MAX));
+        let mut c = behind(&fake);
+        let started = std::time::Instant::now();
+        let err = c.call("screenshot", &json!({"window_id": 11})).unwrap_err();
+        assert!(started.elapsed() >= OPENING, "it was given the grace");
+        assert_eq!(
+            err,
+            "TextEdit's window “Untitled” isn't on screen any more: TextEdit closed it or put it away. Call list_windows and screenshot another window_id, or open_app."
+        );
+    }
+
+    #[test]
+    fn a_minimised_hidden_or_closed_window_is_let_go_and_said_as_it_is() {
+        let safari = behind_the_users().windows.unwrap().remove(1);
+        let cases = [
+            (
+                Whereabouts::Minimised(safari.clone()),
+                "Safari's window “Docs” is minimised. Restoring it would put it in front of the user's windows, so ask them to restore it, or work in another window: call list_windows and screenshot another window_id, or open_app.",
+            ),
+            (
+                Whereabouts::Hidden(safari.clone()),
+                "Safari's window “Docs” is hidden, with the rest of Safari. Showing it would put Safari in front of the user's windows, so ask them to show it, or work in another window: call list_windows and screenshot another window_id, or open_app.",
+            ),
+            (
+                Whereabouts::Closed,
+                "Safari's window “Docs” has closed. Call list_windows and screenshot another window_id, or open_app.",
+            ),
+        ];
+        for (place, said) in cases {
+            let mut c = behind(&behind_the_users());
+            c.call("screenshot", &json!({"window_id": 7})).unwrap();
+            let mut gone = behind_the_users();
+            let mut windows = gone.windows.clone().unwrap();
+            windows.remove(1);
+            gone.windows = Ok(windows);
+            gone.elsewhere = vec![(7, place.clone())];
+            c.desktop = Box::new(gone.clone());
+            assert_eq!(c.call("click", &json!({"x": 1, "y": 1})), Err(said.into()));
+            assert!(c.target.is_none(), "{place:?}: forgotten");
+            assert_eq!(gone.events(), vec![]);
+            // Picked by its id, the same is said.
+            if place != Whereabouts::Closed {
+                assert_eq!(
+                    c.call("screenshot", &json!({"window_id": 7})),
+                    Err(said.into())
+                );
+            }
+        }
+        let mut c = behind(&behind_the_users());
+        assert_eq!(
+            c.call("screenshot", &json!({"window_id": 99})),
+            Err("No window 99 is open. list_windows shows the windows there are.".into())
+        );
     }
 
     #[test]

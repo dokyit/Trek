@@ -21,7 +21,8 @@ extension Backend {
     func reconnect() {}
 }
 
-enum ConnectionState: Equatable {
+// Nonisolated, as what's compared in a view's `animation(_:value:)` may be off the main thread.
+nonisolated enum ConnectionState: Equatable {
     case idle
     case connecting
     case connected
@@ -43,7 +44,7 @@ enum ConnectionState: Equatable {
     }
 }
 
-enum AppMode: Equatable {
+nonisolated enum AppMode: Equatable {
     case unpaired
     case demo
     case live
@@ -68,6 +69,9 @@ final class AppModel {
     var updateDismissal = AppUpdate.Dismissal.load()
 
     var mode: AppMode = .unpaired
+    /// `boot` has run: until it has, `mode` doesn't say yet whether this iPhone is paired, and
+    /// drawing it would show a paired phone the pairing screen at every launch.
+    private(set) var booted = false
     /// Every machine the phone is paired with, connected at once. Thread and project ids that
     /// reach shared state are theirs prefixed (`"host:thread"`), so two machines' rows never mix.
     var links: [HostLink] = []
@@ -127,6 +131,8 @@ final class AppModel {
     static let firstPage = 60
     static let earlierPage = 200
     @ObservationIgnored private var cacheSaves: Set<String> = []
+    /// The Live Activity.
+    @ObservationIgnored let activities = TurnActivities()
 
     init() {
         followUpMode = SendMode(rawValue: UserDefaults.standard.string(forKey: "followUpMode") ?? "") ?? .steer
@@ -196,11 +202,19 @@ final class AppModel {
     // MARK: Lifecycle
 
     func boot(demo forceDemo: Bool) {
+        // Once: iOS can start the app in the background to answer a Live Activity's button, and
+        // its window may come up after that.
+        guard !booted else { return }
+        activities.read = { [weak self] now in self?.activityState(now: now) }
+        activities.knowsAll = { [weak self] in self?.links.allSatisfy(\.listed) ?? true }
+        activities.hears = { [weak self] qid in self?.link(for: qid)?.connection == .connected }
+        activities.adopt()
         if UserDefaults.standard.bool(forKey: "TrekReset") {
             UserDefaults.standard.set(false, forKey: "demoMode")
             PairedMac.clear()
         }
         if forceDemo {
+            forgetDemoTranscripts()
             attach(HostLink(paired: .demo, backend: MockHost()))
             if Launch.demoPC { attach(HostLink(paired: .demoPC, backend: MockHost(name: "T-Book", id: "demo-pc", platform: "windows"))) }
             mode = .demo
@@ -210,13 +224,22 @@ final class AppModel {
             for paired in PairedMac.all() { startLive(paired) }
             if links.isEmpty { mode = .unpaired }
         }
+        booted = true
     }
 
     func startDemo() {
         UserDefaults.standard.set(true, forKey: "demoMode")
         leaveAll()
+        forgetDemoTranscripts()
         attach(HostLink(paired: .demo, backend: MockHost()))
         mode = .demo
+    }
+
+    /// The demo Mac makes its threads up afresh each time, times and all: what an earlier one left
+    /// in the cache would say a message an hour old was sent last night.
+    private func forgetDemoTranscripts() {
+        TranscriptCache.removeAll(host: PairedMac.demo.hostId)
+        TranscriptCache.removeAll(host: PairedMac.demoPC.hostId)
     }
 
     /// Leave demo for the real machines, and the machines for demo: the demo link is its own id
@@ -320,6 +343,15 @@ final class AppModel {
     /// The app came back to the front.
     func foregrounded() {
         for link in links { link.backend.wake() }
+        activities.refresh()
+    }
+
+    /// The app left the front. iOS may end it from here on without a word: what's open is saved
+    /// now (its next save may never come), so it opens as it was and asks the Mac only for what
+    /// came after.
+    func backgrounded() {
+        for s in stores.values where s.subscribed { saveCache(s) }
+        activities.backgrounded()
     }
 
     /// The user asked to try a host again now (its connection banner).
@@ -467,6 +499,7 @@ final class AppModel {
             link.features = Set(features)
             learnPlatform(of: link)
         case .snapshot(let s):
+            link.listed = true
             let rows = s.threads.map { qualify($0, on: link) }
             let projs = s.projects.map { qualify($0, on: link) }
             withAnimation(.snappy) {
@@ -585,6 +618,7 @@ final class AppModel {
         if working != workingCount { workingCount = working }
         if needs != needsYouCount { needsYouCount = needs }
         learnIcons()
+        activities.threadsChanged()
     }
 
     // MARK: Outgoing

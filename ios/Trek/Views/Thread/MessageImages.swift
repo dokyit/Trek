@@ -12,11 +12,17 @@ struct MessageImages: View {
     /// Up to four are drawn; a fourth tile says how many more.
     private var shown: Int { min(count, 4) }
 
+    /// A tile's side: one large, a few side by side, and four that still fit the bubble (at 76 they
+    /// ran it past the transcript's margin, and its buttons towards the screen's edge).
+    nonisolated static func side(count: Int) -> CGFloat {
+        count == 1 ? 168 : count == 2 || count == 3 ? 76 : 66
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             ForEach(0..<shown, id: \.self) { i in
                 Button { open = i } label: {
-                    Thumbnail(threadID: threadID, itemID: itemID, index: i, side: count == 1 ? 168 : 76)
+                    Thumbnail(threadID: threadID, itemID: itemID, index: i, side: Self.side(count: count))
                         .overlay {
                             if i == shown - 1, count > shown {
                                 Text("+\(count - shown + 1)")
@@ -180,13 +186,14 @@ struct ImageViewer: View {
 private struct FullImage: View {
     var image: ViewerImage
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
     @State private var loaded: UIImage?
     @State private var failed = false
 
     var body: some View {
         Group {
             if let loaded {
-                ZoomableImage(image: loaded)
+                ZoomableImage(image: loaded, onClose: { dismiss() })
             } else if failed {
                 ContentUnavailableView("Couldn't load this image", systemImage: "photo",
                                        description: Text("It may not be on the Mac any more."))
@@ -208,9 +215,11 @@ private struct FullImage: View {
     }
 }
 
-/// An image that pinches and double-taps to zoom, and pans when zoomed.
+/// An image that pinches and double-taps to zoom, pans when zoomed, and closes on a swipe down
+/// when it isn't.
 private struct ZoomableImage: UIViewRepresentable {
     var image: UIImage
+    var onClose: () -> Void
 
     func makeUIView(context: Context) -> UIScrollView {
         let scroll = UIScrollView()
@@ -230,18 +239,51 @@ private struct ZoomableImage: UIViewRepresentable {
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleTap(_:)))
         tap.numberOfTapsRequired = 2
         scroll.addGestureRecognizer(tap)
+        let swipe = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swiped(_:)))
+        swipe.delegate = context.coordinator
+        scroll.addGestureRecognizer(swipe)
         return scroll
     }
 
     func updateUIView(_ scroll: UIScrollView, context: Context) {
         context.coordinator.view?.image = image
+        context.coordinator.onClose = onClose
         DispatchQueue.main.async { context.coordinator.layout(scroll) }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator: NSObject, UIScrollViewDelegate {
+    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         weak var view: UIImageView?
+        var onClose: () -> Void = {}
+
+        /// Only straight down, and only with nothing to pan: sideways is the next photo, and a
+        /// zoomed image pans.
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let pan = gesture as? UIPanGestureRecognizer,
+                  let scroll = pan.view as? UIScrollView else { return true }
+            let moved = pan.velocity(in: scroll)
+            return scroll.zoomScale == 1 && moved.y > 0 && moved.y > abs(moved.x)
+        }
+
+        func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
+        @objc func swiped(_ pan: UIPanGestureRecognizer) {
+            guard let scroll = pan.view as? UIScrollView else { return }
+            let down = max(0, pan.translation(in: scroll).y)
+            switch pan.state {
+            case .changed:
+                scroll.transform = CGAffineTransform(translationX: 0, y: down)
+            case .ended where down > 120 || pan.velocity(in: scroll).y > 900:
+                onClose()
+            case .ended, .cancelled, .failed:
+                UIView.animate(withDuration: 0.2) { scroll.transform = .identity }
+            default:
+                break
+            }
+        }
 
         func layout(_ scroll: UIScrollView) {
             guard let view, scroll.zoomScale == 1 else { return }

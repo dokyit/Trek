@@ -13,7 +13,7 @@ Measured 2026-10-31 on Trek 0.4.28 with Claude Code 2.1.316 (Opus 5.5) and Codex
 | Piece | Where it comes from | Claude Code | Codex | OpenCode, ACP agents (Cursor, Copilot, Droid) | Direct models |
 | --- | --- | --- | --- | --- | --- |
 | Notes | `Workspace::session_notes` → `agent_notes` (crates/trek-app/src/workspace.rs) | `--append-system-prompt`, every launch | wrapped in `<trek-project-notes>` around the first message | same as Codex | system prompt |
-| MCP servers | `Workspace::mcp_servers` + `session_mcp` (trek-app), served by `trek-mcp <family>` | `--mcp-config` | `mcp_servers` in `thread/start`'s config | ACP `mcpServers` | none (Direct models get no Trek tools) |
+| MCP servers | `Workspace::mcp_servers` + `session_mcp` (trek-app), served by `trek-mcp <family>` | `--mcp-config` | `mcp_servers` in `thread/start`'s config | ACP `mcpServers` | two tools, `mcp_list` and `mcp_call`, and one line naming the servers: their schemas stay out of the request |
 | Trek's skills folder | `trek_core::skills::shipped_root()` | `--add-dir` | not passed | not passed | not passed |
 | Tool-search line | `trek_agents::tool_search_note`, added by `message_notes` | not added | after the notes, naming the Trek servers handed over | not added | not added |
 
@@ -98,7 +98,7 @@ Estimates in o200k tokens, then what the vendor reported live.
 | Claude Code | notes + server instructions + deferred tool names | 2,679 → 2,357 | 3,001 → 2,657 | **+4,081 → +3,595** | **+4,545 → +4,030** |
 | Codex | notes and the tool-search line in the first message | 1,116 → 1,010 | 1,116 → 1,013 | **+1,116 → +1,010** | **+1,116 → +1,010** (line listed the default servers) |
 | OpenCode, ACP agents | notes in the first message + every tool schema (+ instructions, if the agent passes them on) | 8,217 → 7,952 (9,182 → 8,745) | 9,496 → 9,231 (10,679 → 10,220) | not measured | not measured |
-| Direct models | notes in the system prompt (no Trek tools) | 1,102 → 952, on top of the harness's own 451 | same | not measured | not measured |
+| Direct models | notes in the system prompt, and `mcp_list` and `mcp_call` (about 170) in place of every server's schemas | 952, on top of the harness's own 1,080 (about 200 system prompt, 880 for eight tools; chars / 4, guarded by `the_harness_prompt_stays_small`) | same | not measured | not measured |
 
 ### Claude Code, live
 

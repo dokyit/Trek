@@ -18,6 +18,7 @@ mod steps;
 pub(crate) use steps::node_setup_card;
 
 use crate::permissions::{self, Permission, Status};
+use crate::scale::text;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::InputState;
@@ -576,7 +577,13 @@ impl Onboarding {
                     .workspace_projects()
                     .first()
                     .map(|p| p.path.clone());
+                self.workspace
+                    .update(cx, |ws, cx| ws.scan_worktree_apps(cx));
             }
+            // Coming from another app: what it left is offered here too.
+            Step::Finish => self
+                .workspace
+                .update(cx, |ws, cx| ws.scan_worktree_apps(cx)),
             // Someone new: their other agents' threads come over while they set up.
             Step::Appearance => {
                 let ws = self.workspace.read(cx);
@@ -756,7 +763,7 @@ impl Onboarding {
             )
             .child(
                 h_flex()
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .child(
                         div()
                             .flex_1()

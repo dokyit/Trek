@@ -4,6 +4,7 @@ use super::charts::{dot, hline, vline};
 use super::layout::{Scale, flow_layout, pack};
 use super::{Frame, format_tick, inset, tone, with_unit};
 use crate::fluent::{self, PillExt as _};
+use crate::scale::{radius, text};
 use gpui_kit::component::{StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -198,7 +199,7 @@ pub(super) fn timeline(
                             div()
                                 .whitespace_nowrap()
                                 .when(ticks.is_none(), |el| el.font_family(look.mono.clone()))
-                                .text_size(if ticks.is_some() { px(11.) } else { px(10.) })
+                                .text_size(px(text::META))
                                 .text_color(look.muted)
                                 .child(label.clone()),
                         )
@@ -224,7 +225,7 @@ pub(super) fn timeline(
                             div()
                                 .w_full()
                                 .truncate()
-                                .text_size(px(11.5))
+                                .text_size(px(text::LABEL))
                                 .when(laned, |el| el.font_medium().text_color(look.fg))
                                 .when(solo, |el| {
                                     el.text_color(
@@ -297,7 +298,7 @@ pub(super) fn timeline(
                             el.child(
                                 div()
                                     .whitespace_nowrap()
-                                    .text_size(px(11.))
+                                    .text_size(px(text::META))
                                     .text_color(look.fg.opacity(0.86 * presence))
                                     .child(event.label.clone()),
                             )
@@ -323,7 +324,7 @@ pub(super) fn timeline(
                         .child(
                             div()
                                 .size_full()
-                                .rounded(px(4.))
+                                .rounded(px(radius::TAG))
                                 .when(!laned, |el| {
                                     el.bg(color.opacity(if hovered { 1. } else { 0.85 * presence }))
                                 })
@@ -342,7 +343,7 @@ pub(super) fn timeline(
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_size(px(10.5))
+                                            .text_size(px(text::META))
                                             .font_medium()
                                             .text_color(look.fg.opacity(presence.max(0.4)))
                                             .child(event.label.clone()),
@@ -510,7 +511,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                 );
                 window.paint_quad(
                     fill(rect, group_fill)
-                        .corner_radii(px(fluent::surface(10.)))
+                        .corner_radii(px(fluent::surface(radius::CARD)))
                         .border_widths(px(1.))
                         .border_color(group_edge),
                 );
@@ -615,7 +616,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                     .h_full()
                     .pl(px(if toned { 12. } else { 10. }))
                     .pr(px(8.))
-                    .rounded(px(8.))
+                    .rounded(px(radius::BUTTON))
                     .border_1()
                     .border_color(if hovered {
                         color.opacity(0.8)
@@ -658,7 +659,11 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(if narrow { 11. } else { 12. }))
+                                            .text_size(px(if narrow {
+                                                text::META
+                                            } else {
+                                                text::LABEL
+                                            }))
                                             .font_medium()
                                             .text_color(look.fg)
                                             .child(node.label.clone()),
@@ -667,7 +672,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                                         el.child(
                                             div()
                                                 .flex_none()
-                                                .text_size(px(9.5))
+                                                .text_size(px(text::META))
                                                 .text_color(look.muted)
                                                 .child(tag),
                                         )
@@ -678,7 +683,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                                     div()
                                         .w_full()
                                         .truncate()
-                                        .text_size(px(10.5))
+                                        .text_size(px(text::META))
                                         .text_color(look.muted)
                                         .child(node.detail.clone().unwrap_or_default()),
                                 )
@@ -703,7 +708,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                     .left(relative(lo / slots))
                     .ml(px(12.))
                     .top(px(rank_top(r0) - 18.))
-                    .text_size(px(10.5))
+                    .text_size(px(text::META))
                     .font_medium()
                     .text_color(look.muted)
                     .child(name.clone()),
@@ -739,7 +744,7 @@ pub(super) fn flow(nodes: &[FlowNode], edges: &[FlowEdge], frame: &Frame, cx: &A
                         .border_1()
                         .border_color(look.hairline)
                         .bg(look.popover)
-                        .text_size(px(10.5))
+                        .text_size(px(text::META))
                         .text_color(if linked(e) { look.fg } else { look.muted })
                         .whitespace_nowrap()
                         .child(label),
@@ -924,7 +929,7 @@ pub(super) fn layers(layers: &[Layer], frame: &Frame, cx: &App) -> AnyElement {
             .gap(px(5.))
             .px(px(12.))
             .py(px(9.))
-            .rounded(px(8.))
+            .rounded(px(radius::BUTTON))
             .border_1()
             .border_color(if hovered {
                 colors[ix].opacity(0.45)
@@ -949,7 +954,7 @@ pub(super) fn layers(layers: &[Layer], frame: &Frame, cx: &App) -> AnyElement {
                         div()
                             .flex_none()
                             .font_family(look.mono.clone())
-                            .text_size(px(10.))
+                            .text_size(px(text::META))
                             .text_color(look.muted)
                             .child(format!("{:02}", ix + 1)),
                     )
@@ -957,7 +962,7 @@ pub(super) fn layers(layers: &[Layer], frame: &Frame, cx: &App) -> AnyElement {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .font_semibold()
                             .text_color(look.fg)
                             .child(layer.label.clone()),
@@ -966,7 +971,7 @@ pub(super) fn layers(layers: &[Layer], frame: &Frame, cx: &App) -> AnyElement {
             .when_some(layer.detail.clone(), |el, detail| {
                 el.child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .line_height(relative(1.4))
                         .text_color(look.muted)
                         .child(detail),
@@ -983,11 +988,11 @@ pub(super) fn layers(layers: &[Layer], frame: &Frame, cx: &App) -> AnyElement {
                                 .h(px(19.))
                                 .flex()
                                 .items_center()
-                                .rounded(px(fluent::control(5.)))
+                                .rounded(px(fluent::control(radius::CONTROL)))
                                 .border_1()
                                 .border_color(look.hairline)
                                 .bg(look.fg.opacity(0.03))
-                                .text_size(px(10.5))
+                                .text_size(px(text::META))
                                 .text_color(look.fg.opacity(0.82))
                                 .child(item.clone())
                         })),

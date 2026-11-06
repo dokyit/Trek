@@ -7,6 +7,7 @@ use crate::fluent;
 use crate::onboarding::Onboarding;
 use crate::panels::RightPanel;
 use crate::panels::terminal::Job;
+use crate::scale::{radius, text, to_rems};
 use crate::settings_view::{SettingsNav, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::thread_view::ThreadView;
@@ -23,9 +24,13 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+pub mod split;
+
 pub const SIDEBAR_WIDTH: f32 = 272.;
 /// What the pinned hub needs: its own column and a transcript 600 wide beside it.
 const HUB_ROOM: f32 = 600. + 316.;
+/// The pinned hub's column.
+const HUB_COLUMN: f32 = 316.;
 
 /// How far the mode arriving (the editor, or Agents back) slides in from its side.
 const MODE_SLIDE: f32 = 14.;
@@ -65,6 +70,15 @@ pub struct TrekWindow {
     composer_changed: bool,
     /// Right-panel resize in progress: (pointer x at grab, width at grab).
     panel_drag: Option<(Pixels, f32)>,
+    /// The right pane of a split (`split`), while there is one.
+    pub beside: Option<split::BesidePane>,
+    /// The split's threads when last looked: left and right.
+    split_shown: Option<(String, String)>,
+    /// The split's divider in hand.
+    split_drag: Option<split::SplitDrag>,
+    /// The left button is down from a press that moved the focus across the split, with the
+    /// composer that had it (`pane_press_ended`).
+    pane_press: Option<Entity<Composer>>,
     /// What the window was last told about its glass (`ui::apply_glass`).
     pub glass_applied: Option<crate::ui::GlassState>,
     /// How far the sidebar is out (1) or folded away (0), on a spring the title bar shares: a
@@ -267,9 +281,9 @@ impl TrekWindow {
                     {
                         this.notes.read(cx).focus_handle(cx).focus(window, cx)
                     }
-                    WorkspaceEvent::FocusComposer => {
-                        this.composer.update(cx, |c, cx| c.focus(window, cx))
-                    }
+                    WorkspaceEvent::FocusComposer => this
+                        .focused_composer(window, cx)
+                        .update(cx, |c, cx| c.focus(window, cx)),
                     // The editor has its terminal in the bottom panel; other tools are the harness's.
                     WorkspaceEvent::OpenTool(crate::workspace::PanelTool::Terminal)
                         if this.workspace.read(cx).ide() =>
@@ -352,12 +366,13 @@ impl TrekWindow {
                         }
                     }
                     WorkspaceEvent::InsertIntoComposer(text) => this
-                        .composer
+                        .focused_composer(window, cx)
                         .update(cx, |c, cx| c.insert_text(text, window, cx)),
                     WorkspaceEvent::SendDraft
                         if this.workspace.read(cx).main_window == Some(window.window_handle()) =>
                     {
-                        this.composer.update(cx, |c, cx| c.send_now(window, cx))
+                        this.focused_composer(window, cx)
+                            .update(cx, |c, cx| c.send_now(window, cx))
                     }
                     WorkspaceEvent::SendDraft => {}
                     WorkspaceEvent::OpenEditor {
@@ -395,7 +410,8 @@ impl TrekWindow {
                     WorkspaceEvent::Editor(_) => {}
                     WorkspaceEvent::AttachImage(path) => {
                         let path = path.clone();
-                        this.composer.update(cx, |c, cx| c.attach_image(path, cx));
+                        this.focused_composer(window, cx)
+                            .update(cx, |c, cx| c.attach_image(path, cx));
                     }
                     WorkspaceEvent::RestoreQueued {
                         thread,
@@ -403,22 +419,23 @@ impl TrekWindow {
                         images,
                     } => {
                         // A thread window showing the thread takes them instead.
-                        if this.workspace.read(cx).shown_in(thread) == Some(Scope::Main) {
-                            this.composer
-                                .update(cx, |c, cx| c.restore(text, images, window, cx));
+                        let shown = this.workspace.read(cx).shown_in(thread);
+                        if shown.as_ref().is_some_and(Scope::in_main_window)
+                            && let Some(composer) = this.composer_showing(thread, window, cx)
+                        {
+                            composer.update(cx, |c, cx| c.restore(text, images, window, cx));
                         }
                     }
+                    // The pane showing it: a fork lands in the one with the focus.
                     WorkspaceEvent::ComposeIn {
-                        scope: Scope::Main,
+                        scope: Scope::Main | Scope::Beside,
                         thread,
                         text,
                         images,
                         edit,
                     } => {
-                        if this.workspace.read(cx).thread_id_in(&Scope::Main)
-                            == Some(thread.as_str())
-                        {
-                            this.composer.update(cx, |c, cx| {
+                        if let Some(composer) = this.composer_showing(thread, window, cx) {
+                            composer.update(cx, |c, cx| {
                                 c.compose(thread, text, images, edit.clone(), window, cx)
                             });
                         }
@@ -427,15 +444,19 @@ impl TrekWindow {
                     WorkspaceEvent::OpenContextCard(Scope::Main) => {
                         this.composer.update(cx, |c, cx| c.open_context_card(cx));
                     }
+                    WorkspaceEvent::OpenContextCard(Scope::Beside) => {
+                        this.beside_pane(window, cx)
+                            .composer
+                            .clone()
+                            .update(cx, |c, cx| c.open_context_card(cx));
+                    }
                     WorkspaceEvent::OpenContextCard(_) => {}
                     WorkspaceEvent::CorrectRestatement {
-                        scope: Scope::Main,
+                        scope: Scope::Main | Scope::Beside,
                         thread,
                     } => {
-                        if this.workspace.read(cx).thread_id_in(&Scope::Main)
-                            == Some(thread.as_str())
-                        {
-                            this.composer.update(cx, |c, cx| c.correct(window, cx));
+                        if let Some(composer) = this.composer_showing(thread, window, cx) {
+                            composer.update(cx, |c, cx| c.correct(window, cx));
                         }
                     }
                     WorkspaceEvent::CorrectRestatement { .. } => {}
@@ -452,6 +473,10 @@ impl TrekWindow {
                 },
             ),
             cx.on_focus_lost(window, |this, window, cx| this.focus.focus(window, cx)),
+            // A split coming or going.
+            cx.observe_in(&workspace, window, |this, _, window, cx| {
+                this.sync_split(window, cx)
+            }),
             // Back from a terminal: a branch switched or a commit made there shows.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
@@ -545,9 +570,9 @@ impl TrekWindow {
             let ws = this.workspace.clone();
             match ws.read(cx).route.clone() {
                 // Study's starter is the composer too.
-                Route::Thread(_) | Route::Draft { .. } | Route::Study => {
-                    this.composer.update(cx, |c, cx| c.focus(window, cx))
-                }
+                Route::Thread(_) | Route::Draft { .. } | Route::Study => this
+                    .focused_composer(window, cx)
+                    .update(cx, |c, cx| c.focus(window, cx)),
                 Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
                 Route::Editor { .. } => {
@@ -558,14 +583,17 @@ impl TrekWindow {
                 Route::Settings(_) | Route::Onboarding => this.focus.focus(window, cx),
             }
             let pending = ws.update(cx, |ws, _| ws.pending_compose.take());
-            if let Some((thread, text, images)) =
-                pending.filter(|(t, ..)| ws.read(cx).thread_id_in(&Scope::Main) == Some(t.as_str()))
+            if let Some((thread, text, images)) = pending
+                && let Some(composer) = this.composer_showing(&thread, window, cx)
             {
-                this.composer.update(cx, |c, cx| {
+                composer.update(cx, |c, cx| {
                     c.compose(&thread, &text, &images, None, window, cx)
                 });
             }
             if let Some(id) = ws.read(cx).thread_id_in(&Scope::Main).map(str::to_string) {
+                ws.update(cx, |ws, cx| ws.hand_back_queued(&id, cx));
+            }
+            if let Some(id) = ws.read(cx).thread_id_in(&Scope::Beside).map(str::to_string) {
                 ws.update(cx, |ws, cx| ws.hand_back_queued(&id, cx));
             }
         });
@@ -592,6 +620,10 @@ impl TrekWindow {
             focus: cx.focus_handle(),
             composer_changed: true,
             panel_drag: None,
+            beside: None,
+            split_shown: None,
+            pane_press: None,
+            split_drag: None,
             glass_applied: None,
             sidebar_motion,
             mode_motion,
@@ -705,11 +737,14 @@ impl WindowTitle {
             .when(shown >= 1., |el| el.w(px(width)))
             .flex_none()
             .children(toggle.map(|toggle| crate::chrome::no_drag("toggle-sidebar", toggle)))
-            .child(crate::brand::logo_mark(px(15.)))
+            // The small mark at 16 pt, the traffic lights' size. The row centres it half a point
+            // below their centre line; a point off its top margin lifts it onto theirs (and onto
+            // whole pixels at 1x).
+            .child(div().mt(px(-1.)).child(crate::brand::logo_mark(px(16.))))
             .when(wordmark, |el| {
                 el.child(
                     div()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .font_semibold()
                         .text_color(theme.foreground.opacity(0.9))
                         .child("Trek"),
@@ -729,7 +764,7 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
         .h(px(26.))
         .p(px(2.))
         .gap(px(2.))
-        .rounded(px(fluent::control(7.)))
+        .rounded(px(fluent::control(radius::BUTTON)))
         .bg(theme.foreground.opacity(0.05))
         .border_1()
         .border_color(theme.foreground.opacity(0.07))
@@ -758,8 +793,8 @@ fn mode_switch(mode: crate::workspace::Mode, cx: &App) -> impl IntoElement {
                     .px(px(9.))
                     .gap(px(5.))
                     .items_center()
-                    .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 5.)))
-                    .text_size(px(12.))
+                    .rounded(px(fluent::pick(fluent::THUMB_RADIUS, radius::CONTROL)))
+                    .text_size(px(text::LABEL))
                     .cursor_pointer()
                     .when(on, |el| {
                         el.bg(theme.foreground.opacity(0.12))
@@ -857,13 +892,13 @@ impl WindowTitle {
                                             .gap(px(8.))
                                             .items_center()
                                             .justify_center()
-                                            .rounded(px(fluent::control(7.)))
+                                            .rounded(px(fluent::control(radius::BUTTON)))
                                             .border_1()
                                             .border_color(theme.foreground.opacity(0.08))
                                             .bg(theme.foreground.opacity(0.035))
                                             .hover(|s| s.bg(theme.foreground.opacity(0.06)))
                                             .cursor_pointer()
-                                            .text_size(px(12.5))
+                                            .text_size(px(text::BODY))
                                             .text_color(theme.muted_foreground)
                                             .child(Icon::new(IconName::Search).size(px(13.)))
                                             .when_some(folder, |el, f| {
@@ -986,7 +1021,7 @@ impl Render for WindowTitle {
                             .as_deref()
                             .filter(|c| !trek_core::paths::is_chat_dir(c))
                             .map(project_name)
-                            .or_else(|| ws.on_machine_in(&Scope::Main)),
+                            .or_else(|| ws.on_machine_in(&ws.harness_scope())),
                         t.title.clone(),
                         t.cwd.clone(),
                     ),
@@ -1043,7 +1078,7 @@ impl Render for WindowTitle {
             .map(|r| ws.project_look(r))
             .unwrap_or_default();
         // Where the thread or draft works, and what it has to hand (Open in, Run, git…).
-        let hub = crate::hub::shown(ws, &Scope::Main);
+        let hub = crate::hub::shown(ws, &ws.harness_scope());
         let hub_open = ws.settings.layout.hub_open;
         let transparent = self.workspace.read(cx).see_through();
         // A narrow window keeps what the bar does and drops what repeats: the wordmark and the
@@ -1080,7 +1115,7 @@ impl Render for WindowTitle {
                             .overflow_hidden()
                             .pl_2()
                             .gap_2()
-                            .text_sm()
+                            .text_size(to_rems(text::LABEL))
                             .when_some(project.clone(), |el, p| {
                                 el.child(
                                     div()
@@ -1375,7 +1410,10 @@ pub fn quit_with_main_window(cx: &mut App) {
 /// inside that update, so the work waits for the current one to finish; and a window closed by its
 /// own close button has its task queued already, which the moment lets run.
 pub fn quit(cx: &mut App) {
-    crate::workspace::workspace_global(cx).update(cx, |ws, _| ws.shutdown_sessions());
+    crate::workspace::workspace_global(cx).update(cx, |ws, _| {
+        ws.quitting = true;
+        ws.shutdown_sessions()
+    });
     if cfg!(windows) {
         cx.defer(|cx| {
             for window in cx.windows() {
@@ -1466,7 +1504,7 @@ fn attention(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_sm()
+                                .text_size(to_rems(text::LABEL))
                                 .text_color(cx.theme().foreground)
                                 .child(message.clone()),
                         )
@@ -1541,6 +1579,48 @@ fn reveal_now(workspace: &Entity<Workspace>, thread: &str, cx: &mut App) {
     show_main(workspace.clone(), cx);
 }
 
+/// The jump key: the next thread that needs the user, or a word on why there's none.
+pub fn jump_to_needs_you(cx: &mut App) {
+    let workspace = crate::workspace::workspace_global(cx);
+    let from = thread_in_front(&workspace, cx);
+    let next = workspace.update(cx, |ws, _| ws.next_needing_you(from.as_deref()));
+    go_or_say(&workspace, next, cx);
+}
+
+/// The key back to where the user last sent a prompt.
+pub fn jump_to_last_prompt(cx: &mut App) {
+    let workspace = crate::workspace::workspace_global(cx);
+    let from = thread_in_front(&workspace, cx);
+    let back = workspace.read(cx).last_prompt_thread(from.as_deref());
+    go_or_say(&workspace, back, cx);
+}
+
+/// The thread the user is on: the one in a thread window with the keys, else the main window's.
+fn thread_in_front(workspace: &Entity<Workspace>, cx: &mut App) -> Option<String> {
+    let front = key_window(cx);
+    let ws = workspace.read(cx);
+    front
+        .and_then(|front| {
+            ws.thread_windows
+                .iter()
+                .find(|(_, window)| **window == front)
+                .map(|(id, _)| id.clone())
+        })
+        .or_else(|| ws.focused_thread().map(str::to_string))
+}
+
+fn go_or_say(workspace: &Entity<Workspace>, target: Result<String, &'static str>, cx: &mut App) {
+    match target {
+        Ok(id) => reveal_thread(workspace, &id, cx),
+        Err(message) => workspace.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message: message.into(),
+                undo: None,
+            })
+        }),
+    }
+}
+
 /// Sit `window`'s toasts `bottom` above its bottom edge, clear of the composer: they rise from
 /// the bottom of the window, away from the title bar, the tabs and the start of the transcript.
 pub fn place_toasts(bottom: Pixels, window: &Window, cx: &mut App) {
@@ -1598,7 +1678,7 @@ fn toast(workspace: &Entity<Workspace>, message: String, undo: Option<UndoAction
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .text_color(cx.theme().foreground)
                     .child(message.clone()),
             )
@@ -1634,6 +1714,7 @@ pub fn toast_button_label(action: &UndoAction) -> &'static str {
         UndoAction::RemoveOldCopy(_) => "Remove old copy",
         UndoAction::OpenThread(_) => "Open thread",
         UndoAction::RestartToUpdate => "Restart",
+        UndoAction::InstallWhenFree => "When they finish",
         _ => "Undo",
     }
 }
@@ -1715,7 +1796,13 @@ impl Render for TrekWindow {
         // Toasts clear the composer on a thread, and the status bar in the editor.
         let toast_bottom = match &route {
             _ if self.workspace.read(cx).ide() => px(40.),
-            Route::Thread(_) => self.composer.read(cx).height().max(px(120.)) + px(16.),
+            Route::Thread(_) => {
+                self.focused_composer(window, cx)
+                    .read(cx)
+                    .height()
+                    .max(px(120.))
+                    + px(16.)
+            }
             _ => px(24.),
         };
         place_toasts(toast_bottom, window, cx);
@@ -1762,6 +1849,8 @@ impl Render for TrekWindow {
         let right_width = wanted_width.clamp(crate::panels::MIN_PANEL.min(max_width), max_width);
         let dragging = self.panel_drag.is_some();
         let dock_dragging = self.terminal_dock.read(cx).dragging();
+        let split_dragging = self.split_drag.is_some();
+        let split_live = self.workspace.read(cx).split_live().is_some();
         // Editor mode: the workbench is everything under the title bar. The harness's route stays
         // as it was, for when the user switches back.
         let body = if crossing {
@@ -1862,6 +1951,37 @@ impl Render for TrekWindow {
                         cx.listener(|this, _, _, cx| this.end_panel_drag(cx)),
                     )
             })
+            // The split's divider, likewise.
+            .when(split_dragging, |el| {
+                el.cursor(CursorStyle::ResizeLeftRight)
+                    .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                        // Let go before this frame was drawn to hear it.
+                        if e.dragging() {
+                            this.drag_split(e.position.x, cx)
+                        } else {
+                            this.end_split_drag(cx)
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.end_split_drag(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.end_split_drag(cx)),
+                    )
+            })
+            // Always there with a split showing: a quick click lets go before another frame.
+            .when(split_live, |el| {
+                el.on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.pane_press_ended(window, cx)),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.pane_press_ended(window, cx)),
+                )
+            })
             // The terminal dock's edge, likewise.
             .when(dock_dragging, |el| {
                 el.cursor(CursorStyle::ResizeUpDown)
@@ -1895,8 +2015,9 @@ impl Render for TrekWindow {
                     this.workspace.update(cx, |ws, cx| ws.new_thread(cx))
                 }
             }))
-            .on_action(cx.listener(|this, _: &crate::TakeSnapshot, _, cx| {
-                this.composer.update(cx, |c, cx| c.snapshot_default(cx))
+            .on_action(cx.listener(|this, _: &crate::TakeSnapshot, window, cx| {
+                this.focused_composer(window, cx)
+                    .update(cx, |c, cx| c.snapshot_default(cx))
             }))
             .on_action(cx.listener(|this, _: &OpenFolder, _, cx| {
                 // In the editor a folder opens as the IDE folder.
@@ -1955,6 +2076,9 @@ impl Render for TrekWindow {
                 if let Some(id) = this.workspace.read(cx).focused_thread().map(str::to_string) {
                     crate::thread_window::open(this.workspace.clone(), &id, cx);
                 }
+            }))
+            .on_action(cx.listener(|this, _: &crate::OpenBeside, window, cx| {
+                this.open_beside_keys(window, cx)
             }))
             .on_action(cx.listener(|this, _: &crate::ShareThread, window, cx| {
                 if let Some(id) = crate::thread_menu::focused(&this.workspace, cx) {
@@ -2053,6 +2177,10 @@ impl Render for TrekWindow {
                     return;
                 }
                 this.workspace.update(cx, |ws, cx| {
+                    // In a split, the pane with the focus: its thread keeps its tab.
+                    if ws.close_focused_pane(cx) {
+                        return;
+                    }
                     if let Route::Thread(id) = ws.route.clone() {
                         ws.close_tab(&id, cx);
                     }
@@ -2152,11 +2280,30 @@ impl TrekWindow {
             } else {
                 0.
             };
+        // The main area inside its margins and border: what a split's two panes would share.
+        let main_room = room - 10. - 8. * (1. - shown);
+        let (hub_scope, split_live) = {
+            let ws = self.workspace.read(cx);
+            ws.split_room.set(main_room);
+            (ws.harness_scope(), ws.split_live().is_some())
+        };
+        // In a split it comes after the two panes' minimum: they hold what opened them.
+        let hub_room = if split_live {
+            crate::workspace::split::fits(main_room - HUB_COLUMN)
+        } else {
+            room >= HUB_ROOM
+        };
         let hub_col = {
             let ws = self.workspace.read(cx);
-            ws.settings.layout.hub_open && room >= HUB_ROOM && crate::hub::shown(ws, &Scope::Main)
+            ws.settings.layout.hub_open && hub_room && crate::hub::shown(ws, &hub_scope)
         }
-        .then(|| crate::hub::column(self.workspace.clone(), Scope::Main, window, cx));
+        .then(|| crate::hub::column(self.workspace.clone(), hub_scope, window, cx));
+        let hub_width = if hub_col.is_some() { HUB_COLUMN } else { 0. };
+        let tab_height = if tabs.is_some() {
+            crate::tabs::HEIGHT
+        } else {
+            0.
+        };
         // The terminal dock, under the chat (threads and drafts) while the one on screen has it shown.
         let dock = self
             .terminal_dock
@@ -2192,7 +2339,7 @@ impl TrekWindow {
                             .gap_2()
                             .border_b_1()
                             .border_color(theme.border)
-                            .text_sm()
+                            .text_size(to_rems(text::LABEL))
                             .child(
                                 Icon::new(IconName::File)
                                     .small()
@@ -2204,7 +2351,7 @@ impl TrekWindow {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .text_color(theme.muted_foreground)
                                     .child(dir),
                             )
@@ -2275,6 +2422,16 @@ impl TrekWindow {
                     )
                     .children(dock)
                     .into_any_element(),
+                _ if split_live => {
+                    let panes = self.split_view(main_room - hub_width, window, cx);
+                    v_flex()
+                        .size_full()
+                        .min_w_0()
+                        .children(tabs)
+                        .child(h_flex().flex_1().min_h_0().child(panes).children(hub_col))
+                        .children(dock)
+                        .into_any_element()
+                }
                 _ => v_flex()
                     .size_full()
                     .min_w_0()
@@ -2315,6 +2472,7 @@ impl TrekWindow {
                     .into_any_element(),
             }
         };
+        let drop_zones = self.drop_zones(tab_height, main_room, main_room - hub_width, cx);
         h_flex()
             .flex_1()
             .min_h_0()
@@ -2363,14 +2521,15 @@ impl TrekWindow {
                     .child(
                         div()
                             .size_full()
-                            .rounded(px(fluent::surface(12.)))
+                            .rounded(px(fluent::surface(radius::CARD)))
                             .border_1()
                             .border_color(crate::ui::panel_border(glass, cx))
                             .bg(crate::ui::panel_bg(glass, cx))
                             .overflow_hidden()
                             .relative()
                             .children(crate::ui::glass_sheen(glass, cx))
-                            .child(content),
+                            .child(content)
+                            .children(drop_zones),
                     ),
             )
             .when(right_open && !in_settings, |el| {
@@ -2429,7 +2588,7 @@ impl TrekWindow {
                     .child(
                         div()
                             .size_full()
-                            .rounded(px(fluent::surface(12.)))
+                            .rounded(px(fluent::surface(radius::CARD)))
                             .border_1()
                             .border_color(crate::ui::panel_border(glass, cx))
                             // Over the chat it needs a solid face, and a shadow to lift it off.

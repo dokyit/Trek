@@ -201,6 +201,32 @@ fn the_picture_can_be_turned_off_and_reports_from_gone_threads_are_refused() {
 }
 
 #[test]
+fn the_picture_s_stop_ends_the_agent_s_turn() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = working(&trek, cx).await;
+        report(&trek, cx, &id, step("type", "Typing “hi”", None));
+        assert!(watched(&trek, cx).2, "the picture is up");
+        // Its Stop, as the user takes the computer back: the turn ends, and the picture goes.
+        let b = trek.read(cx, |ws, _| ws.background_use.clone());
+        cx.update(|cx| trek_app::background_use::BackgroundUse::stop_current(&b, cx));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while watched(&trek, cx) != (0, None, false) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the picture should close once stopped: {:?}",
+                watched(&trek, cx)
+            );
+            cx.background_executor
+                .timer(Duration::from_millis(20))
+                .await;
+            cx.run_until_parked();
+        }
+    });
+}
+
+#[test]
 fn the_chip_fits_a_narrow_thread_pane() {
     run(async |cx| {
         let trek = open(cx);

@@ -21,12 +21,14 @@ struct RowIconButton: View {
 private struct RowIcon: View {
     var systemImage: String
     var width: CGFloat = 36
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
+        let big = typeSize.isAccessibilitySize
         Image(systemName: systemImage)
-            .font(.system(size: 13, weight: .medium))
+            .font(.system(size: big ? 19 : 13, weight: .medium))
             .foregroundStyle(Trek.muted)
-            .frame(width: width, height: 32)
+            .frame(width: big ? width * 1.25 : width, height: big ? 44 : 32)
             .contentShape(Rectangle())
     }
 }
@@ -48,22 +50,55 @@ struct TurnActions: View {
     /// The turn ran the project's verification CLI: the Mac's "Verified" badge.
     var verified: Verification? = nil
     var act: (RowAction) -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
+        if typeSize.isAccessibilitySize {
+            // When it finished on a line of its own: beside the buttons, it pushed them off the side.
+            VStack(alignment: .leading, spacing: 0) {
+                finished.padding(.leading, 8)
+                HStack(spacing: 0) {
+                    copy
+                    Spacer(minLength: 0)
+                    actions
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            HStack(spacing: 0) {
+                copy
+                finished
+                Rectangle().fill(Trek.border).frame(height: 0.5).padding(.horizontal, 10)
+                actions
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var copy: some View {
+        RowIconButton(systemImage: "doc.on.doc", label: "Copy response") { act(.copyResponse(end: end)) }
+    }
+
+    @ViewBuilder
+    private var finished: some View {
         HStack(spacing: 0) {
-            RowIconButton(systemImage: "doc.on.doc", label: "Copy response") { act(.copyResponse(end: end)) }
             if at != nil || secs != nil {
                 Text([at.map { When.clock($0) }, secs.map { When.duration($0) }].compactMap { $0 }.joined(separator: " · "))
                     .font(.ui(.caption).monospacedDigit())
                     .foregroundStyle(Trek.muted.opacity(0.85))
-                    .fixedSize()
+                    // On a line of its own at the accessibility sizes, where an older turn's date can need two.
+                    .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: true)
                     .accessibilityLabel("Finished\(at.map { " at \(When.clock($0))" } ?? "")\(secs.map { ", worked for \(When.duration($0))" } ?? "")")
             }
             if let verified {
                 VerifiedBadge(verification: verified, compact: latest)
                     .padding(.leading, 8)
             }
-            Rectangle().fill(Trek.border).frame(height: 0.5).padding(.horizontal, 10)
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
             if latest {
                 RowIconButton(systemImage: "arrow.uturn.backward", label: "Undo this turn", disabled: busy) { act(.undo(end: end)) }
                 RowIconButton(systemImage: "arrow.clockwise", label: "Retry", disabled: busy) { act(.retry(end: end, model: nil)) }
@@ -91,8 +126,6 @@ struct TurnActions: View {
                 }
                 .accessibilityLabel("Turn actions")
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -121,7 +154,7 @@ struct MessageActions: View {
     var act: (RowAction) -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
+        BesideOrOver(overAlignment: .trailing, spacing: 0) {
             if let at {
                 Text(When.clock(at))
                     .font(.ui(.caption).monospacedDigit())
@@ -129,6 +162,13 @@ struct MessageActions: View {
                     .padding(.trailing, 4)
                     .accessibilityLabel("Sent at \(When.clock(at))")
             }
+            buttons
+        }
+        .padding(.trailing, -8)
+    }
+
+    private var buttons: some View {
+        HStack(spacing: 0) {
             if aside {
                 EmptyView()
             } else if latest {
@@ -147,6 +187,5 @@ struct MessageActions: View {
             }
             RowIconButton(systemImage: "doc.on.doc", label: "Copy message") { act(.copy(text)) }
         }
-        .padding(.trailing, -8)
     }
 }

@@ -45,15 +45,36 @@ So Trek never touches subscription tokens. It drives the vendor's own CLI the us
 | **ACP** (Agent Client Protocol v1, crate `agent-client-protocol` 2.2) | Cursor (`agent acp`), Copilot (`copilot --acp`), Gemini (`gemini --acp`), Kimi, Qwen, Grok, Devin, Goose, Amp, Pi, + registry (~60 agents) | stdio JSON-RPC; registry at `cdn.agentclientprotocol.com/registry/v1/latest/registry.json` |
 | **Direct** (Trek's own agent loop + tools) | API keys (Anthropic, OpenAI, Google, OpenRouter, DeepSeek, xAI, Mistral, Groq, any OpenAI-compatible), local models (Ollama :11434, LM Studio :1234, llama.cpp/MLX :8080), later Sign in with ChatGPT | 3 thin wire adapters: Anthropic Messages, OpenAI Responses/Chat, Gemini; Ollama native |
 
-Model metadata (context, cost, tool support, **reasoning options**) comes from `models.dev/api.json`
-(cached snapshot shipped in-app, refreshed daily).
+Model facts (context window, most output, tool support, reasoning levels, image input) come from
+each provider's own model list where it says (`ModelCaps`, `direct::model_caps`, cached per provider),
+else `catalog::context_window`'s guess by name. A model whose list says it takes no tools isn't offered.
 
 ### Effort mapping (one internal scale → every provider)
-Internal: `Off · Minimal · Low · Medium · High · XHigh · Max`. Clamp to what the model supports
-(`reasoning_options` on models.dev).
+Internal: `Off · Minimal · Low · Medium · High · XHigh · Max`. On OpenRouter, the nearest level at or
+above it that the model offers (`reasoning.supported_efforts`), `none` for Off where it can be turned
+off, nothing for a model without reasoning. With no facts, Low, Medium or High.
 - Anthropic (Opus/Sonnet 5.x, Fable): `thinking:{type:"adaptive"}` + `output_config.effort` low…max (no `budget_tokens`; 400s). Haiku 4.5: `budget_tokens`.
 - OpenAI: `reasoning.effort`. Gemini 3+: `thinkingLevel`; Gemini 2.5: `thinkingBudget` (fraction of max). Ollama: `think`.
 - CLIs: `claude --effort`, Codex `turn/start.effort`, ACP config option in the model category.
+
+### The Direct harness
+
+What it does because a benchmark or a real thread showed it mattered, most of it learned from
+OpenCode, Codex, Pi, Goose and Roo (2026-11-05):
+
+- **Failures are told apart** (`direct/failure.rs`): 429, 5xx, dropped streams and stalls are sent again
+  (2, 4, 8, then 10 s, `Retry-After` as a floor, 8 tries); a context overflow goes on in a fresh context;
+  anything else stops with its own message. A request is never sent again without its tools unless the
+  provider says the model takes none: a model with no tools "answers" with nothing to act with.
+- **Tool calls are made sense of** (`direct/repair.rs`): `{…}{}`, trailing commas, raw newlines, invalid
+  escapes, names and field names from other harnesses, calls written as text in six house formats. A call
+  cut off by the output limit never runs, and an unparsable one is never guessed at.
+- **The model is told what happened**: `[exit code N]`, output's end kept (that's where the build error
+  is) with the whole saved to a file, a timeout's remedy, the closest lines when an edit doesn't match.
+- **The context fills slowly**: old tool output cut down at 60% of the window (only when that frees a
+  tenth, since it costs the provider's cache), the model's own notes then a fresh context at 85%.
+- **Runaway guards say why**: the same call with the same result is warned about at 4 and stopped at 8; a
+  round limit of 200 (30 cut off five of six real sub-agents); either way the model reports where it got.
 
 ## 3. Hand-holding (permission) modes
 
@@ -63,7 +84,7 @@ Trek's four modes, mapped per backend:
 |---|---|---|---|---|
 | **Supervised** | Ask before edits and commands | `default` | `read-only` + `on-request`, reviewer=user | ask every tool |
 | **Auto-accept edits** | File edits auto-applied; commands ask | `acceptEdits` | `workspace-write` + Trek auto-approves file-change requests | edits allow, exec ask |
-| **Auto** | Runs freely; risky actions checked | `auto` | `workspace-write` + `approvals_reviewer=auto_review` | allow, deny-list + risk classifier asks |
+| **Auto** | Runs freely; risky actions checked | `auto` | `workspace-write` + `approvals_reviewer=auto_review` | ACP: allow, deny-list + risk classifier asks. Direct: runs a short allow-list of read-only commands unasked, asks for the rest |
 | **Full access** | No prompts, no sandbox | `bypassPermissions` | `danger-full-access` + `never` | allow all |
 
 Plan mode is a separate toggle (⇧Tab), not a hand-holding level, matching Claude Code/Codex/Factory.
@@ -105,7 +126,9 @@ version, notes and per-platform archive URL, SHA-256 and minisign signature; the
 (`assets/update/minisign.pub`). Flow: check on launch and daily → download in the background → verify →
 unpack and inspect the bundle → "Update" pill in the sidebar footer and **Restart to update** → install
 only when no agent turn is running, or on quit (Conductor's pattern; Claude desktop's update-kills-sessions
-bug is the anti-pattern). The swap is one atomic rename with one backup kept, and never replaces a version
+bug is the anti-pattern). With chats running the updater says how many and offers to wait for them (the
+default), install now (it says it stops them) or leave it for the quit; chats it stops are offered back at the
+next launch, and nothing runs by itself after a restart unless the user turned that on. The swap is one atomic rename with one backup kept, and never replaces a version
 that's already as new. Changing the channel drops whatever the old channel downloaded. A version rolled back
 from (by the relaunch helper, or by hand) is never offered again. Only release bundles update themselves:
 `cargo run` and bundles built locally with `script/bundle.sh` are development builds, and a copy in a folder

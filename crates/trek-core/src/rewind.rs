@@ -98,12 +98,56 @@ const RECAP_TURNS: usize = 3;
 /// Longest a recap runs: past it, fewer of the latest exchanges are shown (the oldest go first).
 const RECAP_MAX: usize = 9_000;
 
+/// How much a recap shows, and which notes it ends with.
+#[derive(Debug, Clone, Copy)]
+pub struct RecapLimits {
+    /// Longest the first message runs.
+    pub first: usize,
+    /// Longest any other message runs.
+    pub message: usize,
+    /// How many of the latest exchanges it shows.
+    pub turns: usize,
+    /// Longest it runs: past it, the oldest exchanges go first.
+    pub max: usize,
+    /// End with the agent change the transcript shows ("The conversation moved…").
+    pub moved_note: bool,
+    /// End with the files the agent's edit tools named ("Files changed so far…").
+    pub files_note: bool,
+}
+
+impl Default for RecapLimits {
+    fn default() -> Self {
+        RecapLimits {
+            first: RECAP_FIRST,
+            message: RECAP_MESSAGE,
+            turns: RECAP_TURNS,
+            max: RECAP_MAX,
+            moved_note: true,
+            files_note: true,
+        }
+    }
+}
+
+/// A recap's paragraphs, and how many messages it had no room for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recapped {
+    pub parts: Vec<String>,
+    pub messages_left_out: usize,
+}
+
 /// A short orientation for a session that starts afresh in a conversation already under way:
 /// where the whole transcript is and how to search it (`log`: its path and line count), what was
 /// asked first, the last few exchanges (long messages shortened, tool calls one line per turn),
 /// and where things stand (how the last turn ended, a question left open, the files changed).
 /// Everything else stays in the transcript, word for word, for the agent to search.
 pub fn recap(items: &[Item], log: Option<(&Path, u64)>) -> String {
+    recap_within(items, log, RecapLimits::default())
+        .parts
+        .join("\n\n")
+}
+
+/// `recap`, as much of it as `limits` allow.
+pub fn recap_within(items: &[Item], log: Option<(&Path, u64)>, limits: RecapLimits) -> Recapped {
     // Turns, by the message that starts each.
     let starts: Vec<usize> = items
         .iter()
@@ -112,19 +156,21 @@ pub fn recap(items: &[Item], log: Option<(&Path, u64)>) -> String {
         .map(|(i, _)| i)
         .collect();
     if starts.is_empty() {
-        return String::new();
+        return Recapped::default();
     }
     let turn = |t: usize| {
         let end = starts.get(t + 1).copied().unwrap_or(items.len());
         &items[starts[t]..end]
     };
     let retrieval = log.map(|(path, lines)| crate::session_log::retrieval(path, lines, None));
-    let first = user_line(&items[starts[0]], RECAP_FIRST);
-    let tail = standing(items);
-    // The latest exchanges, as many of `RECAP_TURNS` as fit (the first message is shown apart
+    let first = user_line(&items[starts[0]], limits.first);
+    let tail = standing(items, limits);
+    // The latest exchanges, as many of `limits.turns` as fit (the first message is shown apart
     // when it isn't one of them).
-    let mut from = starts.len().saturating_sub(RECAP_TURNS);
-    let mut turns: Vec<String> = (from..starts.len()).map(|t| exchange(turn(t))).collect();
+    let mut from = starts.len().saturating_sub(limits.turns);
+    let mut turns: Vec<String> = (from..starts.len())
+        .map(|t| exchange(turn(t), limits.message))
+        .collect();
     let fixed = retrieval
         .iter()
         .chain(&tail)
@@ -132,16 +178,18 @@ pub fn recap(items: &[Item], log: Option<(&Path, u64)>) -> String {
         .sum::<usize>()
         + first.len()
         + 200;
-    while turns.len() > 1 && fixed + turns.iter().map(|p| p.len() + 2).sum::<usize>() > RECAP_MAX {
+    while turns.len() > 1 && fixed + turns.iter().map(|p| p.len() + 2).sum::<usize>() > limits.max {
         turns.remove(0);
         from += 1;
     }
     let mut out: Vec<String> = retrieval.into_iter().collect();
+    let mut messages_left_out = 0;
     if from > 0 {
         out.push("What was asked first:".to_string());
         out.push(first);
         let left_out = &items[starts[1].min(starts[from])..starts[from]];
         let messages = from - 1;
+        messages_left_out = messages;
         let tools = left_out
             .iter()
             .filter(|i| matches!(i, Item::Tool { .. }))
@@ -162,11 +210,10 @@ pub fn recap(items: &[Item], log: Option<(&Path, u64)>) -> String {
     if starts.len() > 1 {
         out.push("The latest exchanges, oldest first:".to_string());
     }
-    out.into_iter()
-        .chain(turns)
-        .chain(tail)
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    Recapped {
+        parts: out.into_iter().chain(turns).chain(tail).collect(),
+        messages_left_out,
+    }
 }
 
 /// "User: …", with how many images came with it.
@@ -187,13 +234,13 @@ fn user_line(item: &Item, max: usize) -> String {
 
 /// One turn for a recap: its message (and any answers the user typed in it), one line for the
 /// tools the agent used, and the agent's last words.
-fn exchange(turn: &[Item]) -> String {
-    let mut parts = vec![user_line(&turn[0], RECAP_MESSAGE)];
+fn exchange(turn: &[Item], message: usize) -> String {
+    let mut parts = vec![user_line(&turn[0], message)];
     let mut tools: Vec<String> = vec![];
     let mut calls = 0;
     for item in &turn[1..] {
         match item {
-            Item::User { .. } => parts.push(user_line(item, RECAP_MESSAGE / 4)),
+            Item::User { .. } => parts.push(user_line(item, message / 4)),
             Item::Tool { title, detail, .. } => {
                 calls += 1;
                 let line = format!(
@@ -228,14 +275,14 @@ fn exchange(turn: &[Item]) -> String {
         _ => None,
     });
     if let Some(said) = last_said {
-        parts.push(format!("Assistant: {}", clip(said, RECAP_MESSAGE)));
+        parts.push(format!("Assistant: {}", clip(said, message)));
     }
     parts.join("\n\n")
 }
 
 /// Where the conversation stands at its end: how the last turn ended when it didn't finish, a
 /// question the agent asked that's still open, an agent change, the files changed.
-fn standing(items: &[Item]) -> Vec<String> {
+fn standing(items: &[Item], limits: RecapLimits) -> Vec<String> {
     let mut notes = vec![];
     match items.iter().rev().find(|i| ends_turn(i)) {
         Some(Item::Error { text }) => {
@@ -270,6 +317,7 @@ fn standing(items: &[Item]) -> Vec<String> {
         .iter()
         .rev()
         .find(|i| matches!(i, Item::Handoff { .. }))
+        .filter(|_| limits.moved_note)
     {
         notes.push(format!(
             "The conversation moved from {} to {} along the way.",
@@ -278,7 +326,7 @@ fn standing(items: &[Item]) -> Vec<String> {
         ));
     }
     let mut files: Vec<&str> = vec![];
-    for item in items {
+    for item in items.iter().filter(|_| limits.files_note) {
         if let Item::Tool { title, detail, .. } = item {
             let t = title.to_ascii_lowercase();
             let path = detail.lines().next().unwrap_or_default().trim();
@@ -308,7 +356,7 @@ fn standing(items: &[Item]) -> Vec<String> {
     notes
 }
 
-fn clip(s: &str, max: usize) -> String {
+pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

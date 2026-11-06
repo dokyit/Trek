@@ -19,6 +19,7 @@ struct ElevationChart: View, Animatable {
     static let axis: CGFloat = 20
 
     @Environment(\.displayScale) private var scale
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         GeometryReader { g in
@@ -30,7 +31,7 @@ struct ElevationChart: View, Animatable {
         }
         .sensoryFeedback(.selection, trigger: selected) { _, new in new != nil }
         .accessibilityElement()
-        .accessibilityLabel(profile?.line ?? "A flat trail so far")
+        .accessibilityLabel(profile?.line ?? "No activity yet")
         .accessibilityValue(profile?.total ?? "")
     }
 
@@ -129,7 +130,7 @@ struct ElevationChart: View, Animatable {
         let cell = (1.25 * scale).rounded(.up) / scale
         let spriteW = CGFloat(HikerSprite.width) * cell
         let hikerLeft = ((min(max(nowX - spriteW / 2, left), left + width - spriteW)) / cell).rounded() * cell
-        HikerSprite.draw(ctx, left: hikerLeft, ground: ground + 1, cell: cell, frame: 1, right: true)
+        HikerSprite.draw(ctx, left: hikerLeft, ground: ground + 1, cell: cell, pose: HikerSprite.stand, right: true, dark: scheme == .dark)
 
         // Axis labels.
         for tick in profile?.ticks ?? [] {

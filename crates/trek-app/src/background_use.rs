@@ -14,6 +14,7 @@
 //! is drawn from its own buffer, so what covers it doesn't show.
 
 use crate::fluent;
+use crate::scale::{radius, text};
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -50,6 +51,8 @@ const SWEEP: Duration = Duration::from_millis(if cfg!(any(test, feature = "test-
 });
 /// How long a click's ring shows.
 const RING: Duration = Duration::from_millis(900);
+/// The Stop button's tooltip: the user takes the computer back by stopping the agent's turn.
+const STOP: &str = "Stop the agent";
 
 /// The window an agent works in, as it last said.
 #[derive(Debug, Clone, PartialEq)]
@@ -428,6 +431,18 @@ impl BackgroundUse {
         empty
     }
 
+    /// Stop the agent on show, as its thread's Stop does: the turn ends, so nothing more is
+    /// clicked or typed, and the picture closes with it.
+    pub fn stop_current(model: &Entity<Self>, cx: &mut App) {
+        let b = model.read(cx);
+        let (Some(ws), Some(thread)) =
+            (b.workspace.upgrade(), b.current().map(|s| s.thread.clone()))
+        else {
+            return;
+        };
+        ws.update(cx, |ws, cx| ws.interrupt(&thread, cx));
+    }
+
     /// Open the session's thread in Trek.
     fn open_thread(model: &Entity<Self>, cx: &mut App) {
         let b = model.read(cx);
@@ -618,7 +633,7 @@ impl Render for Pip {
                 .id(id)
                 .flex_none()
                 .size(px(22.))
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -629,9 +644,30 @@ impl Render for Pip {
                 })
                 .child(Icon::new(icon).xsmall())
         };
+        // Worded, not a bare square beside fold and close, where it would read as a window control.
+        let stop_button = |model: Entity<BackgroundUse>| {
+            h_flex()
+                .id("background-use-stop")
+                .flex_none()
+                .h(px(22.))
+                .px(px(7.))
+                .gap(px(4.))
+                .rounded(px(fluent::control(radius::CONTROL)))
+                .border_1()
+                .border_color(border)
+                .text_size(px(text::LABEL))
+                .text_color(muted)
+                .hover(|el| el.bg(fg.opacity(0.08)).text_color(fg))
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(STOP).build(window, cx)
+                })
+                .child(Icon::new(Lucide::Square).xsmall())
+                .child("Stop")
+                .on_click(move |_, _, cx| BackgroundUse::stop_current(&model, cx))
+        };
         let shell = div()
             .size_full()
-            .rounded(px(fluent::surface(12.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .bg(card)
             .border_1()
             .border_color(border)
@@ -640,6 +676,7 @@ impl Render for Pip {
 
         if m.folded {
             let model = model.clone();
+            let stop = model.clone();
             return shell
                 .id("background-use-pill")
                 // It still floats, so Windows keeps a card's corners rather than a chip's.
@@ -654,7 +691,7 @@ impl Render for Pip {
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(12.5))
+                                .text_size(px(text::BODY))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(app),
                         )
@@ -663,10 +700,11 @@ impl Render for Pip {
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .text_color(muted)
                                 .child(detail),
                         )
+                        .child(stop_button(stop))
                         .child(
                             icon_button(
                                 "background-use-unfold",
@@ -733,7 +771,7 @@ impl Render for Pip {
             None => h_flex()
                 .size_full()
                 .justify_center()
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(muted)
                 .child(format!("Watching {app}…"))
                 .into_any_element(),
@@ -745,7 +783,7 @@ impl Render for Pip {
             driving
         };
         let (m1, m2, m3) = (model.clone(), model.clone(), model.clone());
-        let open = model.clone();
+        let (open, stop) = (model.clone(), model.clone());
         let _ = window;
         shell
             .id("background-use")
@@ -766,7 +804,7 @@ impl Render for Pip {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(12.))
+                                    .text_size(px(text::LABEL))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(if waiting { "Waiting" } else { "Working in" }),
                             )
@@ -775,7 +813,7 @@ impl Render for Pip {
                                     .min_w_0()
                                     .flex_1()
                                     .truncate()
-                                    .text_size(px(12.))
+                                    .text_size(px(text::LABEL))
                                     .text_color(muted)
                                     .child(title),
                             )
@@ -789,6 +827,7 @@ impl Render for Pip {
                                     .on_click(move |_, _, cx| m1.update(cx, |m, cx| m.next(cx))),
                                 )
                             })
+                            .child(stop_button(stop))
                             .child(
                                 icon_button(
                                     "background-use-fold",
@@ -832,11 +871,11 @@ impl Render for Pip {
                                 v_flex()
                                     .min_w_0()
                                     .flex_1()
-                                    .child(div().truncate().text_size(px(12.5)).child(detail))
+                                    .child(div().truncate().text_size(px(text::BODY)).child(detail))
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_size(px(11.))
+                                            .text_size(px(text::META))
                                             .text_color(muted)
                                             .child(if count > 1 {
                                                 format!("{thread} · {count} threads")

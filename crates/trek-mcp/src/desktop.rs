@@ -7,6 +7,8 @@
 mod macos;
 #[cfg(target_os = "macos")]
 mod skylight;
+#[cfg(target_os = "macos")]
+mod spaces;
 #[cfg(windows)]
 mod windows;
 
@@ -100,6 +102,30 @@ pub struct AppBundle {
     pub bundle_id: Option<String>,
 }
 
+/// Where a window is, looked up by its id (`Desktop::whereabouts`). Only macOS tells the cases
+/// apart; elsewhere a window is on screen or closed.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum Whereabouts {
+    /// On screen, on a Space that's showing (however covered).
+    OnScreen(WindowInfo),
+    /// On a Space that isn't showing: another desktop, or (`full_screen`) an app's own
+    /// full-screen Space. It's still open, where the user left it.
+    OtherSpace {
+        window: WindowInfo,
+        full_screen: bool,
+    },
+    /// Minimised.
+    Minimised(WindowInfo),
+    /// Its app is hidden.
+    Hidden(WindowInfo),
+    /// The system still lists it but it isn't on screen, for no reason it gives: a window just
+    /// opened and not shown yet, or one its app has closed but kept.
+    NotShowing(WindowInfo),
+    /// There's no such window any more.
+    Closed,
+}
+
 /// Said by a platform that can't work behind the user's windows.
 pub const NOT_BEHIND: &str = "Background use isn't available here: computer use works in front, with the real pointer and keyboard.";
 
@@ -153,6 +179,13 @@ pub trait Desktop {
     fn window(&self, id: i64) -> Result<Option<WindowInfo>, String> {
         Ok(self.windows()?.into_iter().find(|w| w.id == id))
     }
+    /// Where window `id` is, on screen or not. A platform that can't tell the cases apart says
+    /// on screen or closed.
+    fn whereabouts(&self, id: i64) -> Result<Whereabouts, String> {
+        Ok(self
+            .window(id)?
+            .map_or(Whereabouts::Closed, Whereabouts::OnScreen))
+    }
     /// `w` by itself, as it looks under whatever covers it, as a PNG whose longest side is at
     /// most `max_side`; or `region` of it (in its own coordinates).
     fn capture_window(
@@ -194,6 +227,10 @@ pub trait Desktop {
     }
     /// The screen is locked (or the login window is up).
     fn screen_locked(&self) -> bool {
+        false
+    }
+    /// The display is asleep or the screen saver is on: nobody is reading the screen.
+    fn screen_dark(&self) -> bool {
         false
     }
     /// Put window `w` back in front, its app active: after another app's window came forward
@@ -289,6 +326,16 @@ pub mod fake {
         pub stubborn: bool,
         /// A launched app shows its windows only once it's reopened (TextEdit, launched behind).
         pub shy: bool,
+        /// A click behind makes `opens` appear (an app that raises a window when clicked in).
+        pub raises: bool,
+        /// Where windows that aren't in `windows` are (on another Space, minimised…); any other
+        /// is closed.
+        pub elsewhere: Vec<(i64, Whereabouts)>,
+        /// Windows just opened: not showing for this many more lookups, then on screen.
+        pub opening: Rc<RefCell<Vec<(WindowInfo, u32)>>>,
+        /// A window on another Space can't be captured (`capture_window` fails for it).
+        pub blind_off_space: bool,
+        pub dark: bool,
     }
 
     impl Recording {
@@ -317,6 +364,11 @@ pub mod fake {
                 jumps_forward: false,
                 stubborn: false,
                 shy: false,
+                raises: false,
+                elsewhere: vec![],
+                opening: Rc::default(),
+                blind_off_space: false,
+                dark: false,
             }
         }
 
@@ -421,6 +473,12 @@ pub mod fake {
             if !self.behind {
                 return Err(NOT_BEHIND.into());
             }
+            let off_space = |(id, place): &(i64, Whereabouts)| {
+                *id == w.id && matches!(place, Whereabouts::OtherSpace { .. })
+            };
+            if self.blind_off_space && self.elsewhere.iter().any(off_space) {
+                return Err("SLSHWCaptureWindowList returned no image".into());
+            }
             self.record(Event::CaptureWindow {
                 id: w.id,
                 region,
@@ -435,12 +493,15 @@ pub mod fake {
                 note: "",
             })
         }
-        /// Keys sent to an app (no window: its New Window shortcut, say) make `opens` appear.
+        /// Keys sent to an app (no window: its New Window shortcut, say) make `opens` appear, as
+        /// does a click in an app that `raises`.
         fn behind(&self, w: &WindowInfo, input: &Input) -> Result<(), String> {
             if !self.behind {
                 return Err(NOT_BEHIND.into());
             }
-            if w.id == 0 && matches!(input, Input::Key(_)) {
+            if (w.id == 0 && matches!(input, Input::Key(_)))
+                || (self.raises && matches!(input, Input::Click { .. }))
+            {
                 *self.opened.borrow_mut() = true;
             }
             *self.last_post.borrow_mut() = Some(std::time::Instant::now());
@@ -480,6 +541,32 @@ pub mod fake {
         }
         fn screen_locked(&self) -> bool {
             self.locked
+        }
+        fn screen_dark(&self) -> bool {
+            self.dark
+        }
+        /// On screen when `windows` lists it; else where `opening` or `elsewhere` say.
+        fn whereabouts(&self, id: i64) -> Result<Whereabouts, String> {
+            if let Some(w) = self.windows()?.into_iter().find(|w| w.id == id) {
+                return Ok(Whereabouts::OnScreen(w));
+            }
+            if let Some((w, lookups)) = self
+                .opening
+                .borrow_mut()
+                .iter_mut()
+                .find(|(w, _)| w.id == id)
+            {
+                if *lookups == 0 {
+                    return Ok(Whereabouts::OnScreen(w.clone()));
+                }
+                *lookups -= 1;
+                return Ok(Whereabouts::NotShowing(w.clone()));
+            }
+            Ok(self
+                .elsewhere
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map_or(Whereabouts::Closed, |(_, place)| place.clone()))
         }
         fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
             self.record(Event::BringForward(w.id))

@@ -10,6 +10,7 @@ struct PrCard: View {
     /// A button pressed here: busy until the Mac's next update of the card says how it went.
     @State private var pressed: CardAction?
     @State private var confirmingMerge = false
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         CardFrame(card: card, header: header) {
@@ -116,12 +117,14 @@ struct PrCard: View {
     }
 
     private func commitRow(_ c: CardCommit) -> some View {
-        HStack(spacing: 13) {
+        HStack(alignment: typeSize.isAccessibilitySize ? .top : .center, spacing: 13) {
             Circle().fill(card.phase == .merged ? CardHue.purple.mark : CardHue.blue.mark).frame(width: 8, height: 8)
+                .padding(.top, typeSize.isAccessibilitySize ? 14 : 0)
+            BesideOrOver(spacing: typeSize.isAccessibilitySize ? 2 : 13) {
             Text(c.title)
                 .font(.ui(size: 14, relativeTo: .subheadline))
                 .foregroundStyle(Trek.foreground)
-                .lineLimit(1)
+                .lineLimit(typeSize.isAccessibilitySize ? 3 : 1)
                 .frame(maxWidth: .infinity, alignment: .leading)
             CardClock(live: false) { now in
                 HStack(spacing: 4) {
@@ -132,6 +135,8 @@ struct PrCard: View {
                     }
                 }
                 .foregroundStyle(Trek.muted)
+                .lineLimit(1)
+            }
             }
         }
         .padding(.leading, 18)

@@ -10,6 +10,7 @@
 //! `ToolStatus` stays `Done` — it stands for the pull request, not for the call that made it —
 //! and `phase` inside says where the PR itself stands.
 
+use crate::scale::{radius, text};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 
@@ -214,6 +215,12 @@ pub struct Card {
     pub workflow: bool,
     /// Release cards: the workflow run this dispatch made, once it shows in `gh run list`.
     pub run_id: Option<u64>,
+    /// The thread opened this pull request, or it's its branch's own, rather than one it only
+    /// looked at (`gh pr checks 123`): failing checks are its to fix (`workspace::pr_checks`).
+    pub opened: bool,
+    /// The commit its checks ran on (`headRefOid`): a failure dealt with stays dealt with until a
+    /// new commit fails.
+    pub head_oid: String,
 }
 
 impl Card {
@@ -243,6 +250,10 @@ impl Card {
                 (true, ..) => "Resolving".to_string(),
                 (false, Phase::Conflicted, 1) => "1 conflict".to_string(),
                 (false, Phase::Conflicted, n) if n > 1 => format!("{n} conflicts"),
+                (false, Phase::Open, _) if !failing(self).is_empty() => match failing(self).len() {
+                    1 => "1 check failing".to_string(),
+                    n => format!("{n} checks failing"),
+                },
                 (false, phase, _) => phase.label().to_string(),
             },
             // What failed, by name; else how far it got ("Building 2 of 3", "2 of 3 passed").
@@ -272,6 +283,15 @@ impl Card {
     }
 }
 
+/// The names of `card`'s failing checks.
+pub fn failing(card: &Card) -> Vec<String> {
+    card.checks
+        .iter()
+        .filter(|c| c.state == CheckState::Fail)
+        .map(|c| c.name.clone())
+        .collect()
+}
+
 /// A run card's name: its workflow's, once `gh` said it.
 fn run_name(card: &Card) -> &str {
     if card.title.is_empty() {
@@ -289,6 +309,7 @@ fn chip_hue(card: &Card, cx: &App) -> Option<Hue> {
         return None;
     }
     match card.phase {
+        Phase::Open if card.kind == Kind::Pr && !failing(card).is_empty() => Some(h.red),
         Phase::Conflicted => Some(h.amber),
         Phase::Ready | Phase::Passed | Phase::Published => Some(h.green),
         Phase::Merged => Some(h.purple),
@@ -462,7 +483,7 @@ pub fn status_chip(card: &Card, opacity: f32, cx: &App) -> AnyElement {
         .border_color(chip_border(cx))
         .shadow(chip_shadow())
         .opacity(opacity)
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .child(mark)
         .child(div().text_color(theme.foreground).child(what))
         .child(
@@ -1178,6 +1199,7 @@ pub fn tool_started(
                 phase: Phase::Creating,
                 step: "Opening the pull request".into(),
                 created_ms: now_ms(),
+                opened: true,
                 ..Default::default()
             };
             let row = push(live, &key, &card, &mut fx);
@@ -1220,6 +1242,8 @@ pub fn tool_started(
                 let card = Card {
                     kind: Kind::Pr,
                     title: "Pull request".into(),
+                    // None named: `gh` asks about the branch it's on.
+                    opened: pr.is_none(),
                     number: pr.as_deref().and_then(|p| p.parse().ok()),
                     url: pr.filter(|p| p.contains("/pull/")),
                     repo_dir: dir.to_string_lossy().into_owned(),
@@ -1287,8 +1311,12 @@ pub fn tool_started(
         }
         Call::Git(verb) => {
             // The thread's open PR card narrates the step ("Committing the last changes").
-            if let Some((ix, _, mut c)) = latest_pr(live) {
+            if let Some((ix, row, mut c)) = latest_pr(live) {
                 if !c.phase.terminal() {
+                    // New commits mean new checks: look often again for a while.
+                    if verb == GitVerb::Push && followable(&c) {
+                        fx.watch.push(row);
+                    }
                     c.step = match verb {
                         GitVerb::Commit => "Committing the last changes".into(),
                         GitVerb::Push => match c.commits {
@@ -1598,11 +1626,59 @@ pub fn now_ms() -> i64 {
 /// What `gh`/`git` say for `card`, off the main thread (`None`: no answer, the card keeps
 /// what it had).
 pub fn fetch(card: &Card) -> Option<Card> {
+    fetch_with(card, None).ok()
+}
+
+/// Why `gh` had no answer, as far as what it said can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhFailure {
+    /// It couldn't reach GitHub.
+    Offline,
+    /// GitHub says it's asked too often.
+    RateLimited,
+    /// There's no such pull request, or no access to it any more.
+    Gone,
+    Other,
+}
+
+/// Why `gh` failed, from what it wrote to stderr.
+pub fn gh_failure(stderr: &str) -> GhFailure {
+    let s = stderr.to_lowercase();
+    let says = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    if says(&["rate limit", "abuse detection", "too many requests"]) {
+        GhFailure::RateLimited
+    } else if says(&[
+        "could not resolve host",
+        "no such host",
+        "error connecting",
+        "network is unreachable",
+        "connection refused",
+        "connection reset",
+        "i/o timeout",
+        "tls handshake",
+        "timed out",
+        "dial tcp",
+    ]) {
+        GhFailure::Offline
+    } else if says(&[
+        "could not resolve to a pullrequest",
+        "no pull requests found",
+        "http 404",
+    ]) {
+        GhFailure::Gone
+    } else {
+        GhFailure::Other
+    }
+}
+
+/// [`fetch`], saying why there's no answer. `gh_path`: another `gh` to run than the one on the
+/// login PATH.
+pub fn fetch_with(card: &Card, gh_path: Option<&Path>) -> Result<Card, GhFailure> {
     let dir = PathBuf::from(&card.repo_dir);
     match card.kind {
-        Kind::Pr => fetch_pr(card, &dir),
-        Kind::Release => fetch_release(card, &dir),
-        Kind::Run => fetch_run(card, &dir),
+        Kind::Pr => fetch_pr(card, &dir, gh_path),
+        Kind::Release => fetch_release(card, &dir).ok_or(GhFailure::Other),
+        Kind::Run => fetch_run(card, &dir).ok_or(GhFailure::Other),
     }
 }
 
@@ -1763,10 +1839,23 @@ fn run_card(
 
 /// `gh`, found on the login PATH and run in `dir` (the Share sheet's gists use it too).
 pub(crate) fn gh(dir: &Path) -> Option<std::process::Command> {
-    let gh = trek_core::detect::which("gh")?;
+    gh_with(None, dir)
+}
+
+/// [`gh`], or the one at `path` when given. A folder that's gone (a removed worktree's) can't be
+/// run in; asked by url, `gh` doesn't need one.
+pub(crate) fn gh_with(path: Option<&Path>, dir: &Path) -> Option<std::process::Command> {
+    let gh = match path {
+        Some(p) => p.to_path_buf(),
+        None => trek_core::detect::which("gh")?,
+    };
     let mut c = trek_core::procs::command(gh);
-    c.env("PATH", trek_core::detect::login_path())
-        .current_dir(dir);
+    c.env("PATH", trek_core::detect::login_path());
+    if dir.is_dir() {
+        c.current_dir(dir);
+    } else {
+        c.current_dir(trek_core::paths::home());
+    }
     Some(c)
 }
 
@@ -1784,6 +1873,8 @@ struct PrView {
     head: String,
     #[serde(rename = "baseRefName")]
     base: String,
+    #[serde(rename = "headRefOid")]
+    head_oid: String,
     additions: u64,
     deletions: u64,
     commits: Vec<PrCommitJson>,
@@ -1811,17 +1902,31 @@ struct PrAuthorJson {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct CheckJson {
+pub(crate) struct CheckJson {
     name: String,
     context: String,
     status: String,
     state: String,
     conclusion: String,
+    /// Where a check run's details are (`.../actions/runs/<run>/job/<job>` for GitHub Actions).
+    #[serde(rename = "detailsUrl")]
+    details_url: String,
+    /// Where a commit status's are.
+    #[serde(rename = "targetUrl")]
+    target_url: String,
 }
 
-const PR_FIELDS: &str = "number,title,url,state,mergeable,mergeStateStatus,headRefName,baseRefName,additions,deletions,statusCheckRollup,commits";
+impl CheckJson {
+    pub(crate) fn url(&self) -> Option<&str> {
+        [self.details_url.as_str(), self.target_url.as_str()]
+            .into_iter()
+            .find(|u| !u.is_empty())
+    }
+}
 
-fn check(j: &CheckJson) -> Option<Check> {
+const PR_FIELDS: &str = "number,title,url,state,mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,additions,deletions,statusCheckRollup,commits";
+
+pub(crate) fn check(j: &CheckJson) -> Option<Check> {
     let name = if !j.name.is_empty() {
         j.name.clone()
     } else if !j.context.is_empty() {
@@ -1845,22 +1950,23 @@ fn check(j: &CheckJson) -> Option<Check> {
     Some(Check { name, state })
 }
 
-fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
+fn fetch_pr(card: &Card, dir: &Path, gh_path: Option<&Path>) -> Result<Card, GhFailure> {
     // Neither known yet (`gh pr checks` with no PR named): the branch's own PR.
     let pr = card
         .url
         .clone()
         .or_else(|| card.number.map(|n| n.to_string()));
-    let out = gh(dir)?
+    let out = gh_with(gh_path, dir)
+        .ok_or(GhFailure::Other)?
         .args(["pr", "view"])
         .args(pr.as_slice())
         .args(["--json", PR_FIELDS])
         .output()
-        .ok()?;
+        .map_err(|_| GhFailure::Other)?;
     if !out.status.success() {
-        return None;
+        return Err(gh_failure(&String::from_utf8_lossy(&out.stderr)));
     }
-    let view: PrView = serde_json::from_slice(&out.stdout).ok()?;
+    let view: PrView = serde_json::from_slice(&out.stdout).map_err(|_| GhFailure::Other)?;
     let mut card = pr_from_view(card, view);
     // The conflicting files' names, once GitHub says there are some and a trial merge can tell
     // them apart (best effort: its failure only loses the chips). While it resolves, the list is
@@ -1869,7 +1975,7 @@ fn fetch_pr(card: &Card, dir: &Path) -> Option<Card> {
         let next = conflicting_files(&card, dir);
         apply_conflicts(&mut card, next);
     }
-    Some(card)
+    Ok(card)
 }
 
 /// `card` as `gh pr view` reports its pull request.
@@ -1893,6 +1999,7 @@ fn pr_from_view(card: &Card, view: PrView) -> Card {
     }
     card.head = view.head;
     card.base = view.base;
+    card.head_oid = view.head_oid;
     card.commits = Some(view.commits.len() as u32);
     card.history = view
         .commits
@@ -2200,6 +2307,8 @@ pub struct Actions {
     pub rerun: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     /// A published release's notes on GitHub.
     pub notes: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    /// Failing checks offered to the thread's agent (`workspace::pr_checks`).
+    pub send_failure: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
 }
 
 type Act = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -2391,7 +2500,7 @@ pub fn card(ix: usize, card: &Card, actions: Actions, clock: f32, cx: &App) -> A
         .max_w(px(CARD_W))
         .mt(px(2.))
         .mb(px(8.))
-        .rounded(px(fluent::surface(14.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .border_1()
         .border_color(ink.hair)
         .bg(ink.card)
@@ -2429,22 +2538,30 @@ fn tile(icon: Icon, fill: Hsla, color: Hsla) -> AnyElement {
 
 /// A branch, commit or base: mono on the soft square pill the reference's meta row uses.
 fn mono_pill(text: &str, ink: &Ink, cx: &App) -> AnyElement {
+    pill_of(text, ink, cx).flex_none().into_any_element()
+}
+
+/// A branch's pill that narrows, its name cut short, so what follows it on the line stays whole.
+fn shrinking_pill(text: &str, ink: &Ink, cx: &App) -> AnyElement {
+    pill_of(text, ink, cx).min_w(px(28.)).into_any_element()
+}
+
+/// The pill both draw, before it says whether it may narrow.
+fn pill_of(text: &str, ink: &Ink, cx: &App) -> Div {
     div()
-        .flex_none()
         .max_w(px(200.))
         .truncate()
         .h(px(15.))
         .px(px(5.))
-        .rounded(px(4.))
+        .rounded(px(radius::TAG))
         .bg(ink.pill)
         .flex()
         .items_center()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .line_height(px(15.))
         .font_family(cx.theme().mono_font_family.clone())
         .text_color(ink.mono)
-        .child(text.to_string())
-        .into_any_element()
+        .child(div().min_w_0().truncate().child(text.to_string()))
 }
 
 /// "Push", "Pull request": what started a run, as its badge says it.
@@ -2575,7 +2692,7 @@ fn header(
         .min_w_0()
         .gap(px(5.))
         .items_baseline()
-        .text_size(px(15.))
+        .text_size(px(text::HEADING))
         .line_height(px(20.))
         .overflow_hidden()
         .child(
@@ -2605,17 +2722,17 @@ fn header(
         .mt(px(2.))
         .min_w_0()
         .items_center()
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .text_color(ink.muted)
         .overflow_hidden();
     let count = |n: u32| format!("{n} {}", if n == 1 { "commit" } else { "commits" });
     match card.kind {
         Kind::Pr => {
             if !card.head.is_empty() {
-                meta = meta.child(mono_pill(&card.head, ink, cx)).child(
+                meta = meta.child(shrinking_pill(&card.head, ink, cx)).child(
                     div()
                         .px(px(6.))
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(ink.muted.opacity(0.85))
                         .child("→"),
                 );
@@ -2708,7 +2825,7 @@ fn header(
             .items_center()
             .rounded_pill()
             .bg(fill)
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .text_color(color)
             .children(icon)
             .child(label);
@@ -3746,7 +3863,7 @@ fn graph(card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
                             .text_system()
                             .shape_line(
                                 SharedString::from(s.to_string()),
-                                px(12.),
+                                px(text::LABEL),
                                 &[TextRun {
                                     len: s.len(),
                                     font: font(mono.clone()),
@@ -3801,7 +3918,7 @@ fn graph(card: &Card, clock: f32, motion: bool, cx: &App) -> AnyElement {
             .right(px(25.))
             .top(px(11.))
             .bottom(px(12.))
-            .rounded(px(6.))
+            .rounded(px(radius::CONTROL))
             .shadow(vec![BoxShadow {
                 color: ink.band,
                 offset: point(px(0.), px(0.)),
@@ -3946,14 +4063,14 @@ fn paint_scene(
             } => {
                 let (family, weight, pad, h, radius) = match kind {
                     LabelKind::Lane | LabelKind::Branch => {
-                        (mono.clone(), FontWeight::NORMAL, 5., 15., 4.)
+                        (mono.clone(), FontWeight::NORMAL, 5., 15., radius::TAG)
                     }
                     LabelKind::Status => (
                         sans.clone(),
                         FontWeight::MEDIUM,
                         9.,
                         18.,
-                        fluent::control(9.),
+                        fluent::control(radius::FULL),
                     ),
                 };
                 let run = TextRun {
@@ -3972,7 +4089,7 @@ fn paint_scene(
                 };
                 let line = window.text_system().shape_line(
                     SharedString::from(text.clone()),
-                    px(12.),
+                    px(text::LABEL),
                     &[run],
                     None,
                 );
@@ -3983,8 +4100,10 @@ fn paint_scene(
                     Align::Right => x - w,
                 };
                 let bounds = Bounds::new(at((left, *y)), size(px(w), px(h)));
-                window.paint_quad(fill(bounds, ink.surface).corner_radii(px(radius)));
-                let mut quad = fill(bounds, *fill_color).corner_radii(px(radius));
+                // A painted quad isn't clamped to its size as a div is: a pill's corners are.
+                let corners = Corners::all(px(radius)).clamp_radii_for_quad_size(bounds.size);
+                window.paint_quad(fill(bounds, ink.surface).corner_radii(corners));
+                let mut quad = fill(bounds, *fill_color).corner_radii(corners);
                 if let Some(b) = border {
                     quad = quad.border_widths(px(1.)).border_color(*b);
                 }
@@ -4048,7 +4167,7 @@ fn footer(
                 if more > 0 {
                     chips.push(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(ink.muted)
                             .child(format!("+{more} more"))
                             .into_any_element(),
@@ -4146,6 +4265,16 @@ fn footer(
                     .unwrap_or((card.step.clone(), String::new()));
                 if let Some(f) = actions.open.clone() {
                     buttons.push(light_button(("pr-view", ix), "View on GitHub", f, ink));
+                }
+                if let Some(f) = actions.send_failure.clone() {
+                    buttons.push(dark_button(
+                        ("pr-send-failure", ix),
+                        None,
+                        "Send to agent",
+                        f,
+                        ink,
+                        cx,
+                    ));
                 }
                 (lead(warn(), hue.red), head, sub_text(rest))
             }
@@ -4256,7 +4385,7 @@ fn footer(
                                         div()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(14.))
+                                            .text_size(px(text::TITLE))
                                             .line_height(px(18.))
                                             .font_medium()
                                             .text_color(theme.foreground)
@@ -4268,7 +4397,7 @@ fn footer(
                                                 .min_w_0()
                                                 .h(px(17.))
                                                 .items_center()
-                                                .text_size(px(13.))
+                                                .text_size(px(text::BODY))
                                                 .line_height(px(17.))
                                                 .text_color(ink.muted)
                                                 .child(sub),
@@ -4357,11 +4486,11 @@ fn file_chip(path: &str, resolved: Option<bool>, hue: &Hues, ink: &Ink, cx: &App
         .border_1()
         .border_color(ink.hair.opacity(fluent::pick(1., 0.8)))
         .bg(ink.card)
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .when(!tag.is_empty(), |el| {
             el.child(
                 div()
-                    .text_size(px(10.))
+                    .text_size(px(text::META))
                     .font_bold()
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_color(hue.blue.text.opacity(fluent::pick(1., 0.8)))
@@ -4409,8 +4538,13 @@ fn step_chip(stage: &Stage, hue: &Hues, ink: &Ink) -> AnyElement {
         .border_1()
         .border_color(ink.hair.opacity(fluent::pick(1., 0.8)))
         .bg(ink.card)
-        .text_size(px(13.))
-        .child(div().text_size(px(11.)).text_color(color).child(mark))
+        .text_size(px(text::BODY))
+        .child(
+            div()
+                .text_size(px(text::META))
+                .text_color(color)
+                .child(mark),
+        )
         .child(div().text_color(ink.fg.opacity(0.72)).child(what))
         .into_any_element()
 }
@@ -4458,7 +4592,7 @@ fn dark_button(
         .hover(move |s| s.bg(bg.opacity(fluent::pick(0.9, 0.8))))
         .active(move |s| s.bg(bg.opacity(fluent::pick(0.8, 1.))))
         .cursor_pointer()
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .font_medium()
         .text_color(fg)
         .when_some(icon, |el, icon| {
@@ -4491,7 +4625,7 @@ fn light_button(
         .hover(move |s| s.bg(fg.opacity(0.08)))
         .active(move |s| s.bg(fg.opacity(0.11)))
         .cursor_pointer()
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .text_color(fg.opacity(0.85))
         .child(label)
         .on_click(move |_, window, cx| on_click(window, cx))
@@ -4519,7 +4653,7 @@ fn link_pill(id: impl Into<ElementId>, label: &'static str, hue: Hue, on_click: 
         .bg(rest)
         .hover(move |s| s.bg(hover))
         .cursor_pointer()
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .font_medium()
         .text_color(hue.text)
         .child(label)
@@ -4546,7 +4680,7 @@ fn busy_pill(id: impl Into<ElementId>, label: &'static str, ink: &Ink, cx: &App)
         .rounded_pill()
         .bg(ink.pill)
         .when(fluent::WINDOWS, |el| el.border_1().border_color(ink.hair))
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .text_color(ink.muted)
         .child(ring_spinner(12., ink.muted, cx))
         .child(label)
@@ -5132,11 +5266,11 @@ pub fn demo(state: &str) -> Card {
 mod tests {
     // Named, not `super::*`: that would bring in gpui_kit's own `test` macro.
     use super::{
-        Align, Card, CheckState, Glyph, Hue, Hues, Ink, JobJson, Kind, LabelKind, Phase, PrView,
-        Prim, Scene, Stage, Stroke, WorkflowRun, apply_conflicts, conflicting_files,
-        failure_detail, failure_title, graph_height, is_workflow, job_stages, notes_url, now_ms,
-        pick_run, pipeline_scene, pr_from_view, pr_scene, release_card, release_run_card, rerun_id,
-        rerun_started, run_ms, segments, stage_label,
+        Align, Card, CheckState, GhFailure, Glyph, Hue, Hues, Ink, JobJson, Kind, LabelKind, Phase,
+        PrView, Prim, Scene, Stage, Stroke, WorkflowRun, apply_conflicts, conflicting_files,
+        failing, failure_detail, failure_title, gh_failure, graph_height, is_workflow, job_stages,
+        notes_url, now_ms, pick_run, pipeline_scene, pr_from_view, pr_scene, release_card,
+        release_run_card, rerun_id, rerun_started, run_ms, segments, stage_label,
     };
     use std::path::Path;
 
@@ -5903,6 +6037,70 @@ mod tests {
         assert_eq!(
             pr_from_view(&card, view("CONFLICTING", &red)).phase,
             Phase::Conflicted
+        );
+    }
+
+    #[test]
+    fn a_failing_pull_requests_chip_says_how_many() {
+        let card = Card {
+            kind: Kind::Pr,
+            number: Some(9),
+            ..Default::default()
+        };
+        let check = |name: &str, conclusion: &str| {
+            format!(r#"{{"name": "{name}", "status": "COMPLETED", "conclusion": "{conclusion}"}}"#)
+        };
+        let one = format!("[{}]", check("test", "FAILURE"));
+        let c = pr_from_view(&card, view("MERGEABLE", &one));
+        assert_eq!(c.chip(), "#9 1 check failing");
+        assert_eq!(failing(&c), ["test"]);
+        let two = format!("[{}, {}]", check("test", "FAILURE"), check("lint", "ERROR"));
+        assert_eq!(
+            pr_from_view(&card, view("MERGEABLE", &two)).chip(),
+            "#9 2 checks failing"
+        );
+        assert_eq!(
+            pr_from_view(&card, view("MERGEABLE", "[]")).chip(),
+            "#9 Ready to merge"
+        );
+    }
+
+    #[test]
+    fn the_commit_a_pull_requests_checks_ran_on_is_kept() {
+        let card = Card {
+            kind: Kind::Pr,
+            ..Default::default()
+        };
+        let view: PrView = serde_json::from_str(
+            r#"{"number": 9, "state": "OPEN", "mergeable": "MERGEABLE", "headRefOid": "abc123"}"#,
+        )
+        .unwrap();
+        assert_eq!(pr_from_view(&card, view).head_oid, "abc123");
+    }
+
+    #[test]
+    fn what_gh_said_tells_offline_from_rate_limited_from_gone() {
+        for offline in [
+            "error connecting to api.github.com\ncheck your internet connection",
+            "Post \"https://api.github.com/graphql\": dial tcp: lookup api.github.com: no such host",
+            "fatal: could not resolve host: github.com",
+            "net/http: TLS handshake timeout",
+        ] {
+            assert_eq!(gh_failure(offline), GhFailure::Offline, "{offline}");
+        }
+        for limited in [
+            "GraphQL: API rate limit exceeded for user ID 1",
+            "HTTP 403: You have exceeded a secondary rate limit",
+        ] {
+            assert_eq!(gh_failure(limited), GhFailure::RateLimited, "{limited}");
+        }
+        assert_eq!(
+            gh_failure("GraphQL: Could not resolve to a PullRequest with the number of 12."),
+            GhFailure::Gone
+        );
+        assert_eq!(
+            gh_failure("gh: To use GitHub CLI, run: gh auth login"),
+            GhFailure::Other
         );
     }
 

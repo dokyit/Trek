@@ -19,8 +19,56 @@ use std::collections::HashSet;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-fn root() -> PathBuf {
+pub(crate) fn root() -> PathBuf {
     crate::paths::home().join(".claude/projects")
+}
+
+/// The folder Claude Code keeps a working folder's sessions in, under `root`: every character
+/// that isn't a letter or digit written as `-`.
+pub(crate) fn folder_name(cwd: &Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The sessions in `root` that ran in `folders` or under them, however old, reading only their
+/// folders: a whole history can take a while, and these are all that's asked for.
+pub(crate) fn scan_folders(root: &Path, folders: &[PathBuf]) -> Vec<ImportedThread> {
+    let Ok(dirs) = std::fs::read_dir(root) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = folders.iter().map(|f| folder_name(f)).collect();
+    names.extend(
+        folders
+            .iter()
+            .filter_map(|f| std::fs::canonicalize(f).ok())
+            .map(|f| folder_name(&f)),
+    );
+    let held = HashSet::new();
+    let mut out = Vec::new();
+    for dir in dirs.flatten() {
+        let name = dir.file_name();
+        let name = name.to_string_lossy();
+        if !names
+            .iter()
+            .any(|n| name.as_ref() == n || name.starts_with(&format!("{n}-")))
+        {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let path = f.path();
+            if path.extension().is_some_and(|e| e == "jsonl")
+                && let Some(t) = index_file(&path, file_mtime_ms(&path), 0, &held)
+            {
+                out.push(t);
+            }
+        }
+    }
+    out
 }
 
 /// Sessions updated since `min_updated`, and the ones in `held` (already in Trek) whatever their age.
@@ -435,11 +483,22 @@ fn tail_lines(path: &Path, bytes: u64) -> Vec<String> {
 
 /// Session `id`'s file, in whichever project folder Claude Code keeps it.
 pub fn find_session(id: &str) -> Option<PathBuf> {
+    // A thread on another account has its session in that account's folder (`crate::accounts`).
     let name = format!("{id}.jsonl");
-    std::fs::read_dir(root())
+    std::iter::once(root())
+        .chain(
+            crate::accounts::folders()
+                .into_iter()
+                .map(|d| d.join("projects")),
+        )
+        .find_map(|root| find_in(&root, &name))
+}
+
+fn find_in(root: &Path, name: &str) -> Option<PathBuf> {
+    std::fs::read_dir(root)
         .ok()?
         .flatten()
-        .map(|d| d.path().join(&name))
+        .map(|d| d.path().join(name))
         .find(|p| p.is_file())
 }
 
@@ -819,6 +878,21 @@ pub(super) fn load_file(path: &Path) -> anyhow::Result<Vec<Item>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thread on another account has its session in that account's folder, not the user's own:
+    /// rewinding and retrying find it there all the same.
+    #[test]
+    fn a_session_on_an_account_is_found_by_its_id() {
+        let id = "acct-session-claude";
+        let dir = crate::accounts::root()
+            .join("claude-test-account")
+            .join("projects")
+            .join("-some-project");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.jsonl")), "{}").unwrap();
+        assert_eq!(find_session(id), Some(dir.join(format!("{id}.jsonl"))),);
+        assert_eq!(find_session("no-such-session"), None);
+    }
     use crate::import::{Scratch, Skip};
     use serde_json::json;
 

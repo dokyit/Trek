@@ -56,13 +56,15 @@ private struct PrimaryLabel: View {
     var title: String
     /// What it says where the whole title doesn't fit (never cut off with an ellipsis).
     var short: String? = nil
+    @Environment(\.isEnabled) private var enabled
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
             Text(title).fontWeight(.semibold).lineLimit(1).fixedSize()
             Text(short ?? title).fontWeight(.semibold).lineLimit(1).minimumScaleFactor(0.8)
         }
-        .foregroundStyle(Trek.onEmber)
+        // Ember's ink on the grey an unavailable button turns: nothing to read on either theme.
+        .foregroundStyle(enabled ? Trek.onEmber : Trek.muted)
         .frame(maxWidth: .infinity)
     }
 }
@@ -89,6 +91,13 @@ struct ApprovalCard: View {
 
     private var warning: String? { CommandRisk.warning(for: request.detail) }
 
+    /// "Allow for this session" is offered where the Mac takes it: its Settings › Phone allows it
+    /// (`macAllows`, nil from a Mac that doesn't say), and no rule of the user's asks about this
+    /// one every time.
+    static func offersSession(_ request: ApprovalRequest, macAllows: Bool?) -> Bool {
+        macAllows != false && request.askedBy == nil
+    }
+
     /// Roughly how many lines the detail wraps to in the card (~40 monospaced characters a line).
     private var estimatedLines: Int {
         request.detail.split(separator: "\n", omittingEmptySubsequences: false)
@@ -112,7 +121,14 @@ struct ApprovalCard: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack(spacing: 10) {
+            if let rule = request.askedBy {
+                Text("Your rule asks about this every time: \(rule).")
+                    .font(.ui(.footnote))
+                    .foregroundStyle(Trek.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            BesideOrOver(overAlignment: .center, spacing: 10) {
                 Button {
                     answer(.approval(.deny))
                 } label: {
@@ -141,8 +157,9 @@ struct ApprovalCard: View {
                     .controlSize(.large)
                 }
 
-                // Only where the Mac takes it (its Settings › Phone): it refuses otherwise.
-                if model.link(for: threadID)?.macSettings?.sessionApprovals != false {
+                // Only where the Mac takes it (its Settings › Phone, the user's rules): it refuses
+                // otherwise.
+                if Self.offersSession(request, macAllows: model.link(for: threadID)?.macSettings?.sessionApprovals) {
                     Menu {
                         Button("Allow for this session…", systemImage: "checkmark.seal") { allowForSession() }
                     } label: {
@@ -323,13 +340,15 @@ struct PlanCard: View {
     @State private var revising = false
     @FocusState private var writing: Bool
     @Environment(\.requestScroller) private var scroller
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         CardChrome(tint: Trek.plan, symbol: "checklist", title: "\(agentName)'s plan") {
             ScrollView {
                 MarkdownText(text: request.markdown, size: 15)
             }
-            .frame(maxHeight: showAll ? 360 : 150)
+            // Enough of it to start reading, however large the text.
+            .frame(maxHeight: showAll ? 360 : typeSize.isAccessibilitySize ? 260 : 150)
             .scrollDisabled(!showAll)
             .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: showAll ? 1 : 0.72),
                                          .init(color: showAll ? .black : .clear, location: 1)], startPoint: .top, endPoint: .bottom))
@@ -348,15 +367,20 @@ struct PlanCard: View {
             } else {
                 Text("Nothing has been changed yet.").font(.ui(.footnote)).foregroundStyle(Trek.muted)
             }
-            HStack(spacing: 10) {
+            // At the accessibility sizes, side by side they ran off both sides of the screen, and
+            // took the composer under them along.
+            BesideOrOver(overAlignment: .center, spacing: 10) {
                 Button {
                     if revising { answer(.plan(approve: false, feedback: feedback)) } else { withAnimation(.snappy) { revising = true } }
                 } label: {
-                    Text(revising ? "Send back" : "Keep planning").lineLimit(1)
+                    Text(revising ? "Send back" : "Keep planning")
+                        .lineLimit(1)
+                        .minimumScaleFactor(typeSize.isAccessibilitySize ? 0.6 : 1)
+                        .frame(maxWidth: typeSize.isAccessibilitySize ? .infinity : nil)
                 }
                 .buttonStyle(.glass)
                 .controlSize(.large)
-                .fixedSize()
+                .fixedSize(horizontal: !typeSize.isAccessibilitySize, vertical: false)
                 Button {
                     answer(.plan(approve: true, feedback: nil))
                 } label: {

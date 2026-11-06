@@ -7,6 +7,7 @@ use super::{default_model, hand_icon, look, model_name, same_model};
 use crate::fluent;
 use crate::mentions::{self, PickIcon, PickItem, PickKind, Trigger};
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::ui::{self, Pill};
 use crate::workspace::{Prefs, Route, Scope, Workspace};
 use gpui_kit::component::input::{InlineToken, Input, InputState, TextareaState};
@@ -28,6 +29,7 @@ use trek_core::{AgentId, Effort, HandHolding};
 enum Sub {
     Effort,
     Model,
+    Account,
 }
 
 /// The model panel's rail: favourites, or one agent's models.
@@ -118,15 +120,36 @@ pub trait PickerHost: Sized + 'static {
     fn input(&self) -> &Entity<TextareaState>;
     /// A menu or the picker opened or closed.
     fn overlay_changed(&mut self, cx: &mut Context<Self>);
+    /// A pick of another agent waits for the next message, with a bar saying so
+    /// (`workspace::switching`). Otherwise it applies at once.
+    fn holds_switches(&self) -> bool {
+        false
+    }
+}
+
+/// `host`'s prefs as its menus should show them: the switch waiting for the next message included,
+/// where it has the bar that says so.
+fn shown_prefs<H: PickerHost>(host: &H, cx: &App) -> Prefs {
+    let ws = host.workspace().read(cx);
+    if host.holds_switches() {
+        ws.chosen_prefs_in(host.scope())
+    } else {
+        ws.prefs_in(host.scope())
+    }
 }
 
 /// Change the prefs of `host`'s scope (agent, model, effort, access, plan).
 pub fn update_prefs<H: PickerHost>(host: &H, cx: &mut App, f: impl FnOnce(&mut Prefs)) {
     let scope = host.scope().clone();
+    let mut p = shown_prefs(host, cx);
+    f(&mut p);
+    let holds = host.holds_switches();
     host.workspace().update(cx, |ws, cx| {
-        let mut p = ws.prefs_in(&scope);
-        f(&mut p);
-        ws.set_prefs_in(&scope, p, cx);
+        if holds {
+            ws.choose_prefs_in(&scope, p, cx);
+        } else {
+            ws.set_prefs_in(&scope, p, cx);
+        }
     });
 }
 
@@ -145,8 +168,9 @@ pub fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
     let tip = format!(
         "Context {:.0}% · {} of {}",
         frac * 100.,
-        crate::workspace::fmt_tokens(used),
-        crate::workspace::fmt_tokens(window)
+        // Written as the context card, the ring's tooltip and the hub write it: one count, one way.
+        crate::context_popover::fmt_tokens(used),
+        crate::context_popover::fmt_tokens(window)
     );
     h_flex()
         .id("context-ring")
@@ -158,7 +182,7 @@ pub fn context_ring(used: u64, window: u64, cx: &App) -> AnyElement {
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded(px(fluent::control(8.)))
+        .rounded(px(fluent::control(radius::BUTTON)))
         .hover(|s| s.bg(theme.foreground.opacity(0.065)))
         .tooltip(move |window, cx| {
             gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
@@ -175,11 +199,12 @@ pub fn model_pill<H: PickerHost>(
     host: &H,
     narrow: bool,
     compact: bool,
+    account_room: bool,
     small: bool,
     cx: &mut Context<H>,
 ) -> AnyElement {
     let ws = host.workspace().read(cx);
-    let prefs = ws.prefs_in(host.scope());
+    let prefs = shown_prefs(host, cx);
     let models = ws.models_for(&prefs.agent);
     let model_label = prefs
         .model
@@ -187,6 +212,11 @@ pub fn model_pill<H: PickerHost>(
         .map(|m| model_name(&models, m))
         .or_else(|| default_model(&models).map(|m| m.name.clone()))
         .unwrap_or_else(|| prefs.agent.display_name());
+    // Which account it runs on, once the agent has more than one and there's room for it beside
+    // the model's name (which would be cut short for it otherwise).
+    let account = ws
+        .account_label_for(host.scope(), &prefs)
+        .filter(|_| account_room && !narrow);
     let theme = cx.theme().clone();
     let open = host.pickers_ref().model_open;
     let me = cx.entity();
@@ -228,6 +258,18 @@ pub fn model_pill<H: PickerHost>(
                         .text_color(theme.foreground.opacity(0.82))
                         .child(model_label),
                 )
+                .when_some(account, |el, label| {
+                    el.child(
+                        div()
+                            .id("model-pill-account")
+                            .test_support()
+                            .flex_none()
+                            .max_w(px(if compact { 72. } else { 120. }))
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(label),
+                    )
+                })
                 .when(!narrow, |el| {
                     let max = prefs.effort == Effort::Max;
                     el.child(
@@ -272,8 +314,8 @@ fn close_model_menu<H: PickerHost>(this: &mut H, cx: &mut Context<H>) {
 }
 
 fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
+    let prefs = shown_prefs(host, cx);
     let ws = host.workspace().read(cx);
-    let prefs = ws.prefs_in(host.scope());
     let models = ws.models_for(&prefs.agent);
     let current = prefs
         .model
@@ -284,6 +326,13 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         .and_then(|c| models.iter().find(|m| same_model(c, &m.id)))
         .cloned();
     let fast_ok = current_info.as_ref().is_some_and(|m| m.fast.is_some());
+    // Not there at all for an agent with one account. The agent's accounts the menu shows: with a
+    // switch waiting, the new agent's.
+    let choices = ws.account_choices_for(host.scope(), &prefs.agent);
+    let account_label = ws
+        .account_label_for(host.scope(), &prefs)
+        .unwrap_or_default();
+    let on_thread = ws.thread_id_in(host.scope()).is_some();
     let theme = cx.theme().clone();
     let muted = theme.muted_foreground;
     let sub = host.pickers_ref().sub;
@@ -358,12 +407,45 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                     this.pickers().sub = Some(Sub::Model);
                     cx.notify();
                 })),
-        );
+        )
+        .when(!choices.is_empty(), |el| {
+            el.child(
+                look::row("mm-account", sub == Some(Sub::Account), cx)
+                    .test_support()
+                    .child(look::row_icon(
+                        Icon::new(crate::assets::Lucide::Users)
+                            .small()
+                            .text_color(muted),
+                    ))
+                    .child(div().flex_1().child("Account"))
+                    .child(
+                        div()
+                            .text_color(muted)
+                            .max_w(px(120.))
+                            .truncate()
+                            .child(account_label),
+                    )
+                    .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
+                    .on_hover(cx.listener(|this: &mut H, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.pickers().sub = Some(Sub::Account);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(|this: &mut H, _, _, cx| {
+                        this.pickers().sub = Some(Sub::Account);
+                        cx.notify();
+                    })),
+            )
+        });
 
     let panel = match sub {
         Some(Sub::Effort) => Some(effort_panel(&prefs, current_info.as_ref(), cx)),
         Some(Sub::Model) => Some(model_panel(host, &prefs, current.as_deref(), cx)),
-        None => None,
+        Some(Sub::Account) if !choices.is_empty() => {
+            Some(account_panel(&prefs, choices, on_thread, cx))
+        }
+        Some(Sub::Account) | None => None,
     };
     h_flex()
         .id("model-menu-body")
@@ -417,6 +499,65 @@ fn effort_panel<H: PickerHost>(
                 close_model_menu(this, cx);
             }))
         }))
+        .into_any_element()
+}
+
+/// The accounts the agent can run on. A thread under way goes on in a new session on the one
+/// picked, from a recap: its session stays in the other's folder, and the panel says so first.
+fn account_panel<H: PickerHost>(
+    prefs: &Prefs,
+    choices: Vec<crate::workspace::accounts::AccountChoice>,
+    on_thread: bool,
+    cx: &mut Context<H>,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let current = prefs.account.clone();
+    look::surface(cx)
+        .w(px(260.))
+        .children(choices.into_iter().map(|c| {
+            let selected = c.id == current;
+            let key = c.id.clone().unwrap_or_else(|| "default".to_string());
+            let id = c.id.clone();
+            look::picked_row(SharedString::from(format!("account-{key}")), selected, cx)
+                .test_support()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().truncate().child(c.label))
+                        .when_some(c.detail, |el, who| {
+                            el.child(
+                                div()
+                                    .text_size(to_rems(text::META))
+                                    .truncate()
+                                    .text_color(muted)
+                                    .child(who),
+                            )
+                        }),
+                )
+                .when(selected, |el| {
+                    el.child(Icon::new(IconName::Check).size(px(13.)))
+                })
+                .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+                    let id = id.clone();
+                    update_prefs(this, cx, |p| p.account = id);
+                    close_model_menu(this, cx);
+                }))
+        }))
+        .when(on_thread, |el| {
+            el.child(
+                div()
+                    .id("account-recap-note")
+                    .test_support()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .text_size(to_rems(text::META))
+                    .text_color(muted)
+                    .child(
+                        "Another account goes on in a new session, from a recap of this thread.",
+                    ),
+            )
+        })
         .into_any_element()
 }
 
@@ -552,11 +693,12 @@ fn model_panel<H: PickerHost>(
                        cx: &mut Context<H>| {
         div()
             .id(id)
+            .test_support()
             .size(px(30.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(fluent::control(8.)))
+            .rounded(px(fluent::control(radius::BUTTON)))
             .cursor_pointer()
             .when(active, |el| el.bg(look::pressed(cx)))
             .hover(|s| s.bg(look::chip_fill(cx)))
@@ -607,6 +749,7 @@ fn model_panel<H: PickerHost>(
             selected,
             cx,
         )
+        .test_support()
         .group("model-row")
         .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
         .child(
@@ -671,7 +814,7 @@ fn model_panel<H: PickerHost>(
                                 .gap(px(4.))
                                 .border_b_1()
                                 .border_color(look::hairline(cx))
-                                .child(div().id("model-source").test_support().text_size(px(12.)).text_color(theme.muted_foreground).child(source))
+                                .child(div().id("model-source").test_support().text_size(px(text::LABEL)).text_color(theme.muted_foreground).child(source))
                                 .child(Input::new(&search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground))),
                         )
                         .child(
@@ -683,7 +826,7 @@ fn model_panel<H: PickerHost>(
                                 .children(rows)
                                 .when_some(custom_row, |el, row| el.child(row))
                                 .when(empty, |el| {
-                                    el.child(div().p_3().text_sm().text_color(theme.muted_foreground).child(if is_inflight {
+                                    el.child(div().p_3().text_size(to_rems(text::LABEL)).text_color(theme.muted_foreground).child(if is_inflight {
                                         "Loading models…"
                                     } else {
                                         match rail {
@@ -764,7 +907,7 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
             )
             .items_start()
             .py(px(8.))
-            .rounded(px(fluent::control(9.)))
+            .rounded(px(fluent::control(radius::BUTTON)))
             .child(
                 div()
                     .pt(px(2.))
@@ -778,7 +921,7 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                     .child(div().font_medium().child(level.label()))
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .whitespace_normal()
                             .line_height(relative(1.4))
                             .text_color(theme.muted_foreground)
@@ -793,7 +936,7 @@ fn access_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
             .on_click(cx.listener(move |this: &mut H, _, _, cx| {
                 if locked {
                     let route = Route::Settings(crate::workspace::SettingsPage::Permissions);
-                    let main = *this.scope() == Scope::Main;
+                    let main = this.scope().in_main_window();
                     this.workspace().update(cx, |ws, cx| {
                         if main {
                             ws.navigate(route, cx)
@@ -920,7 +1063,7 @@ pub fn picker_items<H: PickerHost>(host: &H, cx: &App) -> Vec<PickItem> {
     let Some(t) = &p.trigger else { return vec![] };
     let ws = host.workspace().read(cx);
     let scope = host.scope();
-    let agent = ws.prefs_in(scope).agent;
+    let agent = shown_prefs(host, cx).agent;
     let q = t.query.to_lowercase();
     let commands = ws.slash_commands(scope, &agent);
     let matches = |name: &str, desc: &str| {
@@ -1272,13 +1415,13 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
         look::surface(cx)
             .w(px(if files { 420. } else { 326. }))
             .max_w_full()
-            .rounded(px(fluent::surface(16.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .when(items.is_empty(), |el| {
                 el.child(
                     div()
                         .px(px(11.))
                         .py(px(10.))
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .text_color(theme.muted_foreground)
                         .child(empty),
                 )
@@ -1307,13 +1450,13 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                             .min_h(px(if files { 30. } else { 47. }))
                             .gap(px(9.))
                             .relative()
-                            .rounded(px(fluent::control(12.)))
+                            .rounded(px(fluent::control(radius::CARD)))
                             .cursor_pointer()
                             .when(i == picked, |el| el.bg(lit))
                             .hover(move |s| s.bg(lit))
                             .children(fluent::selection_bar(i == picked, cx))
                             .when(files, |el| {
-                                el.rounded(px(fluent::control(8.))).child(
+                                el.rounded(px(fluent::control(radius::BUTTON))).child(
                                     icon.size(px(look::ICON)).text_color(theme.muted_foreground),
                                 )
                             })
@@ -1325,7 +1468,7 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_size(px(12.5))
+                                            .text_size(px(text::BODY))
                                             .text_color(theme.foreground)
                                             .child(item.label),
                                     )
@@ -1333,7 +1476,7 @@ pub fn picker<H: PickerHost>(host: &H, cx: &mut Context<H>) -> Option<AnyElement
                                         el.child(
                                             div()
                                                 .truncate()
-                                                .text_size(px(11.5))
+                                                .text_size(px(text::LABEL))
                                                 .text_color(theme.muted_foreground)
                                                 .child(detail),
                                         )

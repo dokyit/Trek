@@ -10,6 +10,7 @@
 //! reading the tasks' output from the agent) redraws only the strip.
 
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::{Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
@@ -294,8 +295,8 @@ impl BackgroundStrip {
             .h(px(SLIM))
             .px(px(8.))
             .gap(px(8.))
-            .rounded(px(fluent::control(7.)))
-            .text_size(px(12.5))
+            .rounded(px(fluent::control(radius::BUTTON)))
+            .text_size(px(text::BODY))
             .text_color(muted)
             .cursor_pointer()
             .hover(|s| {
@@ -304,7 +305,11 @@ impl BackgroundStrip {
             })
             .child(Icon::new(crate::assets::Lucide::Activity).size(px(14.)))
             .child("Background")
-            .child(div().text_xs().child(format!("· {n} running")))
+            .child(
+                div()
+                    .text_size(to_rems(text::META))
+                    .child(format!("· {n} running")),
+            )
             .child(div().flex_1())
             .child(Icon::new(IconName::ChevronUp).xsmall())
             .on_click(cx.listener(|this, _, _, cx| this.set_hidden(false, cx)))
@@ -324,7 +329,7 @@ impl BackgroundStrip {
     /// A popover is open over the main window: native views (the browser) hide so they don't
     /// cover it.
     fn overlay(&self, open: bool, cx: &mut Context<Self>) {
-        if self.scope != Scope::Main {
+        if !self.scope.in_main_window() {
             return;
         }
         self.workspace.update(cx, |ws, cx| {
@@ -371,8 +376,8 @@ impl BackgroundStrip {
                 .gap(px(4.))
                 .px(px(6.))
                 .h(px(20.))
-                .rounded(px(fluent::control(5.)))
-                .text_xs()
+                .rounded(px(fluent::control(radius::CONTROL)))
+                .text_size(to_rems(text::META))
                 .text_color(muted)
                 .cursor_pointer()
                 .hover(|s| {
@@ -422,8 +427,8 @@ impl BackgroundStrip {
                 .h(px(ROW))
                 .px(px(8.))
                 .gap(px(8.))
-                .rounded(px(fluent::control(7.)))
-                .text_size(px(12.5))
+                .rounded(px(fluent::control(radius::BUTTON)))
+                .text_size(px(text::BODY))
                 .cursor_pointer()
                 .when(open, |el| el.bg(theme.foreground.opacity(0.07)))
                 .hover(|s| s.bg(theme.foreground.opacity(0.05)))
@@ -443,14 +448,14 @@ impl BackgroundStrip {
                         .min_w_0()
                         .truncate()
                         .font_family(theme.mono_font_family.clone())
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(muted)
                         .child(line),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(muted)
                         .child(crate::time::elapsed(r.started.elapsed())),
                 )
@@ -559,7 +564,7 @@ impl BackgroundStrip {
             .child(
                 h_flex()
                     .gap(px(8.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .child(kind_icon(r.kind).size(px(15.)).text_color(muted))
                     .child(
                         div()
@@ -569,11 +574,17 @@ impl BackgroundStrip {
                             .font_family(theme.mono_font_family.clone())
                             .child(r.title.clone()),
                     )
-                    .child(div().flex_none().text_xs().text_color(muted).child(format!(
-                        "{} · {}",
-                        kind_label(r.kind),
-                        crate::time::elapsed(r.started.elapsed())
-                    )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(to_rems(text::META))
+                            .text_color(muted)
+                            .child(format!(
+                                "{} · {}",
+                                kind_label(r.kind),
+                                crate::time::elapsed(r.started.elapsed())
+                            )),
+                    )
                     .children(full)
                     .children(stop),
             )
@@ -585,15 +596,20 @@ impl BackgroundStrip {
                         .max_h(px(300.))
                         .overflow_y_scroll()
                         .p(px(10.))
-                        .rounded(px(8.))
+                        .rounded(px(radius::BUTTON))
                         .bg(theme.foreground.opacity(0.045))
                         .font_family(theme.mono_font_family.clone())
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .line_height(relative(1.45))
                         .child(t),
                 )
             })
-            .child(div().text_xs().text_color(muted).child(note))
+            .child(
+                div()
+                    .text_size(to_rems(text::META))
+                    .text_color(muted)
+                    .child(note),
+            )
             .into_any_element()
     }
 }

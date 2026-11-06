@@ -472,8 +472,14 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
       onChange?()
       return
     }
+    let external: AVCaptureDevice.DeviceType
+    if #available(macOS 14.0, *) {
+      external = .external
+    } else {
+      external = .externalUnknown
+    }
     let found = AVCaptureDevice.DiscoverySession(
-      deviceTypes: [.external], mediaType: .muxed, position: .unspecified
+      deviceTypes: [external], mediaType: .muxed, position: .unspecified
     ).devices.first { $0.modelID.contains("iOS") && $0.isConnected }
     if let d = device, found?.uniqueID == d.uniqueID { return }
     session?.stopRunning()
@@ -598,19 +604,24 @@ final class Screen: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
 
 /// The window server's private calls background input needs, as trek-mcp's skylight.rs uses them
 /// (it says what each is for); the public ones stand in where one is missing.
+///
+/// The target's process serial number comes from Launch Services (`lsappinfo`), never
+/// `GetProcessForPID`: that Process Manager call checks the caller in as an app with a Dock icon
+/// (trek-mcp, which made it, showed as a second Trek in the Dock), so a tap through iPhone
+/// Mirroring would have put one there until the helper quit.
 enum Sky {
   static let loaded = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW | RTLD_GLOBAL)
   typealias PostToPid = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Void
   typealias SetField = @convention(c) (UnsafeMutableRawPointer, UInt32, Int64) -> Void
   typealias SetWindowLocation = @convention(c) (UnsafeMutableRawPointer, CGPoint) -> Void
   typealias PostRecord = @convention(c) (UnsafeRawPointer, UnsafeRawPointer) -> Int32
-  typealias ProcessForPid = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
   typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
   static let post: PostToPid? = find("SLEventPostToPid")
   static let setField: SetField? = find("SLEventSetIntegerValueField")
   static let setWindowLocation: SetWindowLocation? = find("CGEventSetWindowLocation")
   static let postRecord: PostRecord? = find("SLPSPostEventRecordTo")
-  static let processForPid: ProcessForPid? = find("GetProcessForPID")
+  /// The last process looked up and its serial number: iPhone Mirroring keeps its pid.
+  nonisolated(unsafe) static var known: (pid: pid_t, psn: [UInt8])?
   /// CGWindowListCreateImage: Swift no longer offers it; the window server still does.
   static let createImage: CreateImage? = find("CGWindowListCreateImage")
 
@@ -632,11 +643,37 @@ enum Sky {
     if let post { post(pid, ptr(e)) } else { e.postToPid(pid) }
   }
 
+  /// Process `pid`'s serial number, as the 8 bytes of a `ProcessSerialNumber`, from its Launch
+  /// Services ASN (`lsappinfo find pid=…` says `ASN:0x0-0x1acaac9-"TextEdit":`).
+  static func psn(_ pid: pid_t) -> [UInt8]? {
+    if let known, known.pid == pid { return known.psn }
+    let run = Process()
+    run.executableURL = URL(fileURLWithPath: "/usr/bin/lsappinfo")
+    run.arguments = ["find", "pid=\(pid)"]
+    let pipe = Pipe()
+    run.standardOutput = pipe
+    run.standardError = FileHandle.nullDevice
+    guard (try? run.run()) != nil else { return nil }
+    let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    run.waitUntilExit()
+    guard let psn = parseASN(out) else { return nil }
+    known = (pid, psn)
+    return psn
+  }
+
+  static func parseASN(_ out: String) -> [UInt8]? {
+    guard let at = out.range(of: "ASN:") else { return nil }
+    let parts = out[at.upperBound...].split(separator: "-", maxSplits: 2)
+    guard parts.count >= 2, parts[0].hasPrefix("0x"), parts[1].hasPrefix("0x"),
+      let high = UInt32(parts[0].dropFirst(2), radix: 16),
+      let low = UInt32(parts[1].dropFirst(2).prefix(while: \.isHexDigit), radix: 16)
+    else { return nil }
+    return withUnsafeBytes(of: high.littleEndian, Array.init) + withUnsafeBytes(of: low.littleEndian, Array.init)
+  }
+
   /// Make window `wid` key inside its app without activating the app or raising the window.
   static func makeKey(_ pid: pid_t, _ wid: CGWindowID) {
-    guard let postRecord, let processForPid else { return }
-    var psn = [UInt8](repeating: 0, count: 8)
-    guard psn.withUnsafeMutableBytes({ processForPid(pid, $0.baseAddress!) }) == 0 else { return }
+    guard let postRecord, let psn = psn(pid) else { return }
     func record(_ kind: UInt8) -> [UInt8] {
       var r = [UInt8](repeating: 0, count: 0xf8)
       r[0x04] = 0xf8

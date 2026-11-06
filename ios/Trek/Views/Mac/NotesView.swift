@@ -88,11 +88,12 @@ struct NotesView: View {
 
 private struct NoteRow: View {
     var note: NoteSummary
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text(note.title).scaledFont(17, weight: .semibold).lineLimit(1)
+                Text(note.title).scaledFont(17, weight: .semibold).lineLimit(typeSize.isAccessibilitySize ? 3 : 1)
                 Spacer(minLength: 8)
                 Text(When.short(note.modified)).font(.ui(.subheadline).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.8))
             }

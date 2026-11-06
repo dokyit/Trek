@@ -49,6 +49,8 @@ nonisolated enum MacFeature: String, CaseIterable {
     case contextCard = "context_card"
     /// Which files an undo, retry or rewind would put back, for its confirmation.
     case turnPreview = "turn_preview"
+    /// A turn cut off when Trek closed: the row's `cut_short`, and Resume and Dismiss.
+    case resumeInterrupted = "resume_interrupted"
     /// Sending with consultants (the composer's consult pill).
     case consult
 }

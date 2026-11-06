@@ -8,6 +8,7 @@
 pub mod claude;
 pub mod codex;
 pub mod opencode;
+pub mod worktree_apps;
 
 use crate::store::{Item, Store};
 use crate::types::{Effort, ThreadSource};

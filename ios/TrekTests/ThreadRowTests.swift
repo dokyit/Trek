@@ -144,3 +144,44 @@ struct ComposerEchoTests {
         #expect(!ComposerState.isEcho("Something else", of: "Fix the tests"))
     }
 }
+
+/// What the Mac adds to a row for the phone: an older Mac's has none of it.
+@MainActor
+struct AskAndCutShortTests {
+    @Test func anOlderMacsRowHasNeither() throws {
+        let t = try row(["needs": ["kind": "approval", "text": "Run it"]])
+        #expect(t.ask == nil && t.cutShort == nil)
+        #expect(try StatusLook.of(row()) == nil, "an idle row with nothing to say has no pill")
+    }
+
+    @Test func aRowSaysWhichRequestAndWhatItWouldDo() throws {
+        let t = try row(["needs": ["kind": "approval", "text": "Run cargo test?"],
+                         "ask": ["request_id": "r1", "detail": "cargo test\nrm -rf target"]])
+        #expect(t.ask?.requestId == "r1")
+        #expect(t.ask?.detail.contains("rm -rf") == true)
+    }
+
+    @Test func aTurnCutOffIsKeptInView() throws {
+        let t = try row(["cut_short": ["state": "offered", "how": "Reopens its Codex session", "waiting": false]])
+        #expect(t.cutShort?.state == .offered)
+        #expect(t.isActive, "not folded away with the quiet threads")
+        #expect(StatusLook.of(t)?.label == "Interrupted")
+        let failed = try row(["cut_short": ["state": "failed", "how": "h", "why": "It stopped"]])
+        #expect(failed.cutShort?.state == .failed && failed.cutShort?.why == "It stopped")
+        let unknown = try row(["cut_short": ["state": "something new"]])
+        #expect(unknown.cutShort?.state == .offered, "a newer Mac's state still offers")
+    }
+
+    @Test func theBarSaysWhatTheMacsBarSays() throws {
+        let thread = try row()
+        let bar = { (cut: CutShort) in CutShortBar(thread: thread, cut: cut) }
+        #expect(bar(CutShort(state: .offered, how: "Reopens it")).title == "Interrupted")
+        #expect(bar(CutShort(state: .offered, how: "Reopens it")).detail == "Reopens it")
+        let waiting = CutShort(state: .offered, how: "Reopens it", waiting: true)
+        #expect(bar(waiting).title == "Waiting for you when Trek closed")
+        #expect(bar(waiting).detail == "Its question went with Trek. Ask again to bring it back.")
+        #expect(bar(CutShort(state: .offered, waiting: true, asked: "Run make?")).detail == "Run make?")
+        #expect(bar(CutShort(state: .failed, why: "No session")).title == "Couldn't resume")
+        #expect(bar(CutShort(state: .failed, why: "No session")).detail == "No session")
+    }
+}

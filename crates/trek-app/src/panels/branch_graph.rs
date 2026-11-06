@@ -6,6 +6,7 @@
 
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -302,6 +303,7 @@ pub fn card(args: GraphArgs, cx: &App) -> AnyElement {
                 } else {
                     1.
                 };
+                // scale: ok, a node in the graph
                 let r = (if end == EndState::Working { 4.5 } else { 4. }) * pop * breathe;
                 match end {
                     EndState::Ready | EndState::Blocked => {
@@ -337,7 +339,7 @@ pub fn card(args: GraphArgs, cx: &App) -> AnyElement {
         .mx_3()
         .mt_2()
         .mb_1()
-        .when(!fluent::WINDOWS, |el| el.rounded_md())
+        .when(!fluent::WINDOWS, |el| el.rounded(px(radius::CONTROL)))
         .when(fluent::WINDOWS, |el| el.rounded(px(fluent::SURFACE_RADIUS)))
         .border_1()
         .border_color(theme.border)
@@ -348,7 +350,7 @@ pub fn card(args: GraphArgs, cx: &App) -> AnyElement {
                 .pt_2()
                 .pb(px(2.))
                 .gap_1()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(muted)
                 .child(
                     div()
@@ -374,14 +376,14 @@ pub fn card(args: GraphArgs, cx: &App) -> AnyElement {
                         .child(
                             div()
                                 .pt(px(8.))
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(muted.opacity(0.9))
                                 .child(args.base.to_string()),
                         )
                         .child(
                             div()
                                 .pb(px(8.))
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(accent)
                                 .max_w_full()
                                 .truncate()

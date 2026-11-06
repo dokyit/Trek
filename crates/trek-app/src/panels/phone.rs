@@ -28,6 +28,7 @@
 
 use crate::assets::Lucide;
 use crate::fluent;
+use crate::scale::{text, to_rems};
 use crate::workspace::Workspace;
 use crate::workspace::phone_use::PhoneCall;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -1401,7 +1402,7 @@ impl PhonePanel {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_sm()
+                            .text_size(to_rems(text::LABEL))
                             .font_weight(FontWeight::MEDIUM)
                             .child(name),
                     )
@@ -1411,7 +1412,7 @@ impl PhonePanel {
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(theme.muted_foreground)
                                 .child(d),
                         )
@@ -1478,10 +1479,10 @@ impl PhonePanel {
                     .w(px(340.))
                     .p_3()
                     .gap_3()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(to_rems(text::LABEL))
                             .font_weight(FontWeight::MEDIUM)
                             .child("How this works"),
                     )
@@ -1528,7 +1529,7 @@ impl PhonePanel {
             .px_3()
             .py(px(6.))
             .gap_1()
-            .text_xs()
+            .text_size(to_rems(text::META))
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -1560,7 +1561,7 @@ impl PhonePanel {
                 .h(px(32.))
                 .px(px(12.))
                 .gap(px(8.))
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .border_b_1()
                 .border_color(theme.border)
         };
@@ -1720,6 +1721,7 @@ impl PhonePanel {
             )
             .child(measure)
             .when_some(layout, |el, (s, image)| {
+                // scale: ok, the iPhone's own corners
                 let radius = px(0.11 * s.size.width.as_f32());
                 el.child(
                     div()
@@ -1728,6 +1730,7 @@ impl PhonePanel {
                         .top(s.origin.y - px(6.))
                         .w(s.size.width + px(12.))
                         .h(s.size.height + px(12.))
+                        // scale: ok, its bezel
                         .rounded(radius + px(6.))
                         .bg(rgb(0x0B0B0D))
                         .border_1()
@@ -1770,6 +1773,7 @@ impl PhonePanel {
                             .text_color(ink)
                             .font_family(".SystemUIFont")
                             .font_weight(FontWeight::SEMIBOLD)
+                            // scale: ok, iOS's clock, to scale
                             .text_size(px(STATUS_FONT * w))
                             .line_height(px((bar.bottom - bar.top) * h))
                             .whitespace_nowrap()
@@ -1788,7 +1792,7 @@ impl PhonePanel {
                         .justify_center()
                         .gap_2()
                         .px_6()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_center()
                         .text_color(theme.muted_foreground)
                         .when(self.helper_building, |el| el.child(Spinner::new().small()))
@@ -1819,7 +1823,13 @@ impl Render for PhonePanel {
                         .border_color(theme.border)
                         .bg(crate::palette::amber(cx).opacity(0.08))
                         .child(Icon::new(IconName::CircleAlert).xsmall())
-                        .child(div().flex_1().min_w_0().text_xs().child(n))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(to_rems(text::META))
+                                .child(n),
+                        )
                         .child(
                             crate::ui::icon_button(
                                 "phone-notice-close",
@@ -1860,6 +1870,7 @@ fn fit(area: Size<Pixels>, w: f32, h: f32) -> Option<Bounds<Pixels>> {
 }
 
 /// The status bar clock's type size, as a share of the screen's width (17 pt on a 440 pt screen).
+// scale: ok, iOS's own
 const STATUS_FONT: f32 = 17. / 440.;
 
 /// The status bar iOS drew in a frame from the cable (with its 9:41): where its clock is, as

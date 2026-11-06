@@ -7,6 +7,7 @@
 //! Each helper takes what the Mac draws, or leaves it alone there, so a component states its Mac
 //! look once and macOS can't change by way of this module.
 
+use crate::scale::radius;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
@@ -14,11 +15,11 @@ use gpui_kit::*;
 pub const WINDOWS: bool = cfg!(windows);
 
 /// A control's corners: buttons, chips, inputs, menu rows, tags and tiles.
-pub const CONTROL_RADIUS: f32 = 4.;
-/// A segmented control's thumb, inside its track's 4 px corners.
-pub const THUMB_RADIUS: f32 = 3.;
+pub const CONTROL_RADIUS: f32 = radius::TAG;
+/// A segmented control's thumb: the same corners as its track, the smallest on the scale.
+pub const THUMB_RADIUS: f32 = radius::TAG;
 /// A card's, flyout's or dialog's corners.
-pub const SURFACE_RADIUS: f32 = 8.;
+pub const SURFACE_RADIUS: f32 = radius::BUTTON;
 /// The selection bar's size on a selected row (see [`selection_bar`]).
 pub const BAR_WIDTH: f32 = 3.;
 pub const BAR_HEIGHT: f32 = 16.;
@@ -119,7 +120,7 @@ pub fn selection_bar(selected: bool, cx: &App) -> Option<Div> {
                 div()
                     .w(px(BAR_WIDTH))
                     .h(px(BAR_HEIGHT))
-                    .rounded(px(BAR_WIDTH / 2.))
+                    .rounded_full()
                     .bg(crate::palette::send(cx)),
             )
     })

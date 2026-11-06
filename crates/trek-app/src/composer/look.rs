@@ -4,6 +4,7 @@
 
 use crate::fluent::{self, PillExt as _};
 use crate::palette;
+use crate::scale::{radius, text};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -14,11 +15,11 @@ pub const CONTROL: f32 = 30.;
 /// The card's padding, all round.
 pub const PAD: f32 = 13.;
 /// The card's corner radius.
-pub const RADIUS: f32 = fluent::surface(18.);
+pub const RADIUS: f32 = fluent::surface(radius::CARD);
 /// Between toolbar controls.
 pub const GAP: f32 = 5.;
 /// A chip's label, in px.
-pub const LABEL: f32 = 12.;
+pub const LABEL: f32 = text::LABEL;
 /// A chip's icon, in px.
 pub const ICON: f32 = 14.;
 /// The kit's multi-line input pads its text by this much on each side; the composer takes it
@@ -26,7 +27,7 @@ pub const ICON: f32 = 14.;
 pub const INPUT_INSET: f32 = 10.;
 /// The prompt's text size and line height in rems: 13 px on 20 at the default 14 px UI size,
 /// and they grow with it.
-pub const TEXT: f32 = 13. / 14.;
+pub const TEXT: f32 = text::BODY / crate::scale::REM;
 
 fn dark(cx: &App) -> bool {
     cx.theme().mode.is_dark()
@@ -109,12 +110,12 @@ pub fn menu_shadow(cx: &App) -> Vec<BoxShadow> {
 pub fn surface(cx: &App) -> Div {
     v_flex()
         .p(px(4.))
-        .rounded(px(fluent::surface(14.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .bg(card_fill(cx))
         .border_1()
         .border_color(ring(cx))
         .shadow(menu_shadow(cx))
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .text_color(cx.theme().foreground)
 }
 
@@ -126,8 +127,8 @@ pub fn row(id: impl Into<ElementId>, active: bool, cx: &App) -> Stateful<Div> {
         .px(px(9.))
         .min_h(px(28.))
         .gap(px(8.))
-        .rounded(px(fluent::control(7.)))
-        .text_size(px(13.))
+        .rounded(px(fluent::control(radius::BUTTON)))
+        .text_size(px(text::BODY))
         .cursor_pointer()
         .when(active, |el| el.bg(fill))
         .hover(move |s| s.bg(fill))
@@ -191,7 +192,7 @@ pub fn chip_button(
         .small()
         .h(px(CONTROL))
         .px(px(11.))
-        .rounded(px(fluent::control(CONTROL / 2.)))
+        .rounded(px(fluent::control(radius::FULL)))
         .bg(fill)
         .child(
             h_flex()
@@ -321,7 +322,7 @@ pub fn effort_bars(effort: Effort, cx: &App) -> Div {
                     div()
                         .w(px(2.))
                         .h(px(h))
-                        .rounded_t(px(1.))
+                        .rounded_t(px(radius::FULL))
                         .bg(if i < n { on } else { off })
                 }),
         )

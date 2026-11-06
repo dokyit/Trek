@@ -1297,6 +1297,105 @@ fn a_follow_up_sent_on_the_mac_reaches_a_phone_that_follows_the_thread() {
 }
 
 #[test]
+fn a_row_says_what_it_waits_on_and_which_request_answers_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            live.permissions
+                .push(trek_app::workspace::PendingPermission {
+                    request_id: "r1".into(),
+                    title: "Run command".into(),
+                    detail: "cargo test -p auth\nrm -rf target".into(),
+                    prompt: None,
+                    after_turn: false,
+                    call: None,
+                });
+            live.revision += 1;
+            ws.start_test_remote();
+        });
+        let snapshot = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        let row = snapshot.threads.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(
+            row.needs.as_ref().map(|n| n.text.as_str()),
+            Some("Run cargo test -p auth?"),
+            "the words the Mac's own row says"
+        );
+        let ask_row = row
+            .ask
+            .as_ref()
+            .expect("its request, to answer it from outside the thread");
+        assert_eq!(ask_row.request_id, "r1");
+        assert!(
+            ask_row.detail.contains("rm -rf target"),
+            "all of it, so what's further down can be judged too: {ask_row:?}"
+        );
+    });
+}
+
+#[test]
+fn a_turn_cut_off_by_a_quit_is_offered_back_on_the_phone() {
+    use trek_app::workspace::resume::{Offer, ResumeState};
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let offer = Offer {
+            turn: trek_core::interrupted::Interrupted {
+                thread: id.clone(),
+                waiting: false,
+                asked: None,
+                at: 1,
+                tries: 0,
+            },
+            state: ResumeState::Offered,
+        };
+        trek.update(cx, |ws, _| {
+            ws.interrupted.insert(id.clone(), offer.clone());
+            ws.start_test_remote();
+        });
+        let row = |cx: &mut gpui_kit::TestAppContext| {
+            let snapshot = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+            snapshot.threads.into_iter().find(|t| t.id == id).unwrap()
+        };
+        let action = |action: tr::ThreadAction| {
+            let id = id.clone();
+            move |reply| tr::HostRequest::ThreadAction {
+                req: tr::ThreadActionRequest {
+                    thread_id: id,
+                    action,
+                },
+                reply,
+            }
+        };
+        let cut = row(cx).cut_short.expect("the offer rides in its row");
+        assert_eq!(cut.state, tr::CutShortState::Offered);
+        assert!(!cut.waiting && cut.why.is_none());
+        assert!(!cut.how.is_empty(), "how its agent comes back");
+
+        // Leave it: the offer goes, and asking again is refused rather than sent to the agent.
+        ask(&trek, cx, action(tr::ThreadAction::DismissInterrupted)).unwrap();
+        assert_eq!(row(cx).cut_short, None);
+        let refused = ask(&trek, cx, action(tr::ThreadAction::ResumeInterrupted)).unwrap_err();
+        assert_eq!(refused.code, tr::ErrorCode::Conflict);
+
+        // Resume: the agent is sent the message, and once it's back the row has nothing to offer.
+        trek.update(cx, |ws, _| {
+            ws.interrupted.insert(id.clone(), offer.clone());
+        });
+        ask(&trek, cx, action(tr::ThreadAction::ResumeInterrupted)).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(row(cx).cut_short, None);
+        assert!(
+            trek.read(cx, |ws, _| ws.interrupted_offer(&id).is_none()),
+            "over once its turn ended"
+        );
+    });
+}
+
+#[test]
 fn another_phone_connecting_keeps_the_rows_already_sent() {
     run(async |cx| {
         let trek = open(cx);
@@ -2075,6 +2174,7 @@ async fn long_thread(
                 detail: "rm -rf build".into(),
                 prompt: None,
                 after_turn: false,
+                call: None,
             });
         live.revision += 1;
         ws.start_test_remote();
@@ -2101,6 +2201,7 @@ fn answers_are_matched_by_thread_and_request_id() {
                         detail: "make".into(),
                         prompt: None,
                         after_turn: false,
+                        call: None,
                     });
                 live.revision += 1;
             }
@@ -2192,6 +2293,7 @@ fn clipped_secret_questions_are_restored_before_they_are_answered() {
                         },
                     ])),
                     after_turn: false,
+                    call: None,
                 });
             live.revision += 1;
             ws.start_test_remote();
@@ -2237,6 +2339,58 @@ fn clipped_secret_questions_are_restored_before_they_are_answered() {
             assert_eq!((answers[0].question.as_str(), answers[0].answer.as_str()), (shown_question.as_str(), shown_secret_label.as_str()));
             assert_eq!(answers[1].answer, shown_public_label);
         });
+    });
+}
+
+#[test]
+fn a_request_for_a_secret_only_tells_the_phone_where_to_answer_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let (tx, rx) = async_channel::bounded(1);
+        trek.update(cx, |ws, cx| {
+            ws.ask_for_secret(&id, "GITHUB_TOKEN", "a private reason", tx, cx);
+            ws.start_test_remote();
+        });
+        let request = trek.request(cx, &id);
+        let transcript = ask(&trek, cx, transcript_req(&id, None, None)).unwrap();
+        let item = transcript
+            .items
+            .iter()
+            .find(|i| i.id == format!("r{request}"))
+            .expect("the phone hears of it");
+        let tr::ItemBody::Notice { text } = &item.body else {
+            panic!("nothing to answer there: {:?}", item.body);
+        };
+        assert!(text.contains("GITHUB_TOKEN"), "{text}");
+        assert!(!text.contains("a private reason"), "{text}");
+        // A phone that answers anyway gets nowhere: not with a yes, and not with a value.
+        for response in [
+            tr::AnswerResponse::Approval {
+                decision: tr::Decision::Allow,
+            },
+            tr::AnswerResponse::Questions {
+                answers: vec![tr::QA {
+                    question: "a private reason".into(),
+                    answer: "ghp_from-the-phone".into(),
+                }],
+            },
+        ] {
+            let answer = ask(&trek, cx, |reply| tr::HostRequest::Answer {
+                req: tr::AnswerRequest {
+                    thread_id: id.clone(),
+                    request_id: request.clone(),
+                    response,
+                },
+                reply,
+            });
+            assert!(answer.is_err(), "{answer:?}");
+            assert!(rx.try_recv().is_err(), "nothing went to the agent");
+            assert_eq!(trek.request(cx, &id), request, "the card is still up");
+        }
+        let items = trek.read(cx, |ws, _| format!("{:?}", ws.live[&id].items.to_vec()));
+        assert!(!items.contains("ghp_from-the-phone"), "{items}");
     });
 }
 

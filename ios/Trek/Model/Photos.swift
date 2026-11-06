@@ -28,6 +28,11 @@ struct PickedPhoto: Identifiable, Equatable {
         return data.map { ImageUpload(mime: "image/jpeg", data: $0.base64EncodedString()) }
     }
 
+    /// What goes with photos sent with no words: the agent and the transcript read it.
+    nonisolated static func caption(_ count: Int) -> String {
+        count > 1 ? "Here are \(count) photos." : "Here's a photo."
+    }
+
     /// Load what the system photo picker handed back.
     static func load(_ items: [PhotosPickerItem]) async -> [PickedPhoto] {
         var out: [PickedPhoto] = []
@@ -47,7 +52,7 @@ struct PhotoStrip: View {
     @State private var open: Int?
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        SidewaysScroll {
             HStack(spacing: 8) {
                 ForEach(photos) { p in
                     Button { open = photos.firstIndex { $0.id == p.id } } label: {

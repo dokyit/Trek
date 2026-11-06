@@ -24,6 +24,9 @@ final class MockHost: Backend {
     private var settings = DemoMac.settings()
     /// The visualizations thread's answer still being written: its item, and the text to come.
     private var vizStream: (tid: String, id: String, text: String, rest: [String])?
+    /// `-TrekDemoStream YES`: the answer being written into the opened thread, and how many so far.
+    private var answerStream: (tid: String, id: String, text: String, rest: [String])?
+    private var answersStreamed = 0
     /// The `t-card` thread's cards, by family (`pr`, `run`, `release`): their item and state.
     private var cardItems: [String: String] = [:]
     private var cardStates: [String: String] = [:]
@@ -98,6 +101,30 @@ final class MockHost: Backend {
             DemoMac.details(&t)
             return t
         }
+        // `-TrekDemoEmpty none`: a Mac with nothing on it. `quiet`: everything settled.
+        switch UserDefaults.standard.string(forKey: "TrekDemoEmpty") {
+        case "none":
+            threads = []
+            notes = []
+        case "quiet":
+            threads = threads.map { t in
+                var t = t
+                t.section = .settled
+                t.runState = .idle
+                t.needs = nil
+                t.needsThread = nil
+                t.unseen = false
+                t.pinned = false
+                t.activity = nil
+                t.workingSince = nil
+                t.subAgents = nil
+                t.background = nil
+                t.backgroundTasks = nil
+                t.busyInBackground = false
+                return t
+            }
+        default: break
+        }
         deliver(.welcome(re: "auth", host: host, features: Self.features), after: 0.15)
         // Sub-agents' threads aren't listed: they come as unlisted rows.
         deliver(.snapshot(Snapshot(threads: threads.filter { $0.parentId == nil }, projects: projects, agents: agents, fullAccess: true,
@@ -106,6 +133,11 @@ final class MockHost: Backend {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.onState?(.connected) }
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.advanceWorkingThread() }
+        }
+        // `-TrekDemoStream YES`: long answers written into the opened thread a few words at a time,
+        // one after another, to measure the transcript while it grows (`-TrekScrollProbe YES`).
+        if UserDefaults.standard.bool(forKey: "TrekDemoStream"), let tid = Launch.open {
+            later(4) { [weak self] in self?.startAnswer(in: tid) }
         }
         // `-TrekDemoChat <seconds>`: a message into the opened thread that often, each answered, so
         // new answers keep arriving under the reader (the transcript's layout as a long thread grows).
@@ -542,6 +574,30 @@ final class MockHost: Backend {
         }
     }
 
+    private func startAnswer(in tid: String) {
+        answersStreamed += 1
+        append(tid, .user(text: "Step \(answersStreamed): carry on", images: 0))
+        update(tid) { $0.runState = .working; $0.workingSince = Self.now; $0.activity = "Writing the answer" }
+        let body = ItemBody.assistant(text: "", streaming: true)
+        answerStream = (tid, newID(tid, body), "", DemoMac.tokens(DemoMac.longAnswer(answersStreamed)))
+        streamAnswer()
+    }
+
+    private func streamAnswer() {
+        guard var s = answerStream else { return }
+        s.text += s.rest.prefix(4).joined()
+        s.rest.removeFirst(min(4, s.rest.count))
+        let done = s.rest.isEmpty
+        answerStream = done ? nil : s
+        put(s.tid, TItem(id: s.id, seq: 0, body: .assistant(text: s.text, streaming: !done)), keepID: true)
+        if done {
+            finish(s.tid, with: "That's step \(answersStreamed) done.", took: 30)
+            later(2) { [weak self] in self?.startAnswer(in: s.tid) }
+        } else {
+            later(0.05) { [weak self] in self?.streamAnswer() }
+        }
+    }
+
     /// The visualizations thread's last answer arrives a few characters at a time, its chart
     /// drawing in as it comes (and stopping part-way with `-TrekVizHold`).
     private func streamViz() {
@@ -793,6 +849,9 @@ final class MockHost: Backend {
         add(id, tool(.edit, "Write", "tests/concurrent_refresh.rs", add: 31, del: 0))
         add(id, .assistant(text: "Both edits are in. The build cache still has artifacts from the old lockfile, so I'd like to clear `target/` and run the auth tests.", streaming: false))
         add(id, .approval(ApprovalRequest(requestId: "r-flaky", title: "Run command", detail: "rm -rf target/ && cargo test -p auth session_refresh -- --test-threads=8 --nocapture 2>&1 | tee /tmp/auth-flaky.log", state: .pending)))
+        if let i = threads.firstIndex(where: { $0.id == id }) {
+            threads[i].ask = RowAsk(requestId: "r-flaky", detail: "rm -rf target/ && cargo test -p auth session_refresh -- --test-threads=8 --nocapture 2>&1 | tee /tmp/auth-flaky.log")
+        }
 
         // Question
         id = "t-ratelimit"
@@ -852,6 +911,28 @@ final class MockHost: Backend {
         add(id, .user(text: "Add a dark theme to the docs site that follows the system setting.", images: 0), at: now - 1 * m)
         add(id, tool(.edit, "Edit", "docs/.vitepress/theme/style.css", add: 31, del: 14))
         add(id, tool(.command, "Run", "pnpm build", .running))
+        // `-TrekDemoAsk YES`: it asks for something harmless, for the Live Activity's Allow and Deny.
+        if UserDefaults.standard.bool(forKey: "TrekDemoAsk"), let i = threads.firstIndex(where: { $0.id == id }) {
+            add(id, .approval(ApprovalRequest(requestId: "r-docs", title: "Run command", detail: "pnpm build --filter docs", state: .pending)))
+            threads[i].runState = .needsYou
+            threads[i].section = .inbox
+            threads[i].needs = Needs(kind: .approval, text: "Run pnpm build --filter docs?")
+            threads[i].ask = RowAsk(requestId: "r-docs", detail: "pnpm build --filter docs")
+            threads[i].updatedAt = now
+        }
+        // `-TrekDemoCutShort YES`: Trek closed on the Mac in the middle of its turn. `waiting`: while
+        // it waited on the user. `failed`: a resume didn't take. `failing`: the next one won't.
+        if let how = UserDefaults.standard.string(forKey: "TrekDemoCutShort"), let i = threads.firstIndex(where: { $0.id == "t-worktree" }) {
+            var cut = CutShort(state: .offered, how: "Reopens its \(threads[i].agent.name) session")
+            if how == "waiting" {
+                cut.waiting = true
+                cut.asked = "Run the cleanup job on the staging box?"
+            } else if how == "failed" {
+                cut.state = .failed
+                cut.why = "Its session is gone, and starting again from a recap failed."
+            }
+            threads[i].cutShort = cut
+        }
 
         // Finished
         id = "t-tailscale"
@@ -1124,6 +1205,30 @@ extension MockHost {
             return true
         }
         switch action {
+        case .resumeInterrupted:
+            guard t.cutShort != nil, t.cutShort?.state != .resuming else {
+                refuse(id, .conflict, "There's nothing to resume")
+                return true
+            }
+            ack(id)
+            update(tid) { $0.cutShort?.state = .resuming }
+            // As a Mac's: Resuming until the agent is back, and then its turn; or, for
+            // `-TrekDemoCutShort failing`, why it couldn't come back.
+            later(2) { [weak self] in
+                guard let self else { return }
+                if UserDefaults.standard.string(forKey: "TrekDemoCutShort") == "failing" {
+                    self.update(tid) { $0.cutShort?.state = .failed; $0.cutShort?.why = "Its session is gone, and starting again from a recap failed." }
+                    return
+                }
+                self.update(tid) { $0.cutShort = nil; $0.runState = .working; $0.section = .working; $0.workingSince = Self.now; $0.activity = "Reopening its session" }
+                self.append(tid, .user(text: "Carry on from where you were when Trek closed.", images: 0))
+                self.respond(in: tid, to: "Carry on")
+            }
+            return true
+        case .dismissInterrupted:
+            ack(id)
+            update(tid) { $0.cutShort = nil }
+            return true
         case .snooze(let until, let preset):
             let calendar = Calendar.current
             let morning = { (days: Int) in

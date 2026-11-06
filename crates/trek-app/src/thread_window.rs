@@ -3,6 +3,7 @@
 //! deleting the thread closes it.
 
 use crate::composer::Composer;
+use crate::scale::{radius, text, to_rems};
 use crate::thread_view::ThreadView;
 use crate::working_bar::WorkingBar;
 use crate::workspace::{Route, Scope, SettingsPage, Workspace, WorkspaceEvent};
@@ -86,6 +87,12 @@ pub struct ThreadWindow {
 }
 
 impl ThreadWindow {
+    /// The window's own composer, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn composer(&self) -> &Entity<Composer> {
+        &self.composer
+    }
+
     fn new(
         workspace: Entity<Workspace>,
         id: String,
@@ -266,7 +273,7 @@ impl ThreadWindow {
                         .min_w_0()
                         .pl_1()
                         .gap_2()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .overflow_hidden()
                         .when_some(name, |el, p| {
                             el.child(
@@ -460,7 +467,7 @@ impl Render for ThreadWindow {
                 div().flex_1().min_h_0().px_2().pb_2().child(
                     v_flex()
                         .size_full()
-                        .rounded(px(crate::fluent::surface(12.)))
+                        .rounded(px(crate::fluent::surface(radius::CARD)))
                         .border_1()
                         .border_color(crate::ui::panel_border(glass, cx))
                         .bg(crate::ui::panel_bg(glass, cx))

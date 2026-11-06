@@ -8,6 +8,7 @@
 //! an Update button, MonoCode's harness updates in Trek's design.
 
 use crate::fluent;
+use crate::scale::{radius, text};
 use crate::workspace::{Hold, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
@@ -627,9 +628,9 @@ fn row(
             .h(px(24.))
             .px(px(8.))
             .gap(px(6.))
-            .rounded(px(fluent::control(6.)))
+            .rounded(px(fluent::control(radius::CONTROL)))
             .bg(theme.foreground.opacity(0.05))
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .child(Spinner::new().xsmall().color(muted))
             .child("Updating")
             .into_any_element(),
@@ -639,9 +640,9 @@ fn row(
             .h(px(24.))
             .px(px(8.))
             .gap(px(5.))
-            .rounded(px(fluent::control(6.)))
+            .rounded(px(fluent::control(radius::CONTROL)))
             .bg(theme.foreground.opacity(0.05))
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .text_color(muted)
             .child(Icon::new(crate::assets::Lucide::Clock).xsmall())
             .child(if hold.is_some() && !stale {
@@ -656,7 +657,7 @@ fn row(
             .h(px(24.))
             .px(px(4.))
             .gap(px(5.))
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .child(
                 Icon::new(IconName::Check)
                     .xsmall()
@@ -702,7 +703,7 @@ fn row(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.5))
+                        .text_size(px(text::TITLE))
                         .font_weight(FontWeight::MEDIUM)
                         .truncate()
                         .child(v.name.clone()),
@@ -711,7 +712,7 @@ fn row(
                     div()
                         .flex_none()
                         .font_family(theme.mono_font_family.clone())
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(muted)
                         .child(versions),
                 )
@@ -728,7 +729,7 @@ fn row(
             h_flex()
                 .pl(px(32.))
                 .gap(px(10.))
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 // Wraps: a failure's reason and the command running are read in full.
                 .items_start()
                 .child(div().flex_1().min_w_0().text_color(tone).child(detail))
@@ -749,7 +750,7 @@ fn row(
                     .border_l_1()
                     .border_color(theme.border)
                     .font_family(theme.mono_font_family.clone())
-                    .text_size(px(11.5))
+                    .text_size(px(text::LABEL))
                     .line_height(relative(1.5))
                     .text_color(theme.foreground.opacity(0.8))
                     .child(out),
@@ -797,7 +798,7 @@ pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(13.5))
+                        .text_size(px(text::TITLE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(title),
                 )
@@ -826,7 +827,7 @@ pub fn card(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .text_color(theme.muted_foreground)
                         .child(WHY),
                 )

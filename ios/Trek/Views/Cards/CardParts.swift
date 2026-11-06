@@ -417,6 +417,7 @@ struct CardHeader: View {
     var restMuted = false
     var badge: CardBadge?
     var meta: [Meta]
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     enum Meta: Hashable {
         case pill(String)
@@ -429,9 +430,9 @@ struct CardHeader: View {
         HStack(alignment: .top, spacing: 11) {
             CardTile(icon: tile.icon, hue: tile.hue)
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .top, spacing: 8) {
+                BesideOrOver(alignment: .top, spacing: 8) {
                     title
-                        .lineLimit(2)
+                        .lineLimit(typeSize.isAccessibilitySize ? 6 : 2)
                         // 20 pt lines, as the design sets Inter 15.
                         .lineSpacing(2)
                         .padding(.vertical, 1)
@@ -481,10 +482,11 @@ struct CardOutcome<Files: View, Actions: View>: View {
     var inline: CardButton?
     @ViewBuilder var files: () -> Files
     @ViewBuilder var actions: () -> Actions
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 11) {
+            HStack(alignment: typeSize.isAccessibilitySize ? .top : .center, spacing: 11) {
                 CardTile(icon: tile.icon, hue: tile.hue)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title)
@@ -501,8 +503,10 @@ struct CardOutcome<Files: View, Actions: View>: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentTransition(.opacity)
-                inline
+                // Beside the words at the accessibility sizes, it left them a letter a line.
+                if !typeSize.isAccessibilitySize { inline }
             }
+            if typeSize.isAccessibilitySize, let inline { CardActions { inline } }
             files()
             actions()
         }

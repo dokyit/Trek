@@ -41,9 +41,12 @@ fn resolve_codex_home(env: Option<&std::ffi::OsStr>, home: &Path) -> PathBuf {
 }
 
 fn db() -> Option<Connection> {
-    let home = codex_home();
+    db_in(&codex_home())
+}
+
+fn db_in(home: &Path) -> Option<Connection> {
     // Newest state db wins (state_5 today; tolerate future bumps).
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&home)
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(home)
         .ok()?
         .flatten()
         .map(|e| e.path())
@@ -67,6 +70,17 @@ fn db() -> Option<Connection> {
 /// Threads updated since `min_updated`, and the ones in `held` (already in Trek) whatever their age.
 pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
     db().map(|conn| scan_conn(&conn, min_updated, held))
+        .unwrap_or_default()
+}
+
+/// [`scan`], of the Codex folder at `home`.
+pub(crate) fn scan_home(
+    home: &Path,
+    min_updated: i64,
+    held: &HashSet<String>,
+) -> Vec<ImportedThread> {
+    db_in(home)
+        .map(|conn| scan_conn(&conn, min_updated, held))
         .unwrap_or_default()
 }
 
@@ -269,7 +283,13 @@ pub(crate) fn session_ids() -> Option<HashSet<String>> {
 }
 
 pub(super) fn rollout_path(id: &str) -> Option<PathBuf> {
-    let conn = db()?;
+    // A thread on another account has its rollout in that account's folder (`crate::accounts`).
+    std::iter::once(codex_home())
+        .chain(crate::accounts::folders())
+        .find_map(|home| rollout_in(&db_in(&home)?, id))
+}
+
+fn rollout_in(conn: &Connection, id: &str) -> Option<PathBuf> {
     conn.query_row(
         "SELECT rollout_path FROM threads WHERE id = ?1",
         [id],
@@ -629,6 +649,27 @@ pub(super) fn load_rollout(path: &Path, id: &str) -> anyhow::Result<Vec<Item>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same for Codex: its state database, and so its rollouts, are per account.
+    #[test]
+    fn a_thread_on_an_account_is_found_by_its_id() {
+        let dir = crate::accounts::root().join("codex-test-account");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("state_5.sqlite");
+        let _ = std::fs::remove_file(&db);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT);
+             INSERT INTO threads VALUES ('acct-thread-codex', '/sessions/rollout.jsonl');",
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(
+            rollout_path("acct-thread-codex"),
+            Some(PathBuf::from("/sessions/rollout.jsonl"))
+        );
+        assert_eq!(rollout_path("no-such-thread"), None);
+    }
     use crate::import::{Scratch, Skip};
     use serde_json::json;
 

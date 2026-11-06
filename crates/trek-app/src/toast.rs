@@ -8,6 +8,7 @@
 
 use crate::fluent;
 use crate::motion::{self, Presence, SURFACE};
+use crate::scale::{text, to_rems};
 use gpui_kit::base::{Root, RootPlugin, ToastMotion, ToastStack, ToastStackState};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, v_flex};
@@ -254,7 +255,7 @@ impl Toasts {
                         .absolute()
                         .top(px(18.))
                         .left_4()
-                        .child(Icon::new(IconName::CircleX).text_color(theme.danger)),
+                        .child(Icon::new(IconName::CircleX).text_color(theme.red)),
                 )
             })
             .child(
@@ -263,7 +264,14 @@ impl Toasts {
                     .overflow_hidden()
                     .when(toast.error, |el| el.pl_6())
                     .when_some(toast.message.clone(), |el, m| {
-                        el.child(div().text_sm().child(m))
+                        // Lines 20 px apart at the default UI size: whole pixels at every display
+                        // scale, so the toast is the same height on each.
+                        el.child(
+                            div()
+                                .text_size(to_rems(text::LABEL))
+                                .line_height(rems(20. / crate::scale::REM))
+                                .child(m),
+                        )
                     })
                     .when_some(content, |el, c| el.child(c)),
             )

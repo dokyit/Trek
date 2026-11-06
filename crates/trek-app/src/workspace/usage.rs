@@ -27,7 +27,18 @@ pub type UsageFetch =
 
 /// The shortest time between two reads of one agent's usage, unless one is asked for (`/usage`,
 /// a limit hit with no reset known).
-const READ_EVERY_MS: i64 = 30_000;
+pub(super) const READ_EVERY_MS: i64 = 30_000;
+/// Claude Code's plan usage comes from Anthropic's servers, which answer slowly when asked often:
+/// read it less often than the others.
+const CLAUDE_READ_EVERY_MS: i64 = 120_000;
+
+/// How often `agent`'s usage is read while the card shows it.
+fn read_every(agent: &AgentId) -> i64 {
+    match agent {
+        AgentId::ClaudeCode => CLAUDE_READ_EVERY_MS,
+        _ => READ_EVERY_MS,
+    }
+}
 
 /// Claude Code's or Codex's own report, with its usage or without, read on Trek's tokio runtime.
 pub fn read_agent(
@@ -100,6 +111,79 @@ pub struct UsageRow {
     pub as_of: Option<i64>,
     /// Tokens Trek recorded for it today, and what they cost.
     pub today: Option<(u64, Spend)>,
+    /// The account of its agent's it's about (`workspace::accounts`). `None`: its normal login.
+    pub account: Option<String>,
+}
+
+impl UsageRow {
+    /// As the agent said it this run.
+    pub(super) fn of_status(
+        agent: AgentId,
+        st: &AgentStatus,
+        today: Option<(u64, Spend)>,
+    ) -> UsageRow {
+        UsageRow {
+            no_limits: st.limits.is_empty() && st.error.is_none(),
+            plan: st.plan.clone(),
+            limits: st.limits.clone(),
+            error: st.error.clone(),
+            note: st.note.clone(),
+            resets: st.resets.clone(),
+            as_of: None,
+            today,
+            agent,
+            account: None,
+        }
+    }
+
+    /// As it said it in an earlier run, with when: windows that have reset since show empty again.
+    pub(super) fn of_snapshot(
+        agent: AgentId,
+        s: &Snapshot,
+        now: i64,
+        today: Option<(u64, Spend)>,
+    ) -> UsageRow {
+        let limits = s
+            .limits
+            .iter()
+            .map(|l| match l.resets_at {
+                Some(at) if at <= now => UsageLimit {
+                    percent: 0.,
+                    resets_at: None,
+                    ..l.clone()
+                },
+                _ => l.clone(),
+            })
+            .collect();
+        UsageRow {
+            no_limits: s.limits.is_empty(),
+            plan: s.plan.clone(),
+            limits,
+            error: None,
+            note: s.note.clone(),
+            resets: vec![],
+            as_of: Some(s.read_at),
+            today,
+            agent,
+            account: None,
+        }
+    }
+
+    /// Nothing known of it yet.
+    pub(super) fn empty(agent: AgentId, today: Option<(u64, Spend)>) -> UsageRow {
+        UsageRow {
+            agent,
+            plan: None,
+            limits: vec![],
+            no_limits: false,
+            error: None,
+            note: None,
+            resets: vec![],
+            as_of: None,
+            today,
+            account: None,
+        }
+    }
 }
 
 impl Workspace {
@@ -223,7 +307,39 @@ impl Workspace {
     /// is the one in use; the nearest of any provider shown when that one reports no limits.
     pub fn usage_focus(&self) -> Option<(AgentId, UsageLimit)> {
         let (agent, model) = self.usage_in_use();
-        self.usage_focus_for(agent, model)
+        let account = match self.current_thread() {
+            Some(t) => t.account.clone(),
+            None => self.draft_prefs.account.clone(),
+        };
+        self.usage_focus_on(agent, model, account.as_deref())
+    }
+
+    /// `usage_focus_for` for a thread on `account`: that account's limits, while it reports any.
+    pub fn usage_focus_on(
+        &self,
+        agent: AgentId,
+        model: Option<String>,
+        account: Option<&str>,
+    ) -> Option<(AgentId, UsageLimit)> {
+        let on_account = account.and_then(|id| {
+            let row = self
+                .account_rows(&agent)
+                .into_iter()
+                .find(|r| r.account.as_deref() == Some(id))?;
+            let model = model.as_deref().unwrap_or_default().to_lowercase();
+            row.limits
+                .iter()
+                .filter(|l| match l.label.split_once(" · ") {
+                    Some((_, family)) => model.contains(&family.trim().to_lowercase()),
+                    None => true,
+                })
+                .max_by(|a, b| a.percent.total_cmp(&b.percent))
+                .cloned()
+        });
+        match on_account {
+            Some(limit) => Some((agent, limit)),
+            None => self.usage_focus_for(agent, model),
+        }
     }
 
     /// `usage_focus` for `agent` running `model` (a thread window's thread, say).
@@ -268,55 +384,11 @@ impl Workspace {
                 let key = agent.key();
                 let today = self.usage_today.get(&key).filter(|(n, _)| *n > 0).cloned();
                 if let Some(st) = self.usage_status(&key) {
-                    return UsageRow {
-                        no_limits: st.limits.is_empty() && st.error.is_none(),
-                        plan: st.plan.clone(),
-                        limits: st.limits.clone(),
-                        error: st.error.clone(),
-                        note: st.note.clone(),
-                        resets: st.resets.clone(),
-                        as_of: None,
-                        today,
-                        agent,
-                    };
+                    return UsageRow::of_status(agent, st, today);
                 }
                 match self.usage_cached.get(&key) {
-                    Some(s) => {
-                        let limits = s
-                            .limits
-                            .iter()
-                            .map(|l| match l.resets_at {
-                                Some(at) if at <= now => UsageLimit {
-                                    percent: 0.,
-                                    resets_at: None,
-                                    ..l.clone()
-                                },
-                                _ => l.clone(),
-                            })
-                            .collect();
-                        UsageRow {
-                            no_limits: s.limits.is_empty(),
-                            plan: s.plan.clone(),
-                            limits,
-                            error: None,
-                            note: s.note.clone(),
-                            resets: vec![],
-                            as_of: Some(s.read_at),
-                            today,
-                            agent,
-                        }
-                    }
-                    None => UsageRow {
-                        agent,
-                        plan: None,
-                        limits: vec![],
-                        no_limits: false,
-                        error: None,
-                        note: None,
-                        resets: vec![],
-                        as_of: None,
-                        today,
-                    },
+                    Some(s) => UsageRow::of_snapshot(agent, s, now, today),
+                    None => UsageRow::empty(agent, today),
                 }
             })
             .collect()
@@ -374,6 +446,7 @@ impl Workspace {
                 self.read_status(agent, false, commands, cx);
             }
         }
+        self.read_accounts(force, cx);
     }
 
     /// Read `agent`'s usage, unless it was read in the last 30 seconds (or is being read) and
@@ -401,7 +474,7 @@ impl Workspace {
             true => {
                 self.usage_inflight.contains(&key)
                     || self.now() - self.usage_fetched.get(&key).copied().unwrap_or(0)
-                        < READ_EVERY_MS
+                        < read_every(&agent)
             }
             false => self.commands_read.contains(&key),
         };
@@ -464,7 +537,34 @@ impl Workspace {
                 // Its commands include the folder's own (project commands, skills).
                 self.agent_commands
                     .insert((key.clone(), folder), st.commands.clone());
-                if with_usage {
+                // The plan's usage didn't come this time: what it said last stays on the card,
+                // marked as such, rather than meters going blank on a slow answer.
+                let late = with_usage
+                    && st.limits.is_empty()
+                    && st.error.as_deref() == Some(trek_agents::USAGE_LATE);
+                if late {
+                    let old = self.agent_status.get(&key).filter(|o| !o.limits.is_empty());
+                    let st = match old {
+                        Some(old) => AgentStatus {
+                            limits: old.limits.clone(),
+                            resets: old.resets.clone(),
+                            note: old.note.clone(),
+                            error: Some(
+                                "Couldn't refresh this just now. These are from the last reading."
+                                    .to_string(),
+                            ),
+                            ..st
+                        },
+                        None => AgentStatus {
+                            error: Some(
+                                "Its usage didn't arrive in time. Trek will ask again shortly."
+                                    .to_string(),
+                            ),
+                            ..st
+                        },
+                    };
+                    self.agent_status.insert(key.clone(), st);
+                } else if with_usage {
                     self.keep_snapshot(&key, Snapshot::of(&st, now), cx);
                     self.agent_status.insert(key.clone(), st);
                 } else if let Some(old) = self.agent_status.get_mut(&key).filter(|_| had_usage) {
@@ -531,6 +631,7 @@ impl Workspace {
             } else {
                 self.fetch_usage(agent.clone(), false, cx);
             }
+            self.read_accounts_of(agent, cx);
         }
         self.refresh_usage_today(cx);
     }

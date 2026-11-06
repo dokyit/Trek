@@ -82,8 +82,10 @@ struct ContextBreakdown: View {
                     Text(running ? "Compacting…" : "Compact now")
                 }
                 .font(.ui(.subheadline).weight(.medium))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
                 .frame(maxWidth: .infinity)
-                .frame(height: 36)
+                .frame(minHeight: 36)
             }
             .buttonStyle(.bordered)
             .tint(Trek.foreground)

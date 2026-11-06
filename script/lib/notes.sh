@@ -24,11 +24,11 @@ trek_install_block() {
   # The quoted heredocs keep the backticks and the backslashes of the Windows paths as they are.
   if [ "${TREK_NOTARIZED:-0}" = 1 ]; then
     cat <<'EOF' | sed "s/@VERSION@/$1/g"
-- **macOS** (13 or later, Apple silicon): download `Trek-@VERSION@-darwin-aarch64.dmg`, open it and drag **Trek** onto **Applications**. (`Trek-@VERSION@-darwin-aarch64.app.tar.gz` is the same app as an archive: unpack it and move **Trek.app** to Applications.)
+- **macOS** (13 or later): download `Trek-@VERSION@-darwin-aarch64.dmg` for Apple silicon or `Trek-@VERSION@-darwin-x86_64.dmg` for an Intel Mac, open it and drag **Trek** onto **Applications**. (`Trek-@VERSION@-darwin-aarch64.app.tar.gz` and `Trek-@VERSION@-darwin-x86_64.app.tar.gz` are the same apps as archives: unpack yours and move **Trek.app** to Applications.)
 EOF
   else
     cat <<'EOF' | sed "s/@VERSION@/$1/g"
-- **macOS** (13 or later, Apple silicon): download `Trek-@VERSION@-darwin-aarch64.dmg`, open it and drag **Trek** onto **Applications**. Apple hasn't notarized Trek, so macOS won't open it the first time: click **Done**, then in **System Settings › Privacy & Security** scroll to **Security**, click **Open Anyway** beside "Trek was blocked" and **Open Anyway** again. It asks only once. (`Trek-@VERSION@-darwin-aarch64.app.tar.gz` is the same app as an archive: unpack it and move **Trek.app** to Applications.)
+- **macOS** (13 or later): download `Trek-@VERSION@-darwin-aarch64.dmg` for Apple silicon or `Trek-@VERSION@-darwin-x86_64.dmg` for an Intel Mac, open it and drag **Trek** onto **Applications**. Apple hasn't notarized Trek, so macOS won't open it the first time: click **Done**, then in **System Settings › Privacy & Security** scroll to **Security**, click **Open Anyway** beside "Trek was blocked" and **Open Anyway** again. It asks only once. (`Trek-@VERSION@-darwin-aarch64.app.tar.gz` and `Trek-@VERSION@-darwin-x86_64.app.tar.gz` are the same apps as archives: unpack yours and move **Trek.app** to Applications.)
 EOF
   fi
   cat <<'EOF' | sed "s/@VERSION@/$1/g"

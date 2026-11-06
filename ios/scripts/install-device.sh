@@ -7,7 +7,8 @@
 #      dev.trek.TrekMobile.<you>), LAUNCH=0 (install without opening it), DRIVER=0 (without
 #      Trek Driver, the test runner inside the app that Trek's iPhone tool taps through over USB
 #      or Wi-Fi;
-#      see ios/scripts/build-driver.sh).
+#      see ios/scripts/build-driver.sh), ACTIVITY=0 (without the Live Activity, which a free team
+#      counts as one more of the three apps it allows; see ios/scripts/embed-activity.sh).
 # With a free Apple ID the app works for 7 days from when Xcode made its provisioning profile;
 # installing again with the same profile doesn't extend that, so a profile with 2 days or less
 # left is set aside first and Xcode makes a fresh one. The first time, the iPhone asks you to
@@ -52,7 +53,7 @@ expiry() {  # profile -> "<epoch seconds it lapses> <application identifier>"
 for f in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"/*.mobileprovision; do
   [ -f "$f" ] || continue
   set -- $(expiry "$f")
-  case "${2:-}" in *".$BUNDLE") ;; *) continue ;; esac
+  case "${2:-}" in *".$BUNDLE"|*".$BUNDLE.Activity") ;; *) continue ;; esac
   if [ $(( ${1:-0} - $(date +%s) )) -le $((2 * 86400)) ]; then
     mkdir -p "$STATE/old-profiles"
     mv "$f" "$STATE/old-profiles/" && echo "Signing lapses within 2 days: Xcode makes a fresh profile."
@@ -65,6 +66,16 @@ xcodebuild -project Trek.xcodeproj -scheme Trek -configuration Debug \
   ${VERSION:+MARKETING_VERSION="$VERSION"} CURRENT_PROJECT_VERSION="$BUILD" \
   build -quiet
 APP="$DD/Build/Products/Debug-iphoneos/Trek.app"
+# The Live Activity inside the app, when it builds and signs (ACTIVITY=0 leaves it out). Before the
+# driver, which copies the app as it finds it.
+if [ "${ACTIVITY:-1}" != 0 ]; then
+  sh scripts/embed-activity.sh "$APP" "$DD" -destination "id=$DEVICE" -allowProvisioningUpdates \
+    DEVELOPMENT_TEAM="$TEAM" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE.Activity" CODE_SIGN_STYLE=Automatic \
+    ${VERSION:+MARKETING_VERSION="$VERSION"} CURRENT_PROJECT_VERSION="$BUILD" || \
+    { echo "The Live Activity didn't build: installing Trek without it." >&2; sh scripts/embed-activity.sh --remove "$APP"; }
+elif [ -d "$APP/PlugIns/TrekActivity.appex" ]; then
+  sh scripts/embed-activity.sh --remove "$APP"
+fi
 # Trek Driver inside the app: the Mac's iPhone tool taps through it over the cable while the
 # iPhone is unlocked (ios/TrekDriver; DRIVER=0 leaves it out). Kept in $STATE/driver with the
 # .xctestrun Trek starts it with.
@@ -83,10 +94,19 @@ if [ "${DRIVER:-1}" != 0 ]; then
 fi
 # A driver left from an older install would put that older Trek back when it starts.
 [ "$APP" = "$DRIVER_DIR/Trek.app" ] || rm -rf "$DRIVER_DIR"
-if [ -n "$TREK_MCP" ] && "$TREK_MCP" phone-device install "$APP" --udid "$DEVICE"; then
-  :
-else
-  xcrun devicectl device install app --device "$DEVICE" "$APP"
+install_app() {
+  if [ -n "$TREK_MCP" ] && "$TREK_MCP" phone-device install "$APP" --udid "$DEVICE"; then
+    :
+  else
+    xcrun devicectl device install app --device "$DEVICE" "$APP"
+  fi
+}
+if ! install_app; then
+  # A free team's three apps may have no room for the extension: Trek itself comes first.
+  [ -d "$APP/PlugIns/TrekActivity.appex" ] || exit 1
+  echo "The iPhone refused the install: trying without the Live Activity." >&2
+  sh scripts/embed-activity.sh --remove "$APP"
+  install_app
 fi
 # What's on the iPhone now, and when its signing lapses: the phone updater reads it.
 set -- $(expiry "$APP/embedded.mobileprovision")

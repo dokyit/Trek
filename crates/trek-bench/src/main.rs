@@ -517,6 +517,7 @@ fn outcome(
         Some(Stop::EndTurn) => ("end_turn", error),
         Some(Stop::MaxTurns) => ("max_turns", error),
         Some(Stop::TimeLimit) => ("time_limit", error),
+        Some(Stop::Stuck) => ("stuck", error),
         // The interrupt's own "Interrupted" says nothing; the bench's error, if any, does.
         _ if interrupted => ("time_limit", error),
         Some(Stop::Error(e)) => ("error", Some(e.clone())),

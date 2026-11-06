@@ -326,6 +326,7 @@ pub fn waveform(levels: Vec<f32>, color: Hsla) -> impl IntoElement {
                         Bounds::new(point(px(x), px(mid - bar / 2.)), size(px(2.), px(bar))),
                         shade.opacity(shade.a * alpha),
                     )
+                    // scale: ok, the waveform's bars
                     .corner_radii(px(1.)),
                 );
             }

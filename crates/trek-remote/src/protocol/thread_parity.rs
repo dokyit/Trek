@@ -76,6 +76,48 @@ pub struct LimitPause {
     pub wrapped: bool,
 }
 
+/// The approval behind a row's `needs` (`ThreadSummary::ask`): which request it is, and all of what
+/// it would do, so whoever answers from outside the thread can read it and judge it first.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RowAsk {
+    pub request_id: String,
+    /// The command or file, whole (at most [`MAX_ASK_DETAIL`] bytes).
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// The most a [`RowAsk`] carries of what it asks.
+pub const MAX_ASK_DETAIL: usize = 2 << 10;
+
+/// A turn cut off when Trek closed (`ThreadSummary::cut_short`), as the Mac's offer has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CutShort {
+    pub state: CutShortState,
+    /// How its agent comes back: "Reopens its Claude Code session".
+    #[serde(default)]
+    pub how: String,
+    /// It was waiting on the user, not working: it comes back waiting.
+    #[serde(default)]
+    pub waiting: bool,
+    /// What it was asking then, when the transcript shows that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<String>,
+    /// Why the last resume failed (`state` `failed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutShortState {
+    /// Waiting for the user's word.
+    Offered,
+    /// A resume went, and the agent hasn't said anything yet.
+    Resuming,
+    /// The resume failed: `why`, and Retry.
+    Failed,
+}
+
 // ---------------------------------------------------------------------------------------------
 // `media`: files a thread names
 // ---------------------------------------------------------------------------------------------

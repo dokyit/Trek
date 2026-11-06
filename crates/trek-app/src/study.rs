@@ -23,6 +23,7 @@
 
 use crate::composer::Composer;
 use crate::fluent::{self, PillExt as _};
+use crate::scale::{radius, text};
 use crate::ui;
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -228,7 +229,7 @@ impl StudyView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(22.))
+                    .text_size(px(text::DISPLAY_S))
                     .font_semibold()
                     .line_height(px(32.))
                     .child("Study"),
@@ -273,13 +274,13 @@ impl StudyView {
                 .ghost()
                 .h(px(32.))
                 .px(px(12.))
-                .rounded(px(fluent::control(16.)))
+                .rounded(px(fluent::control(radius::FULL)))
                 .border_1()
                 .border_color(theme.foreground.opacity(0.08))
                 .child(
                     h_flex()
                         .gap(px(8.))
-                        .text_size(px(13.))
+                        .text_size(px(text::BODY))
                         .text_color(muted)
                         .child(Icon::new(L::NotebookPen).size(px(14.)).text_color(muted))
                         .child("A note"),
@@ -392,7 +393,7 @@ impl StudyView {
                 .child(
                     h_flex()
                         .gap(px(6.))
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child("From your study folder")
                         .when(included > 0, |el| {
@@ -476,7 +477,7 @@ impl StudyView {
             .w_full()
             .p(px(16.))
             .gap(px(16.))
-            .rounded(px(fluent::surface(12.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .border_1()
             .border_color(theme.foreground.opacity(0.08))
             .cursor_pointer()
@@ -485,7 +486,7 @@ impl StudyView {
                 div()
                     .flex_none()
                     .size(px(40.))
-                    .rounded(px(fluent::control(10.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .bg(theme.foreground.opacity(0.06))
                     .flex()
                     .items_center()
@@ -504,14 +505,14 @@ impl StudyView {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(15.))
+                            .text_size(px(text::HEADING))
                             .font_medium()
                             .child(s.title.clone()),
                     )
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .child(meta.join(" · ")),
                     ),
@@ -575,7 +576,7 @@ impl StudyView {
             .min_w_0()
             .p(px(12.))
             .gap(px(8.))
-            .rounded(px(fluent::surface(10.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .border_1()
             .border_color(if on {
                 ember.opacity(0.55)
@@ -598,7 +599,7 @@ impl StudyView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_size(px(text::BODY))
                             .font_medium()
                             .child(t.title.clone()),
                     )
@@ -627,7 +628,7 @@ impl StudyView {
             .child(
                 div()
                     .truncate()
-                    .text_size(px(12.))
+                    .text_size(px(text::LABEL))
                     .text_color(theme.muted_foreground)
                     .child(
                         facts
@@ -689,7 +690,7 @@ impl StudyView {
                     .h(px(40.))
                     .gap(px(12.))
                     .px(px(8.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.list_hover))
                     .child(
@@ -701,7 +702,7 @@ impl StudyView {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .child(format!(
                                 "{} · {}",
@@ -736,16 +737,20 @@ impl StudyView {
             .px(px(16.))
             .py(px(12.))
             .gap(px(12.))
-            .rounded(px(fluent::surface(10.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .bg(theme.foreground.opacity(0.03))
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .text_color(theme.muted_foreground)
             .child(
                 Icon::new(L::Map)
                     .size(px(14.))
                     .text_color(theme.muted_foreground),
             )
-            .child("Each session leaves a map of what you learned; the next one builds on it.")
+            .child(
+                div().flex_1().min_w_0().child(
+                    "Each session leaves a map of what you learned; the next one builds on it.",
+                ),
+            )
             .into_any_element()
     }
 }
@@ -877,7 +882,7 @@ fn action_chip(id: &'static str, icon: L, label: &'static str, cx: &App) -> Chip
         .rounded_pill()
         .border_1()
         .border_color(theme.foreground.opacity(0.08))
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .text_color(theme.muted_foreground)
         .cursor_pointer()
         .hover(|s| {
@@ -899,7 +904,7 @@ fn tick_box(id: SharedString, on: bool, cx: &App) -> AnyElement {
     let ember = crate::palette::ember(cx);
     div()
         .size(px(16.))
-        .rounded(px(4.))
+        .rounded(px(radius::TAG))
         .border_1()
         .border_color(if on {
             ember
@@ -941,7 +946,7 @@ fn file_card(id: SharedString, icon: L, name: String, meta: String, on: bool, cx
         .h(px(56.))
         .px(px(12.))
         .gap(px(12.))
-        .rounded(px(fluent::surface(10.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .border_1()
         .border_color(if on {
             ember.opacity(0.55)
@@ -961,11 +966,11 @@ fn file_card(id: SharedString, icon: L, name: String, meta: String, on: bool, cx
                 .flex_1()
                 .min_w_0()
                 .gap(px(2.))
-                .child(div().truncate().text_size(px(13.)).child(name))
+                .child(div().truncate().text_size(px(text::BODY)).child(name))
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(meta),
                 ),
@@ -991,7 +996,7 @@ pub fn intro_bubble(intro: &Intro, cx: &App) -> AnyElement {
             .gap(px(5.))
             .rounded_pill()
             .bg(theme.foreground.opacity(0.06))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(muted)
             .child(Icon::new(icon).size(px(12.)).text_color(muted))
             .child(div().min_w_0().truncate().child(label))
@@ -1031,7 +1036,7 @@ pub fn intro_bubble(intro: &Intro, cx: &App) -> AnyElement {
         .child(
             h_flex()
                 .gap(px(6.))
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(muted)
                 .child(
                     Icon::new(kind_icon(intro.kind))
@@ -1068,7 +1073,7 @@ fn section_title(title: &'static str, count: Option<usize>, cx: &App) -> AnyElem
     h_flex()
         .pb(px(8.))
         .gap(px(6.))
-        .text_size(px(13.))
+        .text_size(px(text::BODY))
         .child(div().font_medium().child(title))
         .when_some(count.filter(|n| *n > 1), |el, n| {
             el.child(

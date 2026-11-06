@@ -1,18 +1,20 @@
 //! Codex via `codex app-server` (JSON-RPC over stdio, newline-delimited, no `jsonrpc` field).
 //! Uses the user's own Codex login (ChatGPT plan or API key).
 
+use crate::rules::Ruling;
 use crate::{
     AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, Prompt, Question,
     SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title,
 };
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufRead, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use trek_core::catalog::ModelInfo;
+use trek_core::permission_rules::{self, Call as RuleCall, PermissionRule};
 use trek_core::{Effort, HandHolding, TokenUsage, UsageCost, detect};
 
 pub(crate) struct Rpc {
@@ -147,6 +149,7 @@ pub(crate) async fn start_app_server(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::sign_in_as_account(&mut command);
     let mut child = crate::spawn_group(&mut command).context("failed to start codex app-server")?;
     let stderr = StderrTail::capture(child.stderr.take().unwrap(), "codex");
     let mut rpc = Rpc {
@@ -197,6 +200,27 @@ fn context_event(p: &Value) -> Option<AgentEvent> {
     });
     let used = total.saturating_sub(last["reasoningOutputTokens"].as_u64().unwrap_or(0));
     Some(AgentEvent::Context { used, window })
+}
+
+/// Whether Codex has to check each command with Trek, for the user's rules to hold before it runs.
+/// Only at Full access. Left to `on-request`, Codex runs what its sandbox allows without a word,
+/// and `untrusted` would have it ask, but an approval there lets that command out of the sandbox
+/// (checked against codex-cli 0.166 with a stand-in model: `touch ~/x`, accepted at workspace-write,
+/// lands). A rule mustn't cost the user their sandbox, and Full access has none to lose. At the
+/// other levels a rule answers what Codex does ask, and hears of the rest once it has run
+/// (`after_the_fact`).
+fn watches(h: HandHolding, rules: &[PermissionRule]) -> bool {
+    h == HandHolding::FullAccess && permission_rules::watches_work(rules)
+}
+
+/// The `(approvalPolicy, approvalsReviewer)` for a turn.
+fn policy_under(h: HandHolding, rules: &[PermissionRule]) -> (&'static str, &'static str) {
+    let (_, approval, reviewer) = h.codex_policy();
+    if watches(h, rules) {
+        ("untrusted", reviewer)
+    } else {
+        (approval, reviewer)
+    }
 }
 
 fn sandbox_policy(h: HandHolding) -> Value {
@@ -775,6 +799,15 @@ struct Session {
     drafting: Option<(String, String, bool)>,
     /// A fatal error reported before its `turn/completed`.
     turn_error: Option<String>,
+    /// This turn runs under the policy that has Codex ask about everything, so the rules see it
+    /// (`watches`): Trek says yes to what they don't name.
+    watching: bool,
+    /// Items Codex asked about before running them: the rules have had their say.
+    asked: HashSet<String>,
+    /// Nothing may change here (`SessionConfig::read_only`): no allow rule overrules that.
+    read_only: bool,
+    /// The rules to go by, in place of the ones in force.
+    rules: Option<Vec<PermissionRule>>,
     /// `fileChange` item id → its paths, for the approval card.
     edits: HashMap<String, Vec<String>>,
     /// The thread's folder: edits inside it go ahead at Auto-accept edits.
@@ -833,6 +866,10 @@ impl Session {
                 .or(config.model.clone()),
             effort: config.effort,
             hand_holding: config.hand_holding,
+            watching: watches(config.hand_holding, &permission_rules::current()),
+            asked: HashSet::new(),
+            read_only: config.read_only,
+            rules: None,
             fast: config.fast.clone(),
             plan: config.plan,
             mode: opened["collaborationMode"]["mode"]
@@ -922,7 +959,9 @@ impl Session {
     }
 
     fn turn_start(&mut self, input: Value) -> Value {
-        let (_, approval, reviewer) = self.hand_holding.codex_policy();
+        let rules = self.rules();
+        let (approval, reviewer) = policy_under(self.hand_holding, &rules);
+        self.watching = watches(self.hand_holding, &rules);
         let mut p = json!({
             "threadId": self.thread_id,
             "input": input,
@@ -1014,6 +1053,20 @@ impl Session {
     fn command(&mut self, cmd: Command) -> Out {
         let mut out = Out::default();
         match cmd {
+            // Codex compacts by request. As a message it would just be words to the model, which
+            // would answer them and fill the context a little more.
+            Command::Prompt { text, images }
+                if text.trim() == "/compact" && images.is_empty() && self.turn == Turn::Idle =>
+            {
+                self.turn = Turn::Starting;
+                self.turn_error = None;
+                let m = self.request(
+                    "thread/compact/start",
+                    json!({ "threadId": self.thread_id }),
+                    Call::Start,
+                );
+                out.send.push(m);
+            }
             Command::Prompt { text, images } => {
                 let text = match self.recap.take() {
                     Some(r) => crate::recap_prompt(&r, &text),
@@ -1196,19 +1249,78 @@ impl Session {
         }
     }
 
+    fn rules(&self) -> Vec<PermissionRule> {
+        match &self.rules {
+            Some(rules) => rules.clone(),
+            None => permission_rules::current().to_vec(),
+        }
+    }
+
+    /// The rules' answer to an approval Codex asked for, if that settles it: said to Codex and
+    /// noted. `false`: it's still open (`Ruling::Ask` or `Ruling::Level`, in `ruling`).
+    fn rules_settle(
+        &self,
+        rpc_id: &Value,
+        calls: &[RuleCall],
+        ruling: &mut Ruling,
+        out: &mut Out,
+    ) -> bool {
+        // Planning changes nothing yet, so no rule can wave a change through.
+        let may_allow = !self.read_only && !self.plan;
+        *ruling = crate::rules::ruling(&self.rules(), calls, &self.cwd, may_allow);
+        match ruling {
+            Ruling::Refuse { note, .. } => {
+                out.send
+                    .push(json!({ "id": rpc_id, "result": { "decision": "decline" } }));
+                out.events.push(AgentEvent::Notice(note.clone()));
+                true
+            }
+            Ruling::Allow => {
+                out.send
+                    .push(json!({ "id": rpc_id, "result": { "decision": "accept" } }));
+                true
+            }
+            Ruling::Ask | Ruling::Level => false,
+        }
+    }
+
     fn server_request(&mut self, method: &str, rpc_id: Value, p: &Value, out: &mut Out) {
         let request_id = request_key(&rpc_id);
         let mut prompt = None;
+        let mut call = None;
         let (title, detail) = match method {
             "item/commandExecution/requestApproval" => {
+                let host = p["networkApprovalContext"]["host"].as_str();
+                let asked = match host {
+                    Some(host) => RuleCall::fetch("network", host),
+                    None => RuleCall::command("shell", command_text(p)),
+                };
+                if let Some(item) = p["itemId"].as_str() {
+                    self.asked.insert(item.to_string());
+                }
+                let mut ruling = Ruling::Level;
+                if self.rules_settle(&rpc_id, std::slice::from_ref(&asked), &mut ruling, out) {
+                    return;
+                }
+                // Asked only because the rules have Codex ask about everything, at the level
+                // that would have run it anyway.
+                if ruling == Ruling::Level && self.watching {
+                    out.send
+                        .push(json!({ "id": rpc_id, "result": { "decision": "accept" } }));
+                    return;
+                }
                 self.pending
                     .insert(request_id.clone(), Pending::Approval(rpc_id));
-                match p["networkApprovalContext"]["host"].as_str() {
+                call = Some(asked);
+                match host {
                     Some(host) => ("Network access".to_string(), host.to_string()),
                     None => ("Run command".to_string(), command_text(p)),
                 }
             }
             "item/fileChange/requestApproval" => {
+                if let Some(item) = p["itemId"].as_str() {
+                    self.asked.insert(item.to_string());
+                }
                 // Codex only asks for writes its sandbox blocks: outside the project's writable
                 // roots, or with more room (`grantRoot`). Above Supervised, edits inside the
                 // project go ahead, as with Claude's acceptEdits; the rest are the user's call
@@ -1223,11 +1335,27 @@ impl Session {
                     && paths
                         .iter()
                         .all(|f| crate::acp::within(Path::new(f), &self.cwd));
-                let auto = match self.hand_holding {
-                    HandHolding::FullAccess => true,
-                    HandHolding::Supervised => false,
-                    HandHolding::AutoAcceptEdits | HandHolding::Auto => in_project,
-                };
+                let mut targets: Vec<RuleCall> = paths
+                    .iter()
+                    .map(|f| RuleCall::edit("apply_patch", f.as_str()))
+                    .collect();
+                if targets.is_empty() {
+                    targets.push(RuleCall::edit(
+                        "apply_patch",
+                        p["grantRoot"].as_str().unwrap_or_default(),
+                    ));
+                }
+                let mut ruling = Ruling::Level;
+                if self.rules_settle(&rpc_id, &targets, &mut ruling, out) {
+                    return;
+                }
+                call = targets.into_iter().next();
+                let auto = ruling == Ruling::Level
+                    && match self.hand_holding {
+                        HandHolding::FullAccess => true,
+                        HandHolding::Supervised => false,
+                        HandHolding::AutoAcceptEdits | HandHolding::Auto => in_project,
+                    };
                 if auto {
                     out.send
                         .push(json!({ "id": rpc_id, "result": { "decision": "accept" } }));
@@ -1327,6 +1455,7 @@ impl Session {
             title,
             detail,
             prompt,
+            call,
         });
     }
 
@@ -1561,6 +1690,7 @@ impl Session {
                 title: "Plan".into(),
                 detail: String::new(),
                 prompt: Some(Prompt::Plan(plan)),
+                call: None,
             });
         }
     }
@@ -1634,6 +1764,51 @@ impl Session {
         }
     }
 
+    /// Codex ran something inside its sandbox without asking, and a rule names it. The rule never
+    /// had a chance, so the user hears that: and for a deny, the turn stops, for nothing more to
+    /// build on it.
+    fn after_the_fact(&mut self, item: &Value, calls: &[RuleCall], out: &mut Out) {
+        let id = item["id"].as_str().unwrap_or_default();
+        if self.asked.remove(id) || self.watching {
+            return;
+        }
+        let rules = self.rules();
+        let named = calls.iter().find_map(|call| {
+            let v = permission_rules::decide(&rules, call, Some(&self.cwd))?;
+            (v.action != permission_rules::RuleAction::Allow).then_some((v, call))
+        });
+        let Some((verdict, call)) = named else {
+            return;
+        };
+        let rule = rules[verdict.rule].describe();
+        let shown: String = call
+            .target
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(120)
+            .collect();
+        let deny = verdict.action == permission_rules::RuleAction::Deny;
+        out.events.push(AgentEvent::Notice(if deny {
+            format!(
+                "Codex ran `{shown}` inside its sandbox without asking, so your rule ({rule}) couldn't stop it. Trek stopped the turn."
+            )
+        } else {
+            format!(
+                "Codex ran `{shown}` inside its sandbox without asking, so your rule ({rule}) couldn't ask first."
+            )
+        }));
+        if deny && let Turn::Running(turn) = self.turn.clone() {
+            let m = self.request(
+                "turn/interrupt",
+                json!({ "threadId": self.thread_id, "turnId": turn }),
+                Call::Other,
+            );
+            out.send.push(m);
+        }
+    }
+
     fn item_completed(&mut self, item: &Value, out: &mut Out) {
         let id = item["id"].as_str().unwrap_or_default().to_string();
         let status = item["status"].as_str().unwrap_or_default();
@@ -1677,6 +1852,10 @@ impl Session {
                     .unwrap_or_else(declined);
                 let ok = status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0;
                 out.events.push(AgentEvent::ToolFinished { id, output, ok });
+                if status != "declined" {
+                    let call = RuleCall::command("shell", command_text(item));
+                    self.after_the_fact(item, std::slice::from_ref(&call), out);
+                }
                 // Said once after the first command it hit, not at every one.
                 if sandbox_not_set_up(item, self.windows)
                     && !std::mem::replace(&mut self.sandbox_told, true)
@@ -1687,6 +1866,16 @@ impl Session {
                 return;
             }
             Some("fileChange") => {
+                if status == "completed" {
+                    let paths: Vec<RuleCall> = item["changes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["path"].as_str())
+                        .map(|path| RuleCall::edit("apply_patch", path))
+                        .collect();
+                    self.after_the_fact(item, &paths, out);
+                }
                 let (added, removed) = change_lines(item);
                 if status == "completed" && added + removed > 0 {
                     out.events.push(AgentEvent::ToolLines {
@@ -1934,7 +2123,8 @@ pub async fn run(
     // Which login the session uses (ChatGPT plan or API key); answered alongside thread/start.
     let account_req = rpc.request("account/read", json!({})).await?;
 
-    let (sandbox, approval, reviewer) = config.hand_holding.codex_policy();
+    let (sandbox, _, _) = config.hand_holding.codex_policy();
+    let (approval, reviewer) = policy_under(config.hand_holding, &permission_rules::current());
     let mut params = json!({
         "cwd": config.cwd.display().to_string(), "sandbox": sandbox, "approvalPolicy": approval, "approvalsReviewer": reviewer,
     });
@@ -2231,6 +2421,7 @@ pub(crate) async fn fetch_models(
                 tier: out.len().min(255) as u8,
                 fast,
                 context: None,
+                caps: None,
             });
         }
         cursor = result["nextCursor"].as_str().map(String::from);
@@ -2936,6 +3127,313 @@ mod tests {
         assert_eq!(skipped.send, vec![json!({"id":0,"result":{"answers":{}}})]);
     }
 
+    /// The approval Codex asks for a command, as it comes (codex-cli 0.166).
+    fn ask_command(id: u64, command: &str, reason: Option<&str>) -> Value {
+        json!({"id": id, "method": "item/commandExecution/requestApproval", "params": {
+            "threadId": "t", "turnId": "u", "itemId": "e", "command": command, "reason": reason,
+        }})
+    }
+
+    fn rule(
+        kind: permission_rules::RuleKind,
+        pattern: &str,
+        action: permission_rules::RuleAction,
+    ) -> PermissionRule {
+        PermissionRule::new(kind, pattern, action)
+    }
+
+    fn deny_rm() -> PermissionRule {
+        rule(
+            permission_rules::RuleKind::Command,
+            "rm",
+            permission_rules::RuleAction::Deny,
+        )
+    }
+
+    #[test]
+    fn only_full_access_has_codex_ask_about_everything() {
+        use permission_rules::{RuleAction::*, RuleKind};
+        for h in HandHolding::ALL {
+            let (_, approval, reviewer) = h.codex_policy();
+            assert_eq!(
+                policy_under(h, &[]),
+                (approval, reviewer),
+                "no rules: as ever"
+            );
+            let allow_only = [rule(RuleKind::Command, "git status", Allow)];
+            assert_eq!(policy_under(h, &allow_only), (approval, reviewer));
+            for watching in [
+                rule(RuleKind::Command, "rm", Deny),
+                rule(RuleKind::Command, "rm", Ask),
+                rule(RuleKind::Edit, "*.lock", Deny),
+                rule(RuleKind::Tool, "Bash", Deny),
+            ] {
+                let expected = if h == HandHolding::FullAccess {
+                    ("untrusted", reviewer)
+                } else {
+                    // An approval under `untrusted` would let the command out of the sandbox.
+                    (approval, reviewer)
+                };
+                assert_eq!(policy_under(h, &[watching]), expected, "{h:?}");
+            }
+        }
+        let turn = |h| {
+            let mut s = session("t", false);
+            s.rules = Some(vec![deny_rm()]);
+            s.command(Command::SetHandHolding(h));
+            let out = s.command(Command::Prompt {
+                text: "go".into(),
+                images: vec![],
+            });
+            (out.send[0]["params"].clone(), s.watching)
+        };
+        let (p, watching) = turn(HandHolding::FullAccess);
+        assert_eq!(p["approvalPolicy"], "untrusted");
+        assert_eq!(p["sandboxPolicy"], json!({"type":"dangerFullAccess"}));
+        assert!(watching);
+        let (p, watching) = turn(HandHolding::AutoAcceptEdits);
+        assert_eq!(p["approvalPolicy"], "on-request", "the sandbox holds");
+        assert_eq!(p["sandboxPolicy"], json!({"type":"workspaceWrite"}));
+        assert!(!watching);
+    }
+
+    #[test]
+    fn a_deny_rule_declines_at_every_level_and_says_so() {
+        for h in HandHolding::ALL {
+            let mut s = session("t", false);
+            s.rules = Some(vec![deny_rm()]);
+            s.command(Command::SetHandHolding(h));
+            let out = s.incoming(&ask_command(7, "/bin/zsh -lc 'echo hi && rm -rf x'", None));
+            assert_eq!(
+                out.send,
+                vec![json!({"id":7,"result":{"decision":"decline"}})],
+                "{h:?}"
+            );
+            assert!(
+                matches!(&out.events[..], [AgentEvent::Notice(n)] if n.contains("Deny command `rm`")),
+                "{:?}",
+                out.events
+            );
+        }
+    }
+
+    #[test]
+    fn at_full_access_what_the_rules_dont_name_runs_unasked() {
+        let mut s = session("t", false);
+        s.rules = Some(vec![deny_rm()]);
+        s.command(Command::SetHandHolding(HandHolding::FullAccess));
+        s.watching = true;
+        for (id, reason) in [(8, None), (9, Some("I need to write outside"))] {
+            let out = s.incoming(&ask_command(id, "/bin/zsh -lc 'git status'", reason));
+            assert_eq!(
+                out.send,
+                vec![json!({"id":id,"result":{"decision":"accept"}})]
+            );
+            assert!(out.events.is_empty(), "no card: {:?}", out.events);
+        }
+    }
+
+    #[test]
+    fn asking_for_more_than_the_sandbox_is_still_a_question_below_full_access() {
+        for h in [HandHolding::Supervised, HandHolding::AutoAcceptEdits] {
+            let mut s = session("t", false);
+            s.rules = Some(vec![deny_rm()]);
+            s.command(Command::SetHandHolding(h));
+            let out = s.incoming(&ask_command(
+                9,
+                "touch ~/x",
+                Some("I need to write outside"),
+            ));
+            assert!(out.send.is_empty(), "{h:?}: {:?}", out.send);
+            assert!(matches!(
+                &out.events[..],
+                [AgentEvent::PermissionRequest { .. }]
+            ));
+            // What it asks to run with a rule against it doesn't get as far as a card.
+            let out = s.incoming(&ask_command(10, "rm ~/x", Some("I need to delete outside")));
+            assert_eq!(
+                out.send,
+                vec![json!({"id":10,"result":{"decision":"decline"}})]
+            );
+        }
+    }
+
+    /// A command Codex ran without asking, as it reports it.
+    fn ran(id: &str, command: &str, status: &str) -> Value {
+        json!({"method": "item/completed", "params": {"threadId": "t", "turnId": "u", "item": {
+            "type": "commandExecution", "id": id, "command": command, "status": status,
+            "exitCode": 0, "aggregatedOutput": "",
+        }}})
+    }
+
+    #[test]
+    fn a_denied_command_codex_ran_in_its_sandbox_is_owned_up_to_and_stops_the_turn() {
+        let mut s = session("t", false);
+        s.rules = Some(vec![deny_rm()]);
+        s.command(Command::SetHandHolding(HandHolding::AutoAcceptEdits));
+        s.turn = Turn::Running("u".into());
+        let out = s.incoming(&ran("c1", "/bin/zsh -lc 'rm x'", "completed"));
+        let note = out.events.iter().find_map(|e| match e {
+            AgentEvent::Notice(n) => Some(n.clone()),
+            _ => None,
+        });
+        let note = note.expect("the user hears");
+        assert!(
+            note.contains("couldn't stop it") && note.contains("Deny command `rm`"),
+            "{note}"
+        );
+        assert!(
+            out.send.iter().any(|m| m["method"] == "turn/interrupt"),
+            "{:?}",
+            out.send
+        );
+        // What no rule names, or what it was asked about, says nothing.
+        let out = s.incoming(&ran("c2", "ls", "completed"));
+        assert!(
+            out.send.is_empty()
+                && !out
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::Notice(_)))
+        );
+        let out = s.incoming(&ran("c3", "rm y", "declined"));
+        assert!(out.send.is_empty(), "it didn't run");
+        s.rules = Some(vec![rule(
+            permission_rules::RuleKind::Command,
+            "git push",
+            permission_rules::RuleAction::Ask,
+        )]);
+        s.incoming(&ask_command(5, "git push", None));
+        let asked = json!({"id": 6, "method": "item/commandExecution/requestApproval", "params": {
+            "threadId": "t", "turnId": "u", "itemId": "c4", "command": "git push",
+        }});
+        s.incoming(&asked);
+        let out = s.incoming(&ran("c4", "git push", "completed"));
+        assert!(
+            !out.events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice(_))),
+            "the card asked: {:?}",
+            out.events
+        );
+        // An ask rule can only say it didn't get to ask; the turn goes on.
+        let out = s.incoming(&ran("c5", "git push", "completed"));
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("couldn't ask first")))
+        );
+        assert!(out.send.is_empty(), "{:?}", out.send);
+    }
+
+    #[test]
+    fn a_denied_patch_codex_applied_in_its_sandbox_is_owned_up_to_too() {
+        use permission_rules::{RuleAction::*, RuleKind};
+        let mut s = session("t", false);
+        s.rules = Some(vec![rule(RuleKind::Edit, "*.lock", Deny)]);
+        s.command(Command::SetHandHolding(HandHolding::AutoAcceptEdits));
+        s.turn = Turn::Running("u".into());
+        let patch = |id: &str, path: &str| {
+            json!({"method": "item/completed", "params": {"threadId": "t", "turnId": "u", "item": {
+                "type": "fileChange", "id": id, "status": "completed",
+                "changes": [{ "path": path, "kind": { "type": "add" }, "diff": "" }],
+            }}})
+        };
+        let out = s.incoming(&patch("p1", "/p/Cargo.lock"));
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice(_))),
+            "{:?}",
+            out.events
+        );
+        assert!(out.send.iter().any(|m| m["method"] == "turn/interrupt"));
+        let out = s.incoming(&patch("p2", "/p/a.rs"));
+        assert!(
+            !out.events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice(_)))
+        );
+    }
+
+    #[test]
+    fn without_a_watching_rule_a_command_codex_asks_about_still_gets_a_card() {
+        let mut s = session("t", false);
+        s.rules = Some(vec![]);
+        s.watching = false;
+        let out = s.incoming(&ask_command(3, "touch a", None));
+        assert!(out.send.is_empty());
+        assert!(matches!(
+            &out.events[..],
+            [AgentEvent::PermissionRequest { call: Some(c), .. }] if c.target == "touch a"
+        ));
+    }
+
+    #[test]
+    fn an_ask_rule_puts_up_a_card_even_at_full_access_and_an_allow_rule_takes_one_down() {
+        use permission_rules::{RuleAction::*, RuleKind};
+        let mut s = session("t", false);
+        s.rules = Some(vec![
+            rule(RuleKind::Command, "git push", Ask),
+            rule(RuleKind::Command, "git status", Allow),
+        ]);
+        s.command(Command::SetHandHolding(HandHolding::FullAccess));
+        s.watching = true;
+        let out = s.incoming(&ask_command(1, "git push", None));
+        assert!(out.send.is_empty());
+        assert!(matches!(
+            &out.events[..],
+            [AgentEvent::PermissionRequest { .. }]
+        ));
+        let mut s = session("t", false);
+        s.rules = Some(vec![rule(RuleKind::Command, "git status", Allow)]);
+        let out = s.incoming(&ask_command(2, "git status", Some("may I")));
+        assert_eq!(
+            out.send,
+            vec![json!({"id":2,"result":{"decision":"accept"}})]
+        );
+        // No allow rule overrules a session that only advises.
+        s.read_only = true;
+        let out = s.incoming(&ask_command(3, "git status", Some("may I")));
+        assert!(out.send.is_empty(), "{:?}", out.send);
+    }
+
+    #[test]
+    fn file_rules_answer_a_patch_by_each_of_its_files() {
+        use permission_rules::{RuleAction::*, RuleKind};
+        let ask_patch = |id: u64, item: &str| {
+            json!({"id": id, "method": "item/fileChange/requestApproval", "params": {
+                "threadId": "t", "turnId": "u", "itemId": item, "reason": null, "grantRoot": null,
+            }})
+        };
+        let mut s = session("t", false);
+        s.rules = Some(vec![rule(RuleKind::Edit, "*.lock", Deny)]);
+        s.command(Command::SetHandHolding(HandHolding::FullAccess));
+        s.edits
+            .insert("e".into(), vec!["/p/a.rs".into(), "/p/Cargo.lock".into()]);
+        s.edits.insert("f".into(), vec!["/p/a.rs".into()]);
+        let out = s.incoming(&ask_patch(1, "e"));
+        assert_eq!(
+            out.send,
+            vec![json!({"id":1,"result":{"decision":"decline"}})]
+        );
+        assert!(matches!(&out.events[..], [AgentEvent::Notice(_)]));
+        // What no rule names goes by the level (Full access: yes).
+        let out = s.incoming(&ask_patch(2, "f"));
+        assert_eq!(
+            out.send,
+            vec![json!({"id":2,"result":{"decision":"accept"}})]
+        );
+        // An ask rule puts up a card where the level would have gone ahead.
+        s.rules = Some(vec![rule(RuleKind::Edit, "a.rs", Ask)]);
+        let out = s.incoming(&ask_patch(3, "f"));
+        assert!(out.send.is_empty());
+        assert!(matches!(
+            &out.events[..],
+            [AgentEvent::PermissionRequest { .. }]
+        ));
+    }
+
     #[test]
     fn command_approvals_map_each_decision() {
         let lines = fixture(include_str!("../fixtures/codex-approvals.jsonl"));
@@ -3035,7 +3533,8 @@ mod tests {
                 request_id: "codex-0".into(),
                 title: "Edit".into(),
                 detail: "/tmp/trek-agents-e2e/d.txt".into(),
-                prompt: None
+                prompt: None,
+                call: Some(RuleCall::edit("apply_patch", "/tmp/trek-agents-e2e/d.txt")),
             }
         );
         let ok = s.command(Command::Respond {
@@ -3153,6 +3652,7 @@ mod tests {
                         "Network access\nThe requested workflow asks me to request network access."
                             .into(),
                     prompt: None,
+                    call: None,
                 }]
             );
             s.command(Command::Respond {
@@ -3573,6 +4073,52 @@ mod tests {
         assert!(s.held.is_empty());
     }
 
+    /// As a message it would be words to the model. It's a request, and the turn it starts is
+    /// followed like any other.
+    #[test]
+    fn compact_is_a_request_not_a_message() {
+        let mut s = session("t", false);
+        let out = s.command(prompt("/compact"));
+        assert_eq!(out.send.len(), 1);
+        assert_eq!(out.send[0]["method"], "thread/compact/start");
+        assert_eq!(out.send[0]["params"]["threadId"], "t");
+        assert_eq!(s.turn, Turn::Starting);
+        let id = out.send[0]["id"].clone();
+        // Its answer has no turn in it: the turn arrives by notification.
+        let out = s.incoming(&json!({ "id": id, "result": {} }));
+        assert!(out.events.is_empty());
+        s.incoming(&json!({
+            "method": "turn/started",
+            "params": { "threadId": "t", "turn": { "id": "c1", "items": [] } }
+        }));
+        assert_eq!(s.turn, Turn::Running("c1".into()));
+    }
+
+    #[test]
+    fn compact_that_fails_ends_its_turn_with_the_reason() {
+        let mut s = session("t", false);
+        let out = s.command(prompt("/compact"));
+        let id = out.send[0]["id"].clone();
+        let out = s.incoming(&json!({ "id": id, "error": { "code": -32600, "message": "no" } }));
+        assert_eq!(
+            out.events,
+            vec![AgentEvent::TurnComplete {
+                error: Some("no".into())
+            }]
+        );
+        assert_eq!(s.turn, Turn::Idle);
+    }
+
+    /// While a turn runs it's a message like any other: it steers, and the app holds it back in
+    /// the first place.
+    #[test]
+    fn compact_only_means_a_request_when_nothing_is_running() {
+        let mut s = session("t", false);
+        s.turn = Turn::Running("r".into());
+        let out = s.command(prompt("/compact"));
+        assert_ne!(out.send[0]["method"], "thread/compact/start");
+    }
+
     #[test]
     fn plan_updates_become_checklist_rows() {
         // Shape from the app-server schema (TurnPlanUpdatedNotification).
@@ -3782,7 +4328,8 @@ mod tests {
                 request_id: "codex-5".into(),
                 title: "Network access".into(),
                 detail: "pypi.org".into(),
-                prompt: None
+                prompt: None,
+                call: Some(RuleCall::fetch("network", "pypi.org")),
             }]
         );
         let ok = s

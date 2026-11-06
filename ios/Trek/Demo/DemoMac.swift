@@ -229,7 +229,7 @@ enum DemoMac {
         let trek = projects.first { $0.id == "p-trek" }?.ref ?? ProjectRef(id: "p-trek", name: "trek", hue: 24, monogram: "TR")
         let review = threads.filter { $0.needs != nil || $0.unseen || $0.runState == .failed }.map { t -> ReviewRow in
             let (status, text): (ReviewStatus, String?) = switch (t.needs?.kind, t.runState) {
-            case (.limit?, _): (.paused, "Paused until 4 PM")
+            case (.limit?, _): (.paused, "Paused at its limit")
             case (_, .failed): (.failed, "Failed")
             case (.question?, _): (.needsYou, "Question")
             case (.plan?, _): (.needsYou, "Plan to review")
@@ -238,7 +238,8 @@ enum DemoMac {
             }
             return ReviewRow(threadId: t.id, title: t.title, status: status, label: text, agent: t.agent, project: t.project,
                              additions: t.additions, deletions: t.deletions, updatedAt: t.updatedAt, unseen: t.unseen,
-                             needsYou: status == .needsYou || status == .failed)
+                             // As a real Mac's: a failure settled is history, and raises no hand.
+                             needsYou: status == .needsYou || (status == .failed && t.section != .settled))
         }
         let numbers = activity(range, projects: projects)
         let opening = switch range {
@@ -259,7 +260,7 @@ enum DemoMac {
                 RecapSpan(kind: "text", text: ", with "), RecapSpan(kind: "model", text: "Claude Opus 5.5", agent: claude),
                 RecapSpan(kind: "text", text: " carrying "), RecapSpan(kind: "strong", text: "77%"),
                 RecapSpan(kind: "text", text: " of the tokens, ahead of "), RecapSpan(kind: "model", text: "GPT-6 Astra", agent: codex),
-                RecapSpan(kind: "text", text: ". Your agents were on the trail for "), RecapSpan(kind: "strong", text: time),
+                RecapSpan(kind: "text", text: ". Your agents worked for "), RecapSpan(kind: "strong", text: time),
                 RecapSpan(kind: "text", text: "."),
             ],
             summary: RecapSummary(prompts: prompts, threads: 9, turns: prompts + 4, agentSecs: secs, agentTime: time, tokens: tokens, failed: 1,
@@ -267,7 +268,7 @@ enum DemoMac {
                                   bestModel: ModelShare(agent: claude, label: "Claude Opus 5.5", tokens: tokens * 77 / 100, turns: 14, share: 77)),
             profile: ElevationProfile(
                 buckets: buckets, summit: summit, now: n * 3 / 4, nowAt: 0.75,
-                line: summit.map { "Summit \(range == .today ? "at" : "on") \(buckets[$0].label)" } ?? "A flat trail so far",
+                line: summit.map { "Peak \(range == .today ? "at" : "on") \(buckets[$0].label)" } ?? "No activity yet",
                 total: "\(prompts) prompts",
                 ticks: range == .today ? [Tick(at: 0.25, label: "6 AM"), Tick(at: 0.5, label: "Noon"), Tick(at: 0.75, label: "6 PM")]
                     : [Tick(at: 0.1, label: "Sep 14"), Tick(at: 0.5, label: "Sep 21"), Tick(at: 0.9, label: "Oct 1")]),
@@ -390,6 +391,7 @@ enum DemoMac {
     static func plain(_ line: String) -> String {
         line.replacing(/^\s*(#+\s*|>\s?|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+)/, with: "")
             .replacing(/<[^>]*>/, with: "")
+            .replacing(/!\[([^\]]*)\]\([^)]*\)/) { String($0.output.1) }
             .replacing(/[*_~`]/, with: "")
             .trimmingCharacters(in: .whitespaces)
     }
@@ -439,7 +441,26 @@ enum DemoMac {
         +            return Section::Snoozed;
         +        }
                  if self.run_state == RunState::Working {
+        @@ -240,3 +245,3 @@ impl Thread {
+             pub fn wake(&mut self, now: i64) {
+        -        self.snoozed_until = None;
+        +        self.snoozed_until = self.next_wake(now);
+             }
         """)
+    }
+
+    /// A long answer of every kind of block, for `-TrekDemoStream`: as uneven as a real one.
+    static func longAnswer(_ n: Int) -> String {
+        var out = "## Step \(n)\n\n"
+        for k in 0..<6 {
+            out += "The transcript keeps the reader's place while **this** grows: part \(k + 1) of step \(n) says what changed in `store.rs`, and why the list measures each row only once, however long the answer gets.\n\n"
+            switch k % 3 {
+            case 0: out += "- Rows are measured by id\n- A row above the screen moves the offset\n- At the latest, the bottom stays at the latest\n\n"
+            case 1: out += "```swift\nlet row\(k) = layout.frame(for: index + \(k)) // a line long enough to run off the side of a phone's screen\nlet next = row\(k).maxY + spacing\n```\n\n"
+            default: out += "| Case | Before | After |\n|---|---:|---:|\n| Open | 1.9 s | 80 ms |\n| Type | 120 ms | 4 ms |\n\n"
+            }
+        }
+        return out
     }
 
     static let branches = GitBranches(current: "main", defaultBranch: "main", branches: ["main", "inbox/raise-hand", "remote/tailscale", "perf/transcript", "release/0.3"])

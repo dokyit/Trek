@@ -3,46 +3,33 @@
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
-use std::time::Duration;
+use std::cell::Cell;
+use std::rc::Rc;
 
-/// What Trek says an agent is doing while it works, instead of a plain "Working…".
+/// What Trek says an agent is doing while it works, instead of a plain "Working…". Each says
+/// the agent is making its way: none of them has it resting, finishing or lost. The iPhone app
+/// has the same list in the same order (`ios/Trek/Design/Hiker.swift`), so a thread says the
+/// same word on both.
 pub const WORDS: &[&str] = &[
-    "Trailblazing",
-    "Switchbacking",
-    "Summiting",
-    "Scrambling",
-    "Bushwhacking",
-    "Route-finding",
-    "Stacking cairns",
-    "Reading the map",
-    "Checking the compass",
-    "Fording the creek",
-    "Gaining elevation",
-    "Traversing",
-    "Acclimatizing",
-    "Scouting ahead",
-    "Marking the trail",
-    "Crossing the ridge",
     "Breaking trail",
-    "Boulder-hopping",
-    "Topping out",
+    "Reading the map",
+    "Route-finding",
+    "Scouting ahead",
+    "Checking the compass",
+    "Marking the trail",
     "Following the cairns",
+    "Gaining elevation",
+    "Crossing the ridge",
     "Charting a course",
+    "Stacking cairns",
+    "Traversing",
     "Wayfinding",
-    "Lighting the beacon",
-    "Refilling canteens",
-    "Taking the scenic route",
-    "Contouring",
-    "Peak-bagging",
-    "Setting up base camp",
-    "Lacing boots",
-    "Checking the forecast",
-    "Glissading",
-    "Hiking it out",
+    "Trailblazing",
 ];
 
-/// How long each trail word stays before the next.
-pub const WORD_EVERY: u64 = 4;
+/// How long each trail word stays before the next: long enough to read, and slower than the
+/// clock beside it, so the line doesn't flicker.
+pub const WORD_EVERY: u64 = 6;
 
 /// The trail word for a turn that has run `secs` seconds ("Breaking trail"): it changes every
 /// [`WORD_EVERY`] seconds, and `seed` (the thread) keeps threads from moving in lockstep.
@@ -67,86 +54,266 @@ pub fn word(seed: &str, secs: u64) -> &'static str {
     WORDS[i as usize]
 }
 
-/// The hiker's walk: one lap there and back in `LAP`.
-pub const LAP: Duration = Duration::from_secs(16);
-/// Waiting for others to come back, it paces the same trail on a shorter lap: restless where
-/// the working walk is steady.
-pub const PACE: Duration = Duration::from_secs(8);
+/// Frames per second for the working animation. Pixel art reads fine at this rate; each frame
+/// still redraws the window (the other views come from GPUI's cache), so 16 rather than 60 is
+/// about a quarter of the frames — and the bar ticks at half this behind another window.
+pub const FPS: u64 = 16;
+
+/// Walking pace, in art pixels a second: one pixel a frame at [`FPS`], so the hiker glides
+/// evenly instead of stepping one pixel, then two. On a Retina screen that's 24 pt a second.
+pub const WALK: f32 = 16.;
+/// Waiting on others it paces the same trail at twice the speed (two pixels a frame), and rests
+/// less at the ends: restless where the working walk is steady.
+pub const PACE: f32 = 32.;
+/// How long it takes to get up to speed, and to slow to a stop: about a step each way.
+const RAMP: f32 = 0.35;
+/// Standing at an end before it sets off again, working and waiting. It turns halfway through.
+const REST: f32 = 1.2;
+const REST_PACING: f32 = 0.5;
+/// Art pixels walked per pose: four poses a stride, so the feet stay planted as it goes.
+const STEP: f32 = 4.;
+
 /// One sprite pixel, in points. 1.5pt is 3 device pixels on Retina, so edges stay crisp.
 const PX: f32 = 1.5;
-const SPRITE_W: usize = 14;
+const SPRITE_W: usize = 12;
 const SPRITE_H: usize = 16;
 /// Height of the trail with the hiker on it.
 pub const HEIGHT: f32 = SPRITE_H as f32 * PX + 4.;
 
-/// Pixel hiker facing right: hat, ember backpack with a bedroll, walking pole.
-const TOP: [&str; 12] = [
-    "......hhh.....",
-    ".....hhhhh....",
-    "....HHHHHHHH..",
-    ".....ssses....",
-    ".....sssss....",
-    "..rr..ss......",
-    ".bbbbcccc.....",
-    ".bBbbccccC....",
-    ".bBbbcccCsL...",
-    ".bBbbcccC.....",
-    "..bbbcccC.....",
-    "....pppp......",
+/// The hiker's poses, facing right. Its colours: `h` hat, `s` skin, `o` eye, `K` near side
+/// (shirt and the leg nearest), `k` far leg, `b` boots, `E` the ember pack and `e` its shade.
+/// Every pose is 16 rows: on contact the legs are spread and the body sits a row lower, which
+/// is the bob of a walk.
+const POSES: [[&str; SPRITE_H]; 5] = [
+    // Standing.
+    [
+        "....hhhh....",
+        "..hhhhhhhh..",
+        "....ssss....",
+        "....ssos....",
+        ".EE..ss.....",
+        "EEEEKKKK....",
+        "EEEEKKKKK...",
+        "EeEEKKKKs...",
+        "EeEEKKKK....",
+        ".EEEKKKK....",
+        "....KKKK....",
+        "....KKK.....",
+        "....KKK.....",
+        "....KKK.....",
+        "....KKK.....",
+        "....bbbb....",
+    ],
+    // Contact: near leg forward, its arm swung back.
+    [
+        "............",
+        "....hhhh....",
+        "..hhhhhhhh..",
+        "....ssss....",
+        "....ssos....",
+        ".EE..ss.....",
+        "EEEEKKKK....",
+        "EEEEKKKK....",
+        "EeEEKKKK....",
+        "EeEEsKKK....",
+        ".EEEKKKK....",
+        "....KKKK....",
+        "...kkKKKK...",
+        "..kk...KK...",
+        ".kk.....KK..",
+        ".b......bbb.",
+    ],
+    // Passing: near leg under the body, the far one swinging through.
+    [
+        "....hhhh....",
+        "..hhhhhhhh..",
+        "....ssss....",
+        "....ssos....",
+        ".EE..ss.....",
+        "EEEEKKKK....",
+        "EEEEKKKKK...",
+        "EeEEKKKKs...",
+        "EeEEKKKK....",
+        ".EEEKKKK....",
+        "....KKKK....",
+        "....KKkk....",
+        "....KK.kk...",
+        "....KK..k...",
+        "....KK..bb..",
+        "....bbb.....",
+    ],
+    // Contact: far leg forward, the near arm swung forward.
+    [
+        "............",
+        "....hhhh....",
+        "..hhhhhhhh..",
+        "....ssss....",
+        "....ssos....",
+        ".EE..ss.....",
+        "EEEEKKKK....",
+        "EEEEKKKKK...",
+        "EeEEKKKKKs..",
+        "EeEEKKKK....",
+        ".EEEKKKK....",
+        "....KKKK....",
+        "...KKkkkk...",
+        "..KK...kk...",
+        ".KK.....kk..",
+        ".b......bbb.",
+    ],
+    // Passing: far leg under the body, the near one swinging through.
+    [
+        "....hhhh....",
+        "..hhhhhhhh..",
+        "....ssss....",
+        "....ssos....",
+        ".EE..ss.....",
+        "EEEEKKKK....",
+        "EEEEKKKKK...",
+        "EeEEKKKKs...",
+        "EeEEKKKK....",
+        ".EEEKKKK....",
+        "....kkKK....",
+        "....kkKK....",
+        "....kk.KK...",
+        "....kk..K...",
+        "....kk..bb..",
+        "....bbb.....",
+    ],
 ];
-/// Four-frame walk: near leg forward, passing, far leg forward, passing.
-const LEGS: [[&str; 4]; 4] = [
-    [
-        "....PP.pp.....",
-        "...PP...pp....",
-        "...P.....p....",
-        "..kk.....kk...",
-    ],
-    [
-        "....Pppp......",
-        ".....Pp.......",
-        ".....Pp.......",
-        ".....kkk......",
-    ],
-    [
-        "....pp.PP.....",
-        "...pp...PP....",
-        "...p.....P....",
-        "..kk.....kk...",
-    ],
-    [
-        "....pPPP......",
-        ".....pP.......",
-        ".....pP.......",
-        ".....kkk......",
-    ],
-];
-/// Pole from under the grip to the ground: planted ahead on contact frames.
-const POLE: [(f32, f32, f32, f32); 4] = [
-    (10., 9., 13., 15.),
-    (10., 9., 11., 15.),
-    (10., 9., 13., 15.),
-    (10., 9., 11., 15.),
-];
+/// The standing pose's index in [`POSES`]; the walk is the four after it, in order.
+pub const STAND: usize = 0;
 
-fn color(c: char) -> Option<u32> {
-    Some(match c {
-        'h' => 0xB07A45,
-        'H' => 0x8A5A2E,
-        's' => 0xE9C39A,
-        'e' => 0x2A2A2E,
-        'c' => 0x5E8C7B,
-        'C' => 0x4A7262,
-        'b' => 0xFF7A3D,
-        'B' => 0xC9551F,
-        'r' => 0xF2E3C6,
-        'p' => 0x55606F,
-        'P' => 0x3A424E,
-        'k' => 0x2B2B30,
-        'l' => 0xA8A29E,
-        'L' => 0x6B6763,
+/// The hiker's colours on Night and Paper, `(night, paper)`: eight in all, the pack in Trek's
+/// ember. The near and far sides of the body are the theme's ink at two strengths, so the
+/// hiker reads on either background and its legs read apart.
+fn color(c: char, dark: bool) -> Option<u32> {
+    let (night, paper) = match c {
+        'h' => (0xC9A47C, 0xB58A5C),
+        's' => (0xEBC6A0, 0xE9BF95),
+        'o' => (0x1A1A1C, 0x1A1A1C),
+        'K' => (0x9A9AA2, 0x55555B),
+        'k' => (0x5C5C63, 0x9C9A95),
+        'b' => (0x8A5A2E, 0x6B4423),
+        'E' => (0xFF7A3D, 0xE85D1F),
+        'e' => (0xC9551F, 0xB8461A),
         _ => return None,
-    })
+    };
+    Some(if dark { night } else { paper })
+}
+
+/// The hiker's walk along its trail, advanced a frame at a time by whoever draws it (the
+/// working bar). It walks at a steady pace whatever the trail's width, rests and turns at each
+/// end, and takes a pose every [`STEP`] pixels it covers, so its feet don't slide. Its place is
+/// kept as a share of the trail, so a trail that grows or shrinks (a resize, the sidebar going)
+/// stretches under it instead of moving it, and a change of pace never moves it either.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Walk {
+    /// Where it is, 0 at the trail's left end to 1 at its right.
+    pub at: f32,
+    /// It heads right next (or is heading right now).
+    pub right: bool,
+    /// How fast it's going now, art pixels a second.
+    pub speed: f32,
+    /// Resting at an end: how much of the rest is left, 1 to 0. It faces the way it came until
+    /// halfway, then the way it's going.
+    pub rest: f32,
+    /// Art pixels covered since it last set off: its legs' place in the stride.
+    pub walked: f32,
+}
+
+impl Default for Walk {
+    /// At the trail's start, facing along it, half a rest before it sets off.
+    fn default() -> Self {
+        Walk {
+            at: 0.,
+            right: true,
+            speed: 0.,
+            rest: 0.5,
+            walked: 0.,
+        }
+    }
+}
+
+impl Walk {
+    /// `dt` seconds on, along a trail `travel` art pixels long (the hiker's own width left out),
+    /// pacing while it waits on others. `dt` is taken in whole frames at [`FPS`] (a frame at
+    /// least, a few at most), so each one moves it whole pixels at full speed.
+    pub fn step(&mut self, dt: f32, travel: f32, pacing: bool) {
+        let frames = (dt * FPS as f32).round().clamp(0., 4.);
+        if frames == 0. {
+            return;
+        }
+        let dt = frames / FPS as f32;
+        let (top, rest) = if pacing {
+            (PACE, REST_PACING)
+        } else {
+            (WALK, REST)
+        };
+        if self.rest > 0. {
+            self.rest = (self.rest - dt / rest).max(0.);
+            // Rested, it sets off in the same frame: it never stands at an end in a stride.
+            if self.rest > 0. {
+                return;
+            }
+        }
+        let travel = travel.max(1.);
+        let left = if self.right { 1. - self.at } else { self.at } * travel;
+        // Up to speed over the ramp, and down again so it stops right at the end: never faster
+        // than it could stop from in the trail that's left.
+        let accel = top / RAMP;
+        let v = (self.speed + accel * dt)
+            .min(top)
+            .min((2. * accel * left).sqrt());
+        let d = (v * dt).max(0.25);
+        if d >= left {
+            self.at = if self.right { 1. } else { 0. };
+            self.right = !self.right;
+            self.speed = 0.;
+            self.rest = 1.;
+            self.walked = 0.;
+        } else {
+            self.at += if self.right { d } else { -d } / travel;
+            self.speed = v;
+            self.walked += d;
+        }
+    }
+
+    /// Its pose ([`POSES`]): standing while it rests, else one of the four of the walk, a pose
+    /// every [`STEP`] pixels from where it set off.
+    pub fn pose(&self) -> usize {
+        if self.rest > 0. {
+            STAND
+        } else {
+            1 + (self.walked / STEP) as usize % 4
+        }
+    }
+
+    /// It faces right: the way it's going, or while it rests, the way it came until halfway.
+    pub fn facing_right(&self) -> bool {
+        if self.rest > 0.5 {
+            !self.right
+        } else {
+            self.right
+        }
+    }
+}
+
+/// The trail's length the hiker walks, in art pixels, as its last frame drew it: the working
+/// bar reads it to step the walk. A first frame (nothing drawn yet) says a typical trail.
+#[derive(Clone)]
+pub struct Travel(Rc<Cell<f32>>);
+
+impl Default for Travel {
+    fn default() -> Self {
+        Travel(Rc::new(Cell::new(240.)))
+    }
+}
+
+impl Travel {
+    pub fn get(&self) -> f32 {
+        self.0.get()
+    }
 }
 
 /// `TREK_FORCE_ACTIVE=1` runs the working animation as if the window were frontmost, and keeps
@@ -159,27 +326,17 @@ pub fn force_active() -> bool {
     *FORCE
 }
 
-/// Frames per second for the working animation. Pixel art reads fine at this rate; each frame
-/// still redraws the window (the other views come from GPUI's cache), so 16 rather than 60 is
-/// about a quarter of the frames — and the bar ticks at half this behind another window.
-pub const FPS: u64 = 16;
-
-/// Steps a second while walking: a pose about every other frame at [`FPS`] in front — one a
-/// frame behind another window, a few through a fold's quick ones. The pose comes off the walk
-/// clock rather than the frame count, so the gait stays even at every rate.
-const STEPS: f32 = 8.;
-
-/// A dotted trail the width of its parent with the hiker walking it. `phase` is how far through
-/// its lap there and back it is, 0 to 1 — the caller's clock advances it a lap per [`LAP`]
-/// working, [`PACE`] while it waits on others, so a change between the two moves the hiker's
-/// pace, never its place; `gait` is the seconds it has walked, for its legs. `still`, it stands
-/// near the left end. The caller re-renders at [`FPS`] while it wants motion (see `WorkingBar`).
-pub fn trail(phase: f32, gait: f32, still: bool, cx: &App) -> AnyElement {
-    let dots = cx.theme().foreground.opacity(0.16);
-    let (pos, frame, right) = if still {
-        (0.06, 1, true)
+/// A dotted trail the width of its parent with the hiker on it, where `walk` has it. `still`
+/// (reduced motion), it stands where it is, facing along the trail. The caller re-renders at
+/// [`FPS`] while it wants motion, stepping `walk` by `travel` (see `WorkingBar`), which this
+/// keeps up to date with the trail as drawn.
+pub fn trail(walk: Walk, travel: &Travel, still: bool, cx: &App) -> AnyElement {
+    let ink = Ink::of(cx);
+    let travel = travel.0.clone();
+    let (pose, right) = if still {
+        (STAND, walk.right)
     } else {
-        hike(phase, gait)
+        (walk.pose(), walk.facing_right())
     };
     div()
         .h(px(HEIGHT))
@@ -187,32 +344,58 @@ pub fn trail(phase: f32, gait: f32, still: bool, cx: &App) -> AnyElement {
         .child(
             canvas(
                 |_, _, _| {},
-                move |b, _, window, _| paint(b, pos, frame, right, dots, window),
+                move |b, _, window, _| {
+                    let cell = cell_size(window.scale_factor());
+                    travel.set(travel_of(b, cell) / cell);
+                    paint(b, walk.at, pose, right, ink, window)
+                },
             )
             .size_full(),
         )
         .into_any_element()
 }
 
-/// Where a `phase` (0 to 1) of the way through a lap there and back leaves the hiker: its place
-/// on the trail (0 to 1), its walk frame (`gait` seconds in), and which way it faces.
-pub fn hike(phase: f32, gait: f32) -> (f32, usize, bool) {
-    let t = phase % 1.;
-    // Triangle wave: walk right for half the lap, back left for the other half.
-    let (raw, right) = if t < 0.5 {
-        (t * 2., true)
-    } else {
-        (2. - t * 2., false)
-    };
-    // Ease at the ends so the hiker slows to a stop, turns, and sets off again.
-    let pos = 0.5 - 0.5 * (std::f32::consts::PI * raw).cos();
-    let speed = (std::f32::consts::PI * raw).sin();
-    let frame = if speed < 0.15 {
-        1
-    } else {
-        (gait * STEPS) as usize % 4
-    };
-    (pos, frame, right)
+/// The welcome screen's trail: the hiker `progress` of the way along it (0 to 1), in stride while
+/// `walking`, else standing. The caller eases `progress`; the legs follow the ground covered.
+pub fn crossing(progress: f32, walking: bool, cx: &App) -> AnyElement {
+    let ink = Ink::of(cx);
+    let progress = progress.clamp(0., 1.);
+    div()
+        .h(px(HEIGHT))
+        .w_full()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |b, _, window, _| {
+                    let cell = cell_size(window.scale_factor());
+                    let walked = progress * travel_of(b, cell) / cell;
+                    let pose = if walking {
+                        1 + (walked / STEP) as usize % 4
+                    } else {
+                        STAND
+                    };
+                    paint(b, progress, pose, true, ink, window)
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// The colours a trail is drawn in: the theme's mode, and its dots.
+#[derive(Clone, Copy)]
+struct Ink {
+    dark: bool,
+    dots: Hsla,
+}
+
+impl Ink {
+    fn of(cx: &App) -> Ink {
+        Ink {
+            dark: cx.theme().mode.is_dark(),
+            dots: cx.theme().foreground.opacity(0.16),
+        }
+    }
 }
 
 /// `v` points moved to the nearest whole device pixel at `scale` (device pixels per point).
@@ -240,7 +423,14 @@ pub fn grid(x: f32, ground: f32, scale: f32) -> (f32, f32, f32) {
     (snap(left, scale), snap(ground, scale), cell)
 }
 
-fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, window: &mut Window) {
+/// How far the hiker can go along a trail drawn in `b`, in points: its width less the sprite's
+/// and a margin at each end.
+fn travel_of(b: Bounds<Pixels>, cell: f32) -> f32 {
+    (b.size.width.as_f32() - SPRITE_W as f32 * cell - 8.).max(0.)
+}
+
+/// The trail in `b`, with the hiker `share` of the way along it (0 to 1).
+fn paint(b: Bounds<Pixels>, share: f32, pose: usize, right: bool, ink: Ink, window: &mut Window) {
     let scale = window.scale_factor();
     let w = b.size.width.as_f32();
     let ground = snap(b.origin.y.as_f32() + HEIGHT - 2., scale);
@@ -254,60 +444,59 @@ fn paint(b: Bounds<Pixels>, pos: f32, frame: usize, right: bool, dots: Hsla, win
                     point(px(snap(x, scale)), px(snap(ground - 1., scale))),
                     size(px(dot), px(dot)),
                 ),
-                dots,
+                ink.dots,
             )
             .corner_radii(px(dot / 2.)),
         );
         x += 7.;
     }
-    let sprite_w = SPRITE_W as f32 * cell_size(scale);
-    let travel = (w - sprite_w - 8.).max(0.);
-    // The sprite's pixels sit on whole device pixels, so none blurs between two.
-    let (left, feet, cell) = grid(b.origin.x.as_f32() + 4. + travel * pos, ground - 1., scale);
-    sprite(left, feet, cell, frame, right, window);
+    let cell = cell_size(scale);
+    let x = b.origin.x.as_f32() + 4. + travel_of(b, cell) * share.clamp(0., 1.);
+    // The sprite's pixels sit on whole device pixels, so none blurs between two; its boots
+    // stand on the dots.
+    let (left, feet, cell) = grid(x, ground - 1., scale);
+    sprite(left, feet, cell, pose, right, ink.dark, window);
 }
 
-fn sprite(left: f32, ground: f32, cell_px: f32, frame: usize, right: bool, window: &mut Window) {
+fn sprite(
+    left: f32,
+    ground: f32,
+    cell_px: f32,
+    pose: usize,
+    right: bool,
+    dark: bool,
+    window: &mut Window,
+) {
     let top = ground - SPRITE_H as f32 * cell_px;
-    let cell = |x: f32, y: f32, rgb: u32, window: &mut Window| {
-        let col = if right { x } else { SPRITE_W as f32 - 1. - x };
-        window.paint_quad(fill(
-            Bounds::new(
-                point(px(left + col * cell_px), px(top + y * cell_px)),
-                size(px(cell_px), px(cell_px)),
-            ),
-            gpui_kit::rgb(rgb),
-        ));
-    };
-    for (y, row) in TOP.iter().chain(LEGS[frame].iter()).enumerate() {
+    for (y, row) in POSES[pose].iter().enumerate() {
         for (x, ch) in row.chars().enumerate() {
-            if let Some(rgb) = color(ch) {
-                cell(x as f32, y as f32, rgb, window);
-            }
+            let Some(rgb) = color(ch, dark) else {
+                continue;
+            };
+            let col = if right { x } else { SPRITE_W - 1 - x };
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(
+                        px(left + col as f32 * cell_px),
+                        px(top + y as f32 * cell_px),
+                    ),
+                    size(px(cell_px), px(cell_px)),
+                ),
+                gpui_kit::rgb(rgb),
+            ));
         }
-    }
-    let (x0, y0, x1, y1) = POLE[frame];
-    let n = (y1 - y0) as usize;
-    for i in 0..=n {
-        let f = i as f32 / n as f32;
-        cell(
-            (x0 + (x1 - x0) * f).round(),
-            y0 + i as f32,
-            0xA8A29E,
-            window,
-        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WORD_EVERY, WORDS, word};
+    use super::{POSES, STAND, STEP, WALK, WORD_EVERY, WORDS, Walk, word};
 
     #[test]
     fn trail_words_hold_then_move_on() {
         // The same word for the whole step, from its first second to its last.
         assert_eq!(word("thread-a", 0), word("thread-a", WORD_EVERY - 1));
-        assert_eq!(word("thread-a", 8), word("thread-a", 8 + WORD_EVERY - 1));
+        assert_eq!(word("thread-a", 12), word("thread-a", 12 + WORD_EVERY - 1));
         // Over a few minutes it changes often, and never stays on one word for long.
         let steps: Vec<&str> = (0..60).map(|i| word("thread-a", i * WORD_EVERY)).collect();
         let changes = steps.windows(2).filter(|w| w[0] != w[1]).count();
@@ -324,53 +513,177 @@ mod tests {
     }
 
     #[test]
-    fn the_hike_crosses_the_trail_there_and_back() {
-        // Working or pacing while it waits, the hiker goes end to end and back a lap.
-        for lap in [super::LAP, super::PACE] {
-            let secs = lap.as_secs_f32();
-            // `clock` seconds into the lap, having walked all of them.
-            let at = |clock: f32| super::hike((clock / secs) % 1., clock);
-            // The ends of the trail at the lap's ends: left at the start, right halfway, home at
-            // a whole lap — standing at each.
-            let (pos, frame, right) = at(0.);
-            assert!(
-                pos.abs() < 1e-4 && right && frame == 1,
-                "standing at the left end, facing out"
-            );
-            let (pos, frame, right) = at(secs * 0.5);
-            assert!(
-                (pos - 1.).abs() < 1e-4 && !right && frame == 1,
-                "standing at the right end, turned round"
-            );
-            let (pos, frame, right) = at(secs);
-            assert!(
-                pos.abs() < 1e-4 && right && frame == 1,
-                "back where it started"
-            );
-            // In between it's on the trail in one of the four stride poses.
-            for i in 0..400 {
-                let (pos, frame, _) = at(i as f32 * secs / 400.);
-                assert!(
-                    (0. ..=1.).contains(&pos) && frame < 4,
-                    "on the trail, in stride"
-                );
+    fn trail_words_are_plain() {
+        // Short, sentence case, no jokes about resting or getting lost: each one says the agent
+        // is under way.
+        for w in WORDS {
+            assert!(w.len() <= 20, "{w}");
+            assert!(w.chars().next().is_some_and(char::is_uppercase), "{w}");
+            assert!(!w.contains('!') && !w.ends_with('…'), "{w}");
+            assert_eq!(w[1..], w[1..].to_lowercase(), "sentence case: {w}");
+        }
+        let mut all = WORDS.to_vec();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), WORDS.len(), "no word twice");
+    }
+
+    /// The walk a frame at a time at 16 a second, `n` frames, on a trail `travel` pixels long.
+    fn frames(walk: &mut Walk, n: usize, travel: f32, pacing: bool) -> Vec<Walk> {
+        (0..n)
+            .map(|_| {
+                walk.step(1. / 16., travel, pacing);
+                *walk
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_hiker_sets_off_walks_rests_turns_and_comes_back() {
+        let travel = 200.;
+        let mut walk = Walk::default();
+        assert_eq!(
+            (walk.at, walk.pose(), walk.facing_right()),
+            (0., STAND, true),
+            "it starts standing at the trail's start, facing along it"
+        );
+        let mut seen_right_end = false;
+        let mut back_home = false;
+        for w in frames(&mut walk, 16 * 60, travel, false) {
+            assert!((0. ..=1.).contains(&w.at), "on the trail: {w:?}");
+            if w.at == 1. {
+                seen_right_end = true;
+                assert_eq!(w.pose(), STAND, "it stands at the end");
             }
-            // And lap after lap the same walk comes round.
-            for i in 0..50 {
-                let clock = i as f32 * secs / 50.;
-                let (a, b) = (at(clock), at(clock + secs));
-                assert!(
-                    (a.0 - b.0).abs() < 1e-4 && a.2 == b.2,
-                    "lap {i}: same place, same way"
-                );
-                assert!(
-                    (a.1 + 4 - b.1) % 4 <= 1 || (b.1 + 4 - a.1) % 4 <= 1,
-                    "lap {i}: legs within a pose"
-                );
+            if seen_right_end && w.at == 0. {
+                back_home = true;
             }
         }
-        // The wait's pace is a visibly different lap, not the working walk again.
-        assert!(super::PACE < super::LAP);
+        assert!(
+            seen_right_end && back_home,
+            "there and back within a minute"
+        );
+    }
+
+    #[test]
+    fn at_full_speed_it_moves_one_pixel_a_frame() {
+        // Mid-trail, the walk is even: a whole pixel each frame, never one then two.
+        let travel = 400.;
+        let mut walk = Walk {
+            rest: 0.,
+            ..Walk::default()
+        };
+        let path = frames(&mut walk, 160, travel, false);
+        let mids: Vec<f32> = path
+            .windows(2)
+            .filter(|w| (0.1..0.9).contains(&w[0].at) && w[1].speed == WALK)
+            .map(|w| (w[1].at - w[0].at) * travel)
+            .collect();
+        assert!(mids.len() > 40, "{} frames at full speed", mids.len());
+        for d in mids {
+            assert!((d - 1.).abs() < 1e-3, "{d} px in a frame");
+        }
+    }
+
+    #[test]
+    fn its_feet_stay_planted() {
+        // A pose for every few pixels covered: slowing down at the end, the legs slow with it,
+        // instead of churning at full cadence while it barely moves.
+        let mut walk = Walk {
+            rest: 0.,
+            ..Walk::default()
+        };
+        let path = frames(&mut walk, 16 * 20, 120., false);
+        let mut last = (path[0].pose(), path[0].walked);
+        for w in &path[1..] {
+            if w.pose() != last.0 && w.pose() != STAND && last.0 != STAND {
+                assert!(
+                    w.walked - last.1 >= STEP - 1.01,
+                    "a new pose after {} px",
+                    w.walked - last.1
+                );
+                last = (w.pose(), w.walked);
+            }
+            if w.pose() == STAND {
+                last = (STAND, 0.);
+            } else if last.0 == STAND {
+                last = (w.pose(), w.walked);
+            }
+        }
+        // The walk goes through all four poses, in order.
+        let mut walk = Walk {
+            rest: 0.,
+            ..Walk::default()
+        };
+        let poses: Vec<usize> = frames(&mut walk, 60, 400., false)
+            .iter()
+            .map(Walk::pose)
+            .collect();
+        let mut order = poses.clone();
+        order.dedup();
+        for w in order.windows(2) {
+            assert_eq!(w[1], w[0] % 4 + 1, "{order:?}");
+        }
+    }
+
+    #[test]
+    fn it_turns_halfway_through_its_rest() {
+        let mut walk = Walk {
+            at: 0.999,
+            rest: 0.,
+            speed: 1.,
+            ..Walk::default()
+        };
+        walk.step(1. / 16., 100., false);
+        assert_eq!((walk.at, walk.pose()), (1., STAND));
+        assert!(walk.facing_right(), "it arrives facing the way it came");
+        let path = frames(&mut walk, 30, 100., false);
+        let turned = path.iter().position(|w| !w.facing_right()).unwrap();
+        assert!(
+            (8..12).contains(&turned),
+            "turns about halfway: frame {turned}"
+        );
+        assert!(path.iter().skip(turned).all(|w| !w.facing_right()));
+    }
+
+    #[test]
+    fn a_new_pace_or_a_new_width_never_moves_it() {
+        // Working to waiting and back, or the trail resized, at awkward points: it carries on
+        // from where it stood.
+        for frames_in in [5, 40, 90, 200, 333] {
+            let mut walk = Walk::default();
+            frames(&mut walk, frames_in, 300., false);
+            let before = walk;
+            walk.step(1. / 16., 300., true);
+            assert!(
+                (walk.at - before.at).abs() * 300. <= 2.01
+                    && walk.facing_right() == before.facing_right()
+                    || walk.rest > 0.,
+                "{before:?} -> {walk:?}"
+            );
+            let before = walk;
+            walk.step(1. / 16., 600., false);
+            assert!(
+                (walk.at - before.at).abs() * 600. <= 1.01 || walk.rest > 0.,
+                "a wider trail: {before:?} -> {walk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pause_in_drawing_picks_up_where_it_left_off() {
+        // No frame at all moves nothing; a long gap counts as a few frames, not a leap.
+        let mut walk = Walk {
+            rest: 0.,
+            at: 0.5,
+            speed: WALK,
+            ..Walk::default()
+        };
+        let before = walk;
+        walk.step(0., 300., false);
+        assert_eq!(walk, before);
+        walk.step(30., 300., false);
+        assert!((walk.at - before.at) * 300. <= 4.01, "{walk:?}");
     }
 
     /// Within a thousandth of a device pixel of a whole number.
@@ -420,7 +733,7 @@ mod tests {
                 );
                 // Each of the art's pixels begins on one.
                 assert!(
-                    whole(left + 13. * c, scale) && whole(feet - 16. * c, scale),
+                    whole(left + 11. * c, scale) && whole(feet - 16. * c, scale),
                     "{scale}: art pixels at {left}, {feet}"
                 );
             }
@@ -435,10 +748,28 @@ mod tests {
     }
 
     #[test]
-    fn sprite_rows_are_even() {
-        for row in super::TOP.iter().chain(super::LEGS.iter().flatten()) {
-            assert_eq!(row.len(), super::SPRITE_W);
+    fn every_pose_is_on_the_grid_with_its_boots_on_the_ground() {
+        for (i, pose) in POSES.iter().enumerate() {
+            for row in pose {
+                assert_eq!(row.chars().count(), super::SPRITE_W, "pose {i}: {row}");
+                assert!(
+                    row.chars()
+                        .all(|c| c == '.' || super::color(c, true).is_some()),
+                    "pose {i}: {row}"
+                );
+            }
+            assert!(
+                pose[super::SPRITE_H - 1].contains('b'),
+                "pose {i} stands on the trail"
+            );
         }
-        assert_eq!(super::TOP.len() + 4, super::SPRITE_H);
+        // Eight colours, each with a Night and a Paper value.
+        let used: std::collections::BTreeSet<char> = POSES
+            .iter()
+            .flatten()
+            .flat_map(|r| r.chars())
+            .filter(|c| *c != '.')
+            .collect();
+        assert_eq!(used.len(), 8, "{used:?}");
     }
 }

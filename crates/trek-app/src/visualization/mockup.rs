@@ -2,6 +2,7 @@
 //! inside a device's chrome. Images are placeholders by design: nothing is ever loaded.
 
 use super::{Frame, Look, tone};
+use crate::scale::{radius, text};
 use gpui_kit::component::{ActiveTheme as _, Icon, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -50,7 +51,7 @@ pub(super) fn mockup(nodes: &[MockNode], frame: &Frame, cx: &App) -> AnyElement 
             .test_support()
             .w_full()
             .p_3()
-            .rounded(px(fluent::surface(10.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .border_1()
             .border_color(look.hairline)
             .bg(m.screen)
@@ -113,7 +114,7 @@ impl Mock<'_> {
                 .min_w(px(160.))
                 .gap_2()
                 .p_3()
-                .rounded(px(fluent::surface(10.)))
+                .rounded(px(fluent::surface(radius::CARD)))
                 .border_1()
                 .border_color(look.hairline)
                 .bg(look.fg.opacity(if look.dark { 0.03 } else { 0.015 }))
@@ -121,7 +122,7 @@ impl Mock<'_> {
                     el.child(
                         div()
                             .font_medium()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .text_color(look.fg)
                             .child(text),
                     )
@@ -135,7 +136,7 @@ impl Mock<'_> {
                     el.child(
                         div()
                             .px_1()
-                            .text_size(px(11.))
+                            .text_size(px(text::META))
                             .font_medium()
                             .text_color(look.muted)
                             .child(text),
@@ -144,7 +145,7 @@ impl Mock<'_> {
                 .child(
                     v_flex()
                         .w_full()
-                        .rounded(px(fluent::surface(9.)))
+                        .rounded(px(fluent::surface(radius::BUTTON)))
                         .border_1()
                         .border_color(look.hairline)
                         .overflow_hidden()
@@ -176,7 +177,7 @@ impl Mock<'_> {
                 .when(node.text.is_some(), |el| {
                     el.child(
                         div()
-                            .text_size(px(13.))
+                            .text_size(px(text::BODY))
                             .font_semibold()
                             .text_color(look.fg)
                             .child(text),
@@ -186,7 +187,7 @@ impl Mock<'_> {
                 .children(node.children.iter().map(|child| {
                     match child.kind {
                         MockNodeKind::Text => div()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .text_color(look.muted)
                             .child(child.text.clone().unwrap_or_default())
                             .into_any_element(),
@@ -213,12 +214,12 @@ impl Mock<'_> {
                             .pt(px(4.))
                             .child(
                                 div()
-                                    .text_size(px(12.))
+                                    .text_size(px(text::LABEL))
                                     .when(on, |el| el.font_medium())
                                     .text_color(if on { look.fg } else { look.muted })
                                     .child(label),
                             )
-                            .child(div().h(px(2.)).rounded_t(px(2.)).bg(if on {
+                            .child(div().h(px(2.)).rounded_t(px(radius::TAG)).bg(if on {
                                 accent
                             } else {
                                 gpui_kit::transparent_black()
@@ -227,7 +228,7 @@ impl Mock<'_> {
                     .into_any_element()
             }
             MockNodeKind::Text => div()
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .line_height(relative(1.45))
                 .text_color(look.fg.opacity(0.88))
                 .child(text)
@@ -236,10 +237,15 @@ impl Mock<'_> {
                 .flex_1()
                 .min_w(px(104.))
                 .gap(px(2.))
-                .child(div().text_size(px(11.)).text_color(look.muted).child(text))
                 .child(
                     div()
-                        .text_size(px(18.))
+                        .text_size(px(text::META))
+                        .text_color(look.muted)
+                        .child(text),
+                )
+                .child(
+                    div()
+                        .text_size(px(text::DISPLAY_S))
                         .font_semibold()
                         .text_color(if node.tone.is_some() {
                             self.color(node, cx)
@@ -258,8 +264,8 @@ impl Mock<'_> {
                     .justify_center()
                     .px(px(12.))
                     .h(px(30.))
-                    .rounded(px(fluent::control(8.)))
-                    .text_size(px(12.))
+                    .rounded(px(fluent::control(radius::BUTTON)))
+                    .text_size(px(text::LABEL))
                     .font_medium()
                     .when(primary, |el| {
                         el.bg(color)
@@ -292,7 +298,7 @@ impl Mock<'_> {
                     .h(px(20.))
                     .rounded_pill()
                     .bg(color.opacity(0.12))
-                    .text_size(px(10.5))
+                    .text_size(px(text::META))
                     .font_medium()
                     .text_color(color)
                     .child(div().size(px(5.)).rounded_full().bg(color))
@@ -312,7 +318,7 @@ impl Mock<'_> {
                     .when(typed.is_some(), |el| {
                         el.child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(px(text::META))
                                 .text_color(look.muted)
                                 .child(text.clone()),
                         )
@@ -323,7 +329,7 @@ impl Mock<'_> {
                             .h(px(32.))
                             .px(px(10.))
                             .gap(px(8.))
-                            .rounded(px(fluent::control(8.)))
+                            .rounded(px(fluent::control(radius::BUTTON)))
                             .border_1()
                             .border_color(if typed.is_some() {
                                 self.color(node, cx).opacity(0.6)
@@ -337,9 +343,12 @@ impl Mock<'_> {
                                     .text_color(look.muted),
                             )
                             .child(match typed {
-                                Some(v) => div().text_size(px(12.)).text_color(look.fg).child(v),
+                                Some(v) => div()
+                                    .text_size(px(text::LABEL))
+                                    .text_color(look.fg)
+                                    .child(v),
                                 None => div()
-                                    .text_size(px(12.))
+                                    .text_size(px(text::LABEL))
                                     .text_color(look.muted.opacity(0.8))
                                     .child(text),
                             }),
@@ -353,7 +362,12 @@ impl Mock<'_> {
                     .w_full()
                     .justify_between()
                     .gap_3()
-                    .child(div().text_size(px(12.5)).text_color(look.fg).child(text))
+                    .child(
+                        div()
+                            .text_size(px(text::BODY))
+                            .text_color(look.fg)
+                            .child(text),
+                    )
                     .child(
                         div()
                             .flex_none()
@@ -390,11 +404,16 @@ impl Mock<'_> {
                     .child(
                         h_flex()
                             .justify_between()
-                            .child(div().text_size(px(12.)).text_color(look.fg).child(text))
+                            .child(
+                                div()
+                                    .text_size(px(text::LABEL))
+                                    .text_color(look.fg)
+                                    .child(text),
+                            )
                             .child(
                                 div()
                                     .font_family(look.mono.clone())
-                                    .text_size(px(11.))
+                                    .text_size(px(text::META))
                                     .text_color(look.muted)
                                     .child(if value.ends_with('%') {
                                         value.clone()
@@ -432,7 +451,7 @@ impl Mock<'_> {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(10.5))
+                    .text_size(px(text::META))
                     .font_semibold()
                     .text_color(look.fg)
                     .child(initials(&text))
@@ -451,7 +470,7 @@ impl Mock<'_> {
                     .items_center()
                     .justify_center()
                     .gap(px(6.))
-                    .rounded(px(fluent::surface(9.)))
+                    .rounded(px(fluent::surface(radius::BUTTON)))
                     .border_1()
                     .border_color(look.grid)
                     .bg(linear_gradient(
@@ -469,7 +488,7 @@ impl Mock<'_> {
                             div()
                                 .px_2()
                                 .truncate()
-                                .text_size(px(11.))
+                                .text_size(px(text::META))
                                 .text_color(look.muted)
                                 .child(text),
                         )
@@ -525,7 +544,7 @@ impl Mock<'_> {
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(text::LABEL))
                             .font_semibold()
                             .text_color(look.fg)
                             .child("9:41"),
@@ -549,6 +568,7 @@ impl Mock<'_> {
                     .relative()
                     .w_full()
                     .min_h(px(if phone { 440. } else { 300. }))
+                    // scale: ok, a device's screen
                     .rounded(px(if phone { 30. } else { 14. }))
                     .bg(self.screen)
                     .overflow_hidden()
@@ -582,7 +602,7 @@ impl Mock<'_> {
                             .when_some(title, |el, title| {
                                 el.child(
                                     div()
-                                        .text_size(px(20.))
+                                        .text_size(px(text::DISPLAY_S))
                                         .font_semibold()
                                         .text_color(look.fg)
                                         .child(title),
@@ -610,6 +630,7 @@ impl Mock<'_> {
                     .w_full()
                     .max_w(px(if phone { 296. } else { 560. }))
                     .p(px(if phone { 7. } else { 10. }))
+                    // scale: ok, a device's frame
                     .rounded(px(if phone { 38. } else { 24. }))
                     .border_1()
                     .border_color(look.fg.opacity(if look.dark { 0.16 } else { 0.14 }))
@@ -647,7 +668,7 @@ impl Mock<'_> {
                                     .px(px(10.))
                                     .gap(px(6.))
                                     .justify_center()
-                                    .rounded(px(fluent::control(7.)))
+                                    .rounded(px(fluent::control(radius::BUTTON)))
                                     .bg(look.fg.opacity(0.06))
                                     .child(
                                         Icon::new(Lucide::Lock)
@@ -657,7 +678,7 @@ impl Mock<'_> {
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_size(px(11.))
+                                            .text_size(px(text::META))
                                             .text_color(look.muted)
                                             .child(title.clone().unwrap_or_else(|| "app".into())),
                                     ),
@@ -671,7 +692,7 @@ impl Mock<'_> {
                                 .flex_1()
                                 .text_center()
                                 .truncate()
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .font_medium()
                                 .text_color(look.fg.opacity(0.8))
                                 .child(title.clone().unwrap_or_default()),
@@ -680,7 +701,7 @@ impl Mock<'_> {
                     });
                 v_flex()
                     .w_full()
-                    .rounded(px(fluent::surface(11.)))
+                    .rounded(px(fluent::surface(radius::CARD)))
                     .border_1()
                     .border_color(look.fg.opacity(if look.dark { 0.14 } else { 0.12 }))
                     .bg(self.screen)

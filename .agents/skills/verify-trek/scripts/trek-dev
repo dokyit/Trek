@@ -51,7 +51,7 @@ port = 7431
 
 TOOLS = {"git", "explorer", "terminal", "browser", "sidechat", "simulator", "iphone"}
 BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "study", "appearance", "first", "onboarding"}
-CONTROL_VERBS = {"browser", "range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "pair", "limits-demo", "pr-demo", "dictate-demo", "onboarding", "phone"}
+CONTROL_VERBS = {"browser", "range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "pair", "limits-demo", "pr-demo", "dictate-demo", "onboarding", "phone", "update-demo", "resume-demo", "accounts-demo", "compact-demo", "secret-demo", "import-demo", "checks-demo", "privacy-demo", "approve", "deny", "answer"}
 
 
 class CliError(RuntimeError):
@@ -314,11 +314,11 @@ class Driver:
             "Created by verify-trek. TREK_SHOT_DIR isolates Keychain/data and only permits the mock agent.\n"
         )
 
-    def start(self, *, build: bool, size: str) -> dict[str, Any]:
+    def start(self, *, build: bool, size: str, real_agents: bool = False) -> dict[str, Any]:
         with self.locked():
-            return self._start(build=build, size=size)
+            return self._start(build=build, size=size, real_agents=real_agents)
 
-    def _start(self, *, build: bool, size: str) -> dict[str, Any]:
+    def _start(self, *, build: bool, size: str, real_agents: bool = False) -> dict[str, Any]:
         current = self.status()
         if current["running"]:
             return {**current, "already_running": True}
@@ -334,7 +334,7 @@ class Driver:
             {
                 "TREK_DATA_DIR": str(self.data_dir),
                 "TREK_SHOT_DIR": str(self.shot_dir),
-                "TREK_MOCK_AGENT": "1",
+                **({} if real_agents else {"TREK_MOCK_AGENT": "1"}),
                 "TREK_BACKGROUND": "1",
                 "TREK_FORCE_ACTIVE": "1",
                 "TREK_WINDOW_SIZE": size,
@@ -359,7 +359,7 @@ class Driver:
             "pid": proc.pid,
             "binary": str(binary),
             "isolated": True,
-            "mock_only": True,
+            "mock_only": not real_agents,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "size": size,
         }
@@ -381,7 +381,11 @@ class Driver:
             **self.status(),
             "already_running": False,
             "build": build_result,
-            "safety": "throwaway data folder, imports off, notifications off, mock agent only",
+            "safety": (
+                "throwaway data folder, notifications off, the installed agents with their real logins: what they do is real"
+                if real_agents
+                else "throwaway data folder, imports off, notifications off, mock agent only"
+            ),
         }
 
     def batch(self, lines: Iterable[str], *, timeout: float = 90) -> str:
@@ -672,6 +676,11 @@ def parser() -> argparse.ArgumentParser:
     start.add_argument("--no-build", action="store_true", help="Use Cargo's last Trek artifact only if its hash matches the verified shots build.")
     start.add_argument("--size", default="1280x820", metavar="WIDTHxHEIGHT", help="Verification window size (default: 1280x820).")
     start.add_argument("--dry-run", action="store_true", help="Describe the build and launch without changing anything.")
+    start.add_argument(
+        "--real-agents",
+        action="store_true",
+        help="Use the installed agents and their real logins instead of the mock (data folder still throwaway). For checking flows like accounts that need a real agent: what the agents do is real, and costs what it costs.",
+    )
     start.epilog = "Example: trek-dev start --size 1280x820"
 
     status = sub.add_parser("status", help="Report whether the isolated app is running and where its files are.")
@@ -758,7 +767,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif cmd == "start":
             if not re.fullmatch(r"[0-9]{3,5}x[0-9]{3,5}", args.size):
                 raise CliError("--size must look like 1280x820.")
-            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse the last verified shots binary", f"launch isolated mock-only app at {driver.home}"]) if args.dry_run else driver.start(build=not args.no_build, size=args.size)
+            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse the last verified shots binary", f"launch isolated mock-only app at {driver.home}"]) if args.dry_run else driver.start(build=not args.no_build, size=args.size, real_agents=args.real_agents)
         elif cmd == "open":
             line = route_command(args.route)
             data = dry_result(cmd, [f"send {line!r} to isolated Trek"]) if args.dry_run else (driver.batch([line]) and {"opened": args.route, "command_sent": line})

@@ -7,6 +7,7 @@ import SwiftUI
 struct BackgroundStrip: View {
     var thread: ThreadSummary
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var expanded = false
     @State private var open: Opened?
     @State private var listing = false
@@ -76,11 +77,12 @@ struct BackgroundStrip: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                         HStack(spacing: 4) {
-                            Text(stopping ? "Stopping…" : "Running")
+                            Text(stopping ? "Stopping…" : "Running").fixedSize()
                             if let since = task.since, !stopping {
                                 Text(When.duration(max(0, Int(now.timeIntervalSince1970 - Double(since) / 1000)))).monospacedDigit()
                             }
-                            if let line = task.line?.trimmingCharacters(in: .whitespaces), !line.isEmpty {
+                            // At the accessibility sizes there's no room for it: it's in the output.
+                            if let line = task.line?.trimmingCharacters(in: .whitespaces), !line.isEmpty, !typeSize.isAccessibilitySize {
                                 Text("·")
                                 Text(line).font(.code(.caption2)).lineLimit(1).truncationMode(.tail).layoutPriority(-1)
                             }

@@ -16,6 +16,12 @@ use trek_core::catalog::ModelInfo;
 use trek_core::{Effort, detect};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// How long Claude Code's plan usage may take: it asks Anthropic's servers, measured at 14 to 33
+/// seconds on a busy day.
+const USAGE_TIMEOUT: Duration = Duration::from_secs(75);
+/// What a usage read that ran out of time says. The app keeps the last reading it had (`USAGE_LATE`
+/// is how it knows).
+pub const USAGE_LATE: &str = "Claude Code's usage didn't arrive in time";
 /// How long Codex's skills wait for it to learn the account's plugins.
 const PLUGINS_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -124,6 +130,7 @@ async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::sign_in_as_account(&mut command);
     let mut child = crate::spawn_group(&mut command).context("failed to start claude")?;
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
@@ -134,10 +141,12 @@ async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
         s
     });
 
+    // Usage last: it's Claude asking Anthropic's servers, which can take half a minute, and the
+    // others mustn't wait behind it.
     let wanted: Vec<(&str, &str)> = [
         ("i1", "initialize"),
-        ("u1", "get_usage"),
         ("c1", "get_context_usage"),
+        ("u1", "get_usage"),
     ]
     .into_iter()
     .filter(|(id, _)| with_usage || *id != "u1")
@@ -152,11 +161,25 @@ async fn claude_read(cwd: &Path, with_usage: bool) -> Result<AgentStatus> {
 
     let mut responses: HashMap<String, Value> = HashMap::new();
     let mut status = AgentStatus::default();
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let started = tokio::time::Instant::now();
     while responses.len() < wanted.len() {
+        // The account and commands come in a second or two; the usage may take far longer.
+        let waiting_on_usage = wanted
+            .iter()
+            .all(|(id, _)| *id == "u1" || responses.contains_key(*id));
+        let deadline = started
+            + if waiting_on_usage {
+                USAGE_TIMEOUT
+            } else {
+                TIMEOUT
+            };
         match tokio::time::timeout_at(deadline, stdout.next_line()).await {
+            Err(_) if waiting_on_usage => {
+                status.add_error(USAGE_LATE);
+                break;
+            }
             Err(_) => {
-                status.add_error("timed out waiting for Claude Code");
+                status.add_error("Claude Code didn't answer in time");
                 break;
             }
             Ok(Err(e)) => {
@@ -318,6 +341,7 @@ fn claude_models(models: &Value) -> Vec<ModelInfo> {
             tier: claude_tier(id),
             fast: (m["supportsFastMode"] == true).then(|| "settings".to_string()),
             context: None,
+            caps: None,
         });
     }
     out
@@ -612,8 +636,14 @@ fn codex_window(mins: Option<i64>) -> (String, String) {
     match mins {
         Some(300) => ("5-hour".into(), "5h".into()),
         Some(10080) => ("Weekly".into(), "7d".into()),
-        Some(m) if m % 60 == 0 => (format!("{}h", m / 60), format!("{}h", m / 60)),
-        Some(m) => (format!("{m}m"), format!("{m}m")),
+        Some(1440) => ("Daily".into(), "1d".into()),
+        // A free plan's: a 30-day window, which reads as "720h" in hours.
+        Some(m) if m % 1440 == 0 && m / 1440 >= 28 && m / 1440 <= 31 => {
+            ("Monthly".into(), format!("{}d", m / 1440))
+        }
+        Some(m) if m % 1440 == 0 => (format!("{}-day", m / 1440), format!("{}d", m / 1440)),
+        Some(m) if m % 60 == 0 => (format!("{}-hour", m / 60), format!("{}h", m / 60)),
+        Some(m) => (format!("{m}-minute"), format!("{m}m")),
         None => ("Usage".into(), String::new()),
     }
 }
@@ -1284,6 +1314,14 @@ mod tests {
     }
 
     #[test]
+    fn odd_windows_read_as_words() {
+        assert_eq!(codex_window(Some(43_200)), ("Monthly".into(), "30d".into()));
+        assert_eq!(codex_window(Some(2_880)), ("2-day".into(), "2d".into()));
+        assert_eq!(codex_window(Some(120)), ("2-hour".into(), "2h".into()));
+        assert_eq!(codex_window(Some(45)), ("45-minute".into(), "45m".into()));
+    }
+
+    #[test]
     fn codex_limits_are_labeled() {
         let l = codex_limits(&codex_rate_limits());
         let got: Vec<(&str, f32, Option<i64>, &str)> = l
@@ -1307,7 +1345,7 @@ mod tests {
                 odd[0].window.as_str(),
                 odd[0].resets_at
             ),
-            ("24h limit", "24h", None)
+            ("Daily limit", "1d", None)
         );
     }
 

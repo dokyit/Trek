@@ -69,6 +69,13 @@ impl Workspace {
             tr::QueueAction::Edit { text } if text.trim().is_empty() && images == 0 => {
                 return Err(tr::HostError::bad_request("Write something, or remove it"));
             }
+            // What's written may be the secret a card is up for: the queue would keep it and
+            // send it on.
+            tr::QueueAction::Edit { .. } if self.asks_for_secret(id) => {
+                return Err(tr::HostError::conflict(
+                    crate::workspace::permission_requests::secret_waits_here(),
+                ));
+            }
             tr::QueueAction::Edit { text } => Some(text),
         };
         if req.reset {

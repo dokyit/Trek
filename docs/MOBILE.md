@@ -261,6 +261,7 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `context_card` | `context_card`, and `thread_action` `compact` |
 | `turn_preview` | `turn_preview`: the confirmation's file list before an undo, retry or rewind |
 | `consult` | `send.consult`: a message sent with consultants |
+| `resume_interrupted` | a row's `cut_short`, and `thread_action` `resume_interrupted`, `dismiss_interrupted` |
 
 `use_reset` to `icon`, and `card_actions` to `consult`, are described under "Keeping up with the
 Mac" below, `basecamp_v2` under
@@ -344,6 +345,12 @@ Thread details, each optional and left out when there's nothing to say (older Ma
   unknown), `resume` (it carries on by itself at the reset: "Resume at reset" was chosen), `wrapped`
   (the agent wrapped up ahead of the limit: "Wrapped up before the limit"). Left out when it isn't
   paused. Its buttons are `limit_actions`, below.
+- `ask` (`{"request_id","detail"}`): `needs` is an approval of this thread's own: the request, and
+  all of the command or file (at most 2 KiB), so it can be judged and answered from outside the
+  thread (the iPhone's Live Activity). Answered with `answer`, as from the thread.
+- `cut_short` (`{"state","how","waiting","asked","why"}`): its last turn was cut off when Trek closed
+  and that isn't dealt with yet, as the Mac's bar over its composer says it. `state` is `offered`,
+  `resuming` or `failed`; `how` says how its agent comes back. Gone once the agent is back at it.
 - `busy_in_background`: its turn is over but it still waits on what it started (its sub-agents,
   its agent's own in the background, their reports on the way), so the Mac's sidebar keeps it at
   work, "Waiting". The Mac always sends it, `false` too; a row without it is from an older Mac,
@@ -617,7 +624,7 @@ said it has none; `resets` are Codex's granted rate-limit resets, which `use_res
  "summary":{"prompts":18,"threads":4,"turns":20,"agent_secs":3720,"agent_time":"1h 2m","tokens":182000,"failed":1,
             "top_project":{"project":{…},"prompts":12,"tokens":90000},"best_model":{"agent":{…},"label":"Claude Opus 5.5","tokens":140000,"turns":9,"share":77}},
  "profile":{"buckets":[{"value":12.5,"label":"2–3 PM","line":"2–3 PM · 4 prompts · 12m of agent time","prompts":4,"agent_secs":750,"tokens":3000},…],
-            "summit":14,"now":20,"now_at":0.86,"line":"Summit at 2 PM","total":"18 prompts","ticks":[{"at":0.25,"label":"6 AM"},…]},
+            "summit":14,"now":20,"now_at":0.86,"line":"Peak at 2 PM","total":"18 prompts","ticks":[{"at":0.25,"label":"6 AM"},…]},
  "tiles":[{"kind":"best_model","label":"Your best model","figure":"Claude Opus 5.5","note":"77% of tokens · 9 turns","agent":{…}},
           {"kind":"tokens","label":"You used","figure":"182K tokens","note":"≈ $1.28 at API prices today","sparkline":[0.0,0.1,…,1.0]},
           {"kind":"plan_left","label":"Left on Claude Max","figure":"36%","note":"Weekly · Opus · resets in 4d","agent":{…},"percent":36.0,"resets_at":…}]}

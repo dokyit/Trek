@@ -5,6 +5,7 @@
 
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text};
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
@@ -28,11 +29,11 @@ fn frame(id: &'static str, tint: Hsla, cx: &App) -> Stateful<Div> {
         .w_full()
         .p(px(10.))
         .gap(px(8.))
-        .rounded(px(8.))
+        .rounded(px(radius::BUTTON))
         .border_1()
         .border_color(tint.opacity(0.45))
         .bg(tint.opacity(0.05))
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .text_color(theme.foreground)
 }
 
@@ -44,7 +45,9 @@ fn heading(icon: Icon, tint: Hsla, text: String) -> Div {
         .child(div().flex_1().min_w_0().font_semibold().child(text))
 }
 
-/// The agent wants to do something it needs a yes for: Deny, Always allow, Allow.
+/// The agent wants to do something it needs a yes for: Deny, Allow for session, Allow. No
+/// "Allow for session" when `asked_by` (a rule of the user's that asks about it every time).
+#[allow(clippy::too_many_arguments)]
 pub fn approval(
     ws: &Entity<Workspace>,
     thread: &str,
@@ -52,6 +55,7 @@ pub fn approval(
     agent: &str,
     title: &str,
     detail: &str,
+    asked_by: Option<String>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -76,11 +80,20 @@ pub fn approval(
                     .overflow_y_scroll()
                     .px(px(8.))
                     .py(px(5.))
-                    .rounded(px(fluent::control(5.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .bg(theme.foreground.opacity(0.05))
                     .font_family(theme.mono_font_family.clone())
-                    .text_size(px(11.5))
+                    .text_size(px(text::LABEL))
                     .child(detail.to_string()),
+            )
+        })
+        .when_some(asked_by.clone(), |el, rule| {
+            el.child(
+                div()
+                    .id("ai-approval-rule")
+                    .text_size(px(text::LABEL))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("Your rule asks about this every time: {rule}.")),
             )
         })
         .child(
@@ -95,13 +108,15 @@ pub fn approval(
                         .label("Deny")
                         .on_click(respond(Decision::Deny)),
                 )
-                .child(
-                    Button::new("ai-allow-session")
-                        .xsmall()
-                        .outline()
-                        .label("Always allow")
-                        .on_click(respond(Decision::AllowForSession)),
-                )
+                .when(asked_by.is_none(), |el| {
+                    el.child(
+                        Button::new("ai-allow-session")
+                            .xsmall()
+                            .outline()
+                            .label("Allow for session")
+                            .on_click(respond(Decision::AllowForSession)),
+                    )
+                })
                 .child(
                     Button::new("ai-allow")
                         .xsmall()
@@ -146,7 +161,7 @@ pub fn questions(
                 .when(q.multi, |el| {
                     el.child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(px(text::META))
                             .text_color(theme.muted_foreground)
                             .child("Choose any that apply."),
                     )
@@ -167,7 +182,7 @@ pub fn questions(
                         .py(px(5.))
                         .gap(px(8.))
                         .items_start()
-                        .rounded(px(fluent::control(6.)))
+                        .rounded(px(fluent::control(radius::CONTROL)))
                         .border_1()
                         .border_color(if on {
                             ember.opacity(0.7)
@@ -183,7 +198,7 @@ pub fn questions(
                                 .size(px(12.))
                                 .flex_none()
                                 .when(!multi, |el| el.rounded_full())
-                                .when(multi, |el| el.rounded(px(3.)))
+                                .when(multi, |el| el.rounded(px(radius::TAG)))
                                 .border_1()
                                 .border_color(if on {
                                     ember
@@ -198,6 +213,7 @@ pub fn questions(
                                         div()
                                             .size(px(6.))
                                             .when(!multi, |d| d.rounded_full())
+                                            // scale: ok, the box's mark, a glyph
                                             .when(multi, |d| d.rounded(px(1.)))
                                             .bg(ember),
                                     )
@@ -211,7 +227,7 @@ pub fn questions(
                                 .when(!desc.is_empty(), |el| {
                                     el.child(
                                         div()
-                                            .text_size(px(11.5))
+                                            .text_size(px(text::LABEL))
                                             .text_color(theme.muted_foreground)
                                             .child(desc.clone()),
                                     )
@@ -261,7 +277,7 @@ pub fn questions(
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(theme.muted_foreground)
                         .child("Or type an answer below."),
                 )
@@ -322,7 +338,7 @@ pub fn plan(
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(theme.muted_foreground)
                         .child("Nothing has been changed yet."),
                 )
@@ -378,7 +394,7 @@ pub fn changes(
             .flex_none()
             .gap(px(5.))
             .font_family(theme.mono_font_family.clone())
-            .text_size(px(11.))
+            .text_size(px(text::META))
             .when(known && a > 0, |el| {
                 el.child(div().text_color(green).child(format!("+{a}")))
             })
@@ -442,7 +458,7 @@ pub fn changes(
                 div()
                     .w(px(10.))
                     .flex_none()
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .text_color(ember)
                     .when(!on, |el| el.invisible())
                     .child("✦"),
@@ -515,11 +531,11 @@ pub fn changes(
         .id(("ai-turn-changes", ix))
         .test_support()
         .w_full()
-        .rounded(px(8.))
+        .rounded(px(radius::BUTTON))
         .border_1()
         .border_color(theme.foreground.opacity(0.09))
         .overflow_hidden()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .child(head)
         .children(rows)
         .when(n > 12, |el| {
@@ -529,7 +545,7 @@ pub fn changes(
                     .py(px(4.))
                     .border_t_1()
                     .border_color(line)
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .text_color(muted)
                     .child(format!("and {} more", n - 12)),
             )

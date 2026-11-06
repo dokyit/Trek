@@ -6,15 +6,18 @@ Writes, next to this script:
   trek-icon-glass.svg  alternative: frosted glass stones over a sunset (Liquid Glass)
   trek-icon-*-ios.svg  the same three, full bleed, for iOS (ios/scripts/app-icons.sh renders them)
   trek-icon-{dark,tinted}-ios.svg  the iOS icon's dark and tinted variants: the stones on clear
+  trek-icon-{ember,night,glass}-{16,32}.svg  the three drawn for 16 and 32 px: the title bar's
+                       small mark on the tile, on whole pixels, where the full art blurs
   trek-mark.svg        the stones alone, for in-app use (title bar, About, welcome screens)
   menubar-{idle,working,attention}.svg   44 pt template glyphs for the menu bar
 
-Run: python3 trek_icon.py. script/bundle.sh renders the .icns from trek-icon-ember.svg; the app
-switches to the others at run time (Settings › Appearance › App icon).
+Run: python3 trek_icon.py. script/bundle.sh renders the .icns from trek-icon-ember.svg (its 16 and
+32 px from trek-icon-ember-16.svg and -32.svg); the app switches to the others at run time
+(Settings › Appearance › App icon). script/windows-icons.py makes the Windows .icos the same way.
 """
 import math, random, sys, os
 
-def squircle(cx=512, cy=512, half=412, n=4.2, steps=240):
+def squircle(cx=512, cy=512, half=412, n=4.2, steps=240, places=1):
     pts = []
     for i in range(steps):
         t = 2 * math.pi * i / steps
@@ -22,7 +25,7 @@ def squircle(cx=512, cy=512, half=412, n=4.2, steps=240):
         x = cx + half * math.copysign(abs(c) ** (2 / n), c)
         y = cy + half * math.copysign(abs(s) ** (2 / n), s)
         pts.append((x, y))
-    return "M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in pts) + "Z"
+    return "M" + " L".join(f"{x:.{places}f} {y:.{places}f}" for x, y in pts) + "Z"
 
 TILE = squircle()
 
@@ -131,6 +134,7 @@ EMBER = lin("ember", [(0, "#FF9455"), (.5, "#F4692B"), (1, "#D9481A")]) + rad("e
 NIGHT = lin("night", [(0, "#24252B"), (1, "#0B0B0D")]) + rad("nightlight", [(0, "#FF7A3D", .16), (1, "#FF7A3D", 0)], cx=.5, cy=.85, r=.7)
 PAPER = lin("paper", [(0, "#FFFCF7"), (1, "#EEE4D6")])
 DUSK = lin("dusk", [(0, "#2B3550"), (1, "#0E1220")])
+SUNSET = lin("sun3", [(0, "#FF9450"), (.5, "#E9531E"), (1, "#9E2A0C")]) + rad("sun3b", [(0, "#FFD9A8", .75), (1, "#FFD9A8", 0)], cx=.78, cy=.08, r=.55)
 
 def ember_tile():
     return f'<path d="{TILE}" fill="url(#ember)"/><path d="{TILE}" fill="url(#emberlight)"/>'
@@ -171,7 +175,7 @@ for i, (cx, cy, w, h, kw) in enumerate(CAIRN):
     gb += f'<path d="{dd}" fill="none" stroke="url(#glassedge)" stroke-width="4"/>'
 add("glass", "Glass Cairn",
     "Liquid Glass: frosted, translucent stones over a deep sunset gradient, with lit edges and warm light passing through. It reads as made for macOS 26, like Freeform or Journal.",
-    lin("sun3", [(0, "#FF9450"), (.5, "#E9531E"), (1, "#9E2A0C")]) + rad("sun3b", [(0, "#FFD9A8", .75), (1, "#FFD9A8", 0)], cx=.78, cy=.08, r=.55) + gdefs,
+    SUNSET + gdefs,
     f'<path d="{TILE}" fill="url(#sun3)"/><path d="{TILE}" fill="url(#sun3b)"/>' + gb + finish())
 
 # iOS 18's dark and tinted Home Screen icons: the stones alone on a clear ground (iOS draws the
@@ -184,15 +188,59 @@ ios_variant("dark", d, b)
 d, b = porcelain_stack(CAIRN, "#FFFFFF", "#E4E4E4", "#BDBDBD", "ct", side="#8C8C8C", shadow_col="#000", shadow_op=.5, spec=.5)
 ios_variant("tinted", d, b)
 
-# The mark: the cairn alone in Trek's orange, nearest the ground the deepest.
+# The mark: the cairn alone in Trek's orange, nearest the ground the deepest. Top and underside
+# colours, bottom stone first.
+MARK_COLORS = [("#E8541E", "#9E2F0C"), ("#FF6A2B", "#B23C12"), ("#FF8A4C", "#C24A18"), ("#FFB062", "#D5621F")]
 def mark():
-    colors = [("#E8541E", "#9E2F0C"), ("#FF6A2B", "#B23C12"), ("#FF8A4C", "#C24A18"), ("#FFB062", "#D5621F")]
     body = ""
-    for (cx, cy, w, h, kw), (top, side) in zip(CAIRN, colors):
+    for (cx, cy, w, h, kw), (top, side) in zip(CAIRN, MARK_COLORS):
         t = h * .26
         body += f'<path d="{stone(cx, cy + t / 2, w, h - t, **kw)}" fill="{side}"/><path d="{stone(cx, cy - t / 2, w, h - t, **kw)}" fill="{top}"/>'
     return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="226 250 580 540">{body}</svg>'
 open("trek-mark.svg", "w").write(mark())
+
+# The app icon at 16 and 32 px (Finder's list view, the Dock at its smallest, Windows' small
+# icons). Scaled that far, the cairn above blurs into a smudge, as the title bar's did; these are
+# drawn for their size from the small mark the title bar draws instead (crates/trek-brand,
+# SMALL_STONES): the same tile, colours and corners, its flat sides on whole pixels, with flat
+# stones whose tops and heights are whole pixels. script/bundle.sh and script/windows-icons.py use
+# these at 16 and 32 px only: from 64 px up the full art reads (the .icos' 20, 24 and 48 px frames
+# still scale it).
+SMALL_MARK = [(0.5, 12, 15, 4), (3, 8, 11, 3), (3.5, 4, 8, 3), (5.5, 0, 5, 3)]
+# Per size: the tile's half width, then the stones (left, top, width, height), bottom first. The
+# full art's tile is 824 of 1024 across, 12.9 px at 16 and 25.75 at 32; here 14 px (1 to 15: at 12
+# the stones have no room) and 26 (3 to 29). At 32 the small mark sits in it at 1:1, a pixel a
+# point. At 16, half the mark would put every edge on a half pixel, so it's redrawn: 2 px stones
+# a pixel apart and a 1 px cap, stepping right, left and right again as the mark's do.
+SMALL_SIZES = {
+    16: (7, [(3, 11, 10, 2), (5, 8, 7, 2), (5, 5, 5, 2), (7, 3, 3, 1)]),
+    32: (13, [(x + 8, y + 8, w, h) for x, y, w, h in SMALL_MARK]),
+}
+# Each icon's tile (its gradients, by id) and stone fill: Ember's porcelain (the full art's light
+# to dark), Night's the mark's own colours (as the title bar shows them on Night), Glass's frosted
+# white, more opaque than the full art's, which has its lit edges and glow to show it.
+SMALL_TILES = {
+    "ember": (EMBER, "ember", "emberlight", lin("smallstone", [(0, "#FFFBF4"), (.6, "#F7EBDD"), (1, "#E6D2BA")])),
+    "night": (NIGHT, "night", "nightlight", ""),
+    "glass": (SUNSET, "sun3", "sun3b", lin("smallstone", [(0, "#FFFFFF", .85), (1, "#FFF1E6", .45)])),
+}
+
+def small_icon(slug, px):
+    """`trek-icon-<slug>-<px>.svg`. The stones are flat: a pixel a point is too few for the
+    mark's darker underside, which reads as an outline there (the title bar draws it from 2x)."""
+    defs, fill, light, stone_defs = SMALL_TILES[slug]
+    half, stones = SMALL_SIZES[px]
+    tile = squircle(px / 2, px / 2, half, steps=120, places=2)
+    body = f'<path d="{tile}" fill="url(#{fill})"/><path d="{tile}" fill="url(#{light})"/>'
+    for (x, y, w, h), (top, _) in zip(stones, MARK_COLORS):
+        color = top if slug == "night" else "url(#smallstone)"
+        body += f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{h / 2}" fill="{color}"/>'
+    open(f"trek-icon-{slug}-{px}.svg", "w").write(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {px} {px}"><defs>{defs}{stone_defs}</defs>{body}</svg>')
+
+for slug in SMALL_TILES:
+    for px in SMALL_SIZES:
+        small_icon(slug, px)
 
 # Menu bar template glyphs (black on clear; macOS tints them): four stacked stones. "working"
 # shows the top stone as a ring (the tray blinks between the two); "attention" adds a dot.

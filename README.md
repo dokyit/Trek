@@ -38,7 +38,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/assets/icons/platforms/macos.svg" width="24" height="24" align="top" alt="">&nbsp; <b>macOS</b> &nbsp;<sub>13+ · Apple silicon</sub>
+      <img src="docs/assets/icons/platforms/macos.svg" width="24" height="24" align="top" alt="">&nbsp; <b>macOS</b> &nbsp;<sub>13+ · Apple silicon, Intel</sub>
       <br><br>
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/mac/approval-night.png">
@@ -215,9 +215,9 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 
 ## Install
 
-**macOS** (13 or later, Apple silicon)
+**macOS** (13 or later, Apple silicon or Intel)
 
-1. Download the `.dmg` from [the latest release](https://github.com/dokyit/Trek/releases/latest) and drag **Trek** to **Applications**.
+1. Download the `.dmg` for your Mac from [the latest release](https://github.com/dokyit/Trek/releases/latest) (`darwin-aarch64` for Apple silicon, `darwin-x86_64` for Intel) and drag **Trek** to **Applications**.
 2. Releases are signed but not notarized yet. On first launch, open **System Settings › Privacy & Security** and click **Open Anyway**. Or run:
    ```sh
    xattr -dr com.apple.quarantine /Applications/Trek.app
@@ -268,14 +268,14 @@ On Xcode 26+, a missing Metal compiler is one command away: `xcodebuild -downloa
 | [Design decisions](docs/DECISIONS.md) | Why Trek is built the way it is |
 | [iPhone design and protocol](docs/MOBILE.md) | Pairing, TLS pinning, the wire protocol |
 | [Other machines](docs/MULTI-MACHINE.md) | Running a thread on another computer |
-| [Performance](docs/PERF.md) | How Trek is measured, and the numbers |
+| [Performance](docs/PERFORMANCE.md) | Launch, memory and CPU on a Mac, measured, with the command to run it again |
 | [Releasing](docs/RELEASING.md) | Channels, signing and the update path |
 | [All docs](docs/README.md) | The full index |
 
 ## Status
 
 Trek is **0.x**: used every day, moving fast. Expect rough edges.
-Apple silicon and Windows x64 only (no Linux yet). History import covers Claude Code, Codex and OpenCode.
+Mac (Apple silicon and Intel) and Windows x64 only (no Linux yet). History import covers Claude Code, Codex and OpenCode.
 See [open issues](https://github.com/dokyit/Trek/issues) and [what's next](docs/NEXT-WAVE.md).
 
 ## Contributing

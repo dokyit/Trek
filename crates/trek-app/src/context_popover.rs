@@ -9,6 +9,7 @@
 use crate::composer::Composer;
 use crate::fluent::{self, PillExt as _};
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::{Scope, Workspace};
 use gpui_kit::base::{
     Align, MotionStatus, POPUP_PRIORITY, Placement, Positioner, Transition, transition,
@@ -206,7 +207,7 @@ fn ink(cx: &App) -> Ink {
 
 /// The card's type: 12 px on a 16 px line.
 fn small<E: Styled>(el: E) -> E {
-    el.text_size(px(12.)).line_height(px(16.))
+    el.text_size(px(text::LABEL)).line_height(px(16.))
 }
 
 /// A soft shadow: `y` down, `blur` wide, black at `alpha`.
@@ -275,7 +276,7 @@ pub fn dial(used: u64, window: u64, cx: &App) -> impl IntoElement {
         .when(frac >= NEAR, |el| {
             el.child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(if frac >= 0.75 {
                         arc_color(frac, cx)
                     } else {
@@ -352,7 +353,7 @@ impl RenderOnce for RingTrigger {
                             .px(px(10.5))
                             .gap(px(7.5))
                             .items_center()
-                            .rounded(px(fluent::control(8.)))
+                            .rounded(px(fluent::control(radius::BUTTON)))
                             .bg(ink.surface)
                             .border_1()
                             .border_color(ink.tip_edge)
@@ -578,6 +579,8 @@ pub struct Card {
     running: bool,
     /// Nothing to compact (a draft, or no session yet).
     no_thread: bool,
+    /// Its agent has no way to compact on request: sent `/compact`, the model would just read it.
+    cant_compact: bool,
 }
 
 /// Keyed element state (it goes away with the card): the hovered part and its rows' bounds, for
@@ -745,6 +748,7 @@ impl Card {
             agent: thread.map(|t| t.agent.clone()),
             running: id.is_some_and(|id| ws.turn_running(id)),
             no_thread: thread.is_none(),
+            cant_compact: thread.is_some_and(|t| !ws.can_compact(scope, &t.agent)),
         }
     }
 
@@ -871,6 +875,7 @@ impl Card {
             cx,
         );
         let height = BAR * (1. + tall);
+        // scale: ok, the meter's segments, rounder as they grow
         let radius = 2. + 2. * tall;
         let breathing = fluent::pick(4. * tall, 0.);
         let shown_tokens = |p: &Part| match p.kind {
@@ -1039,7 +1044,7 @@ impl Card {
             .child(
                 v_flex()
                     .w(px(280.))
-                    .rounded(px(fluent::surface(14.)))
+                    .rounded(px(fluent::surface(radius::CARD)))
                     .bg(ink.surface)
                     .border_1()
                     .border_color(ink.edge)
@@ -1140,12 +1145,14 @@ impl Card {
             Compact::Idle | Compact::Unchanged { .. } => {
                 let why = if self.no_thread {
                     "Nothing to compact yet: send a message first."
+                } else if self.cant_compact {
+                    "{agent} can't compact on request. It does so by itself when it needs to."
                 } else if self.running {
                     "Stop the running turn to compact."
                 } else if self.limits.paused.is_some() {
                     "The thread is paused at a usage limit."
                 } else {
-                    "Sends /compact to {agent}: it summarizes the conversation so far."
+                    "Has {agent} summarize the conversation so far and go on from that."
                 };
                 let why = why.replace(
                     "{agent}",
@@ -1156,7 +1163,10 @@ impl Card {
                 );
                 (
                     "Compact now",
-                    !(self.no_thread || self.running || self.limits.paused.is_some()),
+                    !(self.no_thread
+                        || self.cant_compact
+                        || self.running
+                        || self.limits.paused.is_some()),
                     Some(SharedString::from(why)),
                 )
             }
@@ -1389,6 +1399,7 @@ fn legend_row(
         .child(
             div()
                 .size(px(8.))
+                // scale: ok, a legend key
                 .rounded(px(2.))
                 .flex_none()
                 // A dimmed swatch goes a little further than its text.
@@ -1470,7 +1481,7 @@ fn flyout(part: &Part, cx: &App) -> AnyElement {
         .pl(px(10.))
         .pr(px(11.))
         .gap(px(4.))
-        .rounded(px(fluent::surface(10.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .bg(ink.surface)
         .border_1()
         .border_color(ink.fly_edge)

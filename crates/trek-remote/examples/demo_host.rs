@@ -524,6 +524,7 @@ impl DemoHost {
                         title: "Run command".into(),
                         detail: "pnpm add -D @testing-library/user-event".into(),
                         state: ApprovalState::Pending,
+                        asked_by: None,
                     },
                 );
                 self.needs_you(
@@ -959,6 +960,7 @@ impl RemoteHost for DemoHost {
                     title,
                     detail,
                     state,
+                    asked_by,
                 },
                 AnswerResponse::Approval { decision },
             ) => {
@@ -978,6 +980,7 @@ impl RemoteHost for DemoHost {
                         title,
                         detail: detail.clone(),
                         state,
+                        asked_by,
                     },
                 );
                 tokio::spawn(self.clone().after_approval(
@@ -1265,8 +1268,11 @@ impl RemoteHost for DemoHost {
                 t.snoozed_until = t.pause.as_ref().and_then(|p| p.resets_at);
                 t.section = Section::Snoozed;
             }
-            ThreadAction::RegenerateTitle | ThreadAction::Delete { .. } | ThreadAction::Compact => {
-            }
+            ThreadAction::RegenerateTitle
+            | ThreadAction::Delete { .. }
+            | ThreadAction::Compact
+            | ThreadAction::ResumeInterrupted
+            | ThreadAction::DismissInterrupted => {}
         });
         Ok(())
     }
@@ -2032,6 +2038,7 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
                 title: "Run command".into(),
                 detail: "rm -rf target/".into(),
                 state: ApprovalState::Pending,
+                asked_by: None,
             },
         ],
     });
@@ -2608,7 +2615,7 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
                 text: "GPT-6".into(),
                 agent: codex,
             },
-            text(". Your agents were on the trail for "),
+            text(". Your agents worked for "),
             strong(format!(
                 "{}h {}m",
                 agent_secs / 3600,
@@ -2642,8 +2649,8 @@ fn demo_basecamp(range: BasecampRange, threads: &[ThreadSummary]) -> Basecamp {
             now: Some(n * 3 / 4),
             now_at: 0.75,
             line: summit
-                .map(|i| format!("Summit {}", buckets[i].label))
-                .unwrap_or_else(|| "A flat trail so far".into()),
+                .map(|i| format!("Peak {}", buckets[i].label))
+                .unwrap_or_else(|| "No activity yet".into()),
             total: format!("{prompts} prompts"),
             ticks: match range {
                 BasecampRange::Today => [(0.25, "6 AM"), (0.5, "Noon"), (0.75, "6 PM")]

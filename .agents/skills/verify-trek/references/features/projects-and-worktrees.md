@@ -2,7 +2,7 @@
 
 ## What it does
 
-Groups threads by working folder, remembers per-project defaults, supplies the title bar's hub (the Overview button: Open in, Run, the branch, Pull, the PR, context, usage, sources and lineage), and can start a thread in an isolated Git worktree. Trek tracks the worktree’s branch and supports returning work to the main folder.
+Groups threads by working folder, remembers per-project defaults, supplies the title bar's hub (the Overview button: Open in, Run, the branch, Pull, the PR, context, usage, sources and lineage), and can start a thread in an isolated Git worktree. Trek tracks the worktree’s branch and supports returning work to the main folder. Worktrees brought over from Conductor, T3 Code or Orca (see [Imports and updates](imports-and-updates.md)) run the same way, except that they stay that app's: no Remove worktree, no Recreate from branch, and leaving a thread leaves its folder. A project can also send a pull request's failing checks to the agent by itself (see [Git and turn changes](git-and-turn-changes.md)).
 
 ## Reach it as a user
 

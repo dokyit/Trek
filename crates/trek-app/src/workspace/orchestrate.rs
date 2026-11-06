@@ -311,6 +311,10 @@ impl Workspace {
         if trek_ipc::phone::is_method(&call.method) {
             return self.phone_call(call, cx);
         }
+        // A secret, through a card: every agent may ask, whatever the settings say.
+        if call.method == trek_ipc::SECRET_TOOL {
+            return self.secret_call(call, cx);
+        }
         // The thread's transcript, which every agent may read whatever the settings say.
         if trek_ipc::TRANSCRIPT_TOOLS.contains(&call.method.as_str()) {
             return self.transcript_call(call, cx);
@@ -514,7 +518,8 @@ impl Workspace {
         }
         let agent = self.resolve_agent(text("agent"), &parent.agent)?;
         let (model, effort) = self.pick_model(&agent, &parent, text("model"), text("effort"))?;
-        if let Some(why) = self.at_limit(&agent, model.as_deref()) {
+        let account = self.account_after(&parent, &agent);
+        if let Some(why) = self.at_limit(&agent, account.as_deref(), model.as_deref()) {
             return Err(why);
         }
         // Advising, it can't change anything: nothing it asks to do is approved (`screen_advice`).
@@ -530,6 +535,8 @@ impl Workspace {
             .create_thread(project.as_deref(), agent, model, effort, hand_holding)
             .map_err(|e| format!("Couldn't start the sub-agent: {e}"))?;
         child.title = title.chars().take(80).collect();
+        // On the account its parent is on: what that one's plan is for.
+        child.account = account;
         // Its parent's folder, worktree and all.
         child.cwd = parent.cwd.clone();
         child.worktree = parent.worktree.clone();
@@ -676,9 +683,14 @@ impl Workspace {
 
     /// Why `agent` can't take more work on `model` now: a usage limit it has used up, as its usage
     /// windows say (those on another model don't count), or as a thread of it paused at one says.
-    pub(super) fn at_limit(&self, agent: &AgentId, model: Option<&str>) -> Option<String> {
+    pub(super) fn at_limit(
+        &self,
+        agent: &AgentId,
+        account: Option<&str>,
+        model: Option<&str>,
+    ) -> Option<String> {
         let now = self.now();
-        let window = self.agent_status.get(&agent.key()).and_then(|st| {
+        let window = self.status_on(agent, account).and_then(|st| {
             st.limits.iter().find(|l| {
                 l.percent >= 99.5
                     && trek_agents::limits::applies(l, &LimitScope::Other, model)
@@ -699,7 +711,7 @@ impl Workspace {
         let paused = self
             .threads
             .iter()
-            .filter(|t| t.agent == *agent)
+            .filter(|t| t.agent == *agent && t.account.as_deref() == account)
             .filter_map(|t| t.paused.as_ref().map(|p| (t, p)))
             .filter(|(t, p)| match &p.scope {
                 LimitScope::Model(_) => t
@@ -1448,6 +1460,7 @@ impl Workspace {
         });
         let mut parked_before: std::collections::HashMap<String, bool> =
             std::collections::HashMap::new();
+        let mut waiting_parents: HashSet<String> = HashSet::new();
         for (parent, child, report) in held {
             let alive = self
                 .thread(&parent)
@@ -1480,12 +1493,18 @@ impl Workspace {
                     continue;
                 }
             };
-            let parked = cut_off.contains(&parent)
-                || *parked_before.entry(parent.clone()).or_insert_with(|| {
-                    self.store
-                        .items(&parent)
-                        .is_ok_and(|items| still_parked(&items))
-                });
+            let before = *parked_before.entry(parent.clone()).or_insert_with(|| {
+                self.store
+                    .items(&parent)
+                    .is_ok_and(|items| still_parked(&items))
+            });
+            // Nothing runs by itself after a restart unless the user turned that on: a parent left
+            // waiting on its sub-agents is a chat cut off like any other, and hears when it's
+            // picked up.
+            if !before && !cut_off.contains(&parent) && !self.settings.general.resume_interrupted {
+                waiting_parents.insert(parent.clone());
+            }
+            let parked = before || cut_off.contains(&parent) || waiting_parents.contains(&parent);
             let line = if parked {
                 &mut self.parked
             } else {
@@ -1498,9 +1517,17 @@ impl Workspace {
         let parked: Vec<(String, usize)> = self
             .parked
             .iter()
-            .filter(|(p, _)| cut_off.contains(p))
+            .filter(|(p, _)| cut_off.contains(p) || waiting_parents.contains(*p))
             .map(|(p, r)| (p.clone(), r.len()))
             .collect();
+        for parent in &waiting_parents {
+            if let Err(e) =
+                self.store
+                    .note_interrupted(parent, false, None, trek_core::store::now_ms())
+            {
+                tracing::warn!("note interrupted {parent}: {e:#}");
+            }
+        }
         for (parent, n) in parked {
             self.ensure_loaded(&parent, cx);
             let agent = self

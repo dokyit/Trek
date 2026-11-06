@@ -440,6 +440,12 @@ impl Workspace {
                 "This thread has no worktree.",
             ))));
         }
+        if let Some(app) = self.worktree_owner(&id) {
+            return drop(reply.send(Err(tr::HostError::bad_request(format!(
+                "This worktree is {}'s, so Trek leaves it where it is.",
+                app.name()
+            )))));
+        }
         let check = self.worktree_removal(&id, cx);
         cx.spawn(async move |this, cx| {
             let Some(r) = check.await else {

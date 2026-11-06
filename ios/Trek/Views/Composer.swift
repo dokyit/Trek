@@ -19,6 +19,7 @@ struct Composer: View {
     @State private var voice = Dictation()
     @Environment(AppModel.self) private var model: AppModel?
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var typeSize
     /// Where the caret goes back to if the dictation is dropped.
     @State private var wasFocused = false
     @MotionAllowed private var motion
@@ -82,16 +83,18 @@ struct Composer: View {
                                     listeningText(voice.heard.text)
                                 }
                             }
-                            .font(.ui(size: 17))
-                            .lineLimit(6)
+                            .font(.ui(size: 17, relativeTo: .body))
+                            .lineLimit(typeSize.isAccessibilitySize ? 3 : 6)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             DictationWave(levels: voice.levels)
                                 .frame(height: 22)
                                 .padding(.top, 4)
                         } else {
-                            TextField(placeholder, text: $text, axis: .vertical)
-                                .lineLimit(1...6)
-                                .font(.ui(size: 17))
+                            // The agent's name left "Messa…" at the accessibility sizes.
+                            TextField(typeSize.isAccessibilitySize ? "Message" : placeholder, text: $text, axis: .vertical)
+                                // At the accessibility sizes six lines would leave no transcript.
+                                .lineLimit(1...(typeSize.isAccessibilitySize ? 3 : 6))
+                                .font(.ui(size: 17, relativeTo: .body))
                                 .focused($focused)
                         }
                     }

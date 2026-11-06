@@ -6,6 +6,7 @@ import SwiftUI
 struct ThreadStatusStrip: View {
     var thread: ThreadSummary
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showingCost = false
     @State private var showingWork = false
 
@@ -32,7 +33,11 @@ struct ThreadStatusStrip: View {
                         .glassEffect(.regular.interactive(), in: Capsule())
                         .popover(isPresented: $showingCost) {
                             ContextCostDetail(context: thread.context, cost: thread.cost, threadID: thread.id)
-                                .presentationCompactAdaptation(.popover)
+                                // Solid: over a busy transcript, its muted lines read against what
+                                // showed through. At the accessibility sizes it needs the width.
+                                .presentationBackground(Trek.elevated)
+                                .presentationDragIndicator(.visible)
+                                .presentationCompactAdaptation(typeSize.isAccessibilitySize ? .sheet : .popover)
                         }
                         .accessibilityLabel(ContextCostLabel.spoken(thread.context, thread.cost))
                         .accessibilityHint("Shows context and cost")
@@ -116,6 +121,7 @@ struct ContextCostLabel: View {
         .padding(.horizontal, 11)
         .frame(height: 30)
         .contentShape(Capsule())
+        .barText()
     }
 
     private func line(cached: Bool) -> some View {
@@ -151,6 +157,7 @@ struct ContextCostDetail: View {
     /// The thread, for what fills its context and Compact now (a Mac that serves `context_card`).
     var threadID: String? = nil
     @Environment(AppModel.self) private var model
+    @Environment(\.dynamicTypeSize) private var typeSize
     /// The height of what scrolls when it's all shown, which the popover asks room for.
     @State private var scrollHeight: CGFloat?
 
@@ -205,7 +212,7 @@ struct ContextCostDetail: View {
             .scrollBounceBehavior(.basedOnSize)
             .frame(idealHeight: scrollHeight)
         }
-        .frame(idealWidth: 290, maxWidth: 320, alignment: .leading)
+        .frame(idealWidth: 290, maxWidth: typeSize.isAccessibilitySize ? .infinity : 320, alignment: .leading)
     }
 
     private func row(_ text: String, symbol: String) -> some View {
@@ -286,6 +293,7 @@ struct AtWorkLabel: View {
         .padding(.horizontal, 11)
         .frame(height: 30)
         .contentShape(Capsule())
+        .barText()
     }
 
     static func spoken(_ agents: [SubAgent], _ background: Int, earlier: Int = 0, waiting: Bool = false) -> String {

@@ -463,7 +463,7 @@ impl Workspace {
 
     /// What the turn ending at `end` of `id` changed through the agent's edit tools, with the
     /// lines each call reported; `None` when it changed nothing that way.
-    fn from_tools(&self, id: &str, end: usize) -> Option<TurnChanges> {
+    pub(super) fn from_tools(&self, id: &str, end: usize) -> Option<TurnChanges> {
         let live = self.live.get(id)?;
         let cwd = self.thread(id).and_then(|t| t.cwd.clone());
         let files = from_tools(&live.items, end, &live.lines, cwd.as_deref());

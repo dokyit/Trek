@@ -163,6 +163,7 @@ struct ThreadSettingsBar: View {
             .foregroundStyle(Trek.foreground)
             .padding(.horizontal, 10)
             .frame(height: 30)
+            .barText()
             .glassEffect(selected ? .regular.tint(Trek.foreground.opacity(0.12)).interactive() : .regular.interactive(), in: Capsule())
     }
 }

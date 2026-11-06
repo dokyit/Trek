@@ -83,6 +83,13 @@ print(f"jumps: {len(jumps)}")
 for t, ia, ib, dy, touch, why in jumps[:40]:
     print(f"  {t - t0:7.2f}s  row {ia} -> {ib}  ({why}){' finger down' if touch else ''}")
 print(f"blank frames: {len(blanks)}" + (f" (first at {blanks[0] - t0:.2f}s)" if blanks else ""))
+# With no finger on it (and no deceleration), a row on screen should only move at the latest, where
+# what's being written pushes it up. Scrolled up to read, any of this is the reader's place moving.
+if has_motion:
+    idle = [f for f in frames if not f["touch"] and f["m"] is not None]
+    moved = [f for f in idle if abs(f["m"]) > 0.5]
+    print(f"frames with nothing touching it: {len(idle)}; of them, the top row moved in {len(moved)}"
+          + (f", at most {max(abs(f['m']) for f in moved):.1f} pt in a frame" if moved else ""))
 kept = [n for _, n in notes if n.startswith("measured") and "above the screen" in n]
 if kept:
     print(f"rows measured above the screen, the offset moved to match: {len(kept)}")

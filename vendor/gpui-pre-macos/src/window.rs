@@ -77,10 +77,15 @@ use std::{
         Arc, Once, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const WINDOW_STATE_IVAR: &str = "windowState";
+
+/// Trek: how long a visible window goes on getting display link ticks with nothing to draw. Then
+/// they stop until GPUI has something for it (`frame_waker`), and an idle Trek on screen wakes the
+/// CPU for nothing no more.
+const FRAMES_IDLE_LIMIT: Duration = Duration::from_millis(250);
 
 static RESTORES_WORKSPACE_AT_LAUNCH_DEFAULT: Once = Once::new();
 
@@ -665,6 +670,10 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
+    // Trek: when something last asked for a frame or was drawn, and whether the frame source is
+    // stopped for having had nothing to draw since (`FRAMES_IDLE_LIMIT`).
+    frames_wanted_at: Instant,
+    frames_paused: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -833,6 +842,8 @@ impl MacWindowState {
 
     fn start_display_link(&mut self) {
         self.stop_display_link();
+        self.frames_paused = false;
+        self.frames_wanted_at = Instant::now();
         unsafe {
             if !self
                 .native_window
@@ -1105,6 +1116,8 @@ impl MacWindow {
                     bounds.size.map(|pixels| pixels.as_f32()),
                     false,
                 ),
+                frames_wanted_at: Instant::now(),
+                frames_paused: false,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -2011,6 +2024,27 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    // Trek: GPUI says here that it wants a frame (a view changed, a next-frame callback): a frame
+    // source stopped for lack of anything to draw starts again, and its first frame doesn't wait
+    // for the display link's first tick. Weak: GPUI's window keeps this, and this state keeps the
+    // frame callback that holds GPUI's invalidator.
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            let mut lock = state.lock();
+            lock.frames_wanted_at = Instant::now();
+            if lock.frames_paused {
+                lock.start_display_link();
+                if let Some(frame_source) = lock.frame_source.as_ref() {
+                    frame_source.request_frame();
+                }
+            }
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
     }
@@ -2112,6 +2146,7 @@ impl PlatformWindow for MacWindow {
 
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
+        this.frames_wanted_at = Instant::now();
         this.renderer.draw(scene);
     }
 
@@ -3402,7 +3437,13 @@ extern "C" fn step(view: *mut c_void) {
     if let Some(mut callback) = lock.request_frame_callback.take() {
         drop(lock);
         callback(Default::default());
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        // Trek: nothing to draw for a while: no more ticks until GPUI asks (`frame_waker`).
+        if lock.frames_wanted_at.elapsed() > FRAMES_IDLE_LIMIT {
+            lock.stop_display_link();
+            lock.frames_paused = true;
+        }
     }
 }
 

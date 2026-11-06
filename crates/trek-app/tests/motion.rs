@@ -861,11 +861,13 @@ fn groups_trading_places_pass_whole_the_one_going_up_over_the_other() {
             let Some(&(y0, y1, m0, m1)) = fills.first() else {
                 continue;
             };
-            for (_, _, m0, m1) in &fills {
-                let painted = (m0.max(band.0), m1.min(band.1));
+            // What's painted is the fill where its mask lets it be: a row clear of the band
+            // needs no mask to stay out of it.
+            for (f0, f1, m0, m1) in &fills {
+                let painted = (f0.max(*m0).max(band.0), f1.min(*m1).min(band.1));
                 assert!(
                     painted.1 - painted.0 < 0.5,
-                    "`a` painted under `b`'s group: mask {m0}..{m1}, group {band:?}"
+                    "`a` painted under `b`'s group: fill {f0}..{f1}, mask {m0}..{m1}, group {band:?}"
                 );
             }
             let mid = row_b.center().y.as_f32();

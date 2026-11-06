@@ -1,9 +1,13 @@
 //! Settings. A nav column replaces the thread sidebar (as in Codex). Pages are flat sections of
 //! hairline-separated rows: a label and one-line explanation on the left, the control on the right.
 
+mod accounts;
+mod coming_from;
 mod connections;
 mod mobile;
 mod pages;
+mod privacy;
+mod rules;
 pub(crate) use mobile::qr;
 pub(crate) use pages::theme_tiles;
 
@@ -38,6 +42,7 @@ pub mod shown {
 
 use crate::fluent::{self, PillExt as _};
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use crate::workspace::{Route, SettingsPage, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -77,6 +82,7 @@ pub fn page_icon(p: SettingsPage) -> Icon {
         SettingsPage::Permissions => Icon::new(crate::assets::Lucide::ShieldCheck),
         SettingsPage::Import => Icon::new(IconName::ArrowDown),
         SettingsPage::Updates => Icon::new(IconName::RefreshCw),
+        SettingsPage::Privacy => Icon::new(crate::assets::Lucide::Shield),
         SettingsPage::About => Icon::new(IconName::Info),
     }
 }
@@ -108,7 +114,14 @@ const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
         "Workflow",
         &[SettingsPage::Permissions, SettingsPage::Import],
     ),
-    ("Trek", &[SettingsPage::Updates, SettingsPage::About]),
+    (
+        "Trek",
+        &[
+            SettingsPage::Updates,
+            SettingsPage::Privacy,
+            SettingsPage::About,
+        ],
+    ),
 ];
 
 /// Every settings page, in the order the navigation lists them.
@@ -156,6 +169,7 @@ pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         SettingsPage::Tools => "Computer use, the iOS Simulator, and the MCP servers, skills and plugins your agents can call.".into(),
         SettingsPage::Permissions => "How much each agent may do without asking.".into(),
         SettingsPage::Updates => "Trek checks for signed updates, gets them ready in the background, and installs them when you restart or quit.".into(),
+        SettingsPage::Privacy => "What Trek shares with its developer, if you let it, and what it never does.".into(),
     }
 }
 
@@ -198,9 +212,9 @@ impl Render for SettingsNav {
                     .px(px(10.))
                     .h(px(30.))
                     .gap(px(10.))
-                    .rounded(px(fluent::control(7.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .cursor_pointer()
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
                     .hover(|s| {
                         s.bg(theme.foreground.opacity(0.045))
@@ -220,7 +234,7 @@ impl Render for SettingsNav {
                         div()
                             .px(px(10.))
                             .pb(px(6.))
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .font_medium()
                             .text_color(theme.muted_foreground.opacity(0.8))
                             .child(*group),
@@ -243,7 +257,7 @@ impl Render for SettingsNav {
                                         .px(px(6.))
                                         .rounded_pill()
                                         .bg(theme.foreground.opacity(0.08))
-                                        .text_size(px(11.))
+                                        .text_size(px(text::META))
                                         .text_color(theme.muted_foreground)
                                         .child(n.to_string()),
                                 )
@@ -299,6 +313,8 @@ pub struct SettingsView {
     skill_name: Entity<InputState>,
     skill_desc: Entity<InputState>,
     skill_home: trek_core::skills::SkillHome,
+    /// General page: what a resumed chat is sent.
+    resume_message: Entity<InputState>,
     /// Project page: the name field (and which project it currently shows), and the new-action fields.
     project_name: Entity<InputState>,
     project_name_for: Option<String>,
@@ -308,6 +324,8 @@ pub struct SettingsView {
     action_command: Entity<InputState>,
     /// Import page: rules whose left-out sessions are listed.
     left_out_open: HashSet<Skip>,
+    /// Permissions page: adding a rule, and trying one out.
+    rules: rules::RulesForm,
     /// Appearance › Material: how frosted liquid glass is, 0 (clear) to 100 (frosted).
     pub(super) glass_slider: Entity<gpui_kit::component::slider::SliderState>,
     /// What the Tools and Snapshots pages show from the Mac's setup, and whether the project's
@@ -325,6 +343,12 @@ pub struct SettingsView {
     pub(super) data_dir: std::path::PathBuf,
     installing_agents: Started,
     signing_in_agents: Started,
+    /// The account whose name is being edited (Settings › Agents & Subscriptions).
+    renaming: Option<accounts::Renaming>,
+    /// The pages' scroll, and the page it was last on: another page opens at its top, not where
+    /// the last one was left.
+    scroll: ScrollHandle,
+    scrolled_page: Option<SettingsPage>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -548,6 +572,39 @@ impl SettingsView {
                 }
             }),
         );
+        let resume_message = {
+            let (said, fallback) = {
+                let ws = workspace.read(cx);
+                (
+                    ws.settings.general.resume_message.clone(),
+                    trek_core::interrupted::RESUME_MESSAGE,
+                )
+            };
+            cx.new(|cx| {
+                let mut s = InputState::new(window, cx).placeholder(fallback);
+                s.set_value(said, window, cx);
+                s
+            })
+        };
+        subs.push(cx.subscribe_in(
+            &resume_message,
+            window,
+            |this: &mut Self, input, event: &gpui_kit::component::input::InputEvent, _, cx| {
+                if matches!(
+                    event,
+                    gpui_kit::component::input::InputEvent::PressEnter { .. }
+                        | gpui_kit::component::input::InputEvent::Blur
+                ) {
+                    let text = input.read(cx).value().trim().to_string();
+                    this.workspace.update(cx, |ws, cx| {
+                        if ws.settings.general.resume_message != text {
+                            ws.settings.general.resume_message = text;
+                            ws.save_settings(cx);
+                        }
+                    });
+                }
+            },
+        ));
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let action_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name, e.g. Test"));
         let worktree_copy =
@@ -646,6 +703,7 @@ impl SettingsView {
             mcp_header_name,
             mcp_header_value,
             mcp_editing: None,
+            resume_message,
             project_name,
             project_name_for: None,
             worktree_copy,
@@ -657,6 +715,7 @@ impl SettingsView {
             skill_desc,
             skill_home: trek_core::skills::SkillHome::ClaudeCode,
             left_out_open: HashSet::new(),
+            rules: rules::RulesForm::new(window, cx),
             glass_slider,
             tools: Probe::default(),
             secret_scan: Probe::default(),
@@ -667,6 +726,9 @@ impl SettingsView {
             data_dir: trek_core::paths::data_dir(),
             installing_agents: Started::default(),
             signing_in_agents: Started::default(),
+            renaming: None,
+            scroll: ScrollHandle::new(),
+            scrolled_page: None,
             _subscriptions: subs,
         }
     }
@@ -866,12 +928,12 @@ impl SettingsView {
                     .flex_1()
                     .min_w_0()
                     .gap(px(3.))
-                    .child(div().text_size(px(13.5)).font_medium().child(title))
+                    .child(div().text_size(px(text::TITLE)).font_medium().child(title))
                     .when(!description.is_empty(), |el| {
                         el.child(
                             div()
                                 .max_w(px(460.))
-                                .text_size(px(12.5))
+                                .text_size(px(text::BODY))
                                 .line_height(relative(1.5))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(description),
@@ -899,9 +961,9 @@ impl SettingsView {
         let status = |text: String, danger: bool| {
             div()
                 .pt(px(4.))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(if danger {
-                    theme.danger
+                    theme.red
                 } else {
                     theme.muted_foreground
                 })
@@ -1024,7 +1086,7 @@ impl SettingsView {
         div()
             .pt(px(36.))
             .pb(px(10.))
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .font_semibold()
             .text_color(cx.theme().foreground)
             .child(text.to_string())
@@ -1037,7 +1099,7 @@ impl SettingsView {
         div()
             .pb(px(16.))
             .max_w(px(560.))
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .line_height(relative(1.55))
             .text_color(cx.theme().muted_foreground)
             .child(text.to_string())
@@ -1054,7 +1116,7 @@ impl SettingsView {
             .max_w(px(460.))
             .gap(px(7.))
             .pt(px(2.))
-            .text_size(px(12.5));
+            .text_size(px(text::BODY));
         let dot = |color: Hsla| div().flex_none().size(px(6.)).rounded_full().bg(color);
         match check {
             McpCheck::Checking(_) => line
@@ -1106,7 +1168,7 @@ impl SettingsView {
     fn status_dot(color: Hsla, label: &'static str) -> AnyElement {
         h_flex()
             .gap(px(7.))
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .child(div().size(px(6.)).rounded_full().bg(color))
             .child(label)
             .into_any_element()
@@ -1130,7 +1192,7 @@ impl SettingsView {
                 div()
                     .w(px(100.))
                     .h(px(66.))
-                    .rounded(px(fluent::control(10.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .overflow_hidden()
                     .border_2()
                     .border_color(if selected {
@@ -1162,7 +1224,7 @@ impl SettingsView {
                             .relative()
                             .w(px(100.))
                             .h(px(66.))
-                            .rounded(px(fluent::control(10.)))
+                            .rounded(px(fluent::control(radius::BUTTON)))
                             .overflow_hidden()
                             .border_2()
                             .border_color(if selected {
@@ -1181,7 +1243,7 @@ impl SettingsView {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(if selected {
                                 theme.foreground
                             } else {
@@ -1201,7 +1263,7 @@ impl SettingsView {
                 tile("bg-choose".into(), false)
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child("Choose image…"),
                     )
@@ -1334,15 +1396,25 @@ impl SettingsView {
                 Some(v) => format!("{account} · v{}", v.trim_end_matches('.')),
                 None => account,
             };
+            // With other accounts beside it, this row is the normal login's.
+            let account = match ws.has_accounts(&a.agent) {
+                true => format!("{} · {account}", crate::workspace::accounts::DEFAULT_LABEL),
+                false => account,
+            };
             let title = h_flex()
                 .gap(px(10.))
                 .child(ui::agent_logo(&a.agent, px(22.), cx))
                 .child(
                     v_flex()
-                        .child(div().text_size(px(14.)).font_medium().child(a.name.clone()))
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(text::TITLE))
+                                .font_medium()
+                                .child(a.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(text::BODY))
                                 .text_color(if needs_login {
                                     palette::amber(cx)
                                 } else {
@@ -1458,12 +1530,32 @@ impl SettingsView {
                         }
                     });
                 }));
+            let add_account = self.add_account_button(&a.agent, cx);
             let controls = h_flex()
                 .gap(px(6.))
                 .children(sign_in)
+                .children(add_account)
                 .children(more)
                 .child(div().pl(px(4.)).child(toggle));
             rows.push(Self::row(title, "", controls, cx));
+            rows.extend(self.account_rows(&a.agent, cx));
+        }
+        // Beside the accounts, for those who have some.
+        if !self.workspace.read(cx).settings.accounts.is_empty() {
+            rows.push(Self::row(
+                "Continue on another account at a limit",
+                "When a limit stops a thread and another account of its agent has room, the thread carries on there by itself, in a new session from a recap. Off, the bar above the prompt offers it and the choice stays yours.",
+                self.switch(
+                    "continue-on-other-account",
+                    self.workspace
+                        .read(cx)
+                        .settings
+                        .general
+                        .continue_on_other_account,
+                    |s, v| s.general.continue_on_other_account = v,
+                ),
+                cx,
+            ));
         }
         // Updates to install come first; otherwise the setting waits under the agents.
         let first = self.workspace.read(cx).agent_updates.pending() > 0
@@ -1515,7 +1607,12 @@ impl SettingsView {
                     let title = h_flex()
                         .gap(px(10.))
                         .child(ui::agent_logo(&a.agent, px(22.), cx))
-                        .child(div().text_size(px(14.)).font_medium().child(a.name.clone()));
+                        .child(
+                            div()
+                                .text_size(px(text::TITLE))
+                                .font_medium()
+                                .child(a.name.clone()),
+                        );
                     // One the user added: what's missing, and its menu (update, remove).
                     if let Some(menu) = self.added_menu(&a.agent, cx) {
                         return Self::row(title, install, menu, cx);
@@ -1710,7 +1807,7 @@ impl SettingsView {
         let heading = if first {
             div()
                 .pb(px(10.))
-                .text_size(px(13.))
+                .text_size(px(text::BODY))
                 .font_semibold()
                 .child("Updates")
                 .into_any_element()
@@ -1726,7 +1823,7 @@ impl SettingsView {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .text_color(cx.theme().muted_foreground)
                             .child(crate::agent_updates::WHY),
                     )
@@ -1960,7 +2057,7 @@ impl SettingsView {
             div()
                 .id(SharedString::from(format!("{id}-checking")))
                 .test_support()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(muted)
                 .child("Checking…")
                 .into_any_element()
@@ -2048,14 +2145,14 @@ impl SettingsView {
         if !crate::words::is_windows() {
             computer_use.push(Self::row(
                 "Work in the background",
-                "Agents click and type in a window of their own behind yours, so you keep the pointer and keyboard. If they need the app you're using, they wait and ask you instead of taking it over, and they use an app that's already open rather than open a second copy. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
+                "Agents click and type in an app's window behind yours, so you keep the pointer and keyboard, and what they open stays behind. The app in front is yours while you're at the Mac, even if you're only reading: if they need it, they wait and ask you instead of taking it over. They use an app that's already open rather than open a second copy. Off: they use the real pointer and keyboard, in front. Applies to new sessions.",
                 self.switch("computer-background", s.tools.computer_background, |s, v| s.tools.computer_background = v),
                 cx,
             ));
             if s.tools.computer_background {
                 computer_use.push(Self::row(
                     "Show what they're doing",
-                    &format!("A small floating picture of the window an agent works in, live. Fold it to a pill or put it away; bring it back from the {}.", crate::words::words().tray_label.to_lowercase()),
+                    &format!("A small floating picture of the window an agent works in, live, with Stop. Fold it to a pill or put it away; bring it back from the {}.", crate::words::words().tray_label.to_lowercase()),
                     self.switch("background-pip", s.tools.background_pip, |s, v| s.tools.background_pip = v),
                     cx,
                 ));
@@ -2307,7 +2404,7 @@ impl SettingsView {
                             .px(px(6.))
                             .rounded_pill()
                             .bg(cx.theme().foreground.opacity(0.07))
-                            .text_size(px(11.))
+                            .text_size(px(text::META))
                             .font_normal()
                             .text_color(muted)
                             .child(transport),
@@ -2315,7 +2412,7 @@ impl SettingsView {
                     .when(editing.as_deref() == Some(m.name.as_str()), |el| {
                         el.child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(px(text::META))
                                 .font_normal()
                                 .text_color(muted)
                                 .child("Editing below"),
@@ -2346,7 +2443,7 @@ impl SettingsView {
                         div()
                             .id("mcp-editing")
                             .test_support()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .text_color(muted)
                             .child(format!("Editing {name}. A value shown as … stays as saved unless you type over it.")),
                     )
@@ -2397,7 +2494,7 @@ impl SettingsView {
                     .id("tools-reading")
                     .test_support()
                     .py(px(16.))
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .text_color(muted)
                     .child("Reading your agents' setup…")
                     .into_any_element(),
@@ -2416,7 +2513,7 @@ impl SettingsView {
                     names.join(", ")
                 },
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .child(names.len().to_string()),
                 cx,
@@ -2443,7 +2540,7 @@ impl SettingsView {
                                 .join(", ")
                         ),
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(muted)
                             .child(skills.len().to_string()),
                         cx,
@@ -2461,7 +2558,7 @@ impl SettingsView {
                 },
                 div()
                     .font_family(mono)
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .child(plugins.len().to_string()),
                 cx,
@@ -2551,7 +2648,7 @@ impl SettingsView {
                                 .child(ui::agent_logo(&a.agent, px(18.), cx))
                                 .child(
                                     div()
-                                        .text_size(px(13.5))
+                                        .text_size(px(text::TITLE))
                                         .font_medium()
                                         .child(a.name.clone()),
                                 );
@@ -2590,7 +2687,10 @@ impl SettingsView {
                                 .gap(px(10.))
                                 .child(ui::agent_logo(&AgentId::ClaudeCode, px(18.), cx))
                                 .child(
-                                    div().text_size(px(13.5)).font_medium().child("Claude Code"),
+                                    div()
+                                        .text_size(px(text::TITLE))
+                                        .font_medium()
+                                        .child("Claude Code"),
                                 ),
                             "~/.claude/projects",
                             self.switch("imp-claude", s.import.claude_code, |s, v| {
@@ -2602,7 +2702,12 @@ impl SettingsView {
                             h_flex()
                                 .gap(px(10.))
                                 .child(ui::agent_logo(&AgentId::Codex, px(18.), cx))
-                                .child(div().text_size(px(13.5)).font_medium().child("Codex")),
+                                .child(
+                                    div()
+                                        .text_size(px(text::TITLE))
+                                        .font_medium()
+                                        .child("Codex"),
+                                ),
                             "~/.codex",
                             self.switch("imp-codex", s.import.codex, |s, v| s.import.codex = v),
                             cx,
@@ -2611,7 +2716,12 @@ impl SettingsView {
                             h_flex()
                                 .gap(px(10.))
                                 .child(ui::agent_logo(&AgentId::OpenCode, px(18.), cx))
-                                .child(div().text_size(px(13.5)).font_medium().child("OpenCode")),
+                                .child(
+                                    div()
+                                        .text_size(px(text::TITLE))
+                                        .font_medium()
+                                        .child("OpenCode"),
+                                ),
                             "~/.local/share/opencode",
                             self.switch("imp-opencode", s.import.opencode, |s, v| {
                                 s.import.opencode = v
@@ -2663,13 +2773,20 @@ impl SettingsView {
                                 1 => line.push_str(" · 1 helper session left out"),
                                 n => line.push_str(&format!(" · {n} helper sessions left out")),
                             }
-                            el.child(div().text_sm().text_color(muted).child(line))
+                            el.child(
+                                div()
+                                    .text_size(to_rems(text::LABEL))
+                                    .text_color(muted)
+                                    .child(line),
+                            )
                         })
                         .into_any_element(),
                 );
+                out.extend(self.coming_from_section(cx));
                 out.extend(self.left_out_section(cx));
             }
             SettingsPage::Updates => out.extend(self.updates_page(&s, cx)),
+            SettingsPage::Privacy => out.extend(self.privacy_page(cx)),
             SettingsPage::About => out.extend(self.about_page(&s, cx)),
         }
         out
@@ -2792,10 +2909,10 @@ impl SettingsView {
                 .gap(px(6.))
                 .h(px(26.))
                 .px(px(8.))
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(muted)
                 .child(sessions.len().to_string())
                 .child(
@@ -2837,7 +2954,7 @@ impl SettingsView {
         // Long temp-folder paths are cut; when it happened stays readable.
         let meta = h_flex()
             .gap(px(6.))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(muted)
             .when(!place.is_empty(), |el| {
                 el.child(div().min_w_0().truncate().child(place)).child("·")
@@ -2860,7 +2977,12 @@ impl SettingsView {
                     .flex_1()
                     .min_w_0()
                     .gap(px(2.))
-                    .child(div().text_size(px(13.)).truncate().child(t.title.clone()))
+                    .child(
+                        div()
+                            .text_size(px(text::BODY))
+                            .truncate()
+                            .child(t.title.clone()),
+                    )
                     .child(meta),
             )
             .child(
@@ -2888,11 +3010,19 @@ impl Render for SettingsView {
             self.sync_project_name(window, cx);
         }
         let body = self.content(cx);
+        if self
+            .scrolled_page
+            .replace(page)
+            .is_some_and(|was| was != page)
+        {
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        }
         div()
             .id("settings-content")
             .test_support()
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .child(
                 h_flex().w_full().justify_center().child(
                     v_flex()
@@ -2901,13 +3031,18 @@ impl Render for SettingsView {
                         .px(px(48.))
                         .pt(px(44.))
                         .pb(px(80.))
-                        .child(div().text_size(px(20.)).font_semibold().child(page.label()))
+                        .child(
+                            div()
+                                .text_size(px(text::DISPLAY_S))
+                                .font_semibold()
+                                .child(page.label()),
+                        )
                         .when(!page_blurb(page).is_empty(), |el| {
                             el.child(
                                 div()
                                     .pt(px(6.))
                                     .max_w(px(560.))
-                                    .text_size(px(13.))
+                                    .text_size(px(text::BODY))
                                     .line_height(relative(1.5))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(page_blurb(page).into_owned()),

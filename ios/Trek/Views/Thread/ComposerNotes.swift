@@ -1,5 +1,81 @@
 import SwiftUI
 
+/// Over the composer, as the Mac's: this thread's turn was cut off when Trek closed, how its agent
+/// comes back, and Resume. Words and buttons as the Mac's own bar has them (`interrupted_bar`).
+struct CutShortBar: View {
+    var thread: ThreadSummary
+    var cut: CutShort
+    @Environment(AppModel.self) private var model
+
+    private var tint: Color {
+        switch cut.state {
+        case .failed: Trek.failed
+        case .resuming: Trek.muted
+        case .offered: Trek.approval
+        }
+    }
+
+    var title: String {
+        switch cut.state {
+        case .resuming: "Resuming…"
+        case .failed: "Couldn't resume"
+        case .offered: cut.waiting ? "Waiting for you when Trek closed" : "Interrupted"
+        }
+    }
+
+    var detail: String {
+        switch cut.state {
+        case .resuming: cut.how
+        case .failed: cut.why ?? cut.how
+        case .offered: cut.waiting ? (cut.asked ?? "Its question went with Trek. Ask again to bring it back.") : cut.how
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if cut.state == .resuming {
+                    RingSpinner(size: 13)
+                } else {
+                    Image(systemName: cut.state == .failed ? "exclamationmark.triangle.fill" : "bolt.horizontal.circle")
+                        .foregroundStyle(tint)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.foreground)
+                    Text(detail).font(.ui(.footnote)).foregroundStyle(Trek.muted).lineLimit(3)
+                }
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .combine)
+            if cut.state != .resuming {
+                HStack(spacing: 8) {
+                    action(cut.state == .failed ? "Retry" : cut.waiting ? "Ask again" : "Resume", strong: true) {
+                        model.resumeCutShort(thread.id)
+                    }
+                    action("Dismiss", strong: false) { model.dismissCutShort(thread.id) }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(12)
+        .background(Trek.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(tint.opacity(0.35), lineWidth: 0.75))
+    }
+
+    private func action(_ title: String, strong: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.ui(.footnote).weight(strong ? .semibold : .medium))
+                .foregroundStyle(strong ? CardInk.onButton : Trek.foreground)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 32)
+                .background(strong ? CardInk.button : Trek.foreground.opacity(0.06), in: Capsule())
+                .fixedSize()
+        }
+        .buttonStyle(CardPress())
+    }
+}
+
 /// Over the composer while the thread is paused at its agent's usage limit, as the Mac's limit
 /// bar (`composer.rs`): what happened, when the limit resets, and what to do about it — resume
 /// by itself at the reset (or not), try again now, snooze the thread until then, or switch to

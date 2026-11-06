@@ -4,9 +4,11 @@
 //! merge into the base, remove the worktree. It also shows what one turn of a thread changed
 //! (`show_turn`, from the card under the turn's answer): between the checkpoints around it.
 
+use crate::diff_review::{self, Arrive, Card, DiffReview, Draft, Nav, ReviewHost};
 use crate::fluent;
 use crate::palette;
-use crate::workspace::{TurnRange, Workspace};
+use crate::scale::{radius, text, to_rems};
+use crate::workspace::{Scope, TurnRange, Workspace, WorkspaceEvent};
 use gpui_kit::base::ScrollbarHandle;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
@@ -254,6 +256,94 @@ fn diff_body(text: &str, mut in_hunk: bool) -> Vec<(LineKind, String)> {
         .collect()
 }
 
+/// How tall a line of the diff is (`uniform_list`: every row the same).
+const DIFF_ROW: f32 = 19.;
+/// Where a line's "+" (comment) sits: over the line's own + or − (the row's 12 px of padding,
+/// then the sign), not half on it.
+const PLUS_LEFT: f32 = 8.5;
+/// A file row's xsmall icon button (Viewed, Revert).
+const ROW_BUTTON: f32 = 20.;
+
+/// A row of the diff list: a line of `GitPanel::diff`, or a row a comment's card covers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DiffRow {
+    Line(usize),
+    Card {
+        card: Card,
+        part: usize,
+        rows: usize,
+    },
+}
+
+/// What the lines of one file's diff are, to move around on (`diff_review::Nav`): numbered from
+/// each `@@` head. An untracked file's lines have no head and count from 1; what comes before the
+/// first head otherwise is no line of the file (a mode, "Binary file", an error).
+fn line_nav(lines: &[(LineKind, String)]) -> Vec<Nav> {
+    let (mut old, mut new) = (1u32, 1u32);
+    let mut hunk: Option<usize> = None;
+    let mut nav = Vec::with_capacity(lines.len());
+    for (kind, text) in lines {
+        nav.push(match kind {
+            LineKind::Hunk => {
+                let (first_old, first_new) = hunk_starts(text).unwrap_or((old, new));
+                (old, new) = (first_old, first_new);
+                let n = hunk.map_or(0, |h| h + 1);
+                hunk = Some(n);
+                Nav::Hunk { file: 0, hunk: n }
+            }
+            LineKind::Add => {
+                new += 1;
+                Nav::Line {
+                    file: 0,
+                    hunk,
+                    old: None,
+                    new: Some(new - 1),
+                    changed: true,
+                }
+            }
+            LineKind::Del if hunk.is_some() => {
+                old += 1;
+                Nav::Line {
+                    file: 0,
+                    hunk,
+                    old: Some(old - 1),
+                    new: None,
+                    changed: true,
+                }
+            }
+            LineKind::Ctx if hunk.is_some() && !text.starts_with('\\') => {
+                old += 1;
+                new += 1;
+                Nav::Line {
+                    file: 0,
+                    hunk,
+                    old: Some(old - 1),
+                    new: Some(new - 1),
+                    changed: false,
+                }
+            }
+            _ => Nav::Skip,
+        });
+    }
+    nav
+}
+
+/// The first old and new line of the hunk with head `head` (`@@ -a,b +c,d @@`). An empty side
+/// starts just after the line its head names.
+fn hunk_starts(head: &str) -> Option<(u32, u32)> {
+    let rest = head.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(' ')?;
+    let new = rest.strip_prefix('+')?.split_once(' ')?.0;
+    let side = |s: &str| -> Option<u32> {
+        let (start, count) = match s.split_once(',') {
+            Some((a, b)) => (a.parse::<u32>().ok()?, b.parse::<u32>().ok()?),
+            None => (s.parse::<u32>().ok()?, 1),
+        };
+        Some(if count == 0 { start + 1 } else { start })
+    };
+    Some((side(old)?, side(new)?))
+}
+
 /// The largest untracked file that's read to count or show its lines: the list is read again
 /// whenever the files change, and an agent's log or a dataset left in the folder can run to
 /// gigabytes.
@@ -398,6 +488,19 @@ pub struct GitPanel {
     loading: bool,
     selected: Option<String>,
     diff: Vec<(LineKind, String)>,
+    /// The file `diff` is of.
+    diff_path: Option<String>,
+    /// What the diff list draws, with comments' cards among the lines, and what each row is.
+    diff_rows: std::rc::Rc<Vec<DiffRow>>,
+    diff_nav: Vec<Nav>,
+    /// The cards among the rows (`diff_review::card_ends`).
+    diff_cards: Vec<(Card, usize)>,
+    /// The row that sets how far a sideways scroll goes.
+    diff_widest: Option<usize>,
+    /// Comments, the cursor and the keys (`diff_review`).
+    diff_review: DiffReview,
+    /// The diff's own focus: its keys work while it has it.
+    diff_focus: FocusHandle,
     /// The diff pane's scroll position (both axes); a new selection starts at the top left.
     diff_scroll: UniformListScrollHandle,
     message: Entity<InputState>,
@@ -414,6 +517,8 @@ pub struct GitPanel {
     _task: Option<Task<()>>,
     /// Reading the selected file's diff; a newer selection replaces it.
     _diff: Option<Task<()>>,
+    /// Asking whether files marked viewed still say what they said (`recheck_viewed`).
+    _viewed: Option<Task<()>>,
     /// A turn's changes on show instead of the working tree's, until closed or another thread
     /// comes on screen.
     turn: Option<TurnView>,
@@ -432,6 +537,9 @@ impl GitPanel {
     ) -> Self {
         let message = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let sub = cx.observe(&workspace, |this, ws, cx| {
+            if ws.read(cx).review_notes_epoch != this.diff_review.seen_epoch {
+                this.rebuild_diff_rows(cx);
+            }
             let (cwd, turns, target, preparing, thread) = {
                 let ws = ws.read(cx);
                 // Another branch checked out counts as news too: the changed files are other ones.
@@ -474,6 +582,13 @@ impl GitPanel {
             loading: false,
             selected: None,
             diff: vec![],
+            diff_path: None,
+            diff_rows: Default::default(),
+            diff_nav: vec![],
+            diff_cards: vec![],
+            diff_widest: None,
+            diff_review: DiffReview::default(),
+            diff_focus: cx.focus_handle(),
             diff_scroll: UniformListScrollHandle::new(),
             message,
             busy: None,
@@ -484,6 +599,7 @@ impl GitPanel {
             _subscriptions: vec![sub],
             _task: None,
             _diff: None,
+            _viewed: None,
             turn: None,
         };
         this.refresh(cx);
@@ -524,7 +640,7 @@ impl GitPanel {
             renamed,
         });
         self.selected = None;
-        self.diff.clear();
+        self.clear_diff();
         if let Some(p) = first {
             self.select(p, cx);
         }
@@ -535,7 +651,7 @@ impl GitPanel {
     fn close_turn(&mut self, cx: &mut Context<Self>) {
         if self.turn.take().is_some() {
             self.selected = None;
-            self.diff.clear();
+            self.clear_diff();
             self._diff = None;
             cx.notify();
         }
@@ -607,7 +723,7 @@ impl GitPanel {
         if target != self.target || preparing != self.preparing {
             self.review = None;
             self.selected = None;
-            self.diff.clear();
+            self.clear_diff();
             self._diff = None;
         }
         self.cwd = cwd;
@@ -713,11 +829,12 @@ impl GitPanel {
             .is_some_and(|s| !self.snap.files.iter().any(|f| &f.path == s))
         {
             self.selected = None;
-            self.diff.clear();
+            self.clear_diff();
         }
         if let Some(sel) = self.selected.clone() {
             self.select(sel, cx);
         }
+        self.recheck_viewed(cx);
         cx.notify();
     }
 
@@ -754,6 +871,7 @@ impl GitPanel {
             .zip(self.change(&path));
         let target = self.target.clone();
         self.selected = Some(path.clone());
+        self.arrive_at(&path);
         self.diff_scroll.set_offset(point(px(0.), px(0.)));
         // Only the newest selection's diff lands: an older one still being read is dropped.
         self._diff = Some(cx.spawn(async move |this, cx| {
@@ -770,8 +888,7 @@ impl GitPanel {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.selected.as_deref() == Some(path.as_str()) && this.target == target {
-                    this.diff = lines;
-                    cx.notify();
+                    this.set_diff(path, lines, cx);
                 }
             });
         }));
@@ -784,6 +901,7 @@ impl GitPanel {
             return;
         }
         self.selected = Some(path.clone());
+        self.arrive_at(&path);
         self.diff_scroll.set_offset(point(px(0.), px(0.)));
         let old = turn.renamed.get(&path).cloned();
         let range = turn.range.clone();
@@ -809,8 +927,7 @@ impl GitPanel {
                 if this.selected.as_deref() == Some(path.as_str())
                     && this.turn.as_ref().is_some_and(|t| t.range == turn.range)
                 {
-                    this.diff = lines;
-                    cx.notify();
+                    this.set_diff(path, lines, cx);
                 }
             });
         }));
@@ -1001,6 +1118,7 @@ impl GitPanel {
             .map(|t| t.title.clone())
             .unwrap_or_default();
         let branch = t.wt.branch.clone();
+        let (thread, dir, pr_title) = (t.thread.clone(), t.wt.path.clone(), title.clone());
         self.run_op(
             "Pull request",
             move || {
@@ -1009,6 +1127,10 @@ impl GitPanel {
             },
             move |this, url, _, cx| {
                 cx.open_url(&url);
+                // A pull request this thread opened: its failing checks are its to hear about.
+                this.workspace.update(cx, |ws, cx| {
+                    ws.pr_checks_track(&thread, &url, &dir, &pr_title, cx)
+                });
                 this.prs.insert(branch, Some(url));
             },
             window,
@@ -1108,7 +1230,7 @@ impl GitPanel {
             .gap_2()
             .border_b_1()
             .border_color(theme.border)
-            .text_sm()
+            .text_size(to_rems(text::LABEL))
             .child(
                 Icon::new(crate::assets::Lucide::GitBranch)
                     .small()
@@ -1129,18 +1251,23 @@ impl GitPanel {
                 el.child(
                     div()
                         .flex_none()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(muted)
                         .child(format!("off {}", t.wt.base)),
                 )
             })
             .when(ahead > 0, |el| {
-                el.child(div().text_xs().text_color(muted).child(format!("↑{ahead}")))
+                el.child(
+                    div()
+                        .text_size(to_rems(text::META))
+                        .text_color(muted)
+                        .child(format!("↑{ahead}")),
+                )
             })
             .when(behind > 0, |el| {
                 el.child(
                     div()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(muted)
                         .child(format!("↓{behind}")),
                 )
@@ -1155,7 +1282,7 @@ impl GitPanel {
                         .id("git-base-ahead")
                         .test_support()
                         .flex_none()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(muted)
                         .child(format!("{base} ↑{n}"))
                         .tooltip(move |window, cx| {
@@ -1181,6 +1308,15 @@ impl GitPanel {
         let total_del: i64 = self.files().iter().map(|f| f.deletions).sum();
         let selected = self.selected.clone();
         let revertible = self.target.is_some() && self.turn.is_none();
+        let key = self.notes_key(cx);
+        let is_viewed = |path: &str, cx: &App| {
+            key.as_ref().is_some_and(|key| {
+                self.workspace
+                    .read(cx)
+                    .is_viewed(key, &self.viewed_name(path))
+            })
+        };
+        let (viewed, listed) = self.viewed_counts(cx);
         v_flex()
             .id("git-files")
             .max_h(px(260.))
@@ -1190,26 +1326,44 @@ impl GitPanel {
                 h_flex()
                     .px_3()
                     .py_1()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .child(summary)
+                    .when(listed > 0, |el| {
+                        el.child(
+                            div()
+                                .id("git-viewed")
+                                .test_support()
+                                .pl_1()
+                                .child(diff_review::viewed_label(viewed, listed)),
+                        )
+                    })
                     .child(div().flex_1())
-                    .child(crate::line_breakdown::hover(
-                        "git-lines",
-                        h_flex()
-                            .child(
-                                div()
-                                    .text_color(palette::emerald(cx))
-                                    .child(format!("+{total_add}")),
-                            )
-                            .child(
-                                div()
-                                    .pl_1()
-                                    .text_color(palette::red(cx))
-                                    .child(format!("−{total_del}")),
-                            ),
-                        self.line_breakdown(),
-                    )),
+                    // A clean tree has no totals to give: "+0 −0" only looks like something.
+                    .when(!self.files().is_empty(), |el| {
+                        el.child(crate::line_breakdown::hover(
+                            "git-lines",
+                            h_flex()
+                                .child(
+                                    div()
+                                        .text_color(palette::emerald(cx))
+                                        .child(format!("+{total_add}")),
+                                )
+                                .child(
+                                    div()
+                                        .pl_1()
+                                        .text_color(palette::red(cx))
+                                        .child(format!("−{total_del}")),
+                                ),
+                            self.line_breakdown(),
+                        ))
+                    })
+                    // The rows' buttons after their counts (laid out even while hidden), as
+                    // room here: the totals stand over the rows' numbers.
+                    .children(
+                        (0..1 + usize::from(revertible))
+                            .map(|_| div().flex_none().ml_2().w(px(ROW_BUTTON))),
+                    ),
             )
             .children(self.files().iter().map(|f| {
                 let color = match f.status.as_str() {
@@ -1229,6 +1383,8 @@ impl GitPanel {
                     None => (String::new(), f.path.clone()),
                 };
                 let revert_path = f.path.clone();
+                let viewed_path = f.path.clone();
+                let viewed = is_viewed(&f.path, cx);
                 h_flex()
                     .id(SharedString::from(format!("gf-{}", f.path)))
                     .test_support()
@@ -1238,16 +1394,16 @@ impl GitPanel {
                     .px_2()
                     .h(px(28.))
                     .gap_2()
-                    .rounded(px(fluent::control(6.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .cursor_pointer()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .when(is_sel, |el| el.bg(theme.list_active))
                     .when(!is_sel, |el| el.hover(|s| s.bg(theme.list_hover)))
                     .children(fluent::selection_bar(is_sel, cx))
                     .child(
                         div()
                             .w(px(12.))
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .font_semibold()
                             .text_color(color)
                             .child(letter),
@@ -1257,12 +1413,17 @@ impl GitPanel {
                             .flex_1()
                             .min_w_0()
                             .overflow_hidden()
-                            .child(div().flex_none().child(name))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .when(viewed, |el| el.text_color(muted))
+                                    .child(name),
+                            )
                             .child(
                                 div()
                                     .pl_1()
                                     .truncate()
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .text_color(muted)
                                     .child(dir),
                             ),
@@ -1272,7 +1433,7 @@ impl GitPanel {
                             format!("gf-lines-{}", f.path),
                             h_flex()
                                 .gap_2()
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .when(f.additions > 0, |el| {
                                     el.child(
                                         div()
@@ -1290,6 +1451,35 @@ impl GitPanel {
                             line_breakdown(std::slice::from_ref(f)),
                         ))
                     })
+                    // Marked viewed: the tick stays. Otherwise it's there on hover to mark it.
+                    .child(
+                        div()
+                            .when(!viewed, |el| {
+                                el.invisible().group_hover("git-file", |s| s.visible())
+                            })
+                            .child(
+                                crate::ui::icon_button(
+                                    SharedString::from(format!("gf-viewed-{}", f.path)),
+                                    Icon::new(crate::assets::Lucide::Check)
+                                        .when(viewed, |i| i.text_color(palette::emerald(cx))),
+                                    if viewed {
+                                        "Viewed".to_string()
+                                    } else {
+                                        format!(
+                                            "Mark viewed ({})",
+                                            crate::keys::hint(crate::keys::Id::DiffViewed)
+                                        )
+                                    },
+                                )
+                                .xsmall()
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_viewed_path(viewed_path.clone(), cx);
+                                    },
+                                )),
+                            ),
+                    )
                     .when(revertible, |el| {
                         el.child(
                             div()
@@ -1311,71 +1501,469 @@ impl GitPanel {
                                 ),
                         )
                     })
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(path.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select(path.clone(), cx);
+                        this.diff_focus.focus(window, cx);
+                    }))
             }))
     }
 
-    fn diff_view(&self, empty: &'static str, cx: &mut Context<Self>) -> AnyElement {
-        if self.selected.is_none() {
-            return super::empty(
-                if self.files().is_empty() {
-                    empty
-                } else {
-                    "Select a file to view its diff."
-                },
-                cx,
-            )
-            .into_any_element();
+    fn diff_view(
+        &mut self,
+        empty: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Cards wrap to the width they're drawn at: measured again when that moves.
+        let width = self.diff_list_width();
+        if (width - self.diff_review.measured).abs() > 1. {
+            self.diff_review.measured = width;
+            if !self.diff_cards.is_empty() {
+                self.compute_diff_rows(cx);
+            }
         }
+        let body = if self.selected.is_none() {
+            let (viewed, listed) = self.viewed_counts(cx);
+            let text: SharedString = if listed == 0 {
+                empty.into()
+            } else if viewed == listed {
+                format!(
+                    "All {listed} file{} viewed.",
+                    if listed == 1 { "" } else { "s" }
+                )
+                .into()
+            } else {
+                "Select a file to view its diff.".into()
+            };
+            super::empty(text, cx).into_any_element()
+        } else {
+            let list = uniform_list(
+                "git-diff",
+                self.diff_rows.len(),
+                cx.processor(|this, range, window, cx| this.render_diff_rows(range, window, cx)),
+            )
+            .size_full()
+            .track_scroll(&self.diff_scroll)
+            .with_width_from_item(self.diff_widest)
+            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained);
+            div()
+                .id("git-diff-list")
+                .size_full()
+                .child(list)
+                .vertical_scrollbar(&self.diff_scroll)
+                .horizontal_scrollbar(&self.diff_scroll)
+                .into_any_element()
+        };
+        let tray = diff_review::tray(self, cx);
+        let focused = self.diff_focus.is_focused(window);
+        diff_review::keys(
+            v_flex()
+                .id("git-diff-view")
+                .size_full()
+                .track_focus(&self.diff_focus),
+            focused,
+            cx,
+        )
+        .test_support()
+        .child(div().flex_1().min_h_0().child(body))
+        .children(tray)
+        .into_any_element()
+    }
+
+    /// The rows of the diff list in `range`, drawn.
+    fn render_diff_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
-        let diff_lines = self.diff.clone();
         let add_bg = palette::emerald(cx).opacity(0.12);
         let del_bg = palette::red(cx).opacity(0.12);
-        // The list measures one item for the content width: the longest line, so a sideways
-        // swipe can reach past the viewport's edge rather than clip the line there.
-        let widest = diff_lines
-            .iter()
-            .map(|(_, t)| t.chars().count())
-            .enumerate()
-            .max_by_key(|&(_, n)| n)
-            .map(|(i, _)| i);
-        let list = uniform_list("git-diff", diff_lines.len(), move |range, _, cx| {
-            let theme = cx.theme();
-            range
-                .map(|i| {
-                    let (kind, text) = &diff_lines[i];
-                    div()
+        let focused = self.diff_focus.is_focused(window);
+        let first_shown = range.start;
+        let rows = self.diff_rows.clone();
+        let card_w = diff_review::card_width(self.diff_list_width(), 12.);
+        range
+            .filter_map(|ix| rows.get(ix).map(|r| (ix, *r)))
+            .map(|(ix, row)| match row {
+                DiffRow::Card { card, part, rows } => diff_review::card_row(
+                    self,
+                    ix,
+                    first_shown,
+                    card,
+                    part,
+                    rows,
+                    DIFF_ROW,
+                    12.,
+                    card_w,
+                    cx,
+                ),
+                DiffRow::Line(i) => {
+                    let Some((kind, text)) = self.diff.get(i) else {
+                        return div().h(px(DIFF_ROW)).into_any_element();
+                    };
+                    let marks = self.diff_review.marks(&self.diff_nav, ix, focused);
+                    let el = div()
+                        .id(("git-diff-row", ix))
                         .px_3()
-                        .h(px(19.))
+                        .h(px(DIFF_ROW))
                         .whitespace_nowrap()
                         .font_family(mono.clone())
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .when(*kind == LineKind::Add, |el| el.bg(add_bg))
                         .when(*kind == LineKind::Del, |el| el.bg(del_bg))
                         .when(*kind == LineKind::Hunk, |el| {
                             el.text_color(theme.muted_foreground).bg(theme.muted)
                         })
-                        .child(text.clone())
+                        .child(text.clone());
+                    match self.diff_nav.get(ix) {
+                        Some(Nav::Line { .. }) => {
+                            diff_review::line_chrome(el, ix, marks, PLUS_LEFT, DIFF_ROW, cx)
+                                .test_support()
+                                .into_any_element()
+                        }
+                        Some(Nav::Hunk { .. }) => {
+                            diff_review::head_chrome(el, marks, cx).into_any_element()
+                        }
+                        _ => el.into_any_element(),
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// How wide the diff list is, as last drawn.
+    fn diff_list_width(&self) -> f32 {
+        self.diff_scroll
+            .0
+            .borrow()
+            .base_handle
+            .bounds()
+            .size
+            .width
+            .as_f32()
+    }
+
+    /// `diff`, as just read, is `path`'s.
+    fn set_diff(&mut self, path: String, lines: Vec<(LineKind, String)>, cx: &mut Context<Self>) {
+        let same = self.diff_path.as_deref() == Some(path.as_str());
+        self.diff = lines;
+        self.diff_path = Some(path);
+        if !same {
+            self.diff_review.cursor = None;
+            self.diff_review.anchor = None;
+        }
+        self.rebuild_diff_rows(cx);
+        match self.diff_review.arrive.take() {
+            Some(Arrive::First) => {
+                self.diff_review.cursor = diff_review::first_stop(&self.diff_nav)
+            }
+            Some(Arrive::LastHunk) => {
+                let head = diff_review::step_hunk(&self.diff_nav, None, -1);
+                self.diff_review.cursor = head
+                    .map(|h| diff_review::landing(&self.diff_nav, h))
+                    .or_else(|| diff_review::first_stop(&self.diff_nav));
+                if let Some(head) = head {
+                    self.diff_scroll.scroll_to_item(head, ScrollStrategy::Top);
+                }
+            }
+            // Read again under the user (the turn ended, a file changed): they stay where they were.
+            None if same => {
+                if let Some(cursor) = self.diff_review.cursor {
+                    self.diff_scroll
+                        .scroll_to_item(cursor, ScrollStrategy::Nearest);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// No diff on show.
+    fn clear_diff(&mut self) {
+        self.diff.clear();
+        self.diff_path = None;
+        self.diff_rows = Default::default();
+        self.diff_nav.clear();
+        self.diff_cards.clear();
+        self.diff_widest = None;
+        self.diff_review.cursor = None;
+        self.diff_review.anchor = None;
+    }
+
+    /// `path` is on its way: when it's another file, the cursor starts on its first change.
+    fn arrive_at(&mut self, path: &str) {
+        if self.diff_path.as_deref() != Some(path) {
+            self.diff_review.arrive = Some(Arrive::First);
+        }
+    }
+
+    /// Put `path`'s lines' cards in the rows, and move comments the diff has moved.
+    fn rebuild_diff_rows(&mut self, cx: &mut Context<Self>) {
+        let moved = self.compute_diff_rows(cx);
+        if !moved.is_empty() {
+            if let Some(key) = self.notes_key(cx) {
+                self.workspace
+                    .update(cx, |ws, cx| ws.move_comments(&key, &moved, cx));
+            }
+        }
+        self.diff_review.seen_epoch = self.workspace.read(cx).review_notes_epoch;
+        self.take_reveal();
+        cx.notify();
+    }
+
+    /// The diff list's rows as things stand; what moved under its comments.
+    fn compute_diff_rows(&mut self, cx: &mut Context<Self>) -> Vec<(u64, u32, u32)> {
+        let was = self.diff_review.remember(&self.diff_nav);
+        let drafts = self.notes_key(cx).map_or_else(Vec::new, |key| {
+            let ws = self.workspace.read(cx);
+            ws.review_notes
+                .get(&key)
+                .map(|n| n.drafts.clone())
+                .unwrap_or_default()
+        });
+        let nav = line_nav(&self.diff);
+        let rows: Vec<DiffRow> = (0..self.diff.len()).map(DiffRow::Line).collect();
+        let width = diff_review::card_width(self.diff_list_width().max(320.), 12.);
+        let (placed, moved, editor_placed) = {
+            let path = self.diff_path.clone();
+            let path_of = move |_: usize| path.clone();
+            let lines = &self.diff;
+            let text_of = |ix: usize| vec![lines[ix].1.clone()];
+            diff_review::place_cards(
+                &nav,
+                &path_of,
+                &text_of,
+                &drafts,
+                self.diff_review.editing.as_ref(),
+                DIFF_ROW,
+                width,
+                cx,
+            )
+        };
+        self.diff_cards = diff_review::card_ends(&placed);
+        let (rows, nav) = diff_review::merge(rows, nav, &placed, |p, part| DiffRow::Card {
+            card: p.card,
+            part,
+            rows: p.rows,
+        });
+        self.diff_widest = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| match r {
+                DiffRow::Line(l) => Some((i, self.diff[*l].1.chars().count())),
+                DiffRow::Card { .. } => None,
+            })
+            .max_by_key(|(_, n)| *n)
+            .map(|(i, _)| i);
+        self.diff_rows = std::rc::Rc::new(rows);
+        self.diff_nav = nav;
+        self.diff_review.editing_placed = editor_placed;
+        self.diff_review.restore(was, &self.diff_nav);
+        moved
+    }
+
+    /// Scroll to the card waiting to be shown, if it's in the rows now.
+    fn take_reveal(&mut self) {
+        let Some(id) = self.diff_review.reveal else {
+            return;
+        };
+        let end = self
+            .diff_cards
+            .iter()
+            .find(|(card, _)| *card == Card::Draft(id))
+            .map(|(_, end)| *end);
+        if let Some(end) = end {
+            self.diff_scroll
+                .scroll_to_item(end, ScrollStrategy::Nearest);
+            self.diff_review.reveal = None;
+        }
+    }
+
+    /// What a file's viewed mark goes by: a turn's diff never changes, and isn't the same diff as
+    /// the working tree's, so each turn has its own marks.
+    fn viewed_name(&self, path: &str) -> String {
+        match &self.turn {
+            Some(t) => format!("turn:{}:{path}", t.range.to),
+            None => path.to_string(),
+        }
+    }
+
+    /// Of the files listed, how many are marked viewed, and how many there are.
+    fn viewed_counts(&self, cx: &App) -> (usize, usize) {
+        let listed = self.files().len();
+        let Some(key) = self.notes_key(cx) else {
+            return (0, listed);
+        };
+        let ws = self.workspace.read(cx);
+        let viewed = self
+            .files()
+            .iter()
+            .filter(|f| ws.is_viewed(&key, &self.viewed_name(&f.path)))
+            .count();
+        (viewed, listed)
+    }
+
+    /// What reads `path`'s diff, as the file list shows it (off the main thread).
+    fn diff_reader(
+        &self,
+        path: &str,
+    ) -> Option<Box<dyn FnOnce() -> Vec<(LineKind, String)> + Send>> {
+        if let Some(turn) = &self.turn {
+            let (range, p) = (turn.range.clone(), path.to_string());
+            let old = turn.renamed.get(path).cloned();
+            return Some(Box::new(move || {
+                trek_core::checkpoint::Repo::find(&range.repo)
+                    .and_then(|r| {
+                        r.diff_patch(&range.from, &range.to, &p, old.as_deref())
+                            .ok()
+                    })
+                    .map(|text| diff_lines(&text))
+                    .unwrap_or_default()
+            }));
+        }
+        let cwd = self.cwd.clone()?;
+        let file = self.snap.files.iter().find(|f| f.path == path)?.clone();
+        let against_base = self
+            .target
+            .clone()
+            .zip(self.merge_base())
+            .zip(self.change(path));
+        Some(Box::new(move || match against_base {
+            Some(((t, base), change)) => diff_lines(&worktree::file_diff(&t.wt, &base, &change)),
+            None => file_diff(&cwd, &file),
+        }))
+    }
+
+    /// Files marked viewed that have changed since aren't viewed any more; a mark made from the
+    /// list learns what its file says.
+    fn recheck_viewed(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.notes_key(cx) else {
+            return;
+        };
+        let jobs: Vec<_> = {
+            let ws = self.workspace.read(cx);
+            self.files()
+                .iter()
+                .filter_map(|f| {
+                    let name = self.viewed_name(&f.path);
+                    let was = ws.viewed_sig(&key, &name)?.to_string();
+                    Some((name, was, self.diff_reader(&f.path)?))
                 })
                 .collect()
-        })
-        .size_full()
-        .track_scroll(&self.diff_scroll)
-        .with_width_from_item(widest)
-        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained);
-        div()
-            .id("git-diff-view")
-            .test_support()
-            .size_full()
-            .child(list)
-            .vertical_scrollbar(&self.diff_scroll)
-            .horizontal_scrollbar(&self.diff_scroll)
-            .into_any_element()
+        };
+        if jobs.is_empty() {
+            return;
+        }
+        self._viewed = Some(cx.spawn(async move |this, cx| {
+            let now = cx
+                .background_executor()
+                .spawn(async move {
+                    jobs.into_iter()
+                        .map(|(name, was, read)| {
+                            let lines = read();
+                            let sig = diff_review::sig_of(lines.iter().map(|(_, t)| t.as_str()));
+                            (name, was, sig)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let ws = this.workspace.clone();
+                ws.update(cx, |ws, cx| {
+                    for (name, was, sig) in now {
+                        if was == diff_review::SIG_UNKNOWN {
+                            ws.set_viewed(&key, &name, Some(sig), cx);
+                        } else if was != sig {
+                            ws.set_viewed(&key, &name, None, cx);
+                        }
+                    }
+                });
+            });
+        }));
+    }
+
+    /// The file's viewed mark on, or off.
+    fn toggle_viewed_path(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(key) = self.notes_key(cx) else {
+            return;
+        };
+        let name = self.viewed_name(&path);
+        let sig = if self.workspace.read(cx).is_viewed(&key, &name) {
+            None
+        } else if self.diff_path.as_deref() == Some(path.as_str()) {
+            Some(diff_review::sig_of(
+                self.diff.iter().map(|(_, t)| t.as_str()),
+            ))
+        } else {
+            Some(diff_review::SIG_UNKNOWN.to_string())
+        };
+        let unknown = sig.as_deref() == Some(diff_review::SIG_UNKNOWN);
+        self.workspace
+            .update(cx, |ws, cx| ws.set_viewed(&key, &name, sig, cx));
+        if unknown {
+            self.recheck_viewed(cx);
+        }
+    }
+
+    /// The next file along from the one selected that isn't marked viewed.
+    fn next_unviewed(&self, cx: &App) -> Option<String> {
+        let key = self.notes_key(cx)?;
+        let ws = self.workspace.read(cx);
+        let files = self.files();
+        let at = self
+            .selected
+            .as_ref()
+            .and_then(|s| files.iter().position(|f| &f.path == s))
+            .unwrap_or(0);
+        files[at..]
+            .iter()
+            .chain(files[..at].iter())
+            .find(|f| !ws.is_viewed(&key, &self.viewed_name(&f.path)))
+            .map(|f| f.path.clone())
+    }
+
+    /// The diff takes the keys (the turn's card's Review, and clicking a file, bring them here).
+    pub fn focus_diff(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.diff_focus.focus(window, cx);
+    }
+
+    /// The rows of the diff as text, for tests: a line's text, or `card` for a comment's rows.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn describe_diff(&self) -> Vec<String> {
+        self.diff_rows
+            .iter()
+            .map(|r| match r {
+                DiffRow::Line(l) => self.diff[*l].1.clone(),
+                DiffRow::Card { .. } => "card".into(),
+            })
+            .collect()
+    }
+
+    /// The line under the cursor, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cursor_line(&self) -> Option<String> {
+        match self.diff_rows.get(self.diff_review.cursor?)? {
+            DiffRow::Line(l) => Some(self.diff[*l].1.clone()),
+            DiffRow::Card { .. } => None,
+        }
+    }
+
+    /// The file selected, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn selected_file(&self) -> Option<String> {
+        self.selected.clone()
+    }
+
+    /// The viewed count the header shows, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn viewed_shown(&self, cx: &App) -> (usize, usize) {
+        self.viewed_counts(cx)
     }
 
     /// A turn's changes: its files and their diffs, and the way back to the working tree's.
-    fn render_turn(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_turn(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         let n = self.files().len();
@@ -1385,7 +1973,7 @@ impl GitPanel {
             .gap_2()
             .border_b_1()
             .border_color(theme.border)
-            .text_sm()
+            .text_size(to_rems(text::LABEL))
             .child(
                 Icon::new(crate::assets::Lucide::FileDiff)
                     .small()
@@ -1424,7 +2012,7 @@ impl GitPanel {
                     .min_h_0()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(self.diff_view("This turn changed no files.", cx)),
+                    .child(self.diff_view("This turn changed no files.", window, cx)),
             )
             .into_any_element()
     }
@@ -1444,15 +2032,16 @@ impl GitPanel {
             .px_6()
             .gap_3()
             .text_center()
-            .child(div().text_sm().font_medium().child("Worktree missing"))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(format!("The folder for {} is gone. Bring it back from its branch, or move the thread to the project folder.", t.wt.branch)))
+            .child(div().text_size(to_rems(text::LABEL)).font_medium().child("Worktree missing"))
+            .child(div().text_size(to_rems(text::LABEL)).text_color(cx.theme().muted_foreground).child(format!("The folder for {} is gone. Bring it back from its branch, or move the thread to the project folder.", t.wt.branch)))
             .child(
                 h_flex()
                     .gap_2()
-                    .child(Button::new("git-wt-recreate").small().outline().label("Recreate from branch").on_click(move |_, _, cx| {
+                    // Where another app's worktree was is that app's to fill again.
+                    .when(self.workspace.read(cx).worktree_owner(&t.thread).is_none(), |el| el.child(Button::new("git-wt-recreate").small().outline().label("Recreate from branch").on_click(move |_, _, cx| {
                         let id = id1.clone();
                         ws1.update(cx, |ws, cx| ws.recreate_worktree(&id, cx))
-                    }))
+                    })))
                     .child(Button::new("git-wt-local").small().ghost().label("Run in project folder").on_click(move |_, _, cx| {
                         let id = id2.clone();
                         ws2.update(cx, |ws, cx| ws.run_in_project_folder(&id, cx))
@@ -1463,7 +2052,12 @@ impl GitPanel {
 
     /// Review of a worktree thread: its changes against the base, then commit, push, pull
     /// request, merge and remove.
-    fn render_review(&mut self, t: Target, cx: &mut Context<Self>) -> AnyElement {
+    fn render_review(
+        &mut self,
+        t: Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = cx.theme().clone();
         if self.preparing {
             return v_flex()
@@ -1476,7 +2070,7 @@ impl GitPanel {
                 .child(Spinner::new().small().color(theme.muted_foreground))
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(format!("Making the worktree for {}…", t.wt.branch)),
                 )
@@ -1495,7 +2089,10 @@ impl GitPanel {
             None => None,
         };
         let review = state.as_ref().map(|s| s.review.clone()).unwrap_or_default();
-        let mut parts = vec![format!("{} changed", review.files.len())];
+        let mut parts = Vec::new();
+        if !review.files.is_empty() {
+            parts.push(format!("{} changed", review.files.len()));
+        }
         if review.ahead > 0 {
             parts.push(format!(
                 "{} {}",
@@ -1652,7 +2249,7 @@ impl GitPanel {
                 |el, b| {
                     el.child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(b.explain(&base)),
                     )
@@ -1668,7 +2265,7 @@ impl GitPanel {
                         .gap(px(6.))
                         .min_w_0()
                         .cursor_pointer()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_color(theme.foreground.opacity(0.85))
                         .hover(|s| s.text_color(theme.foreground).underline())
                         .child(
@@ -1700,20 +2297,26 @@ impl GitPanel {
                             }),
                     )
                     .child(div().flex_1())
-                    .child(
-                        Button::new("git-remove")
-                            .small()
-                            .ghost()
-                            .icon(crate::assets::Lucide::Trash)
-                            .label("Remove worktree…")
-                            .on_click(move |_, window, cx| {
-                                crate::worktree_ui::confirm_remove(
-                                    ws.clone(),
-                                    id.clone(),
-                                    window,
-                                    cx,
-                                )
-                            }),
+                    // One another app keeps isn't Trek's to remove.
+                    .when(
+                        self.workspace.read(cx).worktree_owner(&id).is_none(),
+                        |el| {
+                            el.child(
+                                Button::new("git-remove")
+                                    .small()
+                                    .ghost()
+                                    .icon(crate::assets::Lucide::Trash)
+                                    .label("Remove worktree…")
+                                    .on_click(move |_, window, cx| {
+                                        crate::worktree_ui::confirm_remove(
+                                            ws.clone(),
+                                            id.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                            )
+                        },
                     ),
             );
 
@@ -1721,32 +2324,176 @@ impl GitPanel {
             .size_full()
             .child(self.header(cx))
             .child(graph)
-            .child(self.file_list(parts.join(" · "), cx))
+            .child(self.file_list(
+                if parts.is_empty() {
+                    "No changes".to_string()
+                } else {
+                    parts.join(" · ")
+                },
+                cx,
+            ))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(self.diff_view("No changes yet against the base branch.", cx)),
+                    .child(self.diff_view("No changes yet against the base branch.", window, cx)),
             )
             .child(commit)
             .into_any_element()
     }
 }
 
+impl ReviewHost for GitPanel {
+    fn review(&self) -> &DiffReview {
+        &self.diff_review
+    }
+
+    fn review_mut(&mut self) -> &mut DiffReview {
+        &mut self.diff_review
+    }
+
+    fn workspace_entity(&self) -> Entity<Workspace> {
+        self.workspace.clone()
+    }
+
+    fn nav(&self) -> &[Nav] {
+        &self.diff_nav
+    }
+
+    fn list_scroll(&self) -> &UniformListScrollHandle {
+        &self.diff_scroll
+    }
+
+    fn diff_focus(&self) -> FocusHandle {
+        self.diff_focus.clone()
+    }
+
+    /// The thread whose changes are on show; with none (a draft), the folder.
+    fn notes_key(&self, cx: &App) -> Option<String> {
+        if let Some(t) = &self.turn {
+            return Some(t.thread.clone());
+        }
+        match self.workspace.read(cx).current_thread() {
+            Some(t) if !self.ide => Some(t.id.clone()),
+            _ => self.cwd.as_deref().map(diff_review::folder_key),
+        }
+    }
+
+    fn path_of(&self, _: usize) -> Option<String> {
+        self.diff_path.clone()
+    }
+
+    fn text_of(&self, ix: usize) -> Vec<String> {
+        match self.diff_rows.get(ix) {
+            Some(DiffRow::Line(l)) => vec![self.diff[*l].1.clone()],
+            _ => vec![],
+        }
+    }
+
+    fn placements(&self) -> &[(Card, usize)] {
+        &self.diff_cards
+    }
+
+    fn rows_changed(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_diff_rows(cx);
+    }
+
+    /// One file shows at a time: the next in the list.
+    fn go_to_file(&mut self, by: isize, _: &mut Window, cx: &mut Context<Self>) {
+        let files = self.files();
+        if files.is_empty() {
+            return;
+        }
+        let at = self
+            .selected
+            .as_ref()
+            .and_then(|s| files.iter().position(|f| &f.path == s));
+        let next = match at {
+            Some(at) if by > 0 => files.get(at + 1),
+            Some(at) => at.checked_sub(1).and_then(|at| files.get(at)),
+            None if by > 0 => files.first(),
+            None => files.last(),
+        };
+        if let Some(next) = next.map(|f| f.path.clone()) {
+            self.select(next, cx);
+        }
+    }
+
+    fn ran_out_of_hunks(&mut self, by: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.selected.clone();
+        self.go_to_file(by, window, cx);
+        if by < 0 && self.selected != before {
+            self.diff_review.arrive = Some(Arrive::LastHunk);
+        }
+    }
+
+    /// Marked by key, the next file not viewed comes up (none left: the diff pane says so).
+    fn toggle_viewed(&mut self, advance: bool, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.selected.clone() else {
+            return;
+        };
+        self.toggle_viewed_path(path.clone(), cx);
+        let Some(key) = self.notes_key(cx) else {
+            return;
+        };
+        let now_viewed = self
+            .workspace
+            .read(cx)
+            .is_viewed(&key, &self.viewed_name(&path));
+        if advance && now_viewed {
+            match self.next_unviewed(cx) {
+                Some(next) => self.select(next, cx),
+                None => {
+                    self.selected = None;
+                    self.clear_diff();
+                    self._diff = None;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// As the rest of the Agents' side sees it: the thread on screen, or the draft's first message.
+    fn deliver(&mut self, text: String, _: &mut Window, cx: &mut Context<Self>) -> bool {
+        let target = self.turn.as_ref().map(|t| t.thread.clone()).or_else(|| {
+            self.workspace
+                .read(cx)
+                .current_thread()
+                .map(|t| t.id.clone())
+        });
+        let scope = target.map_or(Scope::Main, Scope::Thread);
+        self.workspace
+            .update(cx, |ws, cx| ws.send_comments_in(&scope, text, cx))
+    }
+
+    fn show_draft(&mut self, draft: &Draft, cx: &mut Context<Self>) {
+        if self.selected.as_deref() != Some(draft.path.as_str())
+            && self.files().iter().any(|f| f.path == draft.path)
+        {
+            self.select(draft.path.clone(), cx);
+        }
+    }
+
+    fn leave(&mut self, cx: &mut Context<Self>) {
+        self.workspace
+            .update(cx, |_, cx| cx.emit(WorkspaceEvent::FocusComposer));
+    }
+}
+
 impl Render for GitPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let muted = theme.muted_foreground;
         if self.turn.is_some() {
-            return self.render_turn(cx);
+            return self.render_turn(window, cx);
         }
         if self.cwd.is_none() {
             return super::empty("Open a project to see its changes.", cx).into_any_element();
         }
         if let Some(t) = self.target.clone() {
-            return self.render_review(t, cx);
+            return self.render_review(t, window, cx);
         }
         if !self.snap.is_repo && !self.loading {
             return v_flex()
@@ -1756,7 +2503,7 @@ impl Render for GitPanel {
                 .gap_3()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_color(muted)
                         .child("This folder isn't a Git repository."),
                 )
@@ -1772,8 +2519,12 @@ impl Render for GitPanel {
                 .into_any_element();
         }
         let header = self.header(cx);
-        let files = self.file_list(format!("{} changed", self.snap.files.len()), cx);
-        let diff = self.diff_view("No changes. The working tree is clean.", cx);
+        let summary = match self.snap.files.len() {
+            0 => "No changes".to_string(),
+            n => format!("{n} changed"),
+        };
+        let files = self.file_list(summary, cx);
+        let diff = self.diff_view("No changes. The working tree is clean.", window, cx);
 
         let commit = v_flex()
             .p_3()
@@ -1824,7 +2575,71 @@ impl Render for GitPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{LineKind, diff_lines, parse_numstat, parse_status, pr_body, pr_label};
+    use super::{
+        LineKind, Nav, diff_lines, hunk_starts, line_nav, parse_numstat, parse_status, pr_body,
+        pr_label,
+    };
+
+    #[test]
+    fn a_diffs_lines_are_numbered_from_their_hunks() {
+        let lines = diff_lines(
+            "diff --git a/f b/f\nnew file mode 100644\n--- a/f\n+++ b/f\n@@ -2,3 +2,3 @@\n ctx\n-old\n+new\n ctx\n\\ No newline at end of file\n@@ -40 +40,2 @@\n same\n+more\n",
+        );
+        let nav = line_nav(&lines);
+        let numbers: Vec<String> = nav
+            .iter()
+            .map(|n| match n {
+                Nav::Line { old, new, hunk, .. } => {
+                    format!("{}:{old:?}:{new:?}", hunk.unwrap())
+                }
+                Nav::Hunk { hunk, .. } => format!("head {hunk}"),
+                Nav::Skip => "skip".into(),
+                Nav::File { .. } => "file".into(),
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            [
+                "skip", // new file mode: no line of the file
+                "head 0",
+                "0:Some(2):Some(2)",
+                "0:Some(3):None",
+                "0:None:Some(3)",
+                "0:Some(4):Some(4)",
+                "skip", // no newline
+                "head 1",
+                "1:Some(40):Some(40)",
+                "1:None:Some(41)",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_untracked_files_lines_count_from_one_and_a_note_is_no_line() {
+        let lines = vec![
+            (LineKind::Add, "+a".to_string()),
+            (LineKind::Add, "+b".to_string()),
+        ];
+        assert!(matches!(
+            line_nav(&lines)[1],
+            Nav::Line {
+                new: Some(2),
+                hunk: None,
+                ..
+            }
+        ));
+        let note = vec![(LineKind::Ctx, "Binary file".to_string())];
+        assert_eq!(line_nav(&note), [Nav::Skip]);
+    }
+
+    #[test]
+    fn a_hunks_head_says_where_each_side_starts() {
+        assert_eq!(hunk_starts("@@ -2,3 +5,4 @@ fn main"), Some((2, 5)));
+        assert_eq!(hunk_starts("@@ -7 +7 @@"), Some((7, 7)));
+        assert_eq!(hunk_starts("@@ -3,0 +4,2 @@"), Some((4, 4)));
+        assert_eq!(hunk_starts("@@ -3,2 +2,0 @@"), Some((3, 3)));
+        assert_eq!(hunk_starts("nonsense"), None);
+    }
 
     #[test]
     fn pull_request_links_read_as_repo_and_number() {

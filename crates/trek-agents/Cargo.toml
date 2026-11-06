@@ -23,6 +23,12 @@ chrono.workspace = true
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
 base64 = "0.22"
+# The `grep` and `glob` tools of the Direct harness (`direct/search.rs`).
+globset = "0.4"
+ignore = "0.4"
+regex = "1"
+# What the HTTP client will make of an address (`direct/web.rs`).
+url = "2"
 # Devin shows its quota only in its terminal UI (`status::devin_status`).
 portable-pty = "0.9"
 vt100 = "0.16"

@@ -6,6 +6,7 @@
 use super::clone::{self, IgnoredFile, Scheme};
 use super::{CloneStage, PairLink, Pairing};
 use crate::fluent;
+use crate::scale::{radius, text};
 use crate::ui;
 use crate::workspace::{Route, SettingsPage, Workspace};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -32,7 +33,7 @@ fn field(
         .gap(px(4.))
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(cx.theme().muted_foreground)
                 .child(label.into()),
         )
@@ -42,7 +43,7 @@ fn field(
 
 fn note(text: impl Into<SharedString>, cx: &App) -> Div {
     div()
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .line_height(relative(1.5))
         .text_color(cx.theme().muted_foreground)
         .child(text.into())
@@ -184,7 +185,7 @@ impl Render for PairSheet {
             .w_full()
             .p(px(PAD))
             .gap(px(14.))
-            .child(div().text_size(px(16.)).font_semibold().child("Add a machine"))
+            .child(div().text_size(px(text::HEADING)).font_semibold().child("Add a machine"))
             .child(note(
                 format!(
                     "On the other machine, open Settings › Phone & Machines, let phones connect, and choose “Show pairing code”. Copy the link under “Pair another machine” and paste it here. Threads you start there then show here, in the sidebar under its name. Pairing {} with itself works too.",
@@ -195,7 +196,7 @@ impl Render for PairSheet {
             .child(h_flex().child(ui::segmented("pair-mode", vec![(false, "Pairing link"), (true, "Address and code")], self.typed, pick, cx)))
             .child(fields)
             .when(busy, |el| el.child(h_flex().id("pair-busy").test_support().gap(px(8.)).child(Spinner::new().xsmall()).child(note("Pairing…", cx))))
-            .when_some(failed, |el, why| el.child(div().id("pair-error").test_support().text_size(px(12.5)).text_color(crate::palette::red(cx)).child(why)))
+            .when_some(failed, |el, why| el.child(div().id("pair-error").test_support().text_size(px(text::BODY)).text_color(crate::palette::red(cx)).child(why)))
             .child(
                 h_flex()
                     .pt(px(4.))
@@ -446,7 +447,7 @@ impl CloneSheet {
                     .test_support()
                     .max_h(px(150.))
                     .overflow_y_scroll()
-                    .rounded(px(8.))
+                    .rounded(px(radius::BUTTON))
                     .border_1()
                     .border_color(theme.foreground.opacity(0.08))
                     .children(files.iter().enumerate().map(|(ix, f)| {
@@ -458,13 +459,13 @@ impl CloneSheet {
                             .h(px(26.))
                             .gap(px(8.))
                             .cursor_pointer()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .hover(|s| s.bg(theme.list_hover))
                             .child(
                                 div()
                                     .flex_none()
                                     .size(px(14.))
-                                    .rounded(px(3.))
+                                    .rounded(px(radius::TAG))
                                     .border_1()
                                     .border_color(theme.foreground.opacity(0.3))
                                     .flex()
@@ -521,7 +522,7 @@ impl Render for CloneSheet {
             div()
                 .w(px(130.))
                 .flex_none()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(theme.muted_foreground)
                 .child(text.to_string())
         };
@@ -534,7 +535,7 @@ impl Render for CloneSheet {
                 .w_full()
                 .p(px(PAD))
                 .gap(px(14.))
-                .child(div().text_size(px(16.)).font_semibold().child("Add to another machine"))
+                .child(div().text_size(px(text::HEADING)).font_semibold().child("Add to another machine"))
                 .child(note("No machine is paired with Trek here yet. Pair one in Settings › Phone & Machines, then come back.", cx))
                 .child(h_flex().justify_end().child(Button::new("clone-pair-first").primary().label("Open Phone & Machines").on_click(move |_, window, cx| {
                     window.close_dialog(cx);
@@ -575,7 +576,7 @@ impl Render for CloneSheet {
                 .test_support()
                 .min_w_0()
                 .truncate()
-                .text_size(px(12.5))
+                .text_size(px(text::LABEL))
                 .font_family(theme.mono_font_family.clone())
                 .child(self.url().unwrap_or_default())
                 .into_any_element(),
@@ -606,16 +607,16 @@ impl Render for CloneSheet {
                     h_flex()
                         .gap(px(8.))
                         .when(running, |el| el.child(Spinner::new().xsmall()))
-                        .child(div().text_size(px(12.5)).child(stage)),
+                        .child(div().text_size(px(text::BODY)).child(stage)),
                 )
                 .when(!r.lines.is_empty(), |el| {
                     el.child(
                         v_flex()
                             .p(px(8.))
-                            .rounded(px(fluent::control(6.)))
+                            .rounded(px(fluent::control(radius::CONTROL)))
                             .bg(theme.foreground.opacity(0.05))
                             .font_family(theme.mono_font_family.clone())
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .children(
                                 r.lines
@@ -645,9 +646,9 @@ impl Render for CloneSheet {
             .w_full()
             .p(px(PAD))
             .gap(px(12.))
-            .child(div().text_size(px(16.)).font_semibold().child("Add to another machine"))
+            .child(div().text_size(px(text::HEADING)).font_semibold().child("Add to another machine"))
             .child(note("Trek clones the project there with git, copies the files git ignores that you tick (an .env), and starts your thread there.", cx))
-            .child(row("From", div().id("clone-source").test_support().text_size(px(12.5)).child(source).into_any_element()))
+            .child(row("From", div().id("clone-source").test_support().text_size(px(text::BODY)).child(source).into_any_element()))
             .child(row("git clone", url))
             .child(row("Over", ui::segmented("clone-scheme", vec![(Scheme::Ssh, "SSH"), (Scheme::Https, "HTTPS")], self.scheme, pick_scheme, cx)))
             .child(row(
@@ -655,9 +656,9 @@ impl Render for CloneSheet {
                 ui::segmented("clone-target", machines.iter().enumerate().map(|(ix, (_, name, reachable))| (ix, if *reachable { name.clone() } else { format!("{name} (offline)") })).collect(), current, pick_target, cx),
             ))
             .child(row(&format!("Folder on {}", target_name.clone().unwrap_or_else(|| "it".into())), field("clone-folder-input", "", &self.folder, cx)))
-            .child(v_flex().gap(px(6.)).child(div().text_size(px(12.5)).font_medium().child("Copy ignored files")).child(self.files_list(cx)))
+            .child(v_flex().gap(px(6.)).child(div().text_size(px(text::BODY)).font_medium().child("Copy ignored files")).child(self.files_list(cx)))
             .children(progress)
-            .when_some(failed, |el, why| el.child(div().id("clone-error").test_support().text_size(px(12.5)).text_color(crate::palette::red(cx)).child(why)))
+            .when_some(failed, |el, why| el.child(div().id("clone-error").test_support().text_size(px(text::BODY)).text_color(crate::palette::red(cx)).child(why)))
             .child(
                 h_flex()
                     .gap(px(8.))

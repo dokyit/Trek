@@ -659,7 +659,7 @@ impl Trek {
     }
 }
 
-/// The working bar's header split at its trail word: what follows it ("4s · 2 agents out"), or
+/// The working bar's header split at its trail word: what follows it ("4s · 2 sub-agents"), or
 /// `None` when it doesn't start with one ("Breaking trail… 4s").
 pub fn trail_word(header: &str) -> Option<&str> {
     trek_app::mascot::WORDS

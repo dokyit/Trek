@@ -7,6 +7,7 @@
 //! thread; this one is under it, where T3 keeps its terminal.
 
 use crate::panels::terminal::{Job, TerminalPanel, TitleChanged};
+use crate::scale::text;
 use crate::workspace::{Route, Workspace, WorkspaceEvent};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -379,7 +380,7 @@ impl Render for TerminalDock {
                     .h_full()
                     .px(px(8.))
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(px(text::META))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("TERMINAL")
                     .when(!many, |el| {
@@ -402,7 +403,7 @@ impl Render for TerminalDock {
                         .min_w_0()
                         .max_w(px(360.))
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(title)
                 }))
@@ -420,7 +421,7 @@ impl Render for TerminalDock {
                         .gap(px(5.))
                         .items_center()
                         .cursor_pointer()
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(if on {
                             theme.foreground
                         } else {

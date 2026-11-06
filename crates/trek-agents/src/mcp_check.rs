@@ -13,7 +13,7 @@ pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 /// The most pages of tools read (a server that keeps handing out cursors isn't followed forever).
-const MAX_PAGES: usize = 20;
+pub(crate) const MAX_PAGES: usize = 20;
 
 /// The names of the tools `server` offers, or why it couldn't be asked, in words for Settings.
 pub async fn list_tools(server: &McpServer) -> Result<Vec<String>, String> {
@@ -25,7 +25,7 @@ pub async fn list_tools(server: &McpServer) -> Result<Vec<String>, String> {
     }
 }
 
-fn initialize() -> Value {
+pub(crate) fn initialize() -> Value {
     json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "Trek", "version": env!("CARGO_PKG_VERSION") } })
 }
 
@@ -117,7 +117,7 @@ async fn stdio(
 /// What to start for `command`: a bare name found on the PATH the server is started with (the
 /// login PATH, or its own `PATH` from `env`), else the name itself, which then fails to start
 /// with the usual "isn't installed"; a path is used as written.
-fn program_for(command: &str, env: &[(String, String)]) -> std::path::PathBuf {
+pub(crate) fn program_for(command: &str, env: &[(String, String)]) -> std::path::PathBuf {
     if trek_core::detect::is_bare_name(command) {
         let own = env
             .iter()
@@ -331,7 +331,7 @@ async fn http(url: &str, headers: &[(String, String)]) -> Result<Vec<String>, St
 
 /// POST one JSON-RPC message; its reply (`None` for a notification) and the session id the
 /// server gave. The reply comes as JSON or as an event stream with it in a `data:` line.
-async fn post(
+pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
     headers: &[(String, String)],

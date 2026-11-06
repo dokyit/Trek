@@ -73,6 +73,12 @@ nonisolated enum TranscriptCache {
         for (old, _) in dated.sorted(by: { $0.1 > $1.1 }).dropFirst(keepThreads) { try? fm.removeItem(at: old) }
     }
 
+    /// Drops every thread's cache for `host`. Waits for the writes under way, so what opens next
+    /// can't read a file that was on its way out.
+    static func removeAll(host: String) {
+        queue.sync { if let dir = folder(host: host) { try? FileManager.default.removeItem(at: dir) } }
+    }
+
     /// Drops one thread's cache (after a reset that couldn't be applied, or the thread's gone).
     static func remove(host: String, thread: String) {
         queue.async { if let url = file(host: host, thread: thread) { try? FileManager.default.removeItem(at: url) } }

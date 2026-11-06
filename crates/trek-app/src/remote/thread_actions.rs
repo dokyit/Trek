@@ -53,6 +53,13 @@ impl Workspace {
                 }
                 self.regenerate_title(id, true, cx);
             }
+            tr::ThreadAction::ResumeInterrupted => {
+                if !self.interrupted_offer(id).is_some_and(|o| o.open()) {
+                    return Err(tr::HostError::conflict("There's nothing to resume"));
+                }
+                self.resume_interrupted(id, cx);
+            }
+            tr::ThreadAction::DismissInterrupted => self.dismiss_interrupted(id, cx),
             action => return self.remote_thread_parity_action(id, action, cx),
         }
         Ok(())
@@ -73,7 +80,9 @@ impl Workspace {
         };
         let sub_agents = self.sub_agents_note(&id, "deleted");
         let sharers = self.worktree_sharers(&id);
-        let Some(wt) = t.worktree.clone().filter(|_| sharers.is_empty()) else {
+        // A worktree another app keeps stays, like one a sharer works in.
+        let keeps = !sharers.is_empty() || self.worktree_owner(&id).is_some();
+        let Some(wt) = t.worktree.clone().filter(|_| !keeps) else {
             if !confirmed {
                 let mut words = vec![if t.source != ThreadSource::Trek {
                     "It leaves Trek for good. The original stays in the agent's own history."

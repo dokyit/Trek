@@ -3,6 +3,7 @@
 
 use super::{LOCKED_KEYS_NOTE, SavedKey, SettingsView};
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use crate::workspace::{Route, UpdateAction};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -44,7 +45,7 @@ fn picker<T: Clone + PartialEq + 'static>(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .child(current_label.into()),
                 )
                 .child(
@@ -79,11 +80,11 @@ fn key(label: &str, cx: &App) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(crate::fluent::control(5.)))
+        .rounded(px(crate::fluent::control(radius::CONTROL)))
         .border_1()
         .border_color(theme.foreground.opacity(0.1))
         .bg(theme.foreground.opacity(0.04))
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .text_color(theme.foreground.opacity(0.85))
         .child(label.to_string())
         .into_any_element()
@@ -126,7 +127,13 @@ impl SettingsView {
                 h_flex()
                     .gap(px(7.))
                     .max_w(px(260.))
-                    .child(div().min_w_0().truncate().text_size(px(12.5)).child(label))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(text::BODY))
+                            .child(label),
+                    )
                     .child(
                         Icon::new(IconName::ChevronDown)
                             .size(px(12.))
@@ -393,6 +400,26 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row(
+                        "Resume interrupted threads at launch",
+                        "When Trek closes or crashes mid-turn, the next launch offers those threads back. On, they resume by themselves. A thread waiting on your answer stays waiting, and a thread you stopped stays stopped.",
+                        self.switch(
+                            "resume-interrupted",
+                            s.general.resume_interrupted,
+                            |s, v| s.general.resume_interrupted = v,
+                        ),
+                        cx,
+                    ),
+                    Self::row(
+                        "Message when resuming",
+                        "What a resumed thread is sent. Resume on a thread also lets you edit it first.",
+                        div().w(px(220.)).child(
+                            Input::new(&self.resume_message)
+                                .id("resume-message")
+                                .small(),
+                        ),
+                        cx,
+                    ),
+                    Self::row(
                         "Usage card shows",
                         "The providers the sidebar's Usage card shows, up to three at a time. Automatic shows the first three with usage to show. The card's … button picks them too.",
                         self.usage_shown_picker(cx),
@@ -528,6 +555,7 @@ impl SettingsView {
                         .child(
                             div()
                                 .p(px(4.))
+                                // scale: ok, a ring round the app icon's own corners
                                 .rounded(px(crate::fluent::control(18.)))
                                 .border_1()
                                 .border_color(if selected {
@@ -539,7 +567,7 @@ impl SettingsView {
                         )
                         .child(
                             div()
-                                .text_size(px(12.5))
+                                .text_size(px(text::BODY))
                                 .text_color(if selected {
                                     theme.foreground
                                 } else {
@@ -605,7 +633,7 @@ impl SettingsView {
                                 .when(!glass, |el| el.opacity(0.45))
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_size(to_rems(text::META))
                                         .text_color(cx.theme().muted_foreground)
                                         .child("Clear"),
                                 )
@@ -617,14 +645,14 @@ impl SettingsView {
                                 )
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_size(to_rems(text::META))
                                         .text_color(cx.theme().muted_foreground)
                                         .child("Frosted"),
                                 )
                                 .child(
                                     div()
                                         .w(px(34.))
-                                        .text_xs()
+                                        .text_size(to_rems(text::META))
                                         .text_right()
                                         .font_family(cx.theme().mono_font_family.clone())
                                         .child(format!(
@@ -815,7 +843,7 @@ impl SettingsView {
                 out.push(
                     div()
                         .pb(px(10.))
-                        .text_size(px(13.))
+                        .text_size(px(text::BODY))
                         .font_semibold()
                         .child(group.to_string())
                         .into_any_element(),
@@ -828,12 +856,17 @@ impl SettingsView {
                         .id(SharedString::from(format!("shortcut-{label}")))
                         .test_support()
                         .h(px(42.))
-                        .child(div().flex_1().text_size(px(13.)).child(label.to_string()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(text::BODY))
+                                .child(label.to_string()),
+                        )
                         .child(h_flex().gap(px(4.)).children(chips.into_iter().map(|chip| {
                             match chip {
                                 crate::keys::Chip::Key(k) => key(&k, cx),
                                 crate::keys::Chip::Word(w) => div()
-                                    .text_size(px(12.))
+                                    .text_size(px(text::LABEL))
                                     .text_color(muted)
                                     .child(w)
                                     .into_any_element(),
@@ -892,15 +925,20 @@ impl SettingsView {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_size(px(13.5)).font_medium().child(p.name))
-                        .child(div().text_size(px(12.)).text_color(muted).child(status)),
+                        .child(div().text_size(px(text::TITLE)).font_medium().child(p.name))
+                        .child(
+                            div()
+                                .text_size(px(text::LABEL))
+                                .text_color(muted)
+                                .child(status),
+                        ),
                 );
             let control = if saved {
                 h_flex()
                     .gap(px(6.))
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .text_color(muted)
                             .child("••••••••"),
                     )
@@ -1108,10 +1146,15 @@ impl SettingsView {
                         v_flex()
                             .flex_1()
                             .gap(px(3.))
-                            .child(div().text_size(px(13.5)).font_medium().child(h.label()))
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size(px(text::TITLE))
+                                    .font_medium()
+                                    .child(h.label()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(text::BODY))
                                     .line_height(relative(1.5))
                                     .text_color(theme.muted_foreground)
                                     .child(if locked {
@@ -1175,7 +1218,7 @@ impl SettingsView {
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .when(head, |el| {
                     el.text_color(theme.muted_foreground).font_medium()
                 })
@@ -1191,7 +1234,7 @@ impl SettingsView {
                 .child(
                     div()
                         .w(px(150.))
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .font_medium()
                         .text_color(theme.muted_foreground)
                         .child("Level"),
@@ -1205,24 +1248,25 @@ impl SettingsView {
             table.push(
                 h_flex()
                     .h(px(38.))
-                    .child(div().w(px(150.)).text_size(px(13.)).child(h.label()))
+                    .child(div().w(px(150.)).text_size(px(text::BODY)).child(h.label()))
                     .child(cell(h.claude_mode().to_string(), false))
                     .child(cell(format!("{sb} · {ap}"), false))
                     .into_any_element(),
             );
         }
 
-        vec![
+        let rules = self.rules_sections(&s.permissions.rules, cx);
+        let mut page = vec![
             div()
                 .pb(px(10.))
-                .text_size(px(13.))
+                .text_size(px(text::BODY))
                 .font_semibold()
                 .child("Default for new threads")
                 .into_any_element(),
             ui::group(levels, cx),
             div()
                 .pt(px(10.))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(theme.muted_foreground)
                 .child("Change it for any thread from the composer.")
                 .into_any_element(),
@@ -1236,19 +1280,23 @@ impl SettingsView {
                 )],
                 cx,
             ),
+        ];
+        page.extend(rules);
+        page.extend([
             Self::heading("What each level means", cx),
             Self::note(
                 "Trek translates your choice into each agent's own permission settings.",
                 cx,
             ),
             ui::group(table, cx),
-        ]
+        ]);
+        page
     }
 
     pub(super) fn updates_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
-        let view = ws.update_view();
+        let view = ws.update_view(cx);
         #[cfg(any(test, feature = "test-support"))]
         super::shown::text(&view.line);
         let pending = ws.pending_changes();
@@ -1299,6 +1347,27 @@ impl SettingsView {
                         .update(cx, |ws, cx| ws.run_update_action(action, cx))
                 }))
         });
+        // Work running: waiting is the default, and says for what.
+        let wait_label = view
+            .choices
+            .as_ref()
+            .filter(|c| !c.waiting)
+            .map(|c| SharedString::from(c.wait.clone()));
+        let action = action.map(|b| match wait_label {
+            Some(label) => b.primary().label(label),
+            None => b,
+        });
+        let later = view.choices.as_ref().filter(|c| c.later).map(|_| {
+            Button::new("update-later")
+                .small()
+                .ghost()
+                .label(UpdateAction::Later.label())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.workspace
+                        .update(cx, |ws, cx| ws.run_update_action(UpdateAction::Later, cx))
+                }))
+        });
+        let cost = view.choices.as_ref().and_then(|c| c.now.clone());
         // The old copy Trek left when it moved: a row of its own, so an update on offer keeps its button.
         let old_copy = ws.old_copy_view().map(|old| {
             let button =
@@ -1336,17 +1405,28 @@ impl SettingsView {
                     .gap(px(2.))
                     .child(
                         div()
-                            .text_size(px(15.))
+                            .text_size(px(text::HEADING))
                             .font_semibold()
                             .child(format!("Trek {}", trek_core::VERSION)),
                     )
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .line_height(relative(1.5))
                             .text_color(theme.muted_foreground)
                             .child(view.line),
                     )
+                    .when_some(cost, |el, cost| {
+                        el.child(
+                            div()
+                                .id("update-cost")
+                                .test_support()
+                                .text_size(px(text::BODY))
+                                .line_height(relative(1.5))
+                                .text_color(theme.muted_foreground)
+                                .child(cost),
+                        )
+                    })
                     .when_some(view.progress, |el, p| {
                         el.child(
                             div()
@@ -1369,6 +1449,7 @@ impl SettingsView {
                 h_flex()
                     .flex_none()
                     .gap(px(6.))
+                    .children(later)
                     .children(secondary)
                     .children(action),
             )
@@ -1387,7 +1468,7 @@ impl SettingsView {
                 h_flex()
                     .pb(px(10.))
                     .gap(px(8.))
-                    .child(div().text_size(px(13.)).font_semibold().child(title))
+                    .child(div().text_size(px(text::BODY)).font_semibold().child(title))
                     .child(div().flex_1())
                     .when_some(changes.compare, |el, url| {
                         el.child(ui::web_link("compare-link", "Compare on GitHub", url, cx))
@@ -1439,7 +1520,7 @@ impl SettingsView {
                     .gap(px(8.))
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .text_size(px(text::BODY))
                             .font_semibold()
                             .child("Release history"),
                     )
@@ -1482,16 +1563,21 @@ impl SettingsView {
             .child(
                 v_flex()
                     .gap(px(3.))
-                    .child(div().text_size(px(18.)).font_semibold().child("Trek"))
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .text_size(px(text::DISPLAY_S))
+                            .font_semibold()
+                            .child("Trek"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(text::BODY))
                             .text_color(theme.muted_foreground)
                             .child(format!("Version {} · {channel}", trek_core::VERSION)),
                     )
                     .child(
                         div()
-                            .text_size(px(13.))
+                            .text_size(px(text::BODY))
                             .text_color(theme.muted_foreground)
                             .child("Every agent, one trail."),
                     ),
@@ -1568,7 +1654,7 @@ impl SettingsView {
                 .detach();
             }));
         let trademarks = div()
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(theme.muted_foreground)
             .pt(px(18.))
             .child(LEGAL)
@@ -1596,6 +1682,16 @@ impl SettingsView {
                             crate::words::words().os_name
                         ),
                         copy,
+                        cx,
+                    ),
+                    Self::row(
+                        "Feedback",
+                        "Report a bug or suggest an idea.",
+                        Button::new("about-feedback")
+                            .small()
+                            .outline()
+                            .label("Send feedback…")
+                            .on_click(|_, _, cx| crate::feedback::open_in_main(cx)),
                         cx,
                     ),
                 ],
@@ -1664,7 +1760,7 @@ impl SettingsView {
         let status = probe.as_ref().map(|p| p.screen_recording);
         let permission: AnyElement = match status {
             None => div()
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(theme.muted_foreground)
                 .child("Checking…")
                 .into_any_element(),
@@ -1803,7 +1899,7 @@ impl SettingsView {
             ),
         ];
         page.extend(permission.into_iter().flatten());
-        page.push(div().pt(px(12.)).text_size(px(12.5)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element());
+        page.push(div().pt(px(12.)).text_size(px(text::BODY)).text_color(theme.muted_foreground).child("Snapshots are saved inside Trek's data folder and attached as images to your next message.").into_any_element());
         page
     }
 
@@ -1883,7 +1979,7 @@ impl SettingsView {
             out.push(
                 div()
                     .py(px(24.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
                     .child("Looking for skills…")
                     .into_any_element(),
@@ -1893,7 +1989,7 @@ impl SettingsView {
         out.push(
             div()
                 .pb(px(4.))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(theme.muted_foreground)
                 .child(format!(
                     "{} skills{}",
@@ -1957,7 +2053,7 @@ impl SettingsView {
             out.push(
                 div()
                     .py(px(24.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
                     .child(if all.is_empty() {
                         "No skills yet. Create one, or add a folder that contains a SKILL.md."
@@ -1981,7 +2077,7 @@ impl SettingsView {
         let editable = skill.source.editable();
         let title = h_flex().gap(px(8.)).child(
             div()
-                .text_size(px(13.5))
+                .text_size(px(text::TITLE))
                 .font_medium()
                 .when(!skill.enabled, |el| el.text_color(theme.muted_foreground))
                 .child(skill.name.clone()),
@@ -2045,7 +2141,7 @@ impl SettingsView {
                 .into_any_element()
         } else {
             div()
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(theme.muted_foreground)
                 .child("Read-only")
                 .into_any_element()
@@ -2067,10 +2163,15 @@ impl SettingsView {
         let theme = cx.theme().clone();
         let title = h_flex()
             .gap(px(8.))
-            .child(div().text_size(px(13.5)).font_medium().child(s.title))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(text::TITLE))
+                    .font_medium()
+                    .child(s.title),
+            )
+            .child(
+                div()
+                    .text_size(px(text::LABEL))
                     .text_color(theme.muted_foreground)
                     .child(format!("by {}", s.author)),
             );
@@ -2173,7 +2274,7 @@ impl SettingsView {
                                 .gap(px(10.))
                                 .child(
                                     div()
-                                        .text_size(px(13.))
+                                        .text_size(px(text::BODY))
                                         .text_color(cx.theme().muted_foreground)
                                         .child("Save to"),
                                 )
@@ -2248,7 +2349,7 @@ impl SettingsView {
             return vec![
                 div()
                     .py(px(24.))
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
                     .child("No projects yet. Add one from the sidebar's folder button.")
                     .into_any_element(),
@@ -2285,7 +2386,7 @@ impl SettingsView {
         let chooser = h_flex()
             .gap(px(8.))
             .pb(px(24.))
-            .text_size(px(13.))
+            .text_size(px(text::BODY))
             .text_color(theme.muted_foreground)
             .child("Settings for")
             .child(picker(
@@ -2582,6 +2683,33 @@ impl SettingsView {
                 cx,
             ));
         }
+        // What happens to a pull request's failing checks; it's about git projects' threads alike,
+        // old and new.
+        let pull_requests = if project.is_repo {
+            let (w, p2) = (self.workspace.clone(), path.clone());
+            v_flex()
+                .w_full()
+                .child(Self::heading("Pull requests", cx))
+                .child(ui::group(
+                    vec![Self::row(
+                        "Send failed checks to the agent",
+                        "Without asking, when a pull request a thread opened fails. At most two tries per pull request, as each one is a turn you pay for. Off, the thread offers it instead.",
+                        Switch::new("proj-send-failed-checks")
+                            .checked(prefs.send_failed_checks)
+                            .on_click(move |on: &bool, _, cx| {
+                                let on = *on;
+                                w.update(cx, |ws, cx| {
+                                    ws.update_project_prefs(&p2, |pr| pr.send_failed_checks = on, cx)
+                                })
+                            }),
+                        cx,
+                    )],
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
 
         // Actions: named commands, run in a terminal tab from the title bar's Run menu.
         let mut action_rows: Vec<AnyElement> = prefs
@@ -2753,6 +2881,7 @@ impl SettingsView {
                 cx,
             ),
             ui::group(new_thread_rows, cx),
+            pull_requests,
             Self::heading("Actions", cx),
             Self::note(
                 "Commands you run often in this project: tests, a build, a dev server. They appear in the Run menu in the title bar and open in a terminal tab.",
@@ -2889,10 +3018,10 @@ impl SettingsView {
                 .truncate()
                 .px(px(8.))
                 .py(px(3.))
-                .rounded(px(crate::fluent::control(6.)))
+                .rounded(px(crate::fluent::control(radius::CONTROL)))
                 .bg(theme.foreground.opacity(0.06))
                 .font_family(theme.mono_font_family.clone())
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                 })
@@ -2917,7 +3046,7 @@ impl SettingsView {
             rows.push(Self::row(
                 "Its CLI",
                 "None named, so Trek can't tell when a turn checked its work. Maintain adds one, named as `cli:` in the skill's metadata.",
-                div().id("verify-no-cli").test_support().text_size(px(12.5)).text_color(muted).child("None"),
+                div().id("verify-no-cli").test_support().text_size(px(text::BODY)).text_color(muted).child("None"),
                 cx,
             ));
         }
@@ -3129,6 +3258,7 @@ pub(crate) fn theme_tiles(
                             .mt_auto()
                             .h(px(10.))
                             .w_full()
+                            // scale: ok, the composer in a theme's miniature
                             .rounded(px(3.))
                             .border_1()
                             .border_color(rgb(line))
@@ -3187,7 +3317,7 @@ pub(crate) fn theme_tiles(
                     div()
                         .w(px(132.))
                         .h(px(84.))
-                        .rounded(px(crate::fluent::control(9.)))
+                        .rounded(px(crate::fluent::control(radius::BUTTON)))
                         .overflow_hidden()
                         .border_1()
                         .border_color(if selected {
@@ -3208,7 +3338,7 @@ pub(crate) fn theme_tiles(
                 )
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .text_color(if selected {
                             theme.foreground
                         } else {

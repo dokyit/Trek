@@ -25,6 +25,10 @@
 			</dict>
 		</dict>
 	</dict>
+	<!-- The thread at work and what waits on the user, on the Lock Screen and in the Dynamic Island
+	     (TurnActivities; drawn by the TrekActivity extension). Updated from the app only: no push. -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Trek connects to Trek on your Mac, on your local network, to show your agents and relay your answers.</string>
 	<!-- Trek on the Mac announces itself as _trek._tcp, so a paired Mac whose address changed is
@@ -33,6 +37,13 @@
 	<array>
 		<string>_trek._tcp</string>
 	</array>
+	<!-- Feedback from Settings goes to PostHog with the project key the Mac's builds use
+	     (docs/PRIVACY.md): the TREK_POSTHOG_KEY and TREK_POSTHOG_HOST build settings, which the
+	     environment of the build sets. Empty without them, and then nothing is sent. -->
+	<key>TrekPostHogKey</key>
+	<string>$(TREK_POSTHOG_KEY)</string>
+	<key>TrekPostHogHost</key>
+	<string>$(TREK_POSTHOG_HOST)</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Trek asks for Face ID before letting an agent skip approvals for the rest of a session.</string>
 	<!-- Dictation in the composer: the mic hears the message, Speech Recognition turns it into

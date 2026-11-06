@@ -97,7 +97,7 @@ struct NoteMarkdown: View {
                 inline(line.text, s).foregroundStyle(Trek.muted)
             }
         case .code:
-            ScrollView(.horizontal, showsIndicators: false) {
+            SidewaysScroll {
                 Text(line.text)
                     .font(.code(size: s * 0.8))
                     .padding(12)

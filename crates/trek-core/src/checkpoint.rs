@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 /// as new ones are taken.
 pub const KEEP: usize = 200;
 
-/// Longest a snapshot may take reading the files. The message waits for it, so past this (huge
-/// untracked files, a clean filter that hangs) it goes without one.
+/// Longest a snapshot may take reading the files. The thread's other git work waits for it, and
+/// the longer it reads the more of what the agent is changing it may see, so past this (huge
+/// untracked files, a clean filter that hangs) the turn goes without one.
 pub const SNAPSHOT_LIMIT: Duration = Duration::from_secs(10);
 
 /// Longest a restore (or its preview) may spend reading the files. It runs once, on request,

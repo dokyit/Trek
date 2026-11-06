@@ -326,7 +326,7 @@ fn every_screen_renders_in_both_themes() {
             t.id
         });
         let pages: Vec<SettingsPage> = trek_app::settings_view::pages().collect();
-        assert_eq!(pages.len(), 16, "every page is listed");
+        assert_eq!(pages.len(), 17, "every page is listed");
         for choice in [ThemeChoice::Paper, ThemeChoice::Night] {
             theme(cx, choice);
             assert_eq!(
@@ -396,6 +396,7 @@ fn every_screen_renders_in_both_themes() {
                     title: "Run command".into(),
                     detail: "cargo test".into(),
                     prompt,
+                    call: None,
                 };
                 trek.update(cx, |ws, cx| ws.apply_events(&id, vec![ask], cx));
                 trek.render(cx);

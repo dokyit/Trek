@@ -9,6 +9,7 @@
 use super::context::ContextChip;
 use super::input::AiInput;
 use super::transcript::AiTranscript;
+use crate::scale::{radius, text};
 use crate::workspace::{IdeTab, Mode, Route, Scope, SettingsPage, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
@@ -282,7 +283,7 @@ impl AiPane {
                             .gap(px(6.))
                             .items_center()
                             .cursor_pointer()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .border_r_1()
                             .border_color(line)
                             .when(on, |el| el.bg(editor_bg).text_color(theme.foreground))
@@ -319,7 +320,7 @@ impl AiPane {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded(px(4.))
+                                    .rounded(px(radius::TAG))
                                     .hover(|s| s.bg(theme.foreground.opacity(0.1)))
                                     // Behind tabs show × on hover only.
                                     .child(
@@ -657,13 +658,13 @@ impl AiPane {
             .gap(px(8.))
             .text_center()
             .child(Icon::new(crate::assets::Lucide::Sparkles).size(px(22.)).text_color(crate::palette::ember(cx)))
-            .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(match (&folder, side) {
+            .child(div().text_size(px(text::TITLE)).font_weight(FontWeight::MEDIUM).child(match (&folder, side) {
                 (Some(f), true) => format!("Side chat in {f}"),
                 (None, true) => "Side chat".into(),
                 (Some(f), false) => format!("New chat in {f}"),
                 (None, false) => "New chat".into(),
             }))
-            .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child(if side {
+            .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child(if side {
                 "A question on the side, in a session of its own: the main thread carries on undisturbed."
             } else {
                 "Ask about this code, or have the agent change it."

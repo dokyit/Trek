@@ -267,6 +267,13 @@ impl WindowFrameSource {
             unsubscribe(display_id, subscriber_id);
         }
     }
+
+    /// Trek: a frame request now, ahead of the next tick, if the source is running.
+    pub fn request_frame(&self) {
+        if self.registration.is_some() {
+            self.frame_requests.merge_data(1);
+        }
+    }
 }
 
 impl Drop for WindowFrameSource {

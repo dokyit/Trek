@@ -11,9 +11,12 @@ struct GitSheet: View {
     @State private var message = ""
     @State private var committing = false
     @State private var removing = false
+    /// The diff open over the panel, if any.
+    @State private var path: [String] = []
     /// The Mac's words for what removing would lose, and whether the branch goes too.
     @State private var lose: (text: String, deleteBranch: Bool)?
     @FocusState private var writing: Bool
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var target: GitTarget { .thread(threadID) }
     private var thread: ThreadSummary? { model.thread(threadID) }
@@ -24,7 +27,7 @@ struct GitSheet: View {
     private var base: String? { worktree?.base ?? thread?.base }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Form {
                 if status == nil, let why = model.gitUnavailable[target] {
                     // Nothing to show, and the Mac said why (a thread with no folder of its own):
@@ -47,7 +50,9 @@ struct GitSheet: View {
             .navigationTitle("Git")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: String.self) { path in
-                DiffScreen(target: target, file: status?.files.first { $0.path == path } ?? ChangedFile(path: path, status: .modified))
+                DiffScreen(target: target, file: status?.files.first { $0.path == path } ?? ChangedFile(path: path, status: .modified),
+                           files: status?.files ?? [], go: { self.path = [$0] })
+                    .id(path)
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -60,6 +65,9 @@ struct GitSheet: View {
             }
             .refreshable { load() }
         }
+        // Around the stack, not on one diff: what's written on one file stays while reading the
+        // next, and sending closes the sheet, so "Sent" shows over the thread rather than behind it.
+        .modifier(DiffCommenting(target: target))
         .onAppear(perform: load)
         .onChange(of: busy) {
             // A commit went through: the message has done its job.
@@ -132,13 +140,13 @@ struct GitSheet: View {
                                 .background(Trek.foreground.opacity(0.07), in: Capsule())
                         }
                     }
-                    HStack(spacing: 10) {
+                    BesideOrOver(spacing: typeSize.isAccessibilitySize ? 2 : 10) {
                         Text(base.map { "Worktree from \($0)" } ?? "In the project folder")
                         aheadBehind
                     }
                     .font(.ui(.footnote))
                     .foregroundStyle(Trek.muted)
-                    .lineLimit(1)
+                    .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
                 }
             }
             .padding(.vertical, 2)
@@ -176,9 +184,9 @@ struct GitSheet: View {
                 ProgressView().frame(maxWidth: .infinity)
             }
         } header: {
-            HStack {
+            BesideOrOver(spacing: 2) {
                 Text("Changes\(status.map { " (\($0.files.count))" } ?? "")")
-                Spacer()
+                if !typeSize.isAccessibilitySize { Spacer() }
                 if let s = status, !s.files.isEmpty {
                     LineCounts(added: s.files.reduce(0) { $0 + $1.added }, removed: s.files.reduce(0) { $0 + $1.removed }, quiet: false)
                 }

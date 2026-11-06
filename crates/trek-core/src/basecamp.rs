@@ -1101,7 +1101,7 @@ impl Recap {
             text(&mut out, ".");
         }
         if self.agent_secs > 0 {
-            text(&mut out, " Your agents were on the trail for ");
+            text(&mut out, " Your agents worked for ");
             out.push(Span::Strong(duration(self.agent_secs)));
             text(&mut out, ".");
         }
@@ -1981,7 +1981,7 @@ mod tests {
         );
         assert_eq!(
             words(&r.narrative(model_label)),
-            "You sent *5 prompts* across *4 threads*. Most of it went into [synara], with <GPT-6 Astra> carrying *77%* of the reported tokens, ahead of <Claude Opus 5.5>. Your agents were on the trail for *43m*."
+            "You sent *5 prompts* across *4 threads*. Most of it went into [synara], with <GPT-6 Astra> carrying *77%* of the reported tokens, ahead of <Claude Opus 5.5>. Your agents worked for *43m*."
         );
         // No tokens reported: turns tell instead, and nothing is said about tokens.
         let mut quiet = day(&tz);
@@ -2018,7 +2018,7 @@ mod tests {
         let r = Recap::compute(Range::Week.window(&now(&tz, "2026-10-03 22:30")), 0, &[one]);
         assert_eq!(
             words(&r.narrative(model_label)),
-            "This week you sent *1 prompt* across *1 thread*. All of it went into [trek], all on <Claude Opus 5.5>. Your agents were on the trail for *under a minute*."
+            "This week you sent *1 prompt* across *1 thread*. All of it went into [trek], all on <Claude Opus 5.5>. Your agents worked for *under a minute*."
         );
     }
 

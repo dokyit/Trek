@@ -133,6 +133,7 @@ struct ReviewRowView: View {
     var row: ReviewRow
     /// The agent's logo on the second line (the Mac's newer rows leave it out).
     var showsAgent = true
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var look: (symbol: String, color: Color) {
         switch row.status {
@@ -159,9 +160,10 @@ struct ReviewRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(row.title)
                     .font(.ui(.body).weight(row.unseen == true ? .semibold : .regular))
-                    .lineLimit(1)
+                    .lineLimit(typeSize.isAccessibilitySize ? 3 : 1)
+                if typeSize.isAccessibilitySize { state }
                 if showsAgent || row.project != nil || row.additions + row.deletions > 0 {
-                    HStack(spacing: 6) {
+                    WordFlow(spacing: 6, lineSpacing: 2) {
                         if showsAgent { AgentGlyph(row.agent, size: 14) }
                         if let p = row.project {
                             ProjectBadge(project: p, size: 14)
@@ -175,22 +177,28 @@ struct ReviewRowView: View {
                     .foregroundStyle(Trek.muted)
                 }
             }
-            Spacer(minLength: 6)
-            Group {
-                if let label = row.label {
-                    Text(label).fontWeight(.medium).foregroundStyle(look.color)
-                } else {
-                    Text(When.short(row.updatedAt)).monospacedDigit().foregroundStyle(Trek.muted)
-                }
+            if !typeSize.isAccessibilitySize {
+                Spacer(minLength: 6)
+                state.padding(.top, 2)
             }
-            .font(.ui(.footnote))
-            .lineLimit(1)
-            .fixedSize()
-            .padding(.top, 2)
         }
         .padding(.vertical, 9)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+
+    /// What it waits on, or when it changed.
+    private var state: some View {
+        Group {
+            if let label = row.label {
+                Text(label).fontWeight(.medium).foregroundStyle(look.color)
+            } else {
+                Text(When.short(row.updatedAt)).monospacedDigit().foregroundStyle(Trek.muted)
+            }
+        }
+        .font(.ui(.footnote))
+        .lineLimit(1)
+        .fixedSize()
     }
 }
 

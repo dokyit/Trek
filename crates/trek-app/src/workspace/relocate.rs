@@ -69,6 +69,7 @@ impl Workspace {
                 secondary: None,
                 busy: true,
                 progress: None,
+                choices: None,
             },
             Moving::Waiting(p) | Moving::Starting(p, _) => UpdateView {
                 line: format!(
@@ -79,6 +80,7 @@ impl Workspace {
                 secondary: None,
                 busy: false,
                 progress: None,
+                choices: None,
             },
         }
     }

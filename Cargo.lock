@@ -9190,9 +9190,12 @@ dependencies = [
  "chrono-tz",
  "ctor",
  "futures",
+ "globset",
  "iana-time-zone",
+ "ignore",
  "libc",
  "portable-pty",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -9202,6 +9205,7 @@ dependencies = [
  "trek-ipc",
  "trek-script",
  "trek-test-fixtures",
+ "url",
  "vt100",
  "windows-sys 0.61.2",
 ]
@@ -9286,6 +9290,7 @@ dependencies = [
  "trek-remote",
  "trek-screenclip",
  "trek-shortcuts",
+ "trek-telemetry",
  "trek-test-fixtures",
  "trek-time",
  "trek-updater",
@@ -9464,6 +9469,8 @@ dependencies = [
  "gpui-pre-windows",
  "lb-wry",
  "log",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-log",
  "tracing-subscriber",
@@ -9601,6 +9608,26 @@ dependencies = [
  "tracing",
  "trek-core",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "trek-telemetry"
+version = "0.4.40"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "chrono",
+ "futures",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "trek-core",
+ "trek-logging",
+ "uuid",
 ]
 
 [[package]]

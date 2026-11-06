@@ -23,6 +23,7 @@ mod native;
 mod surface;
 
 use crate::assets::Lucide;
+use crate::scale::{radius, text};
 use crate::visualization::{Look, header, shell, summary_text, title_text};
 use gpui_kit::component::text::{MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex, v_flex};
@@ -42,7 +43,8 @@ const MAX_LIVE: usize = 4;
 /// Snapshots kept for cards whose views have gone (by document).
 const SHOTS_KEPT: usize = 24;
 /// The card's corner radius, less its 1 px edge: the bottom corners of what's drawn in it.
-const RADIUS: f32 = 11.;
+// scale: ok, inside the card's 1 px edge
+const RADIUS: f32 = radius::CARD - 1.;
 /// How long after a load (or a theme switch) the page is pictured, for its snapshot.
 const SETTLE: Duration = Duration::from_millis(700);
 /// A page that keeps changing its height is let be at this many changes.
@@ -324,11 +326,11 @@ fn note(reason: &str, source: &str, key: usize, size: Pixels, cx: &App) -> AnyEl
                 .gap(px(8.))
                 .px(px(10.))
                 .py(px(7.))
-                .rounded(px(8.))
+                .rounded(px(radius::BUTTON))
                 .border_1()
                 .border_color(look.hairline)
                 .bg(crate::palette::amber(cx).opacity(if look.dark { 0.06 } else { 0.07 }))
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .line_height(relative(1.45))
                 .child(
                     div()
@@ -357,7 +359,7 @@ fn building_label(phase: f32, look: &Look) -> AnyElement {
         .flex_none()
         .h(px(24.))
         .pr_1()
-        .text_size(px(11.))
+        .text_size(px(text::META))
         .text_color(look.muted)
         .opacity(breath)
         .child("Building…")
@@ -376,7 +378,7 @@ fn building(
     let motion = crate::visualization::motion(cx);
     let phase = crate::visualization::shimmer(motion, window);
     let stub = look.fg.opacity(if look.dark { 0.07 } else { 0.06 });
-    let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded(px(h / 2.)).bg(stub);
+    let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded_full().bg(stub);
     let title_el = match title {
         Some(t) => title_text(t.to_string(), &look),
         None => div()
@@ -618,7 +620,7 @@ fn status_layer(status: Status, look: &Look) -> AnyElement {
         .items_center()
         .justify_center()
         .px_6()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .text_color(look.muted)
         .text_center()
         .child(text)
@@ -643,7 +645,7 @@ fn action(
         .min_w(px(24.))
         .px(px(5.))
         .justify_center()
-        .rounded(px(crate::fluent::control(6.)))
+        .rounded(px(crate::fluent::control(radius::CONTROL)))
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .child(Icon::new(icon).size(px(13.)).text_color(muted))
@@ -662,12 +664,12 @@ impl Render for Tip {
             .mt(px(4.))
             .px(px(8.))
             .py(px(4.))
-            .rounded(px(crate::fluent::control(6.)))
+            .rounded(px(crate::fluent::control(radius::CONTROL)))
             .border_1()
             .border_color(theme.border)
             .bg(theme.popover)
             .text_color(theme.popover_foreground)
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .child(self.0)
     }
 }
@@ -704,7 +706,7 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
             .margin_top(px(56.))
             .title(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(text::TITLE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(title.clone()),
             )
@@ -717,7 +719,7 @@ fn expand_artifact(doc: &Arc<Doc>, window: &mut Window, cx: &mut App) {
                     .relative()
                     .w_full()
                     .h(h)
-                    .rounded(px(8.))
+                    .rounded(px(radius::BUTTON))
                     .overflow_hidden()
                     .child(status_layer(status, &look))
                     .child(SurfaceElement {
@@ -793,8 +795,9 @@ pub fn theme(cx: &App) -> core::Theme {
         info: verdict_css(Verdict::Informational, crate::palette::sky(cx), cx),
         font: font_stack(&t.font_family, false),
         mono: font_stack(&t.mono_font_family, true),
+        // scale: ok, in proportion to the answer's text
         font_size: (size * 0.93 * 2.).round() / 2.,
-        radius: 8.,
+        radius: radius::BUTTON,
     }
 }
 
@@ -1136,6 +1139,12 @@ impl ArtifactState {
         let html = self.doc.html.clone();
         let thread = ws.read(cx).card_thread(&html);
         match thread {
+            // The user's own words, so what's typed in the page may be the secret a card is up for.
+            Some((id, false)) if ws.read(cx).asks_for_secret(&id) => crate::toast::push(
+                window,
+                "This thread is waiting for a secret. Give it in its card or decline it, then send again.",
+                cx,
+            ),
             Some((id, false)) => {
                 ws.update(cx, |ws, cx| ws.send_as(&id, text, Vec::new(), None, cx));
                 crate::toast::push(window, format!("Sent from {title}"), cx);

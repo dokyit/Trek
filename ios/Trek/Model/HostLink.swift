@@ -32,6 +32,8 @@ final class HostLink: Identifiable, Equatable {
     var fullAccessAllowed = false
     /// The newest Trek it knows of, from its snapshot (`AppUpdate`).
     var release: TrekRelease?
+    /// Its snapshot has come since it was paired or the app started: it has said what its threads are.
+    @ObservationIgnored var listed = false
 
     /// How the phone reaches it (pinned TLS or plain `ws://`), as the client has it now — it can
     /// tighten from a prefix pin to the full fingerprint after pairing.

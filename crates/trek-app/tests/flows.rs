@@ -719,6 +719,7 @@ fn secret_answers_are_typed_into_the_cached_card() {
             title: "AskUserQuestion".into(),
             detail: String::new(),
             prompt: Some(trek_agents::Prompt::Questions(vec![question])),
+            call: None,
         };
         trek.update(cx, |ws, cx| ws.apply_events(&id, vec![ask], cx));
         assert!(trek.visible(cx, "q-send"));
@@ -1088,6 +1089,7 @@ fn updates_wait_for_a_plan_offered_after_its_turn() {
             prompt: Some(trek_agents::Prompt::Plan(
                 "1. Add the route\n2. Test it".into(),
             )),
+            call: None,
         };
         trek.update(cx, |ws, cx| {
             ws.apply_events(

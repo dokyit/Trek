@@ -118,14 +118,14 @@ impl Stroke {
     }
 
     /// A Ctrl+letter with nothing else held: the keys a shell uses (readline's, and the terminal's
-    /// own Ctrl+C / Ctrl+L / Ctrl+V).
+    /// own Ctrl+C / Ctrl+L / Ctrl+V). Ctrl+\ too, a shell's other way to stop what's running.
     fn is_plain_ctrl_letter(&self) -> bool {
         self.ctrl
             && !self.alt
             && !self.shift
             && !self.cmd
             && self.key.len() == 1
-            && self.key.as_bytes()[0].is_ascii_lowercase()
+            && (self.key.as_bytes()[0].is_ascii_lowercase() || self.key == "\\")
     }
 
     /// The whole keystroke as one run of text: `⌘⇧K` or `Ctrl+Shift+K`.
@@ -267,9 +267,12 @@ pub enum Id {
     OpenPaletteAnywhere,
     InlineEdit,
     OpenInNewWindow,
+    OpenBeside,
     CopyThreadLink,
     CopyThreadMarkdown,
     CopyThreadFolder,
+    NextNeedsYou,
+    BackToLastPrompt,
     OpenBasecamp,
     LeaveBasecamp,
     OpenNotes,
@@ -309,6 +312,23 @@ pub enum Id {
     NewNote,
     SaveFile,
     FormatDocument,
+    DiffNextLine,
+    DiffPreviousLine,
+    DiffDown,
+    DiffUp,
+    DiffExtendDown,
+    DiffExtendUp,
+    DiffExtendArrowDown,
+    DiffExtendArrowUp,
+    DiffNextHunk,
+    DiffPreviousHunk,
+    DiffNextFile,
+    DiffPreviousFile,
+    DiffViewed,
+    DiffStage,
+    DiffComment,
+    DiffSend,
+    DiffClear,
     /// The text fields' own redo (the kit binds it): ⇧⌘Z on a Mac, Ctrl+Y on Windows.
     Redo,
 }
@@ -376,6 +396,7 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
     use Id::*;
     use Win::{Dropped, Keys, Same};
     const NOTES: Option<&str> = Some(crate::notes::CONTEXT);
+    const DIFF: Option<&str> = Some(crate::diff_review::KEY_CONTEXT);
     vec![
         row(Quit, App, "cmd-q", Same, None, act!(crate::Quit)),
         // No such thing as hiding an app on Windows.
@@ -477,6 +498,16 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             None,
             act!(crate::OpenInNewWindow),
         ),
+        // A thread beside the one on screen, or with a split open, the focus across it. Only the
+        // main window has a split.
+        row(
+            OpenBeside,
+            App,
+            "cmd-\\",
+            Same,
+            Some("TrekWindow"),
+            act!(crate::OpenBeside),
+        ),
         // The thread on screen's copies (its "⋯" › Copy). Share… has no keys: ⇧⌘S is a snapshot.
         // Ctrl+Alt+L would be AltGr+L.
         row(
@@ -503,6 +534,23 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             Dropped,
             None,
             act!(crate::CopyThreadFolder),
+        ),
+        // ⇧⌘U, the key rivals use for this, is Study here. I for "inbox", B for "back".
+        row(
+            NextNeedsYou,
+            App,
+            "cmd-shift-i",
+            Same,
+            None,
+            act!(crate::NextNeedsYou),
+        ),
+        row(
+            BackToLastPrompt,
+            App,
+            "cmd-shift-b",
+            Same,
+            None,
+            act!(crate::BackToLastPrompt),
         ),
         row(
             OpenBasecamp,
@@ -826,6 +874,144 @@ static TABLE: LazyLock<Vec<Binding>> = LazyLock::new(|| {
             Some("TrekEditor"),
             act!(crate::editor::FormatDocument),
         ),
+        // A diff with the keyboard: its own while it has focus itself, never in a text field
+        // (`diff_review`). The keys Orca's and cmux's diffs use, the same on both platforms.
+        row(
+            DiffNextLine,
+            App,
+            "j",
+            Same,
+            DIFF,
+            act!(crate::diff_review::NextLine),
+        ),
+        row(
+            DiffPreviousLine,
+            App,
+            "k",
+            Same,
+            DIFF,
+            act!(crate::diff_review::PreviousLine),
+        ),
+        row(
+            DiffDown,
+            App,
+            "down",
+            Same,
+            DIFF,
+            act!(crate::diff_review::NextLine),
+        ),
+        row(
+            DiffUp,
+            App,
+            "up",
+            Same,
+            DIFF,
+            act!(crate::diff_review::PreviousLine),
+        ),
+        row(
+            DiffExtendDown,
+            App,
+            "shift-j",
+            Same,
+            DIFF,
+            act!(crate::diff_review::ExtendDown),
+        ),
+        row(
+            DiffExtendUp,
+            App,
+            "shift-k",
+            Same,
+            DIFF,
+            act!(crate::diff_review::ExtendUp),
+        ),
+        row(
+            DiffExtendArrowDown,
+            App,
+            "shift-down",
+            Same,
+            DIFF,
+            act!(crate::diff_review::ExtendDown),
+        ),
+        row(
+            DiffExtendArrowUp,
+            App,
+            "shift-up",
+            Same,
+            DIFF,
+            act!(crate::diff_review::ExtendUp),
+        ),
+        row(
+            DiffNextHunk,
+            App,
+            "n",
+            Same,
+            DIFF,
+            act!(crate::diff_review::NextHunk),
+        ),
+        row(
+            DiffPreviousHunk,
+            App,
+            "p",
+            Same,
+            DIFF,
+            act!(crate::diff_review::PreviousHunk),
+        ),
+        row(
+            DiffNextFile,
+            App,
+            "]",
+            Same,
+            DIFF,
+            act!(crate::diff_review::NextFile),
+        ),
+        row(
+            DiffPreviousFile,
+            App,
+            "[",
+            Same,
+            DIFF,
+            act!(crate::diff_review::PreviousFile),
+        ),
+        row(
+            DiffViewed,
+            App,
+            "v",
+            Same,
+            DIFF,
+            act!(crate::diff_review::ToggleViewed),
+        ),
+        row(
+            DiffStage,
+            App,
+            "s",
+            Same,
+            DIFF,
+            act!(crate::diff_review::StageHunk),
+        ),
+        row(
+            DiffComment,
+            App,
+            "c",
+            Same,
+            DIFF,
+            act!(crate::diff_review::AddComment),
+        ),
+        row(
+            DiffSend,
+            App,
+            "cmd-enter",
+            Same,
+            DIFF,
+            act!(crate::diff_review::SendComments),
+        ),
+        row(
+            DiffClear,
+            App,
+            "escape",
+            Same,
+            DIFF,
+            act!(crate::diff_review::ClearCursor),
+        ),
         // Not Trek's.
         row(Redo, System, "cmd-shift-z", Keys("ctrl-y"), None, None),
     ]
@@ -1058,6 +1244,8 @@ enum Show {
     Cap(&'static str),
     /// Next / previous change: ⌥⌘↓ ↑ on a Mac.
     Hunks,
+    /// Either of two bindings.
+    Either(Id, Id),
 }
 
 use Show::{Bound, Cap, Hunks};
@@ -1072,11 +1260,20 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
                 "Open the thread in a new window",
                 Bound(Id::OpenInNewWindow),
             ),
+            (
+                "Open a thread beside this one, or move across a split",
+                Bound(Id::OpenBeside),
+            ),
             ("Copy a link to the thread", Bound(Id::CopyThreadLink)),
             ("Copy the thread as Markdown", Bound(Id::CopyThreadMarkdown)),
             (
                 "Copy the thread's working directory",
                 Bound(Id::CopyThreadFolder),
+            ),
+            ("Next thread that needs you", Bound(Id::NextNeedsYou)),
+            (
+                "Back to where you last sent a prompt",
+                Bound(Id::BackToLastPrompt),
             ),
             ("Settle the current thread", Bound(Id::SettleThread)),
             ("Stop the agent", Bound(Id::Interrupt)),
@@ -1088,6 +1285,10 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
             // "Send" and "New line" swap their keys with the setting (`shortcut_groups`).
             ("Send", Show::Keys("enter")),
             ("New line", Show::Keys("shift-enter")),
+            (
+                "Send the other way mid-turn (steer or queue)",
+                Show::Keys("alt-enter"),
+            ),
             ("Plan mode", Bound(Id::TogglePlan)),
             ("Cycle hand-holding", Bound(Id::CycleHandHolding)),
             ("Commands", Cap("/")),
@@ -1128,6 +1329,29 @@ const PAGE: &[(&str, &[(&str, Show)])] = &[
             ("Quit", Bound(Id::Quit)),
         ],
     ),
+    (
+        "Diff review",
+        &[
+            ("Next line", Show::Either(Id::DiffNextLine, Id::DiffDown)),
+            (
+                "Previous line",
+                Show::Either(Id::DiffPreviousLine, Id::DiffUp),
+            ),
+            (
+                "Select lines",
+                Show::Either(Id::DiffExtendDown, Id::DiffExtendUp),
+            ),
+            ("Next hunk", Bound(Id::DiffNextHunk)),
+            ("Previous hunk", Bound(Id::DiffPreviousHunk)),
+            ("Next file", Bound(Id::DiffNextFile)),
+            ("Previous file", Bound(Id::DiffPreviousFile)),
+            ("Comment on the line", Bound(Id::DiffComment)),
+            ("Send comments to the agent", Bound(Id::DiffSend)),
+            ("Mark the file viewed", Bound(Id::DiffViewed)),
+            ("Stage or unstage the hunk", Bound(Id::DiffStage)),
+            ("Clear the selection", Bound(Id::DiffClear)),
+        ],
+    ),
 ];
 
 /// The Keyboard Shortcuts page: groups of (what it does, its keys). `send_with_secondary_enter`
@@ -1162,6 +1386,12 @@ pub fn shortcut_groups(
                             Chip::keys(stroke_of(row_of(*id)?, mac)?.chips(mac))
                         }
                         (_, Show::Keys(keystroke)) => chips_of(keystroke),
+                        (_, Show::Either(a, b)) => {
+                            let mut chips = Chip::keys(stroke_of(row_of(*a)?, mac)?.chips(mac));
+                            chips.push(Chip::Word("or"));
+                            chips.extend(Chip::keys(stroke_of(row_of(*b)?, mac)?.chips(mac)));
+                            chips
+                        }
                         (_, Show::Cap(text)) => vec![Chip::Key((*text).to_string())],
                         (_, Show::Hunks) if mac => {
                             let mut chips =
@@ -1254,8 +1484,8 @@ mod tests {
             .filter_map(|b| resolve(b, true))
             .map(|r| format!("{}|{}", r.keystroke, r.context.unwrap_or_default()))
             .collect();
-        // The 41 in main.rs, the 13 in notes.rs and the 2 in editor.rs.
-        assert_eq!(mac.len(), 41 + 13 + 2);
+        // The 44 in main.rs, the 13 in notes.rs, the 2 in editor.rs, and a diff's 17.
+        assert_eq!(mac.len(), 44 + 13 + 2 + 17);
         for (keys, ctx) in [
             ("cmd-q", ""),
             ("alt-cmd-e", ""),
@@ -1415,6 +1645,13 @@ mod tests {
             "Ctrl+K is the shell's in the terminal"
         );
         assert_eq!(ctx(Id::NewThread).as_deref(), Some("!Terminal"));
+        assert_eq!(
+            ctx(Id::OpenBeside).as_deref(),
+            Some("(TrekWindow) && !Terminal"),
+            "Ctrl+\\ is the shell's in the terminal"
+        );
+        assert_eq!(hint_for(Id::OpenBeside, false), "Ctrl+\\");
+        assert_eq!(hint_for(Id::OpenBeside, true), "⌘\\");
         assert_eq!(
             ctx(Id::ToggleTerminal),
             None,
@@ -1599,7 +1836,7 @@ mod tests {
         };
         assert_eq!(
             page.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
-            ["Threads", "Composer", "Editor", "Window"]
+            ["Threads", "Composer", "Editor", "Window", "Diff review"]
         );
         assert_eq!(
             flat(&page[0].1),
@@ -1608,9 +1845,12 @@ mod tests {
                 "New thread: ⌘ N",
                 "Open a folder: ⌘ O",
                 "Open the thread in a new window: ⌘ ⇧ ↩",
+                "Open a thread beside this one, or move across a split: ⌘ \\",
                 "Copy a link to the thread: ⌥ ⌘ L",
                 "Copy the thread as Markdown: ⌘ ⇧ M",
                 "Copy the thread's working directory: ⌘ ⇧ C",
+                "Next thread that needs you: ⌘ ⇧ I",
+                "Back to where you last sent a prompt: ⌘ ⇧ B",
                 "Settle the current thread: ⌘ E",
                 "Stop the agent: ⌘ .",
             ]
@@ -1620,6 +1860,7 @@ mod tests {
             [
                 "Send: ↩",
                 "New line: ⇧ ↩",
+                "Send the other way mid-turn (steer or queue): ⌥ ↩",
                 "Plan mode: ⇧ ⇥",
                 "Cycle hand-holding: ⌘ ⇧ A",
                 "Commands: /",
@@ -1662,6 +1903,39 @@ mod tests {
         );
         let swapped = shortcut_groups(true, true);
         assert_eq!(flat(&swapped[1].1)[..2], ["Send: ⌘ ↩", "New line: ↩"]);
+    }
+
+    #[test]
+    fn a_diffs_keys_are_on_the_page_and_only_in_the_diff() {
+        for (mac, send) in [(true, "⌘"), (false, "Ctrl")] {
+            let page = shortcut_groups(mac, false);
+            let (name, rows) = page.last().unwrap();
+            assert_eq!(*name, "Diff review");
+            let keys = |row: &str| -> Vec<Chip> {
+                rows.iter()
+                    .find(|(n, _)| *n == row)
+                    .unwrap_or_else(|| panic!("{row}"))
+                    .1
+                    .clone()
+            };
+            assert_eq!(keys("Next hunk"), [Chip::Key("N".into())]);
+            assert_eq!(keys("Comment on the line"), [Chip::Key("C".into())]);
+            assert_eq!(keys("Next file"), [Chip::Key("]".into())]);
+            assert_eq!(
+                keys("Send comments to the agent")[0],
+                Chip::Key(send.into())
+            );
+            assert_eq!(keys("Next line")[1], Chip::Word("or"));
+        }
+        // Plain letters: they must never be bound outside the diff, or they'd stop reaching text.
+        for b in TABLE.iter().filter(|b| b.mac.is_some_and(|m| m.len() == 1)) {
+            assert_eq!(
+                b.context,
+                Some(crate::diff_review::KEY_CONTEXT),
+                "{:?}",
+                b.id
+            );
+        }
     }
 
     #[test]
@@ -1727,7 +2001,7 @@ mod tests {
                 .sum();
             // Windows drops Hide, Minimize and Copy working directory (Ctrl+Shift+C is the
             // terminal's copy there) and adds Ctrl+Shift+P and Ctrl+F4.
-            assert_eq!(n, if mac { 56 } else { 56 - 3 + 2 }, "mac: {mac}");
+            assert_eq!(n, if mac { 76 } else { 76 - 3 + 2 }, "mac: {mac}");
         }
     }
 

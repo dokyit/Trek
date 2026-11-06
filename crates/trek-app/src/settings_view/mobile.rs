@@ -6,6 +6,7 @@
 use super::SettingsView;
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -25,7 +26,7 @@ pub(crate) fn qr(url: &str, module: f32) -> AnyElement {
     v_flex()
         .p(px(module * 4.))
         .bg(gpui_kit::white())
-        .rounded(px(fluent::surface(10.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .children(colors.chunks(width).map(|row| {
             h_flex().children(row.iter().map(|c| {
                 div()
@@ -99,7 +100,7 @@ impl SettingsView {
                 .test_support()
                 .gap(px(28.))
                 .p(px(20.))
-                .rounded(px(fluent::surface(12.)))
+                .rounded(px(fluent::surface(radius::CARD)))
                 .border_1()
                 .border_color(theme.border)
                 .items_start()
@@ -109,18 +110,18 @@ impl SettingsView {
                         .gap(px(10.))
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(12.5))
-                        .child(div().text_size(px(13.5)).font_semibold().child("Set up ntfy on your iPhone"))
+                        .text_size(px(text::BODY))
+                        .child(div().text_size(px(text::TITLE)).font_semibold().child("Set up ntfy on your iPhone"))
                         .child(div().text_color(theme.muted_foreground).child("1. Install ntfy from the App Store."))
                         .child(div().text_color(theme.muted_foreground).child("2. In ntfy, tap + and subscribe to this topic:"))
                         .child(
                             div()
                                 .px(px(10.))
                                 .py(px(6.))
-                                .rounded(px(fluent::control(7.)))
+                                .rounded(px(fluent::control(radius::BUTTON)))
                                 .bg(theme.foreground.opacity(0.06))
                                 .font_family(theme.mono_font_family.clone())
-                                .text_size(px(12.))
+                                .text_size(px(text::LABEL))
                                 .child(topic.clone()),
                         )
                         .child(div().text_color(theme.muted_foreground).child("3. Send a test. Keep the topic to yourself: anyone who has it can read what's sent."))
@@ -139,7 +140,7 @@ impl SettingsView {
                                     })
                                 })),
                         )
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(format!("Through {}", m.push_server))),
+                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Through {}", m.push_server))),
                 )
                 .into_any_element(),
         );
@@ -243,7 +244,7 @@ impl SettingsView {
                     "Phones on this Wi-Fi network dial this address. With Tailscale on {this} and your phone, you can choose your tailnet address here to reach it from anywhere."
                 ),
                 div()
-                    .text_size(px(12.5))
+                    .text_size(px(text::LABEL))
                     .font_family(theme.mono_font_family.clone())
                     .child(advertise.clone()),
                 cx,
@@ -292,7 +293,7 @@ impl SettingsView {
                         .test_support()
                         .gap(px(28.))
                         .p(px(20.))
-                        .rounded(px(fluent::surface(12.)))
+                        .rounded(px(fluent::surface(radius::CARD)))
                         .border_1()
                         .border_color(theme.border)
                         .items_start()
@@ -302,35 +303,35 @@ impl SettingsView {
                                 .gap(px(12.))
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().text_size(px(13.5)).font_semibold().child("Scan this with Trek on your iPhone"))
-                                .child(div().text_size(px(12.5)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type these:"))
+                                .child(div().text_size(px(text::TITLE)).font_semibold().child("Scan this with Trek on your iPhone"))
+                                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type these:"))
                                 .child(
                                     h_flex()
                                         .gap(px(20.))
                                         .child(
                                             v_flex()
                                                 .gap(px(2.))
-                                                .child(div().text_xs().text_color(theme.muted_foreground).child("Code"))
-                                                .child(div().text_size(px(20.)).font_semibold().font_family(theme.mono_font_family.clone()).child(offer.code.clone())),
+                                                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("Code"))
+                                                .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(offer.code.clone())),
                                         )
                                         .when_some(offer.fingerprint.clone(), |el, fp| {
                                             el.child(
                                                 v_flex()
                                                     .gap(px(2.))
-                                                    .child(div().text_xs().text_color(theme.muted_foreground).child(words.computer_fingerprint))
-                                                    .child(div().text_size(px(20.)).font_semibold().font_family(theme.mono_font_family.clone()).child(fp)),
+                                                    .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(words.computer_fingerprint))
+                                                    .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(fp)),
                                             )
                                         }),
                                 )
-                                .child(div().text_xs().text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
+                                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
                                 // Another computer running Trek pairs from the same code, pasted as a link.
                                 .child({
                                     let url = offer.url.clone();
                                     v_flex()
                                         .gap(px(4.))
                                         .pt(px(4.))
-                                        .child(div().text_size(px(12.5)).font_medium().child("Pair another machine"))
-                                        .child(div().text_xs().text_color(theme.muted_foreground).child("In Trek on the other machine, choose Add a machine… and paste this link:"))
+                                        .child(div().text_size(px(text::BODY)).font_medium().child("Pair another machine"))
+                                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("In Trek on the other machine, choose Add a machine… and paste this link:"))
                                         .child(
                                             h_flex()
                                                 .gap(px(8.))
@@ -342,10 +343,10 @@ impl SettingsView {
                                                         .min_w_0()
                                                         .px(px(8.))
                                                         .py(px(5.))
-                                                        .rounded(px(fluent::control(6.)))
+                                                        .rounded(px(fluent::control(radius::CONTROL)))
                                                         .bg(theme.foreground.opacity(0.06))
                                                         .font_family(theme.mono_font_family.clone())
-                                                        .text_size(px(11.))
+                                                        .text_size(px(text::META))
                                                         .truncate()
                                                         .child(offer.url.clone()),
                                                 )
@@ -581,7 +582,7 @@ impl SettingsView {
                 .into_any_element(),
         );
         out.push(div().h(px(12.)).into_any_element());
-        out.push(div().text_size(px(12.)).text_color(theme.muted_foreground).child("A machine is paired like a phone: it lists this one among its paired devices, where it can be unpaired.").into_any_element());
+        out.push(div().text_size(px(text::LABEL)).text_color(theme.muted_foreground).child("A machine is paired like a phone: it lists this one among its paired devices, where it can be unpaired.").into_any_element());
         out
     }
 }

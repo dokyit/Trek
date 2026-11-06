@@ -158,25 +158,30 @@ fn threads_settle_after_days_unless_told_never_to() {
         trek.update(cx, |ws, cx| ws.mark_unread(&unread, cx));
         edit(&trek, cx, &failed, |t| t.run_state = RunState::Failed);
         trek.render(cx);
-        // It's a quiet line, past its project group's cap until the group opens.
+        // It's a quiet line in its project (shown in full: the unread one sits on top there),
+        // and what failed is in Needs you.
         let pid = trek.read(cx, |ws, _| {
             ws.thread(&stale).unwrap().project_id.clone().unwrap()
         });
-        trek.click(cx, format!("live-more-{pid}"));
-        trek.render(cx);
+        if !trek.visible(cx, format!("live-line-{stale}")) {
+            trek.click(cx, format!("live-more-{pid}"));
+            // Off the sidebar again, so its rows don't hold their places under the pointer.
+            trek.window(cx, |window, cx| {
+                window.dispatch_event(
+                    gpui_kit::PlatformInput::MouseMove(gpui_kit::MouseMoveEvent {
+                        position: gpui_kit::point(gpui_kit::px(900.), gpui_kit::px(400.)),
+                        pressed_button: None,
+                        modifiers: Default::default(),
+                    }),
+                    cx,
+                )
+            });
+            trek.render(cx);
+        }
         assert!(trek.visible(cx, format!("live-line-{stale}")));
+        assert!(trek.visible(cx, format!("live-line-unseen-{unread}")));
+        assert!(trek.visible(cx, format!("card-{failed}")));
 
-        // Away from the sidebar, which holds its rows still while the pointer is on it.
-        trek.window(cx, |window, cx| {
-            window.dispatch_event(
-                gpui_kit::PlatformInput::MouseMove(gpui_kit::MouseMoveEvent {
-                    position: gpui_kit::point(gpui_kit::px(900.), gpui_kit::px(400.)),
-                    pressed_button: None,
-                    modifiers: Default::default(),
-                }),
-                cx,
-            )
-        });
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
         trek.render(cx);
         assert_eq!(section_of(&trek, cx, &stale), Some(Section::Settled));
@@ -586,6 +591,7 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
                 false,
                 false,
                 None,
+                None,
             );
             ws.warm = Some((
                 key,
@@ -992,6 +998,7 @@ fn switching_agent_leaves_nothing_waiting_on_the_old_one() {
             title: "Plan".into(),
             detail: String::new(),
             prompt: Some(trek_agents::Prompt::Plan("1. Do it".into())),
+            call: None,
         };
         trek.update(cx, |ws, cx| {
             ws.apply_events(

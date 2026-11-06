@@ -10,6 +10,7 @@ use super::preview::{Kind, NotText, PreviewEvent, PreviewView};
 use crate::editor::EditorView;
 use crate::fluent;
 use crate::keys::{self, Id};
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::Route;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -655,7 +656,7 @@ impl IdeWorkbench {
                     .gap(px(6.))
                     .items_center()
                     .cursor_pointer()
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .border_r_1()
                     .border_color(line)
                     .when(on, |el| {
@@ -692,7 +693,7 @@ impl IdeWorkbench {
                             div()
                                 .id(("ide-tab-agent", ix))
                                 .test_support()
-                                .text_size(px(11.))
+                                .text_size(px(text::META))
                                 .text_color(ember)
                                 .tooltip(|window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(
@@ -706,7 +707,7 @@ impl IdeWorkbench {
                     .when_some(mark, |el, m| {
                         el.child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(px(text::META))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(m.color(cx))
                                 .child(m.letter()),
@@ -722,7 +723,7 @@ impl IdeWorkbench {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(4.))
+                            .rounded(px(radius::TAG))
                             .hover(|s| s.bg(theme.foreground.opacity(0.1)))
                             .when(dirty, |el| {
                                 el.child(
@@ -876,7 +877,7 @@ impl IdeWorkbench {
             .flex_none()
             .px(px(14.))
             .gap(px(5.))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(theme.muted_foreground)
             .overflow_hidden()
             .children(parts.into_iter().enumerate().map(move |(ix, part)| {
@@ -969,7 +970,7 @@ impl IdeWorkbench {
             .items_center()
             .justify_center()
             .gap(px(10.))
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .text_color(theme.muted_foreground)
             .child(
                 div()
@@ -1028,7 +1029,7 @@ impl IdeWorkbench {
                 .h(px(28.))
                 .gap_2()
                 .items_center()
-                .rounded(px(fluent::control(5.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.list_hover))
                 .child(icon)
@@ -1038,14 +1039,14 @@ impl IdeWorkbench {
                         .flex_none()
                         .max_w(relative(0.7))
                         .truncate()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .child(name),
                 )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(theme.muted_foreground)
                         .truncate()
                         .child(trek_core::paths::tildify(path)),
@@ -1056,7 +1057,7 @@ impl IdeWorkbench {
                 div()
                     .pt_4()
                     .pb_1()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("Recent folders"),
             );
@@ -1086,7 +1087,7 @@ impl IdeWorkbench {
                 div()
                     .pt_3()
                     .pb_1()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("Recent files"),
             );
@@ -1127,10 +1128,15 @@ impl IdeWorkbench {
                         v_flex()
                             .items_center()
                             .gap_1()
-                            .child(div().text_lg().font_medium().child("Trek IDE"))
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(to_rems(text::HEADING))
+                                    .font_medium()
+                                    .child("Trek IDE"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(to_rems(text::LABEL))
                                     .text_color(theme.muted_foreground)
                                     .child("A folder, a file, and the agents already signed in."),
                             ),

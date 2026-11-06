@@ -4,9 +4,14 @@
 //! orders it within its thread. Saving a live transcript writes only the rows that are new,
 //! changed or gone (`save_transcript`), so long threads stay cheap to save mid-turn.
 
+mod adopted;
+mod pr_checks;
+mod restart;
 mod search;
 mod usage;
 
+pub use adopted::AdoptedWorktree;
+pub use restart::Unsent;
 pub use search::{INDEX_MAX_BYTES, ImportedToIndex, SearchHit, fts_query};
 pub use usage::{Activity, UsageRow};
 
@@ -178,6 +183,9 @@ pub struct Thread {
     /// tabs and history), never with the threads of Agents mode (the sidebar, inbox, Basecamp,
     /// search, phones). Threads made before there were editor chats stay Agents threads.
     pub editor_chat: bool,
+    /// The account its agent runs on (`accounts::Account::id`). `None`: the user's normal login.
+    /// Its session lives in that account's folder, so moving it to another starts a new one.
+    pub account: Option<String>,
 }
 
 /// Sidebar section, computed from thread state (T3 Code's inbox model).
@@ -508,6 +516,7 @@ const THREAD_COLUMNS_ADDED: &[(&str, &str)] = &[
     ("continued_from", "TEXT"),
     ("notify_starter", "INTEGER NOT NULL DEFAULT 0"),
     ("editor_chat", "INTEGER NOT NULL DEFAULT 0"),
+    ("account", "TEXT"),
 ];
 
 /// Migrations; each is a no-op once applied. Run inside one transaction (`with_connection`), so
@@ -537,9 +546,13 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE TABLE IF NOT EXISTS told_notes (thread_id TEXT PRIMARY KEY, notes TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS reviews (thread_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS review_notes (thread_id TEXT PRIMARY KEY, data TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS ide_chats (root TEXT PRIMARY KEY, data TEXT NOT NULL);",
     )?;
     usage::migrate(conn)?;
+    conn.execute_batch(restart::SCHEMA)?;
+    conn.execute_batch(adopted::SCHEMA)?;
+    conn.execute_batch(pr_checks::SCHEMA)?;
     migrate_items(conn)?;
     search::ensure_schema(conn)
 }
@@ -742,7 +755,7 @@ impl Store {
 
     // ---- threads ----
 
-    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id, started_by, continued_from, notify_starter, editor_chat";
+    const THREAD_COLS: &'static str = "id, project_id, title, agent, model, effort, hand_holding, source, native_id, cwd, branch, created_at, updated_at, last_seen_at, settled_at, pinned_at, snoozed_until, archived_at, run_state, additions, deletions, side_of, never_settle, imported_title, import_hidden, import_kept, worktree_path, worktree_branch, worktree_base, native_at, reopen, paused, parent_id, started_by, continued_from, notify_starter, editor_chat, account";
 
     fn row_to_thread(r: &rusqlite::Row) -> rusqlite::Result<Thread> {
         Ok(Thread {
@@ -796,6 +809,7 @@ impl Store {
             continued_from: r.get(34)?,
             notify_starter: r.get::<_, i64>(35)? != 0,
             editor_chat: r.get::<_, i64>(36)? != 0,
+            account: r.get(37)?,
         })
     }
 
@@ -879,6 +893,7 @@ impl Store {
             continued_from: None,
             notify_starter: false,
             editor_chat: false,
+            account: None,
         };
         self.save_thread(&t)?;
         Ok(t)
@@ -922,7 +937,7 @@ impl Store {
             }
         }
         // Kept prepared: every change to a thread saves it (a run's state, its title, its time),
-        // and an import saves each thread it finds, so the 37-column upsert isn't parsed and
+        // and an import saves each thread it finds, so the 38-column upsert isn't parsed and
         // planned again for each.
         c.prepare_cached(&SQL)?.execute(params![
             t.id,
@@ -965,7 +980,8 @@ impl Store {
             t.started_by,
             t.continued_from,
             t.notify_starter as i64,
-            t.editor_chat as i64
+            t.editor_chat as i64,
+            t.account
         ])?;
         Ok(())
     }
@@ -1010,6 +1026,8 @@ impl Store {
             "tool_lines",
             "told_notes",
             "reviews",
+            "review_notes",
+            "pr_checks",
             "token_usage",
             "turn_stops",
         ] {
@@ -1029,21 +1047,34 @@ impl Store {
     }
 
     /// Close the turns an earlier run left open (it quit or crashed mid-turn, or while a card was
-    /// waiting): no session is behind them any more. Each thread goes back to idle; in its stored
-    /// transcript, tool calls still running are marked failed, empty thoughts go, and a notice
-    /// says the turn was cut short. Returns the threads closed. For launch, before any session
-    /// starts.
+    /// waiting): no session is behind them any more. Each thread goes back to idle and unread (the
+    /// user hasn't seen how it ended); in its stored transcript, tool calls still running are
+    /// marked failed, empty thoughts go, and a notice says the turn was cut short. Each is noted
+    /// for the user to pick up (`interrupted_turns`), sub-agents apart: they report to their
+    /// parents. Returns the threads closed. For launch, before any session starts.
     pub fn close_interrupted_turns(&self) -> Result<Vec<String>> {
-        let open: Vec<String> = self.with(|c| {
-            let mut st = c.prepare("SELECT id FROM threads WHERE run_state IN (?1, ?2)")?;
+        let open: Vec<(String, bool, bool)> = self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, run_state = ?2, parent_id IS NOT NULL FROM threads WHERE run_state IN (?1, ?2)",
+            )?;
             let rows = st.query_map(
                 params![enum_str(&RunState::Working), enum_str(&RunState::NeedsYou)],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
             rows.collect()
         })?;
-        for id in &open {
+        for (id, waiting, sub_agent) in &open {
             let rows = self.items_with_ids(id)?;
+            // What a card was asking: the call still marked running as it went up.
+            let asked = rows.iter().rev().find_map(|(_, i)| match i {
+                Item::Tool {
+                    status: ToolStatus::Running,
+                    title,
+                    detail,
+                    ..
+                } if *waiting => Some(crate::interrupted::asked_line(title, detail)),
+                _ => None,
+            });
             // With nothing stored, the history is still the agent's own (an imported thread):
             // a lone notice would hide it.
             if !rows.is_empty() {
@@ -1070,9 +1101,15 @@ impl Store {
                 });
                 self.save_transcript(id, &mut t)?;
             }
-            self.update_thread(id, |t| t.run_state = RunState::Idle)?;
+            self.update_thread(id, |t| {
+                t.run_state = RunState::Idle;
+                t.last_seen_at = t.last_seen_at.min(t.updated_at - 1);
+            })?;
+            if !sub_agent {
+                self.note_interrupted(id, *waiting, asked.as_deref(), now_ms())?;
+            }
         }
-        Ok(open)
+        Ok(open.into_iter().map(|(id, ..)| id).collect())
     }
 
     /// Agent session ids of Trek's own threads, archived ones included, of imported threads that
@@ -1245,12 +1282,22 @@ impl Store {
     }
 
     fn new_imported(c: &Connection, imp: &ImportedThread) -> rusqlite::Result<Thread> {
-        let project = imp
+        // In a worktree brought in from another app: its repository's project, not one per folder.
+        let adopted = imp
             .cwd
             .as_deref()
-            .filter(|p| p.exists())
-            .map(|p| project_in(c, p))
-            .transpose()?;
+            .map(|p| adopted::holding(c, p))
+            .transpose()?
+            .flatten();
+        let project = match &adopted {
+            Some(a) => Some(project_in(c, &a.project)?),
+            None => imp
+                .cwd
+                .as_deref()
+                .filter(|p| p.exists())
+                .map(|p| project_in(c, p))
+                .transpose()?,
+        };
         Ok(Thread {
             id: uuid::Uuid::now_v7().to_string(),
             project_id: project.map(|p| p.id),
@@ -1278,7 +1325,7 @@ impl Store {
             imported_title: Some(imp.title.clone()),
             import_hidden: None,
             import_kept: false,
-            worktree: None,
+            worktree: adopted.map(|a| a.worktree()),
             native_at: None,
             reopen: None,
             paused: None,
@@ -1287,6 +1334,19 @@ impl Store {
             continued_from: None,
             notify_starter: false,
             editor_chat: false,
+            account: None,
+        })
+    }
+
+    /// Account `id` is gone, and the sessions in its folder with it: its threads, archived ones
+    /// too, go back to the user's normal login and pick up from a recap.
+    pub fn forget_account(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE threads SET account = NULL, native_id = NULL, native_at = NULL, reopen = NULL WHERE account = ?1",
+                [id],
+            )
+            .map(|_| ())
         })
     }
 
@@ -1389,6 +1449,8 @@ impl Store {
             tx.execute("DELETE FROM tool_lines WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM told_notes WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM reviews WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM review_notes WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM pr_checks WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM token_usage WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM turn_stops WHERE thread_id = ?1", [gone])?;
             tx.execute(
@@ -1659,6 +1721,32 @@ impl Store {
         })
     }
 
+    /// Every thread's review notes (line comments not sent yet, files marked viewed) as the app
+    /// saved them: (its key, a thread or a folder; its data).
+    pub fn review_notes(&self) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT thread_id, data FROM review_notes")?;
+            let rows = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Keep `key`'s review notes (`data`, the app's own), or forget them with `None`.
+    pub fn set_review_notes(&self, key: &str, data: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            match data {
+                Some(d) => c.execute(
+                    "INSERT OR REPLACE INTO review_notes (thread_id, data) VALUES (?1, ?2)",
+                    params![key, d],
+                )?,
+                None => c.execute("DELETE FROM review_notes WHERE thread_id = ?1", [key])?,
+            };
+            Ok(())
+        })
+    }
+
     /// The editor's chat tabs as last left in folder `root` (the app's own data).
     pub fn ide_chats(&self, root: &str) -> Result<Option<String>> {
         self.with(|c| {
@@ -1898,6 +1986,40 @@ mod tests {
             HandHolding::Auto,
         )
         .unwrap()
+    }
+
+    /// A thread keeps its account, and a removed account's threads go back to the normal login
+    /// with nothing left to resume: their sessions went with its folder.
+    #[test]
+    fn a_thread_keeps_its_account_until_the_account_goes() {
+        let s = Store::in_memory().unwrap();
+        let mut t = s
+            .create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto)
+            .unwrap();
+        assert_eq!(t.account, None);
+        t.account = Some("work".into());
+        t.native_id = Some("session".into());
+        s.save_thread(&t).unwrap();
+        let mut other = s
+            .create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto)
+            .unwrap();
+        other.account = Some("home".into());
+        other.native_id = Some("other".into());
+        s.save_thread(&other).unwrap();
+        let read = |id: &str| {
+            s.threads()
+                .unwrap()
+                .into_iter()
+                .find(|t| t.id == id)
+                .unwrap()
+        };
+        assert_eq!(read(&t.id).account.as_deref(), Some("work"));
+        s.forget_account("work").unwrap();
+        let gone = read(&t.id);
+        assert_eq!((gone.account, gone.native_id), (None, None));
+        let kept = read(&other.id);
+        assert_eq!(kept.account.as_deref(), Some("home"));
+        assert_eq!(kept.native_id.as_deref(), Some("other"));
     }
 
     #[test]
@@ -2725,6 +2847,7 @@ mod tests {
         s.add_checkpoint(&a.id, "i1", Path::new("/repo"), "abc")
             .unwrap();
         s.set_review(&a.id, Some("{}")).unwrap();
+        s.set_review_notes(&a.id, Some("{}")).unwrap();
         s.set_told_notes(&a.id, "notes").unwrap();
         s.set_tool_lines(&a.id, "e1", Some((1, 1))).unwrap();
         s.record_usage(
@@ -2775,6 +2898,7 @@ mod tests {
             "tool_lines",
             "told_notes",
             "reviews",
+            "review_notes",
             "token_usage",
             "turn_stops",
             "retired_sessions",
@@ -3588,6 +3712,18 @@ mod tests {
             s.reviews().unwrap().is_empty(),
             "a deleted thread's review goes with it"
         );
+        let t = s
+            .create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto)
+            .unwrap();
+        s.set_review_notes(&t.id, Some("{\"drafts\":[]}")).unwrap();
+        s.set_review_notes("dir:/p", Some("{}")).unwrap();
+        assert_eq!(s.review_notes().unwrap().len(), 2);
+        s.set_review_notes("dir:/p", None).unwrap();
+        s.delete_thread(&t.id).unwrap();
+        assert!(
+            s.review_notes().unwrap().is_empty(),
+            "a deleted thread's comments go with it"
+        );
         assert_eq!(s.ide_chats("/p").unwrap(), None);
         s.set_ide_chats("/p", "[1]").unwrap();
         s.set_ide_chats("/p", "[2]").unwrap();
@@ -3671,12 +3807,18 @@ mod tests {
         expected.sort();
         assert_eq!(closed, expected);
         for id in [&working, &asking, &imported] {
-            assert_eq!(s.thread(id).unwrap().unwrap().run_state, RunState::Idle);
+            let t = s.thread(id).unwrap().unwrap();
+            assert_eq!(t.run_state, RunState::Idle);
+            assert!(t.is_unseen(), "how it ended is news");
         }
         assert_eq!(
             s.thread(&failed).unwrap().unwrap().run_state,
             RunState::Failed,
             "a failure still needs the user"
+        );
+        assert!(
+            !s.thread(&idle).unwrap().unwrap().is_unseen(),
+            "nothing happened to an idle one"
         );
         let notice = Item::Notice {
             text: INTERRUPTED_BY_QUIT.into(),

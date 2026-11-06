@@ -6,7 +6,8 @@ name: Release
 # beta and nightly, refreshes) the GitHub release with darwin-aarch64 in <channel>.json. The
 # Windows build runs alongside it (release.ps1 -BuildOnly: its own version bump, cargo build, zip,
 # Inno installer, minisig); only the publish half needs the Mac's release, so a short publish job
-# does the manifest merge and upload once both are done (release.ps1 -PublishOnly -Publish).
+# does the manifest merge and upload once both are done (release.ps1 -PublishOnly -Publish). The
+# Intel Mac build runs alongside them too and joins the release last (jobs intel, publish-intel).
 #
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta
 #   gh workflow run release.yml -f version=0.4.1-beta.4 -f channel=beta -f dry_run=true
@@ -71,6 +72,13 @@ env:
   # Incremental builds don't help a fresh runner and bloat the cache.
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: -D warnings
+  # PostHog, for the usage data and crash reports users say yes to, and feedback (docs/PRIVACY.md):
+  # compiled into every build. Repository *variables*, not secrets (Settings > Secrets and
+  # variables > Actions > Variables): a project key (phc_…) can only add events, and ships in the
+  # app anyway. Unset, the build asks as usual and sends nothing; the host defaults to PostHog's
+  # US cloud.
+  TREK_POSTHOG_KEY: ${{ vars.TREK_POSTHOG_KEY }}
+  TREK_POSTHOG_HOST: ${{ vars.TREK_POSTHOG_HOST }}
 
 jobs:
   macos:
@@ -375,6 +383,248 @@ jobs:
           rm -rf "$RUNNER_TEMP/minisign.key" "$RUNNER_TEMP/codesign.p12" "$RUNNER_TEMP/throwaway-signing" "$RUNNER_TEMP/notes.md"
           rm -rf "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notary.p8"
 
+  # The Intel Mac build (docs/RELEASING.md, "Intel Macs"): the same app for x86_64-apple-darwin,
+  # cross-built on the same kind of runner with the same tools, signed the same way. Each step
+  # below that has the macos job's name is that step, and changes with it. It publishes nothing
+  # itself (publish-intel does, once the others are done), so if it fails the release still goes
+  # out for Apple silicon and Windows, and Intel Macs hear that their build is on its way.
+  intel:
+    name: macOS app (Intel)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+          targets: x86_64-apple-darwin
+
+      # A key of its own: the "release" cache holds Apple-silicon artifacts. warm-release.yml doesn't
+      # keep this one hot; the first run builds everything, and saves it for the next.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-intel
+          save-if: ${{ inputs.dry_run != true }}
+
+      - name: Metal toolchain
+        run: |
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      - name: Install resvg and pigz
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: brew install resvg pigz
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install minisign
+        run: |
+          ver=0.12
+          zip="$RUNNER_TEMP/minisign-$ver-macos.zip"
+          curl -fsSL -o "$zip" "https://github.com/jedisct1/minisign/releases/download/$ver/minisign-$ver-macos.zip"
+          expected=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63
+          actual=$(shasum -a 256 "$zip" | cut -d' ' -f1)
+          if [[ $actual != "$expected" ]]; then
+            echo "::error::minisign $ver macos sha256 mismatch: got $actual, want $expected"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/minisign"
+          unzip -q -o "$zip" minisign -d "$RUNNER_TEMP/minisign"
+          chmod +x "$RUNNER_TEMP/minisign/minisign"
+          "$RUNNER_TEMP/minisign/minisign" -v
+          echo "$RUNNER_TEMP/minisign" >> "$GITHUB_PATH"
+
+      # bundle.sh runs the Intel trek-mcp once, to compile the iPhone helper for Intel.
+      - name: Rosetta
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          arch -x86_64 /usr/bin/true
+
+      - name: minisign secret key
+        env:
+          KEY_FILE: ${{ secrets.TREK_MINISIGN_KEY }}
+        run: |
+          if [[ -z ${KEY_FILE//[[:space:]]/} ]]; then
+            echo "::error::the TREK_MINISIGN_KEY secret is not set (docs/RELEASING.md)"
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$KEY_FILE" > "$RUNNER_TEMP/minisign.key"
+          echo "TREK_MINISIGN_KEY=$RUNNER_TEMP/minisign.key" >> "$GITHUB_ENV"
+
+      - name: Code-signing identity
+        env:
+          P12_BASE64: ${{ secrets.TREK_CODESIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.TREK_CODESIGN_P12_PASSWORD }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/trek-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          echo "::add-mask::$keychain_password"
+          if [[ -z ${P12_BASE64//[[:space:]]/} ]]; then
+            if [[ $DRY_RUN != true ]]; then
+              echo "::error::the TREK_CODESIGN_P12 secret is not set; a release is signed with the real \"Trek Local Signing\" (docs/RELEASING.md)"
+              exit 1
+            fi
+            echo "• no TREK_CODESIGN_P12 secret: this dry run signs with a throwaway \"Trek Local Signing\""
+            dir="$RUNNER_TEMP/throwaway-signing"
+            scratch="$RUNNER_TEMP/throwaway.keychain-db"
+            security create-keychain -p "$keychain_password" "$scratch"
+            security unlock-keychain -p "$keychain_password" "$scratch"
+            TREK_SIGNING_DIR=$dir TREK_SIGNING_KEYCHAIN=$scratch script/signing-identity.sh
+            security delete-keychain "$scratch"
+            P12_BASE64=$(base64 < "$dir/codesign.p12")
+            P12_PASSWORD=$(cat "$dir/codesign.p12.password")
+            echo "::add-mask::$P12_PASSWORD"
+            rm -rf "$dir"
+          fi
+          p12_password=$(printf '%s' "$P12_PASSWORD" | tr -d '\r\n')
+          if [[ -z $p12_password ]]; then
+            echo "::error::TREK_CODESIGN_P12 is set but TREK_CODESIGN_P12_PASSWORD isn't (docs/RELEASING.md)"
+            exit 1
+          fi
+          p12="$RUNNER_TEMP/codesign.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -f pkcs12 -P "$p12_password" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          rm -f "$p12"
+          searched=()
+          while IFS= read -r k; do searched+=("$k"); done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
+          security list-keychains -d user -s "$keychain" "${searched[@]}"
+          if ! security find-identity -p codesigning "$keychain" | grep -qF '"Trek Local Signing"'; then
+            echo "::error::the p12 holds no \"Trek Local Signing\" identity"
+            exit 1
+          fi
+          echo "• \"Trek Local Signing\" ready in $keychain"
+          echo "TREK_SIGN_IDENTITY=Trek Local Signing" >> "$GITHUB_ENV"
+
+      - name: Developer ID and notarization (optional)
+        env:
+          DEVID_P12_BASE64: ${{ secrets.TREK_DEVELOPER_ID_P12 }}
+          DEVID_P12_PASSWORD: ${{ secrets.TREK_DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          missing=()
+          [[ -n ${DEVID_P12_BASE64//[[:space:]]/} ]] || missing+=(TREK_DEVELOPER_ID_P12)
+          [[ -n ${DEVID_P12_PASSWORD//[[:space:]]/} ]] || missing+=(TREK_DEVELOPER_ID_P12_PASSWORD)
+          [[ -n ${NOTARY_KEY//[[:space:]]/} ]] || missing+=(APPLE_NOTARY_KEY)
+          [[ -n ${NOTARY_KEY_ID//[[:space:]]/} ]] || missing+=(APPLE_NOTARY_KEY_ID)
+          [[ -n ${NOTARY_ISSUER_ID//[[:space:]]/} ]] || missing+=(APPLE_NOTARY_ISSUER_ID)
+          if (( ${#missing[@]} == 5 )); then
+            echo "• notarization skipped: no Developer ID or notary secrets. Signed with \"Trek Local Signing\"; macOS asks once on first launch (Privacy & Security › Open Anyway)"
+            exit 0
+          fi
+          if (( ${#missing[@]} )); then
+            echo "::warning::notarization skipped: ${missing[*]} not set (all five Developer ID and notary secrets are needed; docs/RELEASING.md)"
+            exit 0
+          fi
+          umask 077
+          keychain="$RUNNER_TEMP/trek-developer-id.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          echo "::add-mask::$keychain_password"
+          p12="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$DEVID_P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -f pkcs12 \
+            -P "$(printf '%s' "$DEVID_P12_PASSWORD" | tr -d '\r\n')" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          rm -f "$p12"
+          searched=()
+          while IFS= read -r k; do searched+=("$k"); done < <(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')
+          security list-keychains -d user -s "$keychain" "${searched[@]}"
+          identity=$(security find-identity -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
+          if [[ -z $identity ]]; then
+            echo "::error::TREK_DEVELOPER_ID_P12 holds no valid \"Developer ID Application\" identity"
+            exit 1
+          fi
+          printf '%s\n' "$NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          {
+            echo "TREK_SIGN_IDENTITY=$identity"
+            echo "TREK_NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+            echo "TREK_NOTARY_KEY_ID=$(printf '%s' "$NOTARY_KEY_ID" | tr -d '[:space:]')"
+            echo "TREK_NOTARY_ISSUER=$(printf '%s' "$NOTARY_ISSUER_ID" | tr -d '[:space:]')"
+          } >> "$GITHUB_ENV"
+          echo "• signing with \"$identity\" and notarizing with Apple"
+
+      # --dry-run: build, sign, archive and write this build's manifest, with no commit, tag or
+      # release. The macos job does those for the version; publish-intel attaches what's here.
+      - name: script/release.sh for Intel
+        env:
+          TREK_MINISIGN_PASSWORD: ${{ secrets.TREK_MINISIGN_PASSWORD }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          args=("$VERSION" --channel "$CHANNEL" --target x86_64-apple-darwin --dry-run)
+          if [[ -n ${NOTES//[[:space:]]/} ]]; then
+            printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+            args+=(--notes "$RUNNER_TEMP/notes.md")
+          fi
+          script/release.sh "${args[@]}"
+
+      # Under Rosetta: the bundle's Intel code runs, signature and all. (bundle.sh has checked that
+      # each executable is x86_64. Drawing can't be tried here: the runner has no Intel GPU.)
+      - name: The Intel build starts
+        run: arch -x86_64 dist/Trek.app/Contents/MacOS/trek-mcp --version
+
+      - name: Summary
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          VERSION=${VERSION#v}
+          out="dist/release/$VERSION"
+          name="Trek-$VERSION-darwin-x86_64.app.tar.gz"
+          dmg="Trek-$VERSION-darwin-x86_64.dmg"
+          sha=$(shasum -a 256 "$out/$name" | cut -d' ' -f1)
+          dmg_sha=$(shasum -a 256 "$out/$dmg" | cut -d' ' -f1)
+          {
+            echo "### macOS, Intel"
+            echo
+            echo "\`$name\` sha256 \`$sha\`"
+            echo
+            echo "\`$dmg\` sha256 \`$dmg_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # All of it: publish-intel takes the archive, its signature, the disk image and the manifest.
+      # A dry run's stays a week, to open and look at.
+      - name: Intel build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel-build
+          path: dist/release/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Remove keys and keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/trek-signing.keychain-db" 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/throwaway.keychain-db" 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/trek-developer-id.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/minisign.key" "$RUNNER_TEMP/codesign.p12" "$RUNNER_TEMP/throwaway-signing" "$RUNNER_TEMP/notes.md"
+          rm -rf "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notary.p8"
+
   # The Windows build needs nothing the Mac makes: release.ps1 bumps the checked-out version
   # itself. It runs in parallel and hands dist\release\<version>\ to the publish job, which is
   # the only part that waits for the Mac's release (its manifest merge).
@@ -518,3 +768,64 @@ jobs:
             $manifest.TrimEnd()
             '```'
           ) -join "`n" >> $env:GITHUB_STEP_SUMMARY
+
+  # The Intel build joins the release last: after the Windows publish, however that ended, since two
+  # merges of one manifest at once would lose one of them. Until it lands, Intel Macs see the new
+  # version with no build for them yet and say it's on its way. Safe to re-run: it replaces its own
+  # assets and its own entry.
+  publish-intel:
+    name: Intel publish
+    needs: [macos, intel, publish]
+    if: ${{ !cancelled() && needs.macos.result == 'success' && needs.intel.result == 'success' }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      # script/lib/merge-manifest.py.
+      - uses: actions/checkout@v4
+
+      - name: Intel build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: intel-build
+          path: dist/release
+
+      # A dry run's stand-in for the release's <channel>.json, as the macOS job left it.
+      - name: Manifest from the macOS dry run
+        if: inputs.dry_run == true
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-manifest
+          path: ${{ runner.temp }}/mac-manifest
+
+      - name: Merge manifest (dry run)
+        if: inputs.dry_run == true
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          out="dist/release/${VERSION#v}"
+          merged=$(python3 script/lib/merge-manifest.py "$RUNNER_TEMP/mac-manifest/$CHANNEL.json" "$out/$CHANNEL.json")
+          {
+            echo "### Manifest with the Intel build (dry run: nothing uploaded)"
+            echo
+            echo '```json'
+            echo "$merged"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Merge manifest and attach
+        if: inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          version=${VERSION#v}
+          out="dist/release/$version"
+          tag=$CHANNEL
+          [[ $CHANNEL == stable ]] && tag="v$version"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.json" --output "$RUNNER_TEMP/release.json" --clobber
+          python3 script/lib/merge-manifest.py "$RUNNER_TEMP/release.json" "$out/$CHANNEL.json" > "$RUNNER_TEMP/$CHANNEL.json"
+          # The archive first, the manifest that points at it last.
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$out/Trek-$version-darwin-x86_64.app.tar.gz" "$out/Trek-$version-darwin-x86_64.app.tar.gz.minisig" "$out/Trek-$version-darwin-x86_64.dmg"
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/$CHANNEL.json"

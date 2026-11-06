@@ -1,5 +1,6 @@
 //! The sidebar's live area: threads that need eyes on them keep their cards; the quiet rest
-//! group by project as compact lines, capped until opened.
+//! group by project as compact lines, capped until opened. Projects sit under their own label;
+//! Study's sessions, other machines and the phone each have a section of their own.
 
 mod common;
 
@@ -110,7 +111,7 @@ fn unread_and_open_lines_are_never_hidden() {
         let ids: Vec<String> = (0..5)
             .map(|i| quiet(&trek, cx, &format!("Quiet {i}"), i as i64 * 60_000))
             .collect();
-        // The oldest has news: unread lines always show, wherever they'd sort.
+        // The oldest has news: it shows in its project, past the three a project shows.
         trek.update(cx, |ws, cx| {
             ws.store
                 .update_thread(&ids[4], |t| t.last_seen_at = t.updated_at - 1)
@@ -121,10 +122,9 @@ fn unread_and_open_lines_are_never_hidden() {
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(ids[3].clone()), cx));
         trek.render(cx);
         assert!(
-            trek.visible(cx, format!("live-line-{}", ids[4])),
+            trek.visible(cx, format!("live-line-unseen-{}", ids[4])),
             "unread is never capped away"
         );
-        assert!(trek.visible(cx, format!("live-line-unseen-{}", ids[4])));
         assert!(
             trek.visible(cx, format!("live-line-{}", ids[3])),
             "the open thread stays"
@@ -201,7 +201,7 @@ fn folding_a_group_hides_its_rows_but_not_what_waits_on_you() {
         });
         let pid = project_of(&trek, cx, &asking);
         trek.render(cx);
-        // The card sits under Active, above the projects; its project keeps the quiet lines.
+        // The card sits under Needs you, above the projects; its project keeps the quiet lines.
         assert!(trek.visible(cx, format!("card-{asking}")));
         assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
         trek.click(cx, format!("live-fold-{pid}"));
@@ -412,7 +412,7 @@ fn rows_hold_still_under_the_pointer_and_move_once_it_leaves() {
         );
         assert!(
             trek.visible(cx, format!("card-{asking}")),
-            "the answered thread stays under Active, in its place"
+            "the answered thread stays in its group, in its place"
         );
 
         // The pointer leaves for the transcript: the list catches up.
@@ -451,8 +451,8 @@ fn a_thread_waiting_on_you_is_two_lines_high_and_says_what_it_waits_for() {
         );
         assert!(trek.visible(cx, format!("card-needs-{id}")));
         assert_eq!(
-            trek.read(cx, |ws, _| trek_app::sidebar::needs_label(ws, &id)),
-            "Needs approval"
+            trek.read(cx, |ws, _| ws.why_needs_you(&id).map(|w| w.words())),
+            Some("Waiting: run ./scripts/migrate.sh --apply?".to_string())
         );
     });
 }
@@ -500,5 +500,150 @@ fn a_pointer_taken_off_the_window_lets_the_held_rows_go() {
             !trek.window(cx, |window, _| trek_app::chrome::pointer_inside(window)),
             "moved off once, not on every frame"
         );
+    });
+}
+
+/// A Study session, as `start_study` leaves it: in no project, working in the study folder.
+fn study_session(trek: &Trek, cx: &mut TestAppContext, title: &str) -> String {
+    trek.update(cx, |ws, cx| {
+        let mut t = ws
+            .store
+            .create_thread(None, mock(), None, Effort::Medium, HandHolding::Auto)
+            .expect("thread");
+        t.title = title.into();
+        t.cwd = Some(trek_core::study::dir());
+        t.last_seen_at = t.updated_at;
+        ws.store.save_thread(&t).expect("save");
+        ws.reload(cx);
+        t.id
+    })
+}
+
+#[test]
+fn a_study_session_is_listed_under_study_not_as_a_thread_without_a_project() {
+    run(async |cx| {
+        let trek = open(cx);
+        let session = study_session(&trek, cx, "Learn · the chain rule");
+        let loose = trek.update(cx, |ws, cx| {
+            let mut t = ws
+                .store
+                .create_thread(None, mock(), None, Effort::Medium, HandHolding::Auto)
+                .expect("thread");
+            t.title = "Name ideas for the CLI".into();
+            t.last_seen_at = t.updated_at;
+            ws.store.save_thread(&t).unwrap();
+            ws.reload(cx);
+            t.id
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "study-sessions"), "Study has its section");
+        assert!(trek.visible(cx, format!("live-line-{session}")));
+        // The thread with no project keeps its group; the session isn't in it.
+        assert!(trek.visible(cx, format!("live-line-{loose}")));
+        assert!(trek.visible(cx, "live-proj-head-"));
+        let mut under = |id: &str| {
+            trek.bounds(cx, format!("live-line-{id}"))
+                .map(|b| b.origin.y)
+                .unwrap()
+        };
+        let (study_y, loose_y) = (under(&session), under(&loose));
+        let study_head = trek.bounds(cx, "study-sessions").unwrap().origin.y;
+        assert!(
+            loose_y < study_head && study_head < study_y,
+            "the session sits under Study, after the projects"
+        );
+        // It's one: its row is the topic, the kind at its end.
+        let title = trek.read(cx, |ws, _| ws.thread(&session).unwrap().title.clone());
+        assert_eq!(
+            title, "Learn · the chain rule",
+            "the thread keeps its title"
+        );
+    });
+}
+
+#[test]
+fn projects_sit_under_their_own_label_after_what_is_active() {
+    run(async |cx| {
+        let trek = open(cx);
+        let quiet_id = quiet(&trek, cx, "Quiet", 60_000);
+        let working = quiet(&trek, cx, "Working", 10_000);
+        trek.update(cx, |ws, cx| {
+            ws.store
+                .update_thread(&working, |t| t.run_state = RunState::Working)
+                .unwrap();
+            ws.reload(cx);
+        });
+        trek.render(cx);
+        let pid = project_of(&trek, cx, &quiet_id);
+        let mut y = |id: String| trek.bounds(cx, id).map(|b| b.origin.y).unwrap();
+        let (card, label, head) = (
+            y(format!("card-{working}")),
+            y("section-projects".to_string()),
+            y(format!("live-proj-head-{pid}")),
+        );
+        assert!(
+            card < label && label < head,
+            "Active, then the Projects label, then the project: {card:?} {label:?} {head:?}"
+        );
+    });
+}
+
+#[test]
+fn a_paired_phone_is_a_device_that_opens_its_settings() {
+    run(async |cx| {
+        let trek = open(cx);
+        quiet(&trek, cx, "Quiet", 60_000);
+        trek.render(cx);
+        assert!(!trek.visible(cx, "devices"), "no devices, no section");
+        trek.update(cx, |ws, cx| {
+            ws.start_test_remote();
+            let remote = ws.remote.as_mut().unwrap();
+            remote.devices.push(trek_remote::DeviceInfo {
+                device_id: "phone".into(),
+                name: "Test iPhone".into(),
+                paired_at: now_ms() - 86_400_000,
+                last_seen_at: None,
+                app_version: None,
+                platform: Some("ios".into()),
+            });
+            // A machine paired the other way round isn't a phone.
+            remote.devices.push(trek_remote::DeviceInfo {
+                device_id: "mac".into(),
+                name: "Studio Mac".into(),
+                paired_at: now_ms(),
+                last_seen_at: None,
+                app_version: None,
+                platform: Some("macos".into()),
+            });
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "devices"));
+        assert!(trek.visible(cx, "phone-phone"));
+        assert!(!trek.visible(cx, "phone-mac"));
+        trek.click(cx, "phone-phone");
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Settings(trek_app::workspace::SettingsPage::Mobile)
+        );
+    });
+}
+
+#[test]
+fn an_empty_inbox_and_an_empty_search_each_say_so() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "inbox-zero"));
+        quiet(&trek, cx, "Profile the sidebar", 60_000);
+        trek.render(cx);
+        assert!(!trek.visible(cx, "inbox-zero"));
+        trek.update(cx, |ws, cx| ws.set_search("zzqx nothing".into(), cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "search-empty"));
+        trek.update(cx, |ws, cx| ws.set_search(String::new(), cx));
+        trek.render(cx);
+        assert!(!trek.visible(cx, "search-empty"));
     });
 }

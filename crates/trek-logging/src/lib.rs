@@ -1,6 +1,7 @@
 //! Where Trek's log goes: stderr (a terminal launch), and a file a day in `~/Library/Logs/Trek`
 //! (kept a week), so a Finder launch leaves breadcrumbs too. A panic is logged with where it
-//! happened and a backtrace, and leaves a note the next launch shows.
+//! happened and a backtrace, and leaves a note the next launch shows and a report it can send
+//! (`CrashReport`, with the user's yes).
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -11,8 +12,11 @@ use tracing_subscriber::layer::SubscriberExt as _;
 const KEEP_DAYS: i64 = 7;
 
 /// The log folder: `~/Library/Logs/Trek` (`%LOCALAPPDATA%\Trek\logs` on Windows), or `logs` in
-/// the data folder `TREK_DATA_DIR` moved.
+/// the data folder `TREK_DATA_DIR` moved or a test isolated (which never reads the user's).
 pub fn log_dir() -> PathBuf {
+    if trek_core::paths::isolated() {
+        return trek_core::paths::data_dir().join("logs");
+    }
     match std::env::var_os("TREK_DATA_DIR").filter(|d| !d.is_empty()) {
         Some(dir) => PathBuf::from(dir).join("logs"),
         #[cfg(windows)]
@@ -161,12 +165,114 @@ fn install_panic_hook() {
             .to_string();
         let backtrace = std::backtrace::Backtrace::force_capture();
         tracing::error!("panic on thread '{thread}' at {location}: {message}\n{backtrace}");
-        write_crash_note(
-            &trek_core::paths::data_dir(),
-            &format!("{location}: {message}"),
+        let data_dir = trek_core::paths::data_dir();
+        write_crash_note(&data_dir, &format!("{location}: {message}"));
+        write_crash_report(
+            &data_dir,
+            CrashReport {
+                at: chrono::Utc::now().timestamp(),
+                version: trek_core::VERSION.to_string(),
+                thread,
+                location,
+                message,
+                backtrace: backtrace.to_string(),
+            },
         );
         default(info);
     }));
+}
+
+/// What a panic leaves for the next launch to report, if the user said yes to crash reports
+/// (`trek-telemetry`). Secrets agents were given this run are already out of it; paths and the
+/// rest are taken out before it's sent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CrashReport {
+    /// When, in seconds since 1970 (UTC).
+    pub at: i64,
+    /// The Trek that crashed: the next launch may be a newer one.
+    pub version: String,
+    pub thread: String,
+    pub location: String,
+    pub message: String,
+    pub backtrace: String,
+}
+
+/// How many crash reports wait for the next launch at most: the newest are kept.
+const KEEP_CRASH_REPORTS: usize = 5;
+
+fn crash_reports_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("crash-reports")
+}
+
+fn write_crash_report(data_dir: &Path, mut report: CrashReport) {
+    // Not `known()`: this may be the thread that's changing the list, and would wait forever.
+    if let Some(secrets) = trek_core::session_secrets::try_known() {
+        for text in [
+            &mut report.message,
+            &mut report.backtrace,
+            &mut report.location,
+        ] {
+            trek_core::session_secrets::scrub_string(text, &secrets);
+        }
+    }
+    let dir = crash_reports_dir(data_dir);
+    let Ok(json) = serde_json::to_string_pretty(&report) else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // Two panics in one second (two threads) each keep their own.
+    let mut n = 0;
+    let path = loop {
+        let path = dir.join(format!("panic-{}-{n}.json", report.at));
+        if !path.exists() || n > 8 {
+            break path;
+        }
+        n += 1;
+    };
+    let _ = std::fs::write(path, json);
+    let mut files = crash_report_files(data_dir);
+    while files.len() > KEEP_CRASH_REPORTS {
+        let _ = std::fs::remove_file(files.remove(0));
+    }
+}
+
+/// The report files, oldest first.
+fn crash_report_files(data_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(crash_reports_dir(data_dir)) else {
+        return vec![];
+    };
+    let mut files: Vec<(i64, usize, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let (at, n) = name
+                .strip_prefix("panic-")?
+                .strip_suffix(".json")?
+                .split_once('-')?;
+            Some((at.parse().ok()?, n.parse().ok()?, e.path()))
+        })
+        .collect();
+    files.sort();
+    files.into_iter().map(|(_, _, p)| p).collect()
+}
+
+/// The crash reports waiting, oldest first. A file that can't be read is left out.
+pub fn crash_reports(data_dir: &Path) -> Vec<CrashReport> {
+    crash_report_files(data_dir)
+        .iter()
+        .filter_map(|p| serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok())
+        .collect()
+}
+
+/// The crash reports waiting, which are gone after: sent, or not wanted.
+pub fn take_crash_reports(data_dir: &Path) -> Vec<CrashReport> {
+    let reports = crash_reports(data_dir);
+    for path in crash_report_files(data_dir) {
+        let _ = std::fs::remove_file(path);
+    }
+    reports
 }
 
 /// The note a panic leaves for the next launch.
@@ -454,6 +560,48 @@ pub mod tests {
             std::fs::read_to_string(dir.join(format!("trek-{day}.log"))).unwrap(),
             "hello\nagain\n"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(test)]
+    fn report(at: i64, message: &str) -> CrashReport {
+        CrashReport {
+            at,
+            version: "0.4.40".into(),
+            thread: "main".into(),
+            location: "crates/x/src/lib.rs:3".into(),
+            message: message.into(),
+            backtrace: "   0: x::y\n".into(),
+        }
+    }
+
+    #[test]
+    fn a_crash_report_waits_for_the_next_launch_and_is_taken_once() {
+        let dir = scratch();
+        assert_eq!(take_crash_reports(&dir), vec![]);
+        write_crash_report(&dir, report(100, "boom"));
+        write_crash_report(&dir, report(100, "again"));
+        assert_eq!(
+            crash_reports(&dir)
+                .iter()
+                .map(|r| r.message.as_str())
+                .collect::<Vec<_>>(),
+            ["boom", "again"],
+            "two in one second are both kept, in order"
+        );
+        assert_eq!(take_crash_reports(&dir).len(), 2);
+        assert_eq!(crash_reports(&dir), vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_newest_crash_reports_are_kept() {
+        let dir = scratch();
+        for at in 1..=8 {
+            write_crash_report(&dir, report(at, &format!("crash {at}")));
+        }
+        let kept: Vec<i64> = crash_reports(&dir).iter().map(|r| r.at).collect();
+        assert_eq!(kept, [4, 5, 6, 7, 8]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

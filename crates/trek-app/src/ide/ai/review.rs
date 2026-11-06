@@ -5,6 +5,7 @@
 
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text};
 use crate::workspace::Workspace;
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -36,7 +37,7 @@ pub fn pending_bar(
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let ember = palette::ember(cx);
-    let kbd = |k: String, color: Hsla| div().text_size(px(10.)).text_color(color).child(k);
+    let kbd = |k: String, color: Hsla| div().text_size(px(text::META)).text_color(color).child(k);
     let link = |id: &'static str| {
         h_flex()
             .id(id)
@@ -46,7 +47,7 @@ pub fn pending_bar(
             .px(px(6.))
             .h(px(22.))
             .items_center()
-            .rounded(px(fluent::control(5.)))
+            .rounded(px(fluent::control(radius::CONTROL)))
             .cursor_pointer()
             .hover(|s| {
                 s.bg(theme.foreground.opacity(0.06))
@@ -68,7 +69,7 @@ pub fn pending_bar(
             .border_t_1()
             .border_color(line)
             .bg(theme.foreground.opacity(0.025))
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(muted)
             .child(
                 // Clipped, so a narrow chat cuts the counts off rather than drawing them under
@@ -90,7 +91,7 @@ pub fn pending_bar(
                             h_flex()
                                 .gap(px(5.))
                                 .font_family(theme.mono_font_family.clone())
-                                .text_size(px(11.))
+                                .text_size(px(text::META))
                                 .when(added > 0, |el| {
                                     el.child(
                                         div()
@@ -149,10 +150,10 @@ pub fn pending_bar(
                     .px(px(8.))
                     .h(px(22.))
                     .items_center()
-                    .rounded(px(fluent::control(5.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .cursor_pointer()
                     .bg(ember)
-                    .text_color(gpui_kit::white())
+                    .text_color(cx.theme().primary_foreground)
                     .hover(|s| s.opacity(0.9))
                     .child("Keep all")
                     .child(kbd(

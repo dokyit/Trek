@@ -108,6 +108,12 @@ impl Workspace {
     /// Close `id`'s tab. When it was in front, the tab beside it comes forward (the next, else the
     /// previous), or a new thread in its project when it was the last.
     pub fn close_tab(&mut self, id: &str, cx: &mut Context<Self>) {
+        // In a split its pane goes with its tab, and the thread beside it gets the full width.
+        if let Some(pane) = self.pane_of(id) {
+            self.tabs.retain(|t| t != id);
+            self.save_tabs();
+            return self.close_pane(pane, cx);
+        }
         let Some(group) = self.thread(id).map(Self::tab_group) else {
             self.tabs.retain(|t| t != id);
             self.save_tabs();

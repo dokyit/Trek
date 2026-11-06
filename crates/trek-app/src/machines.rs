@@ -519,6 +519,12 @@ impl Machines {
         self.get(host).filter(|m| m.reachable())?.row(id)
     }
 
+    /// What machine thread `id`'s row says it waits for, while the machine can be reached.
+    pub fn needs_text(&self, id: &str) -> Option<&str> {
+        let text = self.reachable_row(id)?.needs.as_ref()?.text.as_str();
+        (!text.is_empty()).then_some(text)
+    }
+
     /// What machine thread `id` has at work, as its row says, the way the sidebar's card shows a
     /// thread here (`Sidebar::at_work`): its sub-agents still out, by logo and name ("Sol: Review
     /// the diff" for one Trek runs there), and what its agent runs in the background, by title.
@@ -706,6 +712,7 @@ pub fn thread_of(host: &str, s: &tr::ThreadSummary) -> Thread {
         continued_from: None,
         notify_starter: false,
         editor_chat: false,
+        account: None,
     }
 }
 
@@ -843,6 +850,7 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                 title,
                 detail,
                 state,
+                ..
             } => {
                 if *state == tr::ApprovalState::Pending {
                     out.requests.push(PendingPermission {
@@ -851,6 +859,7 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                         detail: detail.clone(),
                         prompt: None,
                         after_turn: false,
+                        call: None,
                     });
                 }
                 continue;
@@ -882,6 +891,7 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                         detail: String::new(),
                         prompt: Some(trek_agents::Prompt::Questions(questions)),
                         after_turn: false,
+                        call: None,
                     });
                 }
                 continue;
@@ -898,6 +908,7 @@ pub fn map_items(items: &[tr::Item]) -> Mapped {
                         detail: String::new(),
                         prompt: Some(trek_agents::Prompt::Plan(markdown.clone())),
                         after_turn: false,
+                        call: None,
                     });
                 }
                 continue;
@@ -1716,6 +1727,8 @@ impl Workspace {
             Some(trek_agents::Prompt::Questions(_)) => {
                 tr::AnswerResponse::Questions { answers: vec![] }
             }
+            // A machine shows a secret's request as a note, never as a card to answer from here.
+            Some(trek_agents::Prompt::Secret { .. }) => return,
             None => tr::AnswerResponse::Approval {
                 decision: match decision {
                     trek_agents::Decision::Allow => tr::Decision::Allow,

@@ -439,6 +439,18 @@ pub fn ensure(exe_dir: Option<&Path>, bin_dir: &Path) -> Result<PathBuf, String>
     Ok(out)
 }
 
+/// What the helper is compiled for: the architecture of the program compiling it, so an Intel
+/// bundle gets an Intel helper on any Mac, and the oldest macOS Trek runs on. Left alone, swiftc
+/// aims at the macOS it runs on, and the helper wouldn't start on an older one.
+fn swift_target() -> String {
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        "arm64"
+    };
+    format!("{arch}-apple-macos13.0")
+}
+
 /// Compile the helper to `out` (also what bundling does).
 pub fn build(out: &Path) -> Result<(), String> {
     let tmp = std::env::temp_dir().join(format!("trek-phone-build-{}", std::process::id()));
@@ -447,7 +459,8 @@ pub fn build(out: &Path) -> Result<(), String> {
     std::fs::write(tmp.join("main.swift"), SOURCE).map_err(|e| e.to_string())?;
     std::fs::write(tmp.join("Info.plist"), INFO_PLIST).map_err(|e| e.to_string())?;
     let result = Command::new("/usr/bin/xcrun")
-        .args(["swiftc", "-O", "-suppress-warnings"])
+        .args(["swiftc", "-O", "-suppress-warnings", "-target"])
+        .arg(swift_target())
         .arg(tmp.join("main.swift"))
         .args([
             "-Xlinker",
@@ -480,6 +493,36 @@ pub fn build(out: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Process Manager calls check the caller in as an app with a Dock icon (trek-mcp's made it a
+    /// second Trek there), and a tap through iPhone Mirroring made one. The helper looks process
+    /// serial numbers up through `lsappinfo` instead.
+    #[test]
+    fn the_helper_never_checks_itself_in_as_an_app() {
+        for name in [
+            "ProcessForPID",
+            "CurrentProcess",
+            "FrontProcess",
+            "NextProcess",
+        ] {
+            for call in [format!("Get{name}("), format!("\"Get{name}\"")] {
+                assert!(!SOURCE.contains(&call), "the helper calls {call}");
+            }
+        }
+        assert!(!SOURCE.contains(&["Transform", "ProcessType"].concat()));
+        assert!(SOURCE.contains("/usr/bin/lsappinfo"));
+    }
+
+    #[test]
+    fn the_helper_is_compiled_for_this_builds_architecture_and_trek_s_oldest_macos() {
+        let target = swift_target();
+        assert!(target.ends_with("-apple-macos13.0"), "{target}");
+        assert_eq!(
+            target.starts_with("x86_64-"),
+            cfg!(target_arch = "x86_64"),
+            "{target}"
+        );
+    }
 
     #[test]
     fn messages_become_events() {

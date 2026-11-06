@@ -3,6 +3,7 @@
 
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
@@ -13,6 +14,16 @@ use trek_core::worktree::{BRANCH_PREFIX, Removal, Worktree};
 
 /// A thread's worktree branch: small and neutral, amber once its folder is gone.
 pub fn branch_chip(id: impl Into<ElementId>, wt: &Worktree, cx: &App) -> AnyElement {
+    branch_chip_up_to(id, wt, 160., cx)
+}
+
+/// [`branch_chip`], at most `max_width` wide.
+pub fn branch_chip_up_to(
+    id: impl Into<ElementId>,
+    wt: &Worktree,
+    max_width: f32,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let missing = wt.is_missing();
     let label = if missing {
@@ -31,13 +42,13 @@ pub fn branch_chip(id: impl Into<ElementId>, wt: &Worktree, cx: &App) -> AnyElem
         // Gives way before the names beside it (the project's, on a sidebar card) do.
         .flex_shrink(100.)
         .min_w(px(48.))
-        .max_w(px(160.))
+        .max_w(px(max_width))
         .h(px(20.))
         .px(px(6.))
         .gap(px(4.))
-        .rounded(px(fluent::control(6.)))
+        .rounded(px(fluent::control(radius::CONTROL)))
         .bg(theme.foreground.opacity(0.06))
-        .text_xs()
+        .text_size(to_rems(text::META))
         .text_color(if missing {
             palette::amber(cx)
         } else {
@@ -57,7 +68,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 fn body(lines: Vec<(String, bool)>, cx: &App) -> AnyElement {
     v_flex()
         .gap_2()
-        .text_sm()
+        .text_size(to_rems(text::LABEL))
         .children(lines.into_iter().map(|(text, warn)| {
             div()
                 .text_color(if warn {

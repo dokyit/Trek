@@ -12,6 +12,7 @@ pub mod limits;
 pub mod mcp_check;
 pub mod mock;
 mod opencode;
+mod rules;
 mod status;
 #[cfg(all(test, windows))]
 mod tests_cmd_args;
@@ -21,7 +22,7 @@ mod tests_stop;
 pub use acp::{AcpInfo, acp_authenticate, acp_probe};
 pub use codex::list_models as codex_models;
 pub use direct::{
-    cache_direct_models, cached_direct_models, direct_provider_models,
+    cache_direct_models, cached_direct_models, direct_provider_models, level_would_ask,
     load_all_cached_direct_models,
 };
 /// The Direct harness's agent loop with its options exposed: a key given rather than read from
@@ -38,7 +39,7 @@ pub mod direct_harness {
 pub use limits::{Limit, LimitScope};
 pub use opencode::share_history as share_opencode_history;
 pub use status::{
-    AgentStatus, CommandKind, ResetCredit, SlashCommand, UsageLimit, claude_commands,
+    AgentStatus, CommandKind, ResetCredit, SlashCommand, USAGE_LATE, UsageLimit, claude_commands,
     claude_status, codex_commands, codex_consume_reset, codex_status, devin_status,
 };
 
@@ -322,6 +323,22 @@ pub enum Prompt {
     Questions(Vec<Question>),
     /// A plan to approve before the agent starts changing things (Claude's ExitPlanMode), as Markdown.
     Plan(String),
+    /// A secret the agent asked for through Trek's `request_secret`: Trek saves the value and tells
+    /// the agent where, so it's never in the conversation. Only ever answered on this computer.
+    Secret { name: String, why: String },
+}
+
+impl Prompt {
+    /// A secret's request as a one-question form, for a card that already takes masked answers.
+    pub fn secret_question(name: &str, why: &str) -> Question {
+        Question {
+            question: why.to_string(),
+            header: name.to_string(),
+            options: vec![],
+            multi: false,
+            secret: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -454,6 +471,9 @@ pub enum AgentEvent {
         title: String,
         detail: String,
         prompt: Option<Prompt>,
+        /// What it would do, as a permission rule reads it, where the agent says: what the card's
+        /// "Always allow…" makes a rule from.
+        call: Option<trek_core::permission_rules::Call>,
     },
     /// The agent settled a request on its own (it timed out, or the turn moved on): its card goes.
     PermissionResolved {
@@ -593,6 +613,51 @@ impl SessionLog {
 tokio::task_local! {
     /// The log of the session whose task is running: the processes it starts write there.
     static SESSION_LOG: SessionLog;
+    /// The account the running task's agent processes sign in with (`on_account`).
+    static ACCOUNT_HOME: Option<trek_core::accounts::AccountHome>;
+}
+
+/// Run `work` on `account`: the agent processes it starts look in that account's config folder
+/// for their login and sessions. `None`, or outside this, they run as ever, on the user's normal
+/// login with no variable set.
+pub async fn on_account<F: std::future::Future>(
+    account: Option<&trek_core::accounts::Account>,
+    work: F,
+) -> F::Output {
+    ACCOUNT_HOME
+        .scope(account.and_then(|a| a.open()), work)
+        .await
+}
+
+/// Point a process about to start at the account of the task starting it, if it runs on one.
+pub(crate) fn sign_in_as_account(command: &mut tokio::process::Command) {
+    let _ = ACCOUNT_HOME.try_with(|home| {
+        if let Some(home) = home {
+            command.env(home.var, &home.dir);
+        }
+    });
+}
+
+/// Whether the running task's agent processes run on an account (`on_account`).
+pub(crate) fn on_an_account() -> bool {
+    ACCOUNT_HOME.try_with(Option::is_some).unwrap_or(false)
+}
+
+/// Delete `account`'s folder, and the login in it. The agent's own logout isn't run: nothing here
+/// can prove it leaves the user's normal login alone, and a stray Keychain entry (Claude Code keeps
+/// one, under a name made from the folder) costs far less than signing the wrong account out. What
+/// to do is settled here, and done when the future is run.
+pub fn remove_account_login(
+    account: trek_core::accounts::Account,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let dir = account.dir();
+    async move {
+        if let Some(dir) = dir
+            && let Err(e) = trek_core::accounts::remove_folder(&dir)
+        {
+            tracing::warn!("account folder of {}: {e}", account.id);
+        }
+    }
 }
 
 /// Whether `agent` can resume its session partway (`SessionConfig::resume_at`) and fork it, so a
@@ -646,6 +711,11 @@ pub fn instructions_prompt(instructions: &str, text: &str) -> String {
         "<trek-project-notes>\n{}\n</trek-project-notes>\n\n{text}",
         instructions.trim()
     )
+}
+
+/// Whether `name` is one of Trek's own MCP servers.
+pub(crate) fn is_trek_server(name: &str) -> bool {
+    TREK_TOOLS.iter().any(|(server, _)| *server == name)
 }
 
 /// Trek's own MCP servers, by the name Trek gives each, and what each is for in
@@ -704,8 +774,12 @@ fn first_prompt(
         let mut f = Some(f);
         while let Ok(mut cmd) = commands.recv().await {
             if let Command::Prompt { text, .. } = &mut cmd {
-                if let Some(f) = f.take() {
-                    *text = f(text);
+                // A command for the agent itself isn't a message to wrap: it would stop being
+                // the command, and the recap is for the first real message anyway.
+                if text.trim() != "/compact" {
+                    if let Some(f) = f.take() {
+                        *text = f(text);
+                    }
                 }
             }
             if tx.send(cmd).await.is_err() {
@@ -718,6 +792,14 @@ fn first_prompt(
 
 /// Start a session for `config.agent`.
 pub fn start(config: SessionConfig) -> SessionHandle {
+    start_on(config, None)
+}
+
+/// `start`, on `account` when one is given (`None`: the user's normal login).
+pub fn start_on(
+    config: SessionConfig,
+    account: Option<trek_core::accounts::Account>,
+) -> SessionHandle {
     let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (ev_tx, ev_rx) = async_channel::unbounded();
     let events = ev_tx.clone();
@@ -739,17 +821,20 @@ pub fn start(config: SessionConfig) -> SessionHandle {
     let log = SessionLog::default();
     supervise(
         SESSION_LOG.scope(log.clone(), async move {
-            match &config.agent {
-                AgentId::ClaudeCode => claude::run(config, cmd_rx, events).await,
-                AgentId::Codex => codex::run(config, cmd_rx, events).await,
-                AgentId::Direct(p) if trek_core::catalog::is_mock(p) => {
-                    mock::run(config, cmd_rx, events).await
+            on_account(account.as_ref(), async move {
+                match &config.agent {
+                    AgentId::ClaudeCode => claude::run(config, cmd_rx, events).await,
+                    AgentId::Codex => codex::run(config, cmd_rx, events).await,
+                    AgentId::Direct(p) if trek_core::catalog::is_mock(p) => {
+                        mock::run(config, cmd_rx, events).await
+                    }
+                    AgentId::Direct(_) => direct::run(config, cmd_rx, events).await,
+                    AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => {
+                        acp::run(config, cmd_rx, events).await
+                    }
                 }
-                AgentId::Direct(_) => direct::run(config, cmd_rx, events).await,
-                AgentId::Acp(_) | AgentId::OpenCode | AgentId::Droid => {
-                    acp::run(config, cmd_rx, events).await
-                }
-            }
+            })
+            .await
         }),
         ev_tx,
     );
@@ -1478,6 +1563,68 @@ pub(crate) fn load_image(path: &std::path::Path) -> anyhow::Result<(&'static str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_of(command: &tokio::process::Command, var: &str) -> Option<std::ffi::OsString> {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(var))
+            .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+    }
+
+    /// A process started on an account finds its folder through the agent's own variable; one
+    /// started on the normal login gets no variable at all, so nothing changes for it.
+    #[tokio::test]
+    async fn a_process_is_pointed_at_its_accounts_folder_and_no_other() {
+        let command = || trek_core::procs::async_command("agent");
+        let mut plain = command();
+        sign_in_as_account(&mut plain);
+        assert_eq!(env_of(&plain, "CODEX_HOME"), None);
+
+        let mut none = command();
+        ACCOUNT_HOME
+            .scope(None, async { sign_in_as_account(&mut none) })
+            .await;
+        assert_eq!(env_of(&none, "CODEX_HOME"), None);
+
+        let home = trek_core::accounts::AccountHome {
+            var: "CODEX_HOME",
+            dir: std::path::PathBuf::from("/accounts/work"),
+        };
+        let mut on = command();
+        ACCOUNT_HOME
+            .scope(Some(home), async { sign_in_as_account(&mut on) })
+            .await;
+        assert_eq!(
+            env_of(&on, "CODEX_HOME").as_deref(),
+            Some(std::ffi::OsStr::new("/accounts/work"))
+        );
+        assert_eq!(env_of(&on, "CLAUDE_CONFIG_DIR"), None);
+    }
+
+    /// A session that starts from a recap takes it with its first real message: `/compact` is a
+    /// command to the agent, and wrapped it would stop being one.
+    #[tokio::test]
+    async fn the_recap_waits_for_a_message_rather_than_a_compact() {
+        let (tx, rx) = async_channel::unbounded();
+        let out = recap_first(rx, "RECAP".into());
+        for text in ["/compact", "hello"] {
+            tx.send(Command::Prompt {
+                text: text.into(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
+        }
+        let Ok(Command::Prompt { text, .. }) = out.recv().await else {
+            panic!()
+        };
+        assert_eq!(text, "/compact");
+        let Ok(Command::Prompt { text, .. }) = out.recv().await else {
+            panic!()
+        };
+        assert!(text.contains("RECAP") && text.ends_with("hello"), "{text}");
+    }
 
     #[tokio::test]
     async fn protocol_lines_are_read_whole_and_overlong_ones_skipped() {

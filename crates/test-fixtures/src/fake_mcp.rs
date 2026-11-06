@@ -2,6 +2,7 @@
 //! (as some real servers do), asks the client to `ping` before answering initialize, and lists
 //! its tools in two pages. Its first argument picks how it behaves:
 //!   ok      answer normally; a tool `env_ok` is listed when FAKE_TOKEN is "abc"
+//!   tools   the same, with `picture` and `fail` listed too
 //!   crash   print an error to stderr and exit before answering
 //!   silent  read everything and never answer
 //!   refuse  answer initialize with a JSON-RPC error
@@ -77,7 +78,12 @@ pub fn run(mode: Option<String>) {
                     json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [{ "name": "echo" }, { "name": "add" }], "nextCursor": "page2" } }),
                 );
             } else {
-                let mut tools = vec![json!({ "name": "get_time" })];
+                let mut tools =
+                    vec![json!({ "name": "get_time", "annotations": { "readOnlyHint": true } })];
+                if mode == "tools" {
+                    tools.push(json!({ "name": "picture" }));
+                    tools.push(json!({ "name": "fail" }));
+                }
                 if std::env::var("FAKE_TOKEN").as_deref() == Ok("abc") {
                     tools.push(json!({ "name": "env_ok" }));
                 }
@@ -86,6 +92,23 @@ pub fn run(mode: Option<String>) {
                     json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools } }),
                 );
             }
+        } else if method == "tools/call" {
+            let result = match msg["params"]["name"].as_str() {
+                Some("echo") => {
+                    json!({ "content": [{ "type": "text", "text": msg["params"]["arguments"]["text"] }] })
+                }
+                Some("fail") => {
+                    json!({ "isError": true, "content": [{ "type": "text", "text": "it failed" }] })
+                }
+                Some("picture") => {
+                    json!({ "content": [{ "type": "image", "mimeType": "image/png", "data": "aGk=" }] })
+                }
+                _ => json!({ "content": [{ "type": "text", "text": "done" }] }),
+            };
+            say(
+                &mut out,
+                json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            );
         } else if !id.is_null() {
             say(
                 &mut out,

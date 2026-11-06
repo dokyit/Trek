@@ -230,6 +230,7 @@ fn a_card_shows_the_group_in_the_transcript_until_it_is_answered() {
             title: "Run command".into(),
             detail: "make deploy".into(),
             prompt: None,
+            call: None,
         };
         feed(&trek, cx, &id, vec![ask]);
         // The card takes the bar's place: the group is in the transcript, and nothing folds.

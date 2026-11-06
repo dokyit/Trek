@@ -172,6 +172,31 @@ fn a_limit_pauses_the_thread_with_one_row_and_a_bar() {
 }
 
 #[test]
+fn messages_waiting_for_the_reset_can_change_places() {
+    run(async |cx| {
+        let trek = open(cx);
+        test_clock(&trek, cx);
+        let id = hit_limit(&trek, cx, "mock:limit 5s").await;
+        trek.click(cx, "limit-resume");
+        trek.send(cx, "first follow-up");
+        trek.send(cx, "second follow-up");
+        trek.update(cx, |ws, cx| ws.move_queued_for_reset(&id, 1, 0, cx));
+        let queued: Vec<String> = pause(&trek, cx, &id)
+            .unwrap()
+            .queued
+            .into_iter()
+            .map(|q| q.text)
+            .collect();
+        assert_eq!(queued, ["second follow-up", "first follow-up"]);
+        // Kept with the thread, as the pause is.
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.store.thread(&id).unwrap().unwrap().paused),
+            pause(&trek, cx, &id)
+        );
+    });
+}
+
+#[test]
 fn resume_at_reset_sends_what_was_typed_meanwhile_in_order() {
     run(async |cx| {
         let trek = open(cx);

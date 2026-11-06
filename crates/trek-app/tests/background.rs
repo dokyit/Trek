@@ -791,6 +791,9 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
         };
         let mut s = settings();
         s.user_projects.push(project.display().to_string());
+        // Told to pick work up by itself: otherwise it's the user's call
+        // (`tests/resume.rs`: `a_parent_left_waiting_on_sub_agents_is_offered_not_woken`).
+        s.general.resume_interrupted = true;
         let (ws, root, window) = launch(cx, Store::open(&db).expect("store"), s);
         let trek = Trek {
             ws,
@@ -798,6 +801,8 @@ fn a_relaunch_delivers_reports_held_and_says_what_quitting_cut_off() {
             window,
             project,
         };
+        // The one cut off mid-turn is the user's to pick up here, below.
+        trek.update(cx, |ws, cx| ws.dismiss_interrupted(&busy, cx));
         wait_woken(&trek, cx, &parent).await;
         trek.wait_done(cx, &parent, RunState::Idle).await;
         let woke = wakes(&trek, cx, &parent);
@@ -1604,6 +1609,8 @@ fn an_imported_parent_hears_its_reports_after_its_history_has_loaded() {
         };
         let mut s = settings();
         s.user_projects.push(project.display().to_string());
+        // Told to pick work up by itself: otherwise it hears when the user picks the thread up.
+        s.general.resume_interrupted = true;
         let (ws, root, window) = launch(cx, Store::open(&db).expect("store"), s);
         let trek = Trek {
             ws,

@@ -5,7 +5,8 @@
 //! ntfy rather than Apple's push service: sending through Apple needs a paid developer account
 //! and a server holding its key. ntfy is free, open source, and can be your own server. Anyone
 //! who knows the topic can read what's sent to it, so the topic is a long random name and the
-//! notes say only what the Mac's own banner says: the thread's title and what it needs.
+//! notes say only the thread's title and what kind of news it is. What a thread asks for stays
+//! off the topic: a command can hold a secret (`for_the_phone`).
 
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::Context;
@@ -32,6 +33,16 @@ pub struct Note {
     pub tags: Vec<String>,
     /// 1–5; needs-you notes come in at 4 (high), the rest at 3.
     pub priority: u8,
+}
+
+/// The note's words for an alert the Mac raised: as the banner says it, unless the banner says what
+/// a thread is asking for (`attention::Why::alert`). Then only that it needs the user.
+fn for_the_phone(message: &str, title: &str) -> String {
+    if message.starts_with("Waiting: ") {
+        format!("Needs your approval: {title}")
+    } else {
+        message.to_string()
+    }
 }
 
 /// What a note says with names left out (`Mobile::push_names` off): which kind of news it is,
@@ -262,9 +273,13 @@ impl Workspace {
             .and_then(|t| t.project_id.as_deref())
             .and_then(|p| self.project(p))
             .map(|p| p.name.clone());
+        let title = self
+            .thread(thread)
+            .map(|t| t.title.as_str())
+            .unwrap_or_default();
         let note = note_for(
             &m.push_topic,
-            message,
+            &for_the_phone(message, title),
             Some(thread),
             project.as_deref(),
             m.push_names,
@@ -371,7 +386,8 @@ impl Workspace {
             &crate::remote::host_info().id,
         );
         note.title = "Trek is connected".into();
-        note.tags = vec!["tada".into()];
+        // Plain: the status emoji (done, needs you) carry meaning; this one would only decorate.
+        note.tags = vec![];
         // Once: the user is waiting to hear how it went.
         let job = publish(&m.push_server, note, 1);
         cx.spawn(async move |this, cx| {
@@ -394,6 +410,29 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_a_thread_asks_for_stays_off_the_topic() {
+        let banner = crate::workspace::attention::Why::asking(
+            "Run command",
+            "curl -H 'Authorization: Bearer sk-secret' example.com",
+            None,
+        )
+        .alert("Fix the login bug");
+        assert!(banner.contains("sk-secret"), "the Mac's own banner has it");
+        let said = for_the_phone(&banner, "Fix the login bug");
+        assert_eq!(said, "Needs your approval: Fix the login bug");
+        // Still called what it is, named or not.
+        let n = note_for("trek-abc", &said, Some("t1"), None, true, "m1");
+        assert_eq!((n.message.as_str(), n.priority), (said.as_str(), 4));
+        let n = note_for("trek-abc", &said, Some("t1"), None, false, "m1");
+        assert_eq!(n.message, "A thread needs your approval");
+        // Other news goes as the banner says it.
+        assert_eq!(
+            for_the_phone("Finished: Fix the login bug", "Fix the login bug"),
+            "Finished: Fix the login bug"
+        );
+    }
 
     #[test]
     fn notes_say_what_the_banner_says_and_open_the_thread() {

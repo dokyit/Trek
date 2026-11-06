@@ -445,8 +445,16 @@ fn every_item_state_round_trips() {
             title: "Run".into(),
             detail: "ls".into(),
             state,
+            asked_by: None,
         });
     }
+    bodies.push(ItemBody::Approval {
+        request_id: "r".into(),
+        title: "Run".into(),
+        detail: "./deploy.sh".into(),
+        state: ApprovalState::Pending,
+        asked_by: Some("Ask before running ./deploy.sh".into()),
+    });
     for state in [
         QuestionState::Pending,
         QuestionState::Answered,
@@ -539,10 +547,47 @@ fn every_item_state_round_trips() {
         title: "t".into(),
         detail: String::new(),
         state: ApprovalState::AllowedForSession,
+        asked_by: None,
     }))
     .unwrap();
     assert_eq!(v["state"], "allowed_for_session");
     assert_eq!(v["kind"], "approval");
+    assert!(
+        v.get("asked_by").is_none(),
+        "no rule, nothing new on the wire"
+    );
+}
+
+#[test]
+fn a_rule_that_always_asks_reaches_phones_old_and_new() {
+    // A Mac from before `asked_by`: a phone reads none, and offers "Allow for session" as it did.
+    let item: Item = serde_json::from_str(
+        r#"{"id":"r1","seq":1,"kind":"approval","request_id":"r1","title":"Run command","detail":"ls","state":"pending"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        item.body,
+        ItemBody::Approval { asked_by: None, .. }
+    ));
+    // A Mac with it: the rule, under its own key, beside what older phones read.
+    let v = serde_json::to_value(Item {
+        id: "r1".into(),
+        seq: 1,
+        at: None,
+        body: ItemBody::Approval {
+            request_id: "r1".into(),
+            title: "Run command".into(),
+            detail: "./deploy.sh".into(),
+            state: ApprovalState::Pending,
+            asked_by: Some("Ask before running ./deploy.sh".into()),
+        },
+    })
+    .unwrap();
+    assert_eq!(v["asked_by"], "Ask before running ./deploy.sh");
+    assert_eq!(
+        (v["kind"].as_str(), v["state"].as_str()),
+        (Some("approval"), Some("pending"))
+    );
 }
 
 #[test]
@@ -1216,7 +1261,7 @@ fn a_basecamp_recap() {
                    "best_model":{"agent":{"key":"codex","name":"Codex"},"label":"GPT-6","tokens":140000,"turns":9,"share":77}},
         "profile":{"buckets":[{"value":0.0,"label":"12–1 AM","line":"12–1 AM · quiet","prompts":0,"agent_secs":0,"tokens":0},
                               {"value":12.5,"label":"2–3 PM","line":"2–3 PM · 4 prompts · 12m of agent time","prompts":4,"agent_secs":750,"tokens":3000}],
-                   "summit":1,"now":1,"now_at":0.75,"line":"Summit at 2 PM","total":"18 prompts","ticks":[{"at":0.25,"label":"6 AM"}]},
+                   "summit":1,"now":1,"now_at":0.75,"line":"Peak at 2 PM","total":"18 prompts","ticks":[{"at":0.25,"label":"6 AM"}]},
         "tiles":[{"kind":"tokens","label":"You used","figure":"182K tokens","note":"≈ $1.28 at API prices today","sparkline":[0.0,0.5,1.0]},
                  {"kind":"plan_left","label":"Left on Claude Max","figure":"36%","note":"Weekly limit · resets in 4d","agent":{"key":"claude-code","name":"Claude Code"},"percent":36.0,"resets_at":1791030000000}]}"#;
     let env = server_round_trip(line);
@@ -1425,7 +1470,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -1839,5 +1884,45 @@ fn a_thread_s_files_the_limit_bar_the_context_card_and_the_confirm_card() {
         feature::CONSULT,
     ] {
         assert!(feature::ALL.contains(&f));
+    }
+}
+
+#[test]
+fn a_row_s_ask_and_cut_off_turn_are_left_out_until_there_is_one() {
+    let plain = serde_json::to_value(ThreadSummary::default()).unwrap();
+    assert!(plain.get("ask").is_none() && plain.get("cut_short").is_none());
+    // An older Mac's row has neither.
+    let row: ThreadSummary = serde_json::from_value(plain).unwrap();
+    assert!(row.ask.is_none() && row.cut_short.is_none());
+
+    let row = ThreadSummary {
+        ask: Some(RowAsk {
+            request_id: "r1".into(),
+            detail: "cargo test".into(),
+        }),
+        cut_short: Some(CutShort {
+            state: CutShortState::Failed,
+            how: "Reopens its Codex session".into(),
+            waiting: false,
+            asked: None,
+            why: Some("It stopped".into()),
+        }),
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&row).unwrap();
+    assert_eq!(json["ask"]["request_id"], "r1");
+    assert_eq!(json["cut_short"]["state"], "failed");
+    assert_eq!(serde_json::from_value::<ThreadSummary>(json).unwrap(), row);
+
+    for (action, kind) in [
+        (ThreadAction::ResumeInterrupted, "resume_interrupted"),
+        (ThreadAction::DismissInterrupted, "dismiss_interrupted"),
+    ] {
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(json["kind"], kind);
+        assert_eq!(
+            serde_json::from_value::<ThreadAction>(json).unwrap(),
+            action
+        );
     }
 }

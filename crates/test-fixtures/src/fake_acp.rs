@@ -33,6 +33,8 @@ pub fn run() {
     // A fake-acp-signed-out file: sessions are refused for want of a sign-in (as Droid does
     // before its device pairing) until an `authenticate` call, which the log shows.
     let mut signed_out = std::path::Path::new("fake-acp-signed-out").exists();
+    // A fake-acp-no-load file: it doesn't say it can reopen a session.
+    let can_load = !std::path::Path::new("fake-acp-no-load").exists();
 
     let mut lines = stdin.lock().split(b'\n');
     while let Some(Ok(line)) = lines.next() {
@@ -51,7 +53,7 @@ pub fn run() {
         let method = method.as_str().unwrap_or_default();
         let mut result = json!({});
         if method == "initialize" {
-            result = json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": true, "mcpCapabilities": caps.clone() } });
+            result = json!({ "protocolVersion": 1, "agentCapabilities": { "loadSession": can_load, "mcpCapabilities": caps.clone() } });
             if signed_out {
                 result["authMethods"] = json!([{ "id": "device-pairing", "name": "Login" }]);
             }

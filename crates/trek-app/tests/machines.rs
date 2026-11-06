@@ -393,6 +393,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 title: "Run rm".into(),
                 detail: "rm -rf target".into(),
                 state: tr::ApprovalState::Pending,
+                asked_by: None,
             },
         ),
         item(
@@ -402,6 +403,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 title: "old".into(),
                 detail: String::new(),
                 state: tr::ApprovalState::Allowed,
+                asked_by: None,
             },
         ),
         item(
@@ -1595,6 +1597,9 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         asking.needs_thread = Some("t-10".into());
         send(&trek, cx, asking);
         assert!(trek.visible(cx, format!("card-sub-needs-{id}")));
+        // On top with what waits here, and on the badge.
+        assert!(trek.visible(cx, "needs-you"));
+        assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 1);
 
         // Settled there with its sub-agents out, it's still listed here; done, it goes.
         let mut settled = waiting.clone();
@@ -1622,5 +1627,55 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         assert!(!trek.visible(cx, format!("card-kids-{id}")));
         assert!(trek.read(cx, |ws, _| ws.machines.working_for(&id).is_none()));
         assert!(!trek.read(cx, |ws, _| ws.machines.any_at_work()));
+    });
+}
+
+#[test]
+fn a_machine_in_devices_shows_three_quiet_threads_and_the_rest_behind_show_more() {
+    run(async |cx| {
+        let trek = open(cx);
+        pair_c(&trek, cx).await;
+        let now = trek_core::store::now_ms();
+        for n in 1..=5 {
+            let mut row = row_at_work();
+            row.id = format!("t-{n}");
+            row.title = format!("Quiet thread {n}");
+            row.run_state = tr::RunState::Idle;
+            row.section = tr::Section::Inbox;
+            row.working_since = None;
+            row.sub_agents = vec![];
+            row.unseen = false;
+            row.updated_at = now - n * 60_000;
+            trek.update(cx, |ws, cx| {
+                ws.machine_event(
+                    "machine-c",
+                    tr::client::Event::Message(tr::ServerMessage::Thread { thread: row }),
+                    cx,
+                )
+            });
+        }
+        trek.render(cx);
+        let line = |n: i64| format!("live-line-{}", local_id("machine-c", &format!("t-{n}")));
+
+        // The newest three, then the rest behind "Show 2 more"; the header counts all five.
+        assert!(trek.visible(cx, "machine-head-machine-c"));
+        for n in 1..=3 {
+            assert!(trek.visible(cx, line(n)), "thread {n} on show");
+        }
+        for n in 4..=5 {
+            assert!(!trek.visible(cx, line(n)), "thread {n} behind Show more");
+        }
+        assert!(trek.visible(cx, "machine-more-machine-c"));
+
+        // Opened, all five; closed again, three.
+        trek.click(cx, "machine-more-machine-c");
+        trek.render(cx);
+        for n in 1..=5 {
+            assert!(trek.visible(cx, line(n)), "thread {n} after Show more");
+        }
+        trek.click(cx, "machine-less-machine-c");
+        trek.render(cx);
+        assert!(!trek.visible(cx, line(5)));
+        assert!(trek.visible(cx, "machine-more-machine-c"));
     });
 }

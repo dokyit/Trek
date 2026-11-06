@@ -23,6 +23,7 @@ pub mod registry;
 pub mod webkit;
 
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -616,10 +617,10 @@ pub fn toolbar(
                         .bottom(px(1.))
                         .right(px(0.))
                         .px(px(3.))
-                        .rounded(px(4.))
+                        .rounded(px(radius::TAG))
                         .bg(crate::palette::ember(cx))
                         .text_color(gpui::white())
-                        .text_size(px(8.5))
+                        .text_size(px(text::META))
                         .line_height(px(11.))
                         .child(action.badge.clone())
                 });
@@ -707,7 +708,7 @@ pub fn prompt_strips(cx: &mut App) -> Vec<AnyElement> {
                     .px(px(12.))
                     .py(px(6.))
                     .gap(px(10.))
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .bg(amber.opacity(0.1))
                     .border_b_1()
                     .border_color(theme.border)
@@ -1154,12 +1155,12 @@ impl ExtensionsPage {
             None => div()
                 .size(px(24.))
                 .flex_none()
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .bg(theme.muted)
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .font_semibold()
                 .text_color(theme.muted_foreground)
                 .child(
@@ -1195,12 +1196,12 @@ impl ExtensionsPage {
             .or(ext.problems.first());
         let detail = match why {
             Some(problem) if ext.enabled && ext.broken => div()
-                .text_xs()
-                .text_color(theme.danger)
+                .text_size(to_rems(text::META))
+                .text_color(theme.red)
                 .truncate()
                 .child(format!("Doesn't run: {problem}")),
             _ => div()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(theme.muted_foreground)
                 .truncate()
                 .child(if ext.version.is_empty() {
@@ -1250,11 +1251,13 @@ impl ExtensionsPage {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_sm().truncate().child(if ext.name.is_empty() {
-                                ext.id.clone()
-                            } else {
-                                ext.name.clone()
-                            }))
+                            .child(div().text_size(to_rems(text::LABEL)).truncate().child(
+                                if ext.name.is_empty() {
+                                    ext.id.clone()
+                                } else {
+                                    ext.name.clone()
+                                },
+                            ))
                             .child(detail),
                     )
                     .children(options)
@@ -1312,7 +1315,7 @@ impl ExtensionsPage {
                         .pr(px(12.))
                         .pb(px(10.))
                         .gap(px(2.))
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(theme.muted_foreground)
                         .when(!ext.permissions.is_empty(), |el| {
                             el.child(div().text_color(theme.foreground).child("It can:"))
@@ -1330,9 +1333,10 @@ impl ExtensionsPage {
                                     .child("What went wrong running it:"),
                             )
                             .children(
-                                ext.problems.iter().take(6).map(|p| {
-                                    div().text_color(theme.danger).child(format!("• {p}"))
-                                }),
+                                ext.problems
+                                    .iter()
+                                    .take(6)
+                                    .map(|p| div().text_color(theme.red).child(format!("• {p}"))),
                             )
                         }),
                 )
@@ -1364,12 +1368,12 @@ impl ExtensionsPage {
                     .child(
                         h_flex()
                             .gap(px(8.))
-                            .child(div().text_sm().child(e.name))
+                            .child(div().text_size(to_rems(text::LABEL)).child(e.name))
                             .child(
                                 div()
                                     .px(px(6.))
-                                    .rounded(px(4.))
-                                    .text_size(px(10.5))
+                                    .rounded(px(radius::TAG))
+                                    .text_size(px(text::META))
                                     .bg(color.opacity(0.14))
                                     .text_color(color)
                                     .child(verdict),
@@ -1377,7 +1381,7 @@ impl ExtensionsPage {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(match why {
                                 Some(why) => format!("{} It {why}.", e.blurb),
@@ -1408,7 +1412,7 @@ impl ExtensionsPage {
             .id("browser-extension-review")
             .p(px(12.))
             .gap(px(8.))
-            .rounded(px(8.))
+            .rounded(px(radius::BUTTON))
             .border_1()
             .border_color(theme.border)
             .bg(theme.secondary)
@@ -1422,13 +1426,13 @@ impl ExtensionsPage {
                             .min_w_0()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(to_rems(text::LABEL))
                                     .font_medium()
                                     .child(format!("Install {}?", m.name)),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .text_color(theme.muted_foreground)
                                     .truncate()
                                     .child(if m.version.is_empty() {
@@ -1442,7 +1446,7 @@ impl ExtensionsPage {
             .child(
                 v_flex()
                     .gap(px(2.))
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .child(div().child(if asks.is_empty() {
                         "It asks for no permissions.".to_string()
                     } else {
@@ -1459,7 +1463,7 @@ impl ExtensionsPage {
                 |el, (color, verdict, why)| {
                     el.child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(color)
                             .child(format!("{verdict}: it {why}.")),
                     )
@@ -1529,7 +1533,7 @@ impl Render for ExtensionsPage {
         let heading = |text: &'static str| {
             div()
                 .pt(px(6.))
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .font_medium()
                 .text_color(theme.muted_foreground)
                 .child(text)
@@ -1553,7 +1557,12 @@ impl Render for ExtensionsPage {
                 h_flex()
                     .gap(px(8.))
                     .child(Icon::new(crate::assets::Lucide::Puzzle).small())
-                    .child(div().flex_1().text_base().child("Extensions"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(to_rems(text::TITLE))
+                            .child("Extensions"),
+                    )
                     .child(
                         div().id("browser-extensions-close").test_support().child(
                             ui::icon_button(
@@ -1567,7 +1576,7 @@ impl Render for ExtensionsPage {
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child(about),
             )
@@ -1576,7 +1585,12 @@ impl Render for ExtensionsPage {
                 let why = webkit::unsupported();
                 #[cfg(not(target_os = "macos"))]
                 let why = String::new();
-                el.child(div().text_sm().text_color(theme.danger).child(why))
+                el.child(
+                    div()
+                        .text_size(to_rems(text::LABEL))
+                        .text_color(theme.red)
+                        .child(why),
+                )
             })
             .when(supported(), |el| {
                 el.child(
@@ -1606,27 +1620,32 @@ impl Render for ExtensionsPage {
                     el.child(
                         h_flex()
                             .gap(px(8.))
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(Spinner::new().small())
                             .child(what),
                     )
                 })
                 .when_some(self.error.clone(), |el, e| {
-                    el.child(div().text_xs().text_color(theme.danger).child(e))
+                    el.child(
+                        div()
+                            .text_size(to_rems(text::META))
+                            .text_color(theme.red)
+                            .child(e),
+                    )
                 })
                 .children(review)
                 .child(heading("Installed"))
                 .child(
                     v_flex()
-                        .rounded(px(8.))
+                        .rounded(px(radius::BUTTON))
                         .border_1()
                         .border_color(theme.border)
                         .when(installed.is_empty(), |el| {
                             el.child(
                                 div()
                                     .p(px(12.))
-                                    .text_sm()
+                                    .text_size(to_rems(text::LABEL))
                                     .text_color(theme.muted_foreground)
                                     .child(if self.loaded {
                                         "No extensions yet."
@@ -1640,7 +1659,7 @@ impl Render for ExtensionsPage {
                 .child(heading("From the Chrome Web Store"))
                 .child(
                     v_flex()
-                        .rounded(px(8.))
+                        .rounded(px(radius::BUTTON))
                         .border_1()
                         .border_color(theme.border)
                         .children(starters)
@@ -1652,7 +1671,7 @@ impl Render for ExtensionsPage {
                                     .px(px(12.))
                                     .py(px(8.))
                                     .gap(px(8.))
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .text_color(crate::palette::link(cx))
                                     .cursor_pointer()
                                     .child(Icon::new(crate::assets::Lucide::Search).xsmall())

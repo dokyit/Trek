@@ -9,6 +9,7 @@
 //! output once the call returns. Each test shows with its mark (`trek_ipc::simtest`).
 
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::{Route, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -1869,7 +1870,12 @@ impl SimulatorPanel {
                                     .w_full()
                                     .gap_2()
                                     .child(div().flex_1().min_w_0().truncate().child(name.clone()))
-                                    .child(div().text_xs().text_color(muted).child(runtime.clone()))
+                                    .child(
+                                        div()
+                                            .text_size(to_rems(text::META))
+                                            .text_color(muted)
+                                            .child(runtime.clone()),
+                                    )
                                     .child(
                                         div()
                                             .size(px(6.))
@@ -1900,7 +1906,7 @@ impl SimulatorPanel {
             (Some(_), Some(label)) => h_flex()
                 .gap_1()
                 .px_2()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(theme.muted_foreground)
                 .child(Spinner::new().xsmall())
                 .child(label)
@@ -1983,7 +1989,7 @@ impl SimulatorPanel {
                     .child(
                         div()
                             .px_1()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(cx.theme().muted_foreground)
                             .child("Open a web link or your app's URL scheme"),
                     )
@@ -2082,7 +2088,7 @@ impl SimulatorPanel {
                     h_flex()
                         .gap_1()
                         .pr_1()
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(theme.muted_foreground)
                         .child(Icon::new(Lucide::Keyboard).xsmall())
                         .child(if has_axe {
@@ -2211,7 +2217,7 @@ impl SimulatorPanel {
                         .items_center()
                         .justify_center()
                         .gap_2()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .map(|el| match capture_error {
                             Some(e) => el.child(
@@ -2238,7 +2244,7 @@ impl SimulatorPanel {
             .px_3()
             .py(px(6.))
             .gap_2()
-            .rounded(px(fluent::surface(10.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .bg(theme.popover)
             .border_1()
             .border_color(theme.border)
@@ -2246,7 +2252,7 @@ impl SimulatorPanel {
             .when(fluent::WINDOWS, |el| {
                 el.shadow(fluent::flyout_shadow(Vec::new(), cx))
             })
-            .text_sm()
+            .text_size(to_rems(text::LABEL))
             .child(
                 Icon::new(Lucide::Hand)
                     .small()
@@ -2259,7 +2265,7 @@ impl SimulatorPanel {
                     .child(div().font_medium().child("Touch input needs AXe"))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child("Taps, swipes, typing and hardware buttons"),
                     ),
@@ -2290,7 +2296,7 @@ impl SimulatorPanel {
         let status: AnyElement = match pending {
             Some(label) => h_flex()
                 .gap_1()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(theme.muted_foreground)
                 .child(Spinner::new().xsmall())
                 .child(label)
@@ -2302,7 +2308,7 @@ impl SimulatorPanel {
                     .child(
                         h_flex()
                             .gap_1()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(
                                 div()
@@ -2343,7 +2349,7 @@ impl SimulatorPanel {
             .px_3()
             .h(px(52.))
             .gap_3()
-            .rounded(px(fluent::surface(10.)))
+            .rounded(px(fluent::surface(radius::CARD)))
             .border_1()
             .border_color(if selected {
                 theme.ring.opacity(0.5)
@@ -2360,10 +2366,15 @@ impl SimulatorPanel {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().truncate().child(d.name.clone()))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::LABEL))
+                            .truncate()
+                            .child(d.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(d.runtime.clone()),
                     ),
@@ -2376,9 +2387,9 @@ impl SimulatorPanel {
     fn device_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let mut col = v_flex().id("sim-devices").size_full().overflow_y_scroll().px_3().py_4().gap_2().child(
-            v_flex().px_1().pb_2().gap_1().child(div().text_sm().font_medium().child("iOS Simulator")).child(
+            v_flex().px_1().pb_2().gap_1().child(div().text_size(to_rems(text::LABEL)).font_medium().child("iOS Simulator")).child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child("Boot a device to mirror it here. Click to tap, drag to swipe, and type straight into the app."),
             ),
@@ -2397,7 +2408,7 @@ impl SimulatorPanel {
                 div()
                     .px_1()
                     .pt_2()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .font_medium()
                     .text_color(theme.muted_foreground)
                     .child(family.label()),
@@ -2423,7 +2434,7 @@ impl SimulatorPanel {
                 .child(Spinner::new().small())
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_color(cx.theme().muted_foreground)
                         .child("Looking for simulators…"),
                 )
@@ -2436,7 +2447,7 @@ impl SimulatorPanel {
                 .items_center()
                 .justify_center()
                 .px_6()
-                .text_sm()
+                .text_size(to_rems(text::LABEL))
                 .text_center()
                 .text_color(cx.theme().muted_foreground)
                 .child(text)
@@ -2469,7 +2480,7 @@ impl SimulatorPanel {
                 .justify_center()
                 .gap_2()
                 .child(Spinner::new().small())
-                .child(div().text_sm().child(format!(
+                .child(div().text_size(to_rems(text::LABEL)).child(format!(
                     "{} {}…",
                     label.trim_end_matches('…'),
                     d.name
@@ -2477,7 +2488,7 @@ impl SimulatorPanel {
                 .when(booting, |el| {
                     el.child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(muted)
                             .child("The first boot of a device can take a minute."),
                     )
@@ -2518,7 +2529,13 @@ impl Render for SimulatorPanel {
                                 .xsmall()
                                 .text_color(crate::palette::red(cx)),
                         )
-                        .child(div().flex_1().min_w_0().text_xs().child(e))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(to_rems(text::META))
+                                .child(e),
+                        )
                         .child(
                             crate::ui::icon_button("sim-error-close", IconName::Close, "Dismiss")
                                 .xsmall()
@@ -2618,7 +2635,7 @@ impl SimulatorPanel {
                 .child(
                     h_flex()
                         .gap(px(8.))
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .child(
                             div()
                                 .flex_none()
@@ -2650,7 +2667,7 @@ impl SimulatorPanel {
                         .map(|m| {
                             div()
                                 .pl(px(22.))
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(red.opacity(0.9))
                                 .line_clamp(2)
                                 .child(m)
@@ -2671,7 +2688,7 @@ impl SimulatorPanel {
                     h_flex()
                         .h(px(24.))
                         .gap(px(8.))
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .child(status)
                         .child(
                             div()
@@ -2684,7 +2701,7 @@ impl SimulatorPanel {
                         .child(
                             h_flex()
                                 .gap(px(10.))
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .child(count(passed, Lucide::Check, green))
                                 .when(failed > 0, |el| el.child(count(failed, Lucide::X, red)))
                                 .when(skipped > 0, |el| {
@@ -2709,7 +2726,13 @@ impl SimulatorPanel {
                             })),
                         ),
                 )
-                .children(now.map(|n| div().text_xs().text_color(muted).truncate().child(n)))
+                .children(now.map(|n| {
+                    div()
+                        .text_size(to_rems(text::META))
+                        .text_color(muted)
+                        .truncate()
+                        .child(n)
+                }))
                 .when(!run.cases.is_empty(), |el| {
                     el.child(
                         v_flex()

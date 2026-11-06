@@ -20,6 +20,8 @@ pub struct Settings {
     pub custom_endpoints: Vec<CustomEndpoint>,
     /// ACP agents the user added: from the ACP Registry, or a command of their own.
     pub added_agents: Vec<crate::registry::AddedAgent>,
+    /// Logins of Claude Code and Codex beyond the user's normal one (`accounts`). None for most.
+    pub accounts: Vec<crate::accounts::Account>,
     /// Folders the user added explicitly (always shown as projects).
     pub user_projects: Vec<String>,
     /// Installed agents the user switched off (`AgentId::key()`).
@@ -214,6 +216,10 @@ pub struct ProjectPrefs {
     /// "On this Mac ▾"; `None` is this computer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    /// A pull request's failing checks go back to the thread that opened it without asking, up to
+    /// two tries per pull request. Off unless turned on: each try is a turn someone pays for.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub send_failed_checks: bool,
 }
 
 /// Where a project's verification skill lives and how it's kept up.
@@ -249,6 +255,7 @@ impl Default for ProjectPrefs {
             verification: None,
             verification_away: None,
             machine: None,
+            send_failed_checks: false,
         }
     }
 }
@@ -281,6 +288,19 @@ pub struct Layout {
     /// Whether the hub (the title bar's overview) is pinned open at the window's right edge: on
     /// until its button hides it, and it comes back as it was left.
     pub hub_open: bool,
+    /// Two threads side by side in the main window, as they were left. `None`: one thread.
+    pub split: Option<SplitLayout>,
+}
+
+/// Which two threads share the main window, and how (`Layout::split`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplitLayout {
+    pub left: String,
+    pub right: String,
+    /// The right pane had the focus.
+    pub right_focused: bool,
+    /// The left pane's share of the width.
+    pub ratio: f32,
 }
 
 impl Default for Layout {
@@ -290,6 +310,7 @@ impl Default for Layout {
             terminal_height: DEFAULT_TERMINAL_HEIGHT,
             terminal_open: false,
             hub_open: true,
+            split: None,
         }
     }
 }
@@ -708,6 +729,7 @@ impl Default for Settings {
             api_providers: vec![],
             custom_endpoints: vec![],
             added_agents: vec![],
+            accounts: vec![],
             user_projects: vec![],
             disabled_agents: vec![],
             tools: Tools::default(),
@@ -836,9 +858,17 @@ pub struct General {
     pub favorite_models: Vec<String>,
     /// What a thread does when its agent hits a usage limit.
     pub on_usage_limit: OnUsageLimit,
+    /// A thread its usage limit stops carries on by itself on another account of its agent with
+    /// room left (from a recap). Off: that's offered, and stays the user's choice.
+    pub continue_on_other_account: bool,
     /// Ask a running agent to wrap up when its usage window is nearly used up, rather than
     /// let the limit cut it off mid-edit (`limit::wrap_up_prompt`).
     pub wrap_up_near_limit: bool,
+    /// At launch, resume by itself each chat a quit or crash cut off while it worked
+    /// (`interrupted::Interrupted::may_auto_resume`). Off, Trek offers them and waits to be asked.
+    pub resume_interrupted: bool,
+    /// What a resumed chat is sent (`interrupted::RESUME_MESSAGE` to start with).
+    pub resume_message: String,
     /// Ask agents to start an answer that ends work with a recap: Done, Still to do, Found
     /// (`changes::RECAP`).
     pub ask_recap: bool,
@@ -860,7 +890,10 @@ impl Default for General {
             prevent_sleep_while_running: true,
             favorite_models: vec![],
             on_usage_limit: OnUsageLimit::Ask,
+            continue_on_other_account: false,
             wrap_up_near_limit: true,
+            resume_interrupted: false,
+            resume_message: crate::interrupted::RESUME_MESSAGE.into(),
             ask_recap: true,
             interactive_artifacts: true,
         }
@@ -1030,6 +1063,9 @@ pub enum ProjectGrouping {
 pub struct Permissions {
     /// Full access must be unlocked once before it appears in the composer.
     pub full_access_unlocked: bool,
+    /// Rules on top of a thread's level (`permission_rules`). `Workspace::save_settings` puts
+    /// them in force.
+    pub rules: Vec<crate::permission_rules::PermissionRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1611,6 +1647,24 @@ mod tests {
         let partial: Settings = toml::from_str("[general]\nhand_holding = \"auto\"\n").unwrap();
         assert_eq!(partial.general.hand_holding, HandHolding::Auto);
         assert_eq!(partial.inbox.auto_settle_days, 3);
+    }
+
+    #[test]
+    fn a_split_is_kept_in_the_layout_and_none_writes_nothing() {
+        // One thread, as ever: nothing about splits in the file, and files from before them load.
+        let single = toml::to_string_pretty(&Settings::default()).unwrap();
+        assert!(!single.contains("split"), "{single}");
+        let old: Settings = toml::from_str("[layout]\nhub_open = false\n").unwrap();
+        assert_eq!(old.layout.split, None);
+        let mut s = Settings::default();
+        s.layout.split = Some(SplitLayout {
+            left: "a".into(),
+            right: "b".into(),
+            right_focused: true,
+            ratio: 0.4,
+        });
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
     }
 
     #[test]

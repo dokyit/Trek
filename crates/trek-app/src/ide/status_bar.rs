@@ -4,6 +4,7 @@
 
 use super::{IdeWorkbench, PanelTab, SideView};
 use crate::editor::EditorView;
+use crate::scale::text;
 use crate::workspace::Workspace;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -140,7 +141,7 @@ impl Render for IdeStatus {
             } else {
                 theme.border
             })
-            .text_size(px(11.5))
+            .text_size(px(text::LABEL))
             .text_color(muted)
             .when_some(git, |el, g| {
                 let branch = g.branch.clone().unwrap_or_else(|| "detached".into());

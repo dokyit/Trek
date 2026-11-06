@@ -2,6 +2,10 @@
 # Build and sign Trek.app (release) into dist/.
 #   script/bundle.sh [--install]   (--install also copies it to /Applications)
 #
+# TREK_TARGET=x86_64-apple-darwin builds the app for that architecture instead of this Mac's: the
+# Intel build a release ships beside the Apple-silicon one (docs/RELEASING.md, "Intel Macs"). On
+# Apple silicon it needs Rosetta for one step, the iPhone helper below.
+#
 # Signing (script/lib/sign.sh): $TREK_SIGN_IDENTITY, else "Trek Local Signing" (create it once with
 # script/signing-identity.sh), else "Shelf Dev", else ad-hoc. A stable identity keeps macOS's
 # Accessibility and Screen Recording grants across rebuilds; ad-hoc signatures change every build.
@@ -27,15 +31,26 @@ if [[ ${TREK_RELEASE_BUILD:-} == 1 ]]; then RELEASE_KEY="<key>TrekRelease</key><
 TARGET_DIR=${CARGO_TARGET_DIR:-target}
 PROFILE=bundle
 if [[ ${TREK_RELEASE_BUILD:-} == 1 ]]; then PROFILE=release; fi
-echo "• building $PROFILE $VERSION"
-cargo build --profile "$PROFILE" -p trek-app -p trek-mcp
+# Cargo keeps a --target build's output a folder deeper.
+BIN_DIR="$TARGET_DIR/$PROFILE"
+CARGO_TARGET=()
+if [[ -n ${TREK_TARGET:-} ]]; then
+  BIN_DIR="$TARGET_DIR/$TREK_TARGET/$PROFILE"
+  CARGO_TARGET=(--target "$TREK_TARGET")
+  # The oldest macOS Trek runs on, as Info.plist says below. Left alone, rustc aims an Intel build
+  # at 10.12, for which the linker looks for a Swift library in the app (@rpath) and Trek wouldn't
+  # start: "Library not loaded: @rpath/libswiftCoreMedia.dylib".
+  export MACOSX_DEPLOYMENT_TARGET=13.0
+fi
+echo "• building $PROFILE $VERSION${TREK_TARGET:+ for $TREK_TARGET}"
+cargo build --profile "$PROFILE" -p trek-app -p trek-mcp "${CARGO_TARGET[@]}"
 
 echo "• icon"
 # The artwork below all derives from assets/brand/*.svg; rerender only when those files, the
 # resvg version, or the sizes change. The cache lives under the target dir, so deleting dist/
 # doesn't cost a rerender either.
 ICON_CACHE="$TARGET_DIR/icons"
-ICON_KEY=$( { shasum -a 256 assets/brand/*.svg; resvg --version; print -r -- "iconset 16 32 128 256 512 @2x; menubar 22 44"; } | shasum -a 256 | cut -d' ' -f1 )
+ICON_KEY=$( { shasum -a 256 assets/brand/*.svg; resvg --version; print -r -- "iconset 16 32 128 256 512 @2x, 16 32 px drawn small; menubar 22 44"; } | shasum -a 256 | cut -d' ' -f1 )
 if [[ $(cat "$ICON_CACHE/stamp" 2>/dev/null) != "$ICON_KEY" \
       || ! -f "$ICON_CACHE/AppIcon.icns" \
       || ! -f "$ICON_CACHE/MenuBarIconTemplate.png" \
@@ -43,9 +58,13 @@ if [[ $(cat "$ICON_CACHE/stamp" 2>/dev/null) != "$ICON_KEY" \
   mkdir -p "$ICON_CACHE"
   ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
   pids=()
+  # The art for a frame of $1 px: 16 and 32 px (16 pt at 1x and 2x, 32 pt at 1x) are drawn for
+  # their size, the title bar's small mark on the tile (trek_icon.py), as the full art blurs into a
+  # smudge there. From 64 px up it's the full art.
+  art() { case $1 in 16|32) print -r -- assets/brand/trek-icon-ember-$1.svg ;; *) print -r -- assets/brand/trek-icon-ember.svg ;; esac }
   for s in 16 32 128 256 512; do
-    resvg -w $s -h $s assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}.png" & pids+=($!)
-    resvg -w $((s*2)) -h $((s*2)) assets/brand/trek-icon-ember.svg "$ICONSET/icon_${s}x${s}@2x.png" & pids+=($!)
+    resvg -w $s -h $s "$(art $s)" "$ICONSET/icon_${s}x${s}.png" & pids+=($!)
+    resvg -w $((s*2)) -h $((s*2)) "$(art $((s*2)))" "$ICONSET/icon_${s}x${s}@2x.png" & pids+=($!)
   done
   for p in $pids; do wait $p; done
   iconutil -c icns "$ICONSET" -o "$ICON_CACHE/AppIcon.icns"
@@ -59,13 +78,25 @@ rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ICON_CACHE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 echo "• bundle"
-cp "$TARGET_DIR/$PROFILE/trek" "$APP/Contents/MacOS/trek"
-cp "$TARGET_DIR/$PROFILE/trek-mcp" "$APP/Contents/MacOS/trek-mcp"
+cp "$BIN_DIR/trek" "$APP/Contents/MacOS/trek"
+cp "$BIN_DIR/trek-mcp" "$APP/Contents/MacOS/trek-mcp"
 # The iPhone tool's helper (screen over USB, Bluetooth keyboard and mouse), built here so a
 # person installing Trek needs no Swift compiler; without one here, Trek builds it on first use.
-# Its Info.plist is linked in as `trek_phone::helper::build` does.
-if ! "$TARGET_DIR/$PROFILE/trek-mcp" phone-device build-helper "$APP/Contents/MacOS/trek-phone-helper"; then
+# Its Info.plist is linked in as `trek_phone::helper::build` does, for the architecture trek-mcp was
+# built for (an Intel bundle's trek-mcp runs under Rosetta on Apple silicon).
+if ! "$BIN_DIR/trek-mcp" phone-device build-helper "$APP/Contents/MacOS/trek-phone-helper"; then
   echo "• (no iPhone helper bundled: Trek builds it on first use)"
+fi
+# A build for another architecture holds nothing of this Mac's, and needs no library the app doesn't
+# hold: a mistake here would reach users as a Trek that won't open, with nothing here to show it.
+if [[ -n ${TREK_TARGET:-} ]]; then
+  for exe in "$APP"/Contents/MacOS/*; do
+    [[ $(lipo -archs "$exe") == "${TREK_TARGET%%-*}" ]] || { echo "bundle: ${exe:t} isn't only ${TREK_TARGET%%-*}" >&2; exit 1; }
+    if otool -L "$exe" | grep -q '@rpath/'; then
+      echo "bundle: ${exe:t} looks for a library in the app, which holds none: $(otool -L "$exe" | grep '@rpath/')" >&2
+      exit 1
+    fi
+  done
 fi
 # Menu bar glyph as a bundle resource, so menu bar managers (Shelf, …) can show Trek's real
 # template icon instead of the colour app icon when they stand in for an evicted item.

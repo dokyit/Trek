@@ -1,6 +1,7 @@
 //! Claude Code via the user's own `claude` binary (stream-json + stdio control protocol).
 //! Trek never reads Claude credentials; the CLI handles its own login.
 
+use crate::rules::Ruling;
 use crate::{
     AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, SessionConfig, StderrTail,
     Step, clip, load_image, mcp_servers_json, plan_row, plan_title,
@@ -11,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncWriteExt, BufReader};
+use trek_core::permission_rules::{self, PermissionRule};
 use trek_core::{Effort, TokenUsage, UsageCost, detect};
 
 fn tool_title(name: &str, input: &Value) -> (String, String) {
@@ -219,6 +221,106 @@ fn answer(request_id: &str, request: &Value, answers: Vec<(String, String)>) -> 
         request_id,
         json!({ "behavior": "allow", "updatedInput": input }),
     )
+}
+
+/// The hook's id on the control channel.
+const RULES_HOOK: &str = "trek_rules";
+
+/// What `initialize` says, so every tool call comes by the user's rules first. Claude Code runs a
+/// `PreToolUse` hook at each of its permission modes, `bypassPermissions` and `acceptEdits`
+/// included, where it would otherwise never ask (checked against 2.1.318 with a stand-in model).
+/// It's there with no rules too: one added later applies to sessions already running.
+fn rules_hook() -> Value {
+    json!({ "hooks": { "PreToolUse": [{ "matcher": null, "hookCallbackIds": [RULES_HOOK] }] } })
+}
+
+/// The answer to a `hook_callback` (a tool call about to happen), and what the transcript should
+/// say about it. Empty, the session carries on as if no hook had spoken. An ask comes back through
+/// the permission prompt, as a card.
+fn rules_hook_answer(
+    v: &Value,
+    list: &[PermissionRule],
+    cwd: &Path,
+    may_allow: bool,
+) -> (Value, Option<String>) {
+    let input = &v["request"]["input"];
+    let tool = input["tool_name"].as_str().unwrap_or_default();
+    let id = v["request_id"].as_str().unwrap_or_default();
+    let decision = |decision: &str, why: &str| {
+        json!({ "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": why,
+        } })
+    };
+    if crate::rules::claude_needs_person(tool) {
+        return (control_response(id, json!({})), None);
+    }
+    let call = crate::rules::claude_call(tool, &input["tool_input"]);
+    match crate::rules::ruling(list, &[call], cwd, may_allow) {
+        Ruling::Refuse { message, note } => {
+            (control_response(id, decision("deny", &message)), Some(note))
+        }
+        Ruling::Ask => (
+            control_response(
+                id,
+                decision("ask", "A permission rule in Trek asks about this."),
+            ),
+            None,
+        ),
+        Ruling::Allow => (
+            control_response(
+                id,
+                decision("allow", "A permission rule in Trek allows this."),
+            ),
+            None,
+        ),
+        Ruling::Level => (control_response(id, json!({})), None),
+    }
+}
+
+/// The rules' answer to a permission prompt, for a Claude Code that didn't run the hook (a version
+/// before it, or the user's `disableAllHooks`). `None`: a person or the level decides.
+fn rules_prompt_answer(
+    v: &Value,
+    list: &[PermissionRule],
+    cwd: &Path,
+    may_allow: bool,
+) -> Option<(Value, Option<String>)> {
+    let r = &v["request"];
+    if v["type"] != "control_request" || r["subtype"] != "can_use_tool" {
+        return None;
+    }
+    let tool = r["tool_name"].as_str().unwrap_or_default();
+    if crate::rules::claude_needs_person(tool) {
+        return None;
+    }
+    let id = v["request_id"].as_str().unwrap_or_default();
+    let call = crate::rules::claude_call(tool, &r["input"]);
+    match crate::rules::ruling(list, &[call], cwd, may_allow) {
+        Ruling::Refuse { message, note } => Some((
+            control_response(id, json!({ "behavior": "deny", "message": message })),
+            Some(note),
+        )),
+        Ruling::Allow => Some((
+            control_response(
+                id,
+                json!({ "behavior": "allow", "updatedInput": r["input"] }),
+            ),
+            None,
+        )),
+        Ruling::Ask | Ruling::Level => None,
+    }
+}
+
+/// Whether a rule says to ask about this permission prompt.
+fn rule_asks(v: &Value, list: &[PermissionRule], cwd: &Path) -> bool {
+    let r = &v["request"];
+    if v["type"] != "control_request" || r["subtype"] != "can_use_tool" {
+        return false;
+    }
+    let call = crate::rules::claude_call(r["tool_name"].as_str().unwrap_or_default(), &r["input"]);
+    crate::rules::ruling(list, &[call], cwd, false) == Ruling::Ask
 }
 
 /// The answer to a request to use one of Trek's orchestration tools (`trek-orchestrate`) or its
@@ -505,6 +607,7 @@ impl Cli {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        crate::sign_in_as_account(&mut cmd);
         let mut child = crate::spawn_group(&mut cmd).context("failed to start claude")?;
         let stdin = child.stdin.take().unwrap();
         let stdout = crate::ProtocolLines::new(BufReader::new(child.stdout.take().unwrap()));
@@ -520,7 +623,7 @@ impl Cli {
 
     /// Send the `initialize` control request; its id, to know the response.
     async fn initialize(&mut self, ctl: &mut Control) -> Result<String> {
-        let init = ctl.request("initialize", json!({}));
+        let init = ctl.request("initialize", rules_hook());
         write_line(&mut self.stdin, &init).await?;
         Ok(init["request_id"].as_str().unwrap_or_default().to_string())
     }
@@ -1171,12 +1274,23 @@ pub async fn run(
             .await;
     }
     // Lives as long as the session; removed on drop.
-    let mcp_file = if config.mcp_servers.is_empty() {
+    // On an account, the user's own servers come along: their list is in the file with the normal
+    // login, which an account doesn't share.
+    let user_servers = crate::on_an_account()
+        .then(|| trek_core::accounts::claude_user_mcp_servers(&config.cwd))
+        .flatten();
+    let mcp_file = if config.mcp_servers.is_empty() && user_servers.is_none() {
         None
     } else {
-        let (servers, left_out) = claude_mcp_servers(&config.mcp_servers);
+        let (mut servers, left_out) = claude_mcp_servers(&config.mcp_servers);
         for notice in left_out {
             let _ = events.send(AgentEvent::Notice(notice)).await;
+        }
+        // Trek's own win a name they share.
+        if let (Some(Value::Object(user)), Some(all)) = (user_servers, servers.as_object_mut()) {
+            for (name, server) in user {
+                all.entry(name).or_insert(server);
+            }
         }
         Some(TempFile::write(
             "mcp",
@@ -1381,9 +1495,34 @@ pub async fn run(
                     }
                     continue;
                 }
+                // Every tool call, at every level: the user's rules go first.
+                if v["type"] == "control_request" && v["request"]["subtype"] == "hook_callback" {
+                    let may_allow = !config.read_only && !planning;
+                    let (answer, note) = rules_hook_answer(&v, &permission_rules::current(), &config.cwd, may_allow);
+                    write_line(&mut cli.stdin, &answer).await?;
+                    if let Some(note) = note
+                        && events.send(AgentEvent::Notice(note)).await.is_err()
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                let may_allow = !config.read_only && !planning;
+                if let Some((answer, note)) = rules_prompt_answer(&v, &permission_rules::current(), &config.cwd, may_allow) {
+                    write_line(&mut cli.stdin, &answer).await?;
+                    if let Some(note) = note
+                        && events.send(AgentEvent::Notice(note)).await.is_err()
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 // Trek's own sub-agent tools need no approval: what a sub-agent does is asked
-                // for in its own thread, at the level Trek gives it.
-                if let Some(answer) = trek_tool_allowed(&v) {
+                // for in its own thread, at the level Trek gives it. A rule that asks about one
+                // still asks.
+                if !rule_asks(&v, &permission_rules::current(), &config.cwd)
+                    && let Some(answer) = trek_tool_allowed(&v)
+                {
                     write_line(&mut cli.stdin, &answer).await?;
                     continue;
                 }
@@ -1770,14 +1909,22 @@ fn translate(
                 )),
                 _ => None,
             };
+            // For a command, the command itself: the description is the model's own account of
+            // it, and a card that's there to be checked has to show what would really run.
+            let shows_command = matches!(tool, "Bash" | "PowerShell") && !detail.is_empty();
+            let call = prompt
+                .is_none()
+                .then(|| crate::rules::claude_call(tool, &r["input"]));
             out.push(AgentEvent::PermissionRequest {
                 request_id,
                 title: r["title"].as_str().map(String::from).unwrap_or(title),
                 detail: r["description"]
                     .as_str()
+                    .filter(|_| !shows_command)
                     .map(String::from)
                     .unwrap_or(detail),
                 prompt,
+                call,
             });
         }
         // Claude dropped a prompt it was waiting on (an interrupt, or a hook answered it).
@@ -1798,6 +1945,184 @@ fn translate(
 
 #[cfg(test)]
 mod tests {
+
+    /// A `hook_callback` as Claude Code sends it (2.1.318).
+    fn hook_call(tool: &str, input: Value) -> Value {
+        json!({ "type": "control_request", "request_id": "h1", "request": {
+            "subtype": "hook_callback", "callback_id": RULES_HOOK, "tool_use_id": "t",
+            "input": { "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": input, "permission_mode": "bypassPermissions" },
+        }})
+    }
+
+    #[test]
+    fn every_session_asks_for_the_rules_hook() {
+        let hooks = rules_hook();
+        assert_eq!(
+            hooks["hooks"]["PreToolUse"][0]["hookCallbackIds"][0],
+            RULES_HOOK
+        );
+        assert!(
+            hooks["hooks"]["PreToolUse"][0]["matcher"].is_null(),
+            "every tool"
+        );
+    }
+
+    #[test]
+    fn the_hook_answers_each_tool_call_by_the_rules() {
+        use trek_core::permission_rules::{RuleAction::*, RuleKind::*};
+        let rule = |kind, pattern: &str, action| PermissionRule::new(kind, pattern, action);
+        let list = [
+            rule(Command, "rm", Deny),
+            rule(Command, "git push", Ask),
+            rule(Command, "git status", Allow),
+            rule(Edit, "*.lock", Deny),
+            rule(Tool, "mcp__github__*", Deny),
+        ];
+        let cwd = Path::new("/p");
+        let answer = |tool: &str, input: Value| {
+            let (reply, note) = rules_hook_answer(&hook_call(tool, input), &list, cwd, true);
+            assert_eq!(reply["response"]["request_id"], "h1");
+            (reply["response"]["response"].clone(), note)
+        };
+        let decision = |v: &Value| {
+            v["hookSpecificOutput"]["permissionDecision"]
+                .as_str()
+                .map(String::from)
+        };
+        let (no, note) = answer("Bash", json!({ "command": "FOO=1 /bin/rm -rf x" }));
+        assert_eq!(decision(&no).as_deref(), Some("deny"));
+        assert_eq!(no["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert!(
+            no["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .unwrap()
+                .contains("Deny command `rm`")
+        );
+        assert!(note.unwrap().contains("rm -rf x"));
+        let (ask, note) = answer("Bash", json!({ "command": "git push" }));
+        assert_eq!(decision(&ask).as_deref(), Some("ask"));
+        assert_eq!(note, None);
+        let (yes, _) = answer("Bash", json!({ "command": "git status" }));
+        assert_eq!(decision(&yes).as_deref(), Some("allow"));
+        let (lock, _) = answer(
+            "Write",
+            json!({ "file_path": "/p/Cargo.lock", "content": "" }),
+        );
+        assert_eq!(decision(&lock).as_deref(), Some("deny"));
+        let (mcp, _) = answer("mcp__github__create_issue", json!({}));
+        assert_eq!(decision(&mcp).as_deref(), Some("deny"));
+        // What no rule names, and what only a person can answer, carry on untouched.
+        for (tool, input) in [
+            ("Bash", json!({ "command": "ls" })),
+            ("Read", json!({ "file_path": "/p/Cargo.lock" })),
+            ("AskUserQuestion", json!({ "questions": [] })),
+            ("ExitPlanMode", json!({ "plan": "x" })),
+        ] {
+            let (reply, note) = answer(tool, input);
+            assert_eq!(reply, json!({}), "{tool}");
+            assert_eq!(note, None);
+        }
+        // An allow doesn't overrule a read-only session or plan mode; a deny still holds.
+        let (reply, _) = rules_hook_answer(
+            &hook_call("Bash", json!({ "command": "git status" })),
+            &list,
+            cwd,
+            false,
+        );
+        assert_eq!(reply["response"]["response"], json!({}));
+        let (reply, _) = rules_hook_answer(
+            &hook_call("Bash", json!({ "command": "rm x" })),
+            &list,
+            cwd,
+            false,
+        );
+        assert_eq!(
+            decision(&reply["response"]["response"]).as_deref(),
+            Some("deny")
+        );
+    }
+
+    #[test]
+    fn the_prompt_is_answered_by_the_rules_too_for_a_claude_that_ran_no_hook() {
+        use trek_core::permission_rules::{RuleAction::*, RuleKind::*};
+        let list = [
+            PermissionRule::new(Command, "rm", Deny),
+            PermissionRule::new(Command, "ls", Allow),
+            PermissionRule::new(Command, "git push", Ask),
+        ];
+        let prompt = |tool: &str, input: Value| {
+            json!({ "type": "control_request", "request_id": "r1", "request": {
+                "subtype": "can_use_tool", "tool_name": tool, "input": input,
+            }})
+        };
+        let cwd = Path::new("/p");
+        let (no, note) = rules_prompt_answer(
+            &prompt("Bash", json!({ "command": "rm x" })),
+            &list,
+            cwd,
+            true,
+        )
+        .unwrap();
+        assert_eq!(no["response"]["response"]["behavior"], "deny");
+        assert!(note.is_some());
+        let (yes, _) = rules_prompt_answer(
+            &prompt("Bash", json!({ "command": "ls" })),
+            &list,
+            cwd,
+            true,
+        )
+        .unwrap();
+        assert_eq!(yes["response"]["response"]["behavior"], "allow");
+        assert_eq!(yes["response"]["response"]["updatedInput"]["command"], "ls");
+        // An ask, no rule, or a question: the card.
+        for v in [
+            prompt("Bash", json!({ "command": "git push" })),
+            prompt("Bash", json!({ "command": "pwd" })),
+            prompt("AskUserQuestion", json!({ "questions": [] })),
+        ] {
+            assert!(rules_prompt_answer(&v, &list, cwd, true).is_none(), "{v}");
+        }
+    }
+
+    #[test]
+    fn an_ask_rule_holds_for_treks_own_tools_too() {
+        use trek_core::permission_rules::{RuleAction::Ask, RuleKind::Tool};
+        let v = json!({ "type": "control_request", "request_id": "r1", "request": {
+            "subtype": "can_use_tool", "tool_name": "mcp__trek-orchestrate__delegate_task", "input": {},
+        }});
+        let cwd = Path::new("/p");
+        assert!(trek_tool_allowed(&v).is_some(), "by itself, it would go");
+        assert!(!rule_asks(&v, &[], cwd));
+        let list = [PermissionRule::new(Tool, "mcp__trek-orchestrate__*", Ask)];
+        assert!(rule_asks(&v, &list, cwd));
+    }
+
+    #[test]
+    fn a_command_card_shows_the_command_not_the_models_description_of_it() {
+        let v = json!({ "type": "control_request", "request_id": "r1", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash",
+            "input": { "command": "rm -rf ~", "description": "List files" },
+            "description": "List files",
+        }});
+        let mut turns = Turns::default();
+        let mut pending = HashMap::new();
+        let mut streamed = false;
+        let events = turns.step(&v, &mut pending, &mut streamed);
+        let AgentEvent::PermissionRequest { detail, call, .. } = &events[0] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(detail, "rm -rf ~");
+        assert_eq!(call.as_ref().map(|c| c.target.as_str()), Some("rm -rf ~"));
+        // Elsewhere the description stays: it's all that says what a tool would do.
+        let v = json!({ "type": "control_request", "request_id": "r2", "request": {
+            "subtype": "can_use_tool", "tool_name": "Write",
+            "input": { "file_path": "/p/a.rs" }, "description": "a.rs",
+        }});
+        let events = turns.step(&v, &mut pending, &mut streamed);
+        assert!(
+            matches!(&events[0], AgentEvent::PermissionRequest { detail, .. } if detail == "a.rs")
+        );
+    }
 
     #[test]
     fn trek_names_itself_to_claude_code_with_a_label_of_its_own() {

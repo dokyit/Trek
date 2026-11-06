@@ -5,6 +5,7 @@
 //! the folder or the files do (not on every redraw of the workspace).
 
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::Workspace;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
@@ -239,7 +240,7 @@ impl Render for IdeSearch {
                         el.child(
                             div()
                                 .p_4()
-                                .text_sm()
+                                .text_size(to_rems(text::LABEL))
                                 .text_color(theme.muted_foreground)
                                 .child("Type to search every file in the folder."),
                         )
@@ -248,7 +249,7 @@ impl Render for IdeSearch {
                         el.child(
                             div()
                                 .p_4()
-                                .text_sm()
+                                .text_size(to_rems(text::LABEL))
                                 .text_color(theme.muted_foreground)
                                 .child("Nothing matches."),
                         )
@@ -266,7 +267,7 @@ impl Render for IdeSearch {
                             .px_2()
                             .py(px(5.))
                             .gap_2()
-                            .rounded(px(fluent::control(6.)))
+                            .rounded(px(fluent::control(radius::CONTROL)))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.list_hover))
                             .child(crate::file_icon::badge(&name, px(14.), cx))
@@ -277,17 +278,22 @@ impl Render for IdeSearch {
                                     .child(
                                         h_flex()
                                             .gap_1()
-                                            .child(div().text_xs().truncate().child(name))
                                             .child(
                                                 div()
-                                                    .text_xs()
+                                                    .text_size(to_rems(text::META))
+                                                    .truncate()
+                                                    .child(name),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(to_rems(text::META))
                                                     .text_color(theme.muted_foreground)
                                                     .child(format!(":{line}")),
                                             ),
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_size(to_rems(text::META))
                                             .text_color(theme.muted_foreground)
                                             .truncate()
                                             .child(text),

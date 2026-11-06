@@ -502,6 +502,14 @@ enum TranscriptRow: View, nonisolated Equatable, Identifiable {
         }
     }
 
+    /// `guesses` scaled so that, with `gaps` between them, they come to `whole`.
+    nonisolated static func shareOut(_ whole: CGFloat, guesses: [CGFloat], gaps: CGFloat) -> [CGFloat] {
+        let room = whole - gaps
+        let sum = guesses.reduce(0, +)
+        guard room > 0, sum > 0 else { return guesses }
+        return guesses.map { $0 * room / sum }
+    }
+
     /// A guess at the row's height before it's drawn: close enough that the scroll bar doesn't
     /// lurch as rows are measured (the reader's place doesn't depend on it).
     func estimatedHeight(width: CGFloat) -> CGFloat {
@@ -642,11 +650,11 @@ struct WorkingFooter: View {
             let out = !t.runningSubAgents.isEmpty
             VStack(alignment: .leading, spacing: 12) {
                 // While the turn runs, or while what it started is still at it.
-                if !agents.isEmpty, t.runState == .working || out {
+                if !agents.isEmpty, store.showsWorking || out {
                     SubAgentsCard(agents: agents)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
-                if t.runState == .working {
+                if store.showsWorking {
                     WorkingLine(threadID: t.id, agentKey: t.agent.logo ?? t.agent.key, since: t.workingSince, activity: t.activity,
                                 model: t.modelLabel, subAgents: (t.runningSubAgents.count, agents.count))
                         .padding(.top, 2)
@@ -864,6 +872,11 @@ private struct ComposerArea: View {
                     LimitBar(thread: thread, pause: pause) { composer.pickModelRequest += 1 }
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                // Cut off when Trek closed on the Mac: its offer to carry on.
+                if let thread, let cut = thread.cutShort, thread.runState != .working, model.serves(.resumeInterrupted, on: threadID) {
+                    CutShortBar(thread: thread, cut: cut)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 if !commands.isEmpty {
                     CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
                         composer.draft = "/\(cmd.name) "
@@ -891,11 +904,15 @@ private struct ComposerArea: View {
         // The transcript scrolls under the chips and the composer: it fades out under them
         // rather than showing between the chips' glass.
         .background {
+            // Solid by where the chips start (8 under the top): as a 30 point fade from the top it
+            // left rows showing behind the chips' upper half. It starts over the last rows by less
+            // than the list leaves under the last one, so nothing at the latest is faded.
             VStack(spacing: 0) {
                 LinearGradient(colors: [Trek.background.opacity(0), Trek.background], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 30)
+                    .frame(height: 22)
                 Trek.background
             }
+            .padding(.top, -14)
             .ignoresSafeArea(edges: .bottom)
             .allowsHitTesting(false)
         }
@@ -903,6 +920,7 @@ private struct ComposerArea: View {
         .animation(.smooth(duration: 0.3), value: thread?.needsThread)
         .animation(.smooth(duration: 0.3), value: thread?.queued)
         .animation(.smooth(duration: 0.3), value: thread?.runsInBackground)
+        .animation(.smooth(duration: 0.3), value: thread?.cutShort)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .onChange(of: composer.draft) {
             // The keyboard put back the message just sent: it stays gone.
@@ -940,7 +958,7 @@ private struct ComposerArea: View {
             prompt = String(text.dropFirst(command.count)).trimmingCharacters(in: .whitespaces)
         }
         newPromptSent(prompt)
-        model.send(text.isEmpty ? "Here's a photo." : text, to: threadID,
+        model.send(text.isEmpty ? PickedPhoto.caption(uploads.count) : text, to: threadID,
                    mode: store.summary?.runState == .working ? composer.mode : nil, images: uploads,
                    consult: model.serves(.consult, on: threadID) ? composer.consult : nil)
         composer.consult = nil

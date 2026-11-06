@@ -90,6 +90,13 @@ impl Workspace {
             return fail("This Trek keeps no transcript logs (its database is in memory).".into());
         };
         let (method, params) = (call.method.clone(), call.params.clone());
+        // The log holds terminal output word for word. Once a thread has moved between agents,
+        // the one reading may be another vendor's: what looks like a secret stays here.
+        let scrub = self.live.get(&id).is_some_and(|l| {
+            l.items
+                .iter()
+                .any(|i| matches!(i, trek_core::store::Item::Handoff { .. }))
+        });
         // The search reads the whole log: off the main thread.
         cx.background_spawn(async move {
             let answer = match method.as_str() {
@@ -100,6 +107,10 @@ impl Workspace {
                     session_log::read(&path, n("start").unwrap_or(1), n("end"))
                 }
             };
+            let answer = answer.map(|a| match scrub {
+                true => crate::share::render::redact_secrets(&a),
+                false => a,
+            });
             let _ = reply.try_send(Reply::Done(answer.map(Value::String)));
         })
         .detach();

@@ -19,7 +19,9 @@ use core_graphics::window::{
     kCGWindowListOptionIncludingWindow, kCGWindowListOptionOnScreenOnly,
 };
 
-use super::{AppBundle, Button, Capture, Desktop, Display, Input, Rect, RunningApp, WindowInfo};
+use super::{
+    AppBundle, Button, Capture, Desktop, Display, Input, Rect, RunningApp, Whereabouts, WindowInfo,
+};
 use crate::keys::{self, KeyCombo};
 use crate::util::{self, TempFile};
 
@@ -311,8 +313,36 @@ impl Desktop for Mac {
             .filter(|w| w.id == id as i64))
     }
 
+    /// The window list's own entry for `id`, which it keeps for a window wherever it is; off
+    /// screen, `spaces` says why.
+    fn whereabouts(&self, id: i64) -> Result<Whereabouts, String> {
+        let Ok(wid) = u32::try_from(id) else {
+            return Ok(Whereabouts::Closed);
+        };
+        let arr = copy_window_info(kCGWindowListOptionIncludingWindow, wid)
+            .ok_or("CGWindowListCopyWindowInfo returned nothing")?;
+        let entry = |on_screen| {
+            arr.iter()
+                .find_map(|item| window_info(*item as CFDictionaryRef, on_screen))
+                .filter(|w| w.id == id)
+        };
+        if let Some(w) = entry(true) {
+            return Ok(Whereabouts::OnScreen(w));
+        }
+        let Some(w) = entry(false) else {
+            return Ok(Whereabouts::Closed);
+        };
+        // The on-screen list can have a window before its own entry says it's on screen.
+        if let Some(w) = on_screen_windows()?.into_iter().find(|x| x.id == id) {
+            return Ok(Whereabouts::OnScreen(w));
+        }
+        Ok(super::spaces::off_screen(w))
+    }
+
     /// `screencapture -l`, which draws the window from its own buffer: what covers it doesn't
-    /// show. A zoom is cut from the full-resolution capture.
+    /// show. Off screen (on another Space) it has nothing to give, so the window server's own copy
+    /// of the window is asked first (`spaces::capture`). A zoom is cut from the full-resolution
+    /// capture.
     fn capture_window(
         &self,
         w: &WindowInfo,
@@ -320,21 +350,27 @@ impl Desktop for Mac {
         max_side: u32,
     ) -> Result<Capture, String> {
         let tmp = TempFile::new("png");
-        let out = util::run(
-            "/usr/sbin/screencapture",
-            &[
-                "-x",
-                "-o",
-                "-t",
-                "png",
-                &format!("-l{}", w.id),
-                tmp.path_str(),
-            ],
-            None,
-            Duration::from_secs(20),
-        )?;
+        let on_screen = self.window(w.id).ok().flatten().is_some();
+        let drawn = !on_screen && super::spaces::capture(w.id, tmp.path_str()).is_ok();
+        let out = if drawn {
+            None
+        } else {
+            Some(util::run(
+                "/usr/sbin/screencapture",
+                &[
+                    "-x",
+                    "-o",
+                    "-t",
+                    "png",
+                    &format!("-l{}", w.id),
+                    tmp.path_str(),
+                ],
+                None,
+                Duration::from_secs(20),
+            )?)
+        };
         let size = std::fs::metadata(&tmp.0).map(|m| m.len()).unwrap_or(0);
-        if !out.success() || size == 0 {
+        if let Some(out) = out.filter(|out| !out.success() || size == 0) {
             if !unsafe { CGPreflightScreenCaptureAccess() } {
                 return Err(format!(
                     "{SCREEN_RECORDING_ERROR}{}",
@@ -350,6 +386,10 @@ impl Desktop for Mac {
                 "Couldn't capture {}'s window ({detail}). It may have closed or been minimised: list_windows shows what's open.",
                 w.owner
             ));
+        }
+        // Off screen, `screencapture` can hand back a picture with nothing in it.
+        if !on_screen && !drawn && !super::spaces::has_content(tmp.path_str()) {
+            return Err("the system has no picture of the window while it isn't showing".into());
         }
         let (_, w0, h0) = util::load_png(&tmp.0)?;
         if let Some((x, y, rw, rh)) = region {
@@ -511,9 +551,20 @@ impl Desktop for Mac {
         }
         let dict: CFDictionary<CFString, CFType> =
             unsafe { CFDictionary::wrap_under_create_rule(dict) };
-        dict.find(CFString::from_static_string("CGSSessionScreenIsLocked"))
-            .and_then(|v| v.downcast::<core_foundation::boolean::CFBoolean>())
-            .is_some_and(bool::from)
+        let flag = |key: &'static str| {
+            dict.find(CFString::from_static_string(key))
+                .and_then(|v| v.downcast::<core_foundation::boolean::CFBoolean>())
+                .map(bool::from)
+        };
+        // Off the console: another user's session is in front (fast user switching).
+        flag("CGSSessionScreenIsLocked") == Some(true)
+            || flag("kCGSSessionOnConsoleKey") == Some(false)
+    }
+
+    /// The main display asleep, or a screen saver's window on screen (`ScreenSaverEngine`, or the
+    /// `legacyScreenSaver` that runs older savers).
+    fn screen_dark(&self) -> bool {
+        CGDisplay::main().is_asleep() || screen_saver_on()
     }
 
     fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
@@ -643,39 +694,24 @@ fn sleep_ms(ms: u64) {
 #[derive(Debug, PartialEq)]
 pub(super) enum TypeSegment {
     Key(u16),
-    /// UTF-16 chunk (≤ 20 units, the CGEventKeyboardSetUnicodeString limit).
+    /// One character, as UTF-16 (two units for one outside the Basic Multilingual Plane).
     Text(Vec<u16>),
 }
 
+/// A character a key event, as a keyboard types: an event carrying several makes some apps
+/// (Calculator, measured on macOS 27, in front and behind) take only its first and drop the rest.
 pub(super) fn split_for_typing(s: &str) -> Vec<TypeSegment> {
-    const MAX_UNITS: usize = 20;
-    let mut out = Vec::new();
-    let mut cur: Vec<u16> = Vec::new();
     let s = s.replace("\r\n", "\n");
-    for ch in s.chars() {
-        let key = match ch {
-            '\n' | '\r' => Some(keys::KEY_RETURN),
-            '\t' => Some(keys::KEY_TAB),
-            _ => None,
-        };
-        if let Some(code) = key {
-            if !cur.is_empty() {
-                out.push(TypeSegment::Text(std::mem::take(&mut cur)));
+    s.chars()
+        .map(|ch| match ch {
+            '\n' | '\r' => TypeSegment::Key(keys::KEY_RETURN),
+            '\t' => TypeSegment::Key(keys::KEY_TAB),
+            _ => {
+                let mut buf = [0u16; 2];
+                TypeSegment::Text(ch.encode_utf16(&mut buf).to_vec())
             }
-            out.push(TypeSegment::Key(code));
-            continue;
-        }
-        let mut buf = [0u16; 2];
-        let units = ch.encode_utf16(&mut buf);
-        if cur.len() + units.len() > MAX_UNITS {
-            out.push(TypeSegment::Text(std::mem::take(&mut cur)));
-        }
-        cur.extend_from_slice(units);
-    }
-    if !cur.is_empty() {
-        out.push(TypeSegment::Text(cur));
-    }
-    out
+        })
+        .collect()
 }
 
 fn on_screen_windows() -> Result<Vec<WindowInfo>, String> {
@@ -688,6 +724,25 @@ fn on_screen_windows() -> Result<Vec<WindowInfo>, String> {
         .iter()
         .filter_map(|item| window_info(*item as CFDictionaryRef, false))
         .collect())
+}
+
+/// Whether a window of a screen saver is on screen, at any layer.
+fn screen_saver_on() -> bool {
+    let Some(arr) = copy_window_info(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) else {
+        return false;
+    };
+    arr.iter().any(|item| {
+        let dict: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(*item as CFDictionaryRef) };
+        dict.find(CFString::from_static_string("kCGWindowOwnerName"))
+            .and_then(|v| v.downcast::<CFString>())
+            .is_some_and(|owner| is_screen_saver(&owner.to_string()))
+    })
+}
+
+/// `ScreenSaverEngine`, or `legacyScreenSaver` (older savers, on macOS 14 and later).
+fn is_screen_saver(owner: &str) -> bool {
+    owner.to_ascii_lowercase().contains("screensaver")
 }
 
 /// An app's window (layer 0, at least 2x2) from its window-list entry. `on_screen`: only one
@@ -784,23 +839,30 @@ mod tests {
     }
 
     #[test]
+    fn screen_savers_are_known_by_their_owner() {
+        assert!(is_screen_saver("ScreenSaverEngine") && is_screen_saver("legacyScreenSaver"));
+        assert!(!is_screen_saver("Safari") && !is_screen_saver("Window Server"));
+    }
+
+    #[test]
     fn typing_segments() {
-        let segs = split_for_typing("hi\r\nyou\tthere");
+        let text = |s: &str| TypeSegment::Text(s.encode_utf16().collect());
         assert_eq!(
-            segs,
+            split_for_typing("hi\r\nyo\tu"),
             vec![
-                TypeSegment::Text("hi".encode_utf16().collect()),
+                text("h"),
+                text("i"),
                 TypeSegment::Key(36),
-                TypeSegment::Text("you".encode_utf16().collect()),
+                text("y"),
+                text("o"),
                 TypeSegment::Key(48),
-                TypeSegment::Text("there".encode_utf16().collect()),
+                text("u"),
             ]
         );
-        // long text is chunked at 20 UTF-16 units without splitting surrogate pairs
-        let s = "a".repeat(19) + "😀" + "b";
-        let segs = split_for_typing(&s);
-        assert_eq!(segs.len(), 2);
-        assert!(matches!(&segs[0], TypeSegment::Text(u) if u.len() == 19));
-        assert!(matches!(&segs[1], TypeSegment::Text(u) if u.len() == 3));
+        // A character a key event (Calculator takes only an event's first), and one outside
+        // the BMP stays whole: both its UTF-16 units go in one event.
+        let segs = split_for_typing("12😀");
+        assert_eq!(segs, vec![text("1"), text("2"), text("😀")]);
+        assert!(matches!(&segs[2], TypeSegment::Text(u) if u.len() == 2));
     }
 }

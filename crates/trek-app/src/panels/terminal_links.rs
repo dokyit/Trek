@@ -2,6 +2,7 @@
 //! ⌘-clicked (Ctrl-clicked on Windows) where `[terminal] open_links` says. Until the user has
 //! chosen, the first click asks, and the answer is kept in that setting.
 
+use crate::scale::{text, to_rems};
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
@@ -151,7 +152,7 @@ fn ask(ws: Entity<Workspace>, url: String, window: &mut Window, cx: &mut App) {
             .description(
                 v_flex()
                     .gap_2()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .text_color(muted)
                     .child(div().truncate().child(url.clone()))
                     .child("Trek remembers your choice. You can change it in Settings › General › Terminal."),

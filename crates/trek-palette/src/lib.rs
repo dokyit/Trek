@@ -4,6 +4,8 @@
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::{App, Hsla, rgb};
 
+pub mod scale;
+
 fn pick(cx: &App, (night, paper): (u32, u32)) -> Hsla {
     if cx.theme().mode.is_dark() {
         rgb(night).into()
@@ -152,6 +154,65 @@ mod tests {
         .collect()
     }
 
+    /// Every colour in theme `name` that's a grey (its channels within 0x20 of each other), as
+    /// (key, 0xRRGGBB), translucent ones included by their colour.
+    fn greys(name: &str) -> Vec<(String, u32)> {
+        let themes: serde_json::Value =
+            serde_json::from_str(include_str!("../../trek-assets/assets/themes/trek.json"))
+                .unwrap();
+        let theme = themes["themes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .expect(name);
+        theme["colors"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, v)| {
+                let hex = v.as_str()?.trim_start_matches('#');
+                let c = u32::from_str_radix(hex.get(..6)?, 16).ok()?;
+                let (r, g, b) = ((c >> 16) & 255, (c >> 8) & 255, c & 255);
+                // The ink on an ember fill is ember-dark on purpose.
+                let on_ember = k.ends_with("primary.foreground");
+                (r.max(g).max(b) - r.min(g).min(b) <= 0x20 && !on_ember).then(|| (k.clone(), c))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_theme_s_greys_are_one_family() {
+        // Night's greys are zinc: red and green level, blue a touch above, never the blue-grey
+        // of another theme. Paper's are warm: red over blue by a little, never a tan.
+        let night = greys("Trek Night");
+        assert!(night.len() > 30, "{}", night.len());
+        for (k, c) in night {
+            let (r, g, b) = (
+                (c >> 16) as i32 & 255,
+                (c >> 8) as i32 & 255,
+                c as i32 & 255,
+            );
+            assert!(
+                (g - r).abs() <= 1 && (0..=9).contains(&(b - r)),
+                "Night {k} #{c:06X} isn't a zinc grey"
+            );
+        }
+        let paper = greys("Trek Paper");
+        assert!(paper.len() > 30, "{}", paper.len());
+        for (k, c) in paper {
+            let (r, g, b) = (
+                (c >> 16) as i32 & 255,
+                (c >> 8) as i32 & 255,
+                c as i32 & 255,
+            );
+            assert!(
+                (-2..=10).contains(&(r - b)) && g <= r.max(b) && g >= r.min(b),
+                "Paper {k} #{c:06X} isn't a warm grey"
+            );
+        }
+    }
+
     #[test]
     fn status_colours_are_readable_as_small_text_on_paper() {
         let surfaces = paper_surfaces();
@@ -172,6 +233,36 @@ mod tests {
                     "{name} #{paper:06X} on #{bg:06X}: {ratio:.2}:1"
                 );
             }
+        }
+    }
+
+    /// A colour of theme `name` from the theme file, as 0xRRGGBB.
+    fn colour(name: &str, key: &str) -> u32 {
+        let themes: serde_json::Value =
+            serde_json::from_str(include_str!("../../trek-assets/assets/themes/trek.json"))
+                .unwrap();
+        let theme = themes["themes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .expect(name);
+        let hex = theme["colors"][key].as_str().expect(key);
+        u32::from_str_radix(&hex.trim_start_matches('#')[..6], 16).unwrap()
+    }
+
+    #[test]
+    fn red_buttons_and_red_text_both_read_in_each_theme() {
+        // A red button's white text, at rest and under the pointer, and red text on the
+        // window: no one red does both on Night, so buttons take `danger` and text takes `red`.
+        for name in ["Trek Night", "Trek Paper"] {
+            let ink = colour(name, "danger.foreground");
+            for fill in ["danger.background", "danger.hover.background"] {
+                let c = contrast(ink, colour(name, fill));
+                assert!(c >= 4.5, "{name}: text on {fill} is {c:.2}:1");
+            }
+            let c = contrast(colour(name, "base.red"), colour(name, "background"));
+            assert!(c >= 4.5, "{name}: red text on the window is {c:.2}:1");
         }
     }
 }

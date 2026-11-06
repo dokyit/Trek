@@ -4,6 +4,7 @@
 
 use crate::fluent;
 use crate::palette;
+use crate::scale::{radius, text};
 use crate::workspace::{Route, Workspace};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
@@ -51,11 +52,11 @@ impl Render for DraggedTab {
             .h(px(28.))
             .flex()
             .items_center()
-            .rounded(px(fluent::control(8.)))
+            .rounded(px(fluent::control(radius::BUTTON)))
             .bg(theme.popover)
             .border_1()
             .border_color(theme.border)
-            .text_size(px(12.5))
+            .text_size(px(text::BODY))
             .text_color(theme.foreground)
             .child(self.title.clone())
     }
@@ -171,8 +172,8 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
             .pl(px(9.))
             .pr(px(4.))
             .gap(px(7.))
-            .rounded(px(fluent::control(8.)))
-            .text_size(px(12.5))
+            .rounded(px(fluent::control(radius::BUTTON)))
+            .text_size(px(text::BODY))
             .cursor_pointer()
             .when(active, |el| {
                 el.bg(if glass {
@@ -211,7 +212,7 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(fluent::control(5.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .when(!active, |el| {
                         el.invisible()
                             .group_hover(SharedString::from(format!("tab-{id}")), |s| s.visible())
@@ -255,8 +256,8 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
                 .h(px(28.))
                 .px(px(10.))
                 .gap(px(7.))
-                .rounded(px(fluent::control(8.)))
-                .text_size(px(12.5))
+                .rounded(px(fluent::control(radius::BUTTON)))
+                .text_size(px(text::BODY))
                 .font_weight(FontWeight::MEDIUM)
                 .bg(theme.foreground.opacity(if glass { 0.1 } else { 0.075 }))
                 .text_color(theme.foreground)

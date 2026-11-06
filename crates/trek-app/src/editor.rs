@@ -14,6 +14,7 @@
 //! file, and the edit comes back as a pending hunk like any other. A card over the text rather
 //! than between lines: the editor has no block decorations (yet).
 
+use crate::scale::{radius, text, to_rems};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -185,6 +186,13 @@ pub fn key_bindings() -> Vec<KeyBinding> {
     crate::keys::bindings(crate::keys::Group::Editor)
 }
 
+/// The workspace knows the editors open: their unsaved edits hold an update's restart back. Later,
+/// as a new editor may be made while the workspace is being updated.
+fn note_with_workspace(workspace: &Entity<Workspace>, cx: &mut Context<EditorView>) {
+    let (workspace, me) = (workspace.clone(), cx.weak_entity());
+    cx.defer(move |cx| workspace.update(cx, |ws, _| ws.note_editor(me)));
+}
+
 pub struct EditorView {
     workspace: Entity<Workspace>,
     pub path: PathBuf,
@@ -326,6 +334,7 @@ impl EditorView {
                 }
             }),
         ];
+        note_with_workspace(&workspace, cx);
         let mut this = Self {
             workspace,
             path: path.clone(),
@@ -668,13 +677,13 @@ impl EditorView {
                     };
                     // A review's hunks read stronger than the quiet HEAD fills.
                     let color = match (kind, review) {
-                        (DiffMark::Removed, _) => theme.danger.opacity(0.16),
+                        (DiffMark::Removed, _) => theme.red.opacity(0.16),
                         (DiffMark::Changed, true) if self_scratch => theme.info.opacity(0.10),
                         (DiffMark::Added | DiffMark::Changed, true) => theme.success.opacity(0.17),
-                        (DiffMark::Deleted, true) => theme.danger.opacity(0.5),
+                        (DiffMark::Deleted, true) => theme.red.opacity(0.5),
                         (DiffMark::Added, false) => theme.success.opacity(0.12),
                         (DiffMark::Changed, false) => theme.info.opacity(0.10),
-                        (DiffMark::Deleted, false) => theme.danger.opacity(0.35),
+                        (DiffMark::Deleted, false) => theme.red.opacity(0.35),
                     };
                     gpui_kit::base::input::RangeDecoration::new(start..end)
                         .with_style(gpui_kit::base::input::RangeDecorationStyle::Fill)
@@ -1380,11 +1389,11 @@ impl EditorView {
                 .px(px(8.))
                 .gap(px(5.))
                 .items_center()
-                .rounded(px(fluent::control(5.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
         };
-        let kbd = |k: String, c: Hsla| div().text_size(px(10.5)).text_color(c).child(k);
+        let kbd = |k: String, c: Hsla| div().text_size(px(text::META)).text_color(c).child(k);
         Some(
             h_flex()
                 .id("editor-hunk-bar")
@@ -1395,7 +1404,7 @@ impl EditorView {
                 .p(px(3.))
                 .gap(px(2.))
                 .items_center()
-                .rounded(px(fluent::surface(7.)))
+                .rounded(px(fluent::surface(radius::BUTTON)))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.popover)
@@ -1435,7 +1444,7 @@ impl EditorView {
                         .whitespace_nowrap()
                         .gap(px(4.))
                         .px(px(4.))
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .font_family(theme.mono_font_family.clone())
                         .when(n > 1, |el| el.child(format!("{}/{n}", ix + 1)))
                         .when(added > 0, |el| {
@@ -1507,7 +1516,7 @@ impl EditorView {
                 .px(px(6.))
                 .gap(px(4.))
                 .items_center()
-                .rounded(px(fluent::control(5.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
                 .hover(|s| {
                     s.bg(theme.foreground.opacity(0.07))
@@ -1529,7 +1538,7 @@ impl EditorView {
                         .py(px(3.))
                         .gap(px(4.))
                         .items_center()
-                        .rounded(px(fluent::surface(9.)))
+                        .rounded(px(fluent::surface(radius::BUTTON)))
                         .border_1()
                         .border_color(theme.border)
                         .bg(theme.popover)
@@ -1537,7 +1546,7 @@ impl EditorView {
                         .when(fluent::WINDOWS, |el| {
                             el.shadow(fluent::flyout_shadow(Vec::new(), cx))
                         })
-                        .text_size(px(12.))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .whitespace_nowrap()
                         .child(
@@ -1623,7 +1632,7 @@ impl EditorView {
                 .max_w(relative(0.9))
                 .p(px(8.))
                 .gap(px(6.))
-                .rounded(px(fluent::surface(9.)))
+                .rounded(px(fluent::surface(radius::BUTTON)))
                 .border_1()
                 .border_color(palette::ember(cx).opacity(0.55))
                 .bg(theme.popover)
@@ -1640,7 +1649,7 @@ impl EditorView {
                 .child(
                     h_flex()
                         .gap(px(6.))
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(div().text_color(palette::ember(cx)).child("✦"))
                         .child(
@@ -1665,7 +1674,7 @@ impl EditorView {
                 .child(
                     h_flex()
                         .gap(px(12.))
-                        .text_size(px(11.))
+                        .text_size(px(text::META))
                         .text_color(theme.muted_foreground)
                         .child(kbd(keys::localize("↵").into_owned(), "Run"))
                         .child(kbd("Esc".into(), "Cancel"))
@@ -1772,7 +1781,7 @@ impl Render for EditorView {
                             .flex_none()
                             .border_b_1()
                             .border_color(theme.border)
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(palette::red(cx))
                             .child(p),
                     )
@@ -1807,7 +1816,7 @@ impl Render for EditorView {
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.border)
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .child(
                         Icon::new(crate::assets::Lucide::FilePen)
                             .small()
@@ -1819,7 +1828,7 @@ impl Render for EditorView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(dir),
                     )
@@ -1827,7 +1836,12 @@ impl Render for EditorView {
                         el.child(div().text_color(palette::ember(cx)).child("●"))
                     })
                     .when_some(self.problem.clone(), |el, p| {
-                        el.child(div().text_xs().text_color(palette::red(cx)).child(p))
+                        el.child(
+                            div()
+                                .text_size(to_rems(text::META))
+                                .text_color(palette::red(cx))
+                                .child(p),
+                        )
                     })
                     .child(
                         Button::new("editor-save")

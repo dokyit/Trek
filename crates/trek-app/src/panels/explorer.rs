@@ -8,6 +8,7 @@
 //! holding changes; and a row's context menu adds it to the AI side bar's chat.
 
 use crate::fluent;
+use crate::scale::{radius, text, to_rems};
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
@@ -844,10 +845,10 @@ impl ExplorerPanel {
                 .when(!ide, |el| {
                     el.mx_1()
                         .h(px(26.))
-                        .rounded(px(fluent::control(6.)))
-                        .text_sm()
+                        .rounded(px(fluent::control(radius::CONTROL)))
+                        .text_size(to_rems(text::LABEL))
                 })
-                .when(ide, |el| el.h(px(22.)).text_size(px(13.)))
+                .when(ide, |el| el.h(px(22.)).text_size(px(text::BODY)))
                 .pl(px(8. + depth as f32 * if ide { 12. } else { 14. }))
                 .pr_2()
                 .gap(px(6.))
@@ -884,7 +885,7 @@ impl ExplorerPanel {
                     el.child(
                         div()
                             .flex_none()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(m.color(cx))
                             .child(m.letter()),

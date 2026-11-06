@@ -235,8 +235,73 @@ keep the repository's write access as tight as the Mac's. The key uploaded shoul
 someone who can run a workflow, which sees both. A key without a password still signs, with
 `release.sh`'s warning in the log.
 
+PostHog, for the usage data users say yes to and their feedback (docs/PRIVACY.md), takes two repository
+*variables*, not secrets: the project key ships inside the app, and can only add events.
+
+```sh
+gh variable set TREK_POSTHOG_KEY --body phc_...                       # the project's API key
+gh variable set TREK_POSTHOG_HOST --body https://eu.i.posthog.com     # only for the EU cloud
+```
+
+Unset, a build still asks about usage data and sends nothing. A local `script/release.sh` compiles in
+whatever `TREK_POSTHOG_KEY` its shell has.
+
 The Mac's own way, `script/release.sh` on the Mac, works as before. Run one or the other for a release,
-not both.
+not both. It publishes the Apple-silicon build only, and Intel Macs then hear their build is on its way
+(see "Intel Macs" to add it by hand).
+
+## Intel Macs
+
+A release has two Mac builds, side by side, each with its own archive, signature, disk image and manifest
+entry: `darwin-aarch64` for Apple silicon and `darwin-x86_64` for Intel. Each Trek asks the manifest for
+the build of its own architecture (`update::platform_key`), so each Mac gets its own update. An Intel
+build that finds itself under Rosetta on an Apple-silicon Mac (the wrong disk image, or a Mac migrated
+from an Intel one) asks for `darwin-aarch64`, and so moves to the native build at its next update.
+
+Why two builds and not one universal binary: `trek` is about 105 MB per architecture, and a universal
+one would double the download and every update for everyone, nearly all of them on Apple silicon, to save
+one workflow job. Thin builds also leave the Apple-silicon flow exactly as it was.
+
+In `release.yml`, beside the `macos` job and its steps unchanged:
+
+- The `intel` job runs alongside the others on the same kind of runner (`macos-15`, Apple silicon) and
+  cross-compiles: `script/release.sh <version> --channel <channel> --target x86_64-apple-darwin --dry-run`.
+  That is the normal release run, minus git and GitHub: `bundle.sh` builds with
+  `--target x86_64-apple-darwin` (`TREK_TARGET`) and `MACOSX_DEPLOYMENT_TARGET=13.0` (rustc's default for
+  Intel, 10.12, links a Swift library by `@rpath` and that Trek doesn't start), checks that every executable
+  in the bundle is `x86_64` and looks for nothing by `@rpath`, and it is code-signed, notarized and minisigned
+  the same way (same identities, same key). The Intel `trek-mcp` compiles the iPhone helper for Intel, under
+  Rosetta, which the job installs if the runner lacks it. `xcrun metal` builds the same Metal library for both.
+- The `publish-intel` job runs last: after the Windows publish, done or not, because two merges of one
+  manifest at once would lose one. It downloads the release's `<channel>.json`, adds `darwin-x86_64`
+  (`script/lib/merge-manifest.py`, which refuses another version's manifest), uploads the archive, its
+  signature and the disk image, then the manifest. The Windows merge keeps entries it doesn't own too.
+
+If the `intel` job fails, Apple silicon and Windows go out as usual and Intel Macs say "the Mac build is on
+its way". **Re-run failed jobs** runs `intel` and `publish-intel` again; they replace only their own assets
+and entry. The job keeps a cache of its own (`release-intel`, not warmed by `warm-release.yml`), so the first
+run after a dependency changes compiles everything cold.
+
+A dry run builds and signs it too, keeps its disk image as the `intel-build` artifact for a week, and shows
+the merged manifest in the run's summary.
+
+To build it by hand on an Apple-silicon Mac (`rustup target add x86_64-apple-darwin` once, Rosetta installed):
+
+```sh
+TREK_TARGET=x86_64-apple-darwin script/bundle.sh   # dist/Trek.app, for Intel
+
+# Or to try it isolated: a throwaway data folder and the mock agent. macOS runs it under Rosetta by itself.
+MACOSX_DEPLOYMENT_TARGET=13.0 cargo build --profile bundle --target x86_64-apple-darwin -p trek-app --features shots
+./bin/agent-cli perf launch idle --bin $CARGO_TARGET_DIR/x86_64-apple-darwin/bundle/trek
+```
+
+To add it to a release made by hand: `script/release.sh <version> --channel <channel> --target
+x86_64-apple-darwin --dry-run`, then download the release's `<channel>.json`, run `script/lib/merge-manifest.py`
+on it and the build's `<channel>.json`, and `gh release upload --clobber` the archive, its signature and the disk
+image, then the merged manifest, as `publish-intel` does.
+
+Rosetta runs the Intel build on Apple's GPU, so it proves the code, the bundle and the Metal library load,
+not that an Intel Mac's GPU draws it right. Only a real Intel Mac can show that.
 
 ## Gatekeeper and notarization
 
@@ -369,8 +434,13 @@ keeps it.
 3. Stage: unpack in that folder, then check the bundle id, that the version is exactly the advertised one
    and newer than the running one, and the code signature; clear quarantine. Now the sidebar shows an
    ember **Update** pill and Settings → Updates shows the release notes and **Restart to update**.
-4. Install, when the user restarts (immediately if no agent turn is running, otherwise as soon as the last
-   one finishes) or quits Trek. If the app on disk is already at least that version (another copy of
+4. Install, when the user restarts or quits Trek. With nothing running a restart is immediate. With chats
+   running (turns, sub-agents out in the background) or the iPhone app being installed, the updater says how
+   many and offers **Installs when N threads finish** (the default), **Install now** (it says it stops them
+   first) and **Later** (on quit). A wait goes once the last one ends and nobody is typing or has unsaved
+   edits, after a countdown toast that can call it off. The install itself comes last, with the relaunch
+   right behind it. Chats it cut off are offered back at the next launch, and messages not sent come back
+   in their composers. If the app on disk is already at least that version (another copy of
    Trek updated it, or it was replaced by hand), nothing is installed. Otherwise: move the staged app next
    to the running one, swap the two in one `renamex_np(RENAME_SWAP)` (or two renames on volumes without
    it; if the second fails the current app is put back, and if even that fails it's left where the error

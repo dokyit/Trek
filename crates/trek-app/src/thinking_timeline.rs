@@ -10,6 +10,7 @@ use crate::activity::{Place, ToolKind, placement};
 use crate::assets::Lucide;
 use crate::fluent;
 use crate::palette;
+use crate::scale::text;
 use crate::workspace::Workspace;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, h_flex};
@@ -34,7 +35,7 @@ pub const CHIPS_TOP: f32 = 7.;
 pub const CHIPS_BOTTOM: f32 = 14.;
 const CHIP: f32 = 26.;
 const CHIP_GAP: f32 = 6.;
-pub const TEXT_SIZE: f32 = 13.;
+pub const TEXT_SIZE: f32 = text::BODY;
 const NODE: f32 = 7.;
 const SEARCH: f32 = 11.;
 const CROSS: f32 = 8.;
@@ -712,7 +713,7 @@ pub fn inline_chip(
         .pl(px(5.))
         .pr(px(6.))
         .gap(px(5.))
-        .text_size(px(12.5))
+        .text_size(px(text::BODY))
         .text_color(ink)
 }
 

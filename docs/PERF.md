@@ -1,6 +1,6 @@
 # Performance
 
-How fast Trek is on Windows, measured, and how to measure it again. Numbers are from
+How fast Trek is on Windows, measured, and how to measure it again ([on a Mac](PERFORMANCE.md)). Numbers are from
 2026-10-10 on the Windows port's laptop: x64, 20 logical cores, 32 GB, Intel Iris Xe driving a
 60 Hz 1920×1080 panel at 125 %, Windows 11 Pro, release build (`--features shots`), window
 1280×820. Other builds were running on the machine at the same time, so treat single runs as

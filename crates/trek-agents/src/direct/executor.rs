@@ -9,7 +9,7 @@ use base64::Engine as _;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, BufReader};
@@ -60,6 +60,82 @@ pub trait ToolExecutor: Send + Sync {
     /// Write `bytes` to `path`, making its folders first. A file already there keeps its mode;
     /// a new one is 0644.
     fn write<'a>(&'a self, path: &'a Path, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>>;
+    /// Whether the tools run on this machine, where a search can run in-process and folders can be
+    /// looked at directly.
+    fn is_local(&self) -> bool {
+        false
+    }
+    /// Where a tool's overflow output is saved, for the model to read later.
+    fn temp_dir(&self) -> PathBuf {
+        PathBuf::from("/tmp")
+    }
+}
+
+/// The largest file `read` takes.
+const MAX_READ: u64 = 128 * 1024 * 1024;
+/// How long a command's output may stay open after its shell ended. Normally both pipes close with
+/// the shell; one held by something it left running mustn't hold the answer too.
+const PIPE_GRACE: Duration = Duration::from_millis(500);
+/// How much of a command's output is held in memory: the start, and a rolling end. A command that
+/// writes without stopping mustn't take the machine's memory with it.
+const KEEP_HEAD: usize = 1024 * 1024;
+const KEEP_TAIL: usize = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct Capped {
+    bytes: Vec<u8>,
+    dropped: u64,
+}
+
+impl Capped {
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+        // Twice over before cutting, so it isn't a copy per chunk.
+        if self.bytes.len() > 2 * (KEEP_HEAD + KEEP_TAIL) {
+            let cut_to = self.bytes.len() - KEEP_TAIL;
+            self.dropped += (cut_to - KEEP_HEAD) as u64;
+            self.bytes.drain(KEEP_HEAD..cut_to);
+        }
+    }
+
+    fn text(&self) -> String {
+        if self.dropped == 0 {
+            return String::from_utf8_lossy(&self.bytes).into_owned();
+        }
+        format!(
+            "{}\n[… {} bytes of output were not kept …]\n{}",
+            String::from_utf8_lossy(&self.bytes[..KEEP_HEAD]),
+            self.dropped,
+            String::from_utf8_lossy(&self.bytes[KEEP_HEAD..])
+        )
+    }
+}
+
+/// Reads a command's pipe into `into` until it closes. It runs on after the command's answer has
+/// gone back if something it started still holds the pipe: with no reader that process would die
+/// on its next write.
+async fn drain(mut pipe: impl AsyncRead + Unpin, into: Arc<Mutex<Capped>>) {
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match tokio::io::AsyncReadExt::read(&mut pipe, &mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => into.lock().expect("output").push(&chunk[..n]),
+        }
+    }
+}
+
+/// The shell commands run in: bash where there is one (the tool is called `bash`, and models write
+/// for it), else `sh`.
+#[cfg(unix)]
+fn shell_program() -> &'static str {
+    static SHELL: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    SHELL.get_or_init(|| {
+        if trek_core::detect::which("bash").is_some() {
+            "bash"
+        } else {
+            "sh"
+        }
+    })
 }
 
 /// The tools on this machine: what Trek's own Direct sessions use.
@@ -67,6 +143,14 @@ pub trait ToolExecutor: Send + Sync {
 pub struct LocalExecutor;
 
 impl ToolExecutor for LocalExecutor {
+    fn is_local(&self) -> bool {
+        true
+    }
+
+    fn temp_dir(&self) -> PathBuf {
+        std::env::temp_dir()
+    }
+
     fn exec<'a>(
         &'a self,
         command: &'a str,
@@ -75,16 +159,27 @@ impl ToolExecutor for LocalExecutor {
     ) -> BoxFuture<'a, Result<ExecOutput>> {
         Box::pin(async move {
             #[cfg(unix)]
-            let mut shell = trek_core::procs::async_command("sh");
+            let mut shell = trek_core::procs::async_command(shell_program());
             #[cfg(unix)]
-            shell.arg("-c");
+            shell.arg("-c").arg(command);
             #[cfg(windows)]
             let mut shell = trek_core::procs::async_command("cmd.exe");
+            // As written, not with Rust's argument quoting: cmd.exe doesn't read `\"`, so
+            // `git commit -m "a b"` would reach git as two words. `/s` with the outer quotes makes
+            // it take everything between them literally.
             #[cfg(windows)]
-            shell.arg("/c");
+            shell.raw_arg(format!("/s /c \"{command}\""));
             shell
-                .arg(command)
                 .current_dir(cwd)
+                // The user's real PATH, as every other agent gets: an app started from the Dock
+                // has a bare one, and "node: command not found" sends a model down the wrong road.
+                .env("PATH", trek_core::detect::login_path())
+                // Nothing waits on a person who isn't there.
+                .env("PAGER", "cat")
+                .env("GIT_PAGER", "cat")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("NO_COLOR", "1")
+                .env("TERM", "dumb")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
@@ -92,16 +187,21 @@ impl ToolExecutor for LocalExecutor {
             // command started too, not just the shell: dropping `child` does that.
             let mut child = crate::spawn_group(&mut shell)?;
 
-            let mut stdout = child.stdout.take().expect("stdout");
-            let mut stderr = child.stderr.take().expect("stderr");
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
+            let stdout = child.stdout.take().expect("stdout");
+            let stderr = child.stderr.take().expect("stderr");
+            let out = Arc::new(Mutex::new(Capped::default()));
+            let err = Arc::new(Mutex::new(Capped::default()));
+            let read_out = tokio::spawn(drain(stdout, out.clone()));
+            let read_err = tokio::spawn(drain(stderr, err.clone()));
             let status = {
-                let read_out = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut stdout_buf);
-                let read_err = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut stderr_buf);
                 let run = async {
-                    tokio::try_join!(read_out, read_err)?;
-                    child.wait().await
+                    let status = child.wait().await?;
+                    let readers = async {
+                        let _ = read_out.await;
+                        let _ = read_err.await;
+                    };
+                    let _ = tokio::time::timeout(PIPE_GRACE, readers).await;
+                    anyhow::Ok(status)
                 };
                 match timeout {
                     None => Some(run.await?),
@@ -115,9 +215,11 @@ impl ToolExecutor for LocalExecutor {
                 // A timed-out one is ended now, group and all; what it wrote so far is kept.
                 None => child.kill_now().await,
             }
+            let stdout = out.lock().expect("output").text();
+            let stderr = err.lock().expect("output").text();
             Ok(ExecOutput {
-                stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+                stdout,
+                stderr,
                 exit_code: status.and_then(|s| s.code()),
                 timed_out: status.is_none(),
             })
@@ -126,8 +228,24 @@ impl ToolExecutor for LocalExecutor {
 
     fn read<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<Option<Vec<u8>>>> {
         Box::pin(async move {
-            if !path.exists() {
-                return Ok(None);
+            let meta = match tokio::fs::metadata(path).await {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
+            // `/dev/zero` never ends and a FIFO may never answer, and a Stop can't end a blocking
+            // read: only regular files, of a size that can be held.
+            if meta.is_dir() {
+                bail!("Is a directory");
+            }
+            if !meta.is_file() {
+                bail!("it isn't a regular file");
+            }
+            if meta.len() > MAX_READ {
+                bail!(
+                    "it's {} MB, too large to read whole. Use grep, or head and tail in bash",
+                    meta.len() / (1024 * 1024)
+                );
             }
             Ok(Some(tokio::fs::read(path).await?))
         })

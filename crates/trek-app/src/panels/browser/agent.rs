@@ -13,6 +13,7 @@ use super::BrowserPanel;
 use super::agent_core::{self as core, Wait};
 use crate::assets::Lucide;
 use crate::ipc::Reply;
+use crate::scale::{text, to_rems};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
 use gpui_kit::*;
@@ -267,7 +268,7 @@ impl BrowserPanel {
                 .h(px(32.))
                 .px(px(12.))
                 .gap(px(8.))
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .border_b_1()
                 .border_color(theme.border)
         };

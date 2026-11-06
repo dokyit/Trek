@@ -141,6 +141,8 @@ nonisolated enum ThreadAction: Hashable {
     case resumeAtReset, cancelResume, tryAgain, snoozeUntilReset
     /// The context card's Compact now (`context_card`): the agent's own `/compact`.
     case compact
+    /// A turn cut off when Trek closed (`resume_interrupted`): Resume or Retry, or leave it.
+    case resumeInterrupted, dismissInterrupted
     var json: [String: Any] {
         switch self {
         case .pin: ["kind": "pin"]
@@ -165,6 +167,8 @@ nonisolated enum ThreadAction: Hashable {
         case .tryAgain: ["kind": "try_again"]
         case .snoozeUntilReset: ["kind": "snooze_until_reset"]
         case .compact: ["kind": "compact"]
+        case .resumeInterrupted: ["kind": "resume_interrupted"]
+        case .dismissInterrupted: ["kind": "dismiss_interrupted"]
         }
     }
 }
@@ -273,6 +277,58 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     var sharesFolder: Bool? = nil
     /// Paused at a usage limit: when it resets, whether it resumes then by itself.
     var pause: LimitPause? = nil
+    /// `needs` is an approval of its own: the request, to answer it from outside the thread (the
+    /// Live Activity). Nil from older Macs, and for anything else it may need.
+    var ask: RowAsk? = nil
+    /// Its last turn was cut off when Trek closed on the Mac, and that isn't dealt with yet
+    /// (`resumeInterrupted`). Nil from older Macs.
+    var cutShort: CutShort? = nil
+}
+
+/// The approval behind a row's `needs`.
+nonisolated struct RowAsk: Codable, Hashable {
+    var requestId: String
+    /// All of the command or file it asks about, so it can be judged before it's answered.
+    var detail: String = ""
+}
+
+/// A turn cut off when Trek closed, as the Mac's offer has it.
+nonisolated struct CutShort: Codable, Hashable {
+    var state: CutShortState
+    /// How its agent comes back: "Reopens its Claude Code session".
+    var how: String = ""
+    /// It was waiting on the user, not working: it comes back waiting.
+    var waiting: Bool = false
+    /// What it was asking then, when that's known.
+    var asked: String? = nil
+    /// Why the last resume failed.
+    var why: String? = nil
+}
+
+// Written out: what's synthesized wants every field that isn't optional, and one a Mac leaves out
+// would lose the whole row, and with it the snapshot it came in.
+nonisolated extension RowAsk {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try c.decode(String.self, forKey: .requestId)
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+    }
+}
+
+nonisolated extension CutShort {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = try c.decode(CutShortState.self, forKey: .state)
+        how = try c.decodeIfPresent(String.self, forKey: .how) ?? ""
+        waiting = try c.decodeIfPresent(Bool.self, forKey: .waiting) ?? false
+        asked = try c.decodeIfPresent(String.self, forKey: .asked)
+        why = try c.decodeIfPresent(String.self, forKey: .why)
+    }
+}
+
+nonisolated enum CutShortState: String, LenientEnum {
+    case offered, resuming, failed
+    static var fallback: CutShortState { .offered }
 }
 
 nonisolated struct ContextUse: Codable, Hashable {
@@ -416,6 +472,9 @@ nonisolated struct ApprovalRequest: Hashable {
     var title: String
     var detail: String
     var state: ApprovalState
+    /// The user's rule that asks about this every time, as the Mac's Settings shows it: there's
+    /// no "Allow for session" for it. Nil from a Mac before it, which is told no rule.
+    var askedBy: String? = nil
 }
 
 nonisolated struct QuestionRequest: Hashable {
@@ -539,6 +598,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         var toAgent: AgentRef? = nil
         var videos: [String]? = nil
         var watch: WatchedMedia? = nil
+        var askedBy: String? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -558,7 +618,8 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
                                   added: r.added, removed: r.removed))
         case "approval":
             body = .approval(ApprovalRequest(requestId: r.requestId ?? "", title: r.title ?? "", detail: r.detail ?? "",
-                                             state: ApprovalState(rawValue: r.state ?? "") ?? .resolved))
+                                             state: ApprovalState(rawValue: r.state ?? "") ?? .resolved,
+                                             askedBy: r.askedBy))
         case "question":
             body = .question(QuestionRequest(requestId: r.requestId ?? "", questions: r.questions ?? [],
                                              state: QuestionState(rawValue: r.state ?? "") ?? .resolved,
@@ -600,7 +661,9 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         case .tool(let c):
             r.kind = "tool"; r.callId = c.callId; r.tool = c.tool; r.title = c.title; r.detail = c.detail
             r.status = c.status; r.output = c.output; r.added = c.added; r.removed = c.removed
-        case .approval(let a): r.kind = "approval"; r.requestId = a.requestId; r.title = a.title; r.detail = a.detail; r.state = a.state.rawValue
+        case .approval(let a):
+            r.kind = "approval"; r.requestId = a.requestId; r.title = a.title; r.detail = a.detail; r.state = a.state.rawValue
+            r.askedBy = a.askedBy
         case .question(let q): r.kind = "question"; r.requestId = q.requestId; r.questions = q.questions; r.state = q.state.rawValue; r.answers = q.answers
         case .plan(let p): r.kind = "plan"; r.requestId = p.requestId; r.markdown = p.markdown; r.state = p.state.rawValue
         case .turnEnd(let secs): r.kind = "turn_end"; r.tookSecs = secs

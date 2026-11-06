@@ -8,8 +8,10 @@ use crate::dictate;
 use crate::fluent::{self, PillExt as _};
 use crate::mentions::{self, PickKind};
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::screenclip;
 use crate::ui::{self, Pill};
+use crate::workspace::permission_requests::ReplyNote;
 use crate::workspace::{Route, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{
@@ -30,10 +32,14 @@ use trek_core::orchestrate::{Consult, Consultant, Style};
 use trek_core::settings::FollowUp;
 use trek_core::{AgentId, Effort, HandHolding, RunState};
 
+mod checks_bar;
+mod compact_chip;
 pub(crate) mod look;
 mod machine_chip;
 pub use machine_chip::reach_dot;
 pub mod pickers;
+mod queue;
+mod switch_bar;
 pub mod voice;
 
 pub use pickers::{PickerHost, Pickers};
@@ -63,6 +69,19 @@ pub struct Composer {
     height: std::rc::Rc<std::cell::Cell<Pixels>>,
     /// The message being edited, to send again in its place.
     editing: Option<Editing>,
+    /// A queued follow-up being changed in the prompt.
+    queue_edit: Option<queue::QueueEdit>,
+    /// What the switch bar last worked out.
+    switch_preview: Option<switch_bar::Preview>,
+    /// The switch bar's card with the text is open.
+    switch_preview_open: bool,
+    /// How many of the bars above the prompt this frame has drawn (`bar_corners`).
+    bars_drawn: usize,
+    /// Threads whose Compact chip was dismissed, with their last activity then: it stays gone
+    /// until they've been active again.
+    compact_dismissed: std::collections::HashMap<String, i64>,
+    /// Redraws as a large idle thread's prompt cache runs out.
+    _cache_lapse: Option<(i64, Task<()>)>,
     /// Redraws the usage-limit bar's countdown while it's up.
     limit_tick: Option<Task<()>>,
     /// What the context card's Compact now is doing.
@@ -108,8 +127,9 @@ pub struct Composer {
     draft_key: String,
     /// The prompt's placeholder as last set (`placeholder`).
     placeholder: std::borrow::Cow<'static, str>,
-    /// What was typed for the threads and drafts not on screen, by `draft_key`.
-    drafts: std::collections::HashMap<String, Draft>,
+    /// What was typed for the threads and drafts not on screen, by `draft_key`. A split's two
+    /// composers share theirs: a thread's message is there for whichever pane it next opens in.
+    drafts: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Draft>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -301,6 +321,7 @@ impl Composer {
                         }
                     } else if matches!(event, InputEvent::Change) {
                         pickers::update_trigger(this, cx);
+                        this.note_unsent(cx);
                         // The user has started typing: get the agent process up before they hit Return.
                         // Not while editing: sending that starts a session of its own, after the rewind.
                         let typing = {
@@ -351,7 +372,15 @@ impl Composer {
                     } else {
                         Prompt::Plain
                     };
-                    placeholder(running.then_some(ws.settings.general.follow_up), prompt)
+                    let note = ws
+                        .thread_id_in(&this.scope)
+                        .and_then(|id| ws.reply_note(id));
+                    match note {
+                        Some(note) => reply_placeholder(note),
+                        None => {
+                            placeholder(running.then_some(ws.settings.general.follow_up), prompt)
+                        }
+                    }
                 };
                 if this.placeholder != placeholder {
                     this.input.update(cx, |s, cx| {
@@ -394,6 +423,12 @@ impl Composer {
             width: std::rc::Rc::new(std::cell::Cell::new(px(760.))),
             height: std::rc::Rc::new(std::cell::Cell::new(px(0.))),
             editing: None,
+            queue_edit: None,
+            switch_preview: None,
+            switch_preview_open: false,
+            bars_drawn: 0,
+            compact_dismissed: Default::default(),
+            _cache_lapse: None,
             limit_tick: None,
             compact: crate::context_popover::Compact::Idle,
             context_open: false,
@@ -423,6 +458,17 @@ impl Composer {
             _subscriptions: subscriptions,
         };
         this.draft_key = this.target(cx);
+        // What the last run kept for what's on screen comes back, once the window is up.
+        cx.defer_in(window, |this, window, cx| {
+            this.bring_back_unsent(window, cx)
+        });
+        // And what's here as Trek quits, attachments too, is kept for the next.
+        cx.on_app_quit(|this: &mut Self, cx| {
+            this.note_unsent(cx);
+            this.workspace.update(cx, |ws, _| ws.save_unsent());
+            async {}
+        })
+        .detach();
         // TREK_REVIEW_COMPOSER=restate (Restate first on) or arena (the Consult menu open on an
         // arena): states a click reaches, for design review of a window that isn't in front.
         match std::env::var("TREK_REVIEW_COMPOSER").as_deref() {
@@ -542,7 +588,7 @@ impl Composer {
             || text.trim().is_empty()
             || text.trim_start().starts_with('/'));
         if consulting {
-            let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
+            let agent = self.workspace.read(cx).chosen_prefs_in(&self.scope).agent;
             if let Some(why) = self.workspace.read(cx).consult_unavailable(&agent) {
                 self.workspace.update(cx, |_, cx| {
                     cx.emit(WorkspaceEvent::Toast {
@@ -597,11 +643,35 @@ impl Composer {
                 return;
             }
         }
+        // A queued message being changed while a secret's card is up: the words may be the
+        // secret, which the queue would keep and send on after the turn. They stay here.
+        if self
+            .queue_edit
+            .as_ref()
+            .is_some_and(|e| self.workspace.read(cx).asks_for_secret(&e.thread))
+        {
+            self.workspace.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message: crate::workspace::permission_requests::SECRET_IN_CARD.into(),
+                    undo: None,
+                })
+            });
+            return;
+        }
         state.update(cx, |s, cx| s.set_value("", window, cx));
         self.pickers.trigger = None;
         self.sync_overlay(cx);
         let images = std::mem::take(&mut self.outbox.paths);
+        // A queued follow-up being changed goes back in its place, not out.
+        if self.send_queue_edit(&text, &images, window, cx) {
+            self.note_unsent(cx);
+            return;
+        }
         let scope = self.scope.clone();
+        // The message goes to the agent the user picked: the move happens now, not before.
+        self.workspace
+            .update(cx, |ws, cx| ws.commit_switch_in(&scope, &text, cx));
+        self.switch_preview_open = false;
         let sent = match self.editing.take() {
             // Sent in place of the message: the conversation goes back to just before it. What
             // the composer held before the edit comes back.
@@ -625,18 +695,18 @@ impl Composer {
             }
             None => {
                 self.workspace.update(cx, |ws, cx| {
-                    let running = ws
-                        .thread_id_in(&scope)
-                        .map(str::to_string)
-                        .filter(|id| ws.turn_running(id));
-                    match (follow, running) {
-                        (Some(follow), Some(id)) => ws.send_as(&id, text, images, Some(follow), cx),
-                        _ => ws.send_in(&scope, text, images, cx),
-                    }
+                    ws.send_typed(&scope, text, images, follow, cx);
                 });
                 true
             }
         };
+        self.after_send(window, cx);
+        // Sent: it's no message in progress any more (clearing the field says nothing by itself).
+        self.note_unsent(cx);
+        if sent {
+            self.workspace
+                .update(cx, |ws, _| ws.note_prompt_sent(&scope));
+        }
         if consulting && sent && !self.consult_pinned {
             self.consult.consultants.clear();
             self.consult.judge = None;
@@ -749,6 +819,14 @@ impl Composer {
         {
             self.cancel_edit(window, cx);
         }
+        // So does a queued follow-up being changed: it goes back in its place.
+        if self
+            .queue_edit
+            .as_ref()
+            .is_some_and(|e| format!("thread:{}", e.thread) != key)
+        {
+            self.cancel_queue_edit(window, cx);
+        }
         // A take in progress ends unconfirmed: its words don't follow into a draft put away.
         if self.voice.phase != voice::Phase::Idle {
             self.voice_step(voice::Event::Cancel, window, cx);
@@ -758,8 +836,15 @@ impl Composer {
         let images = std::mem::take(&mut self.outbox.paths);
         let restate = std::mem::take(&mut self.restate);
         let old = std::mem::replace(&mut self.draft_key, key.clone());
+        if !text.is_empty() || !images.is_empty() {
+            let (scope, kept, attached) = (self.scope.clone(), text.clone(), images.clone());
+            let now = cx.background_executor().now();
+            self.workspace.update(cx, |ws, _| {
+                ws.note_unsent(&scope, &old, &kept, attached, now)
+            });
+        }
         if !text.is_empty() || !images.is_empty() || restate {
-            self.drafts.insert(
+            self.drafts.borrow_mut().insert(
                 old,
                 Draft {
                     text,
@@ -769,9 +854,10 @@ impl Composer {
                 },
             );
         } else {
-            self.drafts.remove(&old);
+            self.drafts.borrow_mut().remove(&old);
         }
-        let next = self.drafts.remove(&key).unwrap_or(Draft {
+        let parked = self.drafts.borrow_mut().remove(&key);
+        let next = parked.or_else(|| self.kept_for(&key, cx)).unwrap_or(Draft {
             text: String::new(),
             cursor: 0,
             images: Vec::new(),
@@ -786,6 +872,284 @@ impl Composer {
             s.set_selected_range(cursor..cursor, cx);
         });
         self.sync_overlay(cx);
+    }
+
+    /// Share what's put away with `other`'s composer (a split's two), and take up what's there for
+    /// the thread on screen.
+    pub fn share_drafts_with(
+        &mut self,
+        other: &Entity<Composer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drafts = other.read(cx).drafts.clone();
+        self.take_up_parked(window, cx);
+    }
+
+    /// Bring in what's been put away for the thread on screen, when the prompt is empty: the
+    /// thread came here from the pane beside, whose composer put it away as this one looked.
+    pub fn take_up_parked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.input.read(cx).value().is_empty() || !self.outbox.paths.is_empty() {
+            return;
+        }
+        let Some(draft) = self.drafts.borrow_mut().remove(&self.draft_key) else {
+            return;
+        };
+        self.outbox.paths = draft.images;
+        self.restate = draft.restate;
+        let cursor = draft.cursor.min(draft.text.len());
+        self.input.update(cx, |s, cx| {
+            s.set_value(draft.text, window, cx);
+            s.set_selected_range(cursor..cursor, cx);
+        });
+        // It's this composer's message now (`set_value` says nothing of a change): sent from
+        // here, it's no message in progress, whichever pane first had it.
+        self.note_unsent(cx);
+        cx.notify();
+    }
+
+    /// The composer has the keyboard.
+    pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.focus_handle(cx).is_focused(window)
+    }
+
+    /// What has the keyboard when the composer does.
+    pub fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.input.read(cx).focus_handle(cx)
+    }
+
+    /// Tell the workspace what's in the prompt, to keep for the next launch and to know someone's
+    /// typing. A message being edited isn't noted: it's in the transcript, and the draft it
+    /// replaced for now is what would be lost.
+    fn note_unsent(&mut self, cx: &mut Context<Self>) {
+        if self.editing.is_some() {
+            return;
+        }
+        let mut text = self.input.read(cx).value().to_string();
+        let mut images = self.outbox.paths.clone();
+        // A queued message being changed is in the prompt, and what was there before waits to
+        // come back: both are what would be lost.
+        if let Some((before, before_images)) = self.held_draft() {
+            if !before.is_empty() {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(before);
+            }
+            images.extend(before_images.iter().cloned());
+        }
+        let (scope, key) = (self.scope.clone(), self.draft_key.clone());
+        let now = cx.background_executor().now();
+        self.workspace
+            .update(cx, |ws, _| ws.note_unsent(&scope, &key, &text, images, now));
+    }
+
+    /// What the last run kept for `key`, once.
+    fn kept_for(&mut self, key: &str, cx: &mut Context<Self>) -> Option<Draft> {
+        let scope = self.scope.clone();
+        let (text, images) = self
+            .workspace
+            .update(cx, |ws, _| ws.take_restored_message(&scope, key))?;
+        Some(Draft {
+            cursor: text.len(),
+            text,
+            images,
+            restate: false,
+        })
+    }
+
+    /// What the last run kept for what's on screen as this composer opens. Anything already typed
+    /// stays: the message goes in beside it.
+    fn bring_back_unsent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.draft_key.clone();
+        if let Some(kept) = self.kept_for(&key, cx) {
+            self.restore(&kept.text, &kept.images, window, cx);
+        }
+    }
+
+    /// The bar above the prompt of a chat a quit or a crash cut off: what became of it, how it comes
+    /// back, and the way to bring it back. Nothing here runs anything by itself.
+    fn interrupted_bar(
+        &mut self,
+        id: &str,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::workspace::resume::{ResumeState, how_it_resumes};
+        let ws = self.workspace.read(cx);
+        let offer = ws.interrupted_offer(id)?.clone();
+        let how = how_it_resumes(ws.thread(id)?);
+        let theme = cx.theme().clone();
+        let (title, detail, tint) = match (&offer.state, offer.turn.waiting) {
+            (ResumeState::Going, _) => return None,
+            (ResumeState::Resuming, _) => ("Resuming…", how, theme.muted_foreground),
+            (ResumeState::Failed(why), _) => ("Couldn't resume", why.clone(), palette::failed(cx)),
+            (ResumeState::Offered, true) => (
+                "Waiting for you when Trek closed",
+                offer.turn.asked.clone().unwrap_or_else(|| {
+                    "Its question went with Trek. Ask again to bring it back.".into()
+                }),
+                palette::needs_you(cx),
+            ),
+            (ResumeState::Offered, false) => ("Interrupted", how, palette::amber(cx)),
+        };
+        let action = |key: &'static str, label: &'static str, strong: bool| {
+            div()
+                .id(key)
+                .test_support()
+                .flex_none()
+                .h(px(24.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(fluent::control(radius::CONTROL)))
+                .cursor_pointer()
+                .text_color(if strong {
+                    theme.foreground
+                } else {
+                    theme.muted_foreground
+                })
+                .when(strong, |el| el.font_medium())
+                .hover(|s| {
+                    s.bg(theme.foreground.opacity(0.06))
+                        .text_color(theme.foreground)
+                })
+                .child(label)
+        };
+        let ws = self.workspace.clone();
+        let on = |f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
+            let (ws, id) = (ws.clone(), id.to_string());
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                ws.update(cx, |ws, cx| f(ws, &id, cx))
+            }
+        };
+        let mut actions: Vec<AnyElement> = vec![];
+        match (&offer.state, offer.turn.waiting) {
+            (ResumeState::Offered, false) => {
+                actions.push(
+                    action("resume-thread", "Resume", true)
+                        .on_click(on(|ws, id, cx| ws.resume_interrupted(id, cx)))
+                        .into_any_element(),
+                );
+                actions.push(
+                    action("resume-edit", "Edit message", false)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.edit_resume_message(window, cx)),
+                        )
+                        .into_any_element(),
+                );
+            }
+            (ResumeState::Offered, true) => actions.push(
+                action("resume-thread", "Ask again", true)
+                    .on_click(on(|ws, id, cx| ws.resume_interrupted(id, cx)))
+                    .into_any_element(),
+            ),
+            (ResumeState::Failed(_), _) => actions.push(
+                action("resume-retry", "Retry", true)
+                    .on_click(on(|ws, id, cx| ws.resume_interrupted(id, cx)))
+                    .into_any_element(),
+            ),
+            _ => {}
+        }
+        if offer.open() {
+            actions.push(
+                action("resume-dismiss", "Dismiss", false)
+                    .on_click(on(|ws, id, cx| ws.dismiss_interrupted(id, cx)))
+                    .into_any_element(),
+            );
+        }
+        let resuming = offer.state == ResumeState::Resuming;
+        let wash = if resuming {
+            theme.foreground.opacity(0.04)
+        } else {
+            tint.opacity(0.07)
+        };
+        Some(
+            v_flex()
+                .id("interrupted-bar")
+                .test_support()
+                .mx(px(12.))
+                .rounded_t(px(self.bar_corners()))
+                .border_1()
+                .border_b_0()
+                .border_color(if resuming {
+                    theme.foreground.opacity(0.1)
+                } else {
+                    tint.opacity(0.28)
+                })
+                .bg(wash)
+                .text_size(px(text::BODY))
+                .child(
+                    h_flex()
+                        .h(px(36.))
+                        .pl(px(12.))
+                        .pr(px(6.))
+                        .gap(px(8.))
+                        .child(if resuming {
+                            gpui_kit::component::spinner::Spinner::new()
+                                .xsmall()
+                                .color(theme.muted_foreground)
+                                .into_any_element()
+                        } else {
+                            Icon::new(crate::assets::Lucide::RotateCcwClock)
+                                .small()
+                                .text_color(tint)
+                                .into_any_element()
+                        })
+                        .child(
+                            div()
+                                .id("interrupted-title")
+                                .test_support()
+                                .flex_none()
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(title),
+                        )
+                        .child({
+                            let whole = SharedString::from(detail.clone());
+                            div()
+                                .id("interrupted-detail")
+                                .test_support()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.muted_foreground)
+                                .when(!compact, |el| el.child(detail))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(whole.clone())
+                                        .build(window, cx)
+                                })
+                        })
+                        .children(actions),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The top corners of the next bar drawn above the prompt: the first is rounded as the
+    /// prompt is, and any under it meets the one above square, so a stack of them reads as one.
+    pub(super) fn bar_corners(&mut self) -> f32 {
+        self.bars_drawn += 1;
+        if self.bars_drawn == 1 {
+            fluent::surface(radius::CARD)
+        } else {
+            0.
+        }
+    }
+
+    /// "Edit message": the resume message in the prompt, to change and send like any other (the
+    /// offer takes it as the resume). What's typed already stays where it is: that's what goes.
+    fn edit_resume_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.read(cx).value().is_empty() {
+            let text = self.workspace.read(cx).resume_message();
+            self.input.update(cx, |s, cx| {
+                let end = text.len();
+                s.set_value(text, window, cx);
+                s.set_selected_range(end..end, cx);
+            });
+        }
+        self.focus(window, cx);
+        cx.notify();
     }
 
     /// Stop editing: what the composer held before comes back.
@@ -884,7 +1248,7 @@ impl Composer {
                 .px(px(14.))
                 .pt(px(10.))
                 .gap(px(8.))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .text_color(theme.muted_foreground)
                 .child(Icon::new(crate::assets::Lucide::Pencil).xsmall())
                 .child(
@@ -1053,6 +1417,11 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         use crate::pr_card::{self, Kind, Phase};
+        let compact_offer = {
+            let ws = self.workspace.read(cx);
+            let id = ws.thread_id_in(&self.scope)?.to_string();
+            self.compact_chip_offer(&id, cx).map(|o| (id, o))
+        };
         let (id, keyed, turn_end, files, can_open_pr) = {
             let ws = self.workspace.read(cx);
             let id = ws.thread_id_in(&self.scope)?.to_string();
@@ -1092,10 +1461,14 @@ impl Composer {
         if self.creating_pr && (has_pr || !running) {
             self.creating_pr = false;
         }
+        // What's failing is on the bar above the card (`checks_bar`): the chip would only say it
+        // again, on top of the bar's actions. What else this row has floats above the bar.
+        let checks_bar_up = self.workspace.read(cx).pr_checks_bar_up(&id);
         // The status chip, unless it's done and gone, or moved on from.
         let status = keyed.filter(|(key, card)| {
             pr_card::chip_shown(card, now)
                 && self.chip_dismissed.as_ref() != Some(&(key.clone(), card.phase))
+                && !(checks_bar_up && card.kind == Kind::Pr)
         });
         let creating = self.creating_pr
             || status
@@ -1180,7 +1553,8 @@ impl Composer {
         } else {
             None
         };
-        if changes.is_none() && action.is_none() {
+        let compact_chip = compact_offer.map(|(id, o)| self.compact_chip(&id, &o, cx));
+        if changes.is_none() && action.is_none() && compact_chip.is_none() {
             return None;
         }
         Some(
@@ -1191,8 +1565,10 @@ impl Composer {
                 .bottom_full()
                 .right_0()
                 .pb(px(8.))
+                .when(checks_bar_up, |el| el.mb(px(37.)))
                 .gap(px(6.))
                 .items_center()
+                .children(compact_chip)
                 .children(changes)
                 .children(action)
                 .into_any_element(),
@@ -1331,9 +1707,13 @@ impl Composer {
         }
         let theme = cx.theme().clone();
         let amber = palette::amber(cx);
+        // Another account of the agent with room: the quickest way on, and the user's to take. The
+        // bar says less of the rest then, so there's still room for when the limit resets.
+        let next = self.workspace.read(cx).next_account(id);
+        let offered = next.is_some();
         let when = |at: i64| {
             let clock = crate::time::reset_clock(at, now);
-            if compact {
+            if compact || offered {
                 clock
             } else {
                 format!("{clock} (in {})", crate::time::countdown(at, now))
@@ -1354,7 +1734,7 @@ impl Composer {
             (Some(at), false) => format!("Resets {}", when(at)),
             (None, _) => "Reset time unknown".to_string(),
         };
-        let action = |key: &'static str, label: &'static str, strong: bool| {
+        let action = |key: &'static str, label: SharedString, strong: bool| {
             div()
                 .id(key)
                 .test_support()
@@ -1363,7 +1743,7 @@ impl Composer {
                 .px(px(8.))
                 .flex()
                 .items_center()
-                .rounded(px(fluent::control(6.)))
+                .rounded(px(fluent::control(radius::CONTROL)))
                 .cursor_pointer()
                 .text_color(if strong {
                     theme.foreground
@@ -1385,31 +1765,53 @@ impl Composer {
             }
         };
         let mut actions: Vec<AnyElement> = vec![];
+        if let Some(next) = next {
+            let (ws, id, account) = (self.workspace.clone(), id.to_string(), next.id.clone());
+            actions.push(
+                action(
+                    "limit-continue",
+                    format!("Continue on {}", next.label).into(),
+                    true,
+                )
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(
+                        "Goes on now in a new session there, from a recap of this thread",
+                    )
+                    .build(window, cx)
+                })
+                .on_click(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    ws.update(cx, |ws, cx| {
+                        ws.continue_on_account(&id, account.clone(), cx)
+                    })
+                })
+                .into_any_element(),
+            );
+        }
         match (pause.resets_at.is_some(), pause.resume) {
             (true, false) => actions.push(
-                action("limit-resume", "Resume at reset", true)
+                action("limit-resume", "Resume at reset".into(), true)
                     .on_click(on(|ws, id, cx| ws.resume_at_reset(id, cx)))
                     .into_any_element(),
             ),
             (true, true) => actions.push(
-                action("limit-cancel", "Cancel", false)
+                action("limit-cancel", "Cancel".into(), false)
                     .on_click(on(|ws, id, cx| ws.cancel_resume(id, cx)))
                     .into_any_element(),
             ),
             (false, _) => actions.push(
-                action("limit-retry", "Try again", true)
+                action("limit-retry", "Try again".into(), true)
                     .on_click(on(|ws, id, cx| ws.end_pause(id, true, cx)))
                     .into_any_element(),
             ),
         }
-        if pause.resets_at.is_some() && !snoozed {
+        if pause.resets_at.is_some() && !snoozed && !offered {
             let label = if compact {
                 "Snooze"
             } else {
                 "Snooze until reset"
             };
             actions.push(
-                action("limit-snooze", label, false)
+                action("limit-snooze", label.into(), false)
                     .on_click(on(|ws, id, cx| ws.snooze_until_reset(id, cx)))
                     .into_any_element(),
             );
@@ -1417,11 +1819,12 @@ impl Composer {
         actions.push(
             action(
                 "limit-switch",
-                if compact {
+                if compact || offered {
                     "Switch…"
                 } else {
                     "Switch agent…"
-                },
+                }
+                .into(),
                 false,
             )
             .on_click(cx.listener(|this, _, _, cx| {
@@ -1435,9 +1838,18 @@ impl Composer {
         } else {
             "Sends when you try again"
         };
+        // Drawn from here on: its place in the stack of bars.
+        let corners = self.bar_corners();
+        let in_line = pause.queued.len();
         let queued = pause.queued.iter().enumerate().map(|(ix, q)| {
             let ws = self.workspace.clone();
             let id = id.to_string();
+            let moved = |to: usize| {
+                let (ws, id) = (ws.clone(), id.clone());
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    ws.update(cx, |ws, cx| ws.move_queued_for_reset(&id, ix, to, cx))
+                }
+            };
             let text = if q.text.trim().is_empty() {
                 format!(
                     "{} image{}",
@@ -1450,6 +1862,7 @@ impl Composer {
             h_flex()
                 .id(("limit-queued", ix))
                 .test_support()
+                .group("limit-queued")
                 .h(px(28.))
                 .px(px(12.))
                 .gap(px(8.))
@@ -1476,6 +1889,39 @@ impl Composer {
                             .child(waits_for),
                     )
                 })
+                // The way to reorder them, with the pointer on the row.
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .invisible()
+                        .group_hover("limit-queued", |s| s.visible())
+                        .when(ix > 0, |el| {
+                            el.child(
+                                gpui_kit::component::button::Button::new(("limit-queued-up", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(
+                                        Icon::new(IconName::ArrowUp)
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .tooltip("Move up")
+                                    .on_click(moved(ix - 1)),
+                            )
+                        })
+                        .when(ix + 1 < in_line, |el| {
+                            el.child(
+                                gpui_kit::component::button::Button::new(("limit-queued-down", ix))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(
+                                        Icon::new(IconName::ArrowDown)
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .tooltip("Move down")
+                                    .on_click(moved(ix + 1)),
+                            )
+                        }),
+                )
                 .child(
                     gpui_kit::component::button::Button::new(("limit-unqueue", ix))
                         .ghost()
@@ -1493,12 +1939,12 @@ impl Composer {
                 .id("limit-bar")
                 .test_support()
                 .mx(px(12.))
-                .rounded_t(px(fluent::surface(12.)))
+                .rounded_t(px(corners))
                 .border_1()
                 .border_b_0()
                 .border_color(amber.opacity(0.28))
                 .bg(amber.opacity(0.07))
-                .text_size(px(12.5))
+                .text_size(px(text::BODY))
                 .child(
                     h_flex()
                         .h(px(36.))
@@ -1535,7 +1981,7 @@ impl Composer {
     /// Tell the workspace whether one of our popovers is open (native views hide under it). Only
     /// the main window has native views.
     fn sync_overlay(&self, cx: &mut Context<Self>) {
-        if self.scope != Scope::Main {
+        if !self.scope.in_main_window() {
             return;
         }
         let open = self.pickers.open() || self.consult_open;
@@ -2138,6 +2584,11 @@ impl Composer {
             cx.stop_propagation();
             return;
         }
+        if key == "escape" && self.pickers.trigger.is_none() && self.queue_edit.is_some() {
+            self.cancel_queue_edit(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         pickers::picker_action(self, key, window, cx);
     }
 
@@ -2169,7 +2620,7 @@ impl Composer {
                 .id("snapshot-wait")
                 .test_support()
                 .pt(px(6.))
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(cx.theme().muted_foreground)
                 .child(crate::keys::localize("Pick a region… ⌘⇧S cancels").into_owned())
         });
@@ -2234,7 +2685,7 @@ impl Composer {
             .w(px(look::CONTROL))
             .h(px(look::CONTROL))
             .p_0()
-            .rounded(px(fluent::control(look::CONTROL / 2.)))
+            .rounded(px(fluent::control(radius::FULL)))
             .bg(look::chip_fill(cx))
             // A child, not `.icon()`: the kit sizes an icon to 3/4 of its button.
             .child(
@@ -2363,7 +2814,7 @@ impl Composer {
         if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
             return None;
         }
-        let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
+        let agent = self.workspace.read(cx).chosen_prefs_in(&self.scope).agent;
         if let Some(why) = self.workspace.read(cx).consult_unavailable(&agent) {
             return Some(Err(format!("Can't consult: {why}.")));
         }
@@ -2450,7 +2901,7 @@ impl Composer {
     /// The thread's own agent and model.
     fn main_model(&self, cx: &App) -> (AgentId, String) {
         let ws = self.workspace.read(cx);
-        let prefs = ws.prefs_in(&self.scope);
+        let prefs = ws.chosen_prefs_in(&self.scope);
         let models = ws.models_for(&prefs.agent);
         let model = prefs
             .model
@@ -2486,7 +2937,7 @@ impl Composer {
     /// The consult menu: who's consulted, at what effort, how, and then what.
     fn consult_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let ws = self.workspace.read(cx);
-        let prefs = ws.prefs_in(&self.scope);
+        let prefs = ws.chosen_prefs_in(&self.scope);
         let agents = ws.ready_agents();
         // Another agent than the thread's own comes first: a second opinion from elsewhere.
         let rail = self
@@ -2517,7 +2968,7 @@ impl Composer {
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(13.))
+                    .text_size(px(text::BODY))
                     .font_medium()
                     .child("Consult other models"),
             )
@@ -2526,7 +2977,7 @@ impl Composer {
                     div()
                         .id("consult-clear")
                         .test_support()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .text_color(muted)
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.foreground))
@@ -2701,7 +3152,7 @@ impl Composer {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(fluent::control(7.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .cursor_pointer()
                     .when(active, |el| el.bg(look::pressed(cx)))
                     .hover(|s| s.bg(look::chip_fill(cx)))
@@ -2774,7 +3225,7 @@ impl Composer {
                 div()
                     .px(px(10.))
                     .pb(px(6.))
-                    .text_size(px(12.5))
+                    .text_size(px(text::BODY))
                     .line_height(relative(1.4))
                     .text_color(muted)
                     .child(note),
@@ -2853,7 +3304,7 @@ impl Composer {
                     el.child(
                         div()
                             .p(px(8.))
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .text_color(muted)
                             .child("There's no other model on offer to judge."),
                     )
@@ -2961,14 +3412,14 @@ impl Composer {
                 div()
                     .when(i > 0, |el| el.ml(px(-5.)))
                     .p(px(1.))
-                    .rounded(px(fluent::control(5.)))
+                    .rounded(px(fluent::control(radius::CONTROL)))
                     .bg(look::card_fill(cx))
                     .child(ui::agent_logo(&c.agent, px(14.), cx))
             },
         ));
         // An agent that wouldn't get `delegate_task` can't consult: the pill says why, and opens
         // only to let go of consultants already picked.
-        let agent = self.workspace.read(cx).prefs_in(&self.scope).agent;
+        let agent = self.workspace.read(cx).chosen_prefs_in(&self.scope).agent;
         if let (Some(why), true) = (self.workspace.read(cx).consult_unavailable(&agent), empty) {
             return Pill::new("consult-pill")
                 .chip()
@@ -3288,7 +3739,7 @@ impl Composer {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(format!("off {}", wt.base)),
                     )
@@ -3307,7 +3758,7 @@ impl Composer {
                     .when_some(g.branch.clone(), |el, b| {
                         el.child(
                             div()
-                                .text_xs()
+                                .text_size(to_rems(text::META))
                                 .text_color(theme.muted_foreground)
                                 .child("off"),
                         )
@@ -3409,7 +3860,7 @@ impl Composer {
                             )
                             .small()
                             .h(px(look::CONTROL))
-                            .rounded(px(fluent::control(look::CONTROL / 2.)))
+                            .rounded(px(fluent::control(radius::FULL)))
                             .child(
                                 h_flex()
                                     .gap(px(5.))
@@ -3477,13 +3928,14 @@ impl Composer {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_sm().font_medium().child("Worktree missing"))
-                    .child(div().text_xs().text_color(theme.muted_foreground).child(format!("The folder for {} is gone. Messages wait until the thread has a folder again.", wt.branch))),
+                    .child(div().text_size(to_rems(text::LABEL)).font_medium().child("Worktree missing"))
+                    .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("The folder for {} is gone. Messages wait until the thread has a folder again.", wt.branch))),
             )
-            .child(gpui_kit::component::button::Button::new("wt-recreate").small().outline().label("Recreate from branch").on_click(move |_, _, cx| {
+            // Where another app's worktree was is that app's to fill again.
+            .when(self.workspace.read(cx).worktree_owner(&id).is_none(), |el| el.child(gpui_kit::component::button::Button::new("wt-recreate").small().outline().label("Recreate from branch").on_click({ let id = id.clone(); move |_, _, cx| {
                 let id = id.clone();
                 ws1.update(cx, |ws, cx| ws.recreate_worktree(&id, cx))
-            }))
+            }})))
             .child(gpui_kit::component::button::Button::new("wt-local").small().ghost().label("Run in project folder").on_click(move |_, _, cx| {
                 let id = id2.clone();
                 ws2.update(cx, |ws, cx| ws.run_in_project_folder(&id, cx))
@@ -3532,6 +3984,10 @@ impl Composer {
 }
 
 impl PickerHost for Composer {
+    fn holds_switches(&self) -> bool {
+        true
+    }
+
     fn pickers(&mut self) -> &mut Pickers {
         &mut self.pickers
     }
@@ -3584,7 +4040,8 @@ impl Attaching for Composer {
     }
 
     fn land_elsewhere(&mut self, target: &str, paths: Vec<PathBuf>) {
-        let draft = self.drafts.entry(target.to_string()).or_insert(Draft {
+        let mut drafts = self.drafts.borrow_mut();
+        let draft = drafts.entry(target.to_string()).or_insert(Draft {
             text: String::new(),
             cursor: 0,
             images: Vec::new(),
@@ -3600,12 +4057,20 @@ impl Attaching for Composer {
 
 /// Below this card width the composer's pills get their narrowest form.
 const NARROW: f32 = 440.;
+/// How much sooner they do with the context ring out: its own place, and room for a model name
+/// longer than most.
+const RING_ROOM: f32 = 75.;
+/// And with the mic there.
+const MIC_ROOM: f32 = 35.;
+/// Past the narrow form, what the model pill needs to name the account too ("Default", "Work").
+const ACCOUNT_ROOM: f32 = 130.;
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::rendered("Composer");
         self.redraw_when_chip_goes(cx);
+        self.redraw_when_cache_lapses(cx);
         let ws = self.workspace.read(cx);
         let prefs = ws.prefs_in(&self.scope);
         let thread = ws.thread_in(&self.scope).cloned();
@@ -3614,7 +4079,7 @@ impl Render for Composer {
         let study = ws.is_study_in(&self.scope);
         // A study session: the learner thinks out loud here; no branch, changes or plan mode.
         let session = ws.is_study_session_in(&self.scope);
-        let main = self.scope == Scope::Main;
+        let main = self.scope.in_main_window();
         let follow_up = ws.settings.general.follow_up;
         let own_turn = thread
             .as_ref()
@@ -3634,7 +4099,6 @@ impl Render for Composer {
             .as_ref()
             .and_then(|_| crate::cost::CacheHits::of(&spend));
         let billing_tip = crate::cost::billing_note(billing.as_ref());
-        let queued = thread.as_ref().map_or(0, |t| ws.queued(&t.id));
         let theme = cx.theme().clone();
         let empty = self.input.read(cx).value().trim().is_empty()
             && self.outbox.paths.is_empty()
@@ -3652,9 +4116,20 @@ impl Render for Composer {
             self.context_open = false;
         }
         let compact = self.width.get() < px(600.);
+        // Past `QUIET`, or while Compact now runs and says what it freed: the compaction itself
+        // drops the window below it, and the card must stay.
+        let ring_out = context.is_some_and(|(used, window)| {
+            used as f32 / window as f32 >= crate::context_popover::QUIET
+                || !matches!(self.compact, crate::context_popover::Compact::Idle)
+                || self.context_open
+        });
         // A side bar's width (the editor's AI side bar): the model pill drops its effort and
-        // cuts its name shorter, so the send button stays in view.
-        let narrow = self.width.get() < px(NARROW);
+        // cuts its name shorter, so the send button stays in view. What sits beside the send
+        // button takes room from them.
+        let narrow_below = NARROW
+            + if ring_out { RING_ROOM } else { 0. }
+            + if dictate::available() { MIC_ROOM } else { 0. };
+        let narrow = self.width.get() < px(narrow_below);
         let plan = prefs.plan;
         let preparing = live.is_some_and(|l| l.preparing);
         // Its agent's CLI is being updated: messages wait for the new version.
@@ -3683,7 +4158,10 @@ impl Render for Composer {
 
         // Model pill + menu, access pill + menu (`pickers`). Short labels (Consult, Plan) stay
         // until the card is side-bar narrow; the access level's long one goes first.
-        let model_pill = pickers::model_pill(self, narrow, compact, false, cx);
+        // The account's name beside the model's takes room of its own: short of it, the pill
+        // would cut the model's name to fit it.
+        let account_room = self.width.get() >= px(narrow_below + ACCOUNT_ROOM);
+        let model_pill = pickers::model_pill(self, narrow, compact, account_room, false, cx);
         let access_pill = pickers::access_pill(self, compact, false, cx);
         let hh = prefs.hand_holding;
 
@@ -3692,7 +4170,15 @@ impl Render for Composer {
         let blue = palette::send(cx);
         let on_blue = gpui_kit::white();
         // What the keys do, on the button: sending, a new line, and steer or queue mid-turn.
-        let hint = delivery_hint(self.cmd_enter, follow_up, own_turn);
+        let reply = self
+            .workspace
+            .read(cx)
+            .thread_id_in(&self.scope)
+            .and_then(|id| self.workspace.read(cx).reply_note(id));
+        let hint = match reply {
+            Some(note) => reply_hint(self.cmd_enter, follow_up, note),
+            None => delivery_hint(self.cmd_enter, follow_up, own_turn),
+        };
         let send = if running {
             square("stop")
                 .test_support()
@@ -3705,6 +4191,7 @@ impl Render for Composer {
                 })
                 .bg(palette::red(cx))
                 .hover(|s| s.opacity(0.9))
+                // scale: ok, the stop glyph
                 .child(div().size(px(9.)).rounded(px(2.)).bg(on_blue))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(id) = thread_id.clone() {
@@ -3816,19 +4303,15 @@ impl Render for Composer {
                         .text_color(on_blue)
                         .into_any_element()
                 })
+                // At full strength from the start: it takes the send button's place, in the send
+                // button's blue, so there's nothing for a fade to bring in.
                 .when(!finishing, |el| {
                     el.cursor_pointer()
                         .hover(|s| s.opacity(0.9))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.voice_step(voice::Event::Confirm, window, cx)
                         }))
-                })
-                // Fades in as the take opens.
-                .with_animation(
-                    ("voice-confirm-in", self.voice.take),
-                    Animation::new(std::time::Duration::from_millis(800)),
-                    |el, t| el.opacity(0.6 + 0.4 * t),
-                );
+                });
             // The strip runs from the text's left edge to 16 px short of ✕; ✕ and ✓ sit where
             // the mic and send were, 4 px apart.
             h_flex()
@@ -3856,7 +4339,7 @@ impl Render for Composer {
                 let before = width_cell.get();
                 width_cell.set(bounds.size.width);
                 let crossed = |at: f32| (before < px(at)) != (bounds.size.width < px(at));
-                if crossed(600.) || crossed(NARROW) {
+                if crossed(600.) || crossed(narrow_below) {
                     let me = me.clone();
                     cx.defer(move |cx| {
                         let _ = me.update(cx, |_, cx| cx.notify());
@@ -3939,7 +4422,8 @@ impl Render for Composer {
                     .min_w_0()
                     .overflow_hidden()
                     .child(self.plus_button(cx))
-                    .child(model_pill)
+                    // Short of room (a split's pane) the name gives way: the send button stays.
+                    .child(div().min_w(px(56.)).child(model_pill))
                     .child(self.consult_pill(narrow, cx))
                     .when(self.restate, |el| {
                         el.child(
@@ -3967,14 +4451,8 @@ impl Render for Composer {
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
                     ))
                     .child(div().flex_1().min_w(px(4.)))
-                    // Past `QUIET`, or while Compact now runs and says what it freed: the
-                    // compaction itself drops the window below it, and the card must stay.
                     .when_some(
-                        context.filter(|(used, window)| {
-                            *used as f32 / *window as f32 >= crate::context_popover::QUIET
-                                || !matches!(self.compact, crate::context_popover::Compact::Idle)
-                                || self.context_open
-                        }),
+                        context.filter(|_| ring_out),
                         // The ring keeps its own trigger (`context_popover`); here it only gets
                         // the toolbar's 30 px row.
                         |el, (used, window)| {
@@ -3991,9 +4469,22 @@ impl Render for Composer {
                     .child(send),
             ));
 
+        self.bars_drawn = 0;
         let limit_bar = thread
             .as_ref()
             .and_then(|t| self.limit_bar(&t.id, compact, cx));
+        let interrupted_bar = thread
+            .as_ref()
+            .and_then(|t| self.interrupted_bar(&t.id, compact, cx));
+        let checks_bar = thread
+            .as_ref()
+            .and_then(|t| self.checks_bar(&t.id, compact, cx));
+        let switch_bar = thread
+            .as_ref()
+            .and_then(|t| self.switch_bar(&t.id, compact, cx));
+        let queue_bar = thread
+            .as_ref()
+            .and_then(|t| self.queue_bar(&t.id, compact, cx));
         // Capy-style context chips above the card on a new thread.
         // The AI side bar's new chat works in the IDE folder: it has no project to pick.
         let chips = (is_draft && !study).then(|| {
@@ -4007,6 +4498,12 @@ impl Render for Composer {
         let card = div()
             .relative()
             .w_full()
+            // In here, so the chips and the picker float above them rather than over them.
+            .children(limit_bar)
+            .children(interrupted_bar)
+            .children(checks_bar)
+            .children(switch_bar)
+            .children(queue_bar)
             .child(card)
             .when(picker.is_none(), |el| el.children(status_chips))
             .when_some(picker, |el, p| {
@@ -4045,7 +4542,7 @@ impl Render for Composer {
                 .px(px(6.))
                 .pt(px(8.))
                 .gap_3()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(theme.muted_foreground)
                 .child(
                     h_flex()
@@ -4078,7 +4575,6 @@ impl Render for Composer {
                             }),
                     )
                 })
-                .when(queued > 0, |el| el.child(format!("{queued} queued")))
                 .when(crowded.is_some(), |el| {
                     let ws = self.workspace.clone();
                     el.child(
@@ -4238,7 +4734,6 @@ impl Render for Composer {
                     .w_full()
                     .max_w(self.workspace.read(cx).column())
                     .children(chips)
-                    .children(limit_bar)
                     .child(card)
                     // On Study the agent shows in the model pill; the strip would float alone.
                     .when(!study, |el| el.children(status)),
@@ -4278,6 +4773,29 @@ fn placeholder(running: Option<FollowUp>, prompt: Prompt) -> std::borrow::Cow<'s
             crate::keys::localize("Queue a follow-up · ⌥↩ steers the running turn")
         }
     }
+}
+
+/// The prompt's quiet note while a card waits: what sending would do to it.
+fn reply_placeholder(note: ReplyNote) -> std::borrow::Cow<'static, str> {
+    match note {
+        ReplyNote::Declines => "Reply to decline this and say why".into(),
+        ReplyNote::KeepsPlanning => "Reply to keep planning and say what to change".into(),
+        ReplyNote::SecretInCard => "The secret goes in the card above, not here".into(),
+    }
+}
+
+/// The send button's tooltip while a card waits: where the words go.
+fn reply_hint(cmd_enter: bool, follow: FollowUp, note: ReplyNote) -> String {
+    let send = if cmd_enter { "⌘↩" } else { "↩" }; // keys::localize below
+    let text = match (note, follow) {
+        (ReplyNote::SecretInCard, _) => "The secret goes in the card above".to_string(),
+        // The other key queues: the card stays, and the words wait for the turn to end.
+        (_, FollowUp::Steer) => {
+            format!("{send} declines the card and sends this · ⌥↩ queues for after the turn") // keys::localize below
+        }
+        (_, FollowUp::Queue) => format!("{send} declines the card and sends this"), // keys::localize below
+    };
+    crate::keys::localize(&text).into_owned()
 }
 
 /// The send button's tooltip: which keys send and add a line, and while a turn runs (`running`),
@@ -4381,7 +4899,7 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
             .child(
                 h_flex()
                     .gap(px(12.))
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .font_medium()
                     .child(div().flex_1().child(m.name.clone()))
                     .child(m.amount.clone()),
@@ -4389,7 +4907,7 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
             .children(m.rows.iter().map(|r| {
                 h_flex()
                     .gap(px(8.))
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .child(div().w(px(76.)).child(r.kind))
                     .child(
@@ -4417,9 +4935,19 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
         .child(
             v_flex()
                 .gap(px(2.))
-                .child(div().text_sm().font_medium().child(b.headline.clone()))
+                .child(
+                    div()
+                        .text_size(to_rems(text::LABEL))
+                        .font_medium()
+                        .child(b.headline.clone()),
+                )
                 .when_some(b.billing.clone(), |el, l| {
-                    el.child(div().text_xs().text_color(muted).child(l))
+                    el.child(
+                        div()
+                            .text_size(to_rems(text::META))
+                            .text_color(muted)
+                            .child(l),
+                    )
                 }),
         )
         .when(!b.models.is_empty(), |el| {
@@ -4436,7 +4964,7 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
             el.child(
                 v_flex()
                     .gap(px(2.))
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .when_some(b.subs.clone(), |el, s| el.child(s))
                     .when_some(b.unpriced.clone(), |el, u| {
                         el.child(div().text_color(muted).child(u))
@@ -4450,7 +4978,7 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
                     .pt(px(8.))
                     .border_t_1()
                     .border_color(rule)
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(muted)
                     .children(b.sources.iter().cloned()),
             )

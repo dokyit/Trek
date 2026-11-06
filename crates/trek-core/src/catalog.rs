@@ -19,6 +19,28 @@ pub struct ModelInfo {
     /// (`context_window` has fallbacks for the rest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<u64>,
+    /// What the model can take, when its provider's model list says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<ModelCaps>,
+}
+
+/// What a provider's model list says a model can take. Every field is `None` (or empty) when it
+/// doesn't say, which isn't the same as "can't".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelCaps {
+    /// Most tokens one answer may use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// The reasoning levels it takes, in the provider's words (`high`, `none`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+    /// Whether it can see images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<bool>,
 }
 
 impl ModelInfo {
@@ -30,6 +52,7 @@ impl ModelInfo {
             tier,
             fast: None,
             context: None,
+            caps: None,
         }
     }
 }

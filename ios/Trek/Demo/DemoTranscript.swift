@@ -108,7 +108,7 @@ extension DemoMac {
             (.handoff(from: "Codex", to: "Claude Code"), now - 48 * m, ItemExtras(fromAgent: codex, toAgent: claudeRef)),
             (.tool(ToolCall(callId: "c-l1", tool: .read, title: "Read", detail: "search/index.ts", status: .done, output: "", added: nil, removed: nil)), nil, nil),
             (.assistant(text: "The index is a plain inverted map with BM25 scoring; I'll port it as a `SearchIndex` struct with the same three calls.", streaming: false), nil, nil),
-            (.limit(text: "Claude usage limit reached. Your limit resets at 4:30 PM.", resetsAt: now + 134 * m), now - 30 * m, nil),
+            (.limit(text: "Claude usage limit reached.", resetsAt: now + 134 * m), now - 30 * m, nil),
         ]
     }
 }

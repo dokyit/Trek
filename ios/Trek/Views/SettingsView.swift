@@ -2,13 +2,24 @@ import SwiftUI
 
 enum SettingsRoute: Hashable {
     case appearance
+    case feedback
+
+    /// Where `-TrekTab` opens Settings.
+    static var launched: [SettingsRoute] {
+        switch Launch.tab {
+        case "appearance": [.appearance]
+        case "feedback": [.feedback]
+        default: []
+        }
+    }
 }
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var scanning = false
-    @State private var path: [SettingsRoute] = Launch.tab == "appearance" ? [.appearance] : []
+    @State private var path: [SettingsRoute] = SettingsRoute.launched
     @AppStorage(AppearanceKey.theme) private var theme = ThemeChoice.system.rawValue
+    @AppStorage(TurnActivities.settingKey) private var liveActivity = true
 
     var body: some View {
         @Bindable var model = model
@@ -64,6 +75,16 @@ struct SettingsView: View {
                         .font(.ui(.footnote))
                 }
 
+                if TurnActivities.installed {
+                    Section {
+                        Toggle("Live Activity", isOn: $liveActivity)
+                            .onChange(of: liveActivity) { model.activities.refresh() }
+                    } footer: {
+                        Text("The thread at work and what waits on you, on the Lock Screen and in the Dynamic Island. iOS soon stops Trek once you leave it, so the card says when it last heard from your Mac.")
+                            .font(.ui(.footnote))
+                    }
+                }
+
                 Section {
                     LabeledContent("“Allow for session”", value: "Needs \(DeviceOwner.methodName)")
                     LabeledContent("Requests time out", value: "Never")
@@ -82,6 +103,9 @@ struct SettingsView: View {
                     LabeledContent("Protocol", value: "v\(trekProtocolVersion)")
                     Link(destination: URL(string: "https://github.com/dokyit/Trek")!) {
                         Label("Trek on GitHub", systemImage: "arrow.up.right.square")
+                    }
+                    NavigationLink(value: SettingsRoute.feedback) {
+                        Label("Send feedback…", systemImage: "bubble.left")
                     }
                 } header: {
                     Text("About")
@@ -102,6 +126,7 @@ struct SettingsView: View {
             .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
                 case .appearance: AppearanceView()
+                case .feedback: FeedbackView()
                 }
             }
             .sheet(isPresented: $scanning) {

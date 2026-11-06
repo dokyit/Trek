@@ -2,10 +2,16 @@ import SwiftUI
 
 @main
 struct TrekApp: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
 
     init() {
         TrekFont.styleBars()
+        let model = AppModel()
+        _model = State(initialValue: model)
+        // Before any window: iOS may start the app in the background just for this.
+        TurnActivityAnswers.handler = { [weak model] thread, request, allow in
+            await model?.answerFromActivity(thread: thread, request: request, allow: allow)
+        }
     }
 
     var body: some Scene {
@@ -35,6 +41,23 @@ struct TrekApp: App {
                         if let link = model.links.first(where: { $0.id == which || $0.name == which }) {
                             link.connectionDetail = "This Wi-Fi may not let devices see each other. Tailscale didn't answer either: is it on, on this iPhone and on the Mac?"
                             link.connection = .offline("")
+                        }
+                    }
+                    // The banners for a machine that can't be used (`-TrekDemoConnection identity`,
+                    // `refused`, `connecting`, `offline`), once the demo has connected.
+                    if let how = Launch.demoConnection {
+                        try? await Task.sleep(for: .seconds(0.6))
+                        if let link = model.links.first {
+                            switch how {
+                            case "identity": link.connection = .identityChanged(expected: "B138-0087", seen: "7F21-C4D0")
+                            case "refused": link.connection = .unauthorized("This Mac no longer knows this iPhone. Pair again to carry on.")
+                            case "connecting":
+                                link.connectionDetail = "Looking for \(link.name) on this Wi-Fi…"
+                                link.connection = .connecting
+                            default:
+                                link.connectionDetail = "This Wi-Fi may not let devices see each other. Trying Tailscale…"
+                                link.connection = .offline("")
+                            }
                         }
                     }
                     #endif
@@ -74,7 +97,7 @@ enum Launch {
     static var open: String? { UserDefaults.standard.string(forKey: "TrekOpen") }
     /// Seconds to wait before opening `open`, as if tapped once the app has settled (to measure).
     static var openDelay: Double { UserDefaults.standard.double(forKey: "TrekOpenDelay") }
-    /// `basecamp`, `usage`, `notes`, `settings`, `appearance` or `search`.
+    /// `basecamp`, `usage`, `notes`, `settings`, `appearance`, `feedback` or `search`.
     static var tab: String? { UserDefaults.standard.string(forKey: "TrekTab") }
     /// A note to open on the Notes tab.
     static var note: String? { UserDefaults.standard.string(forKey: "TrekNote") }
@@ -100,6 +123,14 @@ enum Launch {
         nil
         #endif
     }
+    /// How the demo's machine can't be used, with its banner (debug builds).
+    static var demoConnection: String? {
+        #if DEBUG
+        UserDefaults.standard.string(forKey: "TrekDemoConnection")
+        #else
+        nil
+        #endif
+    }
 }
 
 enum MainTab: Hashable {
@@ -120,6 +151,8 @@ struct RootView: View {
             #if DEBUG
             if UserDefaults.standard.bool(forKey: "TrekGallery") {
                 DesignGallery()
+            } else if !model.booted {
+                Trek.background.ignoresSafeArea()
             } else if model.mode == .unpaired {
                 PairingView()
                     .transition(.opacity)
@@ -128,7 +161,9 @@ struct RootView: View {
                     .transition(.opacity)
             }
             #else
-            if model.mode == .unpaired {
+            if !model.booted {
+                Trek.background.ignoresSafeArea()
+            } else if model.mode == .unpaired {
                 PairingView()
                     .transition(.opacity)
             } else {
@@ -142,6 +177,7 @@ struct RootView: View {
         // retry (or a ping) before saying so would show stale threads as live.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { model.foregrounded() }
+            if phase == .background { model.backgrounded() }
         }
         .overlay(alignment: .top) {
             if let toast = model.toast {
@@ -230,7 +266,7 @@ struct MainView: View {
                 tab = .basecamp
                 basecampPath = [.usage]
             case "notes": tab = .notes
-            case "settings", "appearance": tab = .settings
+            case "settings", "appearance", "feedback": tab = .settings
             case "search": tab = .search
             default: break
             }
@@ -350,6 +386,7 @@ struct NewThreadAccessory: View {
         }
         .padding(.leading, 18)
         .padding(.trailing, 14)
+        .barText()
         // The lists' fades hang from this edge, the bars expanded or folded (`BottomBars`).
         .reportsBottomBarsTop()
         .confirmationDialog("Waiting on you", isPresented: Binding(get: { !choosing.isEmpty }, set: { if !$0 { choosing = [] } }),

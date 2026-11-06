@@ -14,6 +14,7 @@ mod diagrams;
 mod layout;
 mod mockup;
 
+use crate::scale::{radius, text};
 use gpui_kit::component::text::{MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -616,7 +617,7 @@ pub fn shell(id: SharedString, look: &Look, cx: &App) -> Stateful<Div> {
         .id(id)
         .relative()
         .w_full()
-        .rounded(px(fluent::surface(12.)))
+        .rounded(px(fluent::surface(radius::CARD)))
         .border_1()
         .border_color(look.hairline)
         // Raised off the column: a step lighter at night, the paper itself by day.
@@ -687,7 +688,7 @@ pub fn header(
                     div()
                         .flex_none()
                         .size(px(22.))
-                        .rounded(px(fluent::control(6.)))
+                        .rounded(px(fluent::control(radius::CONTROL)))
                         .border_1()
                         .border_color(look.hairline)
                         .bg(look.inset)
@@ -705,7 +706,7 @@ pub fn header(
 pub fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElement {
     div()
         .line_clamp(2)
-        .text_size(px(13.5))
+        .text_size(px(text::TITLE))
         .line_height(relative(1.3))
         .font_semibold()
         .text_color(look.fg)
@@ -715,7 +716,7 @@ pub fn title_text(title: impl Into<SharedString>, look: &Look) -> AnyElement {
 
 pub fn summary_text(summary: impl Into<SharedString>, look: &Look) -> AnyElement {
     div()
-        .text_size(px(12.))
+        .text_size(px(text::LABEL))
         .line_height(relative(1.45))
         .text_color(look.muted)
         .child(summary.into())
@@ -742,7 +743,7 @@ fn drawing_label(key: usize, phase: f32, look: &Look) -> AnyElement {
         .flex_none()
         .h(px(24.))
         .pr_1()
-        .text_size(px(11.))
+        .text_size(px(text::META))
         .text_color(look.muted)
         .opacity(breath)
         .child("Drawing…")
@@ -993,7 +994,7 @@ fn pending(
     let motion = motion(cx);
     let phase = shimmer(motion, window);
     let stub = look.fg.opacity(if look.dark { 0.07 } else { 0.06 });
-    let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded(px(h / 2.)).bg(stub);
+    let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded_full().bg(stub);
     let label = match title {
         Some(t) => format!("Visualization being drawn: {t}"),
         None => "Visualization being drawn".into(),
@@ -1156,10 +1157,10 @@ fn invalid(
                 .gap(px(8.))
                 .px(px(8.))
                 .py(px(6.))
-                .rounded(px(fluent::control(8.)))
+                .rounded(px(fluent::control(radius::BUTTON)))
                 .cursor_pointer()
                 .hover(|s| s.bg(cx.theme().list_hover))
-                .text_size(px(12.))
+                .text_size(px(text::LABEL))
                 .text_color(look.muted)
                 .child(
                     Icon::new(IconName::TriangleAlert)
@@ -1167,7 +1168,7 @@ fn invalid(
                         .text_color(crate::palette::amber(cx)),
                 )
                 .child(div().flex_1().min_w_0().line_clamp(1).child(note))
-                .child(div().flex_none().text_size(px(11.)).child("JSON"))
+                .child(div().flex_none().text_size(px(text::META)).child("JSON"))
                 .child(
                     Icon::new(if open {
                         IconName::ChevronDown
@@ -1218,8 +1219,8 @@ fn view_switch(frame: &Frame, showing_data: bool, cx: &App) -> AnyElement {
             .h(px(20.))
             .flex()
             .items_center()
-            .rounded(px(fluent::pick(fluent::THUMB_RADIUS, 5.)))
-            .text_size(px(11.))
+            .rounded(px(fluent::pick(fluent::THUMB_RADIUS, radius::CONTROL)))
+            .text_size(px(text::META))
             .cursor_pointer()
             .when(active, |el| {
                 el.bg(raised)
@@ -1250,7 +1251,7 @@ fn view_switch(frame: &Frame, showing_data: bool, cx: &App) -> AnyElement {
         .mr_1()
         .p(px(2.))
         .gap(px(1.))
-        .rounded(px(fluent::control(7.)))
+        .rounded(px(fluent::control(radius::BUTTON)))
         .bg(look.fg.opacity(0.055))
         .child(segment("Chart", !showing_data, false))
         .child(segment("Data", showing_data, true))
@@ -1276,7 +1277,7 @@ fn copy_button(
         .px(px(5.))
         .gap(px(4.))
         .justify_center()
-        .rounded(px(fluent::control(6.)))
+        .rounded(px(fluent::control(radius::CONTROL)))
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .child(Icon::new(icon).size(px(13.)).text_color(muted))
@@ -1288,7 +1289,12 @@ fn copy_button(
             crate::toast::push(window, done, cx);
         })
         .when_some(label, |el, label| {
-            el.child(div().text_size(px(11.)).text_color(muted).child(label))
+            el.child(
+                div()
+                    .text_size(px(text::META))
+                    .text_color(muted)
+                    .child(label),
+            )
         })
         .into_any_element()
 }
@@ -1299,7 +1305,7 @@ pub(super) fn readout(look: &Look, cx: &App) -> Div {
         .gap(px(3.))
         .px(px(10.))
         .py(px(7.))
-        .rounded(px(8.))
+        .rounded(px(radius::BUTTON))
         .border_1()
         .border_color(look.fg.opacity(if look.dark { 0.14 } else { 0.10 }))
         .bg(look.popover)
@@ -1322,13 +1328,13 @@ pub(super) fn readout(look: &Look, cx: &App) -> Div {
             ],
             cx,
         ))
-        .text_size(px(11.5))
+        .text_size(px(text::LABEL))
 }
 
 /// The inset surface marks sit on.
 pub fn inset(look: &Look) -> Div {
     div()
-        .rounded(px(fluent::surface(9.)))
+        .rounded(px(fluent::surface(radius::BUTTON)))
         .border_1()
         .border_color(look.fg.opacity(if look.dark { 0.05 } else { 0.06 }))
         .bg(look.inset)

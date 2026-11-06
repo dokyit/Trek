@@ -100,16 +100,19 @@
 //! Selected by `AgentId::Direct("mock")`. Trek offers it only when `TREK_MOCK_AGENT=1` (and in
 //! its own tests).
 
+use crate::rules::Ruling;
 use crate::{
     AgentEvent, BackgroundKind, BackgroundTask, Billing, Command, Decision, Prompt, Question,
     SessionConfig,
 };
 use anyhow::Result;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use trek_core::HandHolding;
+use trek_core::permission_rules::{self, Call};
 
 mod browser;
 
@@ -2784,7 +2787,7 @@ impl Session {
             let _told = self.ipc(trek_ipc::COMPUTER_ACTIVITY, report).await?;
             self.emit(AgentEvent::ToolFinished {
                 id: call,
-                output: format!("{app} is the app the user is using right now; ask them whether to work in it, wait, or open a second window."),
+                output: format!("{app} is the app the user is using right now; ask them whether to work in it, or wait and try again."),
                 ok: false,
             })
             .await?;
@@ -2985,7 +2988,31 @@ impl Session {
         let tool = self.id("tool");
         let command = "./scripts/migrate.sh --apply";
         self.tool_start(&tool, "Run command", command).await?;
-        let ask = !self.commands_allowed && self.hand_holding != HandHolding::FullAccess;
+        // The user's rules apply here too, so the rules can be tried out on the mock.
+        let call = Call::command("mock", command);
+        let ruling = crate::rules::ruling(
+            &permission_rules::current(),
+            std::slice::from_ref(&call),
+            Path::new("."),
+            true,
+        );
+        if let Ruling::Refuse { message, note } = &ruling {
+            self.emit(AgentEvent::Notice(note.clone())).await?;
+            self.emit(AgentEvent::ToolFinished {
+                id: tool,
+                output: message.clone(),
+                ok: false,
+            })
+            .await?;
+            return self
+                .say("A permission rule stopped that, so I left it.")
+                .await;
+        }
+        let ask = match ruling {
+            Ruling::Ask => true,
+            Ruling::Allow => false,
+            _ => !self.commands_allowed && self.hand_holding != HandHolding::FullAccess,
+        };
         let decision = if ask {
             let request_id = self.id("permission");
             self.emit(AgentEvent::PermissionRequest {
@@ -2993,6 +3020,7 @@ impl Session {
                 title: "Run command".into(),
                 detail: command.into(),
                 prompt: None,
+                call: Some(call),
             })
             .await?;
             match self.wait_reply(&request_id).await? {
@@ -3059,6 +3087,7 @@ impl Session {
             title: "AskUserQuestion".into(),
             detail: String::new(),
             prompt: Some(Prompt::Questions(questions)),
+            call: None,
         })
         .await?;
         match self.wait_reply(&request_id).await? {
@@ -3096,6 +3125,7 @@ impl Session {
             title: "ExitPlanMode".into(),
             detail: String::new(),
             prompt: Some(Prompt::Plan(PLAN.into())),
+            call: None,
         })
         .await?;
         match self.wait_reply(&request_id).await? {

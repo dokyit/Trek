@@ -187,7 +187,25 @@ fn a_local_run_reports_each_request_and_the_totals() {
     // The key went with the requests, and the model and tools as given.
     let sent = server.join().unwrap();
     assert_eq!(sent[0]["model"], "anthropic/claude-sonnet-5-5");
-    assert_eq!(sent[0]["tools"].as_array().unwrap().len(), 4);
+    let names: Vec<&str> = sent[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "grep",
+            "glob",
+            "list_dir",
+            "web_fetch"
+        ]
+    );
     assert_eq!(sent[0]["reasoning"], json!({ "effort": "high" }));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -241,6 +259,7 @@ fn a_stdio_run_asks_the_sandbox_for_every_tool() {
         let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let reply = match v["type"].as_str().unwrap() {
             "write" => Some(json!({ "type": "result", "id": v["id"] })),
+            "read" => Some(json!({ "type": "result", "id": v["id"], "not_found": true })),
             "exec" => Some(
                 json!({ "type": "result", "id": v["id"], "stdout": "x\n", "stderr": "", "exit_code": 0, "timed_out": false }),
             ),
@@ -256,6 +275,19 @@ fn a_stdio_run_asks_the_sandbox_for_every_tool() {
         }
     }
     assert_eq!(child.wait().unwrap().code(), Some(0), "{seen:#?}");
+    // Before the first request the session looks round the sandbox, through the same executor,
+    // for its system prompt.
+    let first = seen
+        .iter()
+        .position(|v| v["type"] == "request_start")
+        .unwrap();
+    assert!(
+        seen[..first]
+            .iter()
+            .all(|v| v["type"] == "exec" || v["type"] == "read"),
+        "{seen:#?}"
+    );
+    let seen = seen[first..].to_vec();
     assert_eq!(
         types(&seen),
         [
@@ -347,7 +379,7 @@ fn a_script_run_counts_its_nested_calls() {
     assert!(dir.join("out/script-logs").is_dir());
     let sent = server.join().unwrap();
     let tools = sent[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.last().unwrap()["function"]["name"], "script");
     // The program's printed line went back to the model as the tool result.
     let result = sent[1]["messages"]
         .as_array()
@@ -411,7 +443,8 @@ fn the_turn_cap_ends_the_run_with_its_own_code() {
     let done = out.last().unwrap();
     assert_eq!(done["stopped"], "max_turns");
     assert_eq!(done["error"], Value::Null);
-    assert_eq!(done["requests"], 1);
+    // The one allowed, and the one asking the model to report where it got to.
+    assert_eq!(done["requests"], 2);
     assert_eq!(done["tool_calls"], 1);
     let _ = std::fs::remove_dir_all(dir);
 }

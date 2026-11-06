@@ -7,6 +7,7 @@
 //! other pictures; one that can't be found or read is a placeholder saying so.
 
 use crate::fluent;
+use crate::scale::{radius, text};
 use gpui_kit::component::text::{
     InlineElement, InlineRenderContext, MarkdownNode, MarkdownParseContext, MarkdownPlugin,
     markdown_ast,
@@ -478,6 +479,7 @@ impl MarkdownPlugin for NoteImages {
 /// An attached file in a note's preview: its type's icon and its name; a click shows it (Quick
 /// Look plays a video).
 fn file_chip(file: &ParsedFile, context: &InlineRenderContext, cx: &App) -> InlineElement {
+    // scale: ok, in proportion to the note's text
     let size = context.font_size() * 0.92;
     let height = context.line_height().min(context.font_size() * 1.6);
     let baseline = (height + context.font_size() * 0.7) / 2.;
@@ -506,7 +508,7 @@ fn chip(file: &ParsedFile, size: Pixels, height: Pixels, cx: &App) -> AnyElement
         .h(height)
         .px(px(7.))
         .gap(px(5.))
-        .rounded(px(fluent::control(6.)))
+        .rounded(px(fluent::control(radius::CONTROL)))
         .border_1()
         .border_color(tint.edge)
         .bg(tint.fill)
@@ -576,7 +578,7 @@ pub fn picture(
                 .w(shown.width)
                 .h(shown.height)
                 .my(px(6.))
-                .rounded(px(8.))
+                .rounded(px(radius::BUTTON))
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.border)
@@ -652,7 +654,7 @@ fn placeholder(
         .px(px(12.))
         .py(px(10.))
         .gap(px(10.))
-        .rounded(px(8.))
+        .rounded(px(radius::BUTTON))
         .border_1()
         .border_dashed()
         .border_color(theme.foreground.opacity(0.2))
@@ -664,7 +666,7 @@ fn placeholder(
                 .flex_1()
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .text_color(theme.foreground.opacity(0.8))
                         .child(headline),
                 )
@@ -672,7 +674,7 @@ fn placeholder(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(name),
                 ),
@@ -772,7 +774,7 @@ fn file_tile(i: usize, file: &trek_core::notes::FileRef, dir: &Path, cx: &App) -
         .w(px(190.))
         .h(px(TILE))
         .px(px(12.))
-        .rounded(px(fluent::control(8.)))
+        .rounded(px(fluent::control(radius::BUTTON)))
         .border_1()
         .overflow_hidden();
     let Some(path) = path else {
@@ -790,14 +792,14 @@ fn file_tile(i: usize, file: &trek_core::notes::FileRef, dir: &Path, cx: &App) -
                     .min_w_0()
                     .child(
                         div()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .text_color(theme.foreground.opacity(0.8))
                             .child("File not found"),
                     )
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(px(text::LABEL))
                             .text_color(theme.muted_foreground)
                             .child(file.name.clone()),
                     ),
@@ -835,14 +837,14 @@ fn file_tile(i: usize, file: &trek_core::notes::FileRef, dir: &Path, cx: &App) -
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.5))
+                        .text_size(px(text::BODY))
                         .text_color(theme.foreground)
                         .child(name),
                 )
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(11.5))
+                        .text_size(px(text::LABEL))
                         .text_color(theme.muted_foreground)
                         .child(meta),
                 ),
@@ -927,7 +929,7 @@ pub fn strip(body: &str, dir: &Path, cx: &App) -> Option<AnyElement> {
                     .flex_none()
                     .w(width)
                     .h(px(TILE))
-                    .rounded(px(fluent::control(8.)))
+                    .rounded(px(fluent::control(radius::BUTTON)))
                     .overflow_hidden()
                     .border_1()
                     .border_color(theme.border)

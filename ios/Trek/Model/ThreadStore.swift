@@ -171,6 +171,12 @@ final class ThreadStore {
     /// Bumped when the transcript is replaced whole (the host rewrote it): the view draws it
     /// afresh, at the latest, rather than keep places that no longer fit it.
     private(set) var generation = 0
+    /// The working line is out under the transcript: its turn runs, or has only just ended. A Mac
+    /// says a turn is over and sends its last rows a moment apart: the line stays for those, so the
+    /// two land together (`turnEndHold` at most: there may be none).
+    private(set) var showsWorking = false
+    /// Nothing to show under the transcript.
+    var footerEmpty: Bool { !showsWorking && (summary?.runningSubAgents.isEmpty ?? true) }
 
     @ObservationIgnored private(set) var items: [TItem] = []
     @ObservationIgnored private var index: [String: Int] = [:]
@@ -184,11 +190,16 @@ final class ThreadStore {
     @ObservationIgnored private var flushScheduled = false
     /// Called after the items change (to save them to the cache).
     @ObservationIgnored var onChange: (() -> Void)?
+    /// Bumped as a hold on the working line starts and ends: a timer only ends its own.
+    @ObservationIgnored private var hold: Int?
+    @ObservationIgnored private var holds = 0
+    nonisolated static let turnEndHold: TimeInterval = 0.2
 
     init(id: String, host: String, summary: ThreadSummary?) {
         self.id = id
         self.hostId = host
         self.summary = summary
+        showsWorking = summary?.runState == .working
     }
 
     /// The id as its host knows it (the prefix off).
@@ -196,6 +207,22 @@ final class ThreadStore {
 
     func setSummary(_ s: ThreadSummary?) {
         if s != summary { summary = s }
+        if s?.runState == .working {
+            hold = nil
+            if !showsWorking { showsWorking = true }
+        } else if showsWorking, hold == nil {
+            holds += 1
+            let mine = holds
+            hold = mine
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.turnEndHold) { [weak self] in
+                if self?.hold == mine { self?.endHold() }
+            }
+        }
+    }
+
+    private func endHold() {
+        hold = nil
+        if showsWorking { showsWorking = false }
     }
 
     /// The Mac's reply to a subscribe: the whole (last part of the) transcript, or what changed.
@@ -251,6 +278,7 @@ final class ThreadStore {
         queued = []
         upsert(batch)
         seq = batch.reduce(seq) { max($0, $1.seq) }
+        if hold != nil { endHold() }
         onChange?()
     }
 

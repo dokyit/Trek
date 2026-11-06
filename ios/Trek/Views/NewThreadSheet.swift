@@ -3,6 +3,7 @@ import SwiftUI
 
 /// "What are we building?": pick a project, an agent and model, worktree or local; then describe it.
 struct NewThreadSheet: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     var opened: (String) -> Void
     /// The machine the thread starts on (the picked one when not handed in, e.g. by `/new`).
     @State private var machine: HostLink?
@@ -66,6 +67,8 @@ struct NewThreadSheet: View {
                         .tracking(-0.5)
                     if let host = link?.name {
                         Text("Runs on \(host)").font(.ui(.subheadline)).foregroundStyle(Trek.muted)
+                            .multilineTextAlignment(.center)
+                            .minimumScaleFactor(0.7)
                     }
                 }
                 Spacer()
@@ -95,9 +98,9 @@ struct NewThreadSheet: View {
     private var card: some View {
         VStack(alignment: .leading, spacing: 12) {
             if !photos.isEmpty { PhotoStrip(photos: $photos) }
-            TextField("Describe the task", text: $text, axis: .vertical)
+            TextField(typeSize.isAccessibilitySize ? "The task" : "Describe the task", text: $text, axis: .vertical)
                 .lineLimit(2...8)
-                .font(.ui(size: 17))
+                .font(.ui(size: 17, relativeTo: .body))
                 .focused($focused)
                 .padding(.horizontal, 6)
                 .padding(.top, 6)
@@ -264,6 +267,7 @@ struct NewThreadSheet: View {
             .foregroundStyle(Trek.foreground)
             .padding(.horizontal, 12)
             .frame(height: 36)
+            .barText()
             .background(Trek.foreground.opacity(selected ? 0.12 : 0.06), in: Capsule())
     }
 

@@ -303,9 +303,9 @@ struct ToolRow: View {
                     Text(c.detail).font(.code(.caption)).foregroundStyle(Trek.foreground)
                 }
                 if !c.output.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
+                    SidewaysScroll {
                         Text(c.output)
-                            .font(.code(size: 11.5))
+                            .font(.code(size: 11.5, relativeTo: .caption))
                             .foregroundStyle(c.status == .failed ? Trek.failed : Trek.muted)
                             .padding(10)
                     }

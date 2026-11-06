@@ -4,11 +4,13 @@
 Writes:
   assets/brand/trek.ico                                 the app icon (ember, as the Mac bundle's
                                                         .icns), 16 20 24 32 48 64 128 256 px,
-                                                        embedded in trek.exe by crates/trek-app/build.rs
+                                                        embedded in trek.exe by crates/trek-app/build.rs;
+                                                        16 and 32 px from the art drawn for those sizes
+                                                        (trek-icon-ember-16.svg, -32.svg), as the .icns
   assets/brand/trek-night.ico, trek-glass.ico           the other two Appearance › App icon choices,
                                                         same sizes, embedded as resources 2 and 3
                                                         (src/app_icon.rs has the ids)
-  crates/trek-app/assets/brand/tray/{state}-{theme}-{px}.png
+  crates/trek-assets/assets/brand/tray/{state}-{theme}-{px}.png
                                                         the system tray glyphs, state is idle |
                                                         working | attention, px is 16 20 24 32 (the
                                                         tray's size at 100% 125% 150% 200% display
@@ -27,8 +29,11 @@ import tempfile
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 BRAND = os.path.join(ROOT, "assets", "brand")
-TRAY_OUT = os.path.join(ROOT, "crates", "trek-app", "assets", "brand", "tray")
+TRAY_OUT = os.path.join(ROOT, "crates", "trek-assets", "assets", "brand", "tray")
 ICO_SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
+# Sizes with art of their own (assets/brand/trek_icon.py's small sizes: the title bar's small mark
+# on the tile, on whole pixels), where the full art blurs into a smudge. The rest scale the full art.
+SMALL_ART = [16, 32]
 TRAY_SIZES = [16, 20, 24, 32]
 STATES = ["idle", "working", "attention"]
 # Ember is the Mac bundle's icon (script/bundle.sh: Trek orange with porcelain stones) and the
@@ -71,7 +76,8 @@ def main():
             frames = []
             for px in ICO_SIZES:
                 png = os.path.join(tmp, f"app-{px}.png")
-                resvg(os.path.join(BRAND, svg), png, px)
+                art = svg.replace(".svg", f"-{px}.svg") if px in SMALL_ART else svg
+                resvg(os.path.join(BRAND, art), png, px)
                 with open(png, "rb") as f:
                     frames.append((px, f.read()))
             with open(os.path.join(BRAND, name), "wb") as f:

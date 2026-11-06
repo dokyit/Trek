@@ -10,6 +10,8 @@ Open **Settings → Phone**, enable the phone connection, and scan the pairing Q
 
 An iPhone can pair with several machines at once: all stay connected, their threads merge into one list (qualified `"<hostId>:<id>"` on the phone), and each is unpaired independently in Settings › Machines.
 
+What the phone does beside the thread itself: a Live Activity (Lock Screen and Dynamic Island) with the thread at work and what waits, and Allow and Deny for an approval that doesn't look destructive (`ask` on the row; no push, so past its stale date it says when it last heard); the Mac's "Interrupted" bar over the composer with Resume and Dismiss (`cut_short` on the row, feature `resume_interrupted`); and comments on a diff's lines, sent to the agent as one follow-up.
+
 ## Reach it with the CLI
 
 ```sh

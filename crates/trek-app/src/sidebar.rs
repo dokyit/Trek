@@ -1,10 +1,16 @@
-//! Inbox sidebar. Live work and anything waiting on you sit on top as quiet cards
-//! (project · status, title, agent glyph); settled history folds into a footer grouped by project.
+//! Inbox sidebar. What needs you sits on top in its own amber block, saying why; live work follows
+//! (Active), then each project under its badge, Study's sessions, the other machines and the
+//! phone (Devices); settled history folds into a section of its own, grouped by project. Every row
+//! starts with the same state column (`look`), so state, badges and glyphs line up in one column.
+
+mod look;
 
 use crate::fluent::{self, PillExt as _};
 use crate::palette;
+use crate::scale::{radius, text, to_rems};
 use crate::time;
 use crate::ui;
+use crate::workspace::attention::Why;
 use crate::workspace::{ItemRef, Route, SettingsPage, UpdateStatus, Workspace};
 use crate::worktree_ui::Leave;
 use gpui_kit::component::Disableable as _;
@@ -20,6 +26,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use look::{Mark, TEXT_INSET};
 use std::collections::{HashMap, HashSet};
 use trek_core::store::{SearchHit, Section, Thread};
 use trek_core::{RunState, ThreadSource};
@@ -54,6 +61,8 @@ pub struct Sidebar {
     /// Which threads have sub-agents, wait on them, or have one waiting on the user: worked out
     /// once as the list is drawn, not for each of its rows (each answer reads every thread).
     graph: Graph,
+    /// Why each thread that needs the user does, as of the last render (`Workspace::needing_you`).
+    why: HashMap<String, Why>,
     /// The pointer is over the sidebar: the live rows hold still (see `render`).
     hovered: bool,
     /// The live rows as last drawn, held while `hovered`.
@@ -71,6 +80,8 @@ pub struct Sidebar {
     last_rows: HashMap<String, (Thread, String, bool)>,
     /// A search was on last frame: the list it leaves (or comes to) takes its places at once.
     was_searching: bool,
+    /// The study folder: a thread working there is a Study session (`look::is_study`).
+    study_dir: std::path::PathBuf,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -87,14 +98,31 @@ struct Ghost {
     left: crate::motion::Spring,
 }
 
-/// A project's group in the live list as drawn: its rows top to bottom (thread ids), and whether
-/// a "Show more" / "Show less" line closes it.
 /// How far a row's text sits in from its rounded hover box: headings and rows line up on it.
-const ROW_INSET: f32 = 10.;
+const ROW_INSET: f32 = look::ROW_INSET;
+
+/// The most a branch takes on a row: long ones (other apps' `someone/what-it-is`) leave the title
+/// room to read. The tooltip has it whole.
+const ROW_BRANCH_WIDTH: f32 = 110.;
+/// The most a project's name takes beside why a thread needs the user.
+const PROJECT_WIDTH: f32 = 96.;
 
 /// The Active section's key among the live groups (no project id looks like it).
 const ACTIVE: &str = "\u{0}active";
+/// The "Needs you" section's.
+const NEEDS: &str = "\u{0}needs";
+/// Study's sessions', after the projects (they're in none).
+const STUDY: &str = "\u{0}study";
+/// The "Projects" label's place among the live groups: over the first project's.
+const PROJECTS_LABEL: &str = "live-projects-label";
+/// Threads cut short when Trek closed stay on show up to this many, under what's waiting; the
+/// rest wait behind "Show more". Nothing that's waiting ever does.
+const NEWS_SHOWN: usize = 3;
+/// A machine's quiet threads on show in Devices before "Show more".
+const MACHINE_SHOWN: usize = 3;
 
+/// A project's group in the live list as drawn: its rows top to bottom (thread ids), and whether
+/// a "Show more" / "Show less" line closes it.
 #[derive(Clone, Debug, PartialEq)]
 struct LiveGroup {
     pid: String,
@@ -110,6 +138,8 @@ struct GroupInfo {
     open: bool,
     /// Quiet rows behind "Show more".
     more: usize,
+    /// Everything it holds, shown or not: its header's count.
+    total: usize,
 }
 
 /// The threads' standing among their sub-agents, as of the last render (`Sidebar::graph`).
@@ -174,6 +204,7 @@ impl Sidebar {
             agent_updates_open: std::env::var_os("TREK_OPEN_AGENT_UPDATES").is_some(),
             _clock: None,
             graph: Graph::default(),
+            why: HashMap::new(),
             hovered: false,
             shown: None,
             deferred: false,
@@ -181,6 +212,7 @@ impl Sidebar {
             ghosts: vec![],
             last_rows: HashMap::new(),
             was_searching: false,
+            study_dir: trek_core::study::dir(),
             _subscriptions: subscriptions,
         };
         this.sync_clock(cx);
@@ -315,7 +347,7 @@ impl Sidebar {
         .when(waiting > 0, |el| {
             el.child(
                 div()
-                    .text_xs()
+                    .text_size(to_rems(text::META))
                     .text_color(theme.muted_foreground)
                     .child(waiting.to_string()),
             )
@@ -590,36 +622,130 @@ impl Sidebar {
         });
     }
 
-    /// What a live row says at its end: a mark and a few words in its run state's colour (the
-    /// same colours as the IDE's, `palette::run_state`), or its age while there's nothing to say.
-    fn status(&self, t: &Thread, cx: &App) -> AnyElement {
+    /// Where a live thread stands: the mark for its state column, and the few words its card's
+    /// second line says in its run state's colour (the same colours as the IDE's,
+    /// `palette::run_state`), or its age while there's nothing to say.
+    fn status(&self, t: &Thread, cx: &App) -> (Mark, AnyElement) {
         let theme = cx.theme();
         let ws = self.workspace.read(cx);
-        let mark = |id: String, color: Hsla, icon: Option<Icon>, dot: bool, text: String| {
-            h_flex()
+        // The words alone: the mark that goes with them is in the row's state column.
+        let words = |id: String, color: Hsla, text: String| {
+            div()
                 .id(SharedString::from(id))
                 .test_support()
-                .flex_none()
-                .gap(px(5.))
-                .text_xs()
+                .min_w_0()
+                .truncate()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(color)
-                .when_some(icon, |el, icon| el.child(icon.xsmall().text_color(color)))
-                .when(dot, |el| {
-                    el.child(div().flex_none().size(px(6.)).rounded_full().bg(color))
-                })
                 .child(text)
                 .into_any_element()
         };
-        // A sub-agent of its own waits on an approval: sub-agents have no rows, so this one says it.
-        if t.run_state != RunState::NeedsYou && self.graph.needs.contains(&t.id) {
-            return mark(
-                format!("card-sub-needs-{}", t.id),
-                palette::needs_you(cx),
-                None,
-                true,
-                "Sub-agent needs you".into(),
-            );
+        // Cut off by a quit: what became of it, and on the row itself the way back.
+        if let Some(offer) = ws.interrupted_offer(&t.id) {
+            use crate::workspace::resume::ResumeState;
+            let resume = |label: &'static str| {
+                let (ws, id) = (self.workspace.clone(), t.id.clone());
+                div()
+                    .id(SharedString::from(format!("card-resume-{}", t.id)))
+                    .test_support()
+                    .flex_none()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.foreground)
+                    .cursor_pointer()
+                    .hover(|s| s.underline())
+                    .child(label)
+                    .on_click(move |_, _, cx| {
+                        // The row opens the thread; this only resumes it.
+                        cx.stop_propagation();
+                        ws.update(cx, |ws, cx| ws.resume_interrupted(&id, cx));
+                    })
+            };
+            let row = |state: AnyElement, action: Option<&'static str>| {
+                h_flex()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .child(state)
+                    .children(action.map(resume))
+                    .into_any_element()
+            };
+            let id = format!("card-interrupted-{}", t.id);
+            match (&offer.state, offer.turn.waiting) {
+                (ResumeState::Offered, false) => {
+                    return (
+                        Mark::NeedsYou,
+                        row(
+                            words(id, palette::amber(cx), "Interrupted".into()),
+                            Some("Resume"),
+                        ),
+                    );
+                }
+                (ResumeState::Offered, true) => {
+                    return (
+                        Mark::NeedsYou,
+                        words(id, palette::needs_you(cx), "Waiting for you".into()),
+                    );
+                }
+                (ResumeState::Resuming, _) => {
+                    return (
+                        Mark::Working,
+                        words(id, palette::working(cx), "Resuming…".into()),
+                    );
+                }
+                (ResumeState::Failed(_), _) => {
+                    return (
+                        Mark::Failed,
+                        row(
+                            words(id, palette::failed(cx), "Couldn't resume".into()),
+                            Some("Retry"),
+                        ),
+                    );
+                }
+                (ResumeState::Going, _) => {}
+            }
+        }
+        // Why it needs the user, after the offer above: that one comes with the way back.
+        if let Some(why) = self.why.get(&t.id) {
+            // Failing checks come with theirs too.
+            if matches!(why, Why::Checks(_)) {
+                let (ws, id) = (self.workspace.clone(), t.id.clone());
+                let sending = self
+                    .workspace
+                    .read(cx)
+                    .pr_checks_offer(&t.id)
+                    .is_some_and(|o| o.sending);
+                let red = palette::failed(cx);
+                return (
+                    Mark::Failed,
+                    h_flex()
+                        .min_w_0()
+                        .gap(px(6.))
+                        .child(words(
+                            format!("card-checks-failed-{}", t.id),
+                            red,
+                            why.words(),
+                        ))
+                        .when(!sending, |el| {
+                            el.child(
+                                div()
+                                    .id(SharedString::from(format!("card-send-checks-{}", t.id)))
+                                    .test_support()
+                                    .flex_none()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .cursor_pointer()
+                                    .hover(|s| s.underline())
+                                    .child("Send to agent")
+                                    .on_click(move |_, _, cx| {
+                                        // The row opens the thread; this only sends.
+                                        cx.stop_propagation();
+                                        ws.update(cx, |ws, cx| ws.pr_checks_send(&id, cx));
+                                    }),
+                            )
+                        })
+                        .into_any_element(),
+                );
+            }
+            return Self::why_line(t, why, cx);
         }
         // Paused at a usage limit: until when (it's no failure, and nothing to do yet).
         if let Some(p) = t.paused.as_ref().filter(|_| t.run_state == RunState::Idle) {
@@ -627,12 +753,9 @@ impl Sidebar {
                 Some(at) => format!("Paused until {}", time::reset_clock(at, ws.now())),
                 None => "Paused at its limit".to_string(),
             };
-            return mark(
-                format!("paused-{}", t.id),
-                palette::amber(cx),
-                None,
-                false,
-                text,
+            return (
+                Mark::None,
+                words(format!("paused-{}", t.id), palette::amber(cx), text),
             );
         }
         // Its turn is over but its sub-agents are still out: it's at work, waiting on them.
@@ -647,14 +770,18 @@ impl Sidebar {
                 Some(d) => format!("Waiting {}", time::elapsed(d)),
                 None => "Waiting".to_string(),
             };
-            return mark(
-                format!("card-waiting-{}", t.id),
-                palette::working(cx),
-                Some(Icon::new(crate::assets::Lucide::LoaderCircle)),
-                false,
-                text,
+            return (
+                Mark::Working,
+                words(format!("card-waiting-{}", t.id), palette::working(cx), text),
             );
         }
+        let age = |opacity: f32| {
+            div()
+                .flex_none()
+                .text_color(theme.muted_foreground.opacity(opacity))
+                .child(time::relative(t.updated_at))
+                .into_any_element()
+        };
         match t.run_state {
             RunState::Working => {
                 // A machine's thread not open here counts from when its row says it started.
@@ -674,43 +801,61 @@ impl Sidebar {
                 } else {
                     format!("{word} {elapsed}")
                 };
-                mark(
-                    format!("card-working-{}", t.id),
-                    palette::working(cx),
-                    Some(Icon::new(crate::assets::Lucide::LoaderCircle)),
-                    false,
-                    text,
+                (
+                    Mark::Working,
+                    words(format!("card-working-{}", t.id), palette::working(cx), text),
                 )
             }
-            RunState::NeedsYou => mark(
-                format!("card-needs-{}", t.id),
-                palette::needs_you(cx),
-                None,
-                true,
-                needs_label(ws, &t.id).into(),
+            // A machine out of reach: its thread as it last was, with nothing to say what for.
+            RunState::NeedsYou => (
+                Mark::NeedsYou,
+                words(
+                    format!("card-needs-{}", t.id),
+                    palette::needs_you(cx),
+                    "Needs you".into(),
+                ),
             ),
-            RunState::Failed => mark(
-                format!("card-failed-{}", t.id),
-                palette::failed(cx),
-                None,
-                true,
-                "Failed".into(),
+            RunState::Failed => (
+                Mark::Failed,
+                words(
+                    format!("card-failed-{}", t.id),
+                    palette::failed(cx),
+                    "Failed".into(),
+                ),
             ),
-            RunState::Idle if t.is_unseen() => h_flex()
-                .flex_none()
-                .gap_1()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(div().size(px(6.)).rounded_full().bg(palette::emerald(cx)))
-                .child(time::relative(t.updated_at))
-                .into_any_element(),
-            RunState::Idle => div()
-                .flex_none()
-                .text_xs()
-                .text_color(theme.muted_foreground.opacity(0.8))
-                .child(time::relative(t.updated_at))
-                .into_any_element(),
+            RunState::Idle if t.is_unseen() => (Mark::Unread, age(1.)),
+            RunState::Idle => (Mark::None, age(0.8)),
         }
+    }
+
+    /// Why a thread needs the user, on a row's second line: the words its alert used, in its run
+    /// state's colour (its mark is in the state column). What's only news stays quiet. Long words
+    /// give way (the tooltip has them in full), never the project beside them.
+    fn why_line(t: &Thread, why: &Why, cx: &App) -> (Mark, AnyElement) {
+        let news = !why.calls_for_you();
+        let (key, color, mark) = match why {
+            Why::Failed(_) | Why::Checks(_) => ("failed", palette::failed(cx), Mark::Failed),
+            Why::SubAgent => ("sub-needs", palette::needs_you(cx), Mark::NeedsYou),
+            Why::Finished => ("finished", palette::emerald(cx), Mark::Unread),
+            Why::CutShort => ("cut-short", palette::needs_you(cx), Mark::NeedsYou),
+            _ => ("needs", palette::needs_you(cx), Mark::NeedsYou),
+        };
+        (
+            mark,
+            div()
+                .id(SharedString::from(format!("card-{key}-{}", t.id)))
+                .test_support()
+                .min_w_0()
+                .truncate()
+                .when(!news, |el| el.font_weight(FontWeight::MEDIUM))
+                .text_color(if news {
+                    cx.theme().muted_foreground
+                } else {
+                    color
+                })
+                .child(why.words())
+                .into_any_element(),
+        )
     }
 
     /// While searching, the message that put a thread in the list when its title didn't match.
@@ -738,7 +883,7 @@ impl Sidebar {
         div()
             .min_w_0()
             .truncate()
-            .text_size(px(12.))
+            .text_size(px(text::LABEL))
             .text_color(cx.theme().muted_foreground)
             .child(ui::match_text(&text, &ranges, cx))
     }
@@ -790,15 +935,20 @@ impl Sidebar {
     }
 
     /// A live thread with something to say (it needs you, it failed, it's at work), or a pinned
-    /// or snoozed one, at a line's height like the quiet rows: its title, then where it stands
-    /// in its run state's colour. Rows under a project's header leave the project out; pinned and
-    /// snoozed ones (`badge`) aren't under one, so they carry its badge.
+    /// or snoozed one: its state's mark in the state column, its title and its agent's logo, then
+    /// where it stands in its run state's colour. Rows under a project's header leave the project
+    /// out; the ones listed by what they're for (`badge`) aren't under one, so they say it. In the
+    /// Needs you block (`tray`) the block has the margin. A pinned or snoozed one (`named`) with
+    /// nothing to say is a single line: its pin or clock, its title, its project.
+    #[allow(clippy::too_many_arguments)]
     fn card(
         &self,
         t: &Thread,
         project: &str,
         badge: bool,
         selected: bool,
+        tray: bool,
+        named: Option<Mark>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
@@ -817,29 +967,38 @@ impl Sidebar {
             } else {
                 format!("{provider} · {model}")
             };
+            // Why it needs the user comes first, whole: the row may have cut it short.
+            let runs = match self.why.get(&t.id) {
+                Some(why) => format!("{}\n\n{runs}", why.words()),
+                None => runs,
+            };
             Some(SharedString::from(match card_tip(&kids, &background) {
                 Some(rest) => format!("{runs}\n\n{rest}"),
                 None => runs,
             }))
         };
+        let (mark, words) = self.status(t, cx);
         let quiet = t.run_state == RunState::Idle
             && !t.is_unseen()
             && !selected
             && kids.is_empty()
             && !self.graph.waiting.contains(&t.id);
+        // Pinned or snoozed with nothing to say: its pin (or clock) stands for it.
+        let single = named.filter(|_| mark == Mark::None && kids.is_empty());
+        let mark = single.unwrap_or(mark);
         let id = t.id.clone();
         let hit = self.content_hit(t, cx);
+        let study = look::is_study(t, &self.study_dir);
+        let shown_title = if study {
+            look::study_title(&t.title).0.to_string()
+        } else {
+            t.title.clone()
+        };
+        let place = (badge && (t.project_id.is_some() || study)).then(|| project.to_string());
         let title = h_flex()
-            .h(px(20.))
-            .gap_2()
-            // The provider it runs on, by its logo (the tooltip names it and the model).
-            .child(
-                div()
-                    .id(SharedString::from(format!("card-agent-{}", t.id)))
-                    .test_support()
-                    .flex_none()
-                    .child(ui::agent_logo(&t.agent, px(14.), cx)),
-            )
+            .h(px(if single.is_some() { look::LINE_H } else { 18. }))
+            .gap(px(look::MARK_GAP))
+            .child(look::mark(None, mark, cx))
             .child(
                 div()
                     .flex_1()
@@ -847,10 +1006,10 @@ impl Sidebar {
                     .when(t.is_unseen() && !selected, |el| el.font_medium())
                     .child(ui::title_text(
                         SharedString::from(format!("card-title-{}", t.id)),
-                        &t.title,
+                        &shown_title,
                         self.workspace.read(cx).title_reveal(&t.id),
                         if quiet {
-                            theme.foreground.opacity(0.78)
+                            theme.foreground.opacity(look::QUIET)
                         } else {
                             theme.foreground
                         },
@@ -858,9 +1017,10 @@ impl Sidebar {
                     )),
             )
             .when_some(t.worktree.as_ref(), |el, wt| {
-                el.child(crate::worktree_ui::branch_chip(
+                el.child(crate::worktree_ui::branch_chip_up_to(
                     SharedString::from(format!("card-branch-{}", t.id)),
                     wt,
+                    ROW_BRANCH_WIDTH,
                     cx,
                 ))
             })
@@ -873,22 +1033,22 @@ impl Sidebar {
                         .id(SharedString::from(format!("card-kids-{}", t.id)))
                         .test_support()
                         .flex_none()
-                        .h(px(18.))
+                        .h(px(16.))
                         .px(px(5.))
-                        .gap(px(4.))
+                        .gap(px(3.))
                         .rounded_pill()
                         .bg(theme.foreground.opacity(0.07))
                         .children(
                             kid_groups(&kids)
                                 .into_iter()
                                 .take(3)
-                                .map(|(agent, _)| ui::agent_logo(&agent, px(12.), cx)),
+                                .map(|(agent, _)| ui::agent_logo(&agent, px(10.), cx)),
                         )
                         .child(
                             div()
                                 .id(SharedString::from(format!("card-kids-count-{}", t.id)))
                                 .test_support()
-                                .text_size(px(10.5))
+                                .text_size(px(text::META))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.muted_foreground)
                                 .child(kids.len().to_string()),
@@ -908,41 +1068,78 @@ impl Sidebar {
                         .rounded_full()
                         .bg(palette::sky(cx)),
                 )
-            });
-        // Under the title, what it's doing (and, out of its project's group, where).
-        let doing = h_flex()
-            .h(px(16.))
-            .gap(px(5.))
-            .min_w_0()
-            .child(self.status(t, cx))
-            .when(badge && t.project_id.is_some(), |el| {
+            })
+            // A single line ends at its project; a card's first line at the agent's logo (the
+            // tooltip names it and the model). At the end, it doesn't compete with the state.
+            .when_some(single.and(place.clone()), |el, project| {
                 el.child(
                     div()
-                        .min_w_0()
+                        .flex_none()
+                        .max_w(px(PROJECT_WIDTH))
                         .truncate()
-                        .text_xs()
+                        .text_size(px(look::LABEL_SIZE))
                         .text_color(theme.muted_foreground)
-                        .child(format!("· {project}")),
+                        .child(project),
+                )
+            })
+            .when(single.is_none(), |el| {
+                el.child(
+                    div()
+                        .id(SharedString::from(format!("card-agent-{}", t.id)))
+                        .test_support()
+                        .flex_none()
+                        .child(ui::agent_logo(&t.agent, px(12.), cx)),
                 )
             });
+        // Under the title, what it's doing (and, out of its project's group, where), on the
+        // title's line.
+        let doing = single.is_none().then(|| {
+            h_flex()
+                .h(px(16.))
+                .pl(px(look::MARK_W + look::MARK_GAP))
+                .gap(px(4.))
+                .min_w_0()
+                .text_size(px(look::META_SIZE))
+                .child(words)
+                .when_some(place.clone(), |el, project| {
+                    let says_why = self.why.contains_key(&t.id);
+                    let checks = matches!(self.why.get(&t.id), Some(Why::Checks(_)));
+                    el.child(
+                        div()
+                            // Failing checks come with an action: those two keep their room.
+                            .when(checks, |el| el.min_w_0().flex_shrink(100.))
+                            .when(says_why && !checks, |el| {
+                                el.flex_none().max_w(px(PROJECT_WIDTH))
+                            })
+                            .when(!says_why, |el| el.min_w_0())
+                            .truncate()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("· {project}")),
+                    )
+                })
+        });
         let row = v_flex()
             .id(SharedString::from(format!("card-{}", t.id)))
             .test_support()
             .relative()
-            .mx_2()
-            .py(px(5.))
+            .when(!tray, |el| el.mx_2())
+            .when(single.is_none(), |el| el.pt(px(6.)).pb(px(7.)).gap(px(2.)))
             .pl(px(ROW_INSET))
-            .pr_3()
-            .rounded(px(fluent::control(8.)))
+            .pr(px(10.))
+            .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
-            .text_sm()
+            .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
             .children(self.tab_mark(&t.id, selected, cx))
             .child(title)
-            .child(doing)
+            .children(doing)
             .when_some(hit.clone(), |el, h| {
-                el.child(Self::hit_line(&h, cx).pt(px(2.)))
+                el.child(
+                    Self::hit_line(&h, cx)
+                        .pl(px(look::MARK_W + look::MARK_GAP))
+                        .pt(px(2.)),
+                )
             })
             .when_some(tip, |el, tip| {
                 el.tooltip(move |window, cx| {
@@ -950,6 +1147,7 @@ impl Sidebar {
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
+        let row = self.draggable(row, t, cx);
         self.with_menu(row, t, cx).into_any_element()
     }
 
@@ -960,7 +1158,10 @@ impl Sidebar {
         if let Some(bar) = fluent::selection_bar(selected, cx) {
             return Some(bar.into_any_element());
         }
-        let open = self.workspace.read(cx).tabs.iter().any(|t| t == id);
+        let ws = self.workspace.read(cx);
+        let open = ws.tabs.iter().any(|t| t == id);
+        // In the pane beside the one with the focus: on screen too, without the selection.
+        let beside = !selected && ws.pane_of(id).is_some();
         let theme = cx.theme();
         (open || selected).then(|| {
             div()
@@ -969,9 +1170,11 @@ impl Sidebar {
                 .top(px(9.))
                 .bottom(px(9.))
                 .w(px(2.))
-                .rounded(px(1.))
+                .rounded_full()
                 .bg(if selected {
                     theme.foreground.opacity(0.8)
+                } else if beside {
+                    theme.foreground.opacity(0.45)
                 } else {
                     theme.foreground.opacity(0.16)
                 })
@@ -979,9 +1182,10 @@ impl Sidebar {
         })
     }
 
-    /// Codex-style compact row for settled history. One whose sub-agents or background work are
-    /// still going (settled, it stays here, as a working thread would) has a quiet dot that names
-    /// them on hover, as a card does.
+    /// Codex-style compact row for settled history, dimmer than live work's. One whose sub-agents
+    /// or background work are still going (settled, it stays here, as a working thread would) has
+    /// a quiet dot in its state column that names them on hover, as a card does; a Study session
+    /// has its cap.
     fn line(&self, t: &Thread, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let id = t.id.clone();
@@ -993,34 +1197,37 @@ impl Sidebar {
         } else {
             None
         };
+        let study = look::is_study(t, &self.study_dir);
+        let (mark, mark_id) = if tip.is_some() {
+            (Mark::Background, Some(format!("line-at-work-{}", t.id)))
+        } else if study {
+            (Mark::Study, None)
+        } else {
+            (Mark::None, None)
+        };
+        let shown_title = if study {
+            look::study_title(&t.title).0.to_string()
+        } else {
+            t.title.clone()
+        };
         let title = h_flex()
-            .h(px(30.))
-            .gap_2()
+            .h(px(look::LINE_H))
+            .gap(px(look::MARK_GAP))
+            .child(look::mark(mark_id.map(SharedString::from), mark, cx))
             .child(div().flex_1().min_w_0().child(ui::title_text(
                 SharedString::from(format!("line-title-{}", t.id)),
-                &t.title,
+                &shown_title,
                 self.workspace.read(cx).title_reveal(&t.id),
                 if selected {
                     theme.foreground
                 } else {
-                    theme.foreground.opacity(0.78)
+                    theme.foreground.opacity(look::SETTLED)
                 },
                 cx,
             )))
-            .when(tip.is_some(), |el| {
-                el.child(
-                    div()
-                        .id(SharedString::from(format!("line-at-work-{}", t.id)))
-                        .test_support()
-                        .flex_none()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(palette::sky(cx)),
-                )
-            })
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(look::LABEL_SIZE))
                     .text_color(theme.muted_foreground.opacity(0.8))
                     .invisible()
                     .group_hover(SharedString::from(format!("line-{}", t.id)), |s| {
@@ -1035,16 +1242,21 @@ impl Sidebar {
             .relative()
             .mx_2()
             .pl(px(ROW_INSET))
-            .pr_3()
-            .rounded(px(fluent::control(8.)))
+            .pr(px(10.))
+            .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
-            .text_sm()
+            .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
             .children(self.tab_mark(&t.id, selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
-                el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.)))
+                el.child(
+                    Self::hit_line(&h, cx)
+                        .pl(px(look::MARK_W + look::MARK_GAP))
+                        .mt(px(-5.))
+                        .pb(px(6.)),
+                )
             })
             .when_some(tip, |el, tip| {
                 el.tooltip(move |window, cx| {
@@ -1052,12 +1264,14 @@ impl Sidebar {
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
+        let row = self.draggable(row, t, cx);
         self.with_menu(row, t, cx).into_any_element()
     }
 
-    /// A live thread that needs no attention, at a line's height: its title (medium and dotted
-    /// emerald while unread), its worktree, a sky dot while its own or its sub-agents' work still
-    /// runs, and its age — "Paused" instead while it sits at a usage limit.
+    /// A live thread that needs no attention, at a line's height: its state column (a sky dot
+    /// while its own or its sub-agents' work still runs, ember with sub-agents out, emerald while
+    /// unread, Study's cap for a session), its title (medium while unread), its worktree, and its
+    /// age on hover — "Paused" instead while it sits at a usage limit, a session's kind for one.
     fn live_line(&self, t: &Thread, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
@@ -1068,9 +1282,34 @@ impl Sidebar {
         let unseen = t.is_unseen();
         let paused = t.paused.is_some() && t.run_state == RunState::Idle;
         let at_work = !kids.is_empty() || !background.is_empty();
+        let study = look::is_study(t, &self.study_dir);
+        let (shown_title, kind) = if study {
+            let (title, kind) = look::study_title(&t.title);
+            (title.to_string(), kind)
+        } else {
+            (t.title.clone(), None)
+        };
+        // One column for how it stands: what's still running first, then news, then what it is.
+        let (mark, mark_id) = if at_work {
+            (
+                if kids.is_empty() {
+                    Mark::Background
+                } else {
+                    Mark::Working
+                },
+                Some(format!("live-line-at-work-{}", t.id)),
+            )
+        } else if unseen {
+            (Mark::Unread, Some(format!("live-line-unseen-{}", t.id)))
+        } else if study {
+            (Mark::Study, None)
+        } else {
+            (Mark::None, None)
+        };
         let title = h_flex()
-            .h(px(30.))
-            .gap_2()
+            .h(px(look::LINE_H))
+            .gap(px(look::MARK_GAP))
+            .child(look::mark(mark_id.map(SharedString::from), mark, cx))
             .child(
                 div()
                     .flex_1()
@@ -1078,10 +1317,10 @@ impl Sidebar {
                     .when(unseen && !selected, |el| el.font_medium())
                     .child(ui::title_text(
                         SharedString::from(format!("live-line-title-{}", t.id)),
-                        &t.title,
+                        &shown_title,
                         ws.title_reveal(&t.id),
                         if !selected && !unseen {
-                            theme.foreground.opacity(0.78)
+                            theme.foreground.opacity(look::QUIET)
                         } else {
                             theme.foreground
                         },
@@ -1089,50 +1328,35 @@ impl Sidebar {
                     )),
             )
             .when_some(t.worktree.as_ref(), |el, wt| {
-                el.child(crate::worktree_ui::branch_chip(
+                el.child(crate::worktree_ui::branch_chip_up_to(
                     SharedString::from(format!("live-line-branch-{}", t.id)),
                     wt,
+                    ROW_BRANCH_WIDTH,
                     cx,
                 ))
-            })
-            .when(unseen, |el| {
-                el.child(
-                    div()
-                        .id(SharedString::from(format!("live-line-unseen-{}", t.id)))
-                        .test_support()
-                        .flex_none()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(palette::emerald(cx)),
-                )
-            })
-            .when(at_work, |el| {
-                let color = if kids.is_empty() {
-                    palette::sky(cx)
-                } else {
-                    palette::working(cx)
-                };
-                el.child(
-                    div()
-                        .id(SharedString::from(format!("live-line-at-work-{}", t.id)))
-                        .test_support()
-                        .flex_none()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(color),
-                )
             })
             .child(if paused {
                 div()
                     .id(SharedString::from(format!("live-line-paused-{}", t.id)))
                     .test_support()
-                    .text_xs()
+                    .flex_none()
+                    .text_size(px(look::LABEL_SIZE))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(palette::amber(cx))
                     .child("Paused")
                     .into_any_element()
+            } else if let Some(kind) = kind {
+                // Learn or Practice, always: it says what kind of session this is.
+                div()
+                    .flex_none()
+                    .text_size(px(look::LABEL_SIZE))
+                    .text_color(theme.muted_foreground)
+                    .child(kind)
+                    .into_any_element()
             } else {
                 div()
-                    .text_xs()
+                    .flex_none()
+                    .text_size(px(look::LABEL_SIZE))
                     .text_color(theme.muted_foreground.opacity(0.8))
                     .invisible()
                     .group_hover(SharedString::from(format!("live-line-{}", t.id)), |s| {
@@ -1148,16 +1372,21 @@ impl Sidebar {
             .relative()
             .mx_2()
             .pl(px(ROW_INSET))
-            .pr_3()
-            .rounded(px(fluent::control(8.)))
+            .pr(px(10.))
+            .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
-            .text_sm()
+            .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
             .children(self.tab_mark(&t.id, selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
-                el.child(Self::hit_line(&h, cx).mt(px(-6.)).pb(px(6.)))
+                el.child(
+                    Self::hit_line(&h, cx)
+                        .pl(px(look::MARK_W + look::MARK_GAP))
+                        .mt(px(-5.))
+                        .pb(px(6.)),
+                )
             })
             .when_some(tip, |el, tip| {
                 el.tooltip(move |window, cx| {
@@ -1165,28 +1394,44 @@ impl Sidebar {
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
+        let row = self.draggable(row, t, cx);
         self.with_menu(row, t, cx).into_any_element()
     }
 
-    /// A project group's header (live quiet threads and settled history): badge, name, `extra`
-    /// (a count), and a "new thread here" button on hover; wrapped in the project menu.
+    /// A project group's header (live quiet threads and settled history): the project's badge in
+    /// the state column and its name in the primary colour (the one row with a badge, so a project
+    /// never reads as a section), how many threads it holds, and on hover a "new thread here"
+    /// button and the fold; wrapped in the project menu. Settled history's are muted. "No
+    /// project" has a plain glyph for a badge.
+    #[allow(clippy::too_many_arguments)]
     fn group_header(
         &self,
         prefix: &'static str,
         pid: &str,
         name: String,
-        extra: Option<AnyElement>,
+        count: Option<usize>,
         fold: Option<bool>,
         paths: &HashMap<String, std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
+        let settled = prefix == "settled";
         // A new thread in this project (or in none, for "No project"), from its header.
         let here = if pid.is_empty() {
             Some(None)
         } else {
             paths.get(pid).cloned().map(Some)
         };
+        let badge = match paths.get(pid) {
+            Some(path) => ui::project_badge(&name, &self.workspace.read(cx).project_look(path), cx),
+            // Settled Study sessions: the cap, as on their rows.
+            None if pid == STUDY => look::mark(None, Mark::Study, cx),
+            None => Icon::new(crate::assets::Lucide::MessageSquare)
+                .size(px(13.))
+                .text_color(theme.muted_foreground)
+                .into_any_element(),
+        };
+        let folded = fold == Some(true);
         let header = h_flex()
             .id(SharedString::from(format!("{prefix}-proj-head-{pid}")))
             .test_support()
@@ -1194,22 +1439,51 @@ impl Sidebar {
             .mx_2()
             .pl(px(ROW_INSET))
             .pr_1()
-            .h(px(28.))
-            .mt(px(8.))
-            .gap_2()
-            .rounded(px(fluent::control(8.)))
-            .text_xs()
-            .text_color(theme.muted_foreground)
+            .h(px(look::LINE_H))
+            .gap(px(look::MARK_GAP))
+            .rounded(px(fluent::control(look::ROW_RADIUS)))
+            .hover(|s| s.bg(theme.list_hover))
             .child(
                 h_flex()
                     .id(SharedString::from(format!("{prefix}-fold-{pid}")))
                     .test_support()
                     .flex_1()
                     .min_w_0()
-                    .gap_2()
+                    .h_full()
+                    .gap(px(look::MARK_GAP))
                     .cursor_pointer()
-                    .child(div().min_w_0().truncate().child(name.clone()))
-                    .when_some(extra, |el, extra| el.child(extra))
+                    .child(
+                        h_flex()
+                            .flex_none()
+                            .w(px(look::MARK_W))
+                            .justify_center()
+                            .when(settled, |el| el.opacity(0.7))
+                            .child(badge),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(look::TITLE_SIZE))
+                            .when(!settled, |el| {
+                                el.font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                            })
+                            .when(settled, |el| el.text_color(theme.muted_foreground))
+                            .child(name.clone()),
+                    )
+                    // How many it holds; on hover the fold and New thread take its place.
+                    .when_some(count.filter(|n| *n > 0), |el, n| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(look::LABEL_SIZE))
+                                .text_color(theme.muted_foreground.opacity(0.8))
+                                .when(!folded, |el| el.group_hover("proj-head", |s| s.invisible()))
+                                .child(n.to_string()),
+                        )
+                    })
                     // Folded, the chevron says so; open, it shows only to the pointer.
                     .when_some(fold, |el, folded| {
                         el.child(
@@ -1259,6 +1533,7 @@ impl Sidebar {
                                 crate::assets::Lucide::SquarePen,
                                 tip,
                             )
+                            .xsmall()
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     let project = project.clone();
@@ -1276,6 +1551,31 @@ impl Sidebar {
                 .into_any_element(),
             None => header.into_any_element(),
         }
+    }
+
+    /// A thread's row can be dragged to the main area to open beside what's there
+    /// (`root::split`). A click that slipped a little on its way down starts that drag, and lands
+    /// back on its own row: it's still a click.
+    fn draggable<E: StatefulInteractiveElement>(
+        &self,
+        row: E,
+        t: &Thread,
+        cx: &mut Context<Self>,
+    ) -> E {
+        let hit = self.content_hit(t, cx);
+        let dragged = crate::root::split::DraggedThread {
+            id: t.id.clone(),
+            title: t.title.clone().into(),
+        };
+        let id = t.id.clone();
+        row.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
+            .on_drop(
+                cx.listener(move |this, d: &crate::root::split::DraggedThread, _, cx| {
+                    if d.id == id {
+                        this.open(id.clone(), hit.clone(), cx);
+                    }
+                }),
+            )
     }
 
     /// Right-click menu for a thread (T3's set): pin, settle, snooze, rename, copy, project, archive,
@@ -1320,6 +1620,7 @@ impl Sidebar {
             let mut menu = menu
                 .min_w(px(210.))
                 .item(thread_menu::open_in_new_window(&ws, &tid))
+                .item(thread_menu::open_beside(&ws, &tid))
                 .item(thread_menu::fork(&ws, &tid))
                 .separator()
                 .item(thread_menu::pin(&ws, &f))
@@ -1468,15 +1769,9 @@ impl Sidebar {
         })
     }
 
-    fn label(text: &str, cx: &App) -> impl IntoElement {
-        div()
-            .mx_2()
-            .pl(px(ROW_INSET))
-            .pt(px(10.))
-            .pb(px(4.))
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(text.to_string())
+    /// A section's label (`look::section_label`), with how many rows it holds.
+    fn label(text: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
+        look::section_label(text, count, None, cx)
     }
 
     fn footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1548,7 +1843,7 @@ impl Sidebar {
                                 div()
                                     .id("usage-left")
                                     .test_support()
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{:.0}% left", (100. - peak).clamp(0., 100.))),
                             ),
@@ -1580,9 +1875,22 @@ impl Sidebar {
         // An update to install (or what the last one brought): a notice above the footer, only
         // then; the card it opens has the rest. Checking quietly needs no mark at all.
         let notice: Option<(String, &'static str)> = match &update {
-            UpdateStatus::Ready { version, .. } | UpdateStatus::RestartPending { version, .. } => {
-                Some((format!("Trek {version} is ready"), "Restart"))
+            // Waiting for what it was told to: it says for what, and there's nothing more to press.
+            UpdateStatus::RestartPending { version, .. } => {
+                Some(match self.workspace.read(cx).update_view(cx).choices {
+                    Some(c) => (c.wait, ""),
+                    None => (format!("Trek {version} is ready"), "Restart"),
+                })
             }
+            // Work running: the card has the choices.
+            UpdateStatus::Ready { version, .. } => Some((
+                format!("Trek {version} is ready"),
+                if self.workspace.read(cx).update_view(cx).choices.is_some() {
+                    "Options"
+                } else {
+                    "Restart"
+                },
+            )),
             UpdateStatus::Available { version } => {
                 Some((format!("Trek {version} is out"), "Get it"))
             }
@@ -1592,8 +1900,16 @@ impl Sidebar {
             _ if whats_new => Some((format!("What's new in Trek {}", trek_core::VERSION), "Read")),
             _ => None,
         };
+        // Later: it waits for the quit, and the pill stops asking for attention.
+        let put_off = match &update {
+            UpdateStatus::Ready { version, .. } => {
+                self.workspace.read(cx).updater.later.as_ref() == Some(version)
+            }
+            _ => false,
+        };
+        let waiting_on_work = matches!(update, UpdateStatus::RestartPending { .. });
         let updater = notice.map(|(text, action)| {
-            let accent = if ready {
+            let accent = if ready && !put_off {
                 palette::ember(cx)
             } else {
                 theme.foreground
@@ -1628,17 +1944,29 @@ impl Sidebar {
                                 .small()
                                 .text_color(palette::ember(cx))
                                 .into_any_element()
+                        } else if waiting_on_work {
+                            Icon::new(crate::assets::Lucide::Clock)
+                                .small()
+                                .text_color(accent)
+                                .into_any_element()
                         } else {
                             Icon::new(crate::assets::Lucide::CircleArrowUp)
                                 .small()
                                 .text_color(accent)
                                 .into_any_element()
                         })
-                        .child(div().flex_1().min_w_0().truncate().text_xs().child(text))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(to_rems(text::META))
+                                .child(text),
+                        )
                         .when(!action.is_empty(), |el| {
                             el.child(
                                 div()
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .font_medium()
                                     .text_color(accent)
                                     .child(action),
@@ -1684,15 +2012,21 @@ impl Sidebar {
                                 .into_any_element()
                         })
                         .when(count > 0, |el| {
-                            el.child(div().text_xs().child(count.to_string()))
+                            el.child(
+                                div()
+                                    .text_size(to_rems(text::META))
+                                    .child(count.to_string()),
+                            )
                         }),
                 )
                 .content(move |_, _, cx| crate::agent_updates::card(&ws, cx))
         });
+        let interrupted = self.interrupted_notice(cx);
         v_flex()
             .px_3()
             .pb_2()
             .gap(px(6.))
+            .children(interrupted)
             .children(updater.map(|u| div().pt_1().child(u)))
             .child(
                 h_flex()
@@ -1711,7 +2045,7 @@ impl Sidebar {
                                     .small()
                                     .text_color(theme.muted_foreground),
                             )
-                            .child(div().text_xs().child("Settings"))
+                            .child(div().text_size(to_rems(text::META)).child("Settings"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.workspace.update(cx, |ws, cx| {
                                     ws.navigate(Route::Settings(SettingsPage::General), cx)
@@ -1736,8 +2070,20 @@ impl Sidebar {
         let picker = picking.then(|| self.usage_picker(cx));
         let ws = self.workspace.read(cx);
         let loading = ws.usage_loading || ws.devin_loading;
-        let rows = ws.usage_rows();
-        let bar = |pct: f32, cx: &App| {
+        let now = ws.now();
+        // An agent's own row, then a row for each of its accounts.
+        let rows: Vec<_> = ws
+            .usage_rows()
+            .into_iter()
+            .flat_map(|row| {
+                let accounts = ws.account_rows(&row.agent);
+                std::iter::once(row).chain(accounts)
+            })
+            .collect();
+        let labels: Vec<Option<String>> = rows.iter().map(|r| ws.usage_row_label(r)).collect();
+        // The card keeps to the window, with every account's windows to show.
+        let many = rows.iter().any(|r| r.account.is_some());
+        let bar = |pct: f32, pace: Option<f32>, cx: &App| {
             let color = if pct >= 90. {
                 palette::red(cx)
             } else if pct >= 70. {
@@ -1757,10 +2103,22 @@ impl Sidebar {
                         .bg(color)
                         .w(relative((pct / 100.).clamp(0.0, 1.0))),
                 )
+                // Where an even pace would have it by now: a bar past this is running ahead.
+                .when_some(pace, |el, pace| {
+                    el.relative().child(
+                        div()
+                            .absolute()
+                            .top(px(-2.))
+                            .bottom(px(-2.))
+                            .left(relative(pace))
+                            .w(px(1.5))
+                            .bg(cx.theme().foreground.opacity(0.55)),
+                    )
+                })
         };
         let muted = |text: String| {
             div()
-                .text_xs()
+                .text_size(to_rems(text::META))
                 .text_color(theme.muted_foreground)
                 .child(text)
         };
@@ -1770,10 +2128,11 @@ impl Sidebar {
             .w(px(320.))
             .p(px(14.))
             .gap(px(14.))
+            .when(many, |el| el.max_h(px(560.)).overflow_y_scroll())
             .child(
                 h_flex()
                     .gap_1()
-                    .child(div().flex_1().text_sm().font_semibold().child(if picking { "Show in Usage" } else { "Usage" }))
+                    .child(div().flex_1().text_size(to_rems(text::LABEL)).font_semibold().child(if picking { "Show in Usage" } else { "Usage" }))
                     .when(loading && !picking, |el| el.child(Spinner::new().xsmall().color(theme.muted_foreground)))
                     .child(
                         ui::icon_button("usage-choose", if picking { IconName::Check } else { IconName::Ellipsis }, if picking { "Done" } else { "Choose providers" })
@@ -1787,46 +2146,87 @@ impl Sidebar {
             )
             .children(picker)
             .when(!picking && rows.is_empty() && !loading, |el| {
-                el.child(div().text_sm().text_color(theme.muted_foreground).child(if ws.usage_picked() { "No providers picked. Choose some with …" } else { "No plan usage reported by your agents." }))
+                el.child(div().text_size(to_rems(text::LABEL)).text_color(theme.muted_foreground).child(if ws.usage_picked() { "No providers picked. Choose some with …" } else { "No plan usage reported by your agents." }))
             })
-            .when(!picking, |el| el.children(rows.into_iter().map(|u| {
+            .when(!picking, |el| el.children(rows.into_iter().zip(labels).map(|(u, label)| {
                 let agent = u.agent.clone();
+                let row_id = match &u.account {
+                    Some(account) => format!("usage-row-{}-{account}", agent.key()),
+                    None => format!("usage-row-{}", agent.key()),
+                };
                 v_flex()
-                    .id(SharedString::from(format!("usage-row-{}", agent.key())))
+                    .id(SharedString::from(row_id))
                     .test_support()
-                    .gap(px(10.))
+                    .gap(px(if many { 6. } else { 10. }))
                     .child(
                         h_flex()
                             .gap_2()
                             .child(ui::agent_logo(&agent, px(16.), cx))
-                            .child(div().text_sm().font_medium().child(agent.display_name()))
+                            .child(div().text_size(to_rems(text::LABEL)).font_medium().child(agent.display_name()))
+                            .when_some(label, |el, label| {
+                                el.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(to_rems(text::LABEL))
+                                        .text_color(theme.muted_foreground)
+                                        .child(label),
+                                )
+                            })
                             .child(div().flex_1())
-                            .when_some(u.plan.clone(), |el, p| el.child(div().text_xs().text_color(theme.muted_foreground).child(p))),
+                            .when_some(u.plan.clone(), |el, p| el.child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(p))),
                     )
                     .when(u.no_limits, |el| el.child(muted("No usage limits on this plan.".into())))
-                    .when_some(u.error.clone(), |el, e| el.child(div().text_xs().text_color(palette::amber(cx)).child(e)))
+                    .when_some(u.error.clone(), |el, e| el.child(div().text_size(to_rems(text::META)).text_color(palette::amber(cx)).child(e)))
                     .when_some(u.note.clone(), |el, n| el.child(muted(n)))
                     .children(u.limits.iter().map(|l| {
+                        let pace = trek_agents::limits::pace(l, now);
+                        let left = (100. - l.percent).clamp(0., 100.);
+                        // With every account's windows to show, one line each.
+                        if many {
+                            let reset = l
+                                .resets_at
+                                .filter(|at| *at > now)
+                                .map(|at| format!("{left:.0}% left · {}", time::countdown(at, now)))
+                                .unwrap_or_else(|| format!("{left:.0}% left"));
+                            return h_flex()
+                                .gap(px(8.))
+                                .text_size(to_rems(text::META))
+                                .child(div().flex_none().w(px(78.)).truncate().child(l.label.clone()))
+                                .child(div().flex_1().min_w_0().child(bar(l.percent, pace, cx)))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(100.))
+                                        .text_right()
+                                        .text_color(theme.muted_foreground)
+                                        .child(reset),
+                                )
+                                .into_any_element();
+                        }
                         let resets = l.resets_at.map(time::until).unwrap_or_default();
                         v_flex()
                             .gap(px(5.))
                             .child(
                                 h_flex()
-                                    .text_xs()
+                                    .text_size(to_rems(text::META))
                                     .child(div().flex_1().child(l.label.clone()))
                                     .child(div().text_color(theme.muted_foreground).child(format!("{:.0}% left", (100. - l.percent).clamp(0., 100.)))),
                             )
-                            .child(bar(l.percent, cx))
+                            .child(bar(l.percent, pace, cx))
                             .when(!resets.is_empty(), |el| el.child(muted(format!("Resets {resets}"))))
+                            .into_any_element()
                     }))
-                    // No plan to show: what Trek recorded it using today.
+                    // No plan to show: what Trek recorded it using today. Nothing to say, no line:
+                    // an account not signed in ends at its own words.
                     .when(u.limits.is_empty(), |el| {
-                        el.child(muted(match &u.today {
+                        let said = match &u.today {
                             Some((n, spend)) if spend.priced() => format!("Today in Trek: {} tokens · ≈ {}", crate::cost::fmt_tokens(*n), crate::cost::usd(spend.usd())),
                             Some((n, _)) => format!("Today in Trek: {} tokens", crate::cost::fmt_tokens(*n)),
                             None if u.plan.is_none() && !u.no_limits && u.error.is_none() => "Nothing used today.".to_string(),
                             None => String::new(),
-                        }))
+                        };
+                        el.when(!said.is_empty(), |el| el.child(muted(said)))
                     })
                     // Kept from an earlier run: shown until the agent is read again.
                     .when_some(u.as_of, |el, at| {
@@ -1846,7 +2246,7 @@ impl Sidebar {
                                 .test_support()
                                 .gap(px(8.))
                                 .p(px(10.))
-                                .rounded_md()
+                                .rounded(px(radius::CONTROL))
                                 .when(fluent::WINDOWS, |el| {
                                     el.rounded(px(fluent::SURFACE_RADIUS))
                                 })
@@ -1854,10 +2254,10 @@ impl Sidebar {
                                 .border_color(theme.border)
                                 .child(
                                     h_flex()
-                                        .child(div().flex_1().text_xs().font_medium().child("Usage limit resets"))
+                                        .child(div().flex_1().text_size(to_rems(text::META)).font_medium().child("Usage limit resets"))
                                         .child(
                                             div()
-                                                .text_xs()
+                                                .text_size(to_rems(text::META))
                                                 .font_medium()
                                                 .text_color(palette::emerald(cx))
                                                 .child(format!("{n} available")),
@@ -1873,9 +2273,9 @@ impl Sidebar {
                                                 .flex_1()
                                                 .min_w_0()
                                                 .gap(px(2.))
-                                                .child(div().text_xs().truncate().child(r.title.clone()))
+                                                .child(div().text_size(to_rems(text::META)).truncate().child(r.title.clone()))
                                                 .when(!expiry.is_empty(), |e| {
-                                                    e.child(div().text_xs().text_color(theme.muted_foreground).child(expiry))
+                                                    e.child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(expiry))
                                                 }),
                                         )
                                         .child(
@@ -1931,7 +2331,7 @@ impl Sidebar {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.5))
+                            .text_size(px(text::BODY))
                             .child(agent.display_name()),
                     )
                     .when(on, |el| {
@@ -1971,7 +2371,7 @@ impl Sidebar {
                         .test_support()
                         .px(px(8.))
                         .pt(px(6.))
-                        .text_xs()
+                        .text_size(to_rems(text::META))
                         .text_color(color)
                         .child(text),
                 )
@@ -1984,7 +2384,7 @@ impl Sidebar {
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(if picked {
                                 "Picked by you"
@@ -1997,7 +2397,11 @@ impl Sidebar {
                             ui::Pill::new("usage-pick-auto")
                                 .ghost(true)
                                 .small(true)
-                                .child(div().text_xs().child("Pick automatically"))
+                                .child(
+                                    div()
+                                        .text_size(to_rems(text::META))
+                                        .child("Pick automatically"),
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.usage_refused = false;
                                     this.workspace
@@ -2013,7 +2417,7 @@ impl Sidebar {
     fn updater_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
-        let view = ws.update_view();
+        let view = ws.update_view(cx);
         let pending = ws.pending_changes();
         let whats_new = ws.whats_new().cloned();
         let channel = format!("{:?}", ws.settings.updates.channel);
@@ -2048,21 +2452,21 @@ impl Sidebar {
                     .child(crate::brand::logo_mark(px(16.)))
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(to_rems(text::LABEL))
                             .font_semibold()
                             .child(format!("Trek {}", trek_core::VERSION)),
                     )
                     .child(div().flex_1())
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(to_rems(text::META))
                             .text_color(theme.muted_foreground)
                             .child(channel),
                     ),
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(to_rems(text::LABEL))
                     .text_color(theme.muted_foreground)
                     .child(view.line),
             )
@@ -2089,7 +2493,12 @@ impl Sidebar {
                         .pt(px(10.))
                         .border_t_1()
                         .border_color(theme.foreground.opacity(0.07))
-                        .child(div().text_xs().font_medium().child(title))
+                        .child(
+                            div()
+                                .text_size(to_rems(text::META))
+                                .font_medium()
+                                .child(title),
+                        )
                         .child(ui::releases_notes("updater-notes", &releases, px(260.), cx))
                         .when_some(link, |el, (label, url)| {
                             el.child(ui::web_link("updater-link", label, url, cx))
@@ -2097,21 +2506,156 @@ impl Sidebar {
                 )
             })
             .when_some(view.action, |el, action| {
+                let wait = view
+                    .choices
+                    .as_ref()
+                    .filter(|c| !c.waiting)
+                    .map(|c| SharedString::from(c.wait.clone()));
                 el.child(
                     gpui_kit::component::button::Button::new("updater-action")
                         .small()
                         .w_full()
-                        .when(action.is_primary(), |b| b.primary())
-                        .when(!action.is_primary(), |b| b.outline())
+                        .when(action.is_primary() || wait.is_some(), |b| b.primary())
+                        .when(!action.is_primary() && wait.is_none(), |b| b.outline())
                         .loading(view.busy)
-                        .label(action.label())
+                        .label(wait.unwrap_or(action.label().into()))
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.updater_open = false;
                             this.workspace
                                 .update(cx, |ws, cx| ws.run_update_action(action, cx))
                         })),
                 )
             })
+            .when_some(view.choices.as_ref().and(view.secondary), |el, action| {
+                el.child(
+                    gpui_kit::component::button::Button::new("updater-secondary")
+                        .small()
+                        .w_full()
+                        .outline()
+                        .label(action.label())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.updater_open = false;
+                            this.workspace
+                                .update(cx, |ws, cx| ws.run_update_action(action, cx))
+                        })),
+                )
+            })
+            .when(view.choices.as_ref().is_some_and(|c| c.later), |el| {
+                el.child(
+                    gpui_kit::component::button::Button::new("updater-later")
+                        .small()
+                        .w_full()
+                        .ghost()
+                        .label(crate::workspace::UpdateAction::Later.label())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.updater_open = false;
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.run_update_action(crate::workspace::UpdateAction::Later, cx)
+                            })
+                        })),
+                )
+            })
+            .when_some(view.choices.and_then(|c| c.now), |el, cost| {
+                el.child(
+                    div()
+                        .id("updater-cost")
+                        .test_support()
+                        .text_size(to_rems(text::META))
+                        .text_color(theme.muted_foreground)
+                        .child(cost),
+                )
+            })
             .into_any_element()
+    }
+
+    /// Above the footer after a relaunch: how many chats were cut off, Resume all, and a way to
+    /// leave them be. The words open the first of them. Chats waiting on the user are counted, not
+    /// resumed: each says so on its own row and composer.
+    fn interrupted_notice(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let notice = self.workspace.read(cx).interrupted_notice();
+        let headline = notice.headline()?;
+        let waiting_too = notice.waiting_too();
+        let theme = cx.theme().clone();
+        let tint = if notice.working.is_empty() {
+            palette::needs_you(cx)
+        } else {
+            palette::amber(cx)
+        };
+        let first = notice.working.first().or(notice.waiting.first()).cloned();
+        Some(
+            h_flex()
+                .id("interrupted-notice")
+                .test_support()
+                .pl(px(10.))
+                .pr(px(4.))
+                .py(px(5.))
+                .gap(px(6.))
+                .rounded(px(fluent::control(radius::BUTTON)))
+                .bg(tint.opacity(0.08))
+                .text_size(to_rems(text::META))
+                .child(
+                    Icon::new(crate::assets::Lucide::RotateCcwClock)
+                        .small()
+                        .text_color(tint),
+                )
+                .child(
+                    v_flex()
+                        .id("interrupted-headline")
+                        .test_support()
+                        .flex_1()
+                        .min_w_0()
+                        .cursor_pointer()
+                        .child(div().truncate().child(headline))
+                        .when_some(waiting_too, |el, line| {
+                            el.child(
+                                div()
+                                    .truncate()
+                                    .text_color(theme.muted_foreground)
+                                    .child(line),
+                            )
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(id) = first.clone() {
+                                this.workspace.update(cx, |ws, cx| {
+                                    ws.navigate(Route::Thread(id), cx);
+                                });
+                            }
+                        })),
+                )
+                .when(!notice.working.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .id("resume-all")
+                            .test_support()
+                            .flex_none()
+                            .px(px(6.))
+                            .h(px(22.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(fluent::control(radius::CONTROL)))
+                            .font_medium()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.foreground.opacity(0.06)))
+                            .child("Resume all")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.workspace
+                                    .update(cx, |ws, cx| ws.resume_all_interrupted(cx));
+                            })),
+                    )
+                })
+                .child(
+                    gpui_kit::component::button::Button::new("interrupted-dismiss")
+                        .ghost()
+                        .xsmall()
+                        .icon(Icon::new(IconName::Close).text_color(theme.muted_foreground))
+                        .tooltip("Leave them as they are")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace
+                                .update(cx, |ws, cx| ws.dismiss_all_interrupted(cx));
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 }
 
@@ -2186,21 +2730,6 @@ pub fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) ->
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
-/// What a thread waiting on the user waits for, from its pending request.
-pub fn needs_label(ws: &Workspace, id: &str) -> &'static str {
-    match ws
-        .live
-        .get(id)
-        .and_then(|l| l.permissions.first())
-        .map(|p| p.prompt.as_ref())
-    {
-        Some(Some(trek_agents::Prompt::Questions(_))) => "Question",
-        Some(Some(trek_agents::Prompt::Plan(_))) => "Plan ready",
-        Some(None) => "Needs approval",
-        None => "Needs you",
-    }
-}
-
 /// The inbox's cards in order: what waits on the user (approvals, failures), then what's running
 /// now, then the rest of the inbox, newest first as `Thread::inbox_rank` has them. Running threads
 /// mustn't sink below a day's worth of finished ones and out of view.
@@ -2243,6 +2772,28 @@ impl Render for Sidebar {
             _ => None,
         };
         let searching = !ws.search.is_empty();
+        // What needs the user is listed once, on top, whichever project or section it's from
+        // (out of a search, which is a list of its own).
+        let needing: Vec<(Thread, Why)> = ws
+            .needing_you()
+            .into_iter()
+            .map(|(t, why)| (t.clone(), why))
+            .collect();
+        self.why = needing
+            .iter()
+            .map(|(t, why)| (t.id.clone(), why.clone()))
+            .collect();
+        // A thread that only finished isn't waiting on anyone: it stays in its project, on top
+        // with its unread dot, and Needs you holds what can't go on without the user.
+        let needing: Vec<(Thread, Why)> = if searching {
+            vec![]
+        } else {
+            needing
+                .into_iter()
+                .filter(|(_, why)| !matches!(why, Why::Finished))
+                .collect()
+        };
+        let in_needs: HashSet<String> = needing.iter().map(|(t, _)| t.id.clone()).collect();
         let settled_open = ws.settled_open || searching;
         let importing = ws.importing;
         // Rows slide to new places only when the list changes under the user, not as a search
@@ -2260,7 +2811,8 @@ impl Render for Sidebar {
         let mut sections: Vec<(Section, Vec<Thread>)> = ws
             .sections()
             .into_iter()
-            .map(|(s, v)| {
+            .map(|(s, mut v)| {
+                v.retain(|t| !in_needs.contains(&t.id));
                 if s == Section::Settled {
                     settled_count = v.len();
                     if !settled_open {
@@ -2288,9 +2840,13 @@ impl Render for Sidebar {
             .flat_map(|m| m.threads.iter())
             .filter_map(|t| Some((t.id.clone(), ws.machines.place(&t.id)?)))
             .collect();
+        let study_dir = self.study_dir.clone();
         let project_of = |t: &Thread| {
             if let Some(place) = places.get(&t.id) {
                 return place.clone();
+            }
+            if look::is_study(t, &study_dir) {
+                return "Study".into();
             }
             t.project_id
                 .as_ref()
@@ -2300,6 +2856,8 @@ impl Render for Sidebar {
         let theme = cx.theme().clone();
 
         let mut list = v_flex().pt_1().pb_3();
+        // Pinned and Snoozed, under "Needs you" and over the rest.
+        let mut named = v_flex().w_full();
         let mut settled: Vec<Thread> = vec![];
         // Inbox and Working are one run of cards: see `live_order`. Their threads move out of
         // `sections` (which draws neither) rather than being copied again on every render.
@@ -2322,17 +2880,23 @@ impl Render for Sidebar {
         for (section, threads) in sections {
             match section {
                 Section::Settled => settled = threads,
+                Section::Pinned | Section::Snoozed if threads.is_empty() => {}
                 Section::Pinned | Section::Snoozed => {
-                    list = list.child(crate::motion::flip_row(
+                    named = named.child(crate::motion::flip_row(
                         &flip,
                         format!("label-{}", section.label()),
-                        Self::label(section.label(), cx),
+                        Self::label(section.label(), Some(threads.len()), cx),
                         now,
                         window,
                     ));
+                    let kind = if section == Section::Pinned {
+                        Mark::Pinned
+                    } else {
+                        Mark::Snoozed
+                    };
                     for t in &threads {
                         pinned.insert(t.id.clone());
-                        list = list.child(crate::motion::flip_row(
+                        named = named.child(crate::motion::flip_row(
                             &flip,
                             t.id.clone(),
                             self.card(
@@ -2340,6 +2904,8 @@ impl Render for Sidebar {
                                 &project_of(t),
                                 true,
                                 selected.as_deref() == Some(&t.id),
+                                false,
+                                Some(kind),
                                 cx,
                             ),
                             now,
@@ -2354,9 +2920,17 @@ impl Render for Sidebar {
         // failed, it's at work) first, then the quiet rest capped at three (every unread row and
         // the open one stay out), all at a line's height. A folded group keeps its badges —
         // needs-you, working, unread — on the header.
+        let cut_off: HashSet<String> = self
+            .workspace
+            .read(cx)
+            .interrupted
+            .keys()
+            .cloned()
+            .collect();
         let attention = |t: &Thread| {
             t.needs_you()
                 || t.run_state == RunState::Working
+                || cut_off.contains(&t.id)
                 || self.graph.needs.contains(&t.id)
                 || self.graph.waiting.contains(&t.id)
         };
@@ -2371,7 +2945,7 @@ impl Render for Sidebar {
                 .list
                 .iter()
                 .flat_map(|m| m.listed())
-                .filter(|t| attention(t))
+                .filter(|t| attention(t) && !in_needs.contains(&t.id))
                 .cloned()
                 .collect()
         };
@@ -2381,7 +2955,11 @@ impl Render for Sidebar {
         {
             let mut groups: Vec<(String, String, Vec<Thread>, Vec<Thread>)> = Vec::new();
             for t in live {
-                let pid = t.project_id.clone().unwrap_or_default();
+                let pid = if look::is_study(&t, &study_dir) {
+                    STUDY.to_string()
+                } else {
+                    t.project_id.clone().unwrap_or_default()
+                };
                 let ix = groups.iter().position(|g| g.0 == pid).unwrap_or_else(|| {
                     groups.push((pid, project_of(&t), vec![], vec![]));
                     groups.len() - 1
@@ -2406,14 +2984,16 @@ impl Render for Sidebar {
                         .max()
                         .unwrap_or(0)
                 };
-                attention(b)
-                    .cmp(&attention(a))
+                // Study's sessions go after every project: they're in none.
+                (a.0 == STUDY)
+                    .cmp(&(b.0 == STUDY))
+                    .then(attention(b).cmp(&attention(a)))
                     .then(unseen(b).cmp(&unseen(a)))
                     .then(newest(b).cmp(&newest(a)))
                     .then_with(|| a.1.cmp(&b.1))
             });
-            // What's live (working, or waiting on the user) leaves its project for the Active
-            // section on top; each project keeps its quiet threads under a plain heading.
+            // What's at work leaves its project for the Active section, as what needs the user
+            // does for Needs you; each project keeps its quiet threads under a plain heading.
             let mut active: Vec<Thread> = vec![];
             for (pid, name, cards, mut items) in groups {
                 active.extend(cards);
@@ -2468,6 +3048,7 @@ impl Render for Sidebar {
                         folded,
                         open,
                         more,
+                        total: items.len(),
                     },
                 );
                 fresh.push(LiveGroup { pid, rows, footer });
@@ -2482,6 +3063,7 @@ impl Render for Sidebar {
                     ACTIVE.to_string(),
                     GroupInfo {
                         name: "Active".into(),
+                        total: active.len(),
                         ..GroupInfo::default()
                     },
                 );
@@ -2494,6 +3076,40 @@ impl Render for Sidebar {
                     },
                 );
                 by_id.extend(active.into_iter().map(|t| (t.id.clone(), t)));
+            }
+            if !needing.is_empty() {
+                let open = self.open_live_projects.contains(NEEDS);
+                let news = needing.iter().filter(|(_, w)| !w.calls_for_you()).count();
+                let rows: Vec<String> = needing
+                    .iter()
+                    .filter(|(_, w)| w.calls_for_you())
+                    .chain(
+                        needing
+                            .iter()
+                            .filter(|(_, w)| !w.calls_for_you())
+                            .take(if open { news } else { NEWS_SHOWN }),
+                    )
+                    .map(|(t, _)| t.id.clone())
+                    .collect();
+                info.insert(
+                    NEEDS.to_string(),
+                    GroupInfo {
+                        name: "Needs you".into(),
+                        open,
+                        more: needing.len() - rows.len(),
+                        total: needing.len(),
+                        ..GroupInfo::default()
+                    },
+                );
+                fresh.insert(
+                    0,
+                    LiveGroup {
+                        pid: NEEDS.to_string(),
+                        footer: news > NEWS_SHOWN,
+                        rows,
+                    },
+                );
+                by_id.extend(needing.into_iter().map(|(t, _)| (t.id.clone(), t)));
             }
         }
         // While the pointer is over the sidebar its rows hold their places: a thread answered,
@@ -2530,6 +3146,7 @@ impl Render for Sidebar {
         };
         self.shown = Some(layout.clone());
         let live_shown = !layout.is_empty();
+        let needs_shown = layout.first().is_some_and(|g| g.pid == NEEDS);
         // Live rows whose thread went from every list drawn (archived, deleted; settled with the
         // history folded) fade where they were.
         if animate && let Some(before) = before {
@@ -2586,9 +3203,33 @@ impl Render for Sidebar {
         let mut last_rows: HashMap<String, (Thread, String, bool)> = HashMap::new();
         // Each project's header and rows move as one (`flip_stack`).
         let mut live_groups: Vec<(SharedString, AnyElement)> = vec![];
+        let projects_shown = layout
+            .iter()
+            .filter(|g| ![ACTIVE, NEEDS, STUDY].contains(&g.pid.as_str()))
+            .count();
+        let mut first_project = true;
         for g in layout {
             let pid = g.pid;
-            let mut group = v_flex().w_full();
+            let is_project = ![ACTIVE, NEEDS, STUDY].contains(&pid.as_str());
+            // Projects are things under one label; what's above them is listed by what it's for.
+            if is_project && first_project {
+                live_groups.push((
+                    PROJECTS_LABEL.into(),
+                    Self::label("Projects", Some(projects_shown), cx).into_any_element(),
+                ));
+            }
+            // What needs the user is one amber block; each project leaves a little air under it,
+            // the same wherever it sorts, so its rows never move against it as groups trade places.
+            let mut group = if pid == NEEDS {
+                look::needs_tray(cx)
+            } else {
+                v_flex()
+                    .w_full()
+                    .when(is_project, |el| el.pb(px(look::GROUP_GAP)))
+            };
+            if is_project {
+                first_project = false;
+            }
             let i = info.remove(&pid).unwrap_or_else(|| GroupInfo {
                 name: names
                     .get(&pid)
@@ -2596,14 +3237,30 @@ impl Render for Sidebar {
                     .unwrap_or_else(|| "No project".into()),
                 ..GroupInfo::default()
             });
+            // Listed by what they're for, not by project: rows say which project they're from.
+            let on_top = pid == ACTIVE || pid == NEEDS;
+            let tray = pid == NEEDS;
             let head = if pid == ACTIVE {
-                Self::label("Active", cx).into_any_element()
+                Self::label("Active", Some(i.total), cx).into_any_element()
+            } else if pid == NEEDS {
+                div()
+                    .id("needs-you")
+                    .test_support()
+                    .child(look::needs_header(i.total, cx))
+                    .into_any_element()
+            } else if pid == STUDY {
+                // Study's sessions are no project's: a section of their own, its cap on each row.
+                div()
+                    .id("study-sessions")
+                    .test_support()
+                    .child(Self::label("Study", Some(i.total), cx))
+                    .into_any_element()
             } else {
                 self.group_header(
                     "live",
                     &pid,
                     i.name.clone(),
-                    None,
+                    Some(i.total),
                     Some(i.folded),
                     &paths,
                     cx,
@@ -2635,8 +3292,8 @@ impl Render for Sidebar {
                         let sel = selected.as_deref() == Some(id.as_str());
                         let card = attention(t);
                         last_rows.insert(id.clone(), (t.clone(), pid.clone(), card));
-                        let row = if card || pid == ACTIVE {
-                            self.card(t, &project_of(t), pid == ACTIVE, sel, cx)
+                        let row = if card || on_top {
+                            self.card(t, &project_of(t), on_top, sel, tray, None, cx)
                         } else {
                             self.live_line(t, sel, cx)
                         };
@@ -2651,12 +3308,14 @@ impl Render for Sidebar {
                     Err(gx) => {
                         let ghost = &self.ghosts[gx];
                         let left = ghost.left.frame(now, window).clamp(0., 1.);
-                        let row = if ghost.card || pid == ACTIVE {
+                        let row = if ghost.card || on_top {
                             self.card(
                                 &ghost.thread,
                                 &project_of(&ghost.thread),
-                                pid == ACTIVE,
+                                on_top,
                                 false,
+                                tray,
+                                None,
                                 cx,
                             )
                         } else {
@@ -2699,12 +3358,12 @@ impl Render for Sidebar {
                     div()
                         .id(SharedString::from(id))
                         .test_support()
-                        .mx_2()
-                        .pl(px(ROW_INSET))
-                        .h(px(26.))
+                        .when(!tray, |el| el.mx_2())
+                        .pl(px(TEXT_INSET))
+                        .h(px(24.))
                         .flex()
                         .items_center()
-                        .text_xs()
+                        .text_size(px(look::META_SIZE))
                         .text_color(theme.muted_foreground)
                         .cursor_pointer()
                         .hover(|s| s.text_color(theme.foreground))
@@ -2721,10 +3380,31 @@ impl Render for Sidebar {
             }
             live_groups.push((format!("live-g-{pid}").into(), group.into_any_element()));
         }
-        list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
+        // "Needs you" goes over Pinned; everything else under it.
+        let rest = live_groups.split_off(usize::from(needs_shown));
+        list = list
+            .child(crate::motion::flip_stack(&flip, live_groups, now))
+            .child(named)
+            .child(crate::motion::flip_stack(&flip, rest, now));
+        self.last_rows = last_rows;
+        // Nothing live: the inbox says so, quietly, on the titles' line (before the devices, whose
+        // threads live elsewhere).
+        if !live_shown && !searching && !named_sections_busy {
+            list = list.child(look::empty_note(
+                "inbox-zero",
+                if importing {
+                    "Finding your threads…"
+                } else {
+                    "Inbox zero"
+                },
+                "Running agents and anything that needs you will show up here.",
+                cx,
+            ));
+        }
         // Threads living on other machines, under each machine's name (`machines`): its quiet
         // ones, what's live there being in Active. One that can't be reached says since when,
-        // and why when Trek can tell.
+        // and why when Trek can tell. Then the phones paired with this one. Both are Devices:
+        // places, not projects, so a device's glyph stands where a project's badge would.
         let machines: Vec<(String, String, bool, Option<String>, Vec<Thread>)> = {
             let ws = self.workspace.read(cx);
             let this = crate::words::words().this_computer;
@@ -2743,6 +3423,35 @@ impl Render for Sidebar {
                 .filter(|(.., threads)| !threads.is_empty())
                 .collect()
         };
+        // The iPhone app's pairings (a machine paired the other way round is a machine, not a
+        // phone): connected now, or when each was last seen. Out of a search, which they have no
+        // threads for.
+        let phones: Vec<(String, String, bool, String)> = if searching {
+            vec![]
+        } else {
+            self.workspace
+                .read(cx)
+                .remote
+                .as_ref()
+                .map(|r| {
+                    r.devices
+                        .iter()
+                        .filter(|d| d.platform.as_deref().is_none_or(|p| p == "ios"))
+                        .map(|d| {
+                            let on = r.connected.contains(&d.device_id);
+                            (
+                                d.device_id.clone(),
+                                d.name.clone(),
+                                on,
+                                look::phone_seen(on, d.last_seen_at, d.paired_at),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut devices = v_flex().w_full();
+        let mut any_device = false;
         for (host, name, reachable, offline, mut threads) in machines {
             if !searching {
                 threads.retain(|t| !attention(t));
@@ -2750,88 +3459,186 @@ impl Render for Sidebar {
             if threads.is_empty() && offline.is_none() {
                 continue;
             }
+            // Like a project's: what's unread and the open thread, then the newest up to three;
+            // the rest behind "Show more".
+            threads.sort_by(|a, b| {
+                b.is_unseen()
+                    .cmp(&a.is_unseen())
+                    .then(b.updated_at.cmp(&a.updated_at))
+            });
+            let total = threads.len();
+            let more_key = format!("\u{0}machine:{host}");
+            let open = searching || self.open_live_projects.contains(&more_key);
+            if !open {
+                let mut kept = 0;
+                threads.retain(|t| {
+                    let keep = t.is_unseen()
+                        || selected.as_deref() == Some(t.id.as_str())
+                        || kept < MACHINE_SHOWN;
+                    kept += keep as usize;
+                    keep
+                });
+            }
+            let more = total - threads.len();
             let header = h_flex()
                 .id(SharedString::from(format!("machine-head-{host}")))
                 .test_support()
                 .mx_2()
-                .mt_2()
-                .px_3()
-                .h(px(28.))
-                .gap_2()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(crate::composer::reach_dot(reachable, cx))
+                .pl(px(ROW_INSET))
+                .pr(px(10.))
+                .h(px(look::LINE_H))
+                .gap(px(look::MARK_GAP))
+                .child(look::device_glyph(false, reachable, cx))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .font_medium()
+                        .text_size(px(look::TITLE_SIZE))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if reachable {
+                            theme.foreground
+                        } else {
+                            theme.foreground.opacity(0.6)
+                        })
                         .child(name),
                 )
-                .when(!threads.is_empty(), |el| {
-                    el.child(threads.len().to_string())
+                .when(total > 0, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(look::LABEL_SIZE))
+                            .text_color(theme.muted_foreground.opacity(0.8))
+                            .child(total.to_string()),
+                    )
                 });
-            let mut group = v_flex().w_full().child(header);
+            let mut group = v_flex()
+                .w_full()
+                .when(any_device, |el| el.pt(px(look::GROUP_GAP)))
+                .child(header);
+            any_device = true;
             if let Some(note) = offline {
                 group = group.child(
                     div()
                         .id(SharedString::from(format!("machine-offline-{host}")))
                         .test_support()
                         .mx_2()
-                        .px_3()
+                        .pl(px(TEXT_INSET))
+                        .pr_3()
                         .pb_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground.opacity(0.8))
+                        .text_size(px(look::META_SIZE))
+                        .text_color(theme.muted_foreground.opacity(0.85))
                         .child(note),
                 );
             }
             for t in &threads {
                 let sel = selected.as_deref() == Some(t.id.as_str());
                 let row = if attention(t) {
-                    self.card(t, "", false, sel, cx)
+                    self.card(t, "", false, sel, false, None, cx)
                 } else {
                     self.live_line(t, sel, cx)
                 };
                 group = group.child(row);
             }
-            list = list.child(group);
+            if !searching && (more > 0 || open && total > MACHINE_SHOWN) {
+                let (id, label) = if open {
+                    (format!("machine-less-{host}"), "Show less".to_string())
+                } else {
+                    (format!("machine-more-{host}"), format!("Show {more} more"))
+                };
+                group = group.child(
+                    div()
+                        .id(SharedString::from(id))
+                        .test_support()
+                        .mx_2()
+                        .pl(px(TEXT_INSET))
+                        .h(px(24.))
+                        .flex()
+                        .items_center()
+                        .text_size(px(look::META_SIZE))
+                        .text_color(theme.muted_foreground)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.open_live_projects.remove(&more_key) {
+                                this.open_live_projects.insert(more_key.clone());
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+            devices = devices.child(group);
         }
-        self.last_rows = last_rows;
-        if !live_shown && !searching && !named_sections_busy {
-            list = list.child(
-                v_flex()
-                    .mx_4()
-                    .my_2()
-                    .px_3()
-                    .py_3()
-                    .gap_1()
-                    .rounded(px(fluent::surface(10.)))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
+        for (id, name, connected, seen) in phones {
+            devices = devices.child(
+                h_flex()
+                    .id(SharedString::from(format!("phone-{id}")))
+                    .test_support()
+                    .mx_2()
+                    .when(any_device, |el| el.mt(px(look::GROUP_GAP)))
+                    .pl(px(ROW_INSET))
+                    .pr(px(10.))
+                    .h(px(look::LINE_H))
+                    .gap(px(look::MARK_GAP))
+                    .rounded(px(fluent::control(look::ROW_RADIUS)))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.list_hover))
+                    .child(look::device_glyph(true, connected, cx))
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(theme.foreground.opacity(0.8))
-                            .child(if importing {
-                                "Finding your threads…"
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(look::TITLE_SIZE))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if connected {
+                                theme.foreground
                             } else {
-                                "Inbox zero"
-                            }),
+                                theme.foreground.opacity(0.6)
+                            })
+                            .child(name),
                     )
-                    .child("Running agents and anything that needs you will show up here."),
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(look::LABEL_SIZE))
+                            .text_color(theme.muted_foreground)
+                            .child(seen),
+                    )
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Phone & Machines settings")
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace.update(cx, |ws, cx| {
+                            ws.navigate(Route::Settings(SettingsPage::Mobile), cx)
+                        })
+                    })),
             );
+            any_device = true;
+        }
+        if any_device {
+            list = list
+                .child(
+                    div()
+                        .id("devices")
+                        .test_support()
+                        .child(Self::label("Devices", None, cx)),
+                )
+                .child(devices);
         }
 
-        // Settled history, grouped by project (Codex style).
+        // Settled history, grouped by project (Codex style): a section that folds, at the end.
         let mut history = v_flex();
         if settled_count > 0 {
             let mut groups: Vec<(String, String, Vec<Thread>)> = Vec::new();
             for t in settled {
-                let pid = t.project_id.clone().unwrap_or_default();
+                let pid = if look::is_study(&t, &study_dir) {
+                    STUDY.to_string()
+                } else {
+                    t.project_id.clone().unwrap_or_default()
+                };
                 match groups.iter_mut().find(|g| g.0 == pid) {
                     Some(g) => g.2.push(t),
                     None => {
@@ -2843,32 +3650,16 @@ impl Render for Sidebar {
             history = history.child(crate::motion::flip_row(
                 &flip,
                 "settled-toggle",
-                h_flex()
+                div()
                     .id("settled-toggle")
-                    .mx_2()
-                    .px_3()
-                    .h(px(30.))
-                    .gap_2()
-                    .rounded(px(fluent::control(8.)))
+                    .test_support()
                     .cursor_pointer()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .hover(|s| s.text_color(theme.foreground))
-                    .child(
-                        Icon::new(crate::assets::Lucide::Archive)
-                            .xsmall()
-                            .text_color(theme.muted_foreground),
-                    )
-                    .child(format!("{settled_count} settled"))
-                    .child(div().flex_1())
-                    .child(
-                        Icon::new(if settled_open {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .xsmall(),
-                    )
+                    .child(look::section_label(
+                        "Settled",
+                        Some(settled_count),
+                        Some(!settled_open),
+                        cx,
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workspace.update(cx, |ws, cx| {
                             ws.settled_open = !ws.settled_open;
@@ -2889,21 +3680,25 @@ impl Render for Sidebar {
                     };
                     let pid2 = pid.clone();
                     let folded = self.collapsed_settled.contains(&pid) && !searching;
-                    let mut group = v_flex().w_full().child(crate::motion::flip_row(
-                        &flip,
-                        format!("settled-h-{pid}"),
-                        self.group_header(
-                            "settled",
-                            &pid,
-                            name.clone(),
-                            None,
-                            Some(folded),
-                            &paths,
-                            cx,
-                        ),
-                        now,
-                        window,
-                    ));
+                    let mut group =
+                        v_flex()
+                            .w_full()
+                            .pb(px(look::GROUP_GAP))
+                            .child(crate::motion::flip_row(
+                                &flip,
+                                format!("settled-h-{pid}"),
+                                self.group_header(
+                                    "settled",
+                                    &pid,
+                                    name.clone(),
+                                    Some(items.len()),
+                                    Some(folded),
+                                    &paths,
+                                    cx,
+                                ),
+                                now,
+                                window,
+                            ));
                     for t in items.iter().take(if folded { 0 } else { shown }) {
                         group = group.child(crate::motion::flip_row(
                             &flip,
@@ -2918,11 +3713,11 @@ impl Render for Sidebar {
                             div()
                                 .id(SharedString::from(format!("more-{pid}")))
                                 .mx_2()
-                                .pl(px(ROW_INSET))
-                                .h(px(26.))
+                                .pl(px(TEXT_INSET))
+                                .h(px(24.))
                                 .flex()
                                 .items_center()
-                                .text_xs()
+                                .text_size(px(look::META_SIZE))
                                 .text_color(theme.muted_foreground)
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.foreground))
@@ -2940,6 +3735,16 @@ impl Render for Sidebar {
                 }
                 history = history.child(crate::motion::flip_stack(&flip, settled_groups, now));
             }
+        }
+        // A search that finds nothing says so, in place of an empty list.
+        if searching && !live_shown && !named_sections_busy && settled_count == 0 && !any_device {
+            let q = self.workspace.read(cx).search.trim().to_string();
+            list = list.child(look::empty_note(
+                "search-empty",
+                &format!("Nothing matches “{q}”"),
+                "Titles and messages are both searched.",
+                cx,
+            ));
         }
 
         self.flip.borrow_mut().end();

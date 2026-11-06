@@ -256,7 +256,8 @@ impl Workspace {
         let title = text("title").map(|t| t.chars().take(80).collect::<String>());
         let agent = self.resolve_agent(text("agent"), &parent.agent)?;
         let (model, effort) = self.pick_model(&agent, &parent, text("model"), text("effort"))?;
-        if let Some(why) = self.at_limit(&agent, model.as_deref()) {
+        let account = self.account_after(&parent, &agent);
+        if let Some(why) = self.at_limit(&agent, account.as_deref(), model.as_deref()) {
             return Err(why);
         }
         // Another project Trek knows, by name or folder; else this thread's (its main checkout,
@@ -287,6 +288,7 @@ impl Workspace {
             plan: self.live.get(caller).is_some_and(|l| l.plan),
             fast: false,
             worktree,
+            account,
         };
         let by = caller.to_string();
         let named = title.clone();
@@ -420,7 +422,8 @@ impl Workspace {
         }
         let agent = self.resolve_agent(text("agent"), &parent.agent)?;
         let (model, effort) = self.pick_model(&agent, &parent, text("model"), text("effort"))?;
-        if let Some(why) = self.at_limit(&agent, model.as_deref()) {
+        let account = self.account_after(&parent, &agent);
+        if let Some(why) = self.at_limit(&agent, account.as_deref(), model.as_deref()) {
             return Err(why);
         }
         // Its project's, as a fork's is: it works in the same folder, worktree and all.
@@ -438,6 +441,7 @@ impl Workspace {
         t.title = text("title")
             .map(|t| t.chars().take(80).collect())
             .unwrap_or_else(|| parent.title.clone());
+        t.account = account;
         t.cwd = parent.cwd.clone();
         t.worktree = parent.worktree.clone();
         // The thread that started this one follows its continuation too.
@@ -497,7 +501,9 @@ impl Workspace {
                     self.mutate_thread(caller, cx, |t| t.last_seen_at = now_ms().max(t.updated_at))
                 }
             }
-            self.open_thread_here(&id, cx);
+            if !self.split_hand_off(caller, &id, cx) {
+                self.open_thread_here(&id, cx);
+            }
         } else {
             cx.emit(WorkspaceEvent::Toast {
                 message: format!("Handed off to a new thread · {title}"),

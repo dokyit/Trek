@@ -100,7 +100,7 @@ fn the_updates_page_offers_to_move_trek_and_a_click_does_it() {
         let _windows = trek_app::words::pretend(true);
         let trek = open(cx);
         guarded(&trek, cx, fakes(copies, starts));
-        let view = trek.read(cx, |ws, _| ws.update_view());
+        let view = trek.read(cx, |ws, app| ws.update_view(app));
         assert_eq!(view.action, Some(UpdateAction::Move));
         assert!(
             view.line
@@ -145,7 +145,7 @@ fn a_move_that_cant_copy_says_why_and_starts_nothing() {
         assert!(started().is_empty());
         assert!(is_moving(&trek, cx, |m| matches!(m, Moving::No)));
         assert_eq!(
-            trek.read(cx, |ws, _| ws.update_view().action),
+            trek.read(cx, |ws, app| ws.update_view(app).action),
             Some(UpdateAction::Move),
             "and it can be tried again"
         );
@@ -187,13 +187,13 @@ fn the_page_says_when_trek_is_copying_and_when_it_waits_for_agents() {
         let trek = open(cx);
         guarded(&trek, cx, fakes(copies, starts));
         trek.update(cx, |ws, _| ws.moving = Moving::Copying);
-        let view = trek.read(cx, |ws, _| ws.update_view());
+        let view = trek.read(cx, |ws, app| ws.update_view(app));
         assert!(
             view.line.starts_with("Copying Trek to ") && view.busy && view.action.is_none(),
             "{view:?}"
         );
         trek.update(cx, |ws, _| ws.moving = Moving::Waiting(prepared()));
-        let view = trek.read(cx, |ws, _| ws.update_view());
+        let view = trek.read(cx, |ws, app| ws.update_view(app));
         assert_eq!(
             view.line,
             "Trek moves to new-trek when your agents finish their turns. Moving now stops them."
@@ -527,7 +527,7 @@ fn the_page_offers_check_now_beside_the_move_when_the_block_may_lift() {
             trek.visible(cx, "update-action") && trek.visible(cx, "update-secondary"),
             "both buttons"
         );
-        let view = trek.read(cx, |ws, _| ws.update_view());
+        let view = trek.read(cx, |ws, app| ws.update_view(app));
         assert_eq!(
             (view.action, view.secondary),
             (Some(UpdateAction::Move), Some(UpdateAction::Check))

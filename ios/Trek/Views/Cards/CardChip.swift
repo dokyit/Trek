@@ -50,6 +50,7 @@ struct CardChip: View {
         .lineLimit(1)
         .padding(.horizontal, 12)
         .frame(minHeight: 32)
+        .barText()
         .background(CardInk.chipFill, in: Capsule())
         .overlay(Capsule().strokeBorder(CardInk.chipBorder, lineWidth: 1))
         .shadow(color: .black.opacity(0.05), radius: 1, y: 1)
