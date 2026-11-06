@@ -244,8 +244,9 @@ fn the_system_theme_is_night_in_the_dark_and_paper_in_the_light() {
 }
 
 /// On Windows, a window drawn with glass on swaps the theme's quiet text for glass's, its chrome
-/// keeps the measured floor at the Frost slider's Clear end, its panes are solid, and turning glass
-/// off gives the theme's own quiet text back. (The Mac's glass changes none of these.)
+/// keeps only a breath of the theme's colour at the Frost slider's Clear end, its panes are solid,
+/// and turning glass off gives the theme's own quiet text back. (The Mac's glass changes none of
+/// these.)
 #[test]
 fn windows_glass_swaps_the_quiet_text_and_gives_it_back() {
     use gpui_kit::component::ActiveTheme as _;
@@ -258,7 +259,7 @@ fn windows_glass_swaps_the_quiet_text_and_gives_it_back() {
             cx.notify();
         });
         trek.render(cx);
-        let (quiet, dark, chrome, pane, bg) = cx.update(|cx| {
+        let (quiet, dark, chrome, pane, bg, side) = cx.update(|cx| {
             let t = cx.theme();
             (
                 t.muted_foreground,
@@ -266,12 +267,18 @@ fn windows_glass_swaps_the_quiet_text_and_gives_it_back() {
                 trek_app::ui::chrome_bg(Some(0.2), cx),
                 trek_app::ui::panel_bg(Some(0.2), cx),
                 t.background,
+                t.sidebar,
             )
         });
         if cfg!(windows) {
             assert_eq!(quiet, trek_app::ui::glass_quiet_text(dark));
-            let linear = trek_app::winlook::linear_now();
-            assert!((chrome.a - trek_app::ui::acrylic_chrome_floor(dark, linear)).abs() < 1e-3);
+            let clear = trek_app::ui::SEE_THROUGH_CLEAR;
+            let clear = if trek_app::winlook::linear_now() {
+                trek_app::ui::in_linear_light(clear, side, dark)
+            } else {
+                clear
+            };
+            assert!((chrome.a - clear).abs() < 1e-3);
             assert_eq!(pane, bg, "a pane is solid on Windows' glass");
         } else {
             assert_eq!(
@@ -295,7 +302,7 @@ fn without_glass_to_show_the_window_stays_opaque() {
             s.appearance.glass = true;
             s.appearance.glass_tint = 0.6;
         });
-        // Windows 11 with Transparency effects on: Acrylic, at the tint.
+        // Windows 11 with Transparency effects on: glass, at the tint.
         assert_eq!(trek.read(cx, |ws, _| ws.glass_unless(false)), Some(0.6));
         // Windows 10, or 11 with the switch off (`winlook::glass_available` says no): opaque.
         assert!(
