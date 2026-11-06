@@ -136,6 +136,15 @@ pub(crate) fn round_half_toward_zero_f64(value: f64) -> f64 {
     (value.abs() - 0.5).ceil().copysign(value)
 }
 
+/// Rounds to the nearest integer with 0.5 ties toward negative infinity. For positions: shifting a
+/// value by a whole number shifts its rounding by the same (`round_half_toward_zero` does not, as
+/// ties on either side of zero go opposite ways), so an edge lands on the same device pixel
+/// whichever origin it was measured from.
+#[inline]
+pub(crate) fn round_half_down(value: f32) -> f32 {
+    (value - 0.5).ceil()
+}
+
 #[inline]
 pub(crate) fn round_to_device_pixel(logical: f32, scale_factor: f32) -> f32 {
     round_half_toward_zero(logical * scale_factor)
@@ -186,6 +195,32 @@ mod tests {
         assert_eq!(round_half_toward_zero(0.0), 0.0);
         assert_eq!(round_half_toward_zero(3.0), 3.0);
         assert_eq!(round_half_toward_zero(-3.0), -3.0);
+    }
+
+    #[test]
+    fn test_round_half_down() {
+        // Midpoint ties go down, on both sides of zero.
+        assert_eq!(round_half_down(0.5), 0.0);
+        assert_eq!(round_half_down(1.5), 1.0);
+        assert_eq!(round_half_down(-0.5), -1.0);
+        assert_eq!(round_half_down(-1.5), -2.0);
+
+        // Otherwise the nearest integer, as `round_half_toward_zero` gives it.
+        for value in [1.5001, 1.4999, -1.5001, -1.4999, 0.0, 3.0, -3.0, 0.2, -0.2] {
+            assert_eq!(round_half_down(value), round_half_toward_zero(value), "{value}");
+        }
+
+        // Shifted by a whole number, the result shifts by the same: a half pixel above an origin
+        // and the same half pixel measured from further up land together.
+        for value in [-42.5, -0.5, 0.5, 7.5, -3.25, 2.75] {
+            for shift in [-791.0, -1.0, 1.0, 791.0] {
+                assert_eq!(
+                    round_half_down(value + shift),
+                    round_half_down(value) + shift,
+                    "{value} shifted by {shift}"
+                );
+            }
+        }
     }
 
     #[test]

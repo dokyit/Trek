@@ -5070,11 +5070,17 @@ fn changes_chip(
                 .size(px(12.))
                 .text_color(theme.muted_foreground),
         )
-        .child(div().text_color(theme.foreground).child(if files == 1 {
-            "1 file".to_string()
-        } else {
-            format!("{files} files")
-        }))
+        .child(
+            div()
+                .id("changes-chip-files")
+                .test_support()
+                .text_color(theme.foreground)
+                .child(if files == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{files} files")
+                }),
+        )
         .child(div().text_color(green).child(format!("+{added}")))
         .child(div().text_color(red).child(format!("−{removed}")))
         .child(h_flex().gap(px(2.)).children((0..5).map(|i| {

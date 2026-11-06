@@ -2,7 +2,7 @@ use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
     Style, Window, size,
     util::{
-        ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
+        ceil_to_device_pixel, round_half_down, round_stroke_to_device_pixel,
         round_to_device_pixel,
     },
 };
@@ -284,9 +284,11 @@ impl TaffyLayoutEngine {
     // by `scale_factor`, so that snapping targets physical pixels. Bounds
     // are divided by `scale_factor` before being returned to GPUI.
     //
-    // Midpoints are rounded toward zero. This is a stylistic choice: a
-    // 1-logical-pixel line at 150% scale should render as 1 dp rather than
-    // 2 dp.
+    // Midpoints of lengths are rounded toward zero. This is a stylistic
+    // choice: a 1-logical-pixel line at 150% scale should render as 1 dp
+    // rather than 2 dp. Midpoints of edges, which are positions, round down
+    // instead, so that an edge's pixel doesn't depend on the origin it was
+    // measured from (see `layout_bounds`).
     //
     // Pixel snapping is done in two phases:
     //
@@ -368,9 +370,14 @@ impl TaffyLayoutEngine {
             .insert(id, absolute_outer_origin);
 
         let absolute_far = absolute_outer_origin + Point::from(Size::from(layout_size));
+        // Edges round half down, not toward zero: a tree laid out as a root of its own (a cached
+        // view, say) measures from its own origin, so an edge above or left of that origin is
+        // negative there and positive in the window's tree, and toward zero would round the same
+        // half pixel opposite ways in the two (a centred label in a chip floating over the view's
+        // top hopped a pixel each time the view went in and out of its cache).
         let snapped_bounds = Bounds::from_corners(
-            absolute_outer_origin.map(round_half_toward_zero),
-            absolute_far.map(round_half_toward_zero),
+            absolute_outer_origin.map(round_half_down),
+            absolute_far.map(round_half_down),
         );
 
         let bounds = (snapped_bounds / scale_factor).map(Pixels);
