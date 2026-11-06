@@ -467,7 +467,7 @@ fn commands_act_on_the_focused_pane() {
         assert_eq!(effort(&trek, cx, &b), trek_core::Effort::Low);
         assert_ne!(effort(&trek, cx, &a), trek_core::Effort::Low);
         // ⌘E settles the focused pane's thread, ⌘. and its neighbours go by the same route.
-        trek.press(cx, "cmd-e");
+        trek.press(cx, "secondary-e");
         assert!(trek.read(cx, |ws, _| ws.thread(&b).unwrap().settled_at.is_some()));
         assert!(trek.read(cx, |ws, _| ws.thread(&a).unwrap().settled_at.is_none()));
         // A pane sends to its own thread whichever has the focus.
@@ -479,7 +479,7 @@ fn commands_act_on_the_focused_pane() {
         assert!(!format!("{:?}", trek.items(cx, &b)).contains("to the left"));
         assert_eq!(trek.thread_id(cx), b);
         // ⌘W closes the pane, not its tab.
-        trek.press(cx, "cmd-w");
+        trek.press(cx, "secondary-w");
         assert!(trek.read(cx, |ws, _| ws.split.is_none()));
         assert_eq!(trek.thread_id(cx), a);
         assert!(trek.read(cx, |ws, _| ws.tabs.contains(&b)));
@@ -494,7 +494,7 @@ fn the_shortcut_picks_a_thread_then_crosses_the_split() {
         let b = thread(&trek, cx, "second thread").await;
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a.clone()), cx));
         trek.render(cx);
-        trek.press(cx, "cmd-\\");
+        trek.press(cx, "secondary-\\");
         let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
         assert!(cx.read(|cx| palette.read(cx).open && palette.read(cx).beside_only));
         let rows = cx.read(|cx| palette.read(cx).entries(cx));
@@ -505,12 +505,12 @@ fn the_shortcut_picks_a_thread_then_crosses_the_split() {
         assert!(cx.read(|cx| !palette.read(cx).open));
         assert_eq!(focused(&trek, cx), Pane::Right);
         assert_eq!(trek.thread_id(cx), b);
-        trek.press(cx, "cmd-\\");
+        trek.press(cx, "secondary-\\");
         assert_eq!(trek.thread_id(cx), a);
         // The keys came with it.
         trek.type_text(cx, "typed");
         assert_eq!(left_text(&trek, cx), "typed");
-        trek.press(cx, "cmd-\\");
+        trek.press(cx, "secondary-\\");
         assert_eq!(trek.thread_id(cx), b);
     });
 }
@@ -624,7 +624,7 @@ fn no_room_for_two_says_why_and_a_narrowed_window_shows_the_focused_pane() {
         assert!(!trek.visible(cx, "split-pane-left"));
         assert!(trek.read(cx, |ws, _| !ws.on_screen(&a) && ws.on_screen(&b)));
         // ⌘\ reaches the other one.
-        trek.press(cx, "cmd-\\");
+        trek.press(cx, "secondary-\\");
         trek.render(cx);
         assert_eq!(trek.thread_id(cx), a);
         assert!(trek.visible(cx, "split-pane-left"));
@@ -775,7 +775,7 @@ fn the_picker_lists_a_threads_sub_agents_first_and_doesnt_stick() {
         });
         trek.render(cx);
         let palette = cx.read(|cx| trek.root.read(cx).palette.clone());
-        trek.press(cx, "cmd-\\");
+        trek.press(cx, "secondary-\\");
         let rows: Vec<String> = cx.read(|cx| {
             palette
                 .read(cx)

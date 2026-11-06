@@ -140,15 +140,14 @@ impl Workspace {
                 this.worktree_apps.read_owned(&store);
                 let message = match result {
                     Ok(done) => {
-                        let brought: Vec<String> = done
-                            .projects
-                            .iter()
-                            .map(|p| p.display().to_string())
-                            .collect();
+                        // As paths, not text: Windows spells one folder with either slash.
                         let before = this.settings.hidden_projects.len();
-                        this.settings
-                            .hidden_projects
-                            .retain(|p| !brought.contains(p));
+                        this.settings.hidden_projects.retain(|p| {
+                            !done
+                                .projects
+                                .iter()
+                                .any(|b| std::path::Path::new(p) == b.as_path())
+                        });
                         if this.settings.hidden_projects.len() != before {
                             this.save_settings(cx);
                         }

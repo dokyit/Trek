@@ -69,10 +69,15 @@ fn typing_while_a_card_is_up_declines_it_and_sends_the_words() {
         assert!(user_said(&trek, cx, &id, "use the staging script"));
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert_eq!(last_tool_status(&trek, cx, &id), Some(ToolStatus::Failed));
-        // The mock says no to the command, then takes the words as its next message.
+        // The mock says no to the command, then takes the words: as its next message, or folded
+        // into the declined turn when they reach it before that turn has ended (a race CI wins).
         let answers = trek.answers(cx, &id);
         assert!(answers.contains("I won't run it"), "{answers}");
-        assert!(answers.contains("How the app starts"), "{answers}");
+        assert!(
+            answers.contains("How the app starts")
+                || answers.contains("Noted — use the staging script"),
+            "{answers}"
+        );
         assert_eq!(trek.read(cx, |ws, _| ws.reply_note(&id)), None);
     });
 }

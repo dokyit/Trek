@@ -552,9 +552,9 @@ fn a_phone_cant_download_a_secrets_file_an_answer_links() {
             .join(&id)
             .join("GITHUB_TOKEN");
         assert!(file.is_file(), "{file:?}");
-        let link = trek.project.join("token.png");
+        // A link to it in the project, where links can be made without asking.
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&file, &link).unwrap();
+        std::os::unix::fs::symlink(&file, trek.project.join("token.png")).unwrap();
         trek.update(cx, |ws, _| {
             let live = ws.live.get_mut(&id).unwrap();
             live.items.push(Item::Assistant {

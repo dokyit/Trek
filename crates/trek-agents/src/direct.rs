@@ -7907,7 +7907,6 @@ mod tests {
         )
     }
 
-    #[cfg(unix)] // used by the continuation tests, which are unix-only
     /// `response`, reporting `prompt` tokens in and 5 out.
     fn using(prompt: u64, (status, body): (u16, String)) -> (u16, String) {
         let usage = json!({ "prompt_tokens": prompt, "completion_tokens": 5 });
@@ -7918,7 +7917,6 @@ mod tests {
         )
     }
 
-    #[cfg(unix)] // used by the continuation tests, which are unix-only
     fn tool_names(body: &Value) -> Vec<String> {
         body["tools"]
             .as_array()

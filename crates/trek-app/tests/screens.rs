@@ -192,9 +192,19 @@ fn onboarding_resumes_on_the_step_it_was_left_on() {
             !trek.visible(cx, "ob-key-groq"),
             "the rest wait behind More"
         );
+        // Tall enough for every provider's row (taller on Windows), as the body scrolls.
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(1600.)),
+        );
         trek.click(cx, "ob-keys-more");
         trek.render(cx);
         assert!(trek.visible(cx, "ob-key-groq"));
+        cx.simulate_window_resize(
+            trek.window,
+            gpui_kit::size(gpui_kit::px(1280.), gpui_kit::px(820.)),
+        );
+        trek.render(cx);
         // Back goes to the step before; the progress goes anywhere.
         click_after_settling(&trek, cx, "ob-back");
         assert!(trek.visible(cx, "ob-rescan"), "the agents step");
