@@ -1153,6 +1153,11 @@ pub struct UpdateCommand {
     /// without what makes it unfit to run unattended. `program` is then the binary it installs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin: Option<Builtin>,
+    /// Run in a terminal of its own (macOS's `script`), with a "y" waiting on its input: the
+    /// updater is a terminal program that quits with code 130 when there's no terminal to draw
+    /// in, and may ask before it installs (Devin's `devin update`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub terminal: bool,
     /// An older Trek's: why it left this command to the user to run. Read only so that
     /// `Snapshot::load` can drop such a command (this Trek runs it another way, as an
     /// administrator); never written.
@@ -1228,6 +1233,7 @@ impl UpdateCommand {
             display: None,
             elevated: false,
             builtin: None,
+            terminal: false,
             manual: None,
         }
     }
@@ -1322,6 +1328,9 @@ pub const LOST: i32 = 76;
 /// with its binary at `binary`: the package manager that installed it, or for its own
 /// installer, the CLI's own update command (or the install script again). A self-updating cask
 /// updates itself too. `None` when there's no way Trek can run.
+/// Agents whose own updater is a terminal program (`UpdateCommand::terminal`).
+const TERMINAL_UPDATERS: &[&str] = &["acp:devin"];
+
 pub fn update_command(
     h: &Harness,
     install: &Install,
@@ -1329,7 +1338,12 @@ pub fn update_command(
     auto_updates: bool,
     installed: Option<&str>,
 ) -> Option<UpdateCommand> {
-    let own = || h.self_update.map(|args| UpdateCommand::new(binary, args));
+    let own = || {
+        h.self_update.map(|args| UpdateCommand {
+            terminal: cfg!(target_os = "macos") && TERMINAL_UPDATERS.contains(&h.agent),
+            ..UpdateCommand::new(binary, args)
+        })
+    };
     // Installed as the package it moved from: that one goes first (its binary blocks the new
     // one's, and uninstalling it after a forced install takes the shared link with it), then the
     // new one comes in its place. Should that fail (offline, a registry error), the old one is
@@ -1898,15 +1912,48 @@ async fn run_command(
     program: &Path,
     path: &str,
 ) -> Result<(Option<i32>, String), Outcome> {
-    let mut run = crate::procs::async_command(program);
+    let terminal = cmd.terminal && cfg!(target_os = "macos");
+    let mut run = if terminal {
+        // `script -q /dev/null <program> <args>`: the program in a terminal of its own, which
+        // `script` exits with as the program does.
+        let mut run = crate::procs::async_command(Path::new("/usr/bin/script"));
+        run.args(["-q", "/dev/null"]).arg(program);
+        run
+    } else {
+        crate::procs::async_command(program)
+    };
     run.args(&cmd.args)
         .env("PATH", path)
         .envs(cmd.env.iter().map(|(k, v)| (k, v)))
         .env("NO_COLOR", "1")
-        .stdin(std::process::Stdio::null())
+        .stdin(if terminal {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    match tokio::time::timeout(UPDATE_TIMEOUT, run.output()).await {
-        Ok(Ok(out)) => Ok((out.status.code(), all_output(&out.stdout, &out.stderr))),
+    let output = async {
+        let mut child = run.spawn()?;
+        // The answer to "Install it? [y/N]", if it asks. The input stays open until the
+        // updater ends: closed, `script` would hand it the end of input before the answer.
+        let mut input = child.stdin.take();
+        if let Some(input) = input.as_mut() {
+            use tokio::io::AsyncWriteExt as _;
+            let _ = input.write_all(b"y\n").await;
+        }
+        let out = child.wait_with_output().await;
+        drop(input);
+        out
+    };
+    match tokio::time::timeout(UPDATE_TIMEOUT, output).await {
+        Ok(Ok(out)) => Ok((
+            out.status.code(),
+            all_output(&out.stdout, &out.stderr)
+                .replace('\r', "")
+                .replace("^D\u{8}\u{8}", ""),
+        )),
         Ok(Err(e)) => Err(Outcome::Failed {
             summary: format!("Couldn't run {}: {e}", cmd.shown()),
             output: String::new(),
@@ -4528,6 +4575,66 @@ mod tests {
         };
         assert!(e.starts_with("Couldn't copy the new version"), "{e}");
         assert_eq!(std::fs::read_to_string(&entry).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn devins_own_update_runs_in_a_terminal_on_a_mac_and_no_other_does() {
+        let devin = harness("devin").unwrap();
+        let cmd = update_command(
+            devin,
+            &Install::Native,
+            Path::new("/x/devin"),
+            false,
+            Some("1"),
+        )
+        .unwrap();
+        assert_eq!(cmd.args, ["update"]);
+        assert_eq!(cmd.terminal, cfg!(target_os = "macos"));
+        let claude = harness("claude").unwrap();
+        let cmd = update_command(
+            claude,
+            &Install::Native,
+            Path::new("/x/claude"),
+            false,
+            Some("1"),
+        );
+        assert!(cmd.is_none_or(|c| !c.terminal));
+    }
+
+    /// Devin's `devin update` is a terminal program: with no terminal it quits with code 130,
+    /// and it may ask before it installs. In one of its own, with its "y", it goes through.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_terminal_updater_gets_a_terminal_and_its_answer() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("trek-tty-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let updater = root.join("devin");
+        std::fs::write(
+            &updater,
+            "#!/bin/sh\n[ -t 0 ] || exit 130\nprintf 'Install 3000.12.17? [y/N] '\nread a\n\
+             [ \"$a\" = y ] || exit 1\necho 'Updated to version 3000.12.17'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&updater, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cmd = UpdateCommand::new(&updater, &[]);
+        let run = |cmd: &UpdateCommand| {
+            crate::runtime()
+                .block_on(run_command(cmd, &updater, "/usr/bin:/bin"))
+                .unwrap()
+        };
+        assert_eq!(
+            run(&cmd).0,
+            Some(130),
+            "no terminal: it stops, as Devin's does"
+        );
+        cmd.terminal = true;
+        let (code, output) = run(&cmd);
+        assert_eq!(code, Some(0), "{output}");
+        assert!(output.contains("Updated to version 3000.12.17"), "{output}");
+        assert!(!output.contains('\r'), "{output:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
