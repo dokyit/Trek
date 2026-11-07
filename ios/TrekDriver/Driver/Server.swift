@@ -18,6 +18,11 @@ final class Server {
     private let handle: (Request) -> Response
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "dev.trek.driver.server")
+    /// Screenshots, taken off the main thread: there a screenshot (a third of a second) waited for
+    /// any gesture playing and held up the next one, so the picture froze while the user dragged.
+    /// XCTest's screenshot works from any thread (WebDriverAgent's screen stream takes them on one
+    /// of its own).
+    private let shots = DispatchQueue(label: "dev.trek.driver.shots", qos: .userInitiated)
 
     init(port: UInt16, token: String, peers: [String]? = nil, handle: @escaping (Request) -> Response) {
         self.port = port
@@ -78,7 +83,9 @@ final class Server {
                     self.send(connection, .error("not from the Mac that started it (\(peer))", status: 403))
                     return
                 }
-                DispatchQueue.main.async {
+                let worker = request.method == "GET" && request.path == "/screenshot"
+                    ? self.shots : DispatchQueue.main
+                worker.async {
                     let response = self.handle(request)
                     self.queue.async { self.send(connection, response) }
                 }

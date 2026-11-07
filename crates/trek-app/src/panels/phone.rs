@@ -101,6 +101,10 @@ const DRIVER_RETRY: Duration = Duration::from_secs(20);
 /// and the JPEG quality it comes at.
 const DRIVER_FRAME: Duration = Duration::from_millis(350);
 const DRIVER_JPEG: u8 = 70;
+/// While the user is touching or typing (and a little after), the picture is asked for as often
+/// as the phone gives it: what they did shows as it happens, not a third of a second later.
+const DRIVER_FRAME_BUSY: Duration = Duration::from_millis(110);
+const BUSY_FOR: Duration = Duration::from_secs(3);
 
 /// Where Trek remembers that iPhone Mirroring has shown an iPhone here, and its name: the route
 /// then stays iPhone Mirroring while its window is closed.
@@ -161,6 +165,10 @@ pub struct PhonePanel {
     driver_frames: bool,
     /// True while the loop asking the driver for frames runs; it clears it when it ends.
     driver_frames_live: Arc<AtomicBool>,
+    /// When the user last touched or typed on the phone (milliseconds on `busy_clock`): the
+    /// picture comes faster for a while after.
+    last_input: Arc<std::sync::atomic::AtomicU64>,
+    busy_clock: Instant,
     driver_frames_task: Option<Task<()>>,
     /// When the picture's last start of the driver failed.
     driver_frames_retry: Option<Instant>,
@@ -331,6 +339,8 @@ impl PhonePanel {
             mirror_frames: false,
             driver_frames: false,
             driver_frames_live: Arc::new(AtomicBool::new(false)),
+            last_input: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            busy_clock: Instant::now(),
             driver_frames_task: None,
             driver_frames_retry: None,
             mirroring_seen: std::fs::read_to_string(mirroring_marker())
@@ -920,6 +930,11 @@ impl PhonePanel {
         let slot = self.decode_slot.clone();
         let wake = self.decode_wake.clone();
         let executor = cx.background_executor().clone();
+        let (last_input, clock) = (self.last_input.clone(), self.busy_clock);
+        let busy = move || {
+            let last = last_input.load(Ordering::Relaxed);
+            last > 0 && clock.elapsed().as_millis() as u64 <= last + BUSY_FOR.as_millis() as u64
+        };
         self.driver_frames_task = Some(cx.background_executor().spawn(async move {
             if d.ensure(&install, &udid, driver::START_LIMIT).is_err() {
                 live.store(false, Ordering::Relaxed);
@@ -934,8 +949,18 @@ impl PhonePanel {
                     }
                     Err(_) => break,
                 }
-                if let Some(rest) = DRIVER_FRAME.checked_sub(started.elapsed()) {
-                    executor.timer(rest).await;
+                // The next frame at the pace of the moment, looked at again every 40 ms: a touch
+                // during a calm wait brings it on at once.
+                loop {
+                    let pace = if busy() {
+                        DRIVER_FRAME_BUSY
+                    } else {
+                        DRIVER_FRAME
+                    };
+                    match pace.checked_sub(started.elapsed()) {
+                        Some(rest) => executor.timer(rest.min(Duration::from_millis(40))).await,
+                        None => break,
+                    }
                 }
             }
             live.store(false, Ordering::Relaxed);
@@ -994,13 +1019,18 @@ impl PhonePanel {
             return;
         };
         let d = self.driver.clone();
+        self.note_input();
+        let (last_input, clock) = (self.last_input.clone(), self.busy_clock);
         cx.notify();
         self.background(
             window,
             cx,
             move || {
                 let screen = d.ensure(&install, &udid, driver::START_LIMIT)?;
-                driver::run(&*d, &steps(screen))
+                let done = driver::run(&*d, &steps(screen));
+                // Its effect comes after it ends: the fast frames run on from there.
+                last_input.store(clock.elapsed().as_millis() as u64 + 1, Ordering::Relaxed);
+                done
             },
             |this, result, _, cx| {
                 if let Err(e) = result {
@@ -1008,6 +1038,14 @@ impl PhonePanel {
                 }
                 cx.notify();
             },
+        );
+    }
+
+    /// The user touched or typed: the picture comes faster for a while.
+    fn note_input(&self) {
+        self.last_input.store(
+            self.busy_clock.elapsed().as_millis() as u64 + 1,
+            Ordering::Relaxed,
         );
     }
 
@@ -1735,6 +1773,38 @@ impl PhonePanel {
                         .w(s.size.width)
                         .h(s.size.height)
                         .rounded(radius),
+                )
+                // The home bar, where the phone's home indicator is: a click on it goes Home
+                // (`gesture::on_home_bar`), a drag up from it is the phone's own swipe.
+                .when(
+                    self.status.input_ready() || self.mirror_frames || self.driver_frames,
+                    |el| {
+                        let (w, h) = (s.size.width.as_f32(), s.size.height.as_f32());
+                        let (x0, x1, y0) = trek_phone::gesture::HOME_BAR;
+                        let bar_w = (x1 - x0) as f32 * w * 0.8;
+                        let bar_h = 5f32;
+                        el.child(
+                            div()
+                                .id("phone-home-bar")
+                                .absolute()
+                                .left(s.origin.x + px((w - bar_w) / 2.))
+                                .top(s.origin.y + px(((1. + y0 as f32) / 2.) * h - bar_h / 2.))
+                                .w(px(bar_w))
+                                .h(px(bar_h))
+                                // scale: ok, the phone's own home indicator, a pill
+                                .rounded(px(bar_h / 2.))
+                                .bg(rgb(0xFFFFFF).opacity(0.55))
+                                .border_1()
+                                .border_color(rgb(0x000000).opacity(0.25))
+                                .hover(|s| s.bg(rgb(0xFFFFFF).opacity(0.9)))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Home Screen (or drag up for the App Switcher)",
+                                    )
+                                    .build(window, cx)
+                                }),
+                        )
+                    },
                 )
                 .when_some(clock, |el, (bar, time)| {
                     let (w, h) = (s.size.width.as_f32(), s.size.height.as_f32());

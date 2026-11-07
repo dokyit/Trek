@@ -24,6 +24,12 @@ final class Actions {
     var issue: String?
 
     func route(_ request: Request) -> Response {
+        if request.method == "GET", request.path == "/screenshot" {
+            // Taken off the main thread (`Server`), beside a gesture that may be playing: it
+            // leaves the gesture's state (`issue`) alone, and notes its time where that's kept.
+            DispatchQueue.main.async { self.lastRequest = Date() }
+            return screenshot(request.query)
+        }
         lastRequest = Date()
         issue = nil
         let response: Response

@@ -166,6 +166,8 @@ impl PhonePanel {
         };
         self.take_keys(window, cx);
         self.user_wins(cx);
+        // The picture comes faster from the press on, so the screen is fresh as it moves.
+        self.note_input();
         self.touch.press = Some(Press {
             stroke: Stroke::new(at, size),
             at: Instant::now(),
@@ -225,6 +227,14 @@ impl PhonePanel {
         let ms = millis(press.at);
         let at = self.to_fraction(p).unwrap_or(press.pointer);
         let input = press.stroke.finish(at, ms);
+        // A click on the home bar goes Home (a drag from it is the phone's own swipe up).
+        if let gesture::Input::Tap { at, .. } = &input
+            && gesture::on_home_bar(*at)
+        {
+            self.home(window, cx);
+            cx.notify();
+            return;
+        }
         self.send_input(input, window, cx);
         cx.notify();
     }
@@ -243,6 +253,7 @@ impl PhonePanel {
         if self.touch.press.is_some() || !self.picture().is_some_and(|b| b.contains(&e.position)) {
             return;
         }
+        self.note_input();
         let now = Instant::now();
         let going = self
             .touch

@@ -21,6 +21,16 @@ use crate::driver::{self, Step};
 use crate::helper::MirrorCmd;
 use crate::{hid, mirror};
 
+/// The home bar the panel draws where the phone's home indicator is (fractions of the screen:
+/// x from, x to, y from): a click on it goes Home, as the Home button does. A drag from it is the
+/// phone's own swipe up from the bottom edge (Home, or the App Switcher when it rests partway).
+pub const HOME_BAR: (f64, f64, f64) = (0.3, 0.7, 0.965);
+
+/// `at` is on the home bar.
+pub fn on_home_bar(at: (f64, f64)) -> bool {
+    (HOME_BAR.0..=HOME_BAR.1).contains(&at.0) && at.1 >= HOME_BAR.2
+}
+
 /// Pointer travel, in pixels of the picture as drawn, under which a press stays a tap (or a hold).
 pub const SLOP: f64 = 6.;
 /// The shortest and longest press sent as a tap.
@@ -150,8 +160,109 @@ impl Stroke {
         if let Some(cut) = self.spots.iter().position(|s| s.ms > MAX_PATH_MS) {
             self.spots.truncate(cut.max(2));
         }
-        Input::Path(self.spots)
+        Input::Path(finger(self.spots))
     }
+}
+
+/// A flick's move, once the rest before it is gone, plays in this long at most (a mouse drags
+/// slower than a finger flicks, and a slow lift doesn't turn a page or throw a list).
+const FLICK_MS: (u32, u32) = (80, 220);
+/// A move that stopped before the lift plays in this long (enough for the phone to follow it).
+const PLACE_MS: (u32, u32) = (150, 450);
+/// A stop this long before the lift makes a drag one that was put down where it ended, not flung.
+const PLACED_MS: u32 = 100;
+/// Such a drag rests this long where it ended before the lift (no fling), or, from the bottom
+/// edge, up to the longer one (resting partway up opens the App Switcher).
+const END_REST_MS: u32 = 100;
+const SWITCHER_REST_MS: u32 = 700;
+/// A press this close to an edge (fractions of the screen) that moves away from it starts on
+/// the edge itself: a swipe up from the bottom goes Home, one in from the left goes back, one
+/// down from the top opens Notification Center or Control Center. The phone takes these only
+/// from the very edge, which a mouse on a small picture rarely hits.
+const EDGE_BOTTOM: f64 = 0.05;
+const EDGE_SIDE: f64 = 0.04;
+const EDGE_TOP: f64 = 0.03;
+
+/// The path as a finger would draw it: the mouse's shape, but from the edge when it started near
+/// one and moved away, without a short pause before the move (a long press stays: it picks an
+/// icon up), quicker (a mouse drag is slow, and played as slowly it neither turns a page nor
+/// shows for long after the button comes up), still moving at the lift when the mouse was
+/// (flung) and resting briefly when it had stopped (put down where it ended).
+fn finger(mut spots: Vec<Spot>) -> Vec<Spot> {
+    let (Some(&first), Some(&last)) = (spots.first(), spots.last()) else {
+        return spots;
+    };
+    if spots.len() < 2 {
+        return spots;
+    }
+    // From the edge it was pressed by, when it moved away from it.
+    let (dx, dy) = (last.x - first.x, last.y - first.y);
+    let mut edge = None;
+    if first.y >= 1. - EDGE_BOTTOM && dy < -0.04 && dy.abs() > dx.abs() {
+        edge = Some((first.x, 0.997));
+    } else if first.y <= EDGE_TOP && dy > 0.04 && dy.abs() > dx.abs() {
+        edge = Some((first.x, 0.003));
+    } else if first.x <= EDGE_SIDE && dx > 0.04 && dx.abs() > dy.abs() {
+        edge = Some((0.003, first.y));
+    } else if first.x >= 1. - EDGE_SIDE && dx < -0.04 && dx.abs() > dy.abs() {
+        edge = Some((0.997, first.y));
+    }
+    let from_bottom = edge.is_some_and(|(_, y)| y > 0.5);
+    if let Some((x, y)) = edge {
+        for s in spots.iter_mut().take_while(|s| s.at() == first.at()) {
+            (s.x, s.y) = (x, y);
+        }
+    }
+    // The parts: the rest on the press, the move, the rest where it ended.
+    let rest_end = spots
+        .iter()
+        .take_while(|s| s.at() == spots[0].at())
+        .count()
+        .saturating_sub(1);
+    let rest = spots[rest_end].ms;
+    let n = spots.len();
+    let end_rest = if n >= 2 && spots[n - 1].at() == spots[n - 2].at() {
+        spots[n - 1].ms - spots[n - 2].ms
+    } else {
+        0
+    };
+    let move_end = if end_rest > 0 { n - 2 } else { n - 1 };
+    if move_end <= rest_end {
+        return spots;
+    }
+    let moving = spots[move_end].ms - rest;
+    let placed = end_rest >= PLACED_MS;
+    let (lo, hi) = if placed { PLACE_MS } else { FLICK_MS };
+    let target = moving.clamp(lo, hi.max(lo));
+    let scale = f64::from(target) / f64::from(moving.max(1));
+    // A long press before the move stays (it picks up what's under it); a short pause goes.
+    let start = if rest >= LONG_PRESS_MS { rest } else { 0 };
+    let mut out: Vec<Spot> = Vec::with_capacity(n);
+    out.push(Spot { ms: 0, ..spots[0] });
+    if start > 0 {
+        out.push(Spot {
+            ms: start,
+            ..spots[rest_end]
+        });
+    }
+    for s in &spots[rest_end + 1..=move_end] {
+        let ms = start + (f64::from(s.ms - rest) * scale).round() as u32;
+        let ms = ms.max(out.last().map_or(0, |l| l.ms + 1));
+        out.push(Spot { ms, ..*s });
+    }
+    if placed {
+        let hold = end_rest.min(if from_bottom {
+            SWITCHER_REST_MS
+        } else {
+            END_REST_MS
+        });
+        let end = *out.last().expect("a move has an end");
+        out.push(Spot {
+            ms: end.ms + hold,
+            ..end
+        });
+    }
+    out
 }
 
 fn clamp((x, y): (f64, f64)) -> (f64, f64) {
@@ -494,18 +605,99 @@ mod tests {
                 ms: 0
             }
         );
-        // Still on the press until just before the first move.
+        // Still on the press until just before the first move: a long press picks it up.
         assert_eq!((spots[1].at(), spots[1].ms), (spots[0].at(), 692));
         assert_eq!(rest(&spots), 692);
-        assert_eq!(spots[2].ms, 700);
+        assert!(spots[2].ms > 692 && spots[2].at() != spots[0].at());
         assert!(spots.windows(2).all(|w| w[1].ms > w[0].ms), "times rise");
-        let last = spots.last().unwrap();
-        assert_eq!((last.at(), last.ms), (px(150., 200.), ms + 300));
-        assert_eq!(
+        // Put down on the drop spot: it rests there a moment (no fling), not the whole 300 ms.
+        let (last, before) = (spots[spots.len() - 1], spots[spots.len() - 2]);
+        assert_eq!((last.at(), before.at()), (px(150., 200.), px(150., 200.)));
+        assert_eq!(last.ms - before.ms, END_REST_MS);
+    }
+
+    /// The mouse's slow drag across a page, still moving when the button came up: played as a
+    /// finger's flick, quick and moving at the lift, so the page turns and the phone answers
+    /// right after the button comes up.
+    #[test]
+    fn a_slow_drag_let_go_while_moving_is_played_as_a_flick() {
+        let mut s = Stroke::new(px(250., 300.), SIZE);
+        // 200 px left over 900 ms: a mouse's pace.
+        for step in 1..=45 {
+            s.push(px(250. - 4.4 * f64::from(step), 300.), 20 * step);
+        }
+        let Input::Path(spots) = s.finish(px(50., 300.), 905) else {
+            panic!("a drag is a path")
+        };
+        let (first, last) = (spots[0], *spots.last().unwrap());
+        assert_eq!((first.ms, last.at()), (0, px(50., 300.)));
+        assert!(last.ms <= FLICK_MS.1, "played in {} ms", last.ms);
+        assert_ne!(
             spots[spots.len() - 2].at(),
-            px(150., 200.),
-            "rested at the drop"
+            last.at(),
+            "still moving at the lift"
         );
+    }
+
+    /// A short pause before the move isn't the user's: the move starts at once.
+    #[test]
+    fn a_short_pause_before_the_move_goes() {
+        let mut s = Stroke::new(px(100., 300.), SIZE);
+        s.push(px(140., 300.), 250);
+        s.push(px(180., 300.), 280);
+        let Input::Path(spots) = s.finish(px(200., 300.), 300) else {
+            panic!()
+        };
+        assert_eq!(rest(&spots), 0);
+        assert_ne!(spots[1].at(), spots[0].at());
+        assert!(spots.last().unwrap().ms <= FLICK_MS.1);
+    }
+
+    /// Exiting an app: a swipe up from near the bottom starts on the very edge, as the phone
+    /// needs; let go while moving it goes Home, rested partway up it keeps the rest (the App
+    /// Switcher). The same for the other edges.
+    #[test]
+    fn a_swipe_from_near_an_edge_starts_on_it() {
+        let up = |end_rest: u32| {
+            let mut s = Stroke::new(px(150., 640.), SIZE);
+            s.push(px(150., 500.), 120);
+            s.push(px(150., 350.), 240);
+            match s.finish(px(150., 350.), 240 + end_rest) {
+                Input::Path(spots) => spots,
+                _ => panic!("a drag is a path"),
+            }
+        };
+        let home = up(0);
+        assert_eq!(home[0].y, 0.997, "from the bottom edge");
+        assert!(home.last().unwrap().ms <= FLICK_MS.1);
+        let switcher = up(450);
+        assert_eq!(switcher[0].y, 0.997);
+        let n = switcher.len();
+        assert_eq!(
+            switcher[n - 1].ms - switcher[n - 2].ms,
+            450,
+            "rested partway up"
+        );
+        // In from the left edge (back), down from the top: on the edge too.
+        let mut s = Stroke::new(px(8., 300.), SIZE);
+        s.push(px(120., 300.), 100);
+        let Input::Path(back) = s.finish(px(160., 300.), 140) else {
+            panic!()
+        };
+        assert_eq!(back[0].x, 0.003);
+        let mut s = Stroke::new(px(150., 10.), SIZE);
+        s.push(px(150., 200.), 100);
+        let Input::Path(down) = s.finish(px(150., 260.), 140) else {
+            panic!()
+        };
+        assert_eq!(down[0].y, 0.003);
+        // Along the bottom (a tab bar's swipe), or from the middle: where it was pressed.
+        let mut s = Stroke::new(px(50., 640.), SIZE);
+        s.push(px(250., 635.), 150);
+        let Input::Path(along) = s.finish(px(250., 635.), 160) else {
+            panic!()
+        };
+        assert_eq!(along[0].at(), px(50., 640.));
     }
 
     #[test]
