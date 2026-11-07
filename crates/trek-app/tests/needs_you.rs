@@ -1,5 +1,6 @@
-//! "Needs you": what waits on the user sits on top of the sidebar and says why, two keys go
-//! through it, and a thread's state stays true after an agent's crash, a stop and a restart.
+//! The Inbox: what waits on the user sits on top of the sidebar and says why, then what finished
+//! unread; two keys go through it, and a thread's state stays true after an agent's crash, a stop
+//! and a restart.
 
 mod common;
 
@@ -11,9 +12,6 @@ use trek_app::workspace::attention::Why;
 use trek_app::workspace::{Route, Workspace};
 use trek_core::store::{Item, Store, now_ms};
 use trek_core::{Effort, HandHolding, RunState};
-
-/// The sidebar's id for its "Needs you" group, in the ids of its footer.
-const GROUP: &str = "\u{0}needs";
 
 /// A seen thread in the harness project (not on screen), `older_by` ms old.
 fn thread(trek: &Trek, cx: &mut TestAppContext, title: &str, older_by: i64) -> String {
@@ -75,7 +73,7 @@ fn why(trek: &Trek, cx: &TestAppContext, id: &str) -> Option<String> {
 }
 
 fn y_of(trek: &Trek, cx: &mut TestAppContext, id: &str) -> gpui_kit::Pixels {
-    trek.bounds(cx, format!("card-{id}"))
+    trek.bounds(cx, format!("inbox-{id}"))
         .unwrap_or_else(|| panic!("no row for {id}"))
         .origin
         .y
@@ -101,8 +99,8 @@ fn what_waits_on_you_sits_on_top_says_why_and_takes_no_room_otherwise() {
         let quiet = thread(&trek, cx, "Quiet", 3_600_000);
         trek.render(cx);
         assert!(
-            !trek.visible(cx, "needs-you"),
-            "nothing needs you: no heading, no room"
+            !trek.visible(cx, "inbox"),
+            "nothing needs you: no Inbox, no room"
         );
 
         // An approval in a project folded away, a failure, one finished unread, one pinned.
@@ -135,27 +133,28 @@ fn what_waits_on_you_sits_on_top_says_why_and_takes_no_room_otherwise() {
         end_turn(&trek, cx, &finished, None);
         trek.render(cx);
 
-        assert!(trek.visible(cx, "needs-you"));
-        for id in [&asking, &pinned, &failed] {
-            assert!(trek.visible(cx, format!("card-{id}")), "{id} is listed");
+        assert!(trek.visible(cx, "inbox"));
+        for id in [&asking, &pinned, &failed, &finished] {
+            assert!(trek.visible(cx, format!("inbox-{id}")), "{id} is listed");
+            assert!(
+                !trek.visible(cx, format!("live-line-{id}")),
+                "{id} is out of its project while it's in the Inbox"
+            );
         }
-        // What only finished isn't waiting on anyone: it stays in its project, with its dot.
-        assert!(!trek.visible(cx, format!("card-{finished}")));
-        assert!(trek.visible(cx, format!("live-line-unseen-{finished}")));
         assert!(
             !trek.visible(cx, format!("live-line-{also_there}")),
             "the folded project's quiet thread stays folded"
         );
-        // What's asking, newest first; then the failure.
+        // What's asking, newest first; then the failure; then what only finished.
         let (ys, quiet_y) = (
-            [&asking, &pinned, &failed].map(|id| y_of(&trek, cx, id)),
+            [&asking, &pinned, &failed, &finished].map(|id| y_of(&trek, cx, id)),
             trek.bounds(cx, format!("live-line-{quiet}"))
                 .unwrap()
                 .origin
                 .y,
         );
         assert!(ys.windows(2).all(|p| p[0] < p[1]), "{ys:?}");
-        assert!(ys[2] < quiet_y, "above the projects");
+        assert!(ys[3] < quiet_y, "above the projects");
 
         // Each says why, in the words its alert uses.
         assert_eq!(
@@ -168,10 +167,12 @@ fn what_waits_on_you_sits_on_top_says_why_and_takes_no_room_otherwise() {
         );
         assert_eq!(why(&trek, cx, &finished).as_deref(), Some("Finished"));
         assert_eq!(why(&trek, cx, &quiet), None);
-        assert!(trek.visible(cx, format!("card-needs-{asking}")));
-        assert!(trek.visible(cx, format!("card-failed-{failed}")));
+        assert!(trek.visible(cx, format!("inbox-needs-{asking}")));
+        assert!(trek.visible(cx, format!("inbox-failed-{failed}")));
+        assert!(trek.visible(cx, format!("inbox-finished-{finished}")));
 
-        // Answered, settled and read, the group is gone; the pinned thread goes back to Pinned.
+        // Answered, settled and read, the Inbox is gone; the pinned thread goes back to its
+        // project, with its pin.
         for id in [&asking, &pinned] {
             let request = format!("{id}-ask");
             trek.update(cx, |ws, cx| {
@@ -185,40 +186,41 @@ fn what_waits_on_you_sits_on_top_says_why_and_takes_no_room_otherwise() {
             ws.mark_all_read(cx);
         });
         trek.render(cx);
-        assert!(!trek.visible(cx, "needs-you"));
-        assert!(trek.visible(cx, format!("card-{pinned}")));
+        assert!(!trek.visible(cx, "inbox"));
+        assert!(trek.visible(cx, format!("live-line-pinned-{pinned}")));
         assert_eq!(trek.read(cx, |ws, _| ws.needing_you().len()), 0);
     });
 }
 
 #[test]
-fn a_finished_thread_waits_in_its_project_with_its_dot_till_it_is_opened() {
+fn a_finished_thread_waits_in_the_inbox_till_it_is_opened() {
     run(async |cx| {
         let trek = open(cx);
         let done = thread(&trek, cx, "Done", 60_000);
         end_turn(&trek, cx, &done, None);
         trek.render(cx);
-        assert!(!trek.visible(cx, "needs-you"));
-        assert!(!trek.visible(cx, format!("card-finished-{done}")));
-        assert!(trek.visible(cx, format!("live-line-unseen-{done}")));
+        assert!(trek.visible(cx, "inbox"));
+        assert!(trek.visible(cx, format!("inbox-finished-{done}")));
+        assert!(!trek.visible(cx, format!("live-line-{done}")));
         trek.update(cx, |ws, cx| ws.navigate(on_thread(&done), cx));
         trek.render(cx);
+        assert!(!trek.visible(cx, "inbox"), "read, it leaves the Inbox");
         assert!(trek.visible(cx, format!("live-line-{done}")));
         assert!(!trek.visible(cx, format!("live-line-unseen-{done}")));
     });
 }
 
 #[test]
-fn nothing_waiting_ever_folds_and_a_run_of_finished_threads_stays_in_its_project() {
+fn nothing_waiting_ever_folds_and_a_run_of_finished_threads_waits_behind_show_more() {
     run(async |cx| {
         let trek = open(cx);
-        let finished: Vec<String> = (0..5)
+        let finished: Vec<String> = (0..7)
             .map(|i| thread(&trek, cx, &format!("Done {i}"), i as i64 * 60_000 + 60_000))
             .collect();
         for id in &finished {
             end_turn(&trek, cx, id, None);
         }
-        let asking: Vec<String> = (0..5)
+        let asking: Vec<String> = (0..3)
             .map(|i| {
                 thread(
                     &trek,
@@ -233,14 +235,31 @@ fn nothing_waiting_ever_folds_and_a_run_of_finished_threads_stays_in_its_project
         }
         trek.render(cx);
         for id in &asking {
-            assert!(trek.visible(cx, format!("card-needs-{id}")));
+            assert!(trek.visible(cx, format!("inbox-needs-{id}")));
         }
-        assert!(!trek.visible(cx, format!("live-more-{GROUP}")));
-        // Unread, every one shows in its project, past the three a project shows of the rest.
-        for id in &finished {
-            assert!(!trek.visible(cx, format!("card-finished-{id}")));
-            assert!(trek.visible(cx, format!("live-line-unseen-{id}")));
+        // The newest five that only finished; the rest behind "Show 2 more", in the Inbox still
+        // and out of their project.
+        let order: Vec<String> = trek.read(cx, |ws, _| {
+            ws.needing_you()
+                .iter()
+                .filter(|(_, why)| *why == Why::Finished)
+                .map(|(t, _)| t.id.clone())
+                .collect()
+        });
+        assert_eq!(order.len(), 7);
+        for (i, id) in order.iter().enumerate() {
+            assert_eq!(
+                trek.visible(cx, format!("inbox-finished-{id}")),
+                i < 5,
+                "{i}"
+            );
+            assert!(!trek.visible(cx, format!("live-line-{id}")));
         }
+        assert!(trek.visible(cx, "inbox-more"));
+        trek.click(cx, "inbox-more");
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("inbox-finished-{}", order[6])));
+        assert!(trek.visible(cx, "inbox-less"));
     });
 }
 

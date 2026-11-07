@@ -38,7 +38,7 @@ async fn thread(trek: &Trek, cx: &mut TestAppContext, text: &str) -> String {
 
 /// The sidebar row of thread `id`, whichever kind it's drawn as.
 fn row(trek: &Trek, cx: &mut TestAppContext, id: &str) -> gpui_kit::Point<gpui_kit::Pixels> {
-    ["card", "live-line", "line"]
+    ["inbox", "live-line", "line"]
         .into_iter()
         .find_map(|kind| {
             let name = gpui_kit::SharedString::from(format!("{kind}-{id}"));

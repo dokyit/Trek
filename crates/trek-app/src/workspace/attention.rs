@@ -1,4 +1,4 @@
-//! What needs the user, and why, in one place: the list behind the sidebar's "Needs you", the keys
+//! What needs the user, and why, in one place: the list behind the sidebar's Inbox, the keys
 //! that jump through it, and the words a waiting row says, which are the words its alert says.
 
 use super::{PendingPermission, Scope, Workspace};
@@ -92,12 +92,14 @@ impl Why {
         !matches!(self, Why::CutShort | Why::Finished)
     }
 
-    /// Asked first, then failures, then what's only news.
+    /// Asked first, then failures, then what's only news: a turn cut short (the sidebar's Inbox
+    /// lists it with what needs the user), then what finished.
     fn rank(&self) -> u8 {
         match self {
             Why::Approval(_) | Why::Question(_) | Why::Plan | Why::SubAgent | Why::Waiting(_) => 0,
             Why::Failed(_) | Why::Checks(_) => 1,
-            Why::CutShort | Why::Finished => 2,
+            Why::CutShort => 2,
+            Why::Finished => 3,
         }
     }
 }
@@ -305,6 +307,15 @@ impl Workspace {
             .collect()
     }
 
+    /// Mark `ids` read, as opening each would: the sidebar Inbox's "Mark all read", for the
+    /// finished threads it lists. Another machine's threads are read there, not from here.
+    pub fn mark_read(&mut self, ids: &[String], cx: &mut gpui_kit::Context<Self>) {
+        let now = now_ms();
+        for id in ids.iter().filter(|id| !crate::machines::is_remote(id)) {
+            self.mutate_thread(id, cx, |t| t.last_seen_at = now.max(t.updated_at));
+        }
+    }
+
     /// What a waiting thread's row and alert say, for one thread.
     pub fn why_needs_you(&self, id: &str) -> Option<Why> {
         self.needing_you()
@@ -470,6 +481,7 @@ mod tests {
         assert_eq!(ranked[0], Why::Approval("run x".into()));
         assert_eq!(ranked[1], Why::SubAgent);
         assert_eq!(ranked[2], Why::Failed(None));
+        assert_eq!(ranked[3..], [Why::CutShort, Why::Finished]);
         assert!(!Why::Finished.calls_for_you() && !Why::CutShort.calls_for_you());
         assert!(Why::Failed(None).calls_for_you() && Why::SubAgent.calls_for_you());
     }

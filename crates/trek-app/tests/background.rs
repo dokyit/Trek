@@ -403,8 +403,8 @@ fn a_parent_waiting_on_its_sub_agent_is_at_work_not_in_the_inbox() {
             trek.working_bar(cx)
         );
         trek.render(cx);
-        assert!(trek.visible(cx, format!("card-waiting-{id}")));
-        assert!(trek.visible(cx, format!("card-kids-{id}")));
+        assert!(trek.visible(cx, format!("live-line-waiting-{id}")));
+        assert!(trek.visible(cx, format!("live-line-kids-{id}")));
         assert!(trek.visible(cx, "stop"));
         assert!(
             !seen.borrow().iter().any(|m| m.starts_with("Finished")),
@@ -1099,8 +1099,10 @@ fn sub_agents_never_get_inbox_cards() {
         );
         trek.render(cx);
         assert!(
-            !trek.visible(cx, format!("card-{asking}"))
-                && !trek.visible(cx, format!("card-{failing}"))
+            !trek.visible(cx, format!("inbox-{asking}"))
+                && !trek.visible(cx, format!("inbox-{failing}"))
+                && !trek.visible(cx, format!("live-line-{asking}"))
+                && !trek.visible(cx, format!("live-line-{failing}"))
         );
         trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
         // The agent's own sub-agents aren't threads at all.

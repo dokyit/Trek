@@ -13,7 +13,7 @@ Each pane needs 340 points. With less room the split won't open and a toast says
 ## Reach it with the CLI
 
 ```sh
-./.agents/skills/verify-trek/scripts/trek-dev control rclick card-<thread id>
+./.agents/skills/verify-trek/scripts/trek-dev control rclick live-line-<thread id>
 ./.agents/skills/verify-trek/scripts/trek-dev control click thread-open-beside
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot split
 ```

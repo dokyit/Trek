@@ -1,7 +1,14 @@
-//! Inbox sidebar. What needs you sits on top in its own amber block, saying why; live work follows
-//! (Active), then each project under its badge, Study's sessions, the other machines and the
-//! phone (Devices); settled history folds into a section of its own, grouped by project. Every row
-//! starts with the same state column (`look`), so state, badges and glyphs line up in one column.
+//! The sidebar, inbox first (Figma "11 Sidebar options", Option 1). Under the nav, the Inbox: what
+//! needs the user (an approval, a question, a plan, a failure, a sub-agent asking, failing checks,
+//! a turn cut short when Trek closed), each saying why in its alert's words, then the threads that
+//! finished unread; opening one reads it, "Mark all read" reads every finished one, and with
+//! nothing in it the Inbox isn't there. A thread in the Inbox leaves its project's list while it's
+//! there. Then each project under its badge with the rest of its threads, one line each (pinned,
+//! then at work with its clock, then the quiet ones capped behind "Show N more"), Study's
+//! sessions, the other machines and the phone (Devices), and settled history folded at the end,
+//! grouped by project. Every row starts with the same state column and ends on the same
+//! right-hand column (`look`), so state, badges and glyphs line up at the left and counts and
+//! times at the right.
 
 mod look;
 
@@ -54,7 +61,7 @@ pub struct Sidebar {
     updater_open: bool,
     /// The agent updates card is open.
     agent_updates_open: bool,
-    /// Re-renders once a second while a turn runs, so "Working 12s" counts up, and once a minute
+    /// Re-renders once a second while a turn runs, so "4m 12s" counts up, and once a minute
     /// otherwise, so "5m" ages (this view is cached; nothing else would redraw it). The flag is
     /// whether it's the fast one.
     _clock: Option<(bool, Task<()>)>,
@@ -76,7 +83,7 @@ pub struct Sidebar {
     /// fade, as the rows under them close the gap (AnimatePresence's "pop layout").
     ghosts: Vec<Ghost>,
     /// The live rows last drawn, by thread id: the thread as it was, its group, and whether it
-    /// was a card. What a ghost draws.
+    /// was an Inbox row. What a ghost draws.
     last_rows: HashMap<String, (Thread, String, bool)>,
     /// A search was on last frame: the list it leaves (or comes to) takes its places at once.
     was_searching: bool,
@@ -92,32 +99,38 @@ struct Ghost {
     /// The row it was under in its group, if any: it's drawn after that one.
     after: Option<String>,
     thread: Thread,
+    /// It was an Inbox row.
     card: bool,
     height: f32,
     /// 1 drawn in full, 0 gone.
     left: crate::motion::Spring,
 }
 
-/// How far a row's text sits in from its rounded hover box: headings and rows line up on it.
+/// How far a row's text sits in from its rounded hover box, on both sides: headings and rows
+/// line up on it at the left, the right-hand column at the right.
 const ROW_INSET: f32 = look::ROW_INSET;
+/// What "New thread here" takes from a project's name while the pointer's on its header (the
+/// button lies over the count, `HOVER_BUTTON_RIGHT` in from the header's edge).
+const HOVER_BUTTON: f32 = 18.;
+const HOVER_BUTTON_RIGHT: f32 = 4.;
 
 /// The most a branch takes on a row: long ones (other apps' `someone/what-it-is`) leave the title
 /// room to read. The tooltip has it whole.
 const ROW_BRANCH_WIDTH: f32 = 110.;
-/// The most a project's name takes beside why a thread needs the user.
-const PROJECT_WIDTH: f32 = 96.;
+/// The least a project's name keeps beside why a thread is in the Inbox (it gives way first).
+const PROJECT_MIN: f32 = 56.;
 
-/// The Active section's key among the live groups (no project id looks like it).
-const ACTIVE: &str = "\u{0}active";
-/// The "Needs you" section's.
-const NEEDS: &str = "\u{0}needs";
+/// The Inbox's key among the live groups (no project id looks like it).
+const INBOX: &str = "\u{0}inbox";
 /// Study's sessions', after the projects (they're in none).
 const STUDY: &str = "\u{0}study";
 /// The "Projects" label's place among the live groups: over the first project's.
 const PROJECTS_LABEL: &str = "live-projects-label";
-/// Threads cut short when Trek closed stay on show up to this many, under what's waiting; the
-/// rest wait behind "Show more". Nothing that's waiting ever does.
-const NEWS_SHOWN: usize = 3;
+/// What's only news in the Inbox (a turn cut short, a thread finished unread) on show before
+/// "Show N more". What calls for the user never waits behind it.
+const NEWS_SHOWN: usize = 5;
+/// A project's quiet threads on show before "Show more" (unread ones and the open one always are).
+const QUIET_SHOWN: usize = 3;
 /// A machine's quiet threads on show in Devices before "Show more".
 const MACHINE_SHOWN: usize = 3;
 
@@ -622,10 +635,11 @@ impl Sidebar {
         });
     }
 
-    /// Where a live thread stands: the mark for its state column, and the few words its card's
-    /// second line says in its run state's colour (the same colours as the IDE's,
-    /// `palette::run_state`), or its age while there's nothing to say.
-    fn status(&self, t: &Thread, cx: &App) -> (Mark, AnyElement) {
+    /// Why a thread is in the Inbox, for its row's second line: the words its alert used, in its
+    /// run state's colour (its mark is in the state column), with the way back for a turn a quit
+    /// cut short and the offer to send failing checks to its agent. A row held in its place under
+    /// the pointer after its thread stopped needing anything says where it stands now, or nothing.
+    fn status(&self, t: &Thread, cx: &App) -> (Mark, Option<AnyElement>) {
         let theme = cx.theme();
         let ws = self.workspace.read(cx);
         // The words alone: the mark that goes with them is in the row's state column.
@@ -635,69 +649,74 @@ impl Sidebar {
                 .test_support()
                 .min_w_0()
                 .truncate()
-                .font_weight(FontWeight::MEDIUM)
                 .text_color(color)
                 .child(text)
                 .into_any_element()
         };
+        // An action on the row itself: it does its one thing, and the row doesn't open.
+        let action = |id: String,
+                      label: &'static str,
+                      f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
+            let (ws, tid) = (self.workspace.clone(), t.id.clone());
+            div()
+                .id(SharedString::from(id))
+                .test_support()
+                .flex_none()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.foreground)
+                .cursor_pointer()
+                .hover(|s| s.underline())
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    ws.update(cx, |ws, cx| f(ws, &tid, cx));
+                })
+        };
         // Cut off by a quit: what became of it, and on the row itself the way back.
         if let Some(offer) = ws.interrupted_offer(&t.id) {
             use crate::workspace::resume::ResumeState;
-            let resume = |label: &'static str| {
-                let (ws, id) = (self.workspace.clone(), t.id.clone());
-                div()
-                    .id(SharedString::from(format!("card-resume-{}", t.id)))
-                    .test_support()
-                    .flex_none()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
-                    .cursor_pointer()
-                    .hover(|s| s.underline())
-                    .child(label)
-                    .on_click(move |_, _, cx| {
-                        // The row opens the thread; this only resumes it.
-                        cx.stop_propagation();
-                        ws.update(cx, |ws, cx| ws.resume_interrupted(&id, cx));
-                    })
-            };
-            let row = |state: AnyElement, action: Option<&'static str>| {
+            let row = |state: AnyElement, label: Option<&'static str>| {
                 h_flex()
                     .min_w_0()
                     .gap(px(6.))
                     .child(state)
-                    .children(action.map(resume))
+                    .children(label.map(|label| {
+                        action(format!("inbox-resume-{}", t.id), label, |ws, id, cx| {
+                            ws.resume_interrupted(id, cx)
+                        })
+                    }))
                     .into_any_element()
             };
-            let id = format!("card-interrupted-{}", t.id);
+            let id = format!("inbox-interrupted-{}", t.id);
             match (&offer.state, offer.turn.waiting) {
                 (ResumeState::Offered, false) => {
                     return (
                         Mark::NeedsYou,
-                        row(
+                        Some(row(
                             words(id, palette::amber(cx), "Interrupted".into()),
                             Some("Resume"),
-                        ),
+                        )),
                     );
                 }
                 (ResumeState::Offered, true) => {
                     return (
                         Mark::NeedsYou,
-                        words(id, palette::needs_you(cx), "Waiting for you".into()),
+                        Some(words(id, palette::needs_you(cx), "Waiting for you".into())),
                     );
                 }
                 (ResumeState::Resuming, _) => {
                     return (
                         Mark::Working,
-                        words(id, palette::working(cx), "Resuming…".into()),
+                        Some(words(id, palette::working(cx), "Resuming…".into())),
                     );
                 }
                 (ResumeState::Failed(_), _) => {
                     return (
                         Mark::Failed,
-                        row(
+                        Some(row(
                             words(id, palette::failed(cx), "Couldn't resume".into()),
                             Some("Retry"),
-                        ),
+                        )),
                     );
                 }
                 (ResumeState::Going, _) => {}
@@ -707,132 +726,77 @@ impl Sidebar {
         if let Some(why) = self.why.get(&t.id) {
             // Failing checks come with theirs too.
             if matches!(why, Why::Checks(_)) {
-                let (ws, id) = (self.workspace.clone(), t.id.clone());
-                let sending = self
-                    .workspace
-                    .read(cx)
-                    .pr_checks_offer(&t.id)
-                    .is_some_and(|o| o.sending);
-                let red = palette::failed(cx);
+                let sending = ws.pr_checks_offer(&t.id).is_some_and(|o| o.sending);
                 return (
                     Mark::Failed,
-                    h_flex()
-                        .min_w_0()
-                        .gap(px(6.))
-                        .child(words(
-                            format!("card-checks-failed-{}", t.id),
-                            red,
-                            why.words(),
-                        ))
-                        .when(!sending, |el| {
-                            el.child(
-                                div()
-                                    .id(SharedString::from(format!("card-send-checks-{}", t.id)))
-                                    .test_support()
-                                    .flex_none()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                                    .cursor_pointer()
-                                    .hover(|s| s.underline())
-                                    .child("Send to agent")
-                                    .on_click(move |_, _, cx| {
-                                        // The row opens the thread; this only sends.
-                                        cx.stop_propagation();
-                                        ws.update(cx, |ws, cx| ws.pr_checks_send(&id, cx));
-                                    }),
-                            )
-                        })
-                        .into_any_element(),
+                    Some(
+                        h_flex()
+                            .min_w_0()
+                            .gap(px(6.))
+                            .child(words(
+                                format!("inbox-checks-failed-{}", t.id),
+                                palette::failed(cx),
+                                why.words(),
+                            ))
+                            .when(!sending, |el| {
+                                el.child(action(
+                                    format!("inbox-send-checks-{}", t.id),
+                                    "Send to agent",
+                                    |ws, id, cx| ws.pr_checks_send(id, cx),
+                                ))
+                            })
+                            .into_any_element(),
+                    ),
                 );
             }
             return Self::why_line(t, why, cx);
         }
-        // Paused at a usage limit: until when (it's no failure, and nothing to do yet).
-        if let Some(p) = t.paused.as_ref().filter(|_| t.run_state == RunState::Idle) {
-            let text = match p.resets_at {
-                Some(at) => format!("Paused until {}", time::reset_clock(at, ws.now())),
-                None => "Paused at its limit".to_string(),
-            };
-            return (
-                Mark::None,
-                words(format!("paused-{}", t.id), palette::amber(cx), text),
-            );
-        }
-        // Its turn is over but its sub-agents are still out: it's at work, waiting on them.
+        // Held in place after it stopped needing anything: where it stands now.
         if t.run_state == RunState::Idle && self.graph.waiting.contains(&t.id) {
-            let longest = ws
-                .waiting_on(&t.id)
-                .iter()
-                .map(|w| w.elapsed)
-                .max()
-                .or_else(|| ws.machines.waited_for(&t.id));
-            let text = match longest {
-                Some(d) => format!("Waiting {}", time::elapsed(d)),
-                None => "Waiting".to_string(),
-            };
             return (
                 Mark::Working,
-                words(format!("card-waiting-{}", t.id), palette::working(cx), text),
+                Some(words(
+                    format!("inbox-waiting-{}", t.id),
+                    palette::working(cx),
+                    "Waiting on its sub-agents".into(),
+                )),
             );
         }
-        let age = |opacity: f32| {
-            div()
-                .flex_none()
-                .text_color(theme.muted_foreground.opacity(opacity))
-                .child(time::relative(t.updated_at))
-                .into_any_element()
-        };
         match t.run_state {
-            RunState::Working => {
-                // A machine's thread not open here counts from when its row says it started.
-                let (elapsed, secs) = ws
-                    .live
-                    .get(&t.id)
-                    .and_then(|l| l.turn_started)
-                    .map(|s| s.elapsed())
-                    .or_else(|| ws.machines.working_for(&t.id))
-                    .map(|d| (time::elapsed(d), d.as_secs()))
-                    .unwrap_or_default();
-                let word = crate::mascot::word(&t.id, secs);
-                // The loader holds still and the clock beside it ticks: a spinning one would redraw
-                // the whole sidebar every frame.
-                let text = if elapsed.is_empty() {
-                    word.to_string()
-                } else {
-                    format!("{word} {elapsed}")
-                };
-                (
-                    Mark::Working,
-                    words(format!("card-working-{}", t.id), palette::working(cx), text),
-                )
-            }
+            RunState::Working => (
+                Mark::Working,
+                Some(words(
+                    format!("inbox-working-{}", t.id),
+                    palette::working(cx),
+                    "Working".into(),
+                )),
+            ),
             // A machine out of reach: its thread as it last was, with nothing to say what for.
             RunState::NeedsYou => (
                 Mark::NeedsYou,
-                words(
-                    format!("card-needs-{}", t.id),
+                Some(words(
+                    format!("inbox-needs-{}", t.id),
                     palette::needs_you(cx),
                     "Needs you".into(),
-                ),
+                )),
             ),
             RunState::Failed => (
                 Mark::Failed,
-                words(
-                    format!("card-failed-{}", t.id),
+                Some(words(
+                    format!("inbox-failed-{}", t.id),
                     palette::failed(cx),
                     "Failed".into(),
-                ),
+                )),
             ),
-            RunState::Idle if t.is_unseen() => (Mark::Unread, age(1.)),
-            RunState::Idle => (Mark::None, age(0.8)),
+            RunState::Idle if t.is_unseen() => (Mark::Unread, None),
+            RunState::Idle => (Mark::None, None),
         }
     }
 
-    /// Why a thread needs the user, on a row's second line: the words its alert used, in its run
-    /// state's colour (its mark is in the state column). What's only news stays quiet. Long words
-    /// give way (the tooltip has them in full), never the project beside them.
-    fn why_line(t: &Thread, why: &Why, cx: &App) -> (Mark, AnyElement) {
-        let news = !why.calls_for_you();
+    /// Why a thread needs the user, on its Inbox row's second line: the words its alert used, in
+    /// its run state's colour (its mark is in the state column); emerald for what only finished.
+    /// Words too long for the row end in an ellipsis; the tooltip has them in full.
+    fn why_line(t: &Thread, why: &Why, cx: &App) -> (Mark, Option<AnyElement>) {
         let (key, color, mark) = match why {
             Why::Failed(_) | Why::Checks(_) => ("failed", palette::failed(cx), Mark::Failed),
             Why::SubAgent => ("sub-needs", palette::needs_you(cx), Mark::NeedsYou),
@@ -842,19 +806,16 @@ impl Sidebar {
         };
         (
             mark,
-            div()
-                .id(SharedString::from(format!("card-{key}-{}", t.id)))
-                .test_support()
-                .min_w_0()
-                .truncate()
-                .when(!news, |el| el.font_weight(FontWeight::MEDIUM))
-                .text_color(if news {
-                    cx.theme().muted_foreground
-                } else {
-                    color
-                })
-                .child(why.words())
-                .into_any_element(),
+            Some(
+                div()
+                    .id(SharedString::from(format!("inbox-{key}-{}", t.id)))
+                    .test_support()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(color)
+                    .child(why.words())
+                    .into_any_element(),
+            ),
         )
     }
 
@@ -934,258 +895,133 @@ impl Sidebar {
         )
     }
 
-    /// A live thread with something to say (it needs you, it failed, it's at work), or a pinned
-    /// or snoozed one: its state's mark in the state column, its title and its agent's logo, then
-    /// where it stands in its run state's colour. Rows under a project's header leave the project
-    /// out; the ones listed by what they're for (`badge`) aren't under one, so they say it. In the
-    /// Needs you block (`tray`) the block has the margin. A pinned or snoozed one (`named`) with
-    /// nothing to say is a single line: its pin or clock, its title, its project.
-    #[allow(clippy::too_many_arguments)]
-    fn card(
+    /// A row's tooltip: who runs it ("Claude Code · Opus 5.5"; a machine's thread as the machine
+    /// names its model), why it needs the user, whole (the row may have cut it short), then what
+    /// it has at work.
+    fn runs_tip(
+        &self,
+        t: &Thread,
+        kids: &[(trek_core::AgentId, String)],
+        background: &[String],
+        cx: &App,
+    ) -> SharedString {
+        let ws = self.workspace.read(cx);
+        let provider = t.agent.display_name();
+        let model = ws
+            .machines
+            .model_label(&t.id)
+            .unwrap_or_else(|| ws.model_label(t));
+        let runs = if model == provider {
+            provider
+        } else {
+            format!("{provider} · {model}")
+        };
+        let runs = match self.why.get(&t.id) {
+            Some(why) => format!("{}\n\n{runs}", why.words()),
+            None => runs,
+        };
+        SharedString::from(match card_tip(kids, background) {
+            Some(rest) => format!("{runs}\n\n{rest}"),
+            None => runs,
+        })
+    }
+
+    /// A thread in the Inbox, on two lines: its mark (amber or red for what needs the user,
+    /// emerald for what finished unread), its title in bold and how long ago, then why it's here
+    /// in its alert's words and its project ("Finished · Trek").
+    fn inbox_row(
         &self,
         t: &Thread,
         project: &str,
-        badge: bool,
         selected: bool,
-        tray: bool,
-        named: Option<Mark>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
         let (kids, background) = self.at_work(t, cx);
-        // Who runs it ("Claude Code · Opus 5.5"; a machine's thread as the machine names its
-        // model), then what it has at work.
-        let tip = {
-            let ws = self.workspace.read(cx);
-            let provider = t.agent.display_name();
-            let model = ws
-                .machines
-                .model_label(&t.id)
-                .unwrap_or_else(|| ws.model_label(t));
-            let runs = if model == provider {
-                provider
-            } else {
-                format!("{provider} · {model}")
-            };
-            // Why it needs the user comes first, whole: the row may have cut it short.
-            let runs = match self.why.get(&t.id) {
-                Some(why) => format!("{}\n\n{runs}", why.words()),
-                None => runs,
-            };
-            Some(SharedString::from(match card_tip(&kids, &background) {
-                Some(rest) => format!("{runs}\n\n{rest}"),
-                None => runs,
-            }))
-        };
+        let tip = self.runs_tip(t, &kids, &background, cx);
         let (mark, words) = self.status(t, cx);
-        let quiet = t.run_state == RunState::Idle
-            && !t.is_unseen()
-            && !selected
-            && kids.is_empty()
-            && !self.graph.waiting.contains(&t.id);
-        // Pinned or snoozed with nothing to say: its pin (or clock) stands for it.
-        let single = named.filter(|_| mark == Mark::None && kids.is_empty());
-        let mark = single.unwrap_or(mark);
+        let listed = self.why.contains_key(&t.id);
         let id = t.id.clone();
-        let hit = self.content_hit(t, cx);
-        let study = look::is_study(t, &self.study_dir);
-        let shown_title = if study {
+        let shown_title = if look::is_study(t, &self.study_dir) {
             look::study_title(&t.title).0.to_string()
         } else {
             t.title.clone()
         };
-        let place = (badge && (t.project_id.is_some() || study)).then(|| project.to_string());
         let title = h_flex()
-            .h(px(if single.is_some() { look::LINE_H } else { 18. }))
+            .h(px(20.))
             .gap(px(look::MARK_GAP))
             .child(look::mark(None, mark, cx))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .when(t.is_unseen() && !selected, |el| el.font_medium())
+                    .when(listed, |el| el.font_weight(FontWeight::SEMIBOLD))
                     .child(ui::title_text(
-                        SharedString::from(format!("card-title-{}", t.id)),
+                        SharedString::from(format!("inbox-title-{}", t.id)),
                         &shown_title,
                         self.workspace.read(cx).title_reveal(&t.id),
-                        if quiet {
-                            theme.foreground.opacity(look::QUIET)
-                        } else {
-                            theme.foreground
-                        },
+                        theme.foreground,
                         cx,
                     )),
             )
-            .when_some(t.worktree.as_ref(), |el, wt| {
-                el.child(crate::worktree_ui::branch_chip_up_to(
-                    SharedString::from(format!("card-branch-{}", t.id)),
-                    wt,
-                    ROW_BRANCH_WIDTH,
-                    cx,
-                ))
-            })
-            // Its sub-agents at work, in a pill of their own: the logo of each provider they run on,
-            // then how many there are (the tooltip names each). (Overlapped logos read as a
-            // smudge, and a ring the sidebar's colour shows under glass.)
-            .when(!kids.is_empty(), |el| {
-                el.child(
-                    h_flex()
-                        .id(SharedString::from(format!("card-kids-{}", t.id)))
-                        .test_support()
-                        .flex_none()
-                        .h(px(16.))
-                        .px(px(5.))
-                        .gap(px(3.))
-                        .rounded_pill()
-                        .bg(theme.foreground.opacity(0.07))
-                        .children(
-                            kid_groups(&kids)
-                                .into_iter()
-                                .take(3)
-                                .map(|(agent, _)| ui::agent_logo(&agent, px(10.), cx)),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("card-kids-count-{}", t.id)))
-                                .test_support()
-                                .text_size(px(text::META))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.muted_foreground)
-                                .child(kids.len().to_string()),
-                        ),
-                )
-            })
-            // What its agent runs in the background after answering (a dev server, a watcher): a
-            // dot that holds still (one that breathed would redraw the whole cached sidebar); the
-            // tooltip names them.
-            .when(!background.is_empty(), |el| {
-                el.child(
-                    div()
-                        .id(SharedString::from(format!("card-background-{}", t.id)))
-                        .test_support()
-                        .flex_none()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(palette::sky(cx)),
-                )
-            })
-            // A single line ends at its project; a card's first line at the agent's logo (the
-            // tooltip names it and the model). At the end, it doesn't compete with the state.
-            .when_some(single.and(place.clone()), |el, project| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(PROJECT_WIDTH))
-                        .truncate()
-                        .text_size(px(look::LABEL_SIZE))
-                        .text_color(theme.muted_foreground)
-                        .child(project),
-                )
-            })
-            .when(single.is_none(), |el| {
-                el.child(
-                    div()
-                        .id(SharedString::from(format!("card-agent-{}", t.id)))
-                        .test_support()
-                        .flex_none()
-                        .child(ui::agent_logo(&t.agent, px(12.), cx)),
-                )
-            });
-        // Under the title, what it's doing (and, out of its project's group, where), on the
-        // title's line.
-        let doing = single.is_none().then(|| {
-            h_flex()
-                .h(px(16.))
-                .pl(px(look::MARK_W + look::MARK_GAP))
-                .gap(px(4.))
-                .min_w_0()
-                .text_size(px(look::META_SIZE))
-                .child(words)
-                .when_some(place.clone(), |el, project| {
-                    let says_why = self.why.contains_key(&t.id);
-                    let checks = matches!(self.why.get(&t.id), Some(Why::Checks(_)));
-                    el.child(
-                        div()
-                            // Failing checks come with an action: those two keep their room.
-                            .when(checks, |el| el.min_w_0().flex_shrink(100.))
-                            .when(says_why && !checks, |el| {
-                                el.flex_none().max_w(px(PROJECT_WIDTH))
-                            })
-                            .when(!says_why, |el| el.min_w_0())
-                            .truncate()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("· {project}")),
-                    )
-                })
-        });
+            .child(look::trailing(
+                Some(format!("inbox-time-{}", t.id)),
+                time::relative(t.updated_at),
+                theme.muted_foreground,
+            ));
+        // Why it's here, then where it's from. The project gives way first, down to a few letters
+        // ("· FMCET M…"): why is what the row is for.
+        let says_why = words.is_some();
+        let place = h_flex()
+            .h(px(16.))
+            .pl(px(look::MARK_W + look::MARK_GAP))
+            .gap(px(4.))
+            .min_w_0()
+            .text_size(px(look::META_SIZE))
+            .children(words)
+            .child(
+                div()
+                    .when(says_why, |el| el.min_w(px(PROJECT_MIN)).flex_shrink(100.))
+                    .when(!says_why, |el| el.min_w_0())
+                    .truncate()
+                    .text_color(theme.muted_foreground)
+                    .child(if says_why {
+                        format!("· {project}")
+                    } else {
+                        project.to_string()
+                    }),
+            );
+        let inset = look::ROW_INSET - look::INBOX_BORDER - look::INBOX_ROW_MX;
         let row = v_flex()
-            .id(SharedString::from(format!("card-{}", t.id)))
+            .id(SharedString::from(format!("inbox-{}", t.id)))
             .test_support()
             .relative()
-            .when(!tray, |el| el.mx_2())
-            .when(single.is_none(), |el| el.pt(px(6.)).pb(px(7.)).gap(px(2.)))
-            .pl(px(ROW_INSET))
-            .pr(px(10.))
+            .mx(px(look::INBOX_ROW_MX))
+            .pl(px(inset))
+            .pr(px(inset))
+            .pt(px(5.))
+            .pb(px(6.))
+            .gap(px(1.))
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
             .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
-            .children(self.tab_mark(&t.id, selected, cx))
+            .children(fluent::selection_bar(selected, cx))
             .child(title)
-            .children(doing)
-            .when_some(hit.clone(), |el, h| {
-                el.child(
-                    Self::hit_line(&h, cx)
-                        .pl(px(look::MARK_W + look::MARK_GAP))
-                        .pt(px(2.)),
-                )
+            .child(place)
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
-            .when_some(tip, |el, tip| {
-                el.tooltip(move |window, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                })
-            })
-            .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), hit.clone(), cx)));
+            .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), None, cx)));
         let row = self.draggable(row, t, cx);
         self.with_menu(row, t, cx).into_any_element()
     }
 
-    /// A thin bar at a row's left edge while its thread is open as a tab (solid for the one on
-    /// screen): what's open, without a second list. On Windows the one on screen has the selection
-    /// bar in its place, not as well as it.
-    fn tab_mark(&self, id: &str, selected: bool, cx: &App) -> Option<AnyElement> {
-        if let Some(bar) = fluent::selection_bar(selected, cx) {
-            return Some(bar.into_any_element());
-        }
-        let ws = self.workspace.read(cx);
-        let open = ws.tabs.iter().any(|t| t == id);
-        // In the pane beside the one with the focus: on screen too, without the selection.
-        let beside = !selected && ws.pane_of(id).is_some();
-        let theme = cx.theme();
-        (open || selected).then(|| {
-            div()
-                .absolute()
-                .left(px(2.))
-                .top(px(9.))
-                .bottom(px(9.))
-                .w(px(2.))
-                .rounded_full()
-                .bg(if selected {
-                    theme.foreground.opacity(0.8)
-                } else if beside {
-                    theme.foreground.opacity(0.45)
-                } else {
-                    theme.foreground.opacity(0.16)
-                })
-                .into_any_element()
-        })
-    }
-
-    /// Codex-style compact row for settled history, dimmer than live work's. One whose sub-agents
-    /// or background work are still going (settled, it stays here, as a working thread would) has
-    /// a quiet dot in its state column that names them on hover, as a card does; a Study session
-    /// has its cap.
+    /// Codex-style compact row for settled history, dimmer than live work's, its age in the
+    /// right-hand column. One whose sub-agents or background work are still going (settled, it
+    /// stays here, as a working thread would) has a quiet dot in its state column that names them
+    /// on hover; a Study session has its cap.
     fn line(&self, t: &Thread, selected: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let id = t.id.clone();
@@ -1225,30 +1061,23 @@ impl Sidebar {
                 },
                 cx,
             )))
-            .child(
-                div()
-                    .text_size(px(look::LABEL_SIZE))
-                    .text_color(theme.muted_foreground.opacity(0.8))
-                    .invisible()
-                    .group_hover(SharedString::from(format!("line-{}", t.id)), |s| {
-                        s.visible()
-                    })
-                    .child(time::relative(t.updated_at)),
-            );
+            .child(look::trailing(
+                Some(format!("line-time-{}", t.id)),
+                time::relative(t.updated_at),
+                theme.muted_foreground.opacity(0.8),
+            ));
         let row = v_flex()
             .id(SharedString::from(format!("line-{}", t.id)))
-            .group(SharedString::from(format!("line-{}", t.id)))
             .test_support()
             .relative()
             .mx_2()
-            .pl(px(ROW_INSET))
-            .pr(px(10.))
+            .px(px(ROW_INSET))
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
             .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
-            .children(self.tab_mark(&t.id, selected, cx))
+            .children(fluent::selection_bar(selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
                 el.child(
@@ -1268,20 +1097,34 @@ impl Sidebar {
         self.with_menu(row, t, cx).into_any_element()
     }
 
-    /// A live thread that needs no attention, at a line's height: its state column (a sky dot
-    /// while its own or its sub-agents' work still runs, ember with sub-agents out, emerald while
-    /// unread, Study's cap for a session), its title (medium while unread), its worktree, and its
-    /// age on hover — "Paused" instead while it sits at a usage limit, a session's kind for one.
+    /// A thread in its project (in Study, on its device), on one line. Its state column: the
+    /// ember loader while it's at work (its turn, its sub-agents, a resume), amber or red for a
+    /// turn a quit cut off, a sky dot while only its background work runs, emerald while unread,
+    /// its pin or clock, Study's cap. Its title (full strength while at work, open or unread;
+    /// medium while unread), its worktree and its sub-agents' pill. Then the right-hand column:
+    /// how long it's been at work in ember, the way back after a quit, "Paused" at a usage limit,
+    /// a session's kind, or how long ago it last changed.
     fn live_line(&self, t: &Thread, selected: bool, cx: &mut Context<Self>) -> AnyElement {
+        use crate::workspace::resume::ResumeState;
+        /// Where a turn a quit cut off stands.
+        enum Offer {
+            Resume,
+            Waiting,
+            Resuming,
+            Retry,
+        }
         let theme = cx.theme().clone();
         let ws = self.workspace.read(cx);
         let id = t.id.clone();
         let hit = self.content_hit(t, cx);
         let (kids, background) = self.at_work(t, cx);
-        let tip = card_tip(&kids, &background).map(SharedString::from);
         let unseen = t.is_unseen();
+        let pinned = t.pinned_at.is_some();
+        let snoozed = t
+            .snoozed_until
+            .is_some_and(|u| u > trek_core::store::now_ms());
         let paused = t.paused.is_some() && t.run_state == RunState::Idle;
-        let at_work = !kids.is_empty() || !background.is_empty();
+        let waiting = t.run_state == RunState::Idle && self.graph.waiting.contains(&t.id);
         let study = look::is_study(t, &self.study_dir);
         let (shown_title, kind) = if study {
             let (title, kind) = look::study_title(&t.title);
@@ -1289,23 +1132,125 @@ impl Sidebar {
         } else {
             (t.title.clone(), None)
         };
-        // One column for how it stands: what's still running first, then news, then what it is.
-        let (mark, mark_id) = if at_work {
-            (
-                if kids.is_empty() {
-                    Mark::Background
-                } else {
-                    Mark::Working
-                },
-                Some(format!("live-line-at-work-{}", t.id)),
-            )
+        let offer = ws
+            .interrupted_offer(&t.id)
+            .and_then(|o| match (&o.state, o.turn.waiting) {
+                (ResumeState::Offered, false) => Some(Offer::Resume),
+                (ResumeState::Offered, true) => Some(Offer::Waiting),
+                (ResumeState::Resuming, _) => Some(Offer::Resuming),
+                (ResumeState::Failed(_), _) => Some(Offer::Retry),
+                (ResumeState::Going, _) => None,
+            });
+        let working =
+            t.run_state == RunState::Working || waiting || matches!(offer, Some(Offer::Resuming));
+        // One column for how it stands: what's running first, then what's asked of the user, then
+        // news, then what it is.
+        let at_work_id = || Some(format!("live-line-at-work-{}", t.id));
+        let (mark, mark_id) = if working {
+            (Mark::Working, None)
+        } else if !kids.is_empty() {
+            (Mark::Working, at_work_id())
+        } else if matches!(offer, Some(Offer::Resume | Offer::Waiting))
+            || t.run_state == RunState::NeedsYou
+        {
+            (Mark::NeedsYou, None)
+        } else if matches!(offer, Some(Offer::Retry)) || t.run_state == RunState::Failed {
+            (Mark::Failed, None)
+        } else if !background.is_empty() {
+            (Mark::Background, at_work_id())
         } else if unseen {
             (Mark::Unread, Some(format!("live-line-unseen-{}", t.id)))
+        } else if pinned {
+            (Mark::Pinned, Some(format!("live-line-pinned-{}", t.id)))
+        } else if snoozed {
+            (Mark::Snoozed, Some(format!("live-line-snoozed-{}", t.id)))
         } else if study {
             (Mark::Study, None)
         } else {
             (Mark::None, None)
         };
+        let busy = mark == Mark::Working;
+        // The right-hand column.
+        let ember = palette::working(cx);
+        let link = |label: &'static str| {
+            let (ws, tid) = (self.workspace.clone(), t.id.clone());
+            div()
+                .id(SharedString::from(format!("live-line-resume-{}", t.id)))
+                .test_support()
+                .flex_none()
+                .text_size(px(look::LABEL_SIZE))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.foreground)
+                .cursor_pointer()
+                .hover(|s| s.underline())
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    // The row opens the thread; this only resumes it.
+                    cx.stop_propagation();
+                    ws.update(cx, |ws, cx| ws.resume_interrupted(&tid, cx));
+                })
+                .into_any_element()
+        };
+        let end = match offer {
+            Some(Offer::Resume) => link("Resume"),
+            Some(Offer::Retry) => link("Retry"),
+            Some(Offer::Resuming) => look::trailing(
+                Some(format!("live-line-working-{}", t.id)),
+                "Resuming…",
+                ember,
+            ),
+            _ if t.run_state == RunState::Working => {
+                // A machine's thread not open here counts from when its row says it started. The
+                // loader holds still and the clock ticks: a spinning one would redraw the whole
+                // sidebar every frame.
+                let clock = ws
+                    .live
+                    .get(&t.id)
+                    .and_then(|l| l.turn_started)
+                    .map(|s| s.elapsed())
+                    .or_else(|| ws.machines.working_for(&t.id));
+                look::trailing(
+                    Some(format!("live-line-working-{}", t.id)),
+                    match clock {
+                        Some(d) => time::elapsed(d),
+                        None => crate::mascot::word(&t.id, 0).to_string(),
+                    },
+                    ember,
+                )
+            }
+            // Its turn is over but its sub-agents are still out: how long it's waited on them.
+            _ if waiting => {
+                let longest = ws
+                    .waiting_on(&t.id)
+                    .iter()
+                    .map(|w| w.elapsed)
+                    .max()
+                    .or_else(|| ws.machines.waited_for(&t.id));
+                look::trailing(
+                    Some(format!("live-line-waiting-{}", t.id)),
+                    match longest {
+                        Some(d) => time::elapsed(d),
+                        None => "Waiting".to_string(),
+                    },
+                    ember,
+                )
+            }
+            _ if paused => look::trailing(
+                Some(format!("live-line-paused-{}", t.id)),
+                "Paused",
+                palette::amber(cx),
+            ),
+            // Learn or Practice, always: it says what kind of session this is.
+            _ if kind.is_some() => {
+                look::trailing(None, kind.unwrap_or_default(), theme.muted_foreground)
+            }
+            _ => look::trailing(
+                Some(format!("live-line-time-{}", t.id)),
+                time::relative(t.updated_at),
+                theme.muted_foreground,
+            ),
+        };
+        let strong = selected || unseen || busy;
         let title = h_flex()
             .h(px(look::LINE_H))
             .gap(px(look::MARK_GAP))
@@ -1319,10 +1264,10 @@ impl Sidebar {
                         SharedString::from(format!("live-line-title-{}", t.id)),
                         &shown_title,
                         ws.title_reveal(&t.id),
-                        if !selected && !unseen {
-                            theme.foreground.opacity(look::QUIET)
-                        } else {
+                        if strong {
                             theme.foreground
+                        } else {
+                            theme.foreground.opacity(look::QUIET)
                         },
                         cx,
                     )),
@@ -1335,50 +1280,57 @@ impl Sidebar {
                     cx,
                 ))
             })
-            .child(if paused {
-                div()
-                    .id(SharedString::from(format!("live-line-paused-{}", t.id)))
-                    .test_support()
-                    .flex_none()
-                    .text_size(px(look::LABEL_SIZE))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(palette::amber(cx))
-                    .child("Paused")
-                    .into_any_element()
-            } else if let Some(kind) = kind {
-                // Learn or Practice, always: it says what kind of session this is.
-                div()
-                    .flex_none()
-                    .text_size(px(look::LABEL_SIZE))
-                    .text_color(theme.muted_foreground)
-                    .child(kind)
-                    .into_any_element()
-            } else {
-                div()
-                    .flex_none()
-                    .text_size(px(look::LABEL_SIZE))
-                    .text_color(theme.muted_foreground.opacity(0.8))
-                    .invisible()
-                    .group_hover(SharedString::from(format!("live-line-{}", t.id)), |s| {
-                        s.visible()
-                    })
-                    .child(time::relative(t.updated_at))
-                    .into_any_element()
-            });
+            // Its sub-agents at work, in a pill of their own: the logo of each provider they run on,
+            // then how many there are (the tooltip names each). (Overlapped logos read as a
+            // smudge, and a ring the sidebar's colour shows under glass.)
+            .when(!kids.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .id(SharedString::from(format!("live-line-kids-{}", t.id)))
+                        .test_support()
+                        .flex_none()
+                        .h(px(16.))
+                        .px(px(5.))
+                        .gap(px(3.))
+                        .rounded_pill()
+                        .bg(theme.foreground.opacity(0.07))
+                        .children(
+                            kid_groups(&kids)
+                                .into_iter()
+                                .take(3)
+                                .map(|(agent, _)| ui::agent_logo(&agent, px(10.), cx)),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("live-line-kids-count-{}", t.id)))
+                                .test_support()
+                                .text_size(px(text::META))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground)
+                                .child(kids.len().to_string()),
+                        ),
+                )
+            })
+            .child(end);
+        // At work: who runs it and what it has out; otherwise only what still runs in the
+        // background has anything to name.
+        let tip = if busy || offer.is_some() {
+            Some(self.runs_tip(t, &kids, &background, cx))
+        } else {
+            card_tip(&kids, &background).map(SharedString::from)
+        };
         let row = v_flex()
             .id(SharedString::from(format!("live-line-{}", t.id)))
-            .group(SharedString::from(format!("live-line-{}", t.id)))
             .test_support()
             .relative()
             .mx_2()
-            .pl(px(ROW_INSET))
-            .pr(px(10.))
+            .px(px(ROW_INSET))
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .cursor_pointer()
             .text_size(px(look::TITLE_SIZE))
             .when(selected, |el| el.bg(theme.list_active))
             .when(!selected, |el| el.hover(|s| s.bg(theme.list_hover)))
-            .children(self.tab_mark(&t.id, selected, cx))
+            .children(fluent::selection_bar(selected, cx))
             .child(title)
             .when_some(hit.clone(), |el, h| {
                 el.child(
@@ -1398,11 +1350,13 @@ impl Sidebar {
         self.with_menu(row, t, cx).into_any_element()
     }
 
-    /// A project group's header (live quiet threads and settled history): the project's badge in
-    /// the state column and its name in the primary colour (the one row with a badge, so a project
-    /// never reads as a section), how many threads it holds, and on hover a "new thread here"
-    /// button and the fold; wrapped in the project menu. Settled history's are muted. "No
-    /// project" has a plain glyph for a badge.
+    /// A project group's header (live threads and settled history): the project's badge in the
+    /// state column, its name in the primary colour (the one row with a badge, so a project never
+    /// reads as a section) and how many threads it holds in the right-hand column. The fold
+    /// chevron follows the name (folded, always; open, to the pointer), and on hover "New thread
+    /// here" lies over the count rather than keeping room for itself, so the count ends where
+    /// every other row's right-hand column does. Wrapped in the project menu. Settled history's
+    /// are muted. "No project" has a plain glyph for a badge.
     #[allow(clippy::too_many_arguments)]
     fn group_header(
         &self,
@@ -1431,16 +1385,17 @@ impl Sidebar {
                 .text_color(theme.muted_foreground)
                 .into_any_element(),
         };
-        let folded = fold == Some(true);
+        let group = SharedString::from(format!("{prefix}-proj-group-{pid}"));
+        // What "New thread here" takes from the name while it's on show (it lies over the count).
+        let hover_room = if here.is_some() { HOVER_BUTTON } else { 0. };
         let header = h_flex()
             .id(SharedString::from(format!("{prefix}-proj-head-{pid}")))
             .test_support()
-            .group("proj-head")
+            .group(group.clone())
+            .relative()
             .mx_2()
-            .pl(px(ROW_INSET))
-            .pr_1()
+            .px(px(ROW_INSET))
             .h(px(look::LINE_H))
-            .gap(px(look::MARK_GAP))
             .rounded(px(fluent::control(look::ROW_RADIUS)))
             .hover(|s| s.bg(theme.list_hover))
             .child(
@@ -1452,6 +1407,7 @@ impl Sidebar {
                     .h_full()
                     .gap(px(look::MARK_GAP))
                     .cursor_pointer()
+                    .group_hover(group.clone(), |s| s.pr(px(hover_room)))
                     .child(
                         h_flex()
                             .flex_none()
@@ -1461,45 +1417,57 @@ impl Sidebar {
                             .child(badge),
                     )
                     .child(
-                        div()
+                        h_flex()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_size(px(look::TITLE_SIZE))
-                            .when(!settled, |el| {
-                                el.font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.foreground)
-                            })
-                            .when(settled, |el| el.text_color(theme.muted_foreground))
-                            .child(name.clone()),
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(look::TITLE_SIZE))
+                                    .when(!settled, |el| {
+                                        el.font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                    })
+                                    .when(settled, |el| el.text_color(theme.muted_foreground))
+                                    .child(name.clone()),
+                            )
+                            // Folded, the chevron says so; open, it shows only to the pointer.
+                            .when_some(fold, |el, folded| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .when(!folded, |el| {
+                                            el.invisible()
+                                                .group_hover(group.clone(), |s| s.visible())
+                                        })
+                                        .child(
+                                            Icon::new(if folded {
+                                                IconName::ChevronRight
+                                            } else {
+                                                IconName::ChevronDown
+                                            })
+                                            .xsmall()
+                                            .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                            }),
                     )
-                    // How many it holds; on hover the fold and New thread take its place.
+                    // How many it holds, in the right-hand column; "New thread here" lies over it
+                    // on hover.
                     .when_some(count.filter(|n| *n > 0), |el, n| {
                         el.child(
                             div()
+                                .id(SharedString::from(format!("{prefix}-proj-count-{pid}")))
+                                .test_support()
                                 .flex_none()
                                 .text_size(px(look::LABEL_SIZE))
-                                .text_color(theme.muted_foreground.opacity(0.8))
-                                .when(!folded, |el| el.group_hover("proj-head", |s| s.invisible()))
-                                .child(n.to_string()),
-                        )
-                    })
-                    // Folded, the chevron says so; open, it shows only to the pointer.
-                    .when_some(fold, |el, folded| {
-                        el.child(
-                            div()
-                                .when(!folded, |el| {
-                                    el.invisible().group_hover("proj-head", |s| s.visible())
+                                .text_color(theme.muted_foreground)
+                                .when(here.is_some(), |el| {
+                                    el.group_hover(group.clone(), |s| s.invisible())
                                 })
-                                .child(
-                                    Icon::new(if folded {
-                                        IconName::ChevronRight
-                                    } else {
-                                        IconName::ChevronDown
-                                    })
-                                    .xsmall()
-                                    .text_color(theme.muted_foreground),
-                                ),
+                                .child(n.to_string()),
                         )
                     })
                     .when(fold.is_some(), |el| {
@@ -1524,9 +1492,14 @@ impl Sidebar {
                     "New thread here"
                 };
                 el.child(
-                    div()
+                    h_flex()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right(px(HOVER_BUTTON_RIGHT))
+                        .items_center()
                         .invisible()
-                        .group_hover("proj-head", |s| s.visible())
+                        .group_hover(group.clone(), |s| s.visible())
                         .child(
                             ui::icon_button(
                                 SharedString::from(format!("{prefix}-proj-new-{pid}")),
@@ -1769,9 +1742,90 @@ impl Sidebar {
         })
     }
 
-    /// A section's label (`look::section_label`), with how many rows it holds.
-    fn label(text: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
-        look::section_label(text, count, None, cx)
+    /// "Show 2 more" / "Show less" under a group, on the titles' line (in the Inbox, its rows').
+    fn show_more(
+        &self,
+        id: String,
+        label: String,
+        in_box: bool,
+        cx: &App,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .id(SharedString::from(id))
+            .when(!in_box, |el| el.mx_2().pl(px(TEXT_INSET)))
+            .when(in_box, |el| el.pl(px(TEXT_INSET - look::INBOX_BORDER)))
+            .h(px(24.))
+            .flex()
+            .items_center()
+            .text_size(px(look::META_SIZE))
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme.foreground))
+            .child(label)
+            .on_click(on_click)
+            .test_support()
+    }
+
+    /// The Settled row at the end: the archive glyph, "Settled" with its chevron (right while
+    /// folded), and how many threads it holds in the right-hand column.
+    fn settled_row(&self, count: usize, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id("settled-toggle")
+            .test_support()
+            .mx_2()
+            .px(px(ROW_INSET))
+            .h(px(look::LINE_H))
+            .gap(px(look::MARK_GAP))
+            .rounded(px(fluent::control(look::ROW_RADIUS)))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.list_hover))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w(px(look::MARK_W))
+                    .h(px(look::MARK_H))
+                    .justify_center()
+                    .child(
+                        Icon::new(crate::assets::Lucide::Archive)
+                            .size(px(14.))
+                            .text_color(theme.muted_foreground),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(look::TITLE_SIZE))
+                            .text_color(theme.muted_foreground)
+                            .child("Settled"),
+                    )
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                    ),
+            )
+            .child(look::trailing(
+                Some("settled-count".into()),
+                count.to_string(),
+                theme.muted_foreground,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.workspace.update(cx, |ws, cx| {
+                    ws.settled_open = !ws.settled_open;
+                    cx.notify();
+                })
+            }))
     }
 
     fn footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2659,7 +2713,7 @@ impl Sidebar {
     }
 }
 
-/// A card's sub-agents by agent, in the order they first appear, with how many of each.
+/// A row's sub-agents by agent, in the order they first appear, with how many of each.
 fn kid_groups(kids: &[(trek_core::AgentId, String)]) -> Vec<(trek_core::AgentId, usize)> {
     let mut out: Vec<(trek_core::AgentId, usize)> = vec![];
     for (agent, _) in kids {
@@ -2708,7 +2762,7 @@ fn usage_ring(fraction: f32, color: Hsla, cx: &App) -> AnyElement {
     .into_any_element()
 }
 
-/// A card's tooltip while it has work out: its sub-agents, then what runs in the background.
+/// A row's tooltip while it has work out: its sub-agents, then what runs in the background.
 pub fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) -> Option<String> {
     let head = match kids.len() {
         1 => "1 sub-agent at work".to_string(),
@@ -2730,13 +2784,33 @@ pub fn card_tip(kids: &[(trek_core::AgentId, String)], background: &[String]) ->
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
-/// The inbox's cards in order: what waits on the user (approvals, failures), then what's running
-/// now, then the rest of the inbox, newest first as `Thread::inbox_rank` has them. Running threads
-/// mustn't sink below a day's worth of finished ones and out of view.
-fn live_order(inbox: Vec<Thread>, working: Vec<Thread>) -> Vec<Thread> {
-    let (waiting, rest): (Vec<Thread>, Vec<Thread>) =
-        inbox.into_iter().partition(|t| t.needs_you());
-    waiting.into_iter().chain(working).chain(rest).collect()
+/// A project's threads in the order its rows go: pinned first (as pinned), then what's at work,
+/// then the rest, unread first and newest first within.
+fn row_order(mut threads: Vec<Thread>, at_work: impl Fn(&Thread) -> bool) -> Vec<Thread> {
+    threads.sort_by(|a, b| {
+        let pin = |t: &Thread| t.pinned_at.unwrap_or(i64::MAX);
+        pin(a)
+            .cmp(&pin(b))
+            .then(at_work(b).cmp(&at_work(a)))
+            .then(b.is_unseen().cmp(&a.is_unseen()))
+            .then(b.updated_at.cmp(&a.updated_at))
+    });
+    threads
+}
+
+/// The Inbox's rows: everything that calls for the user, then what's only news (a turn cut
+/// short, then what finished) up to `NEWS_SHOWN` unless it's open, in `needing_you`'s order. With
+/// how many wait behind "Show more".
+fn inbox_rows(inbox: &[(Thread, Why)], open: bool) -> (Vec<String>, usize) {
+    let news = inbox.iter().filter(|(_, w)| !w.calls_for_you()).count();
+    let shown = if open { news } else { news.min(NEWS_SHOWN) };
+    let rows = inbox
+        .iter()
+        .filter(|(_, w)| w.calls_for_you())
+        .chain(inbox.iter().filter(|(_, w)| !w.calls_for_you()).take(shown))
+        .map(|(t, _)| t.id.clone())
+        .collect();
+    (rows, news - shown)
 }
 
 impl Render for Sidebar {
@@ -2772,8 +2846,7 @@ impl Render for Sidebar {
             _ => None,
         };
         let searching = !ws.search.is_empty();
-        // What needs the user is listed once, on top, whichever project or section it's from
-        // (out of a search, which is a list of its own).
+        // What needs the user and what finished unread, in the order the jump key goes through them.
         let needing: Vec<(Thread, Why)> = ws
             .needing_you()
             .into_iter()
@@ -2783,17 +2856,6 @@ impl Render for Sidebar {
             .iter()
             .map(|(t, why)| (t.id.clone(), why.clone()))
             .collect();
-        // A thread that only finished isn't waiting on anyone: it stays in its project, on top
-        // with its unread dot, and Needs you holds what can't go on without the user.
-        let needing: Vec<(Thread, Why)> = if searching {
-            vec![]
-        } else {
-            needing
-                .into_iter()
-                .filter(|(_, why)| !matches!(why, Why::Finished))
-                .collect()
-        };
-        let in_needs: HashSet<String> = needing.iter().map(|(t, _)| t.id.clone()).collect();
         let settled_open = ws.settled_open || searching;
         let importing = ws.importing;
         // Rows slide to new places only when the list changes under the user, not as a search
@@ -2807,20 +2869,38 @@ impl Render for Sidebar {
         }
         let flip = self.flip.clone();
         // Settled history can be hundreds of threads; while it's folded only the count is needed.
+        // Everything else is live: pinned, snoozed, at work, and the rest of the inbox.
         let mut settled_count = 0;
-        let mut sections: Vec<(Section, Vec<Thread>)> = ws
-            .sections()
-            .into_iter()
-            .map(|(s, mut v)| {
-                v.retain(|t| !in_needs.contains(&t.id));
-                if s == Section::Settled {
-                    settled_count = v.len();
-                    if !settled_open {
-                        return (s, vec![]);
-                    }
+        let mut settled: Vec<Thread> = vec![];
+        let mut live: Vec<Thread> = vec![];
+        for (section, threads) in ws.sections() {
+            if section == Section::Settled {
+                settled_count = threads.len();
+                if settled_open {
+                    settled = threads.into_iter().cloned().collect();
                 }
-                (s, v.into_iter().cloned().collect())
-            })
+            } else {
+                live.extend(threads.into_iter().cloned());
+            }
+        }
+        // The Inbox: what needs the user (whichever project it's in) and what finished unread, out
+        // of a search, which is a list of its own. A finished thread in a project the filter
+        // leaves out stays out, as it would in its project.
+        let inbox: Vec<(Thread, Why)> = if searching {
+            vec![]
+        } else {
+            let in_view: HashSet<&str> = live.iter().map(|t| t.id.as_str()).collect();
+            needing
+                .into_iter()
+                .filter(|(t, why)| !matches!(why, Why::Finished) || in_view.contains(t.id.as_str()))
+                .collect()
+        };
+        // A thread in the Inbox leaves its project's list while it's there.
+        let in_inbox: HashSet<String> = inbox.iter().map(|(t, _)| t.id.clone()).collect();
+        let finished: Vec<String> = inbox
+            .iter()
+            .filter(|(_, why)| matches!(why, Why::Finished))
+            .map(|(t, _)| t.id.clone())
             .collect();
         let names: HashMap<String, String> = ws
             .projects
@@ -2854,79 +2934,9 @@ impl Render for Sidebar {
                 .unwrap_or_else(|| "No project".into())
         };
         let theme = cx.theme().clone();
-
-        let mut list = v_flex().pt_1().pb_3();
-        // Pinned and Snoozed, under "Needs you" and over the rest.
-        let mut named = v_flex().w_full();
-        let mut settled: Vec<Thread> = vec![];
-        // Inbox and Working are one run of cards: see `live_order`. Their threads move out of
-        // `sections` (which draws neither) rather than being copied again on every render.
-        let live: Vec<Thread> = {
-            let mut take = |s: Section| {
-                sections
-                    .iter_mut()
-                    .find(|(x, _)| *x == s)
-                    .map(|(_, v)| std::mem::take(v))
-                    .unwrap_or_default()
-            };
-            let inbox = take(Section::Inbox);
-            live_order(inbox, take(Section::Working))
-        };
-        // Pinned or snoozed threads showing mean the live run isn't really empty.
-        let named_sections_busy = sections
-            .iter()
-            .any(|(s, v)| matches!(s, Section::Pinned | Section::Snoozed) && !v.is_empty());
-        let mut pinned: HashSet<String> = HashSet::new();
-        for (section, threads) in sections {
-            match section {
-                Section::Settled => settled = threads,
-                Section::Pinned | Section::Snoozed if threads.is_empty() => {}
-                Section::Pinned | Section::Snoozed => {
-                    named = named.child(crate::motion::flip_row(
-                        &flip,
-                        format!("label-{}", section.label()),
-                        Self::label(section.label(), Some(threads.len()), cx),
-                        now,
-                        window,
-                    ));
-                    let kind = if section == Section::Pinned {
-                        Mark::Pinned
-                    } else {
-                        Mark::Snoozed
-                    };
-                    for t in &threads {
-                        pinned.insert(t.id.clone());
-                        named = named.child(crate::motion::flip_row(
-                            &flip,
-                            t.id.clone(),
-                            self.card(
-                                t,
-                                &project_of(t),
-                                true,
-                                selected.as_deref() == Some(&t.id),
-                                false,
-                                Some(kind),
-                                cx,
-                            ),
-                            now,
-                            window,
-                        ));
-                    }
-                }
-                Section::Inbox | Section::Working => {}
-            }
-        }
-        // Every live thread sits under its project: what has something to say (it needs you, it
-        // failed, it's at work) first, then the quiet rest capped at three (every unread row and
-        // the open one stay out), all at a line's height. A folded group keeps its badges —
-        // needs-you, working, unread — on the header.
-        let cut_off: HashSet<String> = self
-            .workspace
-            .read(cx)
-            .interrupted
-            .keys()
-            .cloned()
-            .collect();
+        let cut_off: HashSet<String> = ws.interrupted.keys().cloned().collect();
+        // Something to say: it needs the user, it's at work, a quit cut it off. At work, it stays
+        // in its project, on show whatever the project's cap.
         let attention = |t: &Thread| {
             t.needs_you()
                 || t.run_state == RunState::Working
@@ -2934,26 +2944,17 @@ impl Render for Sidebar {
                 || self.graph.needs.contains(&t.id)
                 || self.graph.waiting.contains(&t.id)
         };
-        // What's live on other machines joins Active too (out of a search, which their groups
-        // don't take part in).
-        let machine_live: Vec<Thread> = if searching {
-            vec![]
-        } else {
-            self.workspace
-                .read(cx)
-                .machines
-                .list
-                .iter()
-                .flat_map(|m| m.listed())
-                .filter(|t| attention(t) && !in_needs.contains(&t.id))
-                .cloned()
-                .collect()
-        };
+
+        // Air at the end is the history's (under Settled), so the gap above Settled is a section's.
+        let mut list = v_flex().pt_1();
+        // Every live thread is in its project (Study's sessions in Study), at a line's height:
+        // pinned ones first, what's at work, then the quiet rest capped at three (an unread row
+        // and the open one stay out). A project counts the threads it has in the Inbox too.
         let mut by_id: HashMap<String, Thread> = HashMap::new();
         let mut info: HashMap<String, GroupInfo> = HashMap::new();
         let mut fresh: Vec<LiveGroup> = vec![];
         {
-            let mut groups: Vec<(String, String, Vec<Thread>, Vec<Thread>)> = Vec::new();
+            let mut groups: Vec<(String, String, Vec<Thread>)> = Vec::new();
             for t in live {
                 let pid = if look::is_study(&t, &study_dir) {
                     STUDY.to_string()
@@ -2961,86 +2962,71 @@ impl Render for Sidebar {
                     t.project_id.clone().unwrap_or_default()
                 };
                 let ix = groups.iter().position(|g| g.0 == pid).unwrap_or_else(|| {
-                    groups.push((pid, project_of(&t), vec![], vec![]));
+                    groups.push((pid, project_of(&t), vec![]));
                     groups.len() - 1
                 });
-                let g = &mut groups[ix];
-                if attention(&t) {
-                    g.2.push(t);
-                } else {
-                    g.3.push(t);
-                }
+                groups[ix].2.push(t);
             }
-            // Groups with something that needs you first, then unread, then their newest activity.
+            // Groups with something to say first, then unread, then their newest activity.
             groups.sort_by(|a, b| {
-                let attention = |g: &(String, String, Vec<Thread>, Vec<Thread>)| !g.2.is_empty();
-                let unseen = |g: &(String, String, Vec<Thread>, Vec<Thread>)| {
-                    g.2.iter().chain(g.3.iter()).any(|t| t.is_unseen())
-                };
-                let newest = |g: &(String, String, Vec<Thread>, Vec<Thread>)| {
-                    g.2.iter()
-                        .chain(g.3.iter())
-                        .map(|t| t.updated_at)
-                        .max()
-                        .unwrap_or(0)
+                let busy = |g: &(String, String, Vec<Thread>)| g.2.iter().any(&attention);
+                let unseen = |g: &(String, String, Vec<Thread>)| g.2.iter().any(|t| t.is_unseen());
+                let newest = |g: &(String, String, Vec<Thread>)| {
+                    g.2.iter().map(|t| t.updated_at).max().unwrap_or(0)
                 };
                 // Study's sessions go after every project: they're in none.
                 (a.0 == STUDY)
                     .cmp(&(b.0 == STUDY))
-                    .then(attention(b).cmp(&attention(a)))
+                    .then(busy(b).cmp(&busy(a)))
                     .then(unseen(b).cmp(&unseen(a)))
                     .then(newest(b).cmp(&newest(a)))
                     .then_with(|| a.1.cmp(&b.1))
             });
-            // What's at work leaves its project for the Active section, as what needs the user
-            // does for Needs you; each project keeps its quiet threads under a plain heading.
-            let mut active: Vec<Thread> = vec![];
-            for (pid, name, cards, mut items) in groups {
-                active.extend(cards);
-                let cards: Vec<Thread> = vec![];
-                if items.is_empty() {
-                    continue;
-                }
-                items.sort_by(|a, b| {
-                    b.is_unseen()
-                        .cmp(&a.is_unseen())
-                        .then(b.updated_at.cmp(&a.updated_at))
-                });
+            for (pid, name, threads) in groups {
+                let total = threads.len();
+                let rows = row_order(
+                    threads
+                        .into_iter()
+                        .filter(|t| !in_inbox.contains(&t.id))
+                        .collect(),
+                    &attention,
+                );
+                // Pinned and at work: always on show, folded or not. The quiet rest fold away.
+                let (kept, quiet): (Vec<Thread>, Vec<Thread>) = rows
+                    .into_iter()
+                    .partition(|t| t.pinned_at.is_some() || attention(t));
                 let folded = self.collapsed_live.contains(&pid) && !searching;
                 let open = self.open_live_projects.contains(&pid);
                 let shown: HashSet<&str> = if open || searching {
-                    items.iter().map(|t| t.id.as_str()).collect()
+                    quiet.iter().map(|t| t.id.as_str()).collect()
                 } else {
-                    let mut shown: HashSet<&str> = items
+                    let mut shown: HashSet<&str> = quiet
                         .iter()
                         .filter(|t| t.is_unseen() || selected.as_deref() == Some(t.id.as_str()))
                         .map(|t| t.id.as_str())
                         .collect();
-                    for t in &items {
-                        if shown.len() >= 3 {
+                    for t in &quiet {
+                        if shown.len() >= QUIET_SHOWN {
                             break;
                         }
                         shown.insert(t.id.as_str());
                     }
                     shown
                 };
-                let more = items.len() - shown.len();
-                let rows: Vec<String> = if folded {
-                    vec![]
-                } else {
-                    cards
-                        .iter()
-                        .map(|t| t.id.clone())
-                        .chain(
-                            items
-                                .iter()
-                                .filter(|t| shown.contains(t.id.as_str()))
-                                .map(|t| t.id.clone()),
-                        )
-                        .collect()
-                };
-                let footer =
-                    !folded && !searching && ((!open && more > 0) || (open && items.len() > 3));
+                let more = quiet.len() - shown.len();
+                let rows: Vec<String> = kept
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .chain(
+                        quiet
+                            .iter()
+                            .filter(|t| !folded && shown.contains(t.id.as_str()))
+                            .map(|t| t.id.clone()),
+                    )
+                    .collect();
+                let footer = !folded
+                    && !searching
+                    && ((!open && more > 0) || (open && quiet.len() > QUIET_SHOWN));
                 info.insert(
                     pid.clone(),
                     GroupInfo {
@@ -3048,74 +3034,41 @@ impl Render for Sidebar {
                         folded,
                         open,
                         more,
-                        total: items.len(),
+                        total,
                     },
                 );
                 fresh.push(LiveGroup { pid, rows, footer });
-                by_id.extend(cards.into_iter().chain(items).map(|t| (t.id.clone(), t)));
+                by_id.extend(kept.into_iter().chain(quiet).map(|t| (t.id.clone(), t)));
             }
-            active.extend(machine_live);
-            // Needs-you first, then at work, as `live_order` put each project's.
-            active.sort_by_key(|t| !(t.needs_you() || self.graph.needs.contains(&t.id)));
-            if !active.is_empty() {
-                // Needs-you first, then at work (as `live_order` put them), newest first within.
+            if !inbox.is_empty() {
+                let open = self.open_live_projects.contains(INBOX);
+                let (rows, more) = inbox_rows(&inbox, open);
+                let news = inbox.iter().filter(|(_, w)| !w.calls_for_you()).count();
                 info.insert(
-                    ACTIVE.to_string(),
+                    INBOX.to_string(),
                     GroupInfo {
-                        name: "Active".into(),
-                        total: active.len(),
-                        ..GroupInfo::default()
-                    },
-                );
-                fresh.insert(
-                    0,
-                    LiveGroup {
-                        pid: ACTIVE.to_string(),
-                        rows: active.iter().map(|t| t.id.clone()).collect(),
-                        footer: false,
-                    },
-                );
-                by_id.extend(active.into_iter().map(|t| (t.id.clone(), t)));
-            }
-            if !needing.is_empty() {
-                let open = self.open_live_projects.contains(NEEDS);
-                let news = needing.iter().filter(|(_, w)| !w.calls_for_you()).count();
-                let rows: Vec<String> = needing
-                    .iter()
-                    .filter(|(_, w)| w.calls_for_you())
-                    .chain(
-                        needing
-                            .iter()
-                            .filter(|(_, w)| !w.calls_for_you())
-                            .take(if open { news } else { NEWS_SHOWN }),
-                    )
-                    .map(|(t, _)| t.id.clone())
-                    .collect();
-                info.insert(
-                    NEEDS.to_string(),
-                    GroupInfo {
-                        name: "Needs you".into(),
+                        name: "Inbox".into(),
                         open,
-                        more: needing.len() - rows.len(),
-                        total: needing.len(),
+                        more,
+                        total: inbox.len(),
                         ..GroupInfo::default()
                     },
                 );
                 fresh.insert(
                     0,
                     LiveGroup {
-                        pid: NEEDS.to_string(),
+                        pid: INBOX.to_string(),
                         footer: news > NEWS_SHOWN,
                         rows,
                     },
                 );
-                by_id.extend(needing.into_iter().map(|(t, _)| (t.id.clone(), t)));
+                by_id.extend(inbox.into_iter().map(|(t, _)| (t.id.clone(), t)));
             }
         }
         // While the pointer is over the sidebar its rows hold their places: a thread answered,
         // stopped or come back with news there mustn't slide another under the next click. What
         // changed shows once the pointer leaves (`hover_changed`); what the user does here (folding,
-        // "Show more", searching) shows at once.
+        // "Show more", "Mark all read", searching) shows at once.
         let before = self.shown.clone();
         let layout: Vec<LiveGroup> = match self.shown.take().filter(|_| self.hovered && !searching)
         {
@@ -3124,8 +3077,8 @@ impl Render for Sidebar {
                 let ws = self.workspace.read(cx);
                 held.into_iter()
                     .map(|mut g| {
-                        // A row that left the live list (settled, say) keeps its place till then;
-                        // one archived or deleted goes.
+                        // A row that left the live list (settled, read, say) keeps its place till
+                        // then; one archived or deleted goes.
                         for id in &g.rows {
                             if !by_id.contains_key(id) {
                                 if let Some(t) = ws.thread(id).filter(|t| t.archived_at.is_none()) {
@@ -3146,7 +3099,6 @@ impl Render for Sidebar {
         };
         self.shown = Some(layout.clone());
         let live_shown = !layout.is_empty();
-        let needs_shown = layout.first().is_some_and(|g| g.pid == NEEDS);
         // Live rows whose thread went from every list drawn (archived, deleted; settled with the
         // history folded) fade where they were.
         if animate && let Some(before) = before {
@@ -3162,7 +3114,6 @@ impl Render for Sidebar {
             for g in &before {
                 for (ix, id) in g.rows.iter().enumerate() {
                     if drawn.contains(id.as_str())
-                        || pinned.contains(id)
                         || in_history.contains(id.as_str())
                         || by_id.contains_key(id)
                         || self.ghosts.iter().any(|x| &x.id == id)
@@ -3201,35 +3152,32 @@ impl Render for Sidebar {
         self.ghosts
             .retain(|g| g.left.moving(now) && layout.iter().any(|l| l.pid == g.pid));
         let mut last_rows: HashMap<String, (Thread, String, bool)> = HashMap::new();
-        // Each project's header and rows move as one (`flip_stack`).
+        // Each group's header and rows move as one (`flip_stack`).
         let mut live_groups: Vec<(SharedString, AnyElement)> = vec![];
         let projects_shown = layout
             .iter()
-            .filter(|g| ![ACTIVE, NEEDS, STUDY].contains(&g.pid.as_str()))
+            .filter(|g| ![INBOX, STUDY].contains(&g.pid.as_str()))
             .count();
         let mut first_project = true;
         for g in layout {
             let pid = g.pid;
-            let is_project = ![ACTIVE, NEEDS, STUDY].contains(&pid.as_str());
-            // Projects are things under one label; what's above them is listed by what it's for.
+            let in_box = pid == INBOX;
+            let is_project = !in_box && pid != STUDY;
+            // Projects are things under one label; the Inbox above them is listed by what it's for.
             if is_project && first_project {
                 live_groups.push((
                     PROJECTS_LABEL.into(),
-                    Self::label("Projects", Some(projects_shown), cx).into_any_element(),
+                    look::section_label("Projects", Some(projects_shown), cx).into_any_element(),
                 ));
-            }
-            // What needs the user is one amber block; each project leaves a little air under it,
-            // the same wherever it sorts, so its rows never move against it as groups trade places.
-            let mut group = if pid == NEEDS {
-                look::needs_tray(cx)
-            } else {
-                v_flex()
-                    .w_full()
-                    .when(is_project, |el| el.pb(px(look::GROUP_GAP)))
-            };
-            if is_project {
                 first_project = false;
             }
+            // Each group leaves a little air under it, the same wherever it sorts, so its rows never
+            // move against it as groups trade places.
+            let mut group = if in_box {
+                look::inbox_card(cx)
+            } else {
+                v_flex().w_full()
+            };
             let i = info.remove(&pid).unwrap_or_else(|| GroupInfo {
                 name: names
                     .get(&pid)
@@ -3237,23 +3185,36 @@ impl Render for Sidebar {
                     .unwrap_or_else(|| "No project".into()),
                 ..GroupInfo::default()
             });
-            // Listed by what they're for, not by project: rows say which project they're from.
-            let on_top = pid == ACTIVE || pid == NEEDS;
-            let tray = pid == NEEDS;
-            let head = if pid == ACTIVE {
-                Self::label("Active", Some(i.total), cx).into_any_element()
-            } else if pid == NEEDS {
+            let head = if in_box {
+                // "Mark all read" clears what only finished; what needs the user stays.
+                let mark_read = (!finished.is_empty()).then(|| {
+                    let ids = finished.clone();
+                    div()
+                        .id("inbox-mark-read")
+                        .test_support()
+                        .flex_none()
+                        .text_size(px(look::SMALL_SIZE))
+                        .text_color(theme.muted_foreground)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.foreground))
+                        .child("Mark all read")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace.update(cx, |ws, cx| ws.mark_read(&ids, cx));
+                            this.thaw(cx);
+                        }))
+                        .into_any_element()
+                });
                 div()
-                    .id("needs-you")
+                    .id("inbox")
                     .test_support()
-                    .child(look::needs_header(i.total, cx))
+                    .child(look::inbox_header(i.total, mark_read, cx))
                     .into_any_element()
             } else if pid == STUDY {
                 // Study's sessions are no project's: a section of their own, its cap on each row.
                 div()
                     .id("study-sessions")
                     .test_support()
-                    .child(Self::label("Study", Some(i.total), cx))
+                    .child(look::section_label("Study", Some(i.total), cx))
                     .into_any_element()
             } else {
                 self.group_header(
@@ -3290,10 +3251,9 @@ impl Render for Sidebar {
                     Ok(id) => {
                         let Some(t) = by_id.get(id) else { continue };
                         let sel = selected.as_deref() == Some(id.as_str());
-                        let card = attention(t);
-                        last_rows.insert(id.clone(), (t.clone(), pid.clone(), card));
-                        let row = if card || on_top {
-                            self.card(t, &project_of(t), on_top, sel, tray, None, cx)
+                        last_rows.insert(id.clone(), (t.clone(), pid.clone(), in_box));
+                        let row = if in_box {
+                            self.inbox_row(t, &project_of(t), sel, cx)
                         } else {
                             self.live_line(t, sel, cx)
                         };
@@ -3308,16 +3268,8 @@ impl Render for Sidebar {
                     Err(gx) => {
                         let ghost = &self.ghosts[gx];
                         let left = ghost.left.frame(now, window).clamp(0., 1.);
-                        let row = if ghost.card || on_top {
-                            self.card(
-                                &ghost.thread,
-                                &project_of(&ghost.thread),
-                                on_top,
-                                false,
-                                tray,
-                                None,
-                                cx,
-                            )
+                        let row = if ghost.card {
+                            self.inbox_row(&ghost.thread, &project_of(&ghost.thread), false, cx)
                         } else {
                             self.live_line(&ghost.thread, false, cx)
                         };
@@ -3345,51 +3297,43 @@ impl Render for Sidebar {
             }
             if g.footer {
                 let pid2 = pid.clone();
-                let (id, label) = match i.open {
-                    true => (format!("live-less-{pid}"), "Show less".to_string()),
-                    false if i.more > 0 => {
+                let (id, label) = match (in_box, i.open) {
+                    (true, true) => ("inbox-less".to_string(), "Show less".to_string()),
+                    (true, false) => ("inbox-more".to_string(), format!("Show {} more", i.more)),
+                    (false, true) => (format!("live-less-{pid}"), "Show less".to_string()),
+                    (false, false) if i.more > 0 => {
                         (format!("live-more-{pid}"), format!("Show {} more", i.more))
                     }
-                    false => (format!("live-more-{pid}"), "Show more".to_string()),
+                    (false, false) => (format!("live-more-{pid}"), "Show more".to_string()),
                 };
+                let toggle = cx.listener(move |this, _, _, cx| {
+                    if !this.open_live_projects.remove(&pid2) {
+                        this.open_live_projects.insert(pid2.clone());
+                    }
+                    this.thaw(cx);
+                });
                 group = group.child(crate::motion::flip_row(
                     &flip,
                     format!("live-f-{pid}"),
-                    div()
-                        .id(SharedString::from(id))
-                        .test_support()
-                        .when(!tray, |el| el.mx_2())
-                        .pl(px(TEXT_INSET))
-                        .h(px(24.))
-                        .flex()
-                        .items_center()
-                        .text_size(px(look::META_SIZE))
-                        .text_color(theme.muted_foreground)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.open_live_projects.remove(&pid2) {
-                                this.open_live_projects.insert(pid2.clone());
-                            }
-                            this.thaw(cx);
-                        })),
+                    self.show_more(id, label, in_box, cx, toggle),
                     now,
                     window,
                 ));
             }
-            live_groups.push((format!("live-g-{pid}").into(), group.into_any_element()));
+            live_groups.push((
+                format!("live-g-{pid}").into(),
+                div()
+                    .w_full()
+                    .pb(px(look::GROUP_GAP))
+                    .child(group)
+                    .into_any_element(),
+            ));
         }
-        // "Needs you" goes over Pinned; everything else under it.
-        let rest = live_groups.split_off(usize::from(needs_shown));
-        list = list
-            .child(crate::motion::flip_stack(&flip, live_groups, now))
-            .child(named)
-            .child(crate::motion::flip_stack(&flip, rest, now));
+        list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
         self.last_rows = last_rows;
-        // Nothing live: the inbox says so, quietly, on the titles' line (before the devices, whose
+        // Nothing live: the list says so, quietly, on the titles' line (before the devices, whose
         // threads live elsewhere).
-        if !live_shown && !searching && !named_sections_busy {
+        if !live_shown && !searching {
             list = list.child(look::empty_note(
                 "inbox-zero",
                 if importing {
@@ -3401,10 +3345,11 @@ impl Render for Sidebar {
                 cx,
             ));
         }
-        // Threads living on other machines, under each machine's name (`machines`): its quiet
-        // ones, what's live there being in Active. One that can't be reached says since when,
-        // and why when Trek can tell. Then the phones paired with this one. Both are Devices:
-        // places, not projects, so a device's glyph stands where a project's badge would.
+        // Threads living on other machines, under each machine's name (`machines`), as a project's
+        // are under its own: what's at work there with its clock, the quiet rest capped at three,
+        // what needs the user in the Inbox. One that can't be reached says since when, and why when
+        // Trek can tell. Then the phones paired with this one. Both are Devices: places, not
+        // projects, so a device's glyph stands where a project's badge would.
         let machines: Vec<(String, String, bool, Option<String>, Vec<Thread>)> = {
             let ws = self.workspace.read(cx);
             let this = crate::words::words().this_computer;
@@ -3451,27 +3396,27 @@ impl Render for Sidebar {
                 .unwrap_or_default()
         };
         let mut devices = v_flex().w_full();
-        let mut any_device = false;
-        for (host, name, reachable, offline, mut threads) in machines {
-            if !searching {
-                threads.retain(|t| !attention(t));
-            }
-            if threads.is_empty() && offline.is_none() {
-                continue;
-            }
-            // Like a project's: what's unread and the open thread, then the newest up to three;
-            // the rest behind "Show more".
-            threads.sort_by(|a, b| {
-                b.is_unseen()
-                    .cmp(&a.is_unseen())
-                    .then(b.updated_at.cmp(&a.updated_at))
-            });
+        let mut device_count = 0;
+        for (host, name, reachable, offline, threads) in machines {
             let total = threads.len();
+            let mut threads: Vec<Thread> = row_order(
+                threads
+                    .into_iter()
+                    .filter(|t| !in_inbox.contains(&t.id))
+                    .collect(),
+                &attention,
+            );
+            // Like a project's: what's at work, unread and the open thread, then the newest up to
+            // three; the rest behind "Show more".
+            let quiet = threads.iter().filter(|t| !attention(t)).count();
             let more_key = format!("\u{0}machine:{host}");
             let open = searching || self.open_live_projects.contains(&more_key);
             if !open {
                 let mut kept = 0;
                 threads.retain(|t| {
+                    if attention(t) {
+                        return true;
+                    }
                     let keep = t.is_unseen()
                         || selected.as_deref() == Some(t.id.as_str())
                         || kept < MACHINE_SHOWN;
@@ -3479,13 +3424,12 @@ impl Render for Sidebar {
                     keep
                 });
             }
-            let more = total - threads.len();
+            let more = quiet - threads.iter().filter(|t| !attention(t)).count();
             let header = h_flex()
                 .id(SharedString::from(format!("machine-head-{host}")))
                 .test_support()
                 .mx_2()
-                .pl(px(ROW_INSET))
-                .pr(px(10.))
+                .px(px(ROW_INSET))
                 .h(px(look::LINE_H))
                 .gap(px(look::MARK_GAP))
                 .child(look::device_glyph(false, reachable, cx))
@@ -3504,19 +3448,14 @@ impl Render for Sidebar {
                         .child(name),
                 )
                 .when(total > 0, |el| {
-                    el.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(look::LABEL_SIZE))
-                            .text_color(theme.muted_foreground.opacity(0.8))
-                            .child(total.to_string()),
-                    )
+                    el.child(look::trailing(
+                        Some(format!("machine-count-{host}")),
+                        total.to_string(),
+                        theme.muted_foreground,
+                    ))
                 });
-            let mut group = v_flex()
-                .w_full()
-                .when(any_device, |el| el.pt(px(look::GROUP_GAP)))
-                .child(header);
-            any_device = true;
+            let mut group = v_flex().w_full().pb(px(look::GROUP_GAP)).child(header);
+            device_count += 1;
             if let Some(note) = offline {
                 group = group.child(
                     div()
@@ -3533,104 +3472,85 @@ impl Render for Sidebar {
             }
             for t in &threads {
                 let sel = selected.as_deref() == Some(t.id.as_str());
-                let row = if attention(t) {
-                    self.card(t, "", false, sel, false, None, cx)
-                } else {
-                    self.live_line(t, sel, cx)
-                };
-                group = group.child(row);
+                group = group.child(self.live_line(t, sel, cx));
             }
-            if !searching && (more > 0 || open && total > MACHINE_SHOWN) {
+            if !searching && (more > 0 || open && quiet > MACHINE_SHOWN) {
                 let (id, label) = if open {
                     (format!("machine-less-{host}"), "Show less".to_string())
                 } else {
                     (format!("machine-more-{host}"), format!("Show {more} more"))
                 };
-                group = group.child(
-                    div()
-                        .id(SharedString::from(id))
-                        .test_support()
-                        .mx_2()
-                        .pl(px(TEXT_INSET))
-                        .h(px(24.))
-                        .flex()
-                        .items_center()
-                        .text_size(px(look::META_SIZE))
-                        .text_color(theme.muted_foreground)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.foreground))
-                        .child(label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.open_live_projects.remove(&more_key) {
-                                this.open_live_projects.insert(more_key.clone());
-                            }
-                            cx.notify();
-                        })),
-                );
+                let toggle = cx.listener(move |this, _, _, cx| {
+                    if !this.open_live_projects.remove(&more_key) {
+                        this.open_live_projects.insert(more_key.clone());
+                    }
+                    cx.notify();
+                });
+                group = group.child(self.show_more(id, label, false, cx, toggle));
             }
             devices = devices.child(group);
         }
         for (id, name, connected, seen) in phones {
             devices = devices.child(
-                h_flex()
-                    .id(SharedString::from(format!("phone-{id}")))
-                    .test_support()
-                    .mx_2()
-                    .when(any_device, |el| el.mt(px(look::GROUP_GAP)))
-                    .pl(px(ROW_INSET))
-                    .pr(px(10.))
-                    .h(px(look::LINE_H))
-                    .gap(px(look::MARK_GAP))
-                    .rounded(px(fluent::control(look::ROW_RADIUS)))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.list_hover))
-                    .child(look::device_glyph(true, connected, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(look::TITLE_SIZE))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if connected {
-                                theme.foreground
-                            } else {
-                                theme.foreground.opacity(0.6)
-                            })
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(look::LABEL_SIZE))
-                            .text_color(theme.muted_foreground)
-                            .child(seen),
-                    )
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Phone & Machines settings")
-                            .build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.navigate(Route::Settings(SettingsPage::Mobile), cx)
+                div().w_full().pb(px(look::GROUP_GAP)).child(
+                    h_flex()
+                        .id(SharedString::from(format!("phone-{id}")))
+                        .test_support()
+                        .mx_2()
+                        .px(px(ROW_INSET))
+                        .h(px(look::LINE_H))
+                        .gap(px(look::MARK_GAP))
+                        .rounded(px(fluent::control(look::ROW_RADIUS)))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.list_hover))
+                        .child(look::device_glyph(true, connected, cx))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(look::TITLE_SIZE))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if connected {
+                                    theme.foreground
+                                } else {
+                                    theme.foreground.opacity(0.6)
+                                })
+                                .child(name),
+                        )
+                        .child(look::trailing(
+                            Some(format!("phone-seen-{id}")),
+                            seen,
+                            theme.muted_foreground,
+                        ))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Phone & Machines settings")
+                                .build(window, cx)
                         })
-                    })),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.navigate(Route::Settings(SettingsPage::Mobile), cx)
+                            })
+                        })),
+                ),
             );
-            any_device = true;
+            device_count += 1;
         }
+        let any_device = device_count > 0;
         if any_device {
             list = list
                 .child(
                     div()
                         .id("devices")
                         .test_support()
-                        .child(Self::label("Devices", None, cx)),
+                        .child(look::section_label("Devices", Some(device_count), cx)),
                 )
                 .child(devices);
         }
 
-        // Settled history, grouped by project (Codex style): a section that folds, at the end.
-        let mut history = v_flex();
+        // Settled history, grouped by project (Codex style): a row that folds, at the end, its
+        // count in the right-hand column.
+        let mut history = v_flex().pb_3();
         if settled_count > 0 {
             let mut groups: Vec<(String, String, Vec<Thread>)> = Vec::new();
             for t in settled {
@@ -3651,21 +3571,9 @@ impl Render for Sidebar {
                 &flip,
                 "settled-toggle",
                 div()
-                    .id("settled-toggle")
-                    .test_support()
-                    .cursor_pointer()
-                    .child(look::section_label(
-                        "Settled",
-                        Some(settled_count),
-                        Some(!settled_open),
-                        cx,
-                    ))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace.update(cx, |ws, cx| {
-                            ws.settled_open = !ws.settled_open;
-                            cx.notify();
-                        })
-                    })),
+                    .pt(px(look::SECTION_GAP - look::GROUP_GAP))
+                    .pb(px(look::GROUP_GAP))
+                    .child(self.settled_row(settled_count, settled_open, cx)),
                 now,
                 window,
             ));
@@ -3709,26 +3617,19 @@ impl Render for Sidebar {
                         ));
                     }
                     if items.len() > 5 && !searching && !folded {
-                        group = group.child(
-                            div()
-                                .id(SharedString::from(format!("more-{pid}")))
-                                .mx_2()
-                                .pl(px(TEXT_INSET))
-                                .h(px(24.))
-                                .flex()
-                                .items_center()
-                                .text_size(px(look::META_SIZE))
-                                .text_color(theme.muted_foreground)
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(theme.foreground))
-                                .child(if open { "Show less" } else { "Show more" })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if !this.open_projects.remove(&pid2) {
-                                        this.open_projects.insert(pid2.clone());
-                                    }
-                                    cx.notify();
-                                })),
-                        );
+                        let toggle = cx.listener(move |this, _, _, cx| {
+                            if !this.open_projects.remove(&pid2) {
+                                this.open_projects.insert(pid2.clone());
+                            }
+                            cx.notify();
+                        });
+                        group = group.child(self.show_more(
+                            format!("more-{pid}"),
+                            if open { "Show less" } else { "Show more" }.to_string(),
+                            false,
+                            cx,
+                            toggle,
+                        ));
                     }
                     settled_groups
                         .push((format!("settled-g-{pid}").into(), group.into_any_element()));
@@ -3737,7 +3638,7 @@ impl Render for Sidebar {
             }
         }
         // A search that finds nothing says so, in place of an empty list.
-        if searching && !live_shown && !named_sections_busy && settled_count == 0 && !any_device {
+        if searching && !live_shown && settled_count == 0 && !any_device {
             let q = self.workspace.read(cx).search.trim().to_string();
             list = list.child(look::empty_note(
                 "search-empty",
@@ -3776,11 +3677,12 @@ impl Render for Sidebar {
 
 #[cfg(test)]
 mod tests {
-    use super::live_order;
+    use super::{inbox_rows, row_order};
+    use crate::workspace::attention::Why;
     use trek_core::store::{Store, Thread};
     use trek_core::{AgentId, Effort, HandHolding, RunState};
 
-    fn thread(s: &Store, title: &str, state: RunState) -> Thread {
+    fn thread(s: &Store, title: &str, state: RunState, age: i64) -> Thread {
         let mut t = s
             .create_thread(
                 None,
@@ -3792,23 +3694,71 @@ mod tests {
             .unwrap();
         t.title = title.into();
         t.run_state = state;
+        t.updated_at = 1_000_000 - age;
+        t.last_seen_at = t.updated_at;
         t
     }
 
+    fn titles(threads: Vec<Thread>) -> Vec<String> {
+        threads.into_iter().map(|t| t.title).collect()
+    }
+
     #[test]
-    fn running_threads_come_after_what_waits_on_you_and_before_the_rest() {
+    fn a_project_lists_what_is_pinned_then_what_is_at_work_then_the_rest_newest_first() {
         let s = Store::in_memory().unwrap();
-        let inbox = vec![
-            thread(&s, "asks", RunState::NeedsYou),
-            thread(&s, "failed", RunState::Failed),
-            thread(&s, "done", RunState::Idle),
-            thread(&s, "older", RunState::Idle),
+        let mut pinned = thread(&s, "pinned", RunState::Idle, 9_000);
+        pinned.pinned_at = Some(5);
+        let mut unread = thread(&s, "unread", RunState::Idle, 8_000);
+        unread.last_seen_at = 0;
+        let threads = vec![
+            thread(&s, "older", RunState::Idle, 3_000),
+            thread(&s, "running", RunState::Working, 7_000),
+            unread,
+            thread(&s, "newer", RunState::Idle, 1_000),
+            pinned,
         ];
-        let working = vec![thread(&s, "running", RunState::Working)];
-        let titles: Vec<String> = live_order(inbox, working)
-            .into_iter()
-            .map(|t| t.title)
-            .collect();
-        assert_eq!(titles, ["asks", "failed", "running", "done", "older"]);
+        let order = row_order(threads, |t| t.run_state == RunState::Working);
+        assert_eq!(
+            titles(order),
+            ["pinned", "running", "unread", "newer", "older"]
+        );
+    }
+
+    #[test]
+    fn the_inbox_shows_all_that_calls_for_you_and_caps_the_news() {
+        let s = Store::in_memory().unwrap();
+        let asks = |n: usize| {
+            (
+                thread(&s, &format!("asks {n}"), RunState::NeedsYou, 0),
+                Why::Approval("run x".into()),
+            )
+        };
+        let done = |n: usize| {
+            (
+                thread(&s, &format!("done {n}"), RunState::Idle, 0),
+                Why::Finished,
+            )
+        };
+        let mut inbox: Vec<(Thread, Why)> = (0..6).map(asks).collect();
+        inbox.push((thread(&s, "cut", RunState::Idle, 0), Why::CutShort));
+        inbox.extend((0..7).map(done));
+        let name = |id: &String| {
+            inbox
+                .iter()
+                .find(|(t, _)| &t.id == id)
+                .map(|(t, _)| t.title.clone())
+                .unwrap()
+        };
+        let (rows, more) = inbox_rows(&inbox, false);
+        let shown: Vec<String> = rows.iter().map(name).collect();
+        assert_eq!(shown.len(), 6 + super::NEWS_SHOWN);
+        assert!(shown[..6].iter().all(|t| t.starts_with("asks")));
+        assert_eq!(
+            shown[6], "cut",
+            "a turn cut short comes before what finished"
+        );
+        assert_eq!(more, 8 - super::NEWS_SHOWN);
+        let (rows, more) = inbox_rows(&inbox, true);
+        assert_eq!((rows.len(), more), (inbox.len(), 0));
     }
 }

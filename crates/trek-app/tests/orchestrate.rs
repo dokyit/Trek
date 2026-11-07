@@ -767,15 +767,18 @@ fn sub_agents_show_inline_and_on_their_parent_s_card() {
             trek.rows(cx)
         );
         assert!(
-            trek.visible(cx, format!("card-kids-{id}")),
-            "the parent's card shows who's at work"
+            trek.visible(cx, format!("live-line-kids-{id}")),
+            "the parent's row shows who's at work"
         );
         assert!(
             trek.read(cx, |ws, _| ws.any_turn_running()),
             "the Mac stays awake while it works"
         );
-        // The sub-agent isn't in the inbox, but a search finds it.
-        assert!(!trek.visible(cx, format!("card-{child}")));
+        // The sub-agent isn't in the sidebar, but a search finds it.
+        assert!(
+            !trek.visible(cx, format!("inbox-{child}"))
+                && !trek.visible(cx, format!("live-line-{child}"))
+        );
         trek.update(cx, |ws, cx| ws.set_search("Second opinion".into(), cx));
         let c = child.clone();
         trek.wait(cx, "the search", move |ws| {
@@ -796,7 +799,7 @@ fn sub_agents_show_inline_and_on_their_parent_s_card() {
         trek.click(cx, "stop");
         wait_task(&trek, cx, &child, TaskState::Cancelled).await;
         trek.render(cx);
-        assert!(!trek.visible(cx, format!("card-kids-{id}")));
+        assert!(!trek.visible(cx, format!("live-line-kids-{id}")));
         assert!(
             trek.rows(cx)
                 .iter()
@@ -1361,12 +1364,12 @@ fn a_sub_agent_waiting_on_an_approval_shows_on_its_parent_everywhere() {
         );
         trek.render(cx);
         assert!(
-            trek.visible(cx, format!("card-sub-needs-{id}")),
-            "the parent's card says it"
+            trek.visible(cx, format!("inbox-sub-needs-{id}")),
+            "the parent's Inbox row says it"
         );
         assert!(
-            !trek.visible(cx, format!("card-{child}")),
-            "the sub-agent has no card of its own"
+            !trek.visible(cx, format!("inbox-{child}")),
+            "the sub-agent has no row of its own"
         );
         trek.update(cx, |ws, cx| ws.navigate(Route::Basecamp, cx));
         trek.render(cx);

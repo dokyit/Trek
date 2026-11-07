@@ -176,7 +176,7 @@ fn a_failing_check_shows_on_the_row_and_the_thread_and_nothing_goes_by_itself() 
         assert!(trek.visible(cx, "checks-bar"), "above the composer");
         assert!(trek.visible(cx, "checks-send"));
         assert!(
-            trek.visible(cx, format!("card-send-checks-{id}")),
+            trek.visible(cx, format!("inbox-send-checks-{id}")),
             "the row offers it too"
         );
 

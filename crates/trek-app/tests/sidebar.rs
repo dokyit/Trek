@@ -1,6 +1,8 @@
-//! The sidebar's live area: threads that need eyes on them keep their cards; the quiet rest
-//! group by project as compact lines, capped until opened. Projects sit under their own label;
-//! Study's sessions, other machines and the phone each have a section of their own.
+//! The sidebar, inbox first: what needs the user and what finished unread sit in the Inbox under
+//! the nav, two lines each; every other thread is a line in its project (at work with its clock),
+//! the quiet ones capped until opened. Projects sit under their own label; Study's sessions,
+//! other machines and the phone each have a section of their own; every row's count or time ends
+//! on one right-hand column.
 
 mod common;
 
@@ -55,8 +57,8 @@ fn quiet_threads_fold_into_a_project_group_capped_at_three() {
                 "quiet {i}"
             );
             assert!(
-                !trek.visible(cx, format!("card-{id}")),
-                "quiet {i} keeps no card"
+                !trek.visible(cx, format!("inbox-{id}")),
+                "quiet {i} isn't in the Inbox"
             );
         }
         assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
@@ -73,7 +75,7 @@ fn quiet_threads_fold_into_a_project_group_capped_at_three() {
 }
 
 #[test]
-fn what_needs_you_keeps_its_card_over_quiet_lines() {
+fn what_needs_you_goes_to_the_inbox_and_what_works_stays_in_its_project() {
     run(async |cx| {
         let trek = open(cx);
         for i in 0..4 {
@@ -92,15 +94,36 @@ fn what_needs_you_keeps_its_card_over_quiet_lines() {
         });
         trek.render(cx);
         assert!(
-            trek.visible(cx, format!("card-{asking}")),
-            "the approval keeps its card"
+            trek.visible(cx, format!("inbox-{asking}")),
+            "the approval is in the Inbox"
         );
         assert!(
-            trek.visible(cx, format!("card-{working}")),
-            "the running turn keeps its card"
+            !trek.visible(cx, format!("live-line-{asking}")),
+            "and out of its project while it's there"
         );
-        assert!(!trek.visible(cx, format!("live-line-{asking}")));
-        assert!(!trek.visible(cx, format!("live-line-{working}")));
+        assert!(
+            trek.visible(cx, format!("live-line-{working}")),
+            "the running turn stays in its project"
+        );
+        assert!(
+            trek.visible(cx, format!("live-line-working-{working}")),
+            "with its clock"
+        );
+        assert!(!trek.visible(cx, format!("inbox-{working}")));
+        // At work, it's on show past the three quiet lines a project shows.
+        let pid = project_of(&trek, cx, &working);
+        assert!(trek.visible(cx, format!("live-more-{pid}")));
+        let head = trek
+            .bounds(cx, format!("live-proj-head-{pid}"))
+            .unwrap()
+            .origin
+            .y;
+        let row = trek
+            .bounds(cx, format!("live-line-{working}"))
+            .unwrap()
+            .origin
+            .y;
+        assert!(head < row, "under its project's header");
     });
 }
 
@@ -111,7 +134,7 @@ fn unread_and_open_lines_are_never_hidden() {
         let ids: Vec<String> = (0..5)
             .map(|i| quiet(&trek, cx, &format!("Quiet {i}"), i as i64 * 60_000))
             .collect();
-        // The oldest has news: it shows in its project, past the three a project shows.
+        // The oldest has news: it's in the Inbox, whatever the three a project shows.
         trek.update(cx, |ws, cx| {
             ws.store
                 .update_thread(&ids[4], |t| t.last_seen_at = t.updated_at - 1)
@@ -122,7 +145,7 @@ fn unread_and_open_lines_are_never_hidden() {
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(ids[3].clone()), cx));
         trek.render(cx);
         assert!(
-            trek.visible(cx, format!("live-line-unseen-{}", ids[4])),
+            trek.visible(cx, format!("inbox-finished-{}", ids[4])),
             "unread is never capped away"
         );
         assert!(
@@ -201,8 +224,8 @@ fn folding_a_group_hides_its_rows_but_not_what_waits_on_you() {
         });
         let pid = project_of(&trek, cx, &asking);
         trek.render(cx);
-        // The card sits under Needs you, above the projects; its project keeps the quiet lines.
-        assert!(trek.visible(cx, format!("card-{asking}")));
+        // The row sits in the Inbox, above the projects; its project keeps the quiet lines.
+        assert!(trek.visible(cx, format!("inbox-{asking}")));
         assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
         trek.click(cx, format!("live-fold-{pid}"));
         trek.render(cx);
@@ -210,11 +233,27 @@ fn folding_a_group_hides_its_rows_but_not_what_waits_on_you() {
         for id in &ids {
             assert!(!trek.visible(cx, format!("live-line-{id}")));
         }
-        assert!(trek.visible(cx, format!("card-{asking}")));
+        assert!(trek.visible(cx, format!("inbox-{asking}")));
         assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
+        // What's at work stays in view in a folded project (off the sidebar, so its rows don't
+        // hold their places under the pointer).
+        move_pointer(
+            &trek,
+            cx,
+            gpui_kit::point(gpui_kit::px(900.), gpui_kit::px(400.)),
+        );
+        trek.update(cx, |ws, cx| {
+            ws.store
+                .update_thread(&ids[0], |t| t.run_state = RunState::Working)
+                .unwrap();
+            ws.reload(cx);
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("live-line-working-{}", ids[0])));
+        assert!(!trek.visible(cx, format!("live-line-{}", ids[1])));
         trek.click(cx, format!("live-fold-{pid}"));
         trek.render(cx);
-        assert!(trek.visible(cx, format!("card-{asking}")));
+        assert!(trek.visible(cx, format!("inbox-{asking}")));
         assert!(trek.visible(cx, format!("live-line-{}", ids[0])));
     });
 }
@@ -336,7 +375,7 @@ fn a_titled_thread_keeps_its_title_after_more_turns() {
 
 /// Where `id`'s row is drawn, whichever kind of row it has.
 fn row_y(trek: &Trek, cx: &mut TestAppContext, id: &str) -> Option<gpui_kit::Pixels> {
-    trek.bounds(cx, format!("card-{id}"))
+    trek.bounds(cx, format!("inbox-{id}"))
         .or_else(|| trek.bounds(cx, format!("live-line-{id}")))
         .map(|b| b.origin.y)
 }
@@ -384,7 +423,7 @@ fn rows_hold_still_under_the_pointer_and_move_once_it_leaves() {
         // The pointer rests on the sidebar; meanwhile the question is answered elsewhere, and
         // another thread starts asking.
         let at = trek
-            .bounds(cx, format!("card-{}", quiet_ids[0]))
+            .bounds(cx, format!("inbox-{}", quiet_ids[0]))
             .or_else(|| trek.bounds(cx, format!("live-line-{}", quiet_ids[0])))
             .unwrap()
             .center();
@@ -411,8 +450,8 @@ fn rows_hold_still_under_the_pointer_and_move_once_it_leaves() {
             "the newcomer waits for the pointer to leave"
         );
         assert!(
-            trek.visible(cx, format!("card-{asking}")),
-            "the answered thread stays in its group, in its place"
+            trek.visible(cx, format!("inbox-{asking}")),
+            "the answered thread stays in the Inbox, in its place"
         );
 
         // The pointer leaves for the transcript: the list catches up.
@@ -441,7 +480,7 @@ fn a_thread_waiting_on_you_is_two_lines_high_and_says_what_it_waits_for() {
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(plain.clone()), cx));
         trek.render(cx);
         let (row, line) = (
-            trek.bounds(cx, format!("card-{id}")).expect("its row"),
+            trek.bounds(cx, format!("inbox-{id}")).expect("its row"),
             trek.bounds(cx, format!("live-line-{plain}"))
                 .expect("a quiet line"),
         );
@@ -449,7 +488,7 @@ fn a_thread_waiting_on_you_is_two_lines_high_and_says_what_it_waits_for() {
             row.size.height > line.size.height && row.size.height < line.size.height * 2.,
             "a title and what it waits for: taller than a quiet line, but not two of them"
         );
-        assert!(trek.visible(cx, format!("card-needs-{id}")));
+        assert!(trek.visible(cx, format!("inbox-needs-{id}")));
         assert_eq!(
             trek.read(cx, |ws, _| ws.why_needs_you(&id).map(|w| w.words())),
             Some("Waiting: run ./scripts/migrate.sh --apply?".to_string())
@@ -467,7 +506,7 @@ fn a_pointer_taken_off_the_window_lets_the_held_rows_go() {
         trek.render(cx);
         // The pointer rests on the sidebar and a thread starts asking: its row waits.
         let at = trek
-            .bounds(cx, format!("card-{}", quiet_ids[0]))
+            .bounds(cx, format!("inbox-{}", quiet_ids[0]))
             .or_else(|| trek.bounds(cx, format!("live-line-{}", quiet_ids[0])))
             .unwrap()
             .center();
@@ -562,29 +601,35 @@ fn a_study_session_is_listed_under_study_not_as_a_thread_without_a_project() {
 }
 
 #[test]
-fn projects_sit_under_their_own_label_after_what_is_active() {
+fn projects_sit_under_their_own_label_after_the_inbox() {
     run(async |cx| {
         let trek = open(cx);
         let quiet_id = quiet(&trek, cx, "Quiet", 60_000);
         let working = quiet(&trek, cx, "Working", 10_000);
+        let asking = quiet(&trek, cx, "Asking", 20_000);
         trek.update(cx, |ws, cx| {
             ws.store
                 .update_thread(&working, |t| t.run_state = RunState::Working)
+                .unwrap();
+            ws.store
+                .update_thread(&asking, |t| t.run_state = RunState::NeedsYou)
                 .unwrap();
             ws.reload(cx);
         });
         trek.render(cx);
         let pid = project_of(&trek, cx, &quiet_id);
         let mut y = |id: String| trek.bounds(cx, id).map(|b| b.origin.y).unwrap();
-        let (card, label, head) = (
-            y(format!("card-{working}")),
+        let (inbox, label, head, row) = (
+            y(format!("inbox-{asking}")),
             y("section-projects".to_string()),
             y(format!("live-proj-head-{pid}")),
+            y(format!("live-line-{working}")),
         );
         assert!(
-            card < label && label < head,
-            "Active, then the Projects label, then the project: {card:?} {label:?} {head:?}"
+            inbox < label && label < head && head < row,
+            "the Inbox, the Projects label, the project, its thread at work: {inbox:?} {label:?} {head:?} {row:?}"
         );
+        assert!(!trek.visible(cx, "section-active"), "no Active section");
     });
 }
 
@@ -645,5 +690,230 @@ fn an_empty_inbox_and_an_empty_search_each_say_so() {
         trek.update(cx, |ws, cx| ws.set_search(String::new(), cx));
         trek.render(cx);
         assert!(!trek.visible(cx, "search-empty"));
+    });
+}
+
+/// `id` asks for an approval, has failed, or has finished unread.
+fn set_state(trek: &Trek, cx: &mut TestAppContext, id: &str, state: RunState, unread: bool) {
+    trek.update(cx, |ws, cx| {
+        ws.store
+            .update_thread(id, |t| {
+                t.run_state = state;
+                if unread {
+                    t.last_seen_at = t.updated_at - 1;
+                }
+            })
+            .unwrap();
+        ws.reload(cx);
+    });
+}
+
+fn y(trek: &Trek, cx: &mut TestAppContext, id: String) -> gpui_kit::Pixels {
+    trek.bounds(cx, id.clone())
+        .unwrap_or_else(|| panic!("{id} isn't drawn"))
+        .origin
+        .y
+}
+
+#[test]
+fn the_inbox_lists_what_needs_you_then_what_finished_and_is_gone_when_empty() {
+    run(async |cx| {
+        let trek = open(cx);
+        let plain = quiet(&trek, cx, "Plain", 300_000);
+        trek.render(cx);
+        assert!(!trek.visible(cx, "inbox"), "nothing in it: no Inbox at all");
+
+        // Newest first would put the finished one on top: what needs you comes first anyway.
+        let finished = quiet(&trek, cx, "Finished", 10_000);
+        let failed = quiet(&trek, cx, "Failed", 20_000);
+        let asking = quiet(&trek, cx, "Asking", 30_000);
+        set_state(&trek, cx, &finished, RunState::Idle, true);
+        set_state(&trek, cx, &failed, RunState::Failed, false);
+        set_state(&trek, cx, &asking, RunState::NeedsYou, false);
+        trek.render(cx);
+        assert!(trek.visible(cx, "inbox"));
+        let ys = [&asking, &failed, &finished].map(|id| y(&trek, cx, format!("inbox-{id}")));
+        assert!(ys.windows(2).all(|p| p[0] < p[1]), "{ys:?}");
+        // Each says why in its alert's words, and where it's from.
+        assert!(trek.visible(cx, format!("inbox-needs-{asking}")));
+        assert!(trek.visible(cx, format!("inbox-failed-{failed}")));
+        assert!(trek.visible(cx, format!("inbox-finished-{finished}")));
+        for id in [&asking, &failed, &finished] {
+            assert!(
+                !trek.visible(cx, format!("live-line-{id}")),
+                "in the Inbox, out of its project"
+            );
+        }
+        // Above the projects.
+        let pid = project_of(&trek, cx, &plain);
+        assert!(ys[2] < y(&trek, cx, format!("live-proj-head-{pid}")));
+
+        // Answered, settled and read, it's gone again.
+        set_state(&trek, cx, &asking, RunState::Idle, false);
+        trek.update(cx, |ws, cx| {
+            ws.settle(&failed, cx);
+            ws.navigate(Route::Thread(finished.clone()), cx);
+        });
+        trek.render(cx);
+        assert!(!trek.visible(cx, "inbox"));
+        assert!(trek.visible(cx, format!("live-line-{finished}")));
+    });
+}
+
+#[test]
+fn mark_all_read_reads_what_finished_and_leaves_what_needs_you() {
+    run(async |cx| {
+        let trek = open(cx);
+        let done: Vec<String> = (0..2)
+            .map(|i| quiet(&trek, cx, &format!("Done {i}"), (i + 1) * 60_000))
+            .collect();
+        let asking = quiet(&trek, cx, "Asking", 10_000);
+        for id in &done {
+            set_state(&trek, cx, id, RunState::Idle, true);
+        }
+        set_state(&trek, cx, &asking, RunState::NeedsYou, false);
+        trek.render(cx);
+        assert!(trek.visible(cx, "inbox-mark-read"));
+        trek.click(cx, "inbox-mark-read");
+        trek.render(cx);
+        // What the user did here shows at once, under the pointer or not.
+        for id in &done {
+            assert!(!trek.read(cx, |ws, _| ws.thread(id).unwrap().is_unseen()));
+            assert!(!trek.visible(cx, format!("inbox-{id}")));
+            assert!(
+                trek.visible(cx, format!("live-line-{id}")),
+                "back in its project"
+            );
+        }
+        assert!(
+            trek.visible(cx, format!("inbox-{asking}")),
+            "what needs you stays"
+        );
+        assert!(
+            !trek.visible(cx, "inbox-mark-read"),
+            "nothing left for it to read"
+        );
+    });
+}
+
+#[test]
+fn opening_a_finished_thread_reads_it_and_sends_it_back_to_its_project() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = quiet(&trek, cx, "Done", 60_000);
+        quiet(&trek, cx, "Other", 120_000);
+        set_state(&trek, cx, &id, RunState::Idle, true);
+        trek.render(cx);
+        let at = y(&trek, cx, format!("inbox-{id}"));
+        trek.click(cx, format!("inbox-{id}"));
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(id.clone())
+        );
+        assert!(!trek.read(cx, |ws, _| ws.thread(&id).unwrap().is_unseen()));
+        // Under the pointer, it holds its place.
+        assert_eq!(y(&trek, cx, format!("inbox-{id}")), at);
+        move_pointer(
+            &trek,
+            cx,
+            gpui_kit::point(gpui_kit::px(900.), gpui_kit::px(400.)),
+        );
+        trek.render(cx);
+        assert!(!trek.visible(cx, "inbox"), "the Inbox had only it");
+        assert!(trek.visible(cx, format!("live-line-{id}")));
+    });
+}
+
+#[test]
+fn a_pinned_thread_stays_on_top_of_its_project_with_its_pin() {
+    run(async |cx| {
+        let trek = open(cx);
+        let ids: Vec<String> = (0..5)
+            .map(|i| quiet(&trek, cx, &format!("Quiet {i}"), (i + 1) * 60_000))
+            .collect();
+        trek.update(cx, |ws, cx| ws.toggle_pin(&ids[4], cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("live-line-pinned-{}", ids[4])));
+        assert!(!trek.visible(cx, "section-pinned"), "no section of its own");
+        assert!(
+            y(&trek, cx, format!("live-line-{}", ids[4]))
+                < y(&trek, cx, format!("live-line-{}", ids[0])),
+            "first in its project, the oldest though it is"
+        );
+        // And on show past the three quiet ones.
+        assert!(trek.visible(cx, format!("live-line-{}", ids[2])));
+        assert!(!trek.visible(cx, format!("live-line-{}", ids[3])));
+    });
+}
+
+#[test]
+fn counts_times_and_devices_end_on_one_right_hand_column() {
+    run(async |cx| {
+        let trek = open(cx);
+        let read = quiet(&trek, cx, "Read", 60_000);
+        let working = quiet(&trek, cx, "Working", 20_000);
+        let asking = quiet(&trek, cx, "Asking", 30_000);
+        let done = quiet(&trek, cx, "Done", 40_000);
+        let settled = quiet(&trek, cx, "Settled", 90_000);
+        set_state(&trek, cx, &working, RunState::Working, false);
+        set_state(&trek, cx, &asking, RunState::NeedsYou, false);
+        set_state(&trek, cx, &done, RunState::Idle, true);
+        trek.update(cx, |ws, cx| {
+            ws.settle(&settled, cx);
+            ws.settled_open = true;
+            ws.start_test_remote();
+            let remote = ws.remote.as_mut().unwrap();
+            remote.devices.push(trek_remote::DeviceInfo {
+                device_id: "phone".into(),
+                name: "Test iPhone".into(),
+                paired_at: now_ms() - 86_400_000,
+                last_seen_at: Some(now_ms() - 120_000),
+                app_version: None,
+                platform: Some("ios".into()),
+            });
+            cx.notify();
+        });
+        trek.render(cx);
+        let pid = project_of(&trek, cx, &read);
+        let column: Vec<(String, f32)> = [
+            format!("live-proj-count-{pid}"),
+            format!("live-line-time-{read}"),
+            format!("live-line-working-{working}"),
+            format!("inbox-time-{asking}"),
+            "inbox-mark-read".to_string(),
+            "phone-seen-phone".to_string(),
+            "settled-count".to_string(),
+            format!("settled-proj-count-{pid}"),
+            format!("line-time-{settled}"),
+        ]
+        .into_iter()
+        .map(|id| {
+            let right = trek
+                .bounds(cx, id.clone())
+                .unwrap_or_else(|| panic!("{id} isn't drawn"))
+                .right()
+                .as_f32();
+            (id, right)
+        })
+        .collect();
+        let edge = column[0].1;
+        for (id, right) in &column {
+            assert!(
+                (right - edge).abs() < 0.5,
+                "{id} ends at {right}, the column at {edge}: {column:?}"
+            );
+        }
+        // On a project's header, "New thread here" lies over the count: nothing moves for it.
+        let head = trek.bounds(cx, format!("live-proj-head-{pid}")).unwrap();
+        move_pointer(&trek, cx, head.center());
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("live-proj-new-{pid}")));
+        let right = trek
+            .bounds(cx, format!("live-line-time-{read}"))
+            .unwrap()
+            .right()
+            .as_f32();
+        assert!((right - edge).abs() < 0.5);
     });
 }

@@ -1100,7 +1100,7 @@ fn a_machine_that_stops_answering_holds_its_threads_still_and_says_why() {
         })
         .await;
         trek.render(cx);
-        let working = format!("card-working-{id}");
+        let working = format!("live-line-working-{id}");
         assert!(trek.visible(cx, working.clone()));
         assert!(!trek.visible(cx, "machine-offline-machine-b"));
 
@@ -1525,7 +1525,7 @@ fn row_at_work() -> tr::ThreadSummary {
 }
 
 #[test]
-fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_agents() {
+fn a_machines_thread_at_work_stays_on_its_machine_with_its_clock_and_sub_agents() {
     run(async |cx| {
         let trek = open(cx);
         // A quiet thread here, so there's a project group to sit above.
@@ -1544,8 +1544,8 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         let id = local_id("machine-c", "t-9");
         send(&trek, cx, row_at_work());
 
-        // At work: its card says so with the clock its row started, as a thread here does.
-        assert!(trek.visible(cx, format!("card-working-{id}")));
+        // At work: its row says so with the clock its row started, as a thread here does.
+        assert!(trek.visible(cx, format!("live-line-working-{id}")));
         let clock = trek.read(cx, |ws, _| ws.machines.working_for(&id)).unwrap();
         assert!(clock >= Duration::from_secs(75), "{clock:?}");
         assert!(
@@ -1553,29 +1553,50 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
                 || ws.machines.any_at_work()),
             "the sidebar's clock ticks by the second"
         );
-        // Its sub-agents: the pill on its card, and their names for its tooltip.
-        assert!(trek.visible(cx, format!("card-kids-{id}")));
+        // Its sub-agents: the pill on its row, and their names for its tooltip.
+        assert!(trek.visible(cx, format!("live-line-kids-{id}")));
         let sidebar = cx.read(|cx| trek.root.read(cx).sidebar.clone());
         let thread = trek.read(cx, |ws, _| ws.thread(&id).cloned()).unwrap();
         let (kids, _) = sidebar.read_with(cx, |s, cx| s.at_work(&thread, cx));
         let names: Vec<&str> = kids.iter().map(|(_, n)| n.as_str()).collect();
         assert_eq!(names, ["Sol: Review the diff", "Explore the tests"]);
-        // Its provider, and how many sub-agents it has out.
-        assert!(trek.visible(cx, format!("card-agent-{id}")));
-        assert!(trek.visible(cx, format!("card-kids-count-{id}")));
-        // It's in Active, above this Mac's projects, as a thread at work here would be; its
-        // machine's group holds only what's quiet there (nothing now).
+        // How many sub-agents it has out (the tooltip names its provider and model).
+        assert!(trek.visible(cx, format!("live-line-kids-count-{id}")));
+        // It stays under its machine in Devices, after this Mac's projects, as a thread at work
+        // here stays in its project.
         let pid = trek.read(cx, |ws, _| {
             ws.thread(&here).unwrap().project_id.clone().unwrap()
         });
-        let card = trek.bounds(cx, format!("card-{id}")).unwrap().origin.y;
+        let row = trek.bounds(cx, format!("live-line-{id}")).unwrap().origin.y;
         let project = trek
             .bounds(cx, format!("live-proj-head-{pid}"))
             .unwrap()
             .origin
             .y;
-        assert!(card < project, "{card:?} above {project:?}");
-        assert!(!trek.visible(cx, "machine-head-machine-c"));
+        let machine = trek
+            .bounds(cx, "machine-head-machine-c")
+            .expect("its machine's header")
+            .origin
+            .y;
+        assert!(
+            project < machine && machine < row,
+            "{project:?}, then {machine:?}, then {row:?}"
+        );
+        assert!(!trek.visible(cx, "section-active"), "no Active section");
+        // A machine's count ends on the same right-hand column as a project's (it used to sit
+        // further right, past the room a project's header kept for its hover buttons).
+        let right = |trek: &Trek, cx: &mut TestAppContext, id: String| {
+            trek.bounds(cx, id).expect("drawn").right().as_f32()
+        };
+        let (project_count, machine_count, clock) = (
+            right(&trek, cx, format!("live-proj-count-{pid}")),
+            right(&trek, cx, "machine-count-machine-c".to_string()),
+            right(&trek, cx, format!("live-line-working-{id}")),
+        );
+        assert!(
+            (project_count - machine_count).abs() < 0.5 && (clock - machine_count).abs() < 0.5,
+            "{project_count} {machine_count} {clock}"
+        );
         let place = trek.read(cx, |ws, _| ws.machines.place(&id));
         assert_eq!(place.as_deref(), Some("trek on Machine C"));
 
@@ -1585,10 +1606,10 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         waiting.section = tr::Section::Inbox;
         waiting.working_since = None;
         send(&trek, cx, waiting.clone());
-        assert!(trek.visible(cx, format!("card-waiting-{id}")));
-        assert!(trek.visible(cx, format!("card-kids-{id}")));
+        assert!(trek.visible(cx, format!("live-line-waiting-{id}")));
+        assert!(trek.visible(cx, format!("live-line-kids-{id}")));
 
-        // One of them waits on the user: the card says so.
+        // One of them waits on the user: its Inbox row says so.
         let mut asking = waiting.clone();
         asking.needs = Some(tr::Needs {
             kind: tr::NeedsKind::Approval,
@@ -1596,19 +1617,20 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
         });
         asking.needs_thread = Some("t-10".into());
         send(&trek, cx, asking);
-        assert!(trek.visible(cx, format!("card-sub-needs-{id}")));
-        // On top with what waits here, and on the badge.
-        assert!(trek.visible(cx, "needs-you"));
+        assert!(trek.visible(cx, format!("inbox-sub-needs-{id}")));
+        // In the Inbox with what waits here, and on the badge.
+        assert!(trek.visible(cx, "inbox"));
+        assert!(!trek.visible(cx, format!("live-line-{id}")));
         assert_eq!(trek.read(cx, |ws, _| ws.needs_you_count()), 1);
 
         // Settled there with its sub-agents out, it's still listed here; done, it goes.
         let mut settled = waiting.clone();
         settled.section = tr::Section::Settled;
         send(&trek, cx, settled.clone());
-        assert!(trek.visible(cx, format!("card-waiting-{id}")));
+        assert!(trek.visible(cx, format!("live-line-waiting-{id}")));
         settled.sub_agents.clear();
         send(&trek, cx, settled);
-        assert!(!trek.visible(cx, format!("card-{id}")));
+        assert!(!trek.visible(cx, format!("inbox-{id}")));
         assert!(!trek.visible(cx, format!("live-line-{id}")));
 
         // Out of reach, nothing it runs can be seen from here: no clock, no sub-agents.
@@ -1623,8 +1645,8 @@ fn a_machines_thread_at_work_shows_above_the_projects_with_its_clock_and_sub_age
             )
         });
         trek.render(cx);
-        assert!(!trek.visible(cx, format!("card-working-{id}")));
-        assert!(!trek.visible(cx, format!("card-kids-{id}")));
+        assert!(!trek.visible(cx, format!("live-line-working-{id}")));
+        assert!(!trek.visible(cx, format!("live-line-kids-{id}")));
         assert!(trek.read(cx, |ws, _| ws.machines.working_for(&id).is_none()));
         assert!(!trek.read(cx, |ws, _| ws.machines.any_at_work()));
     });

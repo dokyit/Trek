@@ -158,8 +158,7 @@ fn threads_settle_after_days_unless_told_never_to() {
         trek.update(cx, |ws, cx| ws.mark_unread(&unread, cx));
         edit(&trek, cx, &failed, |t| t.run_state = RunState::Failed);
         trek.render(cx);
-        // It's a quiet line in its project (shown in full: the unread one sits on top there),
-        // and what failed is in Needs you.
+        // It's a quiet line in its project; the unread one and what failed are in the Inbox.
         let pid = trek.read(cx, |ws, _| {
             ws.thread(&stale).unwrap().project_id.clone().unwrap()
         });
@@ -179,8 +178,8 @@ fn threads_settle_after_days_unless_told_never_to() {
             trek.render(cx);
         }
         assert!(trek.visible(cx, format!("live-line-{stale}")));
-        assert!(trek.visible(cx, format!("live-line-unseen-{unread}")));
-        assert!(trek.visible(cx, format!("card-{failed}")));
+        assert!(trek.visible(cx, format!("inbox-finished-{unread}")));
+        assert!(trek.visible(cx, format!("inbox-{failed}")));
 
         trek.update(cx, |ws, cx| ws.tidy_inbox(now_ms(), cx));
         trek.render(cx);

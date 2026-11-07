@@ -575,9 +575,9 @@ fn chats_cut_off_are_offered_back_and_nothing_runs_by_itself() {
         trek.render(cx);
         assert!(trek.visible(cx, "interrupted-notice"));
         assert!(trek.visible(cx, "resume-all"));
-        assert!(trek.visible(cx, format!("card-resume-{working}")));
+        assert!(trek.visible(cx, format!("inbox-resume-{working}")));
         assert!(
-            !trek.visible(cx, format!("card-resume-{asking}")),
+            !trek.visible(cx, format!("inbox-resume-{asking}")),
             "one waiting isn't resumed from its row"
         );
     });
@@ -689,7 +689,7 @@ fn resume_on_a_row_resumes_it_and_leaves_the_user_where_they_are() {
         cx.run_until_parked();
         trek.render(cx);
         let before = trek.read(cx, |ws, _| ws.route.clone());
-        trek.click(cx, format!("card-resume-{id}"));
+        trek.click(cx, format!("inbox-resume-{id}"));
         assert_eq!(
             trek.read(cx, |ws, _| ws.route.clone()),
             before,

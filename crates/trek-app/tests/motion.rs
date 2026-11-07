@@ -323,7 +323,7 @@ fn bump(trek: &Trek, cx: &mut TestAppContext, id: &str) {
 }
 
 fn row_y(trek: &Trek, cx: &mut TestAppContext, id: &str) -> Option<f32> {
-    trek.bounds(cx, format!("card-{id}"))
+    trek.bounds(cx, format!("inbox-{id}"))
         .or_else(|| trek.bounds(cx, format!("live-line-{id}")))
         .map(|b| b.origin.y.as_f32())
 }
