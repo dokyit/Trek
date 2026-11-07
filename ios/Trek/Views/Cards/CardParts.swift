@@ -126,23 +126,30 @@ struct RingSpinner: View {
     var size: CGFloat
     var color: Color = Trek.muted
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var turning = false
 
     var body: some View {
         ZStack {
             Circle().stroke(color.opacity(0.15), lineWidth: 1.4)
-            Circle()
-                .trim(from: 0, to: 0.75)
-                .stroke(color, style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
-                .rotationEffect(.degrees(turning ? 270 : -90))
+            if reduceMotion {
+                ring(turn: 0)
+            } else {
+                // Turned by the clock, not a repeating animation, which loops whatever else
+                // changes in its update too (see `BeaconDot`).
+                TimelineView(.animation(minimumInterval: Breath.frame)) { ctx in
+                    ring(turn: Breath.turn(at: ctx.date, period: 0.9))
+                }
+            }
         }
         .padding(0.7)
         .frame(width: size, height: size)
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) { turning = true }
-        }
         .accessibilityHidden(true)
+    }
+
+    private func ring(turn: Double) -> some View {
+        Circle()
+            .trim(from: 0, to: 0.75)
+            .stroke(color, style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
+            .rotationEffect(.degrees(-90 + 360 * turn))
     }
 }
 

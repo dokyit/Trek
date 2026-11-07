@@ -1,16 +1,19 @@
 import SwiftUI
 
-/// Home: every thread on the Mac. By project, as the Mac's sidebar has them (Pinned, then each
-/// project with what wants you or is at work on top, Snoozed, and Settled folded away), or by
-/// status (Pinned · Needs you · Working · Snoozed · Recent). Colour only where something wants
-/// action, is moving or broke; the rest recedes.
+/// Home: every thread on the paired machines, laid out as the Mac's sidebar is. What waits on you
+/// first, in the one tinted block; then Pinned; then what's at work, across projects (Active);
+/// then each project with its quiet threads, one line each; Snoozed; and Settled folded away. Or
+/// by status (Pinned · Working · In the background · Snoozed · Recent), under the same block.
+/// Every row starts with a state column that says how its thread stands; colour only where
+/// something wants action, is moving or broke, and the rest recedes.
 struct ThreadsView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [String]
     @Binding var showNew: Bool
     @AppStorage(ThreadGrouping.key) private var groupingRaw = ThreadGrouping.project.rawValue
     @State private var collapsed: Set<String> = Launch.folded
-    /// Project groups showing all their quiet threads, not just the first few.
+    /// Groups showing all their threads, not just the first few: a project's id, "settled:" and
+    /// one, or the Needs you block's key.
     @State private var showingAll: Set<String> = []
     @State private var settledOpen = Launch.folded.contains("-Settled")
     @State private var projectFilter: String?
@@ -35,6 +38,10 @@ struct ThreadsView: View {
     /// Quiet threads a project shows before "Show more" (the Mac's sidebar: 3, and 5 settled).
     private static let quietShown = 3
     private static let settledShown = 5
+    /// Threads the Needs you block shows before "Show more": the rest of the list stays in reach
+    /// when a dozen wait.
+    private static let needsShown = 4
+    private static let needsKey = "needs"
 
     private var grouping: ThreadGrouping { ThreadGrouping(rawValue: Launch.grouping ?? groupingRaw) ?? .project }
 
@@ -49,6 +56,7 @@ struct ThreadsView: View {
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                         .listRowInsets(EdgeInsets())
+                    needsBlock
                     switch grouping {
                     case .project: byProject
                     case .status: byStatus
@@ -63,6 +71,9 @@ struct ThreadsView: View {
                 .listStyle(.plain)
                 .listSectionSpacing(6)
                 .environment(\.defaultMinListHeaderHeight, 0)
+                // A quiet thread is one 44 pt line (the HIG's least), not the taller rows the
+                // list gives by default.
+                .environment(\.defaultMinListRowHeight, 44)
                 .scrollContentBackground(.hidden)
                 .background(RidgeBackdrop(height: 300))
                 // Rows fade out above the "New thread" pill and the tab bar, and the last row clears them.
@@ -154,16 +165,58 @@ struct ThreadsView: View {
         }
     }
 
+    // MARK: Needs you
+
+    /// What waits on you, first and the one tinted block on the page (the Mac's sidebar has it so):
+    /// the first few, then "Show more". The tab's badge and the hand on the "New thread" pill count
+    /// these. A pinned thread that asks stays under Pinned, as on the Mac.
+    @ViewBuilder
+    private var needsBlock: some View {
+        let needs = filtered(model.needsYou)
+        if !needs.isEmpty {
+            let all = showingAll.contains(Self.needsKey)
+            let shown = all ? needs : Array(needs.prefix(Self.needsShown))
+            let more = needs.count > Self.needsShown
+            Section {
+                NeedsHeader(count: needs.count)
+                    .listRowBackground(NeedsWash(part: .top))
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 18))
+                ForEach(shown) { t in
+                    row(t, showsProject: true, wash: !more && t.id == shown.last?.id ? .bottom : .middle)
+                }
+                if more {
+                    moreRow(hidden: needs.count - shown.count, wash: .bottom) {
+                        if all { showingAll.remove(Self.needsKey) } else { showingAll.insert(Self.needsKey) }
+                    }
+                }
+            }
+            .listSectionSeparator(.hidden)
+        }
+    }
+
     // MARK: By project
 
     @ViewBuilder
     private var byProject: some View {
-        section("Pinned", filtered(model.pinned))
-        let live = filtered(model.liveGroups)
-        ForEach(live) { group in
-            projectSection(group)
+        let list = filtered(model.threads)
+        let pinned = filtered(model.pinned)
+        let active = model.active(of: list)
+        let groups = model.quietGroups(of: list)
+        section("Pinned", pinned)
+        section("Active", active)
+        if !groups.isEmpty {
+            // What the groups under it are; each project's header then stays put above its rows.
+            SectionLabel(title: "Projects", count: groups.count)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 18))
+            ForEach(groups) { group in
+                projectSection(group)
+            }
         }
-        if live.isEmpty, model.pinned.isEmpty, !model.threads.isEmpty, model.connection == .connected || model.mode == .demo {
+        if groups.isEmpty, active.isEmpty, pinned.isEmpty, filtered(model.needsYou).isEmpty, !model.threads.isEmpty,
+           model.connection == .connected || model.mode == .demo {
             // The Mac's words for an empty inbox.
             ContentUnavailableView("Inbox zero", systemImage: "checkmark.circle",
                                    description: Text("Running agents and anything that needs you will show up here."))
@@ -171,22 +224,23 @@ struct ThreadsView: View {
                 .listRowSeparator(.hidden)
         }
         section("Snoozed", filtered(model.snoozed))
-        settledSection(filtered(model.settledGroups))
+        settledSection(model.settledGroups(of: list))
     }
 
-    /// A project's live threads under its badge: what wants you and what's at work always out,
-    /// then the first few quiet ones and "Show more".
+    /// A project's quiet threads under its badge: the first few, then "Show more". What waits on
+    /// you and what's at work are above, in Needs you and Active.
     @ViewBuilder
     private func projectSection(_ g: ProjectGroup) -> some View {
         let key = "project:\(g.id)"
         let folded = collapsed.contains(key)
         let all = showingAll.contains(g.id)
-        let quiet = all ? g.quiet : Array(g.quiet.prefix(Self.quietShown))
+        let rows = g.active + g.quiet
+        let shown = all ? rows : Array(rows.prefix(Self.quietShown))
         Section {
             if !folded {
-                ForEach(g.active + quiet) { t in row(t, showsProject: false) }
-                if g.quiet.count > Self.quietShown {
-                    moreRow(hidden: g.quiet.count - quiet.count) {
+                ForEach(shown) { t in row(t, showsProject: false) }
+                if rows.count > Self.quietShown {
+                    moreRow(hidden: rows.count - shown.count) {
                         if all { showingAll.remove(g.id) } else { showingAll.insert(g.id) }
                     }
                 }
@@ -232,7 +286,7 @@ struct ThreadsView: View {
         }
     }
 
-    private func moreRow(hidden: Int, toggle: @escaping () -> Void) -> some View {
+    private func moreRow(hidden: Int, wash: NeedsWash.Part? = nil, toggle: @escaping () -> Void) -> some View {
         Button {
             withAnimation(.snappy) { toggle() }
         } label: {
@@ -240,13 +294,13 @@ struct ThreadsView: View {
                 .font(.ui(.subheadline).weight(.medium))
                 .foregroundStyle(Trek.muted)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, compact ? 28 : 37)
+                .padding(.leading, ThreadRow.titleInset)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .listRowBackground(Color.clear)
+        .listRowBackground(RowGround(wash: wash))
         .listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: 6, trailing: 18))
+        .listRowInsets(EdgeInsets(top: 2, leading: 20, bottom: wash == nil ? 6 : 10, trailing: 18))
     }
 
     // MARK: By status
@@ -254,22 +308,21 @@ struct ThreadsView: View {
     @ViewBuilder
     private var byStatus: some View {
         section("Pinned", filtered(model.pinned))
-        section("Needs you", filtered(model.needsYou), tint: Trek.approval)
-        section("Working", filtered(model.working), tint: Trek.working)
-        section("In the background", filtered(model.inBackground), tint: Trek.sky)
+        section("Working", filtered(model.working))
+        section("In the background", filtered(model.inBackground))
         section("Snoozed", filtered(model.snoozed))
         section("Recent", filtered(model.recent))
     }
 
     @ViewBuilder
-    private func section(_ title: String, _ threads: [ThreadSummary], tint: Color? = nil) -> some View {
+    private func section(_ title: String, _ threads: [ThreadSummary]) -> some View {
         if !threads.isEmpty {
             Section {
                 if !collapsed.contains(title) {
                     ForEach(threads) { t in row(t, showsProject: true) }
                 }
             } header: {
-                SectionHeader(title: title, count: threads.count, tint: tint, folded: collapsed.contains(title)) {
+                SectionHeader(title: title, count: threads.count, folded: collapsed.contains(title)) {
                     withAnimation(.snappy) {
                         if collapsed.contains(title) { collapsed.remove(title) } else { collapsed.insert(title) }
                     }
@@ -288,31 +341,23 @@ struct ThreadsView: View {
         return list
     }
 
-    private func filtered(_ groups: [ProjectGroup]) -> [ProjectGroup] {
-        var groups = groups
-        if let machineFilter {
-            groups = groups.compactMap { g in
-                var g = g
-                g.active = g.active.filter { model.link(for: $0.id)?.id == machineFilter }
-                g.quiet = g.quiet.filter { model.link(for: $0.id)?.id == machineFilter }
-                return g.count > 0 ? g : nil
-            }
-        }
-        if let projectFilter { groups = groups.filter { $0.id == projectFilter } }
-        return groups
+    /// The machine a row says it's on: with two or more paired and the list showing them all.
+    /// Picked to one, every row is on it and none says so.
+    private func host(of t: ThreadSummary) -> String? {
+        model.links.count > 1 && machineFilter == nil ? model.hostName(of: t.id) : nil
     }
 
-    private func row(_ t: ThreadSummary, showsProject: Bool) -> some View {
-        NavigationLink(value: t.id) {
-            ThreadRow(thread: t, showsProject: showsProject,
-                      host: model.links.count > 1 ? model.hostName(of: t.id) : nil,
-                      hostKind: model.machineKind(of: t.id))
+    private func row(_ t: ThreadSummary, showsProject: Bool, wash: NeedsWash.Part? = nil) -> some View {
+        // A quiet thread is one 44 pt line; one with something to say is two.
+        let quiet = compact || !RowState.of(t).says
+        return NavigationLink(value: t.id) {
+            ThreadRow(thread: t, showsProject: showsProject, host: host(of: t), hostKind: model.machineKind(of: t.id))
         }
         .id(t.id)
         .navigationLinkIndicatorVisibility(.hidden)
-        .listRowBackground(Color.clear)
+        .listRowBackground(RowGround(wash: wash))
         .listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: compact ? 7 : 9, leading: 20, bottom: compact ? 7 : 9, trailing: 18))
+        .listRowInsets(EdgeInsets(top: quiet ? (compact ? 7 : 10) : 8, leading: 20, bottom: quiet ? (compact ? 7 : 10) : 8, trailing: 18))
         .swipeActions(edge: .leading) {
             if t.unseen {
                 Button("Read", systemImage: "checkmark") { model.markSeen(t.id) }.tint(Trek.done)
@@ -363,8 +408,9 @@ struct ThreadsView: View {
         projectFilter = nil
         pickedMachine = nil
         withAnimation(.snappy) {
-            collapsed.remove("project:\(t.project?.id ?? "")")
-            for title in ["Pinned", "Needs you", "Working", "In the background", "Snoozed", "Recent"] { collapsed.remove(title) }
+            collapsed.remove("project:\(model.groupKey(of: t))")
+            for title in ["Pinned", "Active", "Working", "In the background", "Snoozed", "Recent"] { collapsed.remove(title) }
+            if model.needsYou.contains(where: { $0.id == id }) { showingAll.insert(Self.needsKey) }
             if t.section == .settled { settledOpen = true }
         }
         DispatchQueue.main.async {
@@ -373,11 +419,80 @@ struct ThreadsView: View {
     }
 }
 
+/// The ground behind a row: the list's own, or a slice of the Needs you block's wash.
+private struct RowGround: View {
+    var wash: NeedsWash.Part?
+
+    var body: some View {
+        if let wash { NeedsWash(part: wash) } else { Color.clear }
+    }
+}
+
+/// The Needs you block's amber wash, drawn row by row (a list draws each row's ground on its
+/// own): rounded at the block's top and foot, inset from the screen's edges so it reads as one
+/// block. 8 %, as the Mac's sidebar has it; the only fill on the page.
+struct NeedsWash: View {
+    enum Part { case top, middle, bottom }
+    var part: Part
+    static let radius: CGFloat = 18
+
+    var body: some View {
+        UnevenRoundedRectangle(topLeadingRadius: part == .top ? Self.radius : 0,
+                               bottomLeadingRadius: part == .bottom ? Self.radius : 0,
+                               bottomTrailingRadius: part == .bottom ? Self.radius : 0,
+                               topTrailingRadius: part == .top ? Self.radius : 0,
+                               style: .continuous)
+            .fill(Trek.approval.opacity(0.08))
+            .padding(.horizontal, 12)
+            .padding(.top, part == .top ? 6 : 0)
+            .accessibilityHidden(true)
+    }
+}
+
+/// The head of the Needs you block: amber words and how many.
+private struct NeedsHeader: View {
+    var count: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Needs you").font(.ui(.subheadline).weight(.semibold))
+            Text("\(count)")
+                .font(.ui(.footnote).weight(.semibold).monospacedDigit())
+                .padding(.horizontal, 7)
+                .padding(.vertical, 1)
+                .background(Trek.approval.opacity(0.16), in: Capsule())
+            Spacer()
+        }
+        .foregroundStyle(Trek.approval)
+        .padding(.top, 16)
+        .padding(.bottom, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Needs you, \(count)")
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// What the groups under it are, as a section's title is drawn, without a fold: "Projects 4".
+private struct SectionLabel: View {
+    var title: String
+    var count: Int
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(title).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.muted)
+            Text("\(count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.7))
+            Spacer()
+        }
+        .padding(.top, 14)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
 /// A section's title, how many it holds, and its fold chevron.
 private struct SectionHeader: View {
     var title: String
     var count: Int
-    var tint: Color? = nil
     var folded: Bool
     var toggle: () -> Void
 
@@ -385,7 +500,7 @@ private struct SectionHeader: View {
         Button(action: toggle) {
             HStack(spacing: 7) {
                 Text(title).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.muted)
-                Text("\(count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(tint ?? Trek.muted.opacity(0.7))
+                Text("\(count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.7))
                 Spacer()
                 FoldChevron(folded: folded)
             }
@@ -400,8 +515,8 @@ private struct SectionHeader: View {
     }
 }
 
-/// A project's header, as the Mac's sidebar draws it: its badge and name, then what's in it (what
-/// waits and what works only while folded: unfolded, the rows say so), and the fold chevron.
+/// A project's header, as the Mac's sidebar draws it: its badge and name, what's new in it, how
+/// many, and the fold chevron. One for a name, whichever machines it's on (`groupKey`).
 private struct ProjectHeader: View {
     var group: ProjectGroup
     var folded: Bool
@@ -423,26 +538,6 @@ private struct ProjectHeader: View {
                     .font(.ui(.subheadline).weight(.semibold))
                     .foregroundStyle(Trek.foreground.opacity(0.88))
                     .lineLimit(1)
-                if folded, group.needs > 0 {
-                    Label("\(group.needs)", systemImage: "hand.raised.fill")
-                        .labelStyle(TightLabelStyle())
-                        .foregroundStyle(Trek.approval)
-                }
-                if folded, group.working > 0 {
-                    HStack(spacing: 4) {
-                        BeaconDot(color: Trek.working, pulses: true, size: 6)
-                        Text("\(group.working)")
-                    }
-                    .foregroundStyle(Trek.working)
-                }
-                if folded, group.inBackground > 0 {
-                    HStack(spacing: 4) {
-                        Circle().fill(Trek.sky).frame(width: 6, height: 6)
-                        Text("\(group.inBackground)")
-                    }
-                    .foregroundStyle(Trek.sky)
-                    .accessibilityLabel("\(group.inBackground) running in the background")
-                }
                 if group.unread > 0 {
                     Text("\(group.unread) new").foregroundStyle(Trek.done)
                 }
@@ -485,7 +580,7 @@ private struct SettledProjectLabel: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            if let p = group.project { ProjectBadge(project: p, size: 15) }
+            if let p = group.project, !p.isNone { ProjectBadge(project: p, size: 15) }
             Text(group.name).font(.ui(.footnote).weight(.semibold)).foregroundStyle(Trek.muted)
             Text("\(group.count)").font(.ui(.footnote).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.7))
         }
@@ -504,63 +599,197 @@ private struct FoldChevron: View {
     }
 }
 
-private struct TightLabelStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 3) {
-            configuration.icon.font(.system(size: 10, weight: .semibold))
-            configuration.title
+/// How a row's thread stands, said once: the mark in its state column and, for a thread with
+/// something to say, the words its second line opens with, in the state's colour (the Mac's
+/// sidebar's one state column). A quiet thread has no words and is one line.
+struct RowState {
+    enum Mark: Equatable {
+        /// At work: the ember beacon, breathing.
+        case beacon
+        /// Asked, failed, interrupted, background work, finished and unread.
+        case dot
+        case pin
+        case snoozed
+        case none
+    }
+
+    var mark: Mark
+    var color: Color
+    /// "Approval", "Working", "Running"…; nil for a quiet thread.
+    var words: String?
+    /// What VoiceOver says for a mark with no words beside it ("Unread", "Pinned").
+    var spoken: String?
+
+    /// Whether it has something to say: two lines.
+    var says: Bool { words != nil }
+
+    static func of(_ t: ThreadSummary) -> RowState {
+        if t.runState == .working, t.needs == nil {
+            return RowState(mark: .beacon, color: Trek.working, words: "Working")
         }
+        // Asked (approval, question, plan, paused at a limit), failed, interrupted.
+        if let look = StatusLook.of(t) {
+            return RowState(mark: .dot, color: look.color, words: look.label)
+        }
+        // Its turn is over, but it waits on what it started (the Mac's "Waiting").
+        if t.waitsInBackground {
+            return RowState(mark: .beacon, color: Trek.working, words: "Waiting")
+        }
+        if t.runsInBackground {
+            return RowState(mark: .dot, color: Trek.sky, words: "Running")
+        }
+        if t.section == .snoozed { return RowState(mark: .snoozed, color: Trek.muted, spoken: "Snoozed") }
+        if t.unseen { return RowState(mark: .dot, color: Trek.done, spoken: "Unread") }
+        if t.section == .pinned { return RowState(mark: .pin, color: Trek.muted, spoken: "Pinned") }
+        return RowState(mark: .none, color: Trek.muted)
     }
 }
 
+/// A row's state column (20 pt): where every row starts, so how each thread stands reads down one
+/// edge of the list. Empty for a quiet thread.
+struct StateColumn: View {
+    var state: RowState
+    static let width: CGFloat = 20
+
+    var body: some View {
+        Group {
+            switch state.mark {
+            case .beacon: BeaconDot(color: state.color, pulses: true, size: 8)
+            case .dot: Circle().fill(state.color).frame(width: 8, height: 8)
+            case .pin:
+                Image(systemName: "pin.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Trek.muted.opacity(0.8))
+            case .snoozed:
+                Image(systemName: "moon.zzz").font(.system(size: 11, weight: .medium)).foregroundStyle(Trek.muted)
+            case .none: Color.clear.frame(width: 8, height: 8)
+            }
+        }
+        .frame(width: Self.width)
+        .accessibilityHidden(state.spoken == nil)
+        .accessibilityLabel(state.spoken ?? "")
+    }
+}
+
+/// A thread's row. Its state column, then: a quiet thread is one line, its title and how long
+/// ago (with two machines, which one, by its mark); a thread with something to say is two, its
+/// title with its agent's logo at the end, then where it stands in its state's colour, why, its
+/// project and its machine, muted, the reason giving way first.
 struct ThreadRow: View {
     var thread: ThreadSummary
-    /// Its project's badge and name: left out under the project's own header.
+    /// Its project's name on the second line (its badge on a quiet line): left out under the
+    /// project's own header.
     var showsProject = true
-    /// Which machine it's on, when several are paired, and what that machine is.
+    /// Which machine it's on, when several are paired and the list shows them all, and what that
+    /// machine is.
     var host: String? = nil
     var hostKind: MachineKind = .unknown
     @Environment(\.compactRows) private var compact
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    private var recedes: Bool {
-        thread.runState == .idle && !thread.unseen && thread.needs == nil && thread.runningSubAgents.isEmpty && !thread.waitsInBackground
-            && thread.cutShort == nil
-    }
+    /// Where a row's title starts, from its leading edge: past the state column.
+    static let titleInset: CGFloat = StateColumn.width + 10
+
+    private var state: RowState { RowState.of(thread) }
+
+    /// Read, idle, nothing to say: its title steps back.
+    private var recedes: Bool { !state.says && !thread.unseen }
 
     var body: some View {
-        if typeSize.isAccessibilitySize { accessibleBody } else if compact { compactBody } else { fullBody }
+        if typeSize.isAccessibilitySize { accessibleBody } else if compact { compactBody } else if state.says { twoLines } else { oneLine }
+    }
+
+    private var title: some View {
+        Text(thread.title)
+            .scaledFont(17, weight: thread.unseen ? .semibold : .regular)
+            .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
+    }
+
+    /// Something to say: the title (and its agent), then the state's words, why, and where.
+    private var twoLines: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .center, spacing: 10) {
+                StateColumn(state: state)
+                title.lineLimit(1)
+                Spacer(minLength: 4)
+                SubAgentsPill(agents: thread.runningSubAgents)
+                AgentGlyph(thread.agent, size: 18)
+            }
+            standing
+                .font(.ui(.subheadline))
+                .lineLimit(1)
+                .padding(.leading, Self.titleInset)
+                .transaction { $0.animation = nil }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Quiet: the title, then how long ago (and, with two machines, which).
+    private var oneLine: some View {
+        HStack(alignment: .center, spacing: 10) {
+            StateColumn(state: state)
+            title.lineLimit(1)
+            Spacer(minLength: 4)
+            HStack(spacing: 6) {
+                if showsProject, let p = thread.project, !p.isNone {
+                    ProjectBadge(project: p, size: 15)
+                }
+                if let host { MachineMark(kind: hostKind, size: 10).accessibilityLabel("On \(host)") }
+                Text(when)
+                    .font(.ui(.subheadline).monospacedDigit())
+                    .foregroundStyle(Trek.muted.opacity(0.8))
+            }
+            .fixedSize()
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The setting for one line a row: the state column, the title, the state's words or the time.
+    private var compactBody: some View {
+        HStack(alignment: .center, spacing: 10) {
+            StateColumn(state: state)
+            if showsProject, let p = thread.project, !p.isNone { ProjectBadge(project: p, size: 15) }
+            title.lineLimit(1)
+            Spacer(minLength: 4)
+            SubAgentsPill(agents: thread.runningSubAgents)
+            if let words = state.words {
+                Group {
+                    if state.mark == .beacon, thread.runState == .working, let since = thread.workingSince {
+                        Ticking(since: since) { "\(words) \($0)" }
+                    } else {
+                        Text(words)
+                    }
+                }
+                .font(.ui(.footnote).weight(.medium))
+                .foregroundStyle(state.color)
+                .fixedSize()
+            } else {
+                if let host { MachineMark(kind: hostKind, size: 10).accessibilityLabel("On \(host)") }
+                Text(when).font(.ui(.subheadline).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.8)).fixedSize()
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 
     /// At the accessibility sizes, a line for each: beside the status, the title was squeezed down
-    /// to nothing and the row said only "Working".
+    /// to nothing.
     private var accessibleBody: some View {
         HStack(alignment: .top, spacing: 10) {
-            AgentGlyph(thread.agent, size: 24)
-                .padding(.top, 4)
-                .opacity(recedes ? 0.7 : 1)
+            StateColumn(state: state)
+                .padding(.top, 8)
             VStack(alignment: .leading, spacing: 4) {
-                Text(thread.title)
-                    .scaledFont(17, weight: thread.unseen ? .semibold : .regular)
-                    .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
-                    .lineLimit(3)
+                title.lineLimit(3)
                 WordFlow(spacing: 8, lineSpacing: 4) {
-                    trailing
+                    if state.says { standingWords.foregroundStyle(state.color) }
                     SubAgentsPill(agents: thread.runningSubAgents)
-                    if thread.additions + thread.deletions > 0, thread.needs == nil, !thread.onlyRunsInBackground {
-                        DiffStat(additions: thread.additions, deletions: thread.deletions, font: .ui(.caption).monospacedDigit())
-                            .opacity(recedes ? 0.6 : 0.9)
-                    }
+                    if !state.says { Text(when).foregroundStyle(Trek.muted) }
                 }
-                if hasDetail {
-                    detail
-                        .font(.ui(.subheadline))
-                        .lineLimit(2)
+                .font(.ui(.subheadline))
+                if let reason {
+                    Text(reason).font(.ui(.subheadline)).foregroundStyle(Trek.muted).lineLimit(2)
                         .transaction { $0.animation = nil }
                 }
                 if showsProject, let p = thread.project {
                     HStack(spacing: 6) {
-                        ProjectBadge(project: p, size: 16)
+                        if !p.isNone { ProjectBadge(project: p, size: 16) }
                         Text(p.name).font(.ui(.subheadline)).foregroundStyle(Trek.muted).lineLimit(1)
                     }
                 }
@@ -570,223 +799,128 @@ struct ThreadRow: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// One line: logo, project badge, title, sub-agents, status.
-    private var compactBody: some View {
-        HStack(alignment: .center, spacing: 10) {
-            AgentGlyph(thread.agent, size: 18)
-                .opacity(recedes ? 0.7 : 1)
-            if showsProject, let p = thread.project { ProjectBadge(project: p, size: 15) }
-            if let host { MachineTag(name: host, kind: hostKind, compact: true) }
-            Text(thread.title)
-                .scaledFont(16, weight: thread.unseen ? .semibold : .regular)
-                .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            SubAgentsPill(agents: thread.runningSubAgents)
-            trailing
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private var fullBody: some View {
-        HStack(alignment: .top, spacing: 13) {
-            AgentGlyph(thread.agent, size: 24)
-                .padding(.top, 1)
-                .opacity(recedes ? 0.7 : 1)
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text(thread.title)
-                        .scaledFont(17, weight: thread.unseen ? .semibold : .regular)
-                        .foregroundStyle(recedes ? Trek.foreground.opacity(0.72) : Trek.foreground)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    trailing
+    /// The second line: the state's words (and its clock), why, then the project and machine.
+    /// The reason gives way first; the project and machine stay whole as long as they can.
+    private var standing: some View {
+        StandingLayout {
+            standingWords
+                .fontWeight(.medium)
+                .foregroundStyle(state.color)
+            Group {
+                if let reason {
+                    reasonText(reason).foregroundStyle(Trek.muted)
+                } else {
+                    Color.clear.frame(width: 0, height: 0)
                 }
-                HStack(spacing: 6) {
-                    if showsProject, let p = thread.project {
-                        ProjectBadge(project: p, size: 16)
-                        // At work, the model and what it's doing need the room (and what still
-                        // runs in the background, or why it waits on you: the name was squeezed
-                        // down to "tr" beside it): the badge says which project.
-                        if thread.runState != .working, !thread.onlyRunsInBackground, thread.needs == nil, thread.cutShort == nil {
-                            Text(p.name).foregroundStyle(Trek.muted).lineLimit(1).layoutPriority(-1)
-                        }
-                    }
-                    secondary
-                        .lineLimit(1)
-                        .transaction { $0.animation = nil }
-                        // At large text sizes the tags and the model alone can outgrow the line:
-                        // what doesn't fit is cut off here rather than drawn under the pill.
-                        .frame(minWidth: 0, alignment: .leading)
-                        .clipped()
-                    Spacer(minLength: 0)
-                    if !thread.runningSubAgents.isEmpty {
-                        SubAgentsPill(agents: thread.runningSubAgents)
-                    } else if thread.additions + thread.deletions > 0, thread.needs == nil, !thread.onlyRunsInBackground {
-                        DiffStat(additions: thread.additions, deletions: thread.deletions, font: .ui(.caption).monospacedDigit())
-                            .opacity(recedes ? 0.6 : 0.9)
-                    }
-                }
-                .font(.ui(.subheadline))
             }
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder
-    private var trailing: some View {
-        if thread.runState == .working, thread.needs == nil {
-            // Working, and for how long, as the Mac's sidebar card says it.
-            HStack(spacing: 8) {
-                backgroundDot
-                WorkingPill(since: thread.workingSince)
-            }
-        } else if let look = StatusLook.of(thread) {
-            HStack(spacing: 8) {
-                backgroundDot
-                StatusPill(look: look)
-            }
-        } else if thread.waitsInBackground {
-            // Its turn is over, but what it started is still at it (the Mac's "Waiting").
-            HStack(spacing: 8) {
-                backgroundDot
-                StatusPill(look: StatusLook(label: "Waiting", color: Trek.working.opacity(0.8), symbol: nil, pulses: true))
-            }
-        } else if thread.unseen {
-            // Done and not read yet: an emerald dot by the time, as in the Mac's sidebar.
-            HStack(spacing: 6) {
-                Circle().fill(Trek.done).frame(width: 7, height: 7)
-                backgroundDot
-                Text(When.short(thread.updatedAt)).font(.ui(.footnote).weight(.medium).monospacedDigit())
-                    .foregroundStyle(Trek.muted)
-            }
-            .fixedSize()
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Done, unread, \(When.short(thread.updatedAt))")
-        } else {
-            HStack(spacing: 6) {
-                backgroundDot
-                Text(When.short(thread.updatedAt))
-                    .font(.ui(.subheadline).monospacedDigit())
-                    .foregroundStyle(Trek.muted.opacity(0.8))
-            }
-            .fixedSize()
-        }
-    }
-
-    /// The Mac's still sky dot: what its agent left running in the background still runs.
-    @ViewBuilder
-    private var backgroundDot: some View {
-        if thread.runsInBackground {
-            Circle().fill(Trek.sky).frame(width: 7, height: 7)
-                .accessibilityLabel("Running in the background")
-        }
-    }
-
-    /// The model at work, then the request waiting on you, what the agent is doing, or the branch.
-    @ViewBuilder
-    private var secondary: some View {
-        HStack(spacing: 5) {
-            if let host {
-                MachineTag(name: host, kind: hostKind, compact: true)
-            }
-            // The command still running needs the room more than the model does.
-            if (!showsProject || thread.runState == .working), !thread.onlyRunsInBackground {
-                Text(thread.modelLabel ?? thread.agent.name)
-                    .foregroundStyle(thread.runState == .working ? Trek.foreground.opacity(0.8) : Trek.muted)
-                    .fixedSize()
-                if hasDetail { Text("·").foregroundStyle(Trek.muted.opacity(0.6)) }
-            }
-            detail
-        }
-    }
-
-    private var hasDetail: Bool {
-        thread.needs != nil || (thread.section == .snoozed && thread.snoozedUntil != nil) || thread.cutShort != nil
-            || (thread.runState == .working && thread.activity != nil) || thread.runsInBackground || thread.branch != nil
-    }
-
-    @ViewBuilder
-    private var detail: some View {
-        if let needs = thread.needs {
-            Text(needs.text.replacingOccurrences(of: "`", with: "")).foregroundStyle(Trek.muted)
-        } else if thread.cutShort != nil, thread.runState != .working {
-            Text("Cut short when Trek closed").foregroundStyle(Trek.muted)
-        } else if thread.section == .snoozed, let until = SnoozeWords.until(thread.snoozedUntil) {
-            Label(until, systemImage: "moon.zzz").labelStyle(BranchLabelStyle()).foregroundStyle(Trek.muted.opacity(0.85))
-        } else if thread.runState == .working, let activity = thread.activity {
-            RichText(markdown: activity, size: 15, style: .subheadline, autoPaths: true)
+            .clipped()
+            Text(context.map { " · " + $0 } ?? "")
                 .foregroundStyle(Trek.muted)
-                .environment(\.projectHue, thread.project?.hue)
-        } else if thread.runsInBackground {
-            BackgroundLine(tasks: thread.backgroundWork)
-        } else if let branch = thread.branch {
-            Label {
-                Text(branch)
-            } icon: {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.ui(.caption2))
-            }
-            .labelStyle(BranchLabelStyle())
-            .foregroundStyle(Trek.muted.opacity(0.85))
+        }
+    }
+
+    /// Why, after a dot: a command still running in the background in code's face.
+    private func reasonText(_ reason: String) -> Text {
+        state.words == "Running" ? Text(" · ") + Text(reason).font(.code(.footnote)) : Text(" · " + reason)
+    }
+
+    /// "Working 3m 05s" and "Running 1h 2m" (ticking), "Approval", "Waiting"…
+    @ViewBuilder
+    private var standingWords: some View {
+        let words = state.words ?? ""
+        if state.mark == .beacon, thread.runState == .working, let since = thread.workingSince {
+            Ticking(since: since) { "\(words) \($0)" }
+        } else if words == "Running", let since = thread.backgroundWork.compactMap(\.since).min() {
+            Ticking(since: since) { "\(words) \($0)" }
+        } else {
+            Text(words)
+        }
+    }
+
+    /// Why it stands so: what it asks or why it failed, what it's doing or runs, when it wakes.
+    private var reason: String? {
+        if let needs = thread.needs { return needs.text.replacingOccurrences(of: "`", with: "") }
+        if state.words == "Running", let first = thread.backgroundWork.first {
+            // What it runs: the first command, and how many more.
+            let more = thread.backgroundWork.count - 1
+            return BackgroundLine.oneLine(first.title) + (more > 0 ? " +\(more)" : "")
+        }
+        if thread.cutShort != nil, thread.runState != .working { return "Cut short when Trek closed" }
+        if thread.runState == .working, let activity = thread.activity, !activity.isEmpty {
+            return activity.replacingOccurrences(of: "`", with: "")
+        }
+        if thread.section == .snoozed, let until = SnoozeWords.until(thread.snoozedUntil) { return until }
+        return nil
+    }
+
+    /// Where it is: its project (unless under the project's header) and, with two machines, which.
+    private var context: String? {
+        let parts = [showsProject ? thread.project?.name : nil, host.map(MachineTag.short)].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// How long ago, or when a snoozed thread wakes ("Sat 9:00 AM": the moon beside it says
+    /// until, and the title keeps the room).
+    private var when: String {
+        if thread.section == .snoozed, let until = SnoozeWords.until(thread.snoozedUntil) {
+            return until.hasPrefix("Until ") ? String(until.dropFirst(6)) : until
+        }
+        return When.short(thread.updatedAt)
+    }
+}
+
+/// A row's second line, in three parts: the state's words, why, and where (project, machine).
+/// The words and where keep their width; why takes what's left, cut short, and is left out when
+/// that's less than `leastReason` (a dot and an ellipsis said nothing: "Working 1m 13s ·… · trek").
+struct StandingLayout: Layout {
+    var leastReason: CGFloat = 56
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let ideal = subviews.map { $0.sizeThatFits(.unspecified) }
+        let total = ideal.reduce(0) { $0 + $1.width }
+        return CGSize(width: min(proposal.width ?? total, total), height: ideal.map(\.height).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let widths = Self.widths(available: bounds.width, ideal: subviews.map { $0.sizeThatFits(.unspecified).width },
+                                 leastReason: leastReason)
+        var x = bounds.minX
+        for (i, view) in subviews.enumerated() {
+            let w = i < widths.count ? widths[i] : 0
+            // What it takes of `w`: a reason cut short ends at its ellipsis, and where follows it.
+            let size = view.sizeThatFits(ProposedViewSize(width: w, height: nil))
+            view.place(at: CGPoint(x: x, y: bounds.midY - size.height / 2), proposal: ProposedViewSize(width: w, height: size.height))
+            x += min(w, size.width)
+        }
+    }
+
+    /// Each part's width in `available`, from their ideal widths (words, why, where): the words
+    /// whole, then where, then why in what's left, or none of it under `leastReason`.
+    static func widths(available: CGFloat, ideal: [CGFloat], leastReason: CGFloat) -> [CGFloat] {
+        guard ideal.count == 3 else { return ideal }
+        let words = min(ideal[0], available)
+        let place = min(ideal[2], max(0, available - words))
+        let left = max(0, available - words - place)
+        let reason = ideal[1] <= left ? ideal[1] : (left >= leastReason ? left : 0)
+        return [words, reason, place]
+    }
+}
+
+/// Text that ticks every second with how long since `since` (ms): "Working 3m 05s".
+private struct Ticking: View {
+    var since: Int64
+    var words: (String) -> String
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            Text(words(When.duration(max(0, Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000)))))
+                .monospacedDigit()
         }
     }
 }
 
-/// "Working 3m 05s": the beacon and how long the turn has run, ticking.
-struct WorkingPill: View {
-    var since: Int64?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            BeaconDot(color: Trek.working, pulses: true, size: 7)
-            if let since {
-                TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                    Text("Working \(When.duration(max(0, Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000))))")
-                        .monospacedDigit()
-                }
-            } else {
-                Text("Working")
-            }
-        }
-        .font(.ui(.footnote).weight(.medium))
-        .foregroundStyle(Trek.working)
-        .fixedSize()
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// Under a thread's title while a command or server it started still runs: "Running", what it
-/// runs (the first, and how many more), and for how long, as the Mac's strip says it.
-struct BackgroundLine: View {
-    var tasks: [BackgroundTask]
-
-    var body: some View {
-        if let first = tasks.first {
-            HStack(spacing: 5) {
-                Text("Running").foregroundStyle(Trek.foreground.opacity(0.8)).fixedSize()
-                Text(BackgroundLine.oneLine(first.title))
-                    .font(.code(.footnote))
-                    .foregroundStyle(Trek.muted)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .layoutPriority(-1)
-                if tasks.count > 1 {
-                    Text("+\(tasks.count - 1)").foregroundStyle(Trek.muted).fixedSize()
-                }
-                if let since = tasks.compactMap(\.since).min() {
-                    TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                        Text(When.duration(max(0, Int(ctx.date.timeIntervalSince1970 - Double(since) / 1000))))
-                            .monospacedDigit()
-                            .foregroundStyle(Trek.muted)
-                    }
-                    .fixedSize()
-                }
-            }
-            .accessibilityElement(children: .combine)
-        }
-    }
-
+/// A command a thread left running, as its row and the strip above the composer name it.
+enum BackgroundLine {
     /// A command's first line, its runs of spaces closed up.
     static func oneLine(_ title: String) -> String {
         let first = title.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? title
@@ -824,16 +958,6 @@ struct SubAgentsPill: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(agents.count) sub-agent\(agents.count == 1 ? "" : "s") at work")
         }
-    }
-}
-
-private struct BranchLabelStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 3) {
-            configuration.icon
-            configuration.title
-        }
-        .padding(.leading, 4)
     }
 }
 
@@ -952,10 +1076,11 @@ struct ThreadsHeader: View {
                 .padding(.trailing, 16)
                 .padding(.bottom, 6)
             if model.links.count > 1 {
+                // Each chip's target reaches 6 pt above and below its capsule (44 pt, as the HIG
+                // asks); the bar's own room is that much less.
                 MachineFilterBar(picked: $picked)
                     .padding(.horizontal, 16)
-                    .padding(.top, 2)
-                    .padding(.bottom, 6)
+                    .padding(.top, -4)
             }
             if let update {
                 UpdateCard(update: update)
@@ -995,7 +1120,7 @@ private struct MachineFilterBar: View {
     var body: some View {
         // Wrapping rather than scrolling sideways: on iOS 27.2 a scroll view at the head of the
         // list was taken for the list's own, and the bar's large title stopped following the list.
-        WordFlow(spacing: 8, lineSpacing: 8) {
+        WordFlow(spacing: 8, lineSpacing: -4) {
             Button {
                 withAnimation(.snappy(duration: 0.2)) { picked = nil }
             } label: {
@@ -1005,20 +1130,23 @@ private struct MachineFilterBar: View {
                     .padding(.horizontal, 14)
                     .frame(height: 32)
                     .background(Trek.foreground.opacity(picked == nil ? 0.14 : 0.06), in: Capsule())
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             ForEach(model.links) { link in
                 Button {
                     withAnimation(.snappy(duration: 0.2)) { picked = picked == link.id ? nil : link.id }
                 } label: {
-                    HStack(spacing: 6) {
-                        MachineTag(name: link.name, kind: link.kind, selected: picked == link.id)
-                    }
-                    .overlay(alignment: .topTrailing) {
-                        if link.connection != .connected {
-                            Circle().fill(Trek.failed).frame(width: 7, height: 7).offset(x: 1, y: -1)
+                    // Its short name: every machine of one person begins with the same "Toby's".
+                    MachineTag(name: MachineTag.short(link.name), kind: link.kind, selected: picked == link.id)
+                        .overlay(alignment: .topTrailing) {
+                            if link.connection != .connected {
+                                Circle().fill(Trek.failed).frame(width: 7, height: 7).offset(x: 1, y: -1)
+                            }
                         }
-                    }
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel("\(link.name)\(link.kind.word.map { ", \($0)" } ?? "")")

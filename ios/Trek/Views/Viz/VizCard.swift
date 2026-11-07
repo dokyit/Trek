@@ -371,18 +371,25 @@ private struct ChartDataSwitch: View {
 /// "Drawing…", breathing, in a card's corner while its marks are arriving.
 private struct DrawingLabel: View {
     @MotionAllowed private var motion
-    @State private var dim = false
 
     var body: some View {
+        // Breathes by the clock, not a repeating animation, which loops whatever else changes in
+        // its update too (see `BeaconDot`).
+        if motion {
+            TimelineView(.animation(minimumInterval: Breath.frame)) { ctx in
+                label.opacity(1 - 0.45 * Breath.level(at: ctx.date))
+            }
+        } else {
+            label
+        }
+    }
+
+    private var label: some View {
         Text("Drawing…")
             .font(.system(size: 12))
             .foregroundStyle(Trek.muted)
-            .opacity(dim ? 0.55 : 1)
             .frame(height: 28)
             .padding(.trailing, 6)
-            .onChange(of: motion, initial: true) { _, on in
-                if on { withAnimation(.easeInOut(duration: 0.8).repeatForever()) { dim = true } } else { dim = false }
-            }
     }
 }
 

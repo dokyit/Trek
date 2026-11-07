@@ -57,7 +57,7 @@ struct SearchView: View {
                             ThreadRow(thread: model.thread(r.thread.id) ?? r.thread,
                                       host: model.links.count > 1 ? model.hostName(of: r.thread.id) : nil)
                             SearchHitLine(result: r, parent: r.thread.parentId.flatMap { model.thread($0)?.title })
-                                .padding(.leading, compact ? 28 : 37)
+                                .padding(.leading, ThreadRow.titleInset)
                         }
                     }
                     .navigationLinkIndicatorVisibility(.hidden)

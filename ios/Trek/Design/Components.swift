@@ -75,36 +75,64 @@ struct ProjectBadge: View {
 }
 
 /// The beacon: a dot that breathes while an agent works (design spec: "beacon status dot").
+///
+/// It breathes by the clock (`Breath`), not by a repeating animation. Begun with `withAnimation`,
+/// a `repeatForever` goes with whatever else changes in that update and loops that too: on an
+/// iPhone on iOS 27.2 the thread list took it, and with a thread at work on screen the whole list
+/// slid up under the bar and back down every 1.6 s (the beacon's two 0.8 s halves), with nobody
+/// touching it. A clock has no transaction to lend.
 struct BeaconDot: View {
     var color: Color
     var pulses: Bool
     var size: CGFloat = 7
-    @State private var lit = false
     @MotionAllowed private var motion
 
     var body: some View {
+        // Whenever it's to pulse, not only if it was when the row first showed: a thread that
+        // starts working with its row on screen breathes at once.
+        if pulses && motion {
+            TimelineView(.animation(minimumInterval: Breath.frame)) { ctx in
+                dot(level: Breath.level(at: ctx.date))
+            }
+        } else {
+            dot(level: nil)
+        }
+    }
+
+    /// The dot `level` of the way through its breath (0 dim, 1 lit), or still with no level.
+    private func dot(level: Double?) -> some View {
         Circle()
             .fill(color)
             .frame(width: size, height: size)
-            .opacity(pulses && motion ? (lit ? 1 : 0.4) : 1)
+            .opacity(level.map { 0.4 + 0.6 * $0 } ?? 1)
             .background {
-                if pulses && motion {
+                if let level {
                     Circle().fill(color.opacity(0.35)).frame(width: size * 2.2, height: size * 2.2).blur(radius: 3)
-                        .opacity(lit ? 0.9 : 0.1)
+                        .opacity(0.1 + 0.8 * level)
                 }
             }
-            // Started whenever it's to pulse, not only if it was when the row first showed: a
-            // thread that starts working with its row on screen had a dim dot that never moved.
-            .onChange(of: pulses && motion, initial: true) { _, on in
-                if on {
-                    lit = false
-                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { lit = true }
-                } else {
-                    var still = Transaction()
-                    still.disablesAnimations = true
-                    withTransaction(still) { lit = false }
-                }
-            }
+    }
+}
+
+/// A breath placed by the clock: what the beacon, a "Drawing…" label and a spinner use in place
+/// of a repeating animation (see `BeaconDot`, and `Sweep` for the shimmer).
+nonisolated enum Breath {
+    /// One breath, in and out, in seconds: the 0.8 s ease each way the beacon always had.
+    static let period: TimeInterval = 1.6
+    /// How often a breath is drawn: smooth for a dot, without redrawing every row at 120 Hz.
+    static let frame: TimeInterval = 1.0 / 30
+
+    /// How far into its breath anything is at `date`: 0 dim as it begins, 1 lit halfway, eased in
+    /// and out. Read from the one clock, every beacon on screen breathes together, and a row drawn
+    /// again mid-breath carries on rather than starting over.
+    static func level(at date: Date, period: TimeInterval = period) -> Double {
+        let t = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
+        return (1 - cos(2 * .pi * t)) / 2
+    }
+
+    /// How far round a turn taking `period` seconds is at `date`, from 0 up to 1.
+    static func turn(at date: Date, period: TimeInterval) -> Double {
+        date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
     }
 }
 

@@ -77,6 +77,12 @@ extension ThreadSummary {
     }
 }
 
+extension ProjectRef {
+    /// The Mac's "No project", which it sends for a thread outside every project: id `""`,
+    /// qualified here with its host (`"demo:"`).
+    var isNone: Bool { id.isEmpty || id.hasSuffix(":") }
+}
+
 extension AppModel {
     /// Every thread waiting on the user, newest first: what the hand on the "New thread" pill and
     /// the tab's badge count.
@@ -84,10 +90,10 @@ extension AppModel {
         threads.filter { $0.waitsOnYou && $0.section != .snoozed }.sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    /// The inbox and what's working, by project: projects with something waiting or at work first,
-    /// then those with unread threads, then the most recently active (the Mac's order).
-    var liveGroups: [ProjectGroup] {
-        groups(threads.filter { $0.section == .inbox || $0.section == .working }) { a, b in
+    /// The inbox and what's working in `list`, by project: projects with something waiting or at
+    /// work first, then those with unread threads, then the most recently active (the Mac's order).
+    func liveGroups(of list: [ThreadSummary]) -> [ProjectGroup] {
+        groups(list.filter { $0.section == .inbox || $0.section == .working }) { a, b in
             if (a.needs > 0) != (b.needs > 0) { return a.needs > 0 }
             if a.active.isEmpty != b.active.isEmpty { return !a.active.isEmpty }
             if (a.unread > 0) != (b.unread > 0) { return a.unread > 0 }
@@ -96,25 +102,49 @@ extension AppModel {
         }
     }
 
-    /// Settled threads by project, the project settled in most recently first.
-    var settledGroups: [ProjectGroup] {
-        groups(threads.filter { $0.section == .settled }) { $0.newest > $1.newest }
+    /// The quiet inbox by project, for the list's Projects: what waits on the user and what's at
+    /// work have places of their own above it (`needsYou`, `active`), as in the Mac's sidebar.
+    func quietGroups(of list: [ThreadSummary]) -> [ProjectGroup] {
+        liveGroups(of: list.filter { !$0.isActive })
+    }
+
+    /// At work across projects, as the Mac's Active: working, waiting on what it started, running
+    /// in the background, cut short. Not what waits on the user (`needsYou`), nor pinned threads.
+    func active(of list: [ThreadSummary]) -> [ThreadSummary] {
+        list.filter { ($0.section == .inbox || $0.section == .working) && $0.isActive && !$0.waitsOnYou }
+            .sorted(by: Self.activeOrder)
+    }
+
+    /// Settled threads in `list` by project, the project settled in most recently first.
+    func settledGroups(of list: [ThreadSummary]) -> [ProjectGroup] {
+        groups(list.filter { $0.section == .settled }) { $0.newest > $1.newest }
+    }
+
+    /// The group a thread is listed under: one for a project's name whichever machines it's on,
+    /// and one for threads in no project. Keyed by id, each machine's "No project" (which every
+    /// Mac sends as `""`, qualified here by host) and each machine's copy of a project made a
+    /// section of its own, two "No project"s and two "trek"s, told apart only by their rows.
+    func groupKey(of t: ThreadSummary) -> String {
+        guard let p = t.project, !p.isNone else { return "" }
+        return "name:" + p.name.lowercased()
     }
 
     private func groups(_ list: [ThreadSummary], by order: (ProjectGroup, ProjectGroup) -> Bool) -> [ProjectGroup] {
         var byProject: [String: [ThreadSummary]] = [:]
         var refs: [String: ProjectRef] = [:]
         for t in list {
-            let id = t.project?.id ?? ""
-            byProject[id, default: []].append(t)
-            if let p = t.project, refs[id] == nil { refs[id] = p }
+            let key = groupKey(of: t)
+            byProject[key, default: []].append(t)
+            if let p = t.project, refs[key] == nil { refs[key] = p }
         }
-        return byProject.map { id, threads in
+        return byProject.map { key, threads in
             let active = threads.filter(\.isActive).sorted(by: Self.activeOrder)
             let quiet = threads.filter { !$0.isActive }.sorted {
                 $0.unseen != $1.unseen ? $0.unseen : $0.updatedAt > $1.updatedAt
             }
-            return ProjectGroup(id: id, project: refs[id] ?? project(id)?.ref, active: active, quiet: quiet)
+            // The one "No project" keeps the Mac's name for it, but not one machine's id.
+            let ref = key.isEmpty ? refs[key].map { ProjectRef(id: "", name: $0.name, hue: $0.hue, monogram: $0.monogram) } : refs[key]
+            return ProjectGroup(id: key, project: ref, active: active, quiet: quiet)
         }
         .sorted(by: order)
     }
