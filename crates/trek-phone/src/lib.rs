@@ -12,6 +12,8 @@
 //! - **Or input over USB through Trek Driver**: while the phone is unlocked on the cable, a small
 //!   XCUITest inside Trek's own iPhone app (built by `ios/scripts/install-device.sh`) takes taps,
 //!   swipes and keys over HTTP through usbmuxd (`driver`).
+//! - **The user's own mouse and keys** on the tool's picture, as touches held and dragged as
+//!   long as the button was, swipes for scrolling, and typing (`gesture`), for each route.
 //! - **Apps and files**: the phone's own services over usbmuxd, as Finder uses them (`device`):
 //!   install an app signed for the phone, list apps, copy files to and from its media folder or
 //!   a file-sharing app's Documents, switch AssistiveTouch on and off.
@@ -27,6 +29,8 @@ pub mod device;
 pub mod diagnose;
 #[cfg(target_os = "macos")]
 pub mod driver;
+#[cfg(target_os = "macos")]
+pub mod gesture;
 #[cfg(target_os = "macos")]
 pub mod helper;
 #[cfg(target_os = "macos")]

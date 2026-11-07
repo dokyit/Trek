@@ -1384,7 +1384,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 .read(cx)
                 .phone()
                 .ok_or_else(|| anyhow::anyhow!("phone: the iPhone tool didn't open"))?;
-            phone.update(cx, |p, cx| p.demo(arg, cx))
+            phone.update(cx, |p, cx| p.demo(arg, window, cx))
         })??;
         cx.refresh_windows();
         return Ok(());

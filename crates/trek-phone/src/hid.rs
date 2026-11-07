@@ -159,6 +159,29 @@ pub fn swipe(from: (f64, f64), to: (f64, f64), duration_ms: u32) -> Vec<Step> {
     out
 }
 
+/// A press that follows `points` (fractions as for `tap`, each with its time in milliseconds from
+/// the press): held where it rests, moved as it moves, let go at the last one. Points closer
+/// together than a connection event merge (the later goes), so the reports keep their timing.
+pub fn path(points: &[(f64, f64, u32)]) -> Vec<Step> {
+    let Some(&(x, y, _)) = points.first() else {
+        return vec![];
+    };
+    let mut out = vec![pointer(x, y, 0), Step::Wait(STEP_MS * 2), button(true)];
+    // When the latest report goes, in the press's time.
+    let mut at = 0u32;
+    for (i, &(x, y, ms)) in points.iter().enumerate().skip(1) {
+        if ms < at + STEP_MS && i + 1 < points.len() {
+            continue;
+        }
+        let wait = ms.saturating_sub(at).max(STEP_MS);
+        out.push(Step::Wait(wait));
+        out.push(pointer(x, y, 1));
+        at += wait;
+    }
+    out.extend([Step::Wait(STEP_MS), button(false), Step::Wait(STEP_MS)]);
+    out
+}
+
 /// A consumer control press (Home, media keys).
 pub fn consumer(usage: u16) -> Vec<Step> {
     let b = usage.to_le_bytes();
@@ -375,6 +398,39 @@ mod tests {
         let last_y = u16::from_le_bytes([moves[10][3], moves[10][4]]);
         assert_eq!(last_y, axis(0.2));
         assert!(matches!(steps.last(), Some(Step::Wait(_))));
+    }
+
+    #[test]
+    fn a_path_keeps_its_timing_and_holds_the_button_throughout() {
+        // Pressed at the top for 600 ms, then dragged down in two steps 10 ms apart (merged).
+        let steps = path(&[
+            (0.5, 0.2, 0),
+            (0.5, 0.2, 600),
+            (0.5, 0.25, 610),
+            (0.5, 0.3, 640),
+        ]);
+        assert_eq!(steps[2], Step::Send(Report::Relative, vec![1, 0, 0, 0]));
+        let moves: Vec<_> = steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Send(Report::Absolute, b) => Some(b.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            moves.len(),
+            3,
+            "the press, the hold's end and the last point"
+        );
+        assert!(moves[1..].iter().all(|b| b[0] == 1), "button held");
+        assert_eq!(steps[3], Step::Wait(600), "the hold before the move");
+        let last_y = u16::from_le_bytes([moves[2][3], moves[2][4]]);
+        assert_eq!(last_y, axis(0.3));
+        assert_eq!(
+            steps[steps.len() - 2],
+            Step::Send(Report::Relative, vec![0, 0, 0, 0])
+        );
+        assert!(path(&[]).is_empty());
     }
 
     #[test]

@@ -506,10 +506,14 @@ pub fn explainer(route: Route, wifi: bool) -> Vec<(&'static str, &'static str)> 
         "The clock",
         "While its screen is captured over USB, iOS shows 9:41 and full bars in the status bar, on the iPhone too, as it does for QuickTime. While Trek Driver runs, the picture comes from the driver instead and the clock is the real one; otherwise Trek draws the iPhone's real time over it.",
     );
+    let hands = (
+        "Your mouse and keys",
+        "Click the picture to tap, or hold to long-press. A drag goes to the iPhone as you made it, pauses included, when you let go (through iPhone Mirroring, as a straight swipe). Scroll with the trackpad or mouse wheel. After a click, typing goes to the iPhone; Esc or a click outside this tool gives the keys back.",
+    );
     let mut out = match route {
-        Route::Driver => vec![usb, screen, clock, files, mirroring, bluetooth],
-        Route::Mirroring => vec![mirroring, screen, clock, files, usb, bluetooth],
-        Route::Bluetooth => vec![bluetooth, screen, clock, files, usb, mirroring],
+        Route::Driver => vec![usb, hands, screen, clock, files, mirroring, bluetooth],
+        Route::Mirroring => vec![mirroring, hands, screen, clock, files, usb, bluetooth],
+        Route::Bluetooth => vec![bluetooth, hands, screen, clock, files, usb, mirroring],
     };
     // Right after the route in use while there's no cable; else last.
     let at = if wifi { 1 } else { out.len() };
@@ -828,6 +832,9 @@ mod tests {
         assert_eq!(wifi.len(), usb.len());
         assert!(wifi[1].1.contains("Show this iPhone when on Wi-Fi"));
         assert_eq!(explainer(Route::Mirroring, true)[1].0, "Over Wi-Fi");
+        // How the user's own mouse and keys work comes right after the route.
+        assert_eq!(usb[1].0, "Your mouse and keys");
+        assert!(usb[1].1.contains("hold to long-press") && usb[1].1.contains("Esc"));
     }
 
     /// The phone over Wi-Fi only: the helper runs (Bluetooth, iPhone Mirroring) but the cable

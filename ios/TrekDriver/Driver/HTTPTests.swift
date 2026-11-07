@@ -56,6 +56,78 @@ final class HTTPTests: XCTestCase {
         XCTAssertTrue(text.hasSuffix("\r\n\r\n{\"ok\":true}"))
     }
 
+    func testAPathsTimesComeFromItsFirstPointAndRise() {
+        let json = """
+        {"points":[{"x":100,"y":200,"t_ms":5000},{"x":100,"y":200,"t_ms":5592},\
+        {"x":120,"y":200,"t_ms":5600},{"x":120,"y":200,"t_ms":5600}]}
+        """
+        let request = Request(method: "POST", path: "/path", headers: [:], body: Data(json.utf8))
+        guard case .spots(let spots) = Synth.spots(request.json["points"]) else {
+            return XCTFail("not taken")
+        }
+        XCTAssertEqual(spots.count, 4)
+        XCTAssertEqual(spots[0], Synth.Spot(at: CGPoint(x: 100, y: 200), offset: 0))
+        XCTAssertEqual(spots[1].offset, 0.592, accuracy: 1e-9)
+        XCTAssertEqual(spots[2].at, CGPoint(x: 120, y: 200))
+        // The same time twice: a millisecond apart, so the synthesizer sees them rising.
+        XCTAssertEqual(spots[3].offset - spots[2].offset, 0.001, accuracy: 1e-9)
+    }
+
+    func testRefusesAPathItCantPlay() {
+        let point: (Double) -> [String: Any] = { ["x": 1, "y": 2, "t_ms": $0] }
+        let bad: [Any?] = [
+            nil,
+            [] as [Any],
+            [["x": 1, "y": 2]],
+            [point(100), point(50)],
+            [point(0), point(31_000)],
+            Array(repeating: point(0), count: Synth.maxSpots + 1),
+        ]
+        for points in bad {
+            guard case .bad = Synth.spots(points) else {
+                return XCTFail("took \(String(describing: points))")
+            }
+        }
+        // One point is a press held there.
+        guard case .spots(let one) = Synth.spots([["x": "3", "y": 4, "t_ms": 0]]) else {
+            return XCTFail("one point")
+        }
+        XCTAssertEqual(one, [Synth.Spot(at: CGPoint(x: 3, y: 4), offset: 0)])
+    }
+
+    func testAPathIsThinnedToWhatTheSynthesizerTakes() {
+        // A mouse's pace (every 16 ms) after a rest of 0.6 s, then a rest at the end.
+        var spots = [Synth.Spot(at: CGPoint(x: 10, y: 10), offset: 0),
+                     Synth.Spot(at: CGPoint(x: 10, y: 10), offset: 0.592)]
+        for i in 0..<10 {
+            spots.append(Synth.Spot(at: CGPoint(x: 10, y: 20 + Double(i) * 5), offset: 0.6 + Double(i) * 0.016))
+        }
+        spots.append(Synth.Spot(at: CGPoint(x: 10, y: 65), offset: 0.75))
+        let thin = Synth.thinned(spots)
+        XCTAssertEqual(thin.first, spots[0])
+        XCTAssertEqual(thin[1], spots[1], "the rest's end stays")
+        XCTAssertEqual(thin.last, spots.last, "the lift stays")
+        for (a, b) in zip(thin, thin.dropFirst()) {
+            XCTAssertGreaterThanOrEqual(b.offset - a.offset, Synth.minGap - 1e-9)
+        }
+        XCTAssertLessThan(thin.count, spots.count)
+        // Two points close together: both go (a flick).
+        let flick = [Synth.Spot(at: .zero, offset: 0), Synth.Spot(at: CGPoint(x: 0, y: 50), offset: 0.01)]
+        XCTAssertEqual(Synth.thinned(flick), flick)
+    }
+
+    func testKeysTheKeyboardHas() {
+        XCTAssertEqual(Actions.keyText("enter"), "\n")
+        XCTAssertEqual(Actions.keyText("Backspace"), XCUIKeyboardKey.delete.rawValue)
+        XCTAssertEqual(Actions.keyText("up"), XCUIKeyboardKey.upArrow.rawValue)
+        XCTAssertNil(Actions.keyText("forwarddelete"))
+        XCTAssertTrue(Actions.hardwareKeys.contains("left"))
+        XCTAssertEqual(Actions.keyText("A"), "A")
+        XCTAssertNil(Actions.keyText("hyper"))
+        XCTAssertEqual(Actions.version, 2)
+        XCTAssertTrue(Actions.features.contains("path"))
+    }
+
     func testNumbersFromJSONOrStrings() {
         XCTAssertEqual(number(NSNumber(value: 3.5)), 3.5)
         XCTAssertEqual(number("12"), 12)

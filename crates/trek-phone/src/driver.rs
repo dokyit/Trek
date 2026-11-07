@@ -31,8 +31,12 @@ use crate::device;
 
 /// The phone port the driver serves on (WebDriverAgent's is 8100; this one keeps clear of it).
 pub const PORT: u16 = 8117;
-/// The driver's protocol version (`/status` says it).
-pub const VERSION: u64 = 1;
+/// The driver's protocol version (`/status` says it): 2 added `/path`, and the arrows and
+/// repeats in `/key` (its `features` say so). A driver from before is still used, with
+/// what it has: Trek's iPhone app on the phone is replaced only by its updater.
+pub const VERSION: u64 = 2;
+/// The oldest driver Trek still talks to.
+pub const OLDEST: u64 = 1;
 /// How long a start may take: installing Trek's iPhone app the first time is most of it.
 pub const START_LIMIT: Duration = Duration::from_secs(120);
 /// The driver stops itself after this long without a request (Trek gone, or forgot it).
@@ -471,6 +475,8 @@ struct Inner {
     run: Option<Run>,
     /// The screen in points, from `/status`.
     screen: Option<(f64, f64)>,
+    /// What the driver running says it does, from `/status` (`path`, `keys`).
+    features: Vec<String>,
     used: Option<Instant>,
 }
 
@@ -521,6 +527,17 @@ impl Driver {
     /// The screen in points while it runs.
     pub fn screen(&self) -> Option<(f64, f64)> {
         self.inner.lock().unwrap().screen
+    }
+
+    /// Whether the driver running does `feature` (`path`: `/path`; `keys`: the arrows and repeats
+    /// in `/key`), as its `/status` said.
+    pub fn takes(&self, feature: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .features
+            .iter()
+            .any(|f| f == feature)
     }
 
     /// While it runs (or starts): whether it was started over Wi-Fi, so it answers there too. One
@@ -686,7 +703,7 @@ impl Driver {
     /// `/status`: the screen in points.
     fn status(&self) -> Result<(f64, f64), String> {
         let v = self.send("GET", "/status", None, Duration::from_secs(5))?;
-        if v["version"].as_u64() != Some(VERSION) {
+        if v["version"].as_u64().is_none_or(|n| n < OLDEST) {
             return Err(format!(
                 "The iPhone has another Trek Driver (version {}): run {INSTALL} again.",
                 v["version"]
@@ -699,7 +716,9 @@ impl Driver {
         if screen.0 < 1. || screen.1 < 1. {
             return Err("Trek Driver didn't say the screen's size.".into());
         }
-        self.inner.lock().unwrap().screen = Some(screen);
+        let mut inner = self.inner.lock().unwrap();
+        inner.screen = Some(screen);
+        inner.features = features(&v);
         Ok(screen)
     }
 
@@ -783,6 +802,7 @@ impl Driver {
         let run = {
             let mut inner = self.inner.lock().unwrap();
             inner.screen = None;
+            inner.features.clear();
             if inner.state != State::Off && !matches!(inner.state, State::Failed(_)) {
                 inner.state = State::Off;
             }
@@ -803,12 +823,46 @@ impl Driver {
     }
 }
 
+/// What a driver's `/status` answer says it does: its `features`, and what its version implies
+/// (version 2 came with `/path` and the keys).
+pub fn features(status: &Value) -> Vec<String> {
+    let mut out: Vec<String> = status["features"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if status["version"].as_u64().is_some_and(|v| v >= 2) {
+        for f in ["path", "keys"] {
+            if !out.iter().any(|o| o == f) {
+                out.push(f.into());
+            }
+        }
+    }
+    out
+}
+
+/// How long the driver may take to answer `body`: the gesture's own length (a press held, a
+/// path's last point), and each key typed, on top of the usual wait.
+pub fn answer_limit(body: &Value) -> Duration {
+    let chars = body["text"].as_str().map_or(0, |t| t.chars().count()) as u64;
+    let keys = body["count"].as_u64().unwrap_or(1).min(100);
+    let gesture = body["hold_ms"].as_u64().unwrap_or(0)
+        + body["duration_ms"].as_u64().unwrap_or(0)
+        + body["points"]
+            .as_array()
+            .and_then(|p| p.last())
+            .and_then(|p| p["t_ms"].as_u64())
+            .unwrap_or(0);
+    Duration::from_millis(15_000 + chars * 150 + keys * 150 + gesture.min(60_000))
+}
+
 impl Transport for Driver {
     fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
-        // Typing waits for each key; a long text gets longer.
-        let chars = body["text"].as_str().map_or(0, |t| t.chars().count()) as u64;
-        let limit = Duration::from_millis(15_000 + chars * 150);
-        self.send("POST", path, Some(body), limit)
+        // Typing waits for each key; a long text gets longer, and so does a long press or drag.
+        self.send("POST", path, Some(body), answer_limit(body))
     }
 }
 
@@ -851,6 +905,44 @@ mod tests {
         assert_eq!((code, body.as_slice()), (200, &b"{\"ok\":true}"[..]));
         assert!(response(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{}").is_err());
         assert!(response(b"garbage").is_err());
+    }
+
+    #[test]
+    fn a_drivers_status_says_what_it_does() {
+        // The one on the phone before /path: version 1, no features.
+        assert!(features(&json!({"ok": true, "version": 1, "width": 440})).is_empty());
+        let now = features(&json!({"version": 2, "features": ["path", "keys"]}));
+        assert_eq!(now, ["path", "keys"]);
+        // A later one that names more keeps them.
+        let later = features(&json!({"version": 3, "features": ["path", "keys", "pinch"]}));
+        assert!(later.contains(&"pinch".to_string()));
+    }
+
+    #[test]
+    fn the_driver_and_the_mac_agree_on_the_version() {
+        let actions = include_str!("../../../ios/TrekDriver/Driver/Actions.swift");
+        assert!(
+            actions.contains(&format!("static let version = {VERSION}\n")),
+            "Actions.version must be driver::VERSION"
+        );
+        for f in ["path", "keys"] {
+            assert!(actions.contains(&format!("\"{f}\"")), "{f} in its features");
+        }
+    }
+
+    #[test]
+    fn long_gestures_get_as_long_to_answer() {
+        let base = answer_limit(&json!({"x": 1, "y": 2})).as_millis();
+        assert_eq!(
+            answer_limit(&json!({"hold_ms": 3000})).as_millis(),
+            base + 3000
+        );
+        let path = json!({"points": [{"x": 1, "y": 1, "t_ms": 0}, {"x": 2, "y": 2, "t_ms": 9000}]});
+        assert_eq!(answer_limit(&path).as_millis(), base + 9000);
+        assert!(
+            answer_limit(&json!({"key": "backspace", "count": 20}))
+                > answer_limit(&json!({"key": "backspace"}))
+        );
     }
 
     #[test]

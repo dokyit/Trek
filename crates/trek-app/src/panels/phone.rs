@@ -20,6 +20,9 @@
 //! window while it shows the phone. Mirroring connects only while the phone is locked; while
 //! it's unlocked the picture comes over USB and the panel says to lock it to tap.
 //!
+//! The user's own clicks, holds, drags, scrolls and keys on the picture go to the phone by the
+//! same routes (`touch`).
+//!
 //! Agents' `trek-mcp phone` calls come here one at a time (`RightPanel::phone_call`). One thread
 //! holds the phone at a time (`trek_phone::lease`); a strip says who, with Stop to take it back,
 //! as the Browser's does. Installing and changing files ask first by the thread's access level,
@@ -59,6 +62,8 @@ use trek_phone::mirror::{self, Settle, State as MirrorState};
 use trek_phone::route::{self, Facts, Route, Tone};
 use trek_phone::{device, files};
 
+mod touch;
+
 /// Frames for the panel are at most this wide, and come this often at most.
 const FRAME_WIDTH: u32 = 900;
 const LIVE_FPS: u32 = 15;
@@ -69,8 +74,6 @@ const ASK_WAIT: Duration = Duration::from_secs(15 * 60);
 /// A screenshot's longest side by default, and at most.
 const SHOT_EDGE: u32 = 1200;
 const SHOT_MAX: u32 = 2000;
-/// Pointer travel (window px) below which a press is a tap.
-const TAP_SLOP: f32 = 6.;
 /// How often iPhone Mirroring's window is read while Bluetooth can't tap.
 const MIRROR_LOOK: Duration = Duration::from_secs(3);
 /// How long iPhone Mirroring gets to show the phone once opened or told to connect.
@@ -162,7 +165,8 @@ pub struct PhonePanel {
     /// When the picture's last start of the driver failed.
     driver_frames_retry: Option<Instant>,
     area: Rc<Cell<Bounds<Pixels>>>,
-    press: Option<Point<Pixels>>,
+    /// The user's own mouse, trackpad and keys on the picture.
+    touch: touch::Touch,
     lease: Lease,
     queue: VecDeque<PhoneCall>,
     running: bool,
@@ -289,6 +293,7 @@ impl PhonePanel {
                 }
             }
         });
+        let touch = touch::Touch::new(window, cx);
         Self {
             workspace,
             visible: false,
@@ -309,7 +314,7 @@ impl PhonePanel {
             decode_slot,
             decode_wake: wake_tx,
             area: Rc::new(Cell::new(Bounds::default())),
-            press: None,
+            touch,
             lease: Lease::default(),
             queue: VecDeque::new(),
             running: false,
@@ -1023,72 +1028,6 @@ impl PhonePanel {
         Some((x as f64, y as f64))
     }
 
-    fn pointer_up(&mut self, p: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(start) = self.press.take() else {
-            return;
-        };
-        if self.facts().route() == Route::Driver {
-            let (Some(a), Some(b)) = (self.to_fraction(start), self.to_fraction(p)) else {
-                return;
-            };
-            let moved =
-                ((p.x - start.x).as_f32().powi(2) + (p.y - start.y).as_f32().powi(2)).sqrt();
-            self.usb_input(
-                move |screen| {
-                    let (a, b) = (driver::to_points(a, screen), driver::to_points(b, screen));
-                    vec![if moved < TAP_SLOP {
-                        driver::Step::Post("/tap", json!({ "x": a.0, "y": a.1, "hold_ms": 80 }))
-                    } else {
-                        driver::Step::Post(
-                            "/swipe",
-                            json!({ "x1": a.0, "y1": a.1, "x2": b.0, "y2": b.1, "duration_ms": 300 }),
-                        )
-                    }]
-                },
-                window,
-                cx,
-            );
-            return;
-        }
-        let mirrored = !self.status.input_ready() && self.mirror_frames;
-        if !self.status.input_ready() && !mirrored {
-            self.cant_tap(cx);
-            return;
-        }
-        let (Some(a), Some(b), Some(link)) = (
-            self.to_fraction(start),
-            self.to_fraction(p),
-            self.link.clone(),
-        ) else {
-            return;
-        };
-        let moved = ((p.x - start.x).as_f32().powi(2) + (p.y - start.y).as_f32().powi(2)).sqrt();
-        if mirrored {
-            // The picture is iPhone Mirroring's window: its fractions are the window's.
-            let _ = link.mirror(&if moved < TAP_SLOP {
-                MirrorCmd::Tap {
-                    x: a.0,
-                    y: a.1,
-                    hold_ms: 80,
-                }
-            } else {
-                MirrorCmd::Drag {
-                    from: a,
-                    to: b,
-                    ms: 300,
-                }
-            });
-            return;
-        }
-        self.ensure_assistive(window, cx);
-        let steps = if moved < TAP_SLOP {
-            hid::tap(a.0, a.1, 80)
-        } else {
-            hid::swipe(a, b, 300)
-        };
-        let _ = link.hid(&steps);
-    }
-
     fn home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.facts().route() == Route::Driver {
             let home = |_| vec![driver::Step::Post("/key", json!({ "key": "home" }))];
@@ -1223,10 +1162,16 @@ impl PhonePanel {
 
     /// A made-up phone in one of the strip's situations, for design review (`control phone
     /// <state>` in an isolated capture run): usb, lock, locked, mirroring, pair, bluetooth,
-    /// none, how, Trek Driver's: driver, driver-starting, driver-install, driver-how, and with no
-    /// cable: wifi, wifi-starting, wifi-locked, wifi-how.
+    /// none, how, Trek Driver's: driver, driver-starting, driver-install, driver-how, with no
+    /// cable: wifi, wifi-starting, wifi-locked, wifi-how, and the user's own input over a made-up
+    /// Home Screen: touch, hold, typing.
     #[cfg(feature = "shots")]
-    pub fn demo(&mut self, state: &str, cx: &mut Context<Self>) -> anyhow::Result<()> {
+    pub fn demo(
+        &mut self,
+        state: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
         if state == "real" {
             // The user's real phone after all, for a live check (`phone call …` drives it).
             self.demo = false;
@@ -1274,8 +1219,21 @@ impl PhonePanel {
         self.demo_driver = None;
         self.blocker = None;
         self.passcode = None;
+        self.give_keys_back(window, cx);
+        // Only the touch states have a picture (a made-up Home Screen).
+        if let Some(old) = self.frame.take() {
+            self.stale.push(old.image);
+        }
+        self.demo_touch(state, window, cx);
         match state {
             "usb" => {}
+            // The user's own touch on the driver's picture: a drag, a long press, typing.
+            "touch" | "hold" | "typing" => {
+                self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
+                self.driver_frames = true;
+                *self.decode_slot.lock().unwrap() = Some(touch::demo_home_screen());
+                let _ = self.decode_wake.try_send((440, 956, false));
+            }
             "driver" => self.demo_driver = Some((driver::Avail::Ready, driver::State::Off)),
             "driver-starting" => {
                 self.demo_driver = Some((driver::Avail::Ready, driver::State::Starting))
@@ -1354,7 +1312,7 @@ impl PhonePanel {
                 }
             }
             other => anyhow::bail!(
-                "phone: unknown state {other:?} (usb|lock|locked|unreachable|mirroring|pair|bluetooth|none|how|driver|driver-starting|driver-install|driver-how|wifi|wifi-starting|wifi-locked|wifi-how)"
+                "phone: unknown state {other:?} (usb|lock|locked|unreachable|mirroring|pair|bluetooth|none|how|driver|driver-starting|driver-install|driver-how|wifi|wifi-starting|wifi-locked|wifi-how|touch|hold|typing)"
             ),
         }
         cx.notify();
@@ -1442,8 +1400,9 @@ impl PhonePanel {
     }
 
     /// The status strip: Screen and Taps (and AssistiveTouch on the Bluetooth route), each a dot
-    /// and a few words, with "How this works" at its end; under it, the one thing to do now.
-    fn chips(&self, strip: &route::Strip, cx: &mut Context<Self>) -> AnyElement {
+    /// and a few words, with "How this works" at its end; under it, the one thing to do now, and
+    /// while the picture has the keys, that typing goes to the iPhone.
+    fn chips(&self, strip: &route::Strip, typing: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let color = |tone: Tone| match tone {
             Tone::Good => crate::palette::emerald(cx),
@@ -1549,6 +1508,17 @@ impl PhonePanel {
                     .child(explain),
             )
             .children(action)
+            .when(typing, |el| {
+                el.child(
+                    h_flex()
+                        .id("phone-typing")
+                        .test_support()
+                        .gap(px(6.))
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(Lucide::Keyboard).xsmall())
+                        .child("Typing goes to the iPhone · esc"),
+                )
+            })
             .into_any_element()
     }
 
@@ -1636,8 +1606,9 @@ impl PhonePanel {
         })
     }
 
-    fn mirror(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn mirror(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        let typing = self.typing(window);
         let area = self.area.clone();
         let entity = cx.entity().downgrade();
         let measure = canvas(
@@ -1700,25 +1671,37 @@ impl PhonePanel {
             ),
             _ => None,
         };
+        let marks = layout
+            .as_ref()
+            .map(|(s, _)| self.touch_marks(*s, cx))
+            .unwrap_or_default();
         div()
             .id("phone-mirror")
+            .test_support()
+            .key_context("PhoneScreen")
+            .track_focus(&self.touch.focus)
             .relative()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .when(self.status.input_ready() || self.mirror_frames, |el| {
-                el.cursor_pointer()
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &MouseDownEvent, _, _| this.press = Some(e.position)),
-            )
+            .when(self.touchable(), |el| el.cursor_pointer())
+            .on_key_down(cx.listener(Self::key_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::press_down))
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.press_move(e, cx)))
+            .on_hover(cx.listener(|this, over: &bool, _, _| this.hover(*over)))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseUpEvent, window, cx| {
-                    this.pointer_up(e.position, window, cx)
+                    this.press_up(e.position, window, cx)
                 }),
             )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseUpEvent, window, cx| {
+                    this.press_up(e.position, window, cx)
+                }),
+            )
+            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .child(measure)
             .when_some(layout, |el, (s, image)| {
                 // scale: ok, the iPhone's own corners
@@ -1735,6 +1718,10 @@ impl PhonePanel {
                         .bg(rgb(0x0B0B0D))
                         .border_1()
                         .border_color(theme.border)
+                        // The keys go to the phone: ringed.
+                        .when(typing, |el| {
+                            el.border_2().border_color(crate::palette::sky(cx))
+                        })
                         .when(!fluent::WINDOWS, |el| el.shadow_lg())
                         .when(fluent::WINDOWS, |el| {
                             el.shadow(fluent::flyout_shadow(Vec::new(), cx))
@@ -1781,6 +1768,7 @@ impl PhonePanel {
                     )
                 })
             })
+            .children(marks)
             .when_some(waiting, |el, text| {
                 el.child(
                     v_flex()
@@ -1804,14 +1792,17 @@ impl PhonePanel {
 }
 
 impl Render for PhonePanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let notice = self.notice.clone();
         let strip = self.facts().strip();
+        let typing = self.typing(window);
         v_flex()
             .size_full()
+            // A click outside the tool gives the keys back to Trek.
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.give_keys_back(window, cx)))
             .child(self.header(cx))
-            .child(self.chips(&strip, cx))
+            .child(self.chips(&strip, typing, cx))
             .children(self.strip(cx))
             .when_some(notice, |el, n| {
                 el.child(
@@ -1844,7 +1835,7 @@ impl Render for PhonePanel {
                         ),
                 )
             })
-            .child(self.mirror(cx))
+            .child(self.mirror(window, cx))
     }
 }
 

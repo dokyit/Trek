@@ -5,8 +5,11 @@ import XCTest
 /// SpringBoard's coordinate space (it fills the screen in every app), so they land wherever they
 /// point, in any app or on the Home Screen.
 final class Actions {
-    /// The driver's version, for `/status` (the Mac checks it matches what it expects).
-    static let version = 1
+    /// The driver's version, for `/status` (the Mac talks to this one and older ones). 2 added
+    /// `/path`, and the arrows and `count` in `/key`.
+    static let version = 2
+    /// What it does beyond version 1's endpoints, for `/status`.
+    static let features = ["path", "keys"]
 
     private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
     /// The app last opened through `/open`: where text goes when nothing else says.
@@ -28,6 +31,7 @@ final class Actions {
         case ("GET", "/status"): response = status()
         case ("POST", "/tap"): response = tap(request.json)
         case ("POST", "/swipe"): response = swipe(request.json)
+        case ("POST", "/path"): response = path(request.json)
         case ("POST", "/type"): response = type(request.json)
         case ("POST", "/key"): response = key(request.json)
         case ("POST", "/open"): response = open(request.json)
@@ -35,8 +39,8 @@ final class Actions {
         case ("POST", "/stop"):
             stopped = true
             response = .json(["ok": true])
-        case (_, "/status"), (_, "/tap"), (_, "/swipe"), (_, "/type"), (_, "/key"), (_, "/open"),
-             (_, "/screenshot"), (_, "/stop"):
+        case (_, "/status"), (_, "/tap"), (_, "/swipe"), (_, "/path"), (_, "/type"), (_, "/key"),
+             (_, "/open"), (_, "/screenshot"), (_, "/stop"):
             response = .error("\(request.method) isn't taken here", status: 405)
         default:
             response = .error("no \(request.path)", status: 404)
@@ -88,6 +92,7 @@ final class Actions {
         return .json([
             "ok": true,
             "version": Actions.version,
+            "features": Actions.features,
             "width": size.width,
             "height": size.height,
             "scale": UITraitCollection.current.displayScale,
@@ -124,6 +129,31 @@ final class Actions {
         point(x1, y1).press(forDuration: 0.05, thenDragTo: point(x2, y2),
                             withVelocity: velocity, thenHoldForDuration: 0.05)
         return .json(["ok": true])
+    }
+
+    /// A touch that follows `points` (`[{x, y, t_ms}]`, `t_ms` from the touch-down and rising):
+    /// held where it rests, moved as it moves, lifted at the last point. What Trek's iPhone tool
+    /// sends for the user's own drag, a press held before it moves included. `via: "coordinate"`
+    /// plays it through XCTest's own press-then-drag instead (a straight line), to compare.
+    private func path(_ body: [String: Any]) -> Response {
+        let spots: [Synth.Spot]
+        switch Synth.spots(body["points"]) {
+        case .spots(let s): spots = s
+        case .bad(let why): return .error(why, status: 400)
+        }
+        if body["via"] as? String != "coordinate", Synth.path(spots) {
+            return .json(["ok": true, "via": "synth"])
+        }
+        // XCTest's own calls: pressed as long as the path rests first, dragged straight to its end.
+        guard let first = spots.first, let last = spots.last else { return .error("no points", status: 400) }
+        let rest = spots.prefix { $0.at == first.at }.last?.offset ?? 0
+        let moving = max(last.offset - rest, 0.05)
+        let distance = hypot(last.at.x - first.at.x, last.at.y - first.at.y)
+        let velocity = XCUIGestureVelocity(CGFloat(max(distance / moving, 50)))
+        point(first.at.x, first.at.y).press(
+            forDuration: max(rest, 0.05), thenDragTo: point(last.at.x, last.at.y),
+            withVelocity: velocity, thenHoldForDuration: 0.05)
+        return .json(["ok": true, "via": "coordinate"])
     }
 
     private func type(_ body: [String: Any]) -> Response {
@@ -168,24 +198,45 @@ final class Actions {
         default:
             break
         }
-        let text: String
-        switch name {
-        case "enter", "return": text = "\n"
-        case "backspace", "delete": text = XCUIKeyboardKey.delete.rawValue
-        case "tab": text = "\t"
-        case "space": text = " "
-        case "escape", "esc": text = XCUIKeyboardKey.escape.rawValue
-        default:
-            guard raw.count == 1 else {
-                return .error("\(raw) isn't a key the iPhone's keyboard has over USB", status: 400)
+        guard let text = Actions.keyText(raw) else {
+            return .error("\(raw) isn't a key the iPhone's keyboard has over USB", status: 400)
+        }
+        // `count`: a held key (Delete) in one go.
+        let count = min(max(Int(number(body["count"]) ?? 1), 1), 100)
+        // The arrows go as a hardware keyboard's keys: typed, they'd land in the field as
+        // characters. (Forward delete, sent so, does nothing in iOS 27's fields: it isn't taken.)
+        if Actions.hardwareKeys.contains(name) {
+            for _ in 0..<count where !Synth.key(text) {
+                return .error("can't press \(raw) on this iPhone", status: 501)
             }
-            text = raw
+            return .json(["ok": true])
         }
         guard let app = focusedApp(hint: body["bundle"] as? String) else {
             return .error("Nothing has the keyboard on the iPhone: tap a text field first.", status: 409)
         }
-        app.typeText(text)
+        app.typeText(String(repeating: text, count: count))
         return .json(["ok": true])
+    }
+
+    /// Keys pressed as a hardware keyboard's rather than typed.
+    static let hardwareKeys: Set = [
+        "up", "arrowup", "down", "arrowdown", "left", "arrowleft", "right", "arrowright",
+    ]
+
+    /// What typing `key` is (a key the keyboard has, or one character); nil for one it hasn't.
+    static func keyText(_ key: String) -> String? {
+        switch key.lowercased() {
+        case "enter", "return": return "\n"
+        case "backspace", "delete": return XCUIKeyboardKey.delete.rawValue
+        case "tab": return "\t"
+        case "space": return " "
+        case "escape", "esc": return XCUIKeyboardKey.escape.rawValue
+        case "up", "arrowup": return XCUIKeyboardKey.upArrow.rawValue
+        case "down", "arrowdown": return XCUIKeyboardKey.downArrow.rawValue
+        case "left", "arrowleft": return XCUIKeyboardKey.leftArrow.rawValue
+        case "right", "arrowright": return XCUIKeyboardKey.rightArrow.rawValue
+        default: return key.count == 1 ? key : nil
+        }
     }
 
     private func open(_ body: [String: Any]) -> Response {
