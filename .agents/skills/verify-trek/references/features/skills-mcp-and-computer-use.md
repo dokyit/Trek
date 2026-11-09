@@ -28,7 +28,7 @@ Background use's picture can be checked with the mock, which reports steps the w
 ./.agents/skills/verify-trek/scripts/trek-dev control background-use fold     # or unfold, hide, show, toggle, next, stop
 ```
 
-The picture is a window of its own (layer 101), so `trek-dev screenshot` doesn't include it: capture it with `screencapture -l <its window id>`. The working bar's chip does show in `trek-dev screenshot`. To check `trek-mcp computer` itself in the background, run it over stdio with `TREK_COMPUTER_MODE=background` against a throwaway window (a TextEdit file, or Chrome with a `--user-data-dir` in /tmp) and confirm the front app and the pointer never change, that `pgrep` finds one process of the app, and that `lsappinfo list` never lists the `trek-mcp` pid (a Dock icon).
+The picture is a window of its own (layer 101), so `trek-dev screenshot` doesn't include it. It opens on the Trek Test Display with the rest of the run (bottom right, as on a real screen): `trek-dev screenshot <name> --real --display` shows it beside the main window, and `trek-dev windows` lists its id for `screencapture -l <its window id>`. The working bar's chip does show in `trek-dev screenshot`. To check `trek-mcp computer` itself in the background, run it over stdio with `TREK_COMPUTER_MODE=background` against a throwaway window (a TextEdit file, or Chrome with a `--user-data-dir` in /tmp) and confirm the front app and the pointer never change, that `pgrep` finds one process of the app, and that `lsappinfo list` never lists the `trek-mcp` pid (a Dock icon).
 
 ## Code
 

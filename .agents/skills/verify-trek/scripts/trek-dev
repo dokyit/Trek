@@ -54,6 +54,73 @@ BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "study", "appearance
 CONTROL_VERBS = {"browser", "range", "settled", "glass", "tint", "theme", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "attach", "pair", "limits-demo", "pr-demo", "dictate-demo", "onboarding", "phone", "update-demo", "resume-demo", "accounts-demo", "compact-demo", "secret-demo", "import-demo", "checks-demo", "privacy-demo", "approve", "deny", "answer"}
 
 
+# Values of TREK_TEST_DISPLAY that turn the test display off.
+NO = {"0", "off", "false", "no"}
+
+
+def wants_test_display(off: bool = False) -> bool:
+    """Whether the isolated app gets a display of its own, so none of it is on your screens.
+
+    macOS only, and on unless `start --no-test-display` or TREK_TEST_DISPLAY=0 says otherwise.
+    """
+    if platform.system() != "Darwin" or off:
+        return False
+    return os.environ.get("TREK_TEST_DISPLAY", "1").strip().lower() not in NO
+
+
+def live_displays() -> Optional[dict[int, dict[str, Any]]]:
+    """Every active display's bounds (points, y down, the main display's top-left at 0,0), asked
+    of CoreGraphics; None where it can't be asked."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        import ctypes
+
+        class Rect(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_double) for name in ("x", "y", "w", "h")]
+
+        cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        cg.CGDisplayBounds.restype = Rect
+        cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+        cg.CGMainDisplayID.restype = ctypes.c_uint32
+        ids = (ctypes.c_uint32 * 32)()
+        count = ctypes.c_uint32(0)
+        if cg.CGGetActiveDisplayList(32, ids, ctypes.byref(count)) != 0:
+            return None
+        main = cg.CGMainDisplayID()
+        found: dict[int, dict[str, Any]] = {}
+        for display in ids[: count.value]:
+            r = cg.CGDisplayBounds(display)
+            found[int(display)] = {"x": round(r.x), "y": round(r.y), "w": round(r.w), "h": round(r.h), "main": display == main}
+        return found
+    except Exception:
+        return None
+
+
+def test_display_support() -> dict[str, Any]:
+    """What `preflight` says of the test display: whether this macOS can make one."""
+    if platform.system() != "Darwin":
+        return {"api": False, "default": False, "detail": "macOS only"}
+    classes = ["CGVirtualDisplay", "CGVirtualDisplayDescriptor", "CGVirtualDisplaySettings", "CGVirtualDisplayMode"]
+    try:
+        import ctypes
+
+        ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        missing = [name for name in classes if not objc.objc_getClass(name.encode())]
+    except Exception as exc:
+        return {"api": False, "default": wants_test_display(), "detail": f"could not ask: {exc}"}
+    # "Displays have separate Spaces" (on unless this key is 1): the test display has a Space of
+    # its own, so its window stays visible whatever Space or full-screen app you are in.
+    spans = subprocess.run(["defaults", "read", "com.apple.spaces", "spans-displays"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip() == "1"
+    detail = "CoreGraphics has the CGVirtualDisplay classes" if not missing else f"missing in this macOS: {', '.join(missing)}; the app runs on your screen behind other windows, as before"
+    if not missing and spans:
+        detail += '; "Displays have separate Spaces" is off, so the test window is drawn only while the Space it opened in is showing'
+    return {"api": not missing, "default": wants_test_display(), "separate_spaces": not spans, "detail": detail}
+
+
 class CliError(RuntimeError):
     def __init__(self, message: str, *, hint: Optional[str] = None, details: Any = None):
         super().__init__(message)
@@ -207,7 +274,27 @@ class Driver:
             "data_dir": str(self.data_dir),
             "log": str(self.log_path),
             "started_at": state.get("started_at") if running else None,
+            "test_display": self.test_display(state) if running else None,
         }
+
+    def test_display(self, state: dict[str, Any]) -> dict[str, Any]:
+        """The running app's display of its own: its id, size and where it sits, as the app
+        reported them (display.json) and as CoreGraphics has them now."""
+        try:
+            report = json.loads((self.shot_dir / "display.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            report = {}
+        if report.get("pid") != state.get("pid"):
+            return {"asked": bool(state.get("test_display")), "created": False, "why": "the app wrote no display report"}
+        report.pop("pid", None)
+        if report.get("created"):
+            live = live_displays()
+            if live is not None:
+                now = live.get(report.get("id"))
+                report["live"] = now is not None
+                if now:
+                    report["bounds"] = {k: now[k] for k in ("x", "y", "w", "h")}
+        return report
 
     def prerequisites(self) -> dict[str, Any]:
         def probe(command: list[str]) -> tuple[bool, str]:
@@ -226,6 +313,7 @@ class Driver:
             "rust": {"ok": rust_ok, "detail": rust},
             "xcode": {"ok": xcode_ok, "detail": xcode},
             "metal": {"ok": metal_ok, "detail": metal},
+            "test_display": test_display_support(),
         }
 
     def build(self) -> dict[str, Any]:
@@ -314,11 +402,13 @@ class Driver:
             "Created by verify-trek. TREK_SHOT_DIR isolates Keychain/data and only permits the mock agent.\n"
         )
 
-    def start(self, *, build: bool, size: str, real_agents: bool = False) -> dict[str, Any]:
+    def start(self, *, build: bool, size: str, real_agents: bool = False, test_display: Optional[bool] = None) -> dict[str, Any]:
         with self.locked():
-            return self._start(build=build, size=size, real_agents=real_agents)
+            return self._start(build=build, size=size, real_agents=real_agents, test_display=test_display)
 
-    def _start(self, *, build: bool, size: str, real_agents: bool = False) -> dict[str, Any]:
+    def _start(self, *, build: bool, size: str, real_agents: bool = False, test_display: Optional[bool] = None) -> dict[str, Any]:
+        if test_display is None:
+            test_display = wants_test_display()
         current = self.status()
         if current["running"]:
             return {**current, "already_running": True}
@@ -327,7 +417,7 @@ class Driver:
             build_result = self.build()
         binary = self.verified_binary()
         self.seed()
-        for stale in (self.shot_dir / "cmd", self.shot_dir / "done", self.pending_path):
+        for stale in (self.shot_dir / "cmd", self.shot_dir / "done", self.shot_dir / "display.json", self.shot_dir / "windows.json", self.pending_path):
             stale.unlink(missing_ok=True)
         env = os.environ.copy()
         env.update(
@@ -337,6 +427,8 @@ class Driver:
                 **({} if real_agents else {"TREK_MOCK_AGENT": "1"}),
                 "TREK_BACKGROUND": "1",
                 "TREK_FORCE_ACTIVE": "1",
+                # A display of its own (macOS): no window of the run is on your screens.
+                "TREK_TEST_DISPLAY": "1" if test_display else "0",
                 "TREK_WINDOW_SIZE": size,
                 "RUST_LOG": "warn,trek=info",
             }
@@ -362,6 +454,7 @@ class Driver:
             "mock_only": not real_agents,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "size": size,
+            "test_display": test_display,
         }
         state["process_signature"] = self.process_signature(proc.pid)
         if not state["process_signature"]:
@@ -455,6 +548,75 @@ class Driver:
             shutil.copy2(source, output)
             return {"captured": True, "path": str(output), "bytes": output.stat().st_size}
 
+    def windows(self) -> dict[str, Any]:
+        with self.locked():
+            return self._windows()
+
+    def _windows(self) -> dict[str, Any]:
+        """Every window of the isolated app as the window server has it, and its display."""
+        (self.shot_dir / "windows.json").unlink(missing_ok=True)
+        self._batch(["windows"], timeout=30)
+        try:
+            windows = json.loads((self.shot_dir / "windows.json").read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CliError("Trek did not list its windows.", details=str(exc))
+        display = self.test_display(self.running_state())
+        shown = [w for w in windows if w.get("shown")]
+        return {
+            "windows": windows,
+            "test_display": display,
+            # False means a window of the test app is on one of your own displays.
+            "all_on_test_display": bool(display.get("created")) and all(w.get("on_test_display") for w in shown),
+        }
+
+    def capture_real(self, output: Path, *, whole_display: bool) -> dict[str, Any]:
+        """The pixels the window server composites, taken with screencapture: the main window's
+        rectangle on the test display (glass frosts the display's wallpaper behind it, as it
+        would a desktop), or the whole test display. Vibrancy and native views are in it.
+
+        With no test display the window is on your screen under other windows, so its rectangle
+        would show those: the window is captured alone by its id instead, glass frosting nothing.
+        """
+        with self.locked():
+            listing = self._windows()
+            display = listing["test_display"]
+            on_display = bool(display.get("created") and display.get("live"))
+            main = next((w for w in listing["windows"] if w.get("main")), None)
+            note = None
+            if whole_display:
+                if not on_display:
+                    raise CliError("--display captures the test display, and this run has none.", hint="start without --no-test-display (and without TREK_TEST_DISPLAY=0), or drop --display", details=display)
+                b = display["bounds"]
+                command = ["screencapture", "-x", f"-R{b['x']},{b['y']},{b['w']},{b['h']}", str(output)]
+            elif main is None:
+                raise CliError("The isolated app has no main window to capture.", details=listing["windows"])
+            elif on_display and main.get("on_test_display"):
+                f = main["frame"]
+                command = ["screencapture", "-x", f"-R{round(f['x'])},{round(f['y'])},{round(f['w'])},{round(f['h'])}", str(output)]
+            else:
+                command = ["screencapture", "-x", "-o", f"-l{main['id']}", str(output)]
+                note = "no test display: the window is on your screen under other windows, so it was captured alone (glass frosts nothing in the picture) and macOS may not have drawn it lately"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.unlink(missing_ok=True)
+            try:
+                proc = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+                detail = proc.stdout.strip()
+                failed = proc.returncode != 0
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                detail, failed = str(exc), True
+            if failed or not output.is_file() or output.stat().st_size == 0:
+                raise CliError(
+                    "screencapture took no picture.",
+                    hint="give the app this terminal runs in Screen Recording (System Settings › Privacy & Security); a plain `screenshot` needs none",
+                    details=detail,
+                )
+            result = {"captured": True, "real": True, "path": str(output), "bytes": output.stat().st_size, "of": "test display" if whole_display else "main window", "on_test_display": on_display}
+            if main is not None and not whole_display:
+                result["window"] = main
+            if note:
+                result["note"] = note
+            return result
+
     def stop(self) -> dict[str, Any]:
         with self.locked():
             return self._stop()
@@ -464,6 +626,7 @@ class Driver:
         if not state or not self.state_alive(state):
             return {"stopped": True, "was_running": False, "runtime_dir": str(self.home)}
         pid = int(state["pid"])
+        display = self.test_display(state)
         if self.pending_path.exists():
             self._end_process(state)
         else:
@@ -484,7 +647,18 @@ class Driver:
         self.pending_path.unlink(missing_ok=True)
         for stale in (self.shot_dir / "cmd", self.shot_dir / "done"):
             stale.unlink(missing_ok=True)
-        return {"stopped": True, "was_running": True, "runtime_dir": str(self.home)}
+        result = {"stopped": True, "was_running": True, "runtime_dir": str(self.home)}
+        if display.get("created"):
+            # The display lives only as long as the process that made it.
+            deadline = time.monotonic() + 5
+            gone = False
+            while not gone and time.monotonic() < deadline:
+                live = live_displays()
+                gone = live is not None and display.get("id") not in live
+                if not gone:
+                    time.sleep(0.1)
+            result["test_display"] = {"id": display.get("id"), "name": display.get("name"), "gone": gone}
+        return result
 
     @staticmethod
     def signal_process(pid: int, sig: signal.Signals) -> None:
@@ -653,7 +827,7 @@ def run_check(driver: Driver, *, quick: bool) -> dict[str, Any]:
                 target = artifacts / f"{name}.png"
                 shutil.copy2(source, target)
                 shots.append(str(target))
-            steps.append({"name": "isolated UI smoke", "passed": True, "routes": ["basecamp", "settings:general"], "screenshots": shots})
+            steps.append({"name": "isolated UI smoke", "passed": True, "routes": ["basecamp", "settings:general"], "screenshots": shots, "test_display": driver.test_display(driver.running_state())})
         finally:
             if not was_running:
                 driver._stop()
@@ -669,7 +843,7 @@ def parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
-    preflight = sub.add_parser("preflight", help="Check macOS, Rust, Xcode, and Metal prerequisites.")
+    preflight = sub.add_parser("preflight", help="Check macOS, Rust, Xcode, and Metal prerequisites, and whether this macOS can make the test display.")
     preflight.epilog = "Example: trek-dev preflight"
 
     start = sub.add_parser("start", help="Build and launch isolated Trek.")
@@ -681,9 +855,14 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use the installed agents and their real logins instead of the mock (data folder still throwaway). For checking flows like accounts that need a real agent: what the agents do is real, and costs what it costs.",
     )
+    start.add_argument(
+        "--no-test-display",
+        action="store_true",
+        help="macOS: open the window on your own screen, behind your windows, as before. By default the app makes an invisible display of its own (Trek Test Display) and opens there; TREK_TEST_DISPLAY=0 turns it off too.",
+    )
     start.epilog = "Example: trek-dev start --size 1280x820"
 
-    status = sub.add_parser("status", help="Report whether the isolated app is running and where its files are.")
+    status = sub.add_parser("status", help="Report whether the isolated app is running, where its files are, and its test display (id, size, where it sits).")
     status.epilog = "Example: trek-dev status"
 
     open_p = sub.add_parser("open", help="Open a route or right-panel tool in the isolated app.")
@@ -710,11 +889,20 @@ def parser() -> argparse.ArgumentParser:
     control.add_argument("--dry-run", action="store_true", help="Validate and show the command without sending it.")
     control.epilog = "Examples: trek-dev control theme paper; trek-dev control wait idle 60000"
 
-    shot = sub.add_parser("screenshot", help="Render the Trek window to a PNG without Screen Recording permission.")
+    shot = sub.add_parser("screenshot", help="Render the Trek window to a PNG without Screen Recording permission; --real for the pixels macOS composites.")
     shot.add_argument("name", help="Screenshot name, or output filename when --output is omitted.")
     shot.add_argument("--output", type=Path, help="Destination PNG; defaults to the isolated artifacts folder.")
+    shot.add_argument(
+        "--real",
+        action="store_true",
+        help="macOS: the main window's rectangle on the test display as the window server composites it (screencapture -R), for real glass, vibrancy and native views; glass frosts the test display's wallpaper, and nothing of yours is in the picture. Uses the terminal app's Screen Recording permission.",
+    )
+    shot.add_argument("--display", action="store_true", help="With --real: the whole test display, every window and sheet on it, over its wallpaper.")
     shot.add_argument("--dry-run", action="store_true", help="Describe the capture without writing it.")
-    shot.epilog = "Example: trek-dev screenshot appearance --output /tmp/trek-appearance.png"
+    shot.epilog = "Examples: trek-dev screenshot appearance --output /tmp/trek-appearance.png; trek-dev screenshot glass --real"
+
+    windows = sub.add_parser("windows", help="macOS: list the isolated app's windows: id, title, frame, and the display each is on.")
+    windows.epilog = "Example: trek-dev windows  # all_on_test_display says none is on your screens"
 
     logs = sub.add_parser("logs", help="Read recent isolated-app logs.")
     logs.add_argument("--lines", type=int, default=80, help="Number of lines to return (default: 80).")
@@ -767,7 +955,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         elif cmd == "start":
             if not re.fullmatch(r"[0-9]{3,5}x[0-9]{3,5}", args.size):
                 raise CliError("--size must look like 1280x820.")
-            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse the last verified shots binary", f"launch isolated mock-only app at {driver.home}"]) if args.dry_run else driver.start(build=not args.no_build, size=args.size, real_agents=args.real_agents)
+            on_display = wants_test_display(args.no_test_display)
+            where = "on a display of its own (Trek Test Display)" if on_display else "on your screen, behind your windows"
+            data = dry_result(cmd, ["build Trek with the shots feature" if not args.no_build else "reuse the last verified shots binary", f"launch isolated mock-only app at {driver.home}, {where}"]) if args.dry_run else driver.start(build=not args.no_build, size=args.size, real_agents=args.real_agents, test_display=on_display)
         elif cmd == "open":
             line = route_command(args.route)
             data = dry_result(cmd, [f"send {line!r} to isolated Trek"]) if args.dry_run else (driver.batch([line]) and {"opened": args.route, "command_sent": line})
@@ -798,11 +988,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             output = args.output or (driver.home / "artifacts" / f"{name}.png")
             if not output.is_absolute():
                 output = (root / output).resolve()
-            actions = [f"render the isolated Trek window as {name}.png", f"write {output}"]
+            if args.display and not args.real:
+                raise CliError("--display goes with --real.")
+            if args.real and platform.system() != "Darwin":
+                raise CliError("--real is for macOS.", hint="use screenshot without it")
+            what = "the test display" if args.display else "the isolated Trek window"
+            actions = [f"capture {what} with screencapture" if args.real else f"render the isolated Trek window as {name}.png", f"write {output}"]
             if args.dry_run:
                 data = dry_result(cmd, actions)
+            elif args.real:
+                data = driver.capture_real(output, whole_display=args.display)
             else:
                 data = driver.capture(name, output)
+        elif cmd == "windows":
+            data = driver.windows()
         elif cmd == "logs":
             if args.lines < 1:
                 raise CliError("--lines must be at least 1.")

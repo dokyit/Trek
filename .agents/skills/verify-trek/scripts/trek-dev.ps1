@@ -12,6 +12,10 @@
 # JSON is the default output; add --human anywhere for readable text. Throwaway state
 # lives in $env:TEMP\trek-verify-<user>-<hash of this checkout> (TREK_VERIFY_HOME
 # overrides the base), never %APPDATA%\trek or the credential store.
+#
+# The Mac driver's test display (a display of the app's own, `start --no-test-display`,
+# `screenshot --real`, `windows`) has no twin here: Windows needs none. `start` takes
+# `--no-test-display` and does nothing with it, so one command line works on both.
 
 $ErrorActionPreference = 'Stop'
 
@@ -404,6 +408,7 @@ switch -Regex ($script:Cmd) {
         Out-Result @{ command_sent = $line }
     }
     '^screenshot$' {
+        if ($Rest -contains '--real' -or $Rest -contains '--display') { Die '--real and --display are for macOS, where the app has a test display.' 'use screenshot without them' }
         $pos = Rest-Positionals
         if (-not $pos) { Die 'Missing a screenshot name.' }
         $name = ([IO.Path]::GetFileNameWithoutExtension($pos[0]) -replace '[^A-Za-z0-9._-]+', '-').Trim('-.')
