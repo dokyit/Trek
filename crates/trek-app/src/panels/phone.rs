@@ -1017,6 +1017,8 @@ impl PhonePanel {
             // stream's turn); a driver without `/stream` never gets one.
             let mut poll_until: Option<Option<Instant>> = None;
             let mut drops = 0u32;
+            // How often in a row the stream brought nothing while screenshots worked.
+            let mut broken = 0u32;
             while live.load(Ordering::Relaxed) {
                 if d.ensure(&install, &udid, driver::START_LIMIT).is_err() {
                     break;
@@ -1043,6 +1045,7 @@ impl PhonePanel {
                     });
                     if frames > 0 {
                         drops = 0;
+                        broken = 0;
                     }
                     match driver::after_stream(&end, drops) {
                         driver::Next::Stop => break,
@@ -1055,6 +1058,23 @@ impl PhonePanel {
                             drops += 1;
                             executor.timer(wait).await;
                         }
+                        // It keeps dropping with no frame. A screenshot tells which it is: the
+                        // stream on this iPhone (screenshots stand in for a while, as the
+                        // picture came before there was one), or the iPhone itself (locked,
+                        // gone: the stream is tried again, and picks up when it's back).
+                        driver::Next::Doubt => match d.screenshot(FRAME_WIDTH, DRIVER_JPEG) {
+                            Ok(jpeg) => {
+                                show(jpeg);
+                                drops = 0;
+                                broken += 1;
+                                let rest = driver::stream_rest(broken);
+                                tracing::warn!(
+                                    "the iPhone's screen stream brings nothing while screenshots work: screenshots for {rest:?} ({end:?})"
+                                );
+                                poll_until = Some(Some(Instant::now() + rest));
+                            }
+                            Err(_) => executor.timer(Duration::from_secs(2)).await,
+                        },
                     }
                     continue;
                 }
@@ -1065,6 +1085,12 @@ impl PhonePanel {
                     let started = Instant::now();
                     match d.screenshot(FRAME_WIDTH, DRIVER_JPEG) {
                         Ok(jpeg) => show(jpeg),
+                        // Standing in for the stream: back to it (the driver checked first).
+                        Err(_) if poll_until.is_some_and(|until| until.is_some()) => {
+                            poll_until = None;
+                            executor.timer(Duration::from_secs(2)).await;
+                            break;
+                        }
                         Err(_) => {
                             live.store(false, Ordering::Relaxed);
                             break;

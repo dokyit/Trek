@@ -1045,6 +1045,10 @@ pub enum Next {
     Poll(Option<Duration>),
     /// Connect again after this long (the driver checked first, and started if it went away).
     Again(Duration),
+    /// It keeps dropping without a frame: ask for one screenshot, to tell a stream that brings
+    /// nothing on this iPhone (screenshots work: use them for [`stream_rest`]) from an iPhone
+    /// that shows nothing now (locked, gone: wait and connect again).
+    Doubt,
 }
 
 /// How long screenshots are asked for while as many as the driver takes watch its stream
@@ -1054,16 +1058,33 @@ const STREAM_FULL_WAIT: Duration = Duration::from_secs(10);
 /// What follows a stream that ended as `end`, after `drops` drops in a row without a frame
 /// between them: a driver that hasn't `/stream` is asked for screenshots instead (one whose
 /// stream is full, for a while), and a connection that dropped (the phone locked, the cable
-/// came out, the Wi-Fi address changed) is made again, a little later each time it fails.
+/// came out, the Wi-Fi address changed) is made again, a little later each time it fails,
+/// until [`STREAM_GIVE_UP`] in a row put the stream itself in doubt.
 pub fn after_stream(end: &StreamEnd, drops: u32) -> Next {
     match end {
         StreamEnd::Stopped => Next::Stop,
         StreamEnd::Refused(503, _) => Next::Poll(Some(STREAM_FULL_WAIT)),
         StreamEnd::Refused(..) => Next::Poll(None),
+        StreamEnd::Dropped(_) if drops + 1 >= STREAM_GIVE_UP => Next::Doubt,
         StreamEnd::Dropped(_) => {
             Next::Again(Duration::from_millis((250u64 << drops.min(4)).min(3000)))
         }
     }
+}
+
+/// This many drops in a row with no frame between them, and the stream itself is in doubt
+/// ([`Next::Doubt`]): the tool mustn't go without a picture for a stream that connects and
+/// brings nothing, when screenshots (how the picture came before `/stream`) still work.
+pub const STREAM_GIVE_UP: u32 = 4;
+
+/// How long screenshots stand in for a stream that brought nothing while they worked, the
+/// `times`th time in a row: a minute, then ten, then an hour, before it's tried again.
+pub fn stream_rest(times: u32) -> Duration {
+    Duration::from_secs(match times {
+        0 | 1 => 60,
+        2 => 600,
+        _ => 3600,
+    })
 }
 
 /// One thing the stream brought.
@@ -1349,15 +1370,25 @@ mod tests {
         assert!(
             matches!(after_stream(&full, 0), Next::Poll(Some(wait)) if wait >= Duration::from_secs(5))
         );
-        // Dropped: again, soon, then less eagerly, and never slower than every 3 s.
+        // Dropped: again, soon, then less eagerly.
         let dropped = StreamEnd::Dropped("The iPhone closed the connection.".into());
-        let waits: Vec<u64> = (0..8)
+        let waits: Vec<u64> = (0..STREAM_GIVE_UP - 1)
             .map(|n| match after_stream(&dropped, n) {
                 Next::Again(d) => d.as_millis() as u64,
                 other => panic!("{other:?}"),
             })
             .collect();
-        assert_eq!(waits, [250, 500, 1000, 2000, 3000, 3000, 3000, 3000]);
+        assert_eq!(waits, [250, 500, 1000]);
+        // And once it has dropped that often with no frame, the stream is in doubt: a
+        // screenshot says whether it's the stream (screenshots stand in, longer each time) or
+        // the iPhone.
+        for n in STREAM_GIVE_UP - 1..STREAM_GIVE_UP + 4 {
+            assert_eq!(after_stream(&dropped, n), Next::Doubt);
+        }
+        assert_eq!(
+            [1, 2, 3, 9].map(|times| stream_rest(times).as_secs()),
+            [60, 600, 3600, 3600]
+        );
         assert_eq!(StreamOptions::CABLE.path(), "/stream?w=0&q=70&fps=30");
     }
 
