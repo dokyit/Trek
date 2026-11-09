@@ -224,7 +224,8 @@ and 865 / 6,318 chars): each tool says what only it knows, the server instructio
 pieces fit (elements first, refs, a screenshot when looks matter), and argument descriptions are a
 few words. Windows has no elements, so its tool list and schemas are as they were. New budgets
 (size plus about 10%): computer 885 / 6,450, computer-background 1,365 / 7,775, simulator
-890 / 6,670; all families together 44,300 (43,107 today).
+890 / 6,670; all families together 46,200 (44,765 today, with the iPhone's elements: its
+family is 1,475 / 7,413 against a budget of 1,620 / 8,150).
 
 ## The budget tests
 
@@ -235,7 +236,7 @@ few words. Windows has no elements, so its tool list and schemas are as they wer
   tool-search line is held to 220 chars and Codex's notes with everything on to 4,650.
 - `crates/trek-mcp/src/main.rs`, `prompt_budget`: each family's server instructions and tool schemas,
   as `initialize` and `tools/list` return them, against a per-family budget, and all of them
-  together (44,300 chars since elements, below; 40,500 before).
+  together (46,200 chars since elements, below; 40,500 before).
 - `trek_core::visualization`'s and `trek_core::artifact`'s own compactness tests now stop at 1,750
   and 1,150 chars.
 
