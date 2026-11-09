@@ -847,6 +847,35 @@ impl Workspace {
         out
     }
 
+    /// A sub-agent under `id` (theirs too) with a request waiting on the user, the one that has
+    /// waited longest: its parent's thread shows the request where its own would be, so it's
+    /// answered there instead of in the sub-agent's thread, found by scrolling back to where it
+    /// was started.
+    pub fn sub_agent_asking(&self, id: &str) -> Option<String> {
+        let under = |t: &Thread| {
+            let mut up = t.parent_id.clone();
+            for _ in 0..self.threads.len().min(64) {
+                match up {
+                    Some(p) if p == id => return true,
+                    Some(p) => up = self.thread(&p).and_then(|p| p.parent_id.clone()),
+                    None => return false,
+                }
+            }
+            false
+        };
+        self.threads
+            .iter()
+            .filter(|t| t.parent_id.is_some() && t.run_state == RunState::NeedsYou)
+            .filter(|t| {
+                self.live
+                    .get(&t.id)
+                    .is_some_and(|l| !l.permissions.is_empty())
+            })
+            .filter(|t| under(t))
+            .min_by_key(|t| t.updated_at)
+            .map(|t| t.id.clone())
+    }
+
     /// Every sub-agent under `id`, theirs too, archived ones included.
     fn descendants(&self, id: &str) -> Vec<Thread> {
         let mut out = vec![];

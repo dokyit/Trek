@@ -4389,9 +4389,75 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// An approval, question or plan waiting on the user, in place of the working bar.
+    /// An approval, question or plan waiting on the user, in place of the working bar: the
+    /// thread's own, or else one of its sub-agents' (answered from here, with a line naming the
+    /// sub-agent and opening it).
     fn live_footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let id = self.current.clone()?;
+        let own = self.current.clone()?;
+        let kid = {
+            let ws = self.workspace.read(cx);
+            let mine = ws.live.get(&own).is_some_and(|l| !l.permissions.is_empty());
+            (!mine).then(|| ws.sub_agent_asking(&own)).flatten()
+        };
+        let Some(kid) = kid else {
+            return self.request_footer(own, window, cx);
+        };
+        let card = self.request_footer(kid.clone(), window, cx)?;
+        let ws = self.workspace.read(cx);
+        let name = ws.thread(&kid).map(|t| t.title.clone()).unwrap_or_default();
+        let theme = cx.theme().clone();
+        let width = ws.column();
+        let handle = self.workspace.clone();
+        let open = kid.clone();
+        Some(
+            v_flex()
+                .w_full()
+                .items_center()
+                .child(
+                    h_flex()
+                        .id("sub-agent-asking")
+                        .test_support()
+                        .w_full()
+                        .max_w(width)
+                        .px_6()
+                        .pb_1()
+                        .gap_2()
+                        .items_center()
+                        .text_size(px(text::LABEL))
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("Sub-agent “{name}” is asking")),
+                        )
+                        .child(
+                            gpui_kit::component::button::Button::new("sub-agent-asking-open")
+                                .label("Open it")
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    handle.update(cx, |ws, cx| {
+                                        ws.navigate(
+                                            crate::workspace::Route::Thread(open.clone()),
+                                            cx,
+                                        )
+                                    })
+                                }),
+                        ),
+                )
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// The card for what's waiting on the user in thread `id`.
+    fn request_footer(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         // Questions and plans get their own cards.
         let special = {
             let ws = self.workspace.read(cx);

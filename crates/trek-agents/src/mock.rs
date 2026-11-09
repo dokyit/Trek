@@ -1871,6 +1871,12 @@ impl Session {
         let task = after_keyword(text, &["mock:consult", "mock:delegate"])
             .unwrap_or("Review how the app starts and say what you'd change.")
             .to_string();
+        // `mock:delegate implement <task>`: a sub-agent that may act (and so asks), with its
+        // parent's access.
+        let (mode, task) = match task.strip_prefix("implement ") {
+            Some(rest) => ("implement", rest.trim().to_string()),
+            None => ("advise", task),
+        };
         self.say("I'll get a second opinion from another model.")
             .await?;
         let id = self.id("tool");
@@ -1882,7 +1888,7 @@ impl Session {
             title,
         )
         .await?;
-        let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "effort": "low", "mode": "advise", "wait": wait });
+        let params = serde_json::json!({ "title": title, "prompt": task, "agent": format!("direct:{PROVIDER}"), "model": "mock-swift", "effort": "low", "mode": mode, "wait": wait });
         match self.ipc("delegate_task", params).await? {
             Ok(answer) => {
                 let output = serde_json::to_string_pretty(&answer).unwrap_or_default();

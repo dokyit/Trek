@@ -32,6 +32,12 @@ pub(super) fn server(bin: String, env: Vec<(String, String)>) -> McpServer {
     }
 }
 
+/// Whether approval `request_id` is the Browser's own (typing a password, sending a form
+/// elsewhere…), which only the user answers.
+pub(super) fn is_ask(request_id: &str) -> bool {
+    request_id.starts_with(ASK_PREFIX)
+}
+
 /// The user answered approval `request_id`: whether it was the Browser's (and is now answered).
 pub(super) fn answered(request_id: &str, decision: Decision) -> bool {
     if !request_id.starts_with(ASK_PREFIX) {

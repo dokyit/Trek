@@ -1439,3 +1439,98 @@ fn a_thread_in_no_project_makes_no_project_of_its_folder() {
         wait_task(&trek, cx, &child, TaskState::Done).await;
     });
 }
+
+/// A sub-agent's approval shows on its parent's thread where the parent's own would, named,
+/// and is answered there: nobody has to find where it was started and open it in a window.
+#[test]
+fn a_sub_agent_s_request_is_answered_from_its_parent() {
+    run(async |cx| {
+        let trek = open(cx);
+        let parent = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            ws.set_hand_holding(Some(&parent), HandHolding::Supervised, cx)
+        })
+        .unwrap();
+        let doer = trek
+            .update(cx, |ws, cx| {
+                ws.delegate(
+                    &parent,
+                    &json!({ "title": "Migrate", "prompt": "mock:permission", "mode": "implement" }),
+                    cx,
+                )
+            })
+            .unwrap();
+        wait_task(&trek, cx, &doer, TaskState::NeedsYou).await;
+        trek.update(cx, |ws, cx| {
+            ws.navigate(trek_app::workspace::Route::Thread(parent.clone()), cx)
+        });
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.sub_agent_asking(&parent)),
+            Some(doer.clone())
+        );
+        assert!(
+            trek.visible(cx, "sub-agent-asking"),
+            "the parent names who's asking"
+        );
+        assert!(trek.visible(cx, "allow"), "and shows its card");
+
+        trek.click(cx, "allow");
+        wait_task(&trek, cx, &doer, TaskState::Done).await;
+        assert!(
+            task_row(&trek, cx, &parent, &doer)
+                .1
+                .contains("Migrations applied"),
+            "the answer went to the sub-agent"
+        );
+        assert_eq!(trek.read(cx, |ws, _| ws.sub_agent_asking(&parent)), None);
+        assert!(!trek.visible(cx, "sub-agent-asking"));
+    });
+}
+
+/// In Full access nothing waits on the user for an approval: what an agent still asks (Claude
+/// Code asks about some paths even bypassing its checks) is allowed as it comes, with no alert,
+/// and the same for a sub-agent working for such a thread. A question still needs the user.
+#[test]
+fn full_access_allows_what_an_agent_still_asks() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            ws.settings.permissions.full_access_unlocked = true;
+            ws.set_hand_holding(Some(&id), HandHolding::FullAccess, cx)
+        })
+        .unwrap();
+        let ask = |rid: &str, prompt: Option<trek_agents::Prompt>| {
+            trek_agents::AgentEvent::PermissionRequest {
+                request_id: rid.into(),
+                title: "Write".into(),
+                detail: ".claude/settings.json".into(),
+                prompt,
+                call: None,
+            }
+        };
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(&id, vec![ask("protected", None)], cx)
+        });
+        trek.read(cx, |ws, _| {
+            assert!(ws.live[&id].permissions.is_empty(), "allowed as it came");
+            assert_ne!(ws.thread(&id).unwrap().run_state, RunState::NeedsYou);
+            assert_eq!(ws.needs_you_count(), 0);
+        });
+
+        let question = trek_agents::Prompt::Questions(vec![trek_agents::Question {
+            question: "Which database?".into(),
+            header: "Database".into(),
+            options: vec![("SQLite".into(), String::new())],
+            multi: false,
+            secret: false,
+        }]);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(&id, vec![ask("pick", Some(question))], cx)
+        });
+        trek.read(cx, |ws, _| {
+            assert_eq!(ws.live[&id].permissions.len(), 1, "a question waits");
+            assert_eq!(ws.thread(&id).unwrap().run_state, RunState::NeedsYou);
+        });
+    });
+}

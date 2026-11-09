@@ -5891,6 +5891,36 @@ impl Workspace {
                 && live.turn_started.is_none()
                 && live.background_agents().next().is_none();
         }
+        // Full access asks the user nothing: what its agent still asks to do (Claude Code asks
+        // about some paths even when told to bypass its checks) is allowed here, so a thread, or a
+        // sub-agent working for one, never stops for it. Questions, plans and secrets still need
+        // the user, and so does what a rule of theirs says to ask about every time.
+        if asked
+            && self
+                .thread(id)
+                .is_some_and(|t| t.hand_holding == HandHolding::FullAccess)
+        {
+            let covered: Vec<String> = self
+                .live
+                .get(id)
+                .map(|l| {
+                    l.permissions
+                        .iter()
+                        .filter(|p| p.prompt.is_none())
+                        .filter(|p| !permission_requests::a_rule_asks(self, id, p))
+                        .filter(|p| !browser_use::is_ask(&p.request_id))
+                        .map(|p| p.request_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for rid in covered {
+                self.respond(id, &rid, Decision::Allow, cx);
+            }
+            if self.live.get(id).is_some_and(|l| l.permissions.is_empty()) {
+                run_state = run_state.filter(|s| *s != RunState::NeedsYou);
+                notify_why = None;
+            }
+        }
         // The session went with no turn open and nothing left to answer: whatever had the thread
         // marked at work (an answer it never got to) or waiting (a request that went with it) is
         // over, and nothing else would ever say so.

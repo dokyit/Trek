@@ -61,6 +61,30 @@ do {
     exit(1)
 }
 
+// The simulator shutting down under this connection crashes FBSimulatorControl, in a callback
+// it makes with a nil object on its way out (on CoreSimulator's own queue, often in the same
+// instant the watch below sees it going), and macOS showed a crash report each time a simulator
+// shut down while Trek was open. It's the one way this helper ends in a crash: it leaves quietly
+// instead, with a line saying so, and Trek starts it again when it's needed.
+for sig in [SIGSEGV, SIGBUS] {
+    signal(sig) { _ in
+        let note: StaticString = "trek-simhid: the simulator went away under its connection\n"
+        _ = write(2, note.utf8Start, note.utf8CodeUnitCount)
+        _exit(0)
+    }
+}
+
+// And leaves first when it can, as soon as the simulator starts to go.
+let shutdownWatch = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "trek.simhid.watch"))
+shutdownWatch.schedule(deadline: .now() + 0.2, repeating: 0.2)
+shutdownWatch.setEventHandler {
+    if simulator.state != .booted {
+        message("gone simulator is \(FBiOSTargetStateStringFromState(simulator.state).rawValue)")
+        exit(0)
+    }
+}
+shutdownWatch.resume()
+
 // ---------- screen ----------
 
 final class Streamer: NSObject, FBFramebufferConsumer {

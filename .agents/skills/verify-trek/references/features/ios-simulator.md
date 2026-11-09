@@ -2,7 +2,7 @@
 
 ## What it does
 
-Discovers Xcode simulators, boots/shuts them down, mirrors frames, sends touch/keyboard input through AXe, installs/launches apps, opens URLs, and attaches device screenshots to chat.
+Discovers Xcode simulators, boots/shuts them down, mirrors frames, sends touch/keyboard input through AXe, installs/launches apps, opens URLs, and attaches device screenshots to chat. The input and frame helper (`trek-simhid`, `crates/trek-app/simhid/main.swift`, built from AXe's FBSimulatorControl) exits quietly when its simulator shuts down: FBSimulatorControl crashes on that, and macOS used to show a crash report every time a simulator shut down with Trek open. It writes "the simulator went away under its connection" to stderr instead; Trek starts it again when needed. `cargo test -p trek-app --lib the_helper_builds -- --ignored` builds it (`TREK_SIMHID_KEEP=<path>` keeps the binary to try by hand).
 
 ## Reach it as a user
 

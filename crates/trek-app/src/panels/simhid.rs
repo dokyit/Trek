@@ -326,6 +326,22 @@ fn unqualify(text: &str, module: &str) -> String {
 mod tests {
     use super::unqualify;
 
+    /// The helper compiles against AXe's frameworks (needs Xcode and AXe, so it's run by hand:
+    /// `cargo test -p trek-app --lib the_helper_builds -- --ignored`).
+    #[test]
+    #[ignore]
+    fn the_helper_builds() {
+        let frameworks = super::axe_frameworks().expect("AXe installed");
+        let out = std::env::temp_dir().join(format!("trek-simhid-test-{}", std::process::id()));
+        super::build_helper(&frameworks, &out).unwrap();
+        assert!(out.exists());
+        // `TREK_SIMHID_KEEP=<path>` keeps it there, to try by hand.
+        match std::env::var_os("TREK_SIMHID_KEEP") {
+            Some(keep) => std::fs::rename(&out, keep).unwrap(),
+            None => std::fs::remove_file(out).unwrap(),
+        }
+    }
+
     #[test]
     fn strips_module_qualifiers() {
         let src = "import FBSimulatorControl\nfunc a(_ s: FBSimulatorControl.FBSimulator) -> IOSurface.IOSurface? // MyFBSimulatorControl.x";
