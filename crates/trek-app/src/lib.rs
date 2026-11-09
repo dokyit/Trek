@@ -52,6 +52,7 @@ pub use trek_palette as palette;
 pub use trek_palette::scale;
 pub mod panels;
 pub mod permissions;
+pub mod photos;
 pub use trek_perf as perf;
 pub mod push;
 pub mod remote;

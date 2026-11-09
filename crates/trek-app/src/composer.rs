@@ -2392,22 +2392,109 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let refs: Vec<String> = files
-            .iter()
-            .map(|p| trek_core::media::mention_of(&p.display().to_string()))
-            .collect();
         self.input.update(cx, |s, cx| {
-            let mut v = s.value().to_string();
-            if !v.is_empty() && !v.ends_with(' ') {
-                v.push(' ');
-            }
-            v.push_str(&refs.join(" "));
-            v.push(' ');
+            let v = with_refs(&s.value(), files);
             let end = v.len();
             // A multi-line input puts the caret at the start of a new value.
             s.set_value(v, window, cx);
             s.set_selected_range(end..end, cx);
         });
+    }
+
+    /// Photos and videos from the Photos library: the system's picker, as a sheet on this
+    /// window (Mac). Where there's none, the open panel.
+    pub fn attach_photos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            use crate::photos::picker::{self, Opened};
+            match picker::open(window, crate::photos::dir()) {
+                Opened::Showing(picked) => return self.take_photos(picked, window, cx),
+                Opened::AlreadyShowing => return,
+                Opened::Unavailable => {}
+            }
+        }
+        self.attach(window, cx);
+    }
+
+    /// What the Photos picker hands over (`photos::Picked`): the strip shows the picks as
+    /// saving while they're copied out of the library, then photos go on it and videos are
+    /// mentioned with `@`, as files picked in Finder are. A send meanwhile waits for them; a
+    /// thread switched to meanwhile leaves them in the draft they were picked for.
+    pub fn take_photos(
+        &mut self,
+        picked: async_channel::Receiver<crate::photos::Picked>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::photos::{self, Failed, Picked};
+        let meant_for = self.target(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            // Closed without a word: cancelled, nothing picked.
+            let Ok(Picked::Copying(n)) = picked.recv().await else {
+                return;
+            };
+            if this
+                .update(cx, |c, cx| attachments::expect(c, n, cx))
+                .is_err()
+            {
+                return;
+            }
+            let done = match picked.recv().await {
+                Ok(Picked::Done(done)) => done,
+                _ => Vec::new(),
+            };
+            let done = cx
+                .background_executor()
+                .spawn(async move {
+                    done.into_iter()
+                        .map(|result| {
+                            let pick = result?;
+                            let name = pick.name.clone();
+                            photos::ready(pick).map_err(|e| Failed {
+                                name,
+                                why: format!("{e:#}"),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update_in(cx, |c, window, cx| {
+                c.photos_landed(n, &meant_for, done, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// The `n` picks `take_photos` waited for are in (or failed), picked for `meant_for`.
+    fn photos_landed(
+        &mut self,
+        n: usize,
+        meant_for: &str,
+        done: Vec<Result<PathBuf, crate::photos::Failed>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (photos, videos, failed) = crate::photos::sort(done);
+        if meant_for == self.target(cx) {
+            self.outbox.add(photos);
+            if !videos.is_empty() {
+                self.append_file_refs(&videos, window, cx);
+            }
+        } else {
+            self.land_elsewhere(meant_for, photos);
+            if !videos.is_empty() {
+                let mut drafts = self.drafts.borrow_mut();
+                if let Some(draft) = drafts.get_mut(meant_for) {
+                    draft.text = with_refs(&draft.text, &videos);
+                    draft.cursor = draft.text.len();
+                }
+            }
+        }
+        let failed = failed
+            .into_iter()
+            .map(|f| (f.name, anyhow::anyhow!(f.why)))
+            .collect();
+        attachments::arrived(self, n, failed, window, cx);
     }
 
     /// Take a screenshot with macOS's own picker and attach it. `mode`: "window", "area" or "screen".
@@ -2679,6 +2766,7 @@ impl Composer {
 
     /// "+" menu: files and photos, snapshots, the three pickers, and restating first.
     fn plus_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::photos::Source;
         let me = cx.entity();
         let theme = cx.theme().clone();
         let restate = self.restate;
@@ -2707,17 +2795,28 @@ impl Composer {
                     me.clone(),
                     me.clone(),
                 );
-                let menu = menu
+                let mut menu = menu
                     .min_w(px(230.))
-                    .check_side(gpui_kit::component::Side::Right)
-                    .item(
-                        PopupMenuItem::new("Add photos & files")
-                            .icon(crate::assets::Lucide::Image)
-                            .on_click(move |_, window, cx| {
-                                a.update(cx, |c, cx| c.attach(window, cx))
-                            }),
-                    )
-                    .separator();
+                    .check_side(gpui_kit::component::Side::Right);
+                // The Mac's open panel can't reach the Photos library: the Mac has its picker
+                // beside it (`photos::menu`).
+                let sources = crate::photos::menu();
+                for &(label, source) in sources {
+                    let me = a.clone();
+                    let icon = match source {
+                        Source::Files if sources.len() > 1 => crate::assets::Lucide::Paperclip,
+                        _ => crate::assets::Lucide::Image,
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).icon(icon).on_click(
+                        move |_, window, cx| {
+                            me.update(cx, |c, cx| match source {
+                                Source::Photos => c.attach_photos(window, cx),
+                                Source::Files => c.attach(window, cx),
+                            })
+                        },
+                    ));
+                }
+                let menu = menu.separator();
                 // Snipping Tool has the window, area and screen choice in its own toolbar.
                 let menu = if cfg!(windows) {
                     menu.item(
@@ -4014,6 +4113,21 @@ impl PickerHost for Composer {
     fn overlay_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_overlay(cx);
     }
+}
+
+/// `text` with `@path` references to `files` after it, and a space after them.
+fn with_refs(text: &str, files: &[PathBuf]) -> String {
+    let refs: Vec<String> = files
+        .iter()
+        .map(|p| trek_core::media::mention_of(&p.display().to_string()))
+        .collect();
+    let mut v = text.to_string();
+    if !v.is_empty() && !v.ends_with(' ') {
+        v.push(' ');
+    }
+    v.push_str(&refs.join(" "));
+    v.push(' ');
+    v
 }
 
 impl Attaching for Composer {

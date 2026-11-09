@@ -216,12 +216,18 @@ pub fn convert_file(path: &Path, dir: &Path) -> Result<PathBuf> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "image".into());
     let out = dir.join(format!("{stem}-{}.png", timestamp()));
-    let converted = sips_png(path, &out) || image_crate_png(path, &out);
+    convert_to(path, &out)?;
+    Ok(out)
+}
+
+/// `path` as a PNG at `out` (see `convert_file`).
+pub fn convert_to(path: &Path, out: &Path) -> Result<()> {
+    let converted = sips_png(path, out) || image_crate_png(path, out);
     if !converted || !out.is_file() {
-        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(out);
         bail!("it couldn't be converted to PNG");
     }
-    Ok(out)
+    Ok(())
 }
 
 /// `path` as PNG at `out`, by macOS's own `sips` (HEIC included). There is none off macOS.
@@ -320,24 +326,59 @@ fn save<T: Attaching>(this: &mut T, jobs: Vec<Job>, window: &mut Window, cx: &mu
             if !away.is_empty() {
                 this.land_elsewhere(&meant_for, away);
             }
-            let (failed, send) = this.outbox().landed(n, results);
-            if let Some(message) = failed {
-                crate::workspace::workspace_global(cx).update(cx, |_, cx| {
-                    cx.emit(WorkspaceEvent::Toast {
-                        message,
-                        undo: None,
-                    })
-                });
-            }
-            // Sent elsewhere than the view now shows (the user moved on meanwhile): it stays in
-            // the composer rather than go somewhere it wasn't meant for.
-            if send.is_some_and(|target| target == this.target(cx)) {
-                this.send_held(window, cx);
-            }
-            cx.notify();
+            settle(this, n, results, window, cx);
         });
     })
     .detach();
+}
+
+/// `n` of the images being saved are done: attach the ones in `results`, say what failed, and
+/// send a message that waited for them once nothing is left.
+fn settle<T: Attaching>(
+    this: &mut T,
+    n: usize,
+    results: Vec<(String, Result<PathBuf>)>,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) {
+    let (failed, send) = this.outbox().landed(n, results);
+    if let Some(message) = failed {
+        crate::workspace::workspace_global(cx).update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message,
+                undo: None,
+            })
+        });
+    }
+    // Sent elsewhere than the view now shows (the user moved on meanwhile): it stays in the
+    // composer rather than go somewhere it wasn't meant for.
+    if send.is_some_and(|target| target == this.target(cx)) {
+        this.send_held(window, cx);
+    }
+    cx.notify();
+}
+
+/// `n` files are on their way from somewhere slow (the Photos picker copies each out of the
+/// library first): the strip shows them as saving, and a send waits for them (`arrived`).
+pub fn expect<T: Attaching>(this: &mut T, n: usize, cx: &mut Context<T>) {
+    this.outbox().saving += n;
+    cx.notify();
+}
+
+/// The `n` files `expect` announced are in, already put where they go by the caller: say which
+/// couldn't be had (`failed`: each one's name and why), and send a message that waited for them.
+pub fn arrived<T: Attaching>(
+    this: &mut T,
+    n: usize,
+    failed: Vec<(String, anyhow::Error)>,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) {
+    let results = failed
+        .into_iter()
+        .map(|(label, e)| (label, Err(e)))
+        .collect();
+    settle(this, n, results, window, cx);
 }
 
 /// Attach image files (dropped, picked or pasted): ones agents read go on at once, the rest

@@ -1032,3 +1032,127 @@ fn slash_enter_picks_highlight_but_tab_accepts_first_ghost() {
         assert_eq!(slash_completion(&trek, cx).1, 1);
     });
 }
+
+/// The Photos picker's side of "Photos & videos…" (Mac), played by hand: what it says arrives on
+/// `take_photos`'s channel as the picker sends it.
+fn take_photos(
+    trek: &Trek,
+    cx: &mut gpui_kit::TestAppContext,
+) -> async_channel::Sender<trek_app::photos::Picked> {
+    let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+    let (picked, rx) = async_channel::unbounded();
+    trek.window(cx, |window, cx| {
+        composer.update(cx, |c, cx| c.take_photos(rx, window, cx))
+    });
+    picked
+}
+
+/// A pick the picker kept at `path`.
+fn kept(path: &std::path::Path, photo: bool) -> Result<Pick, Failed> {
+    std::fs::write(path, b"x").unwrap();
+    Ok(Pick {
+        path: path.to_path_buf(),
+        photo,
+        name: "IMG_1".into(),
+    })
+}
+
+use trek_app::photos::{Failed, Pick, Picked};
+
+/// While picks are copied out of the library the strip shows them saving; then photos go on the
+/// strip and videos are mentioned with `@` after what's typed, in the order picked, and one that
+/// couldn't be had says so.
+#[test]
+fn picked_photos_go_on_the_strip_and_videos_are_mentioned() {
+    run(async |cx| {
+        let trek = open(cx);
+        let said = toasts(&trek, cx);
+        trek.type_text(cx, "what's in these");
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let picked = take_photos(&trek, cx);
+        picked.try_send(Picked::Copying(4)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| composer.read(cx).attached()), (vec![], 4));
+        let (a, clip, b) = (
+            trek.project.join("IMG_1-a.jpeg"),
+            trek.project.join("IMG_2-b.mov"),
+            trek.project.join("IMG_3-c.png"),
+        );
+        let missing = Failed {
+            name: "IMG_4".into(),
+            why: "it isn't downloaded from iCloud".into(),
+        };
+        picked
+            .try_send(Picked::Done(vec![
+                kept(&a, true),
+                kept(&clip, false),
+                kept(&b, true),
+                Err(missing),
+            ]))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| composer.read(cx).attached()), (vec![a, b], 0));
+        assert_eq!(
+            trek.composer_text(cx),
+            format!("what's in these @{} ", clip.display())
+        );
+        assert_eq!(
+            said.borrow()
+                .iter()
+                .map(|(m, _)| m.as_str())
+                .collect::<Vec<_>>(),
+            ["Couldn't attach IMG_4: it isn't downloaded from iCloud."]
+        );
+    });
+}
+
+/// Cancel (or Escape) closes the picker's channel without a word: nothing changes.
+#[test]
+fn a_cancelled_photos_pick_changes_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.type_text(cx, "as it was");
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        drop(take_photos(&trek, cx));
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| composer.read(cx).attached()), (vec![], 0));
+        assert_eq!(trek.composer_text(cx), "as it was");
+    });
+}
+
+/// Picks that come in after the user moved to another thread belong to the draft they were
+/// picked for: the photo and the video's mention are there on coming back, not in the thread.
+#[test]
+fn photos_picked_for_a_draft_stay_with_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let project = trek.project.clone();
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let picked = take_photos(&trek, cx);
+        picked.try_send(Picked::Copying(2)).unwrap();
+        cx.run_until_parked();
+        let a = trek.quiet_thread(cx);
+        let (photo, clip) = (
+            trek.project.join("IMG_1-a.png"),
+            trek.project.join("IMG_2-b.mp4"),
+        );
+        picked
+            .try_send(Picked::Done(vec![kept(&photo, true), kept(&clip, false)]))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| composer.read(cx).attached()), (vec![], 0));
+        assert_eq!(trek.composer_text(cx), "");
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project),
+                },
+                cx,
+            )
+        });
+        assert_eq!(cx.read(|cx| composer.read(cx).attached().0), [photo]);
+        assert_eq!(trek.composer_text(cx), format!("@{} ", clip.display()));
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a), cx));
+        assert!(cx.read(|cx| composer.read(cx).attached().0).is_empty());
+    });
+}
