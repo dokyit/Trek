@@ -20,13 +20,16 @@ final class Drive: XCTestCase {
         let peers = (env["TREK_DRIVER_PEERS"] ?? "").split(separator: ",").map(String.init)
         let server = Server(
             port: port, token: env["TREK_DRIVER_TOKEN"] ?? "", peers: peers.isEmpty ? nil : peers,
-            handle: actions.route)
+            handle: actions.route, watch: actions.stream.add)
+        // Somebody watching the screen keeps the driver from stopping as idle.
+        actions.stream.onActivity = { DispatchQueue.main.async { actions.watched() } }
         try server.start()
         XCTContext.runActivity(named: "TrekDriver: serving on \(server.reach), port \(port)") { _ in }
         while !actions.stopped, Date().timeIntervalSince(actions.lastRequest) < idle {
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.25))
         }
         print(actions.stopped ? "TrekDriver: stopped by Trek" : "TrekDriver: idle for \(Int(idle)) s, stopping")
+        actions.stream.stop()
         server.stop()
     }
 

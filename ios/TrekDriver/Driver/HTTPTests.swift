@@ -124,8 +124,10 @@ final class HTTPTests: XCTestCase {
         XCTAssertTrue(Actions.hardwareKeys.contains("left"))
         XCTAssertEqual(Actions.keyText("A"), "A")
         XCTAssertNil(Actions.keyText("hyper"))
-        XCTAssertEqual(Actions.version, 2)
-        XCTAssertTrue(Actions.features.contains("path"))
+        XCTAssertEqual(Actions.version, 3)
+        for feature in ["path", "keys", "stream", "elements"] {
+            XCTAssertTrue(Actions.features.contains(feature), feature)
+        }
     }
 
     func testNumbersFromJSONOrStrings() {

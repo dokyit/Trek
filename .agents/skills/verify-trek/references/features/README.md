@@ -23,7 +23,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Editor and deep links](editor.md) — open and edit project files in-app, and reach them from `trek://` links and editor extensions; Editor mode, a code editor of its own whose AI side bar keeps editor chats apart from Agents threads.
 - [Browser](browser.md) — browse, inspect elements, take page screenshots, and open devtools; agents' browser use (`trek-browser`, `mock:browser`).
 - [iOS Simulator](ios-simulator.md) — boot devices, mirror the screen, install apps, tap, type, and capture.
-- [iPhone tool](iphone-tool.md) — the user's real iPhone over USB: its screen (with its real clock), taps over USB through Trek Driver, Bluetooth or iPhone Mirroring, apps and files; `control phone <state>` for made-up situations.
+- [iPhone tool](iphone-tool.md) — the user's real iPhone over USB: its screen (with its real clock, pushed as a stream by Trek Driver), taps over USB through Trek Driver, Bluetooth or iPhone Mirroring, the screen's elements with refs for agents, apps and files; `control phone <state>` for made-up situations.
 - [Side Chat](side-chat.md) — use a second conversation without leaving the main thread.
 
 ## Configuration and continuity

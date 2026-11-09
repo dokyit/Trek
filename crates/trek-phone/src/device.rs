@@ -322,9 +322,23 @@ pub fn clock(udid: Option<&str>) -> Result<Clock, String> {
     })?
 }
 
-/// One HTTP/1.1 exchange over plain TCP: `request` sent, the answer read until it's whole by
-/// its Content-Length or the far end closes.
-async fn exchange_tcp(addr: std::net::SocketAddr, request: &[u8]) -> Result<Vec<u8>, String> {
+/// Why an exchange with a port on the phone failed, and whether the request had gone out by
+/// then: when it had, what it asked for (a tap) may have happened all the same, and only the
+/// answer was lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failed {
+    /// The whole request was written before it failed.
+    pub sent: bool,
+    pub why: String,
+}
+
+/// One HTTP/1.1 exchange over plain TCP: `request` sent (`sent` set once it has all gone), the
+/// answer read until it's whole by its Content-Length or the far end closes.
+async fn exchange_tcp(
+    addr: std::net::SocketAddr,
+    request: &[u8],
+    sent: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<u8>, String> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
         format!(
@@ -336,6 +350,7 @@ async fn exchange_tcp(addr: std::net::SocketAddr, request: &[u8]) -> Result<Vec<
         .write_all(request)
         .await
         .map_err(|e| format!("Couldn't send to the iPhone: {e}"))?;
+    sent.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut out = Vec::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -379,7 +394,19 @@ pub fn exchange(
     request: &[u8],
     limit: std::time::Duration,
 ) -> Result<Vec<u8>, String> {
-    block_on(async move {
+    exchange_told(udid, port, request, limit).map_err(|f| f.why)
+}
+
+/// [`exchange`], saying on failure whether the request had gone out ([`Failed`]).
+pub fn exchange_told(
+    udid: Option<&str>,
+    port: u16,
+    request: &[u8],
+    limit: std::time::Duration,
+) -> Result<Vec<u8>, Failed> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let sent = AtomicBool::new(false);
+    let answer = block_on(async {
         let work = async {
             let mut mux = UsbmuxdConnection::default()
                 .await
@@ -395,7 +422,7 @@ pub fn exchange(
             // port), not a port an app listens on: Trek Driver's is reached straight over TCP,
             // at the phone's address; the driver takes only this Mac's connections there.
             if let Connection::Network(ip) = device.connection_type {
-                return exchange_tcp(phone_socket(ip, port), request).await;
+                return exchange_tcp(phone_socket(ip, port), request, &sent).await;
             }
             // A connection of its own: after Connect it carries only the phone's port.
             let tunnel = UsbmuxdConnection::default()
@@ -408,6 +435,7 @@ pub fn exchange(
             conn.send_raw(request)
                 .await
                 .map_err(err("Couldn't send to the iPhone"))?;
+            sent.store(true, Ordering::Relaxed);
             let mut out = Vec::new();
             loop {
                 // A whole answer by its Content-Length is the end too: over Wi-Fi the close
@@ -428,6 +456,158 @@ pub fn exchange(
         tokio::time::timeout(limit, work)
             .await
             .map_err(|_| format!("The iPhone's port {port} didn't answer in time."))?
+    });
+    answer.and_then(|a| a).map_err(|why| Failed {
+        sent: sent.load(Ordering::Relaxed),
+        why,
+    })
+}
+
+/// How often a long answer's reader hears from [`stream`] when nothing comes (an empty piece),
+/// so it can stop it.
+const STREAM_TICK: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Where a long answer's pieces come from: the next bytes read, none when the far end closed.
+/// (Dropping a read that hasn't finished loses nothing: [`pump`] does, at each tick.)
+trait Pieces {
+    async fn next(&mut self) -> Result<Vec<u8>, String>;
+}
+
+impl Pieces for tokio::net::TcpStream {
+    async fn next(&mut self) -> Result<Vec<u8>, String> {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = vec![0u8; 1 << 18];
+        let n = self.read(&mut buf).await.map_err(|e| e.to_string())?;
+        buf.truncate(n);
+        Ok(buf)
+    }
+}
+
+impl Pieces for idevice::Idevice {
+    async fn next(&mut self) -> Result<Vec<u8>, String> {
+        self.read_any(1 << 18).await.map_err(|e| e.to_string())
+    }
+}
+
+/// Hand what `pieces` reads to `on_bytes`, piece by piece, until it says to stop (`Ok`), the
+/// far end closes, a read fails, or nothing has come for `quiet` (each an `Err` saying which).
+/// While nothing comes `on_bytes` gets an empty piece every [`STREAM_TICK`].
+async fn pump(
+    pieces: &mut impl Pieces,
+    quiet: std::time::Duration,
+    on_bytes: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), String> {
+    let mut heard = std::time::Instant::now();
+    loop {
+        match tokio::time::timeout(STREAM_TICK, pieces.next()).await {
+            Ok(Ok(piece)) if piece.is_empty() => {
+                return Err("The iPhone closed the connection.".into());
+            }
+            Ok(Ok(piece)) => {
+                heard = std::time::Instant::now();
+                if !on_bytes(&piece) {
+                    return Ok(());
+                }
+            }
+            Ok(Err(e)) => return Err(format!("Couldn't read from the iPhone: {e}")),
+            Err(_) => {
+                if !on_bytes(&[]) {
+                    return Ok(());
+                }
+                if heard.elapsed() >= quiet {
+                    return Err(format!(
+                        "Nothing came from the iPhone for {} s.",
+                        quiet.as_secs().max(1)
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// [`stream`] over plain TCP at `addr`: how the phone's port is reached over Wi-Fi (and a
+/// simulator's, on this Mac).
+async fn stream_from(
+    addr: std::net::SocketAddr,
+    request: &[u8],
+    quiet: std::time::Duration,
+    on_bytes: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+    let connect = tokio::time::timeout(quiet, tokio::net::TcpStream::connect(addr));
+    let mut socket = match connect.await {
+        Ok(Ok(socket)) => socket,
+        Ok(Err(e)) => {
+            return Err(format!(
+                "Nothing answers on the iPhone's port {}: {e}",
+                addr.port()
+            ));
+        }
+        Err(_) => {
+            return Err(format!(
+                "Nothing answers on the iPhone's port {}.",
+                addr.port()
+            ));
+        }
+    };
+    socket
+        .write_all(request)
+        .await
+        .map_err(|e| format!("Couldn't send to the iPhone: {e}"))?;
+    pump(&mut socket, quiet, on_bytes).await
+}
+
+/// A long answer over plain TCP (blocking): `request` sent to `addr`, and what comes back
+/// handed to `on_bytes` as [`stream`] does. For a port that isn't behind usbmuxd: Trek Driver
+/// in a simulator.
+pub fn stream_tcp(
+    addr: std::net::SocketAddr,
+    request: &[u8],
+    quiet: std::time::Duration,
+    on_bytes: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), String> {
+    block_on(stream_from(addr, request, quiet, on_bytes))?
+}
+
+/// Send `request` to TCP `port` on the phone and hand what it answers to `on_bytes` piece by
+/// piece, as it comes, for as long as the phone keeps the connection open: Trek Driver's
+/// `/stream`. `on_bytes` returns whether to go on; it also gets an empty piece every fifth of a
+/// second while nothing comes, so it can stop a quiet stream. `Ok` when it stopped it (the
+/// connection is closed, which is how the phone learns nobody watches); `Err` when the
+/// connection couldn't be made, dropped, or brought nothing for `quiet`. Reaches the port as
+/// [`exchange`] does: through usbmuxd over the cable, straight over TCP on Wi-Fi.
+pub fn stream(
+    udid: Option<&str>,
+    port: u16,
+    request: &[u8],
+    quiet: std::time::Duration,
+    on_bytes: &mut dyn FnMut(&[u8]) -> bool,
+) -> Result<(), String> {
+    block_on(async {
+        let mut mux = UsbmuxdConnection::default()
+            .await
+            .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+        let mut devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
+        devices.sort_by_key(|d| d.connection_type != Connection::Usb);
+        let device = match udid {
+            Some(u) => devices.into_iter().find(|d| d.udid == u),
+            None => devices.into_iter().next(),
+        }
+        .ok_or("No iPhone is connected: plug it in, unlock it and trust this Mac.")?;
+        if let Connection::Network(ip) = device.connection_type {
+            return stream_from(phone_socket(ip, port), request, quiet, on_bytes).await;
+        }
+        let tunnel = UsbmuxdConnection::default()
+            .await
+            .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+        let mut conn = tunnel
+            .connect_to_device(device.device_id, port, LABEL)
+            .await
+            .map_err(|e| format!("Nothing answers on the iPhone's port {port}: {e}"))?;
+        conn.send_raw(request)
+            .await
+            .map_err(err("Couldn't send to the iPhone"))?;
+        pump(&mut conn, quiet, on_bytes).await
     })?
 }
 
@@ -649,14 +829,128 @@ mod tests {
             // Never closed: the reader must not wait for that.
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         });
+        let sent = std::sync::atomic::AtomicBool::new(false);
         let raw = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            exchange_tcp(addr, b"GET /x HTTP/1.1\r\n\r\n"),
+            exchange_tcp(addr, b"GET /x HTTP/1.1\r\n\r\n", &sent),
         )
         .await
         .expect("done before the far end closes")
         .unwrap();
         let (status, body) = crate::driver::response(&raw).unwrap();
         assert_eq!((status, body.as_slice()), (200, &b"hello wifi"[..]));
+        assert!(sent.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// Whether a failed exchange had sent its request decides what a tap's failure means:
+    /// nothing listening is "not sent"; a far end that takes the request and hangs up without
+    /// answering is "sent".
+    #[tokio::test]
+    async fn a_failed_exchange_says_whether_the_request_went_out() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncReadExt as _;
+        // Nothing listens there (the listener is gone before the connect).
+        let gone = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = gone.local_addr().unwrap();
+        drop(gone);
+        let sent = AtomicBool::new(false);
+        assert!(
+            exchange_tcp(addr, b"POST /tap HTTP/1.1\r\n\r\n", &sent)
+                .await
+                .is_err()
+        );
+        assert!(!sent.load(Ordering::Relaxed), "never connected: not sent");
+        // It reads the request, then closes without a word.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = s.read(&mut buf).await;
+        });
+        let sent = AtomicBool::new(false);
+        let raw = exchange_tcp(addr, b"POST /tap HTTP/1.1\r\n\r\n", &sent).await;
+        assert!(sent.load(Ordering::Relaxed), "the request went out");
+        // No answer at all: the driver's reader calls that cut short.
+        assert!(raw.is_ok_and(|r| crate::driver::response(&r).is_err()));
+    }
+
+    /// A long answer comes piece by piece until the reader stops it, the far end closes, or it
+    /// goes quiet; the reader hears a tick while nothing comes.
+    #[test]
+    fn a_long_answer_is_read_until_stopped_closed_or_quiet() {
+        use std::io::{Read as _, Write as _};
+        use std::time::Duration;
+        let serve = |script: fn(&mut std::net::TcpStream)| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let thread = std::thread::spawn(move || {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 256];
+                let _ = s.read(&mut buf);
+                script(&mut s);
+                // Wait for the reader to hang up (or for our own end to).
+                let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                matches!(s.read(&mut buf), Ok(0))
+            });
+            (addr, thread)
+        };
+        // Pieces come, then the far end closes.
+        let (addr, server) = serve(|s| {
+            s.write_all(b"one").unwrap();
+            std::thread::sleep(Duration::from_millis(60));
+            s.write_all(b"two").unwrap();
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        });
+        let mut got = Vec::new();
+        let end = stream_tcp(
+            addr,
+            b"GET /stream HTTP/1.1\r\n\r\n",
+            Duration::from_secs(5),
+            &mut |b| {
+                got.extend_from_slice(b);
+                true
+            },
+        );
+        assert_eq!(got, b"onetwo");
+        assert_eq!(end.unwrap_err(), "The iPhone closed the connection.");
+        let _ = server.join();
+        // The reader stops it: `Ok`, and the far end sees the connection close.
+        let (addr, server) = serve(|s| s.write_all(b"frame").unwrap());
+        let end = stream_tcp(
+            addr,
+            b"GET /stream HTTP/1.1\r\n\r\n",
+            Duration::from_secs(5),
+            &mut |b| b.is_empty(),
+        );
+        assert_eq!(end, Ok(()));
+        assert!(server.join().unwrap(), "stopping closes the connection");
+        // Nothing comes: ticks (empty pieces) until it has been quiet too long.
+        let (addr, server) = serve(|_| std::thread::sleep(Duration::from_millis(900)));
+        let mut ticks = 0;
+        let end = stream_tcp(
+            addr,
+            b"GET /stream HTTP/1.1\r\n\r\n",
+            Duration::from_millis(500),
+            &mut |b| {
+                assert!(b.is_empty());
+                ticks += 1;
+                true
+            },
+        );
+        assert!(end.unwrap_err().starts_with("Nothing came from the iPhone"));
+        assert!(ticks >= 2, "{ticks} ticks");
+        let _ = server.join();
+        // Nothing listens.
+        let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = gone.local_addr().unwrap();
+        drop(gone);
+        let end = stream_tcp(
+            addr,
+            b"GET /stream HTTP/1.1\r\n\r\n",
+            Duration::from_secs(2),
+            &mut |_| true,
+        );
+        assert!(end.unwrap_err().starts_with("Nothing answers"));
     }
 }

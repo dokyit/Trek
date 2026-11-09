@@ -89,6 +89,12 @@ per line). "Schemas" are the tools as MCP JSON, "function wire" as an OpenAI fun
 | **Default** (no computer use) | 57 | **965 → 793** | 612 | 6,554 → 6,439 | **7,101 → 6,986** |
 | **Everything on** (+ computer, background) | 67 | **1,183 → 989** | 716 | 7,733 → 7,618 | **8,380 → 8,265** |
 
+Since this table (2026-11-09, counted in characters, not measured again in tokens): trek-phone has
+17 tools. `phone_elements` and `phone_wait` are new, `phone_tap` takes a `ref`, and its instructions
+say to read elements first and take a screenshot when looks matter. Instructions 1,178 → 1,475
+characters, schemas 6,033 → 7,413 (about +75 and +345 tokens by chars/4); the `phone` budget and
+`ALL_CHARS` in `prompt_budget` (`crates/trek-mcp/src/main.rs`) were raised to that plus headroom.
+
 ## Per agent, per request
 
 Estimates in o200k tokens, then what the vendor reported live.

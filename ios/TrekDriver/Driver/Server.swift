@@ -4,6 +4,8 @@ import Network
 /// A tiny HTTP server on the iPhone's loopback: the Mac reaches it over the USB cable through
 /// usbmuxd (which connects to the phone's own 127.0.0.1), and nothing on the network can. Each
 /// request is one connection; `handle` runs on the main thread, where XCUITest wants its calls.
+/// `GET /stream` alone isn't answered and closed: its connection goes to `watch` (the screen
+/// stream), which sends frames down it until the Mac hangs up.
 ///
 /// Over Wi-Fi (no cable) usbmuxd connects to the phone's address on the network instead, so Trek
 /// passes `peers`, the Mac's own addresses there: the server then listens on the local network
@@ -16,6 +18,9 @@ final class Server {
     /// only, as over the cable.
     private let peers: [Data]?
     private let handle: (Request) -> Response
+    /// Takes over a connection that asked for `GET /stream` (the one request that isn't answered
+    /// and closed: frames go down it for as long as the Mac keeps it).
+    private let watch: ((NWConnection, Request) -> Void)?
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "dev.trek.driver.server")
     /// Screenshots, taken off the main thread: there a screenshot (a third of a second) waited for
@@ -24,11 +29,13 @@ final class Server {
     /// of its own).
     private let shots = DispatchQueue(label: "dev.trek.driver.shots", qos: .userInitiated)
 
-    init(port: UInt16, token: String, peers: [String]? = nil, handle: @escaping (Request) -> Response) {
+    init(port: UInt16, token: String, peers: [String]? = nil, handle: @escaping (Request) -> Response,
+         watch: ((NWConnection, Request) -> Void)? = nil) {
         self.port = port
         self.token = token
         self.peers = peers.map { $0.compactMap(Server.raw) }
         self.handle = handle
+        self.watch = watch
     }
 
     /// Where it takes connections from, for its log.
@@ -81,6 +88,10 @@ final class Server {
                 if let peer = self.refused(connection) {
                     NSLog("TrekDriver: refused a connection from \(peer)")
                     self.send(connection, .error("not from the Mac that started it (\(peer))", status: 403))
+                    return
+                }
+                if request.method == "GET", request.path == "/stream", let watch = self.watch {
+                    watch(connection, request)
                     return
                 }
                 let worker = request.method == "GET" && request.path == "/screenshot"

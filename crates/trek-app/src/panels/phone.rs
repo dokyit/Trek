@@ -97,14 +97,30 @@ const PASSCODE_ASK: Duration = Duration::from_secs(8);
 /// How long the picture waits after the driver failed to start before starting it again (each
 /// try runs xcodebuild for seconds; the strip says why meanwhile).
 const DRIVER_RETRY: Duration = Duration::from_secs(20);
-/// How often the picture is asked of Trek Driver while it runs (a screenshot takes it ~0.3 s),
-/// and the JPEG quality it comes at.
+/// From a driver without `/stream`: how often the picture is asked of it while it runs (a
+/// screenshot takes it ~0.3 s), and the JPEG quality it comes at. (One with `/stream` pushes
+/// its frames: `PhonePanel::start_driver_frames`.)
 const DRIVER_FRAME: Duration = Duration::from_millis(350);
 const DRIVER_JPEG: u8 = 70;
 /// While the user is touching or typing (and a little after), the picture is asked for as often
 /// as the phone gives it: what they did shows as it happens, not a third of a second later.
 const DRIVER_FRAME_BUSY: Duration = Duration::from_millis(110);
 const BUSY_FOR: Duration = Duration::from_secs(3);
+/// `phone_elements`: the most elements asked of the driver, and how long it may take reading
+/// them.
+const ELEMENTS_MAX: u32 = 400;
+const ELEMENTS_LIMIT: Duration = Duration::from_secs(5);
+/// What a command to iPhone Mirroring that got no answer says.
+const MIRROR_LATE: &str = "iPhone Mirroring didn't answer in time.";
+
+/// A tap or key that went to the helper (`who`) and got no answer in time: it may have
+/// happened all the same, so it's said to be unknown rather than failed.
+fn unanswered(who: &str) -> String {
+    format!(
+        "{} {who} didn't answer in time, so the tap or key may or may not have happened, and wasn't sent again: look at the screen (phone_screenshot) before deciding to repeat it.",
+        driver::UNKNOWN
+    )
+}
 
 /// Where Trek remembers that iPhone Mirroring has shown an iPhone here, and its name: the route
 /// then stays iPhone Mirroring while its window is closed.
@@ -139,6 +155,29 @@ struct Frame {
     real_clock: bool,
 }
 
+/// A frame as it came, waiting for the decoder thread: only the newest waits.
+struct Undecoded {
+    jpeg: Vec<u8>,
+    /// The screen's size as the cable says it with each frame; 0 for the driver's picture,
+    /// which is its own size (read from its header).
+    width: u32,
+    height: u32,
+    /// From Trek Driver.
+    real_clock: bool,
+}
+
+impl Undecoded {
+    /// A frame from Trek Driver.
+    fn driver(jpeg: Vec<u8>) -> Self {
+        Undecoded {
+            jpeg,
+            width: 0,
+            height: 0,
+            real_clock: true,
+        }
+    }
+}
+
 pub struct PhonePanel {
     workspace: Entity<Workspace>,
     visible: bool,
@@ -157,14 +196,17 @@ pub struct PhonePanel {
     at_by_trek: bool,
     frame: Option<Frame>,
     stale: Vec<Arc<RenderImage>>,
-    /// The newest undecoded frame, for the decoder thread.
-    decode_slot: Arc<Mutex<Option<Vec<u8>>>>,
-    decode_wake: async_channel::Sender<(u32, u32, bool)>,
+    /// The newest undecoded frame, for the decoder thread, and its nudge to look.
+    decode_slot: Arc<Mutex<Option<Undecoded>>>,
+    decode_wake: async_channel::Sender<()>,
     /// The picture comes from Trek Driver (`start_driver_frames`), the cable's capture off: the
     /// iPhone shows its real clock then (captured, it shows 9:41, on the phone too).
     driver_frames: bool,
-    /// True while the loop asking the driver for frames runs; it clears it when it ends.
+    /// True while the loop getting the driver's frames runs; it clears it when it ends.
     driver_frames_live: Arc<AtomicBool>,
+    /// The tool is on screen, for that loop: frames that come while it's hidden (an agent holds
+    /// the phone) are kept, the newest only, and decoded when it shows.
+    shown: Arc<AtomicBool>,
     /// When the user last touched or typed on the phone (milliseconds on `busy_clock`): the
     /// picture comes faster for a while after.
     last_input: Arc<std::sync::atomic::AtomicU64>,
@@ -232,8 +274,8 @@ pub struct PhonePanel {
 impl PhonePanel {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Frames decode on a thread of their own; only the newest waits.
-        let decode_slot: Arc<Mutex<Option<Vec<u8>>>> = Arc::default();
-        let (wake_tx, wake_rx) = async_channel::bounded::<(u32, u32, bool)>(1);
+        let decode_slot: Arc<Mutex<Option<Undecoded>>> = Arc::default();
+        let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
         let (frames_tx, frames_rx) = async_channel::bounded::<Frame>(2);
         let (slot, renderer) = (decode_slot.clone(), cx.svg_renderer());
         let _ = std::thread::Builder::new()
@@ -243,8 +285,14 @@ impl PhonePanel {
                 // app in front changes).
                 let mut bar = None;
                 let mut bar_at: Option<Instant> = None;
-                while let Ok((w, h, real_clock)) = wake_rx.recv_blocking() {
-                    let Some(jpeg) = slot.lock().unwrap().take() else {
+                while wake_rx.recv_blocking().is_ok() {
+                    let Some(Undecoded {
+                        jpeg,
+                        width: w,
+                        height: h,
+                        real_clock,
+                    }) = slot.lock().unwrap().take()
+                    else {
                         continue;
                     };
                     if real_clock {
@@ -339,6 +387,7 @@ impl PhonePanel {
             mirror_frames: false,
             driver_frames: false,
             driver_frames_live: Arc::new(AtomicBool::new(false)),
+            shown: Arc::new(AtomicBool::new(false)),
             last_input: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             busy_clock: Instant::now(),
             driver_frames_task: None,
@@ -474,13 +523,15 @@ impl PhonePanel {
         self.mirroring_seen = Some(name);
     }
 
-    /// Shown or hidden by the right panel: frames stream only while it's on screen.
+    /// Shown or hidden by the right panel: frames come only while it's on screen, or while an
+    /// agent holds the phone (the driver's, kept undecoded until it shows).
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
         }
         self.visible = visible;
-        if !visible {
+        self.shown.store(visible, Ordering::Relaxed);
+        if !visible && !self.held() {
             self.stop_driver_frames(cx);
         }
         if let Some(link) = &self.link {
@@ -488,14 +539,22 @@ impl PhonePanel {
         }
         if visible {
             self.refreshed = None;
+            // The newest frame that came while it was hidden.
+            let _ = self.decode_wake.try_send(());
         }
         cx.notify();
+    }
+
+    /// An agent has the phone: a call of its is running or waiting, or its turn still holds it.
+    fn held(&self) -> bool {
+        self.busy() || self.lease.holder(Instant::now()).is_some()
     }
 
     /// The tab is closing: the helper stops (the Bluetooth keyboard goes away), AssistiveTouch
     /// goes back off if Trek turned it on, and calls waiting fail.
     pub fn release(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.visible = false;
+        self.shown.store(false, Ordering::Relaxed);
         for call in self.queue.drain(..) {
             call.answer(Err("The user closed Trek's iPhone tool.".into()));
         }
@@ -524,9 +583,8 @@ impl PhonePanel {
                 self.driver_shown = state.clone();
                 cx.notify();
             }
-            let held = self.busy() || self.lease.holder(Instant::now()).is_some();
             if state == driver::State::Ready
-                && !held
+                && !self.held()
                 && self.driver.idle().is_some_and(|i| i >= DRIVER_IDLE)
             {
                 self.stop_driver(cx);
@@ -803,8 +861,13 @@ impl PhonePanel {
                 if self.driver_frames {
                     return;
                 }
-                *self.decode_slot.lock().unwrap() = Some(jpeg);
-                let _ = self.decode_wake.try_send((width, height, false));
+                *self.decode_slot.lock().unwrap() = Some(Undecoded {
+                    jpeg,
+                    width,
+                    height,
+                    real_clock: false,
+                });
+                let _ = self.decode_wake.try_send(());
             }
             Event::Status(s) => {
                 if s != self.status {
@@ -890,11 +953,13 @@ impl PhonePanel {
     }
 
     /// The picture from Trek Driver while it can run (the phone unlocked, on the cable or over
-    /// Wi-Fi, the driver installed, the panel on screen): started and stopped as that changes,
-    /// and stopped when its loop ended (the driver went away). After a start that failed it
-    /// waits `DRIVER_RETRY` before starting again by itself (a tap starts it at once).
+    /// Wi-Fi, the driver installed) and somebody looks: the panel on screen, or an agent holding
+    /// the phone. Started and stopped as that changes (the phone encodes for as long as it
+    /// runs: nobody looking, it stops), and stopped when its loop ended (the driver went away).
+    /// After a start that failed it waits `DRIVER_RETRY` before starting again by itself (a tap
+    /// starts it at once).
     fn manage_driver_frames(&mut self, cx: &mut Context<Self>) {
-        let wanted = self.visible
+        let wanted = (self.visible || self.held())
             && !self.mirror_frames
             && self.driver_avail() == driver::Avail::Ready
             && self.facts().route() == Route::Driver;
@@ -914,9 +979,13 @@ impl PhonePanel {
         }
     }
 
-    /// A loop asking the driver (started if need be) for the screen a few times a second; its
-    /// first frame switches the picture over (`show_frame`) and the cable's capture off, so the
-    /// iPhone shows its real clock.
+    /// The driver's picture (the driver started if need be): its first frame switches the
+    /// picture over (`show_frame`) and the cable's capture off, so the iPhone shows its real
+    /// clock. A driver with `/stream` pushes its frames as the screen changes
+    /// (`Driver::watch`); when that connection drops (the phone locked, the cable out, another
+    /// Wi-Fi address) the driver is checked, started again if it went, and the stream connected
+    /// again (`driver::after_stream`). One without `/stream`, or that won't serve it, is asked
+    /// for a screenshot a few times a second, as before.
     fn start_driver_frames(&mut self, cx: &mut Context<Self>) {
         let (Some(install), Some(udid)) = (
             self.driver_install.clone(),
@@ -929,37 +998,90 @@ impl PhonePanel {
         let d = self.driver.clone();
         let slot = self.decode_slot.clone();
         let wake = self.decode_wake.clone();
+        let shown = self.shown.clone();
         let executor = cx.background_executor().clone();
         let (last_input, clock) = (self.last_input.clone(), self.busy_clock);
         let busy = move || {
             let last = last_input.load(Ordering::Relaxed);
             last > 0 && clock.elapsed().as_millis() as u64 <= last + BUSY_FOR.as_millis() as u64
         };
-        self.driver_frames_task = Some(cx.background_executor().spawn(async move {
-            if d.ensure(&install, &udid, driver::START_LIMIT).is_err() {
-                live.store(false, Ordering::Relaxed);
-                return;
+        // The newest frame waits for the decoder; while the tool is hidden it only waits.
+        let show = move |jpeg: Vec<u8>| {
+            *slot.lock().unwrap() = Some(Undecoded::driver(jpeg));
+            if shown.load(Ordering::Relaxed) {
+                let _ = wake.try_send(());
             }
+        };
+        self.driver_frames_task = Some(cx.background_executor().spawn(async move {
+            // Until when screenshots are asked for instead of the stream (`None`: it's the
+            // stream's turn); a driver without `/stream` never gets one.
+            let mut poll_until: Option<Option<Instant>> = None;
+            let mut drops = 0u32;
             while live.load(Ordering::Relaxed) {
-                let started = Instant::now();
-                match d.screenshot(FRAME_WIDTH, DRIVER_JPEG) {
-                    Ok(jpeg) => {
-                        *slot.lock().unwrap() = Some(jpeg);
-                        let _ = wake.try_send((0, 0, true));
-                    }
-                    Err(_) => break,
+                if d.ensure(&install, &udid, driver::START_LIMIT).is_err() {
+                    break;
                 }
-                // The next frame at the pace of the moment, looked at again every 40 ms: a touch
-                // during a calm wait brings it on at once.
-                loop {
-                    let pace = if busy() {
-                        DRIVER_FRAME_BUSY
+                if poll_until.is_some_and(|until| until.is_some_and(|t| Instant::now() >= t)) {
+                    poll_until = None;
+                }
+                if poll_until.is_none() && d.takes("stream") {
+                    let wifi = matches!(device::link(&udid), Ok(Some(device::Link::Network(_))));
+                    let options = if wifi {
+                        driver::StreamOptions::WIFI
                     } else {
-                        DRIVER_FRAME
+                        driver::StreamOptions::CABLE
                     };
-                    match pace.checked_sub(started.elapsed()) {
-                        Some(rest) => executor.timer(rest.min(Duration::from_millis(40))).await,
-                        None => break,
+                    let mut frames = 0u32;
+                    // Blocks until it ends; `live` is looked at with each frame, and five times
+                    // a second while none comes.
+                    let end = d.watch(&options, &mut |picture| {
+                        if let driver::Picture::Frame(jpeg) = picture {
+                            frames += 1;
+                            show(jpeg);
+                        }
+                        live.load(Ordering::Relaxed)
+                    });
+                    if frames > 0 {
+                        drops = 0;
+                    }
+                    match driver::after_stream(&end, drops) {
+                        driver::Next::Stop => break,
+                        driver::Next::Poll(again) => {
+                            tracing::debug!("the iPhone's screen by screenshots: {end:?}");
+                            poll_until = Some(again.map(|wait| Instant::now() + wait));
+                        }
+                        driver::Next::Again(wait) => {
+                            tracing::debug!("the iPhone's screen stream dropped: {end:?}");
+                            drops += 1;
+                            executor.timer(wait).await;
+                        }
+                    }
+                    continue;
+                }
+                // One screenshot at a time, until the stream's turn comes (if it does).
+                while live.load(Ordering::Relaxed)
+                    && !poll_until.is_some_and(|until| until.is_some_and(|t| Instant::now() >= t))
+                {
+                    let started = Instant::now();
+                    match d.screenshot(FRAME_WIDTH, DRIVER_JPEG) {
+                        Ok(jpeg) => show(jpeg),
+                        Err(_) => {
+                            live.store(false, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    // The next frame at the pace of the moment, looked at again every 40 ms: a
+                    // touch during a calm wait brings it on at once.
+                    loop {
+                        let pace = if busy() {
+                            DRIVER_FRAME_BUSY
+                        } else {
+                            DRIVER_FRAME
+                        };
+                        match pace.checked_sub(started.elapsed()) {
+                            Some(rest) => executor.timer(rest.min(Duration::from_millis(40))).await,
+                            None => break,
+                        }
                     }
                 }
             }
@@ -971,6 +1093,12 @@ impl PhonePanel {
     fn stop_driver_frames(&mut self, cx: &mut Context<Self>) {
         self.driver_frames_live.store(false, Ordering::Relaxed);
         self.driver_frames_task = None;
+        // A frame of its that still waits (it came while the tool was hidden) is old news by
+        // the time the tool shows again.
+        self.decode_slot
+            .lock()
+            .unwrap()
+            .take_if(|waiting| waiting.real_clock);
         if self.driver_frames {
             self.driver_frames = false;
             if let Some(link) = &self.link {
@@ -1269,8 +1397,13 @@ impl PhonePanel {
             "touch" | "hold" | "typing" => {
                 self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
                 self.driver_frames = true;
-                *self.decode_slot.lock().unwrap() = Some(touch::demo_home_screen());
-                let _ = self.decode_wake.try_send((440, 956, false));
+                *self.decode_slot.lock().unwrap() = Some(Undecoded {
+                    jpeg: touch::demo_home_screen(),
+                    width: 440,
+                    height: 956,
+                    real_clock: false,
+                });
+                let _ = self.decode_wake.try_send(());
             }
             "driver" => self.demo_driver = Some((driver::Avail::Ready, driver::State::Off)),
             "driver-starting" => {
@@ -2078,6 +2211,7 @@ fn phone_time(clock: Option<device::Clock>, now: chrono::DateTime<chrono::Utc>) 
 fn starting(method: &str) -> &'static str {
     match method {
         "phone_screenshot" => "Looking at the screen…",
+        "phone_elements" => "Reading the screen…",
         "phone_tap" => "Tapping…",
         "phone_swipe" => "Swiping…",
         "phone_type" => "Typing…",
@@ -2240,17 +2374,27 @@ impl Run<'_> {
                         self.mirror_act(&link, cmd, limit).await?;
                     }
                 }
-                text(format!(
-                    "{} ({}, {}). Take a screenshot to see what it did.",
-                    if hold >= 500 {
-                        "Long-pressed"
-                    } else {
-                        "Tapped"
-                    },
-                    p["x"],
-                    p["y"]
-                ))
+                let did = if hold >= 500 {
+                    "Long-pressed"
+                } else {
+                    "Tapped"
+                };
+                // `what`: the element trek-mcp found for a tap by ref, for the strip.
+                match p["what"].as_str().filter(|w| !w.is_empty()) {
+                    Some(what) => text(format!(
+                        "{did} {what}. Take phone_elements again to see what it did."
+                    )),
+                    None => text(format!(
+                        "{did} ({}, {}). Take a screenshot to see what it did.",
+                        p["x"], p["y"]
+                    )),
+                }
             }
+            "phone_elements" => self.elements().await,
+            // trek-mcp's own: it asks for phone_elements until what's waited for shows.
+            "phone_wait" => Err(
+                "phone_wait is answered by trek-mcp, from phone_elements: call that here.".into(),
+            ),
             "phone_swipe" => {
                 let ms = p["duration_ms"].as_u64().unwrap_or(300).clamp(60, 5000) as u32;
                 match self.via().await? {
@@ -2620,6 +2764,56 @@ impl Run<'_> {
         .await
     }
 
+    /// What's on the screen, for `phone_elements`: Trek Driver's list as it gives it (frames in
+    /// points; `Driver::elements`), with `picture`, the size in pixels of the picture x/y are
+    /// taken in. That is the latest `phone_screenshot`'s; before any, the size the next one
+    /// will have, which x/y are then read in. trek-mcp makes the outline and its refs from it
+    /// (`trek-mcp/src/phone.rs`). Only the driver reads elements: on the other routes this says
+    /// so.
+    async fn elements(&mut self) -> Result<Value, String> {
+        let facts = self.facts()?;
+        if facts.route() != Route::Driver {
+            return Err(format!(
+                "Elements need Trek Driver (the iPhone unlocked on the cable or Wi-Fi, with Trek's iPhone app built here), and taps go {} now, which can't read what's on the screen: use phone_screenshot and tap by x/y.",
+                match facts.route() {
+                    Route::Bluetooth => "over Bluetooth",
+                    _ => "through iPhone Mirroring",
+                }
+            ));
+        }
+        let Via::Usb(d, screen) = self.usb_via().await? else {
+            return Err(self.why_no_taps()?);
+        };
+        self.check()?;
+        let reader = d.clone();
+        let mut found = self
+            .blocking(move || reader.elements(ELEMENTS_MAX, ELEMENTS_LIMIT))
+            .await?;
+        let predicted = d
+            .shot_size(SHOT_EDGE)
+            .map(|(w, h)| (w as f64, h as f64))
+            .unwrap_or(screen);
+        let picture = self
+            .this
+            .update(self.cx, |p, _| match p.shot_size {
+                Some(size) if !p.shot_mirrored => size,
+                _ => {
+                    p.shot_size = Some(predicted);
+                    p.shot_mirrored = false;
+                    predicted
+                }
+            })
+            .map_err(gone)?;
+        let count = found["elements"].as_array().map_or(0, Vec::len);
+        found["picture"] = json!({ "width": picture.0, "height": picture.1 });
+        found["text"] = format!(
+            "Read the screen: {count} element{}.",
+            if count == 1 { "" } else { "s" }
+        )
+        .into();
+        Ok(found)
+    }
+
     /// One command for iPhone Mirroring; what it shows afterwards is the panel's too.
     async fn mirror_cmd(
         &mut self,
@@ -2628,10 +2822,7 @@ impl Run<'_> {
         limit: Duration,
     ) -> Result<Mirrored, String> {
         let rx = link.mirror(&cmd);
-        let m = self
-            .within(rx, limit)
-            .await
-            .ok_or("iPhone Mirroring didn't answer in time.")??;
+        let m = self.within(rx, limit).await.ok_or(MIRROR_LATE)??;
         self.this
             .update(self.cx, |p, cx| {
                 p.mirror_looked = Some(Instant::now());
@@ -2649,7 +2840,14 @@ impl Run<'_> {
         limit: Duration,
     ) -> Result<(), String> {
         self.check()?;
-        let m = self.mirror_cmd(link, cmd, limit).await?;
+        // Sent, and no word back: it may have reached the phone.
+        let m = self.mirror_cmd(link, cmd, limit).await.map_err(|e| {
+            if e == MIRROR_LATE {
+                unanswered("iPhone Mirroring")
+            } else {
+                e
+            }
+        })?;
         match (m.error, MirrorState::of(&m.look)) {
             (None, _) => Ok(()),
             (Some(e), MirrorState::Live) => Err(e),
@@ -2964,6 +3162,24 @@ impl Run<'_> {
         } else if strip.route == Route::Mirroring && !facts.mirror_frames {
             lines.push("Taps go through iPhone Mirroring, which Trek opens behind the user's windows when needed; screenshots then come from its window.".into());
         }
+        // Whether the screen can be read as elements: only through the driver, and one that
+        // has them (a driver not running yet hasn't said).
+        let old_driver = self
+            .this
+            .update(self.cx, |p, _| {
+                p.driver.state() == driver::State::Ready && !p.driver.takes("elements")
+            })
+            .map_err(gone)?;
+        lines.push(
+            if strip.route != Route::Driver || strip.advice.is_some() {
+                "Elements: none on this route (they need Trek Driver): use phone_screenshot and x/y."
+            } else if old_driver {
+                "Elements: none yet (the Trek Driver on the iPhone is from before them): use phone_screenshot and x/y."
+            } else {
+                "Elements: phone_elements reads the screen through Trek Driver, and phone_tap takes its refs."
+            }
+            .into(),
+        );
         if let Some(at) = &strip.assistive {
             lines.push(format!(
                 "AssistiveTouch: {} (Trek turns it on for Bluetooth taps).",
@@ -3101,11 +3317,8 @@ impl Run<'_> {
         let path = self.shot_path()?;
         let bytes = self
             .blocking(move || {
-                let width = match d.screen() {
-                    Some((w, h)) if h > w => (edge as f64 * w / h).round() as u32,
-                    _ => edge,
-                };
-                d.screenshot(width.max(1), 0)
+                let width = d.screen().map_or(edge, |s| driver::shot_width(s, edge));
+                d.screenshot(width, 0)
             })
             .await?;
         // Its size from its header: this runs on the main thread, and decoding the whole
@@ -3211,7 +3424,7 @@ impl Run<'_> {
         let (sent, missed) = self
             .within(rx, budget)
             .await
-            .ok_or("The keyboard and mouse didn't answer in time.")??;
+            .ok_or_else(|| unanswered("Trek's Bluetooth keyboard and mouse"))??;
         if missed > 0 && sent == 0 {
             return Err(self.why_no_taps()?);
         }
@@ -3432,5 +3645,20 @@ mod tests {
             assert!(!starting(t).is_empty());
         }
         assert_eq!(starting("phone_tap"), "Tapping…");
+        assert_eq!(starting("phone_elements"), "Reading the screen…");
+    }
+
+    #[test]
+    fn a_tap_the_helper_never_answered_is_unknown_not_failed() {
+        // The same opening words as a tap through Trek Driver whose answer was lost, so an
+        // agent reads both the same way: look first, don't repeat blindly.
+        for who in ["iPhone Mirroring", "Trek's Bluetooth keyboard and mouse"] {
+            let said = super::unanswered(who);
+            assert!(said.starts_with(trek_phone::driver::UNKNOWN), "{said}");
+            assert!(
+                said.contains(who) && said.contains("wasn't sent again"),
+                "{said}"
+            );
+        }
     }
 }

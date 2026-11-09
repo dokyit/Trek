@@ -23,6 +23,12 @@ Third-party materials bundled in this repository:
   (an absolute pointer whose presses go through a second, relative mouse) and the HID over
   GATT service layout follow iphone-use (NewWave AI, github.com/xhoantran/iphone-use), MIT.
   The iPhone's own services are reached through the idevice crate (Jackson Coxson), MIT.
+* ios/TrekDriver/Driver/Capture.swift and Stream.swift — asking XCTest's daemon for the screen
+  as a JPEG and serving it as an MJPEG stream follows WebDriverAgent (Appium and Facebook,
+  github.com/appium/WebDriverAgent: FBScreenshot.m, FBMjpegServer.m), BSD-3-Clause; no code of
+  theirs is included. The element outline with refs for agents (crates/trek-mcp/src/phone.rs,
+  ios/TrekDriver/Driver/Elements.swift) follows the shape of terminal-phone (Govijr,
+  github.com/govijr/terminal-phone), MIT.
 * Agent and provider logos under crates/trek-app/assets/logos and
   ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,

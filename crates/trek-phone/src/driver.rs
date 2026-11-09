@@ -20,6 +20,16 @@
 //!
 //! Points: the driver speaks in screen points; the tools and the panel in pixels of the cable's
 //! picture, or fractions of it ([`to_points`]).
+//!
+//! The picture: a driver with `stream` in its `features` pushes the screen as it changes down
+//! one long answer ([`Driver::watch`], read by [`Mjpeg`]); one without is asked for a screenshot
+//! at a time ([`Driver::screenshot`]), and [`after_stream`] says which follows a stream that
+//! ended. What's on the screen as elements comes from one with `elements`
+//! ([`Driver::elements`]).
+//!
+//! An action that went out without its answer coming back (the connection dropped, or the
+//! answer was late) is not a failure: it may have happened. [`Transport::post`] on the driver
+//! says so ([`UNKNOWN`]) and nothing here sends it again.
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -32,9 +42,10 @@ use crate::device;
 /// The phone port the driver serves on (WebDriverAgent's is 8100; this one keeps clear of it).
 pub const PORT: u16 = 8117;
 /// The driver's protocol version (`/status` says it): 2 added `/path`, and the arrows and
-/// repeats in `/key` (its `features` say so). A driver from before is still used, with
-/// what it has: Trek's iPhone app on the phone is replaced only by its updater.
-pub const VERSION: u64 = 2;
+/// repeats in `/key`; 3 `/stream` (the screen pushed, [`Driver::watch`]) and `/elements` (what's
+/// on it, [`Driver::elements`]). Its `features` say so. A driver from before is still used,
+/// with what it has: Trek's iPhone app on the phone is replaced only by its updater.
+pub const VERSION: u64 = 3;
 /// The oldest driver Trek still talks to.
 pub const OLDEST: u64 = 1;
 /// How long a start may take: installing Trek's iPhone app the first time is most of it.
@@ -196,6 +207,34 @@ pub enum State {
     Ready,
     /// It didn't start, or stopped on its own: what to do about it.
     Failed(String),
+}
+
+/// The width in pixels to ask `/screenshot` for so the picture's longest side is `edge`, for a
+/// screen of `screen` points (upright or on its side).
+pub fn shot_width(screen: (f64, f64), edge: u32) -> u32 {
+    let (w, h) = screen;
+    let width = if h > w && h > 0. {
+        (edge as f64 * w / h).round() as u32
+    } else {
+        edge
+    };
+    width.max(1)
+}
+
+/// The size in pixels of the picture `/screenshot?w=shot_width(screen, edge)` answers with,
+/// for a screen of `screen` points at `scale` pixels a point: scaled to that width as the
+/// driver does it, or the screen's own size when that is no wider.
+pub fn shot_size(screen: (f64, f64), scale: f64, edge: u32) -> (u32, u32) {
+    let native = ((screen.0 * scale).round(), (screen.1 * scale).round());
+    let width = shot_width(screen, edge) as f64;
+    if native.0 <= width || native.0 < 1. {
+        return (native.0.max(1.) as u32, native.1.max(1.) as u32);
+    }
+    let factor = width / native.0;
+    (
+        (native.0 * factor).round().max(1.) as u32,
+        (native.1 * factor).round().max(1.) as u32,
+    )
 }
 
 /// A fraction of the screen (0…1 each way) in the driver's points.
@@ -475,7 +514,10 @@ struct Inner {
     run: Option<Run>,
     /// The screen in points, from `/status`.
     screen: Option<(f64, f64)>,
-    /// What the driver running says it does, from `/status` (`path`, `keys`).
+    /// How many pixels a point is on it, from `/status` (3 on most iPhones).
+    scale: f64,
+    /// What the driver running says it does, from `/status` (`path`, `keys`, `stream`,
+    /// `elements`).
     features: Vec<String>,
     used: Option<Instant>,
 }
@@ -718,8 +760,17 @@ impl Driver {
         }
         let mut inner = self.inner.lock().unwrap();
         inner.screen = Some(screen);
+        inner.scale = v["scale"].as_f64().filter(|s| *s >= 1.).unwrap_or(3.);
         inner.features = features(&v);
         Ok(screen)
+    }
+
+    /// The size in pixels of the picture [`Driver::screenshot`] answers with when asked for a
+    /// longest side of `edge` (what `phone_screenshot` does), while it runs: x/y of the tools
+    /// are pixels of it.
+    pub fn shot_size(&self, edge: u32) -> Option<(u32, u32)> {
+        let inner = self.inner.lock().unwrap();
+        Some(shot_size(inner.screen?, inner.scale, edge))
     }
 
     /// One request to the running driver; its JSON answer, or its error.
@@ -730,7 +781,7 @@ impl Driver {
         body: Option<&Value>,
         limit: Duration,
     ) -> Result<Value, String> {
-        let (status, body) = self.fetch(method, path, body, limit)?;
+        let (status, body) = self.fetch(method, path, body, limit).map_err(|f| f.why)?;
         if status != 200 {
             return Err(Self::said(status, &body));
         }
@@ -741,7 +792,9 @@ impl Driver {
     /// wide (0: as it is). An older driver answers with a full-size PNG; `image` reads both.
     pub fn screenshot(&self, max_width: u32, quality: u8) -> Result<Vec<u8>, String> {
         let path = format!("/screenshot?w={max_width}&q={quality}");
-        let (status, body) = self.fetch("GET", &path, None, Duration::from_secs(15))?;
+        let (status, body) = self
+            .fetch("GET", &path, None, Duration::from_secs(15))
+            .map_err(|f| f.why)?;
         if status != 200 {
             return Err(Self::said(status, &body));
         }
@@ -751,30 +804,73 @@ impl Driver {
         Ok(body)
     }
 
-    /// One request to the running driver: the status code and body of its answer.
+    /// One request to the running driver: the status code and body of its answer; or why none
+    /// came, and whether the request had gone out by then.
     fn fetch(
         &self,
         method: &str,
         path: &str,
         body: Option<&Value>,
         limit: Duration,
-    ) -> Result<(u16, Vec<u8>), String> {
-        let (udid, token) = {
-            let inner = self.inner.lock().unwrap();
-            let run = inner.run.as_ref().ok_or("Trek Driver isn't running.")?;
-            (run.udid.clone(), run.token.clone())
-        };
-        let raw = device::exchange(
+    ) -> Result<(u16, Vec<u8>), device::Failed> {
+        let (udid, token) = self
+            .running()
+            .map_err(|why| device::Failed { sent: false, why })?;
+        let raw = device::exchange_told(
             Some(&udid),
             PORT,
             &request(method, path, &token, body),
             limit,
         )?;
-        let (status, body) = response(&raw)?;
+        // An answer that isn't whole came after the request went.
+        let (status, body) = response(&raw).map_err(|why| device::Failed { sent: true, why })?;
         if status == 200 {
             self.inner.lock().unwrap().used = Some(Instant::now());
         }
         Ok((status, body))
+    }
+
+    /// The phone and token of the run under way.
+    fn running(&self) -> Result<(String, String), String> {
+        let inner = self.inner.lock().unwrap();
+        let run = inner.run.as_ref().ok_or("Trek Driver isn't running.")?;
+        Ok((run.udid.clone(), run.token.clone()))
+    }
+
+    /// `GET /elements`: what's on the screen, as the driver lists it (see
+    /// `ios/TrekDriver/Driver/Elements.swift`): `elements` (each with `type`, `label`,
+    /// `identifier`, `value`, `frame` in points as `[x, y, width, height]`, `enabled`,
+    /// `selected`, `focused`, `depth`), the screen's `width` and `height` in points, the `app`
+    /// in front, `more` (elements past `max`) and `partial` (its time, `limit`, ran out).
+    pub fn elements(&self, max: u32, limit: Duration) -> Result<Value, String> {
+        if !self.takes("elements") {
+            return Err(NO_ELEMENTS.into());
+        }
+        let path = format!("/elements?max={max}&ms={}", limit.as_millis());
+        self.send("GET", &path, None, limit + Duration::from_secs(10))
+    }
+
+    /// `GET /stream`: the screen as the driver pushes it, each frame a JPEG handed to `on` as it
+    /// comes (and [`Picture::Still`] about once a second while the screen doesn't change, or
+    /// more often while nothing comes at all), until `on` returns false. Blocks for as long;
+    /// says how it ended. A driver without `stream` is [`StreamEnd::Refused`] at once.
+    pub fn watch(&self, options: &StreamOptions, on: &mut dyn FnMut(Picture) -> bool) -> StreamEnd {
+        if !self.takes("stream") {
+            return StreamEnd::Refused(404, "This Trek Driver has no /stream.".into());
+        }
+        let (udid, token) = match self.running() {
+            Ok(run) => run,
+            Err(why) => return StreamEnd::Dropped(why),
+        };
+        let request = request("GET", &options.path(), &token, None);
+        read_stream(
+            |sink| device::stream(Some(&udid), PORT, &request, STREAM_QUIET, sink),
+            &mut |picture| {
+                // Watched is used: the Mac doesn't stop a driver somebody is looking through.
+                self.inner.lock().unwrap().used = Some(Instant::now());
+                on(picture)
+            },
+        )
     }
 
     /// What a driver answer other than 200 means.
@@ -862,7 +958,276 @@ pub fn answer_limit(body: &Value) -> Duration {
 impl Transport for Driver {
     fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
         // Typing waits for each key; a long text gets longer, and so does a long press or drag.
-        self.send("POST", path, Some(body), answer_limit(body))
+        let (status, answer) = self
+            .fetch("POST", path, Some(body), answer_limit(body))
+            // Gone out but not answered: it may have happened. Said so, and never sent again
+            // here: whoever asked looks at the screen and decides.
+            .map_err(|f| if f.sent { unknown(path, &f.why) } else { f.why })?;
+        if status != 200 {
+            return Err(Self::said(status, &answer));
+        }
+        Ok(serde_json::from_slice(&answer).unwrap_or(Value::Null))
+    }
+}
+
+/// How an error begins when a tap, swipe or key went out to the phone and only its answer was
+/// lost (the connection dropped, or the answer didn't come in time): it may have happened.
+pub const UNKNOWN: &str = "Outcome unknown:";
+
+/// The error for `path`'s request that went out without an answer (`why`).
+pub fn unknown(path: &str, why: &str) -> String {
+    let what = match path {
+        "/tap" => "The tap",
+        "/swipe" | "/path" => "The swipe",
+        "/type" => "The text",
+        "/key" => "The key",
+        "/open" => "Opening the app",
+        _ => "The request",
+    };
+    format!(
+        "{UNKNOWN} {what} went out to the iPhone but its answer didn't come back ({}). It may or may not have happened, and wasn't sent again: look at the screen (phone_elements or phone_screenshot) before deciding to repeat it.",
+        why.trim_end_matches('.')
+    )
+}
+
+/// What a driver without `/elements` (or a route without the driver) says to an agent asking
+/// for elements.
+pub const NO_ELEMENTS: &str = "Elements need a newer Trek Driver on the iPhone than the one running (it has no /elements): use phone_screenshot and x/y until Trek's iPhone app is updated.";
+
+/// How long the stream may bring nothing (not even word that the screen is still, which the
+/// driver sends every second) before the connection counts as dead.
+pub const STREAM_QUIET: Duration = Duration::from_secs(5);
+
+/// What the Mac asks of `/stream`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamOptions {
+    /// While the screen moves, frames at most this many pixels wide (0: the screen's own
+    /// size); the driver gets there by halving, which costs it little.
+    pub width: u32,
+    /// The JPEG's quality, 1–100.
+    pub quality: u8,
+    /// Frames a second at most.
+    pub fps: u32,
+}
+
+impl StreamOptions {
+    /// Over the cable: every frame at the screen's own size (the phone encodes it once and
+    /// nothing more; the cable carries it easily).
+    pub const CABLE: StreamOptions = StreamOptions {
+        width: 0,
+        quality: 70,
+        fps: 30,
+    };
+    /// Over Wi-Fi: half-size frames while the screen moves (a third of the bytes), then a
+    /// full-size one when it rests.
+    pub const WIFI: StreamOptions = StreamOptions {
+        width: 900,
+        quality: 60,
+        fps: 24,
+    };
+
+    /// The request path for them.
+    pub fn path(&self) -> String {
+        format!(
+            "/stream?w={}&q={}&fps={}",
+            self.width, self.quality, self.fps
+        )
+    }
+}
+
+/// What the panel does about its picture once a stream has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Next {
+    /// Nothing more: it was stopped.
+    Stop,
+    /// Ask for one screenshot at a time, as before `/stream`: for this long, then try the stream
+    /// again; for good when this driver hasn't one.
+    Poll(Option<Duration>),
+    /// Connect again after this long (the driver checked first, and started if it went away).
+    Again(Duration),
+}
+
+/// How long screenshots are asked for while as many as the driver takes watch its stream
+/// already, before the stream is tried again.
+const STREAM_FULL_WAIT: Duration = Duration::from_secs(10);
+
+/// What follows a stream that ended as `end`, after `drops` drops in a row without a frame
+/// between them: a driver that hasn't `/stream` is asked for screenshots instead (one whose
+/// stream is full, for a while), and a connection that dropped (the phone locked, the cable
+/// came out, the Wi-Fi address changed) is made again, a little later each time it fails.
+pub fn after_stream(end: &StreamEnd, drops: u32) -> Next {
+    match end {
+        StreamEnd::Stopped => Next::Stop,
+        StreamEnd::Refused(503, _) => Next::Poll(Some(STREAM_FULL_WAIT)),
+        StreamEnd::Refused(..) => Next::Poll(None),
+        StreamEnd::Dropped(_) => {
+            Next::Again(Duration::from_millis((250u64 << drops.min(4)).min(3000)))
+        }
+    }
+}
+
+/// One thing the stream brought.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picture {
+    /// The screen changed: a JPEG of it.
+    Frame(Vec<u8>),
+    /// Nothing new: the screen is as the last frame showed it (or nothing has come for a
+    /// moment).
+    Still,
+}
+
+/// How a stream ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// Whoever read it stopped it.
+    Stopped,
+    /// The driver wouldn't serve it: its status and what it said (404 from a driver without
+    /// `/stream`, 503 when enough are watching already).
+    Refused(u16, String),
+    /// The connection couldn't be made, dropped, went quiet, or brought something that isn't
+    /// the stream: why. Worth trying again.
+    Dropped(String),
+}
+
+/// The driver's `/stream` answer, read as it arrives: `multipart/x-mixed-replace`, each part a
+/// JPEG with its `Content-Length` (an empty part says the screen is still). Bytes go in as the
+/// connection gives them, in pieces of any size; whole parts come out.
+#[derive(Debug, Default)]
+pub struct Mjpeg {
+    buf: Vec<u8>,
+    /// The answer's headers are read: what follows is parts.
+    started: bool,
+}
+
+/// The most one frame may be: more is not a frame.
+const MAX_FRAME: usize = 32 << 20;
+
+impl Mjpeg {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// More bytes of the answer: the parts they complete, in order. `Err` when the answer isn't
+    /// a stream (`Refused`, once its body is whole) or stops making sense (`Dropped`).
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Picture>, StreamEnd> {
+        self.buf.extend_from_slice(bytes);
+        let mut out = vec![];
+        if !self.started {
+            let Some(end) = find(&self.buf, b"\r\n\r\n") else {
+                return if self.buf.len() > 64 << 10 {
+                    Err(StreamEnd::Dropped(
+                        "Trek Driver's answer wasn't HTTP.".into(),
+                    ))
+                } else {
+                    Ok(out)
+                };
+            };
+            let head = String::from_utf8_lossy(&self.buf[..end]).to_string();
+            let status = head
+                .lines()
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|c| c.parse::<u16>().ok())
+                .ok_or_else(|| StreamEnd::Dropped("Trek Driver's answer wasn't HTTP.".into()))?;
+            if status != 200 {
+                // An ordinary answer saying why not: whole by its Content-Length.
+                if !device::answer_complete(&self.buf) {
+                    return Ok(out);
+                }
+                let said = Driver::said(status, &self.buf[end + 4..]);
+                return Err(StreamEnd::Refused(status, said));
+            }
+            if !header(&head, "content-type").is_some_and(|t| t.contains("multipart/")) {
+                return Err(StreamEnd::Dropped(
+                    "Trek Driver answered /stream with something else.".into(),
+                ));
+            }
+            self.buf.drain(..end + 4);
+            self.started = true;
+        }
+        loop {
+            // Between parts: the line break that ended the last one.
+            let skip = self
+                .buf
+                .iter()
+                .take_while(|b| **b == b'\r' || **b == b'\n')
+                .count();
+            let rest = &self.buf[skip..];
+            let Some(end) = find(rest, b"\r\n\r\n") else {
+                if rest.len() > 16 << 10 {
+                    return Err(StreamEnd::Dropped("The stream lost its place.".into()));
+                }
+                break;
+            };
+            let head = String::from_utf8_lossy(&rest[..end]);
+            if !head.starts_with("--") {
+                return Err(StreamEnd::Dropped("The stream lost its place.".into()));
+            }
+            let length = header(&head, "content-length")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n <= MAX_FRAME)
+                .ok_or_else(|| StreamEnd::Dropped("A frame came without its size.".into()))?;
+            let body = end + 4;
+            if rest.len() < body + length {
+                break;
+            }
+            out.push(if length == 0 {
+                Picture::Still
+            } else {
+                Picture::Frame(rest[body..body + length].to_vec())
+            });
+            self.buf.drain(..skip + body + length);
+        }
+        Ok(out)
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// A header's value in `head` (the lines before the blank one), by its name in any case.
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// Read a stream: `pieces` runs the connection, handing each piece it reads to the sink it's
+/// given (as [`device::stream`] does) until the sink returns false; each frame goes to `on`,
+/// which returns whether to go on. A piece without bytes is a tick: `on` hears
+/// [`Picture::Still`], so it can stop a stream that brings nothing.
+pub fn read_stream(
+    pieces: impl FnOnce(&mut dyn FnMut(&[u8]) -> bool) -> Result<(), String>,
+    on: &mut dyn FnMut(Picture) -> bool,
+) -> StreamEnd {
+    let mut parser = Mjpeg::new();
+    let mut end = None;
+    let ran = pieces(&mut |bytes| {
+        if bytes.is_empty() {
+            if !on(Picture::Still) {
+                end = Some(StreamEnd::Stopped);
+            }
+            return end.is_none();
+        }
+        match parser.push(bytes) {
+            Ok(pictures) => {
+                for picture in pictures {
+                    if !on(picture) {
+                        end = Some(StreamEnd::Stopped);
+                        break;
+                    }
+                }
+            }
+            Err(e) => end = Some(e),
+        }
+        end.is_none()
+    });
+    match (end, ran) {
+        (Some(end), _) => end,
+        (None, Err(why)) => StreamEnd::Dropped(why),
+        (None, Ok(())) => StreamEnd::Stopped,
     }
 }
 
@@ -916,6 +1281,13 @@ mod tests {
         // A later one that names more keeps them.
         let later = features(&json!({"version": 3, "features": ["path", "keys", "pinch"]}));
         assert!(later.contains(&"pinch".to_string()));
+        // The stream and the elements come only with a driver that names them: a version
+        // alone promises neither.
+        assert!(!now.iter().any(|f| f == "stream" || f == "elements"));
+        assert!(!later.iter().any(|f| f == "stream" || f == "elements"));
+        let v3 =
+            features(&json!({"version": 3, "features": ["path", "keys", "stream", "elements"]}));
+        assert!(v3.contains(&"stream".to_string()) && v3.contains(&"elements".to_string()));
     }
 
     #[test]
@@ -925,9 +1297,313 @@ mod tests {
             actions.contains(&format!("static let version = {VERSION}\n")),
             "Actions.version must be driver::VERSION"
         );
-        for f in ["path", "keys"] {
+        for f in ["path", "keys", "stream", "elements"] {
             assert!(actions.contains(&format!("\"{f}\"")), "{f} in its features");
         }
+    }
+
+    /// A driver as its `/status` left it, with no run behind it.
+    fn driver_taking(features: &[&str]) -> Driver {
+        let d = Driver::new();
+        d.inner.lock().unwrap().features = features.iter().map(|f| f.to_string()).collect();
+        d
+    }
+
+    #[test]
+    fn an_older_driver_is_asked_for_neither_the_stream_nor_elements() {
+        // Version 2, as on a phone the updater hasn't reached yet: nothing is sent to it.
+        let old = driver_taking(&["path", "keys"]);
+        let mut frames = 0;
+        let end = old.watch(&StreamOptions::CABLE, &mut |_| {
+            frames += 1;
+            true
+        });
+        assert!(matches!(end, StreamEnd::Refused(404, _)), "{end:?}");
+        assert_eq!(frames, 0);
+        // …so the picture is polled, as before, for good.
+        assert_eq!(after_stream(&end, 0), Next::Poll(None));
+        assert_eq!(
+            old.elements(300, Duration::from_secs(5)).unwrap_err(),
+            NO_ELEMENTS
+        );
+        // One that has them is asked (here it isn't running, which is all it can say).
+        let new = driver_taking(&["path", "keys", "stream", "elements"]);
+        let end = new.watch(&StreamOptions::CABLE, &mut |_| true);
+        assert_eq!(end, StreamEnd::Dropped("Trek Driver isn't running.".into()));
+        assert_eq!(
+            new.elements(300, Duration::from_secs(5)).unwrap_err(),
+            "Trek Driver isn't running."
+        );
+    }
+
+    #[test]
+    fn a_stream_that_ended_is_stopped_polled_or_made_again() {
+        assert_eq!(after_stream(&StreamEnd::Stopped, 0), Next::Stop);
+        // No such endpoint (or another driver's token): screenshots one at a time, for good.
+        for status in [404, 401, 501] {
+            let refused = StreamEnd::Refused(status, "no".into());
+            assert_eq!(after_stream(&refused, 0), Next::Poll(None));
+        }
+        // Enough watching already: screenshots for a while, then the stream is tried again.
+        let full = StreamEnd::Refused(503, "2 are watching the screen already".into());
+        assert!(
+            matches!(after_stream(&full, 0), Next::Poll(Some(wait)) if wait >= Duration::from_secs(5))
+        );
+        // Dropped: again, soon, then less eagerly, and never slower than every 3 s.
+        let dropped = StreamEnd::Dropped("The iPhone closed the connection.".into());
+        let waits: Vec<u64> = (0..8)
+            .map(|n| match after_stream(&dropped, n) {
+                Next::Again(d) => d.as_millis() as u64,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(waits, [250, 500, 1000, 2000, 3000, 3000, 3000, 3000]);
+        assert_eq!(StreamOptions::CABLE.path(), "/stream?w=0&q=70&fps=30");
+    }
+
+    const STREAM_HEAD: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=trekframe\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+
+    /// One part, as `ScreenStream.part` writes it.
+    fn part(jpeg: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "--trekframe\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+            jpeg.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(jpeg);
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    const STILL: &[u8] =
+        b"--trekframe\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n\r\n";
+
+    /// The driver's ordinary answer saying no, as `Response.error` writes it.
+    fn refusal(status: u16, error: &str) -> Vec<u8> {
+        let body = json!({"error": error, "ok": false}).to_string();
+        format!(
+            "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// Bytes that look like the stream's own punctuation, to make sure a frame is taken by its
+    /// length and not by what's in it.
+    fn tricky() -> Vec<u8> {
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(b"\r\n\r\n--trekframe\r\nContent-Length: 3\r\n\r\nabc\r\n");
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+        jpeg
+    }
+
+    #[test]
+    fn frames_come_out_whole_however_the_bytes_were_split() {
+        let (a, b) = (tricky(), vec![0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]);
+        let mut answer = STREAM_HEAD.to_vec();
+        answer.extend(part(&a));
+        answer.extend_from_slice(STILL);
+        answer.extend(part(&b));
+        let want = [
+            Picture::Frame(a.clone()),
+            Picture::Still,
+            Picture::Frame(b.clone()),
+        ];
+        // All at once.
+        assert_eq!(Mjpeg::new().push(&answer).unwrap(), want);
+        // A byte at a time.
+        let mut parser = Mjpeg::new();
+        let mut got = vec![];
+        for byte in &answer {
+            got.extend(parser.push(std::slice::from_ref(byte)).unwrap());
+        }
+        assert_eq!(got, want);
+        // In two pieces, cut at every place: in the headers, inside a frame, between parts.
+        for cut in 0..=answer.len() {
+            let mut parser = Mjpeg::new();
+            let mut got = parser.push(&answer[..cut]).unwrap();
+            got.extend(parser.push(&answer[cut..]).unwrap());
+            assert_eq!(got, want, "cut at {cut}");
+        }
+        // Part of a frame is no frame yet.
+        let mut parser = Mjpeg::new();
+        let half = STREAM_HEAD.len() + part(&a).len() - 10;
+        assert_eq!(parser.push(&answer[..half]).unwrap(), []);
+    }
+
+    #[test]
+    fn an_answer_that_isnt_the_stream_ends_it() {
+        // A driver from before /stream: an ordinary 404, whole by its length.
+        let no = refusal(404, "no /stream");
+        let mut parser = Mjpeg::new();
+        assert_eq!(parser.push(&no[..no.len() - 5]).unwrap(), []);
+        assert_eq!(
+            parser.push(&no[no.len() - 5..]).unwrap_err(),
+            StreamEnd::Refused(404, "Trek Driver: no /stream".into())
+        );
+        // Enough are watching.
+        let busy = refusal(503, "2 are watching the screen already");
+        let end = Mjpeg::new().push(&busy).unwrap_err();
+        assert!(matches!(&end, StreamEnd::Refused(503, why) if why.contains("watching")));
+        // Not multipart, not HTTP, or a part without its size: dropped, to be tried again.
+        let plain = b"HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 2\r\n\r\nhi";
+        assert!(matches!(
+            Mjpeg::new().push(plain),
+            Err(StreamEnd::Dropped(_))
+        ));
+        assert!(matches!(
+            Mjpeg::new().push(b"SSH-2.0 hello\r\n\r\n"),
+            Err(StreamEnd::Dropped(_))
+        ));
+        let mut sizeless = STREAM_HEAD.to_vec();
+        sizeless.extend_from_slice(b"--trekframe\r\nContent-Type: image/jpeg\r\n\r\nabc");
+        assert!(matches!(
+            Mjpeg::new().push(&sizeless),
+            Err(StreamEnd::Dropped(_))
+        ));
+        let mut lost = STREAM_HEAD.to_vec();
+        lost.extend_from_slice(b"garbage\r\n\r\n");
+        assert!(matches!(
+            Mjpeg::new().push(&lost),
+            Err(StreamEnd::Dropped(_))
+        ));
+    }
+
+    /// A far end that takes the request, writes `script`'s pieces a moment apart and hangs up.
+    fn serve(pieces: Vec<Vec<u8>>) -> std::net::SocketAddr {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = s.read(&mut buf);
+            for piece in pieces {
+                if s.write_all(&piece).is_err() {
+                    return;
+                }
+                let _ = s.flush();
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        });
+        addr
+    }
+
+    fn watch_at(addr: std::net::SocketAddr, on: &mut dyn FnMut(Picture) -> bool) -> StreamEnd {
+        let request = request("GET", "/stream?w=0&q=70&fps=30", "t", None);
+        read_stream(
+            |sink| device::stream_tcp(addr, &request, Duration::from_secs(5), sink),
+            on,
+        )
+    }
+
+    #[test]
+    fn a_dropped_connection_ends_the_stream_after_the_frames_it_brought() {
+        let (a, b) = (vec![0xFF, 0xD8, 7, 7, 0xFF, 0xD9], tricky());
+        // The first frame split across two writes, the second cut off by the hang-up.
+        let first = part(&a);
+        let second = part(&b);
+        let mut one = STREAM_HEAD.to_vec();
+        one.extend_from_slice(&first[..20]);
+        let mut two = first[20..].to_vec();
+        two.extend_from_slice(&second[..second.len() - 8]);
+        let addr = serve(vec![one, two]);
+        let mut frames = vec![];
+        let end = watch_at(addr, &mut |p| {
+            if let Picture::Frame(jpeg) = p {
+                frames.push(jpeg);
+            }
+            true
+        });
+        assert_eq!(frames, [a], "the whole frame, and not the half one");
+        assert_eq!(
+            end,
+            StreamEnd::Dropped("The iPhone closed the connection.".into())
+        );
+        // Dropped is tried again.
+        assert!(matches!(after_stream(&end, 0), Next::Again(_)));
+    }
+
+    #[test]
+    fn the_reader_stops_a_stream_and_a_refusal_comes_through() {
+        let mut answer = STREAM_HEAD.to_vec();
+        for n in 0..5u8 {
+            answer.extend(part(&[0xFF, 0xD8, n, 0xFF, 0xD9]));
+        }
+        let addr = serve(vec![answer, vec![0; 1]]);
+        let mut seen = 0;
+        let end = watch_at(addr, &mut |_| {
+            seen += 1;
+            seen < 2
+        });
+        assert_eq!((end, seen), (StreamEnd::Stopped, 2));
+        let end = watch_at(serve(vec![refusal(404, "no /stream")]), &mut |_| true);
+        assert_eq!(
+            end,
+            StreamEnd::Refused(404, "Trek Driver: no /stream".into())
+        );
+    }
+
+    #[test]
+    fn a_screenshots_size_is_known_before_its_taken() {
+        // An iPhone 17: 402×874 points at 3 pixels a point; phone_screenshot's longest side is
+        // 1200 unless asked otherwise. (What its driver answered in a simulator: 552×1200.)
+        assert_eq!(shot_width((402., 874.), 1200), 552);
+        assert_eq!(shot_size((402., 874.), 3., 1200), (552, 1200));
+        // A Pro Max, where rounding leaves the long side a pixel short.
+        assert_eq!(shot_size((440., 956.), 3., 1200), (552, 1199));
+        // Asked for more than the screen has: the screen's own pixels.
+        assert_eq!(shot_size((402., 874.), 3., 4000), (1206, 2622));
+        // On its side, the width is the long one.
+        assert_eq!(shot_size((874., 402.), 3., 1200), (1200, 552));
+        // A point of the screen and the same point of that picture are one place: an element's
+        // box goes out in the picture's pixels, and a tap comes back as a fraction of it.
+        let (screen, picture) = ((402., 874.), (552., 1200.));
+        let pixel = (201. * picture.0 / screen.0, 406.3 * picture.1 / screen.1);
+        let back = to_points((pixel.0 / picture.0, pixel.1 / picture.1), screen);
+        assert_eq!(back, (201., 406.3));
+        // While it runs, the driver says its own.
+        let d = driver_taking(&["elements"]);
+        assert_eq!(d.shot_size(1200), None);
+        {
+            let mut inner = d.inner.lock().unwrap();
+            inner.screen = Some((402., 874.));
+            inner.scale = 3.;
+        }
+        assert_eq!(d.shot_size(1200), Some((552, 1200)));
+    }
+
+    #[test]
+    fn an_action_that_went_out_unanswered_is_unknown_and_stops_what_follows() {
+        let said = unknown("/tap", "The iPhone's port 8117 didn't answer in time.");
+        assert!(said.starts_with(UNKNOWN), "{said}");
+        assert!(said.contains("The tap went out"), "{said}");
+        assert!(said.contains("wasn't sent again"), "{said}");
+        assert!(said.contains("(The iPhone's port 8117 didn't answer in time)"));
+        assert!(unknown("/path", "x").contains("The swipe"));
+        assert!(unknown("/type", "x").contains("The text"));
+
+        /// A driver whose `/type` goes out and is never answered.
+        struct Lost(RefCell<Vec<String>>);
+        impl Transport for Lost {
+            fn post(&self, path: &str, _: &Value) -> Result<Value, String> {
+                self.0.borrow_mut().push(path.to_string());
+                match path {
+                    "/type" => Err(unknown(path, "Couldn't read from the iPhone: reset")),
+                    _ => Ok(json!({"ok": true})),
+                }
+            }
+        }
+        let lost = Lost(RefCell::default());
+        // Typing then Return: the text's outcome is unknown, so Return isn't pressed on top,
+        // and the text isn't typed a second time.
+        let steps = [
+            Step::Post("/type", json!({"text": "hello"})),
+            Step::Post("/key", json!({"key": "enter"})),
+        ];
+        let err = run(&lost, &steps).unwrap_err();
+        assert!(err.starts_with(UNKNOWN), "{err}");
+        assert_eq!(*lost.0.borrow(), ["/type"]);
     }
 
     #[test]

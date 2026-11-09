@@ -6,12 +6,16 @@ import XCTest
 /// point, in any app or on the Home Screen.
 final class Actions {
     /// The driver's version, for `/status` (the Mac talks to this one and older ones). 2 added
-    /// `/path`, and the arrows and `count` in `/key`.
-    static let version = 2
+    /// `/path`, and the arrows and `count` in `/key`; 3 `/stream` and `/elements`.
+    static let version = 3
     /// What it does beyond version 1's endpoints, for `/status`.
-    static let features = ["path", "keys"]
+    static let features = ["path", "keys", "stream", "elements"]
 
-    private let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    /// The screen pushed to whoever watches (`GET /stream`, which the server hands it).
+    let stream = ScreenStream()
+
+    private static let springboardID = "com.apple.springboard"
+    private let springboard = XCUIApplication(bundleIdentifier: Actions.springboardID)
     /// The app last opened through `/open`: where text goes when nothing else says.
     private var lastOpened: String?
     /// Set by `/stop`: the test returns and the runner goes away.
@@ -23,6 +27,11 @@ final class Actions {
     /// instead of failing).
     var issue: String?
 
+    /// The stream has a watcher: that counts as use, as a request does.
+    func watched() {
+        lastRequest = Date()
+    }
+
     func route(_ request: Request) -> Response {
         if request.method == "GET", request.path == "/screenshot" {
             // Taken off the main thread (`Server`), beside a gesture that may be playing: it
@@ -32,9 +41,12 @@ final class Actions {
         }
         lastRequest = Date()
         issue = nil
+        // A touch or a key is about to change the screen: the stream looks at full pace again.
+        if request.method == "POST" { stream.wake() }
         let response: Response
         switch (request.method, request.path) {
         case ("GET", "/status"): response = status()
+        case ("GET", "/elements"): response = elements(request.query)
         case ("POST", "/tap"): response = tap(request.json)
         case ("POST", "/swipe"): response = swipe(request.json)
         case ("POST", "/path"): response = path(request.json)
@@ -46,7 +58,7 @@ final class Actions {
             stopped = true
             response = .json(["ok": true])
         case (_, "/status"), (_, "/tap"), (_, "/swipe"), (_, "/path"), (_, "/type"), (_, "/key"),
-             (_, "/open"), (_, "/screenshot"), (_, "/stop"):
+             (_, "/open"), (_, "/screenshot"), (_, "/stop"), (_, "/elements"), (_, "/stream"):
             response = .error("\(request.method) isn't taken here", status: 405)
         default:
             response = .error("no \(request.path)", status: 404)
@@ -61,36 +73,35 @@ final class Actions {
     private lazy var size: CGSize = springboard.frame.size
 
     /// The screen, at most `w=<n>` pixels wide: a PNG, or with `q=<1-100>` a JPEG of that
-    /// quality (Trek's iPhone tool shows the screen this way while the driver runs, so the
-    /// cable's capture, which makes iOS show 9:41, stays off).
+    /// quality (Trek's iPhone tool shows the screen this way from a driver without `/stream`, so
+    /// the cable's capture, which makes iOS show 9:41, stays off). `via=daemon` takes it the way
+    /// the stream does (always a JPEG), to compare the two.
     private func screenshot(_ query: String) -> Response {
         var width = 0
         var quality = 0
+        var via = Capture.Via.xctest
         for pair in query.split(separator: "&") {
             let kv = pair.split(separator: "=", maxSplits: 1)
-            guard kv.count == 2, let n = Int(kv[1]) else { continue }
+            guard kv.count == 2 else { continue }
+            if kv[0] == "via" {
+                guard let named = Capture.Via(rawValue: String(kv[1])) else {
+                    return .error("via is daemon or xctest", status: 400)
+                }
+                via = named
+            }
+            guard let n = Int(kv[1]) else { continue }
             if kv[0] == "w" { width = n } else if kv[0] == "q" { quality = n }
         }
-        let shot = XCUIScreen.main.screenshot()
-        var image = shot.image
-        let pixels = image.size.width * image.scale
-        guard quality > 0 || (width > 0 && pixels > CGFloat(width)) else {
-            return Response(status: 200, type: "image/png", body: shot.pngRepresentation)
+        if via == .daemon {
+            let quality = quality > 0 ? quality : 70
+            guard let raw = Capture.daemonJPEG(quality: width > 0 ? max(quality, Capture.sourceQuality) : quality),
+                  let jpeg = Capture.scaled(raw, width: width, quality: quality)
+            else { return .error("this iOS doesn't give the screen as a JPEG directly", status: 501) }
+            return Response(status: 200, type: "image/jpeg", body: jpeg)
         }
-        if width > 0, pixels > CGFloat(width) {
-            let factor = CGFloat(width) / pixels
-            let size = CGSize(width: (image.size.width * image.scale * factor).rounded(),
-                              height: (image.size.height * image.scale * factor).rounded())
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-                image.draw(in: CGRect(origin: .zero, size: size))
-            }
+        guard let (type, data) = Capture.xctest(width: width, quality: quality) else {
+            return .error("couldn't encode the screen", status: 500)
         }
-        let (type, data) = quality > 0
-            ? ("image/jpeg", image.jpegData(compressionQuality: CGFloat(min(quality, 100)) / 100))
-            : ("image/png", image.pngData())
-        guard let data else { return .error("couldn't encode the screen", status: 500) }
         return Response(status: 200, type: type, body: data)
     }
 
@@ -102,7 +113,64 @@ final class Actions {
             "width": size.width,
             "height": size.height,
             "scale": UITraitCollection.current.displayScale,
-            "active": activeApp().flatMap(bundleID) ?? "",
+            "active": activeBundles().first ?? "",
+            "stream": stream.stats,
+        ])
+    }
+
+    /// What's on the screen, as a flat list (`Elements`): each app XCTest counts as active, the
+    /// one in front first. That is SpringBoard on the Home Screen, and SpringBoard alone under a
+    /// system alert (a permission asked over an app). `max=<n>` and `ms=<n>` bound the answer;
+    /// `more` counts what was left out, and `partial` says the time ran out.
+    private func elements(_ query: String) -> Response {
+        let started = Date()
+        let limits = Elements.Limits(query: query)
+        let screen = CGRect(origin: .zero, size: size)
+        var flat = Elements.Flat(limit: limits.count, deadline: started.addingTimeInterval(limits.seconds))
+        var bundles = activeBundles()
+        if bundles.isEmpty {
+            // This XCTest doesn't say which apps are active: the app last opened here while
+            // it's in front, else SpringBoard.
+            let opened = lastOpened.flatMap {
+                XCUIApplication(bundleIdentifier: $0).state == .runningForeground ? $0 : nil
+            }
+            bundles = [opened ?? Actions.springboardID]
+        }
+        var read: [String] = []
+        for bundle in bundles {
+            guard Date() < flat.deadline, !flat.partial else {
+                flat.partial = true
+                break
+            }
+            let left = max(flat.deadline.timeIntervalSinceNow, 0.2)
+            let app = XCUIApplication(bundleIdentifier: bundle)
+            guard let root = Elements.bounded(seconds: left, { try? app.snapshot() }) else { continue }
+            read.append(bundle)
+            // The app itself, by its bundle id, then what it shows.
+            let name = root.label.trimmingCharacters(in: .whitespacesAndNewlines)
+            if flat.elements.count < flat.limit {
+                flat.elements.append(Elements.Element(
+                    type: Elements.name(.application), label: Elements.clip(name), identifier: bundle,
+                    frame: root.frame))
+            }
+            for kid in root.children {
+                Elements.flatten(Elements.Live(snapshot: kid), screen: screen, depth: 1, into: &flat)
+            }
+        }
+        guard !read.isEmpty else {
+            return Date() >= flat.deadline
+                ? .error("what's on the iPhone's screen took too long to read", status: 504)
+                : .error("couldn't read what's on the iPhone's screen", status: 500)
+        }
+        return .json([
+            "ok": true,
+            "app": read[0],
+            "width": size.width,
+            "height": size.height,
+            "elements": flat.elements.map(\.json),
+            "more": flat.more,
+            "partial": flat.partial,
+            "ms": Int((Date().timeIntervalSince(started) * 1000).rounded()),
         ])
     }
 
@@ -275,24 +343,31 @@ final class Actions {
     /// The app in front, through XCTest's own accessibility client (not public API; nil when this
     /// Xcode's XCTest doesn't have it).
     private func activeApp() -> XCUIApplication? {
+        activeBundles().first.map { XCUIApplication(bundleIdentifier: $0) }
+    }
+
+    /// The apps on the screen as XCTest's accessibility client has them, by bundle id: the one
+    /// in front first, and SpringBoard (which is among them on the Home Screen) last.
+    private func activeBundles() -> [String] {
         let device = XCUIDevice.shared as NSObject
         let interface = NSSelectorFromString("accessibilityInterface")
         let monitorSel = NSSelectorFromString("applicationMonitor")
         guard device.responds(to: interface), device.responds(to: monitorSel),
               let client = device.value(forKey: "accessibilityInterface") as? NSObject,
               let monitor = device.value(forKey: "applicationMonitor") as? NSObject
-        else { return nil }
+        else { return [] }
         let active = NSSelectorFromString("activeApplications")
         guard client.responds(to: active),
               let elements = client.perform(active)?.takeUnretainedValue() as? [NSObject]
-        else { return nil }
-        let bundles = elements.compactMap { element -> String? in
-            guard let pid = (element.value(forKey: "processIdentifier") as? NSNumber)?.int32Value
-            else { return nil }
-            return Actions.bundle(pid: pid, monitor: monitor)
+        else { return [] }
+        var bundles: [String] = []
+        for element in elements {
+            guard let pid = (element.value(forKey: "processIdentifier") as? NSNumber)?.int32Value,
+                  let bundle = Actions.bundle(pid: pid, monitor: monitor), !bundles.contains(bundle)
+            else { continue }
+            bundles.append(bundle)
         }
-        let bundle = bundles.first { $0 != "com.apple.springboard" } ?? bundles.first
-        return bundle.map { XCUIApplication(bundleIdentifier: $0) }
+        return bundles.filter { $0 != Actions.springboardID } + bundles.filter { $0 == Actions.springboardID }
     }
 
     /// The bundle id of the app running as `pid`, from XCTest's application monitor.
@@ -305,11 +380,5 @@ final class Actions {
               found.responds(to: NSSelectorFromString("bundleID"))
         else { return nil }
         return found.value(forKey: "bundleID") as? String
-    }
-
-    private func bundleID(_ app: XCUIApplication) -> String? {
-        let sel = NSSelectorFromString("bundleID")
-        guard app.responds(to: sel) else { return nil }
-        return app.perform(sel)?.takeUnretainedValue() as? String
     }
 }

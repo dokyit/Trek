@@ -211,10 +211,13 @@ mod prompt_budget {
         ("video", 240, 1_250),
         ("orchestrate", 1_050, 11_000),
         ("browser", 950, 7_300),
-        ("phone", 1_230, 6_650),
+        // Raised for phone_elements and phone_wait, phone_tap's ref, and the instructions'
+        // "elements first" (1,178 and 6,033 before; 1,475 and 7,413 measured with them).
+        ("phone", 1_620, 8_150),
     ];
-    /// Everything on (computer use in the background and every default family) together.
-    const ALL_CHARS: usize = 40_500;
+    /// Everything on (computer use in the background and every default family) together
+    /// (41,054 measured with the phone's elements).
+    const ALL_CHARS: usize = 42_200;
 
     fn families() -> Vec<(&'static str, Box<dyn ToolSet>)> {
         vec![

@@ -40,6 +40,15 @@ a free Apple ID installs only three apps on a phone, so it isn't an app of its o
 Its HTTP parsing tests run on a simulator: `xcodebuild test -project TrekDriver/TrekDriver.xcodeproj
 -scheme TrekDriver -destination 'platform=iOS Simulator,name=iPhone 17'`.
 
+Version 3 also pushes the screen (`GET /stream`, an MJPEG answer the Mac's iPhone tool shows as it
+arrives: `Driver/Stream.swift`, `Driver/Capture.swift`) and lists what's on it for agents (`GET
+/elements`: `Driver/Elements.swift`). Both run in a simulator too, where the driver serves on the
+Mac's loopback: start it with `TEST_RUNNER_TREK_DRIVER=1 TEST_RUNNER_TREK_DRIVER_TOKEN=<token>
+xcodebuild test … -only-testing:TrekDriver/Drive` and reach it with curl, `cargo run -p trek-phone
+--example driver_bench` (frames a second, input to picture) or trek-mcp's
+`a_simulators_driver_reads_and_taps_by_ref` test. The wire formats and the measurements are in
+`.agents/skills/verify-trek/references/features/iphone-tool.md`.
+
 ## Live Activity
 
 `ios/TrekActivity` is a WidgetKit extension that draws the thread at work and what waits on you, on
