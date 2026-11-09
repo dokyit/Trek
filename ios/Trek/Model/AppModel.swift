@@ -209,6 +209,8 @@ final class AppModel {
         activities.knowsAll = { [weak self] in self?.links.allSatisfy(\.listed) ?? true }
         activities.hears = { [weak self] qid in self?.link(for: qid)?.connection == .connected }
         activities.adopt()
+        // Copies of videos and files picked for a message that never went: no composer has them now.
+        Task.detached(priority: .background) { PickedFile.clearCopies() }
         if UserDefaults.standard.bool(forKey: "TrekReset") {
             UserDefaults.standard.set(false, forKey: "demoMode")
             PairedMac.clear()
@@ -569,7 +571,7 @@ final class AppModel {
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
              .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
              .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _), .media(let re, _), .contextCard(let re, _),
-             .turnPreview(let re, _):
+             .turnPreview(let re, _), .uploadProgress(let re, _):
             link.reply(re, message)
         case .unlisted(let t):
             setUnlisted(qualify(t, on: link))
@@ -629,18 +631,18 @@ final class AppModel {
         func t(_ qid: String) -> HostLink? { link(for: qid) }
         switch m {
         case .subscribe(let tid, _, _), .transcriptBefore(let tid, _, _), .unsubscribe(let tid),
-             .send(let tid, _, _, _), .threadAction(let tid, _), .answer(let tid, _, _),
+             .send(let tid, _, _, _, _), .threadAction(let tid, _), .answer(let tid, _, _),
              .interrupt(let tid), .markSeen(let tid), .worktreeMerge(let tid),
              .commands(let tid), .turnAction(let tid, _, _, _, _), .queueAction(let tid, _, _, _, _),
              .attachment(let tid, _, _, _), .backgroundOutput(let tid, _), .stopBackground(let tid, _),
              .cardAction(let tid, _, _), .media(let tid, _, _, _, _), .contextCard(let tid), .turnPreview(let tid, _, _),
-             .sendConsult(let tid, _, _, _, _):
+             .sendConsult(let tid, _, _, _, _, _):
             return t(tid)
         case .setPrefs(let tid, _, _, _, _, _):
             return t(tid)
         case .worktreeRemove(let tid, _, _):
             return t(tid)
-        case .newThread(let pid, _, _, _, _, _, _, _, _):
+        case .newThread(let pid, _, _, _, _, _, _, _, _, _):
             return t(pid)
         case .gitStatus(let g), .gitDiff(let g, _), .gitCommit(let g, _), .gitPush(let g),
              .gitBranches(let g), .gitSwitch(let g, _):
@@ -663,10 +665,11 @@ final class AppModel {
         case .subscribe(let tid, let after, let limit): return .subscribe(threadId: b(tid), afterSeq: after, limit: limit)
         case .transcriptBefore(let tid, let before, let limit): return .transcriptBefore(threadId: b(tid), before: before, limit: limit)
         case .unsubscribe(let tid): return .unsubscribe(threadId: b(tid))
-        case .send(let tid, let text, let mode, let images): return .send(threadId: b(tid), text: text, mode: mode, images: images)
-        case .newThread(let pid, let agent, let model, let text, let worktree, let effort, let access, let plan, let images):
+        case .send(let tid, let text, let mode, let images, let files):
+            return .send(threadId: b(tid), text: text, mode: mode, images: images, files: files)
+        case .newThread(let pid, let agent, let model, let text, let worktree, let effort, let access, let plan, let images, let files):
             return .newThread(projectId: b(pid), agent: agent, model: model, text: text, worktree: worktree,
-                              effort: effort, access: access, plan: plan, images: images)
+                              effort: effort, access: access, plan: plan, images: images, files: files)
         case .setPrefs(let tid, let a, let m2, let e, let ac, let p2):
             return .setPrefs(threadId: b(tid), agent: a, model: m2, effort: e, access: ac, plan: p2)
         case .threadAction(let tid, let action): return .threadAction(threadId: b(tid), action: action)
@@ -692,8 +695,8 @@ final class AppModel {
             return .media(threadId: b(tid), path: path, maxPx: px, offset: offset, length: length)
         case .contextCard(let tid): return .contextCard(threadId: b(tid))
         case .turnPreview(let tid, let iid, let a): return .turnPreview(threadId: b(tid), itemId: iid, action: a)
-        case .sendConsult(let tid, let text, let mode, let images, let consult):
-            return .sendConsult(threadId: b(tid), text: text, mode: mode, images: images, consult: consult)
+        case .sendConsult(let tid, let text, let mode, let images, let consult, let files):
+            return .sendConsult(threadId: b(tid), text: text, mode: mode, images: images, consult: consult, files: files)
         case .turnAction(let tid, let iid, let a, let mo, let rf):
             return .turnAction(threadId: b(tid), itemId: iid, action: a, model: mo, restoreFiles: rf)
         case .noteAsset(let nid, let path, let px): return .noteAsset(noteId: b(nid), path: path, maxPx: px)
@@ -848,11 +851,20 @@ final class AppModel {
         if let link = link(for: tid) { link.backend.send(.markSeen(threadId: link.bare(tid)), id: nil) }
     }
 
-    func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = [], consult: ConsultRequest? = nil) {
-        let message: ClientMessage = consult.map { .sendConsult(threadId: tid, text: text, mode: mode, images: images, consult: $0) }
-            ?? .send(threadId: tid, text: text, mode: mode, images: images)
+    /// `files`: upload ids of what went up first. `failed`: the host refused it (after its words
+    /// are shown); `sent`: it took it.
+    func send(_ text: String, to tid: String, mode: SendMode?, images: [ImageUpload] = [], consult: ConsultRequest? = nil,
+              files: [String] = [], failed: ((ErrorCode) -> Void)? = nil, sent: (() -> Void)? = nil) {
+        let message: ClientMessage = consult.map { .sendConsult(threadId: tid, text: text, mode: mode, images: images, consult: $0, files: files) }
+            ?? .send(threadId: tid, text: text, mode: mode, images: images, files: files)
         let link = route(message)
-        act(message) { [weak self, weak link] reply in
+        request(message) { [weak self, weak link] reply in
+            if case .error(_, let code, let text) = reply {
+                self?.show(text, error: true)
+                failed?(code)
+                return
+            }
+            sent?()
             // `/new`: the host leaves its own screen be and asks the phone to open its sheet.
             guard let self, let link else { return }
             if case .ack(_, _, let open?, _) = reply, open.screen == "new_thread" {
@@ -915,11 +927,17 @@ final class AppModel {
 
     func newThread(project: String, agent: String, model: String?, text: String, worktree: Bool,
                    effort: String? = nil, access: Access? = nil, plan: Bool = false, images: [ImageUpload] = [],
-                   opened: @escaping (String) -> Void) {
-        let link = route(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree, effort: effort, access: access, plan: plan, images: images))
-        act(.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree,
-                       effort: effort, access: access, plan: plan, images: images)) { [weak link] reply in
-            if case .ack(_, let tid?, _, _) = reply, let link { opened(link.qualified(tid)) }
+                   files: [String] = [], failed: ((ErrorCode) -> Void)? = nil, opened: @escaping (String) -> Void) {
+        let message = ClientMessage.newThread(projectId: project, agent: agent, model: model, text: text, worktree: worktree,
+                                              effort: effort, access: access, plan: plan, images: images, files: files)
+        let link = route(message)
+        request(message) { [weak self, weak link] reply in
+            if case .error(_, let code, let text) = reply {
+                self?.show(text, error: true)
+                failed?(code)
+            } else if case .ack(_, let tid?, _, _) = reply, let link {
+                opened(link.qualified(tid))
+            }
         }
     }
 

@@ -756,6 +756,8 @@ nonisolated enum ServerMessage {
     case media(re: String?, MediaChunk)
     case contextCard(re: String?, ContextCard)
     case turnPreview(re: String?, TurnPreview)
+    /// How much of a file sent with a message the Mac has (`upload_part`).
+    case uploadProgress(re: String?, UploadProgress)
     /// How an iPhone update the Mac runs is going (to every phone, asked or not).
     case phoneUpdate(PhoneUpdate)
     case unknown(String)
@@ -852,6 +854,7 @@ nonisolated enum ServerMessage {
         case "media": return .media(re: r.re, try decoder.decode(MediaChunk.self, from: data))
         case "context_card": return .contextCard(re: r.re, try decoder.decode(ContextCard.self, from: data))
         case "turn_preview": return .turnPreview(re: r.re, try decoder.decode(TurnPreview.self, from: data))
+        case "upload_progress": return .uploadProgress(re: r.re, try decoder.decode(UploadProgress.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -903,9 +906,10 @@ nonisolated enum ClientMessage {
     /// a message, its `user` item). `model`: retry with another model.
     case turnAction(threadId: String, itemId: String, action: TurnAction, model: String? = nil, restoreFiles: Bool = true)
     case unsubscribe(threadId: String)
-    case send(threadId: String, text: String, mode: SendMode?, images: [ImageUpload])
+    /// `files`: upload ids of what went up first (`uploadPart`, feature `uploads`).
+    case send(threadId: String, text: String, mode: SendMode?, images: [ImageUpload], files: [String] = [])
     case newThread(projectId: String, agent: String, model: String?, text: String, worktree: Bool,
-                   effort: String?, access: Access?, plan: Bool, images: [ImageUpload])
+                   effort: String?, access: Access?, plan: Bool, images: [ImageUpload], files: [String] = [])
     case setPrefs(threadId: String, agent: String?, model: String?, effort: String?, access: Access?, plan: Bool?)
     case threadAction(threadId: String, action: ThreadAction)
     case answer(threadId: String, requestId: String, response: AnswerResponse)
@@ -963,7 +967,11 @@ nonisolated enum ClientMessage {
     /// Which files undoing, retrying or rewinding would put back (`turn_preview`).
     case turnPreview(threadId: String, itemId: String, action: TurnAction)
     /// `send` with consultants (`consult`).
-    case sendConsult(threadId: String, text: String, mode: SendMode?, images: [ImageUpload], consult: ConsultRequest)
+    case sendConsult(threadId: String, text: String, mode: SendMode?, images: [ImageUpload], consult: ConsultRequest,
+                     files: [String] = [])
+    /// A piece of a file sent with a message (`uploads`): base64 `data` from `offset` of a file
+    /// `total` bytes long, every piece under the same `uploadId` (a UUID).
+    case uploadPart(uploadId: String, name: String, total: Int64, offset: Int64, data: String)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     /// The build (the number of commits it was built from, `install-device.sh`).
@@ -990,16 +998,21 @@ nonisolated enum ClientMessage {
             if action != .fork { o["restore_files"] = restoreFiles }
         case .unsubscribe(let threadId):
             o = ["type": "unsubscribe", "thread_id": threadId]
-        case .send(let threadId, let text, let mode, let images):
+        case .send(let threadId, let text, let mode, let images, let files):
             o = ["type": "send", "thread_id": threadId, "text": text, "mode": mode?.rawValue ?? NSNull()]
             if !images.isEmpty { o["images"] = images.map(\.json) }
-        case .newThread(let projectId, let agent, let model, let text, let worktree, let effort, let access, let plan, let images):
+            if !files.isEmpty { o["files"] = files }
+        case .newThread(let projectId, let agent, let model, let text, let worktree, let effort, let access, let plan, let images,
+                        let files):
             o = ["type": "new_thread", "project_id": projectId, "agent": agent, "model": model ?? NSNull(),
                  "text": text, "worktree": worktree]
             if let effort { o["effort"] = effort }
             if let access { o["access"] = access.rawValue }
             if plan { o["plan"] = true }
             if !images.isEmpty { o["images"] = images.map(\.json) }
+            if !files.isEmpty { o["files"] = files }
+        case .uploadPart(let uploadId, let name, let total, let offset, let data):
+            o = ["type": "upload_part", "upload_id": uploadId, "name": name, "total": total, "offset": offset, "data": data]
         case .setPrefs(let threadId, let agent, let model, let effort, let access, let plan):
             o = ["type": "set_prefs", "thread_id": threadId]
             if let agent { o["agent"] = agent }

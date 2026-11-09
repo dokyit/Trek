@@ -23,6 +23,7 @@ use crate::protocol::{
     UpdatePhoneRequest,
 };
 use crate::protocol::{ContextCard, Media, MediaRequest, TurnPreview, TurnPreviewRequest};
+use crate::protocol::{UploadPart, UploadProgress};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -421,6 +422,19 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("preview a turn's undo")
     }
 
+    /// A piece of a file the phone sends with a message (feature `uploads`), already checked
+    /// ([`UploadPart::check`]): decode it ([`UploadPart::decode`]) and write it after the pieces
+    /// before it, off the thread that answers the rest; refuse (`bad_request`, ending the upload)
+    /// one that doesn't start where the last ended. Once the whole file is in, keep it under its
+    /// name and remember its id for `send.files` and `new_thread.files`.
+    fn upload_part(
+        &self,
+        req: UploadPart,
+    ) -> impl Future<Output = HostResult<UploadProgress>> + Send {
+        let _ = req;
+        unsupported("receive files from the phone")
+    }
+
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -671,6 +685,11 @@ pub enum HostRequest {
     TurnPreview {
         req: TurnPreviewRequest,
         reply: Reply<TurnPreview>,
+    },
+    /// See [`RemoteHost::upload_part`].
+    UploadPart {
+        req: UploadPart,
+        reply: Reply<UploadProgress>,
     },
 }
 
@@ -997,6 +1016,11 @@ impl RemoteHost for ChannelHost {
 
     async fn turn_preview(&self, req: TurnPreviewRequest) -> HostResult<TurnPreview> {
         self.call(|reply| HostRequest::TurnPreview { req, reply })
+            .await
+    }
+
+    async fn upload_part(&self, req: UploadPart) -> HostResult<UploadProgress> {
+        self.call(|reply| HostRequest::UploadPart { req, reply })
             .await
     }
 }

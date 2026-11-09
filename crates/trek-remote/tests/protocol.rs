@@ -678,6 +678,7 @@ fn spec_actions() {
             mode: Some(SendMode::Steer),
             images: vec![],
             consult: None,
+            files: vec![],
         })
     );
     let queued: ClientEnvelope =
@@ -1470,7 +1471,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -1925,4 +1926,129 @@ fn a_row_s_ask_and_cut_off_turn_are_left_out_until_there_is_one() {
             action
         );
     }
+}
+
+#[test]
+fn files_from_the_phone_go_up_in_pieces() {
+    let id = "3F2504E0-4F89-11D3-9A0C-0305E82C3301";
+    let line = format!(
+        r#"{{"type":"upload_part","id":"20","upload_id":"{id}","name":"IMG_0042.MOV","total":10485760,"offset":4194304,"data":"AAEC"}}"#
+    );
+    let env = client_round_trip(&line);
+    assert_eq!(env.msg.kind(), "upload_part");
+    assert!(!env.msg.is_query(), "it writes, in order");
+    let ClientMessage::UploadPart(part) = env.msg else {
+        panic!()
+    };
+    let piece = part.decode().unwrap();
+    assert_eq!(
+        (
+            piece.upload_id.as_str(),
+            piece.name.as_str(),
+            piece.offset,
+            piece.bytes
+        ),
+        (
+            "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+            "IMG_0042.MOV",
+            4194304,
+            vec![0, 1, 2]
+        )
+    );
+
+    // Each piece is answered with how far the file got; the last says it's in.
+    for line in [
+        format!(
+            r#"{{"type":"upload_progress","re":"20","upload_id":"{id}","received":4194307,"total":10485760}}"#
+        ),
+        format!(
+            r#"{{"type":"upload_progress","re":"22","upload_id":"{id}","received":10485760,"total":10485760,"done":true}}"#
+        ),
+    ] {
+        server_round_trip(&line);
+    }
+    let last: ServerEnvelope = serde_json::from_str(&format!(
+        r#"{{"type":"upload_progress","upload_id":"{id}","received":3,"total":3,"done":true}}"#
+    ))
+    .unwrap();
+    assert!(matches!(
+        last.msg,
+        ServerMessage::UploadProgress(UploadProgress { done: true, .. })
+    ));
+
+    // A message takes them by id; one without any reads as before (and older Macs never see it).
+    let sent = client_round_trip(&format!(
+        r#"{{"type":"send","id":"23","thread_id":"t","text":"What happens at 0:12?","mode":null,"files":["{id}"]}}"#
+    ));
+    let ClientMessage::Send(SendRequest { files, .. }) = sent.msg else {
+        panic!()
+    };
+    assert_eq!(files, [id]);
+    let started = client_round_trip(&format!(
+        r#"{{"type":"new_thread","id":"24","project_id":"p1","agent":"codex","model":null,"text":"Summarise this","worktree":false,"files":["{id}"]}}"#
+    ));
+    let ClientMessage::NewThread(NewThreadRequest { files, .. }) = started.msg else {
+        panic!()
+    };
+    assert_eq!(files, [id]);
+    let plain = SendRequest {
+        thread_id: "t".into(),
+        text: "x".into(),
+        mode: None,
+        images: vec![],
+        consult: None,
+        files: vec![],
+    };
+    assert!(serde_json::to_value(&plain).unwrap().get("files").is_none());
+    assert!(feature::ALL.contains(&feature::UPLOADS));
+}
+
+#[test]
+fn pieces_that_cannot_be_kept_are_refused() {
+    let part = |id: &str, name: &str, total: u64, offset: u64, data: &str| UploadPart {
+        upload_id: id.into(),
+        name: name.into(),
+        total,
+        offset,
+        data: data.into(),
+    };
+    let id = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+    assert!(part(id, "a.txt", 3, 0, "AAEC").decode().is_ok());
+    // An empty file is one empty piece.
+    assert!(part(id, "empty.txt", 0, 0, "").decode().is_ok());
+    for (bad, why) in [
+        (
+            part("not-a-uuid", "a.txt", 3, 0, "AAEC"),
+            "isn't an upload id",
+        ),
+        (
+            part("../../etc/passwd", "a.txt", 3, 0, "AAEC"),
+            "isn't an upload id",
+        ),
+        (part(id, "../..", 3, 0, "AAEC"), "can't be a file's name"),
+        (part(id, "\u{7}", 3, 0, "AAEC"), "can't be a file's name"),
+        (
+            part(id, "huge.mov", MAX_UPLOAD + 1, 0, "AAEC"),
+            "too big to send",
+        ),
+        (part(id, "a.txt", 3, 4, ""), "past the end"),
+        (part(id, "a.txt", 2, 0, "AAEC"), "runs past the end"),
+        (part(id, "a.txt", 3, 0, ""), "empty"),
+        (part(id, "a.txt", 3, 0, "not base64!"), "isn't base64"),
+    ] {
+        let err = bad.decode().unwrap_err();
+        assert!(err.contains(why), "{bad:?}: {err}");
+    }
+    // Over a piece's most, told from the base64's length before decoding it.
+    let big = "A".repeat((MAX_UPLOAD_PART as usize).div_ceil(3) * 4 + 8);
+    let err = part(id, "a.bin", MAX_UPLOAD, 0, &big).check().unwrap_err();
+    assert!(err.contains("piece is too big"), "{err}");
+    // A name that only needs cleaning is kept cleaned, its extension and all.
+    assert_eq!(
+        part(id, "../../tmp/évil\u{0}.sh", 3, 0, "AAEC")
+            .decode()
+            .unwrap()
+            .name,
+        "évil.sh"
+    );
 }

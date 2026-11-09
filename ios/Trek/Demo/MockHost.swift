@@ -146,7 +146,7 @@ final class MockHost: Backend {
             chatter = Timer.scheduledTimer(withTimeInterval: Launch.demoChat, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
                     n += 1
-                    self?.take(.send(threadId: tid, text: "Step \(n): carry on", mode: nil, images: []), id: nil)
+                    self?.take(.send(threadId: tid, text: "Step \(n): carry on", mode: nil, images: [], files: []), id: nil)
                 }
             }
         }
@@ -223,7 +223,9 @@ final class MockHost: Backend {
             append(tid, .error("Interrupted"))
             update(tid) { $0.runState = .idle; $0.activity = nil; $0.workingSince = nil }
             subAgentChanged(tid, to: .stopped)
-        case .send(let tid, let text, _, let images):
+        case .send(let tid, let typed, _, let images, let files):
+            // Files that went up first: mentioned after the words, as the Mac does.
+            let text = mentioning(typed, files)
             // Trek's own commands: `/new` opens the phone's sheet, the rest get the Mac's answer.
             let command = text.hasPrefix("/") ? text.dropFirst().split(separator: " ").first.map(String.init) : nil
             if command == "new" || command == "clear" {
@@ -268,12 +270,13 @@ final class MockHost: Backend {
                 default: break
                 }
             }
-        case .newThread(let pid, let agentKey, let model, let text, let worktree, _, _, _, let images):
+        case .newThread(let pid, let agentKey, let model, let typed, let worktree, _, _, _, let images, let files):
+            let text = mentioning(typed, files)
             let tid = "t-new-\(Int(Date().timeIntervalSince1970))"
             let project = projects.first { $0.id == pid } ?? projects[0]
             let agent = agents.first { $0.key == agentKey } ?? agents[0]
             let modelId = model ?? agent.defaultModel
-            let words = text.split(separator: " ").prefix(6).joined(separator: " ")
+            let words = typed.split(separator: " ").prefix(6).joined(separator: " ")
             let t = ThreadSummary(id: tid, title: words.isEmpty ? "New thread" : words.prefix(1).uppercased() + words.dropFirst(),
                                   project: project.ref, agent: AgentRef(key: agent.key, name: agent.name), model: modelId,
                                   modelLabel: agent.models.first { $0.id == modelId }?.label, runState: .working, needs: nil,
@@ -372,8 +375,10 @@ final class MockHost: Backend {
             updatePhone(version: version, id: id)
         case .media, .contextCard, .turnPreview:
             takeTranscriptParity(message, id: id)
-        case .sendConsult(let tid, let text, let mode, let images, let consult):
-            take(.send(threadId: tid, text: DemoMac.withConsult(text, consult), mode: mode, images: images), id: id)
+        case .sendConsult(let tid, let text, let mode, let images, let consult, let files):
+            take(.send(threadId: tid, text: DemoMac.withConsult(mentioning(text, files), consult), mode: mode, images: images), id: id)
+        case .uploadPart:
+            takeUpload(message, id: id)
         }
     }
 

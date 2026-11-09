@@ -1,4 +1,3 @@
-import PhotosUI
 import SwiftUI
 
 /// "What are we building?": pick a project, an agent and model, worktree or local; then describe it.
@@ -18,9 +17,11 @@ struct NewThreadSheet: View {
     @State private var access: Access?
     @State private var plan = false
     @State private var photos: [PickedPhoto] = []
-    @State private var picking = false
-    @State private var picked: [PhotosPickerItem] = []
+    /// Videos and files to start it with (`uploads`).
+    @State private var files: [PickedFile] = []
     @State private var sending = false
+    /// Its files are going up: it starts once they're in.
+    @State private var uploading = false
     @State private var choosingModel = false
     @FocusState private var focused: Bool
 
@@ -97,11 +98,13 @@ struct NewThreadSheet: View {
 
     private var card: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !photos.isEmpty { PhotoStrip(photos: $photos) }
+            if !photos.isEmpty || !files.isEmpty { AttachmentStrip(photos: $photos, files: $files, locked: uploading) }
             TextField(typeSize.isAccessibilitySize ? "The task" : "Describe the task", text: $text, axis: .vertical)
                 .lineLimit(2...8)
                 .font(.ui(size: 17, relativeTo: .body))
                 .focused($focused)
+                .disabled(uploading)
+                .opacity(uploading ? 0.6 : 1)
                 .padding(.horizontal, 6)
                 .padding(.top, 6)
             HStack(spacing: 8) {
@@ -119,36 +122,33 @@ struct NewThreadSheet: View {
                 .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.88),
                                              .init(color: .clear, location: 1)], startPoint: .leading, endPoint: .trailing))
                 Button(action: start) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(Trek.background)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(empty ? Trek.muted.opacity(0.35) : Trek.foreground))
+                    Group {
+                        if uploading {
+                            ProgressView().tint(Trek.background).controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.up").font(.system(size: 16, weight: .bold))
+                        }
+                    }
+                    .foregroundStyle(Trek.background)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(empty ? Trek.muted.opacity(0.35) : Trek.foreground))
                 }
                 .buttonStyle(.plain)
                 .disabled(empty || sending)
-                .accessibilityLabel("Start thread")
+                .accessibilityLabel(uploading ? "Sending its files" : "Start thread")
             }
         }
         .padding(12)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .photosPicker(isPresented: $picking, selection: $picked, maxSelectionCount: 4, matching: .images)
-        .onChange(of: picked) {
-            let items = picked
-            picked = []
-            Task {
-                let loaded = await PickedPhoto.load(items)
-                withAnimation(.snappy) { photos.append(contentsOf: loaded) }
-            }
-        }
     }
 
+    /// Photos, and (from a Mac that takes them) videos and files.
     private var photoChip: some View {
-        Button { picking = true } label: {
-            chip { Image(systemName: "photo.on.rectangle").font(.system(size: 14, weight: .medium)) }
+        AttachPicker(photos: $photos, files: $files, uploads: link?.serves(.uploads) == true) {
+            chip { Image(systemName: link?.serves(.uploads) == true ? "paperclip" : "photo.on.rectangle").font(.system(size: 14, weight: .medium)) }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Add photos")
+        .disabled(uploading)
     }
 
     private var accessChip: some View {
@@ -180,7 +180,7 @@ struct NewThreadSheet: View {
         .accessibilityLabel(plan ? "Plan first: on" : "Plan first: off")
     }
 
-    private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && photos.isEmpty && files.isEmpty }
 
     /// Which machine the thread runs on (several paired only).
     private var machineChip: some View {
@@ -273,13 +273,49 @@ struct NewThreadSheet: View {
 
     private func start() {
         guard let pid = project?.id ?? (isNoProject ? noProjectID : nil), let agent else { return }
-        sending = true
-        model.newThread(project: pid, agent: agent.key, model: modelID ?? ModelNaming.defaultModel(agent)?.id,
-                        text: text.trimmingCharacters(in: .whitespacesAndNewlines), worktree: worktree && (project?.isRepo ?? false),
-                        effort: effort, access: access, plan: plan, images: photos.compactMap(\.upload)) { tid in
-            dismiss()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { opened(tid) }
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let images = photos.compactMap(\.upload)
+        let begin = { (ids: [String], failed: ((ErrorCode) -> Void)?) in
+            model.newThread(project: pid, agent: agent.key, model: modelID ?? ModelNaming.defaultModel(agent)?.id,
+                            text: words.isEmpty
+                                ? MessageFiles.caption(photos: images.count, videos: files.count { $0.kind == .video },
+                                                       files: files.count { $0.kind == .file })
+                                : words,
+                            worktree: worktree && (project?.isRepo ?? false),
+                            effort: effort, access: access, plan: plan, images: images, files: ids, failed: failed) { tid in
+                for f in files { f.discard() }
+                dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { opened(tid) }
+            }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { sending = false }
+        sending = true
+        guard !files.isEmpty else {
+            begin([], nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { sending = false }
+            return
+        }
+        guard let link, link.connection == .connected else {
+            sending = false
+            model.show(AppModel.notConnected, error: true)
+            return
+        }
+        // Videos and files go up first; the sheet stays, as it is, until the thread starts.
+        uploading = true
+        Task {
+            do {
+                let ids = try await model.upload(files, on: link) { id, f in
+                    if let i = files.firstIndex(where: { $0.id == id }) { f(&files[i]) }
+                }
+                begin(ids) { code in
+                    uploading = false
+                    sending = false
+                    if code == .badRequest { for i in files.indices { files[i].sent = nil } }
+                }
+            } catch {
+                uploading = false
+                sending = false
+                model.show(error.localizedDescription, error: true)
+            }
+        }
     }
 }

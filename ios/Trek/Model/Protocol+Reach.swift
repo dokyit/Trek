@@ -53,6 +53,8 @@ nonisolated enum MacFeature: String, CaseIterable {
     case resumeInterrupted = "resume_interrupted"
     /// Sending with consultants (the composer's consult pill).
     case consult
+    /// Videos and files sent with a message, a piece at a time (`upload_part`, `send.files`).
+    case uploads
 }
 
 /// The Mac's snooze menu.

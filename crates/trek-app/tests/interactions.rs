@@ -101,6 +101,7 @@ fn phone_send(
         mode,
         images: vec![],
         consult: None,
+        files: vec![],
     };
     move |reply| tr::HostRequest::Send { req, reply }
 }
@@ -881,6 +882,7 @@ fn a_thread_started_on_the_phone_runs_on_the_agents_own_login() {
                 access: None,
                 plan: false,
                 images: vec![],
+                files: vec![],
             },
             reply,
         })

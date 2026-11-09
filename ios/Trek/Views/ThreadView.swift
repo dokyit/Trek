@@ -23,6 +23,10 @@ struct ThreadView: View {
 final class ComposerState {
     var draft = ""
     var photos: [PickedPhoto] = []
+    /// Videos and files to send with it (`uploads`).
+    var files: [PickedFile] = []
+    /// Its files are going up: the message waits, as it is, until they're in.
+    var uploading = false
     var mode: SendMode = .steer
     /// Bumped to bring the keyboard up (after "Edit" put a message back in the composer).
     var focusRequest = 0
@@ -48,6 +52,13 @@ final class ComposerState {
         sent = (text, now)
         draft = ""
         photos = []
+        for f in files { f.discard() }
+        files = []
+    }
+
+    /// `f` done to the file `id`, if it's still with the message.
+    func change(_ id: PickedFile.ID, _ f: (inout PickedFile) -> Void) {
+        if let i = files.firstIndex(where: { $0.id == id }) { f(&files[i]) }
     }
 
     /// A message put back on purpose (undo, rewind, Edit): not an echo, however soon.
@@ -719,11 +730,18 @@ struct BlockRow: View, nonisolated Equatable {
                 // As written: what Trek added for the agent (a consult, a restatement) is a line
                 // under the bubble.
                 let parts = MessageParts.of(text)
+                // Files it ends with (`@/…/uploads/iPhone … clip.mov`): by name under the bubble, or
+                // playing there for a video, not as a path in it.
+                let attached = MessageFiles.split(parts.said)
+                let files = attached.files.filter { !block.extras.videos.contains($0) }
                 VStack(alignment: .trailing, spacing: 4) {
-                    UserBubble(text: parts.said, images: images, threadID: threadID, itemID: block.itemID)
+                    if !attached.text.isEmpty || images > 0 || attached.files.isEmpty {
+                        UserBubble(text: attached.text, images: images, threadID: threadID, itemID: block.itemID)
+                    }
                     if !block.extras.videos.isEmpty {
                         AttachedVideos(paths: block.extras.videos, threadID: threadID)
                     }
+                    if !files.isEmpty { MessageFileChips(paths: files) }
                     MessageNotes(parts: parts, threadID: threadID)
                     MessageActions(item: block.itemID, text: parts.said, at: at, latest: latest, busy: busy, aside: aside, act: act)
                 }
@@ -892,9 +910,10 @@ private struct ComposerArea: View {
                     ThreadSettingsBar(thread: thread, pickRequest: composer.pickModelRequest,
                                       consult: $c.consult, consultRequest: composer.consultRequest)
                 }
-                Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos,
+                Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos, files: $c.files,
                          placeholder: "Message \(thread?.agent.name ?? "the agent")",
-                         working: working, focusRequest: composer.focusRequest, send: send, stop: { model.interrupt(threadID) })
+                         working: working, uploads: model.serves(.uploads, on: threadID), uploading: composer.uploading,
+                         focusRequest: composer.focusRequest, send: send, stop: { model.interrupt(threadID) })
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { restHeight = $0 }
         }
@@ -945,9 +964,9 @@ private struct ComposerArea: View {
 
     private func send() {
         let text = composer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !composer.photos.isEmpty else { return }
+        guard !composer.uploading, !text.isEmpty || !composer.photos.isEmpty || !composer.files.isEmpty else { return }
         // Nothing can go while the Mac is out of reach: what's typed stays in the composer.
-        guard model.link(for: threadID)?.connection == .connected else {
+        guard let link = model.link(for: threadID), link.connection == .connected else {
             model.show(AppModel.notConnected, error: true)
             return
         }
@@ -957,12 +976,41 @@ private struct ComposerArea: View {
         for command in ["/new ", "/clear "] where text.hasPrefix(command) {
             prompt = String(text.dropFirst(command.count)).trimmingCharacters(in: .whitespaces)
         }
-        newPromptSent(prompt)
-        model.send(text.isEmpty ? PickedPhoto.caption(uploads.count) : text, to: threadID,
-                   mode: store.summary?.runState == .working ? composer.mode : nil, images: uploads,
-                   consult: model.serves(.consult, on: threadID) ? composer.consult : nil)
-        composer.consult = nil
-        composer.cleared(after: composer.draft)
+        let files = composer.files
+        let words = text.isEmpty
+            ? MessageFiles.caption(photos: uploads.count, videos: files.count { $0.kind == .video }, files: files.count { $0.kind == .file })
+            : text
+        let mode = store.summary?.runState == .working ? composer.mode : nil
+        let consult = model.serves(.consult, on: threadID) ? composer.consult : nil
+        guard !files.isEmpty else {
+            newPromptSent(prompt)
+            model.send(words, to: threadID, mode: mode, images: uploads, consult: consult)
+            composer.consult = nil
+            composer.cleared(after: composer.draft)
+            return
+        }
+        // Videos and files go up first, a piece at a time; the message waits as it is (and stays
+        // in the composer if they, or it, don't go).
+        let composer = composer, model = model, threadID = threadID, newPromptSent = newPromptSent
+        composer.uploading = true
+        Task {
+            do {
+                let ids = try await model.upload(files, on: link) { id, f in composer.change(id, f) }
+                newPromptSent(prompt)
+                model.send(words, to: threadID, mode: mode, images: uploads, consult: consult, files: ids, failed: { code in
+                    composer.uploading = false
+                    // A file it names may be gone from the Mac (it restarted): sent again next time.
+                    if code == .badRequest { for f in files { composer.change(f.id) { $0.sent = nil } } }
+                }, sent: {
+                    composer.uploading = false
+                    composer.consult = nil
+                    composer.cleared(after: composer.draft)
+                })
+            } catch {
+                composer.uploading = false
+                model.show(error.localizedDescription, error: true)
+            }
+        }
     }
 }
 

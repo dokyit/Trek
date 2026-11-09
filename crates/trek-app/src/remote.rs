@@ -52,6 +52,7 @@ mod settings;
 mod sub_agents;
 mod thread_actions;
 mod thread_parity;
+pub mod uploads;
 mod usage;
 
 /// How often changes go out to phones.
@@ -791,6 +792,8 @@ impl Workspace {
                             })
                     });
                     config.devices_path = Some(mobile_dir().join("devices.json"));
+                    // What a Trek that quit mid-upload left of a phone's file.
+                    uploads::sweep_stale(&uploads::uploads_dir(), uploads::STALE);
                     config.tls = Some(identity);
                     // The iPhone app builds on a Mac only (Xcode).
                     config.features = tr::feature::ALL
@@ -1144,6 +1147,8 @@ impl Workspace {
                 });
             }
             tr::HostRequest::TurnPreview { req, reply } => self.remote_turn_preview(req, reply, cx),
+            // A video or file from the phone, a piece at a time (`uploads.rs`).
+            tr::HostRequest::UploadPart { req, reply } => uploads::part(req, reply, cx),
         }
     }
 
@@ -1162,10 +1167,19 @@ impl Workspace {
                 crate::workspace::permission_requests::secret_waits_here(),
             ));
         }
+        // Files sent up first: mentioned after what was typed, as the Mac's composer mentions
+        // them (after what a command becomes, for a command).
+        let files = uploads::finished(&req.files)?;
+        let command = req.text.trim_start().starts_with('/');
+        let typed = match command {
+            true => req.text.clone(),
+            false => uploads::mentioning(&req.text, &files),
+        };
         // Trek's own commands: `/new` is the phone's to carry out, `/consult` and `/restate` become
         // the message the composer would send, the rest are answered as on the Mac.
-        let text = match self.phone_command(&t, &req.text)? {
+        let text = match self.phone_command(&t, &typed)? {
             commands::Phone::Open(open) => return Ok(Some(open)),
+            commands::Phone::Send(text) if command => uploads::mentioning(&text, &files),
             commands::Phone::Send(text) => text,
         };
         // Consultants picked in the phone's composer: the message goes as the Mac's composer
@@ -1278,7 +1292,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> tr::HostResult<String> {
         let agent = AgentId::from_key(&req.agent);
-        let text = self.phone_first_message(&agent, req.model.as_deref(), &req.text)?;
+        // Files sent up first, mentioned as in `remote_send`.
+        let files = uploads::finished(&req.files)?;
+        let text = match req.text.trim_start().starts_with('/') {
+            true => uploads::mentioning(
+                &self.phone_first_message(&agent, req.model.as_deref(), &req.text)?,
+                &files,
+            ),
+            false => self.phone_first_message(
+                &agent,
+                req.model.as_deref(),
+                &uploads::mentioning(&req.text, &files),
+            )?,
+        };
         let project = match req.project_id.as_str() {
             "" => None,
             id => Some(

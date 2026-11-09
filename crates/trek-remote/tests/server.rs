@@ -486,6 +486,22 @@ impl RemoteHost for FakeHost {
             ..settings()
         })
     }
+
+    /// Takes any piece; a file named `refused.txt` is refused.
+    async fn upload_part(&self, req: UploadPart) -> HostResult<UploadProgress> {
+        self.record(format!("upload_part {} {}", req.name, req.offset));
+        let piece = req.decode().map_err(HostError::bad_request)?;
+        if piece.name == "refused.txt" {
+            return Err(HostError::bad_request("Not that one"));
+        }
+        let received = piece.offset + piece.bytes.len() as u64;
+        Ok(UploadProgress {
+            upload_id: piece.upload_id,
+            received,
+            total: piece.total,
+            done: received == piece.total,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -900,6 +916,87 @@ async fn a_channel_host_forwards_what_another_machine_asks() {
     )
     .await;
     assert_eq!(recv(&mut c).await["type"], "ack");
+}
+
+#[tokio::test]
+async fn a_phone_has_a_few_files_part_way_up_at_once() {
+    let (handle, host) = start().await;
+    let (mut c, _) = pair(&handle, "uploader").await;
+    let id = |n: u32| format!("00000000-0000-4000-8000-{n:012}");
+    // The first 2 bytes of a 3-byte file: part-way up.
+    let first = |n: u32, name: &str| {
+        json!({"type": "upload_part", "id": format!("u{n}"), "upload_id": id(n), "name": name,
+               "total": 3, "offset": 0, "data": "AAE="})
+    };
+    for n in 0..MAX_UPLOADS_IN_FLIGHT as u32 {
+        send(&mut c, first(n, "clip.mov")).await;
+        let reply = recv(&mut c).await;
+        assert_eq!(
+            (
+                reply["type"].as_str(),
+                reply["re"].as_str(),
+                reply["received"].as_u64(),
+                reply.get("done")
+            ),
+            (
+                Some("upload_progress"),
+                Some(format!("u{n}").as_str()),
+                Some(2),
+                None
+            ),
+            "{reply}"
+        );
+    }
+    // One more is refused until one of them is in; their next pieces still go.
+    let more = MAX_UPLOADS_IN_FLIGHT as u32;
+    send(&mut c, first(more, "clip.mov")).await;
+    let refused = recv(&mut c).await;
+    assert_eq!(
+        (refused["code"].as_str(), refused["re"].as_str()),
+        (Some("rate_limited"), Some(format!("u{more}").as_str())),
+        "{refused}"
+    );
+    send(
+        &mut c,
+        json!({"type": "upload_part", "id": "last", "upload_id": id(0), "name": "clip.mov",
+               "total": 3, "offset": 2, "data": "Ag=="}),
+    )
+    .await;
+    let done = recv(&mut c).await;
+    assert_eq!(
+        (done["re"].as_str(), done["done"].as_bool()),
+        (Some("last"), Some(true)),
+        "{done}"
+    );
+    send(&mut c, first(more, "clip.mov")).await;
+    assert_eq!(recv(&mut c).await["type"], "upload_progress");
+
+    // A refused piece frees its place too; one the server can tell is bad never reaches the host.
+    send(&mut c, first(1, "refused.txt")).await;
+    assert_eq!(recv(&mut c).await["code"], "bad_request");
+    send(&mut c, first(more + 1, "clip.mov")).await;
+    assert_eq!(recv(&mut c).await["type"], "upload_progress");
+    let calls = host.calls.lock().unwrap().len();
+    send(
+        &mut c,
+        json!({"type": "upload_part", "id": "bad", "upload_id": "../x", "name": "a.txt",
+               "total": 3, "offset": 0, "data": "AAE="}),
+    )
+    .await;
+    let bad = recv(&mut c).await;
+    assert_eq!(bad["code"], "bad_request", "{bad}");
+    assert_eq!(
+        host.calls.lock().unwrap().len(),
+        calls,
+        "checked before the host"
+    );
+    // Without a request id the phone couldn't tell how it went: refused.
+    send(
+        &mut c,
+        json!({"type": "upload_part", "upload_id": id(9), "name": "a.txt", "total": 3, "offset": 0, "data": "AAE="}),
+    )
+    .await;
+    assert_eq!(recv(&mut c).await["code"], "bad_request");
 }
 
 #[tokio::test]
@@ -2196,6 +2293,7 @@ async fn channel_host_round_trip() {
         mode: None,
         images: vec![],
         consult: None,
+        files: vec![],
     })
     .await
     .unwrap();
@@ -2209,6 +2307,7 @@ async fn channel_host_round_trip() {
         access: None,
         plan: false,
         images: vec![],
+        files: vec![],
     };
     assert_eq!(host.new_thread(req).await.unwrap(), "c2");
     let answer = AnswerRequest {

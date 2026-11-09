@@ -349,6 +349,7 @@ fn send(id: &str, text: &str) -> impl FnOnce(tr::Reply<Option<tr::Open>>) -> tr:
         mode: None,
         images: vec![],
         consult: None,
+        files: vec![],
     };
     move |reply| tr::HostRequest::Send { req, reply }
 }
@@ -412,6 +413,7 @@ fn a_phone_reads_sends_and_answers() {
                 mode: None,
                 images: vec![],
                 consult: None,
+                files: vec![],
             },
             reply,
         })
@@ -479,6 +481,7 @@ fn a_thread_started_on_the_phone_leaves_the_mac_where_it_was() {
                         access: None,
                         plan: false,
                         images: vec![],
+                        files: vec![],
                     },
                     reply,
                 },
@@ -641,6 +644,7 @@ fn a_phone_pins_settles_renames_and_sends_photos() {
                 mode: None,
                 images: vec![image],
                 consult: None,
+                files: vec![],
             },
             reply,
         })
@@ -671,6 +675,7 @@ fn a_phone_pins_settles_renames_and_sends_photos() {
                     mode: None,
                     images: vec![image],
                     consult: None,
+                    files: vec![],
                 },
                 reply,
             })
@@ -701,6 +706,7 @@ fn a_phone_pins_settles_renames_and_sends_photos() {
                 mode: None,
                 images: vec![junk],
                 consult: None,
+                files: vec![],
             },
             reply,
         });
@@ -735,6 +741,7 @@ fn a_photo_that_cannot_be_kept_leaves_the_macs_follow_up_setting_alone() {
                 mode: Some(mode),
                 images: vec![junk],
                 consult: None,
+                files: vec![],
             },
             reply,
         });
@@ -839,6 +846,7 @@ fn trek_s_own_commands_run_from_the_phone_but_full_access_waits_for_the_mac() {
                 access: None,
                 plan: false,
                 images: vec![],
+                files: vec![],
             },
             reply,
         });
@@ -3794,6 +3802,7 @@ fn a_message_s_images_go_to_the_phone_scaled_down() {
                 mode: None,
                 images: vec![upload],
                 consult: None,
+                files: vec![],
             },
             reply,
         })
@@ -5205,6 +5214,7 @@ fn a_message_goes_with_consultants_as_the_composer_sends_it() {
                     then: tr::ConsultThen::Report,
                     judge: None,
                 }),
+                files: vec![],
             };
             move |reply| tr::HostRequest::Send { req, reply }
         };
@@ -5243,4 +5253,327 @@ fn a_message_goes_with_consultants_as_the_composer_sends_it() {
             "{sent}"
         );
     });
+}
+
+/// One `upload_part` of `bytes` at `offset` of a `total`-byte file, answered off the main thread.
+async fn upload_piece(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+    id: &str,
+    name: &str,
+    total: u64,
+    offset: u64,
+    bytes: &[u8],
+) -> tr::HostResult<tr::UploadProgress> {
+    let req = tr::UploadPart {
+        upload_id: id.into(),
+        name: name.into(),
+        total,
+        offset,
+        data: tr::base64(bytes),
+    };
+    ask_later(trek, cx, move |reply| tr::HostRequest::UploadPart {
+        req,
+        reply,
+    })
+    .await
+}
+
+/// `bytes` sent up as `name` in pieces of at most `piece` bytes; its upload id.
+async fn upload(
+    trek: &common::Trek,
+    cx: &mut gpui_kit::TestAppContext,
+    name: &str,
+    bytes: &[u8],
+    piece: usize,
+) -> String {
+    let id = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let total = bytes.len() as u64;
+    if bytes.is_empty() {
+        let got = upload_piece(trek, cx, &id, name, 0, 0, b"").await.unwrap();
+        assert!(got.done);
+        return id;
+    }
+    let mut offset = 0;
+    for chunk in bytes.chunks(piece) {
+        let got = upload_piece(trek, cx, &id, name, total, offset, chunk)
+            .await
+            .unwrap();
+        offset += chunk.len() as u64;
+        assert_eq!((got.received, got.done), (offset, offset == total));
+    }
+    id
+}
+
+/// The last message in thread `id`.
+fn last_message(trek: &common::Trek, cx: &gpui_kit::TestAppContext, id: &str) -> String {
+    trek.items(cx, id)
+        .into_iter()
+        .rev()
+        .find_map(|i| match i {
+            trek_core::store::Item::User { text, .. } => Some(text),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn send_with_files(
+    id: &str,
+    text: &str,
+    files: Vec<String>,
+) -> impl FnOnce(tr::Reply<Option<tr::Open>>) -> tr::HostRequest {
+    let req = tr::SendRequest {
+        thread_id: id.to_string(),
+        text: text.into(),
+        mode: None,
+        images: vec![],
+        consult: None,
+        files,
+    };
+    move |reply| tr::HostRequest::Send { req, reply }
+}
+
+#[test]
+fn a_phone_s_file_comes_in_pieces_and_goes_with_the_message_as_a_mention() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+
+        // Three pieces, the last one short; each answered with how far it got.
+        let clip: Vec<u8> = (0..10u8).collect();
+        let upload_id = upload(&trek, cx, "Clip of the bug.mov", &clip, 4).await;
+        let dir = trek_app::remote::uploads::uploads_dir();
+        assert!(
+            !dir.join(format!("{}.part", upload_id.to_lowercase()))
+                .exists(),
+            "the part file became the file"
+        );
+
+        ask(
+            &trek,
+            cx,
+            send_with_files(&id, "What breaks at 0:03?", vec![upload_id.clone()]),
+        )
+        .unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let sent = last_message(&trek, cx, &id);
+        let (said, mention) = sent
+            .split_once(" @\"")
+            .expect("a quoted mention: the path has spaces");
+        assert_eq!(said, "What breaks at 0:03?");
+        let path = std::path::PathBuf::from(mention.strip_suffix('"').unwrap());
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with("iPhone ") && name.ends_with(" Clip of the bug.mov"),
+            "{name}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), clip);
+        // The Mac plays it under the message, as it does a video the composer mentions.
+        assert_eq!(
+            trek_core::media::mentioned_videos(&sent, None),
+            vec![path.clone()]
+        );
+
+        // The same name again is kept apart; a new thread takes files too, after its words.
+        let again = upload(&trek, cx, "Clip of the bug.mov", b"other", 4096).await;
+        let empty = upload(&trek, cx, "empty.txt", b"", 4096).await;
+        let project_id = trek.read(cx, |ws, _| {
+            ws.projects
+                .iter()
+                .find(|p| p.path == trek.project)
+                .unwrap()
+                .id
+                .clone()
+        });
+        let req = tr::NewThreadRequest {
+            project_id,
+            agent: common::mock().key(),
+            model: None,
+            text: "Read these".into(),
+            worktree: false,
+            effort: None,
+            access: None,
+            plan: false,
+            images: vec![],
+            files: vec![again, empty.to_lowercase()],
+        };
+        let started = ask(&trek, cx, |reply| tr::HostRequest::NewThread { req, reply }).unwrap();
+        trek.wait_done(cx, &started, RunState::Idle).await;
+        let first = last_message(&trek, cx, &started);
+        assert!(first.starts_with("Read these @\""), "{first}");
+        let files = trek_core::media::mentioned_files(&first, None);
+        assert_eq!(files.len(), 2, "{first}");
+        assert_ne!(
+            files[0].file_name(),
+            path.file_name(),
+            "a second file of the same name doesn't replace the first"
+        );
+        assert_eq!(std::fs::read(&files[0]).unwrap(), b"other");
+        assert_eq!(std::fs::read(&files[1]).unwrap(), b"");
+        // The ids stay good: a message that failed and is sent again finds them still.
+        ask(&trek, cx, send_with_files(&id, "", vec![upload_id])).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(
+            trek_core::media::mentioned_files(&last_message(&trek, cx, &id), None),
+            vec![path]
+        );
+    });
+}
+
+#[test]
+fn pieces_out_of_order_too_big_or_badly_named_are_refused() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = trek_app::remote::uploads::uploads_dir();
+        let part = dir.join(format!("{id}.part"));
+        upload_piece(&trek, cx, &id, "a.txt", 12, 0, b"abcd")
+            .await
+            .unwrap();
+        assert!(part.is_file());
+
+        // A gap: refused, and the upload ends (the phone sends the file again).
+        let gap = upload_piece(&trek, cx, &id, "a.txt", 12, 8, b"ijkl")
+            .await
+            .unwrap_err();
+        assert_eq!(gap.code, tr::ErrorCode::BadRequest);
+        assert!(
+            gap.message.contains("next one starts at byte 4"),
+            "{}",
+            gap.message
+        );
+        assert!(!part.exists(), "what came of it is gone");
+        let after = upload_piece(&trek, cx, &id, "a.txt", 12, 4, b"efgh")
+            .await
+            .unwrap_err();
+        assert!(
+            after.message.contains("send the file again"),
+            "{}",
+            after.message
+        );
+
+        // Over the size it said, over the most a file may be, a piece of another file.
+        let id = uuid::Uuid::new_v4().to_string();
+        let over = upload_piece(&trek, cx, &id, "a.txt", 3, 0, b"abcd")
+            .await
+            .unwrap_err();
+        assert!(over.message.contains("past the end"), "{}", over.message);
+        let huge = upload_piece(&trek, cx, &id, "a.mov", tr::MAX_UPLOAD + 1, 0, b"abcd")
+            .await
+            .unwrap_err();
+        assert!(huge.message.contains("too big"), "{}", huge.message);
+        upload_piece(&trek, cx, &id, "a.txt", 8, 0, b"abcd")
+            .await
+            .unwrap();
+        let other = upload_piece(&trek, cx, &id, "b.txt", 8, 4, b"efgh")
+            .await
+            .unwrap_err();
+        assert!(other.message.contains("another file"), "{}", other.message);
+
+        // Names: nothing usable is refused; the rest is kept inside the folder, cleaned.
+        for bad in ["../..", "\u{7}", " . ", ""] {
+            let fresh = uuid::Uuid::new_v4().to_string();
+            let refused = upload_piece(&trek, cx, &fresh, bad, 1, 0, b"x")
+                .await
+                .unwrap_err();
+            assert_eq!(refused.code, tr::ErrorCode::BadRequest, "{bad:?}");
+        }
+        let refused = upload_piece(&trek, cx, "../../../etc/passwd", "a.txt", 1, 0, b"x")
+            .await
+            .unwrap_err();
+        assert!(
+            refused.message.contains("isn't an upload id"),
+            "{}",
+            refused.message
+        );
+        let sneaky = upload(&trek, cx, "../../.ssh/évil\u{0}\u{202E}hs.txt", b"x", 1).await;
+        let thread = trek.send(cx, "a thread");
+        trek.wait_done(cx, &thread, RunState::Idle).await;
+        ask(&trek, cx, send_with_files(&thread, "see", vec![sneaky])).unwrap();
+        trek.wait_done(cx, &thread, RunState::Idle).await;
+        let kept = trek_core::media::mentioned_files(&last_message(&trek, cx, &thread), None);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].parent(), Some(dir.as_path()), "{kept:?}");
+        assert!(
+            kept[0].to_string_lossy().ends_with(" évilhs.txt"),
+            "{kept:?}"
+        );
+    });
+}
+
+#[test]
+fn a_message_naming_a_file_that_never_came_is_refused_and_not_sent() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let before = trek.items(cx, &id).len();
+        let unknown = ask(
+            &trek,
+            cx,
+            send_with_files(&id, "with a file", vec![uuid::Uuid::new_v4().to_string()]),
+        )
+        .unwrap_err();
+        assert_eq!(unknown.code, tr::ErrorCode::BadRequest);
+        assert!(
+            unknown.message.contains("attach it again"),
+            "{}",
+            unknown.message
+        );
+        let junk = ask(
+            &trek,
+            cx,
+            send_with_files(&id, "with a file", vec!["../../etc/passwd".into()]),
+        )
+        .unwrap_err();
+        assert_eq!(junk.code, tr::ErrorCode::BadRequest);
+        // Part-way up isn't finished.
+        let partial = uuid::Uuid::new_v4().to_string();
+        upload_piece(&trek, cx, &partial, "a.txt", 8, 0, b"abcd")
+            .await
+            .unwrap();
+        let early = ask(
+            &trek,
+            cx,
+            send_with_files(&id, "with a file", vec![partial]),
+        )
+        .unwrap_err();
+        assert!(
+            early.message.contains("hasn't finished"),
+            "{}",
+            early.message
+        );
+        assert_eq!(trek.items(cx, &id).len(), before, "nothing went");
+    });
+}
+
+#[test]
+fn part_files_a_day_old_are_swept_when_the_server_starts() {
+    let dir = std::env::temp_dir().join(format!("trek-uploads-sweep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("3f2504e0-4f89-11d3-9a0c-0305e82c3301.part");
+    let fresh = dir.join("3f2504e0-4f89-11d3-9a0c-0305e82c3302.part");
+    let kept = dir.join("iPhone 2026-11-08 at 10.00.00 clip.mov");
+    for f in [&old, &fresh, &kept] {
+        std::fs::write(f, b"x").unwrap();
+    }
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+    for f in [&old, &kept] {
+        std::fs::File::options()
+            .write(true)
+            .open(f)
+            .unwrap()
+            .set_modified(day_ago)
+            .unwrap();
+    }
+    assert_eq!(
+        trek_app::remote::uploads::sweep_stale(&dir, trek_app::remote::uploads::STALE),
+        1
+    );
+    assert!(!old.exists() && fresh.exists(), "only the stale part went");
+    assert!(kept.exists(), "a finished file stays: a message names it");
+    let _ = std::fs::remove_dir_all(&dir);
 }

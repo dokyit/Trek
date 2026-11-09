@@ -262,8 +262,9 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `turn_preview` | `turn_preview`: the confirmation's file list before an undo, retry or rewind |
 | `consult` | `send.consult`: a message sent with consultants |
 | `resume_interrupted` | a row's `cut_short`, and `thread_action` `resume_interrupted`, `dismiss_interrupted` |
+| `uploads` | `upload_part` (answered with `upload_progress`), and `send.files` / `new_thread.files`: videos and files sent with a message |
 
-`use_reset` to `icon`, and `card_actions` to `consult`, are described under "Keeping up with the
+`use_reset` to `icon`, and `card_actions` to `consult` and `uploads`, are described under "Keeping up with the
 Mac" below, `basecamp_v2` under
 Basecamp, `note_images` and `note_files` under Notes.
 
@@ -974,6 +975,36 @@ the Mac would refuse, or a thread whose agent can't consult: `bad_request` with 
 ```json
 {"type":"send","id":"9","thread_id":"t","text":"Which cache is better?","consult":{"with":["codex/gpt-5.6-sol/high","claude-code/claude-opus-5-5/max"],"style":"arena","then":"report"}}   → ack
 ```
+
+**`uploads`**: a video from the photo library or any file from the Files app goes with a message.
+Each goes up first, in order, in pieces of at most 4 MiB before base64 (`MAX_UPLOAD_PART`, so a
+piece stays well under a message's 8 MiB): `upload_part` names a UUID the phone chose, the file's
+name and whole size, the piece's `offset` and its `data`, and every piece waits for the one before
+it to be answered with `upload_progress` (`received` of `total`, `done` on the last). The first
+piece is at 0, each next one where the last ended; a gap, a piece past `total`, a file over 2 GiB
+(`MAX_UPLOAD`), an id that isn't a UUID, a name with nothing usable left (the Mac keeps the last
+path part without control characters or leading dots, its extension kept) or a piece of another
+file is `bad_request`, and ends that upload (send it again under a new id; a piece at 0 for one
+part-way up starts it again). A request needs an `id`; one connection has at most 4 files part-way
+up (`MAX_UPLOADS_IN_FLIGHT`; one more is `rate_limited`). The Mac writes `<data dir>/uploads/<id>.part`
+off its main thread and, once whole, keeps it as `iPhone <date> at <time> <name>` (` 2`, ` 3`… when
+taken). `send` and `new_thread` then name finished uploads in `files`: the Mac adds an `@path`
+mention of each after the words (`@"…"` when the path has spaces), as its composer mentions a file,
+so the agent reads it there and a video plays under the message (`user.videos`, `media`). An id it
+doesn't have whole is `bad_request` and nothing is sent. Ids stay good for a day (a message sent
+again after a refusal finds them); `.part` files a day old go when the phone server starts.
+
+```json
+{"type":"upload_part","id":"20","upload_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","name":"IMG_0042.MOV","total":10485760,"offset":0,"data":"AAAAIGZ0eXBx…"}
+  → {"type":"upload_progress","re":"20","upload_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","received":4194304,"total":10485760}
+{"type":"upload_part","id":"22","upload_id":"3F2504E0-4F89-11D3-9A0C-0305E82C3301","name":"IMG_0042.MOV","total":10485760,"offset":8388608,"data":"…"}
+  → {"type":"upload_progress","re":"22","upload_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","received":10485760,"total":10485760,"done":true}
+{"type":"send","id":"23","thread_id":"t","text":"What breaks at 0:03?","mode":null,"files":["3F2504E0-4F89-11D3-9A0C-0305E82C3301"]}   → ack
+```
+
+The message the agent gets: `What breaks at 0:03? @"/Users/me/Library/Application Support/dev.trek.Trek/uploads/iPhone 2026-11-08 at 10.15.30 IMG_0042.MOV"`.
+The phone's bubble shows mentions of absolute paths at the end of a message as chips by name (a
+video the row's `videos` lists plays instead).
 
 **Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
 question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone

@@ -1,7 +1,7 @@
 //! The WebSocket server: accepts phones, authenticates them, serves requests through a
 //! [`RemoteHost`] and fans [`HostEvent`]s out to them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -29,8 +29,9 @@ use crate::pairing::{
     pairing_url_with_routes, source,
 };
 use crate::protocol::{
-    ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, PROTOCOL_VERSION,
-    ServerEnvelope, ServerMessage, Snapshot, ThreadAction, ThreadActionRequest, Transcript,
+    ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, MAX_UPLOADS_IN_FLIGHT,
+    PROTOCOL_VERSION, ServerEnvelope, ServerMessage, Snapshot, ThreadAction, ThreadActionRequest,
+    Transcript,
 };
 
 /// How the server listens and behaves.
@@ -1136,6 +1137,7 @@ const CLIENT_TYPES: &[&str] = &[
     "media",
     "context_card",
     "turn_preview",
+    "upload_part",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -1551,6 +1553,11 @@ async fn call<H: RemoteHost>(
         ClientMessage::TurnPreview(req) => {
             host.turn_preview(req).await.map(ServerMessage::TurnPreview)
         }
+        // Checked as it came (`Session::on_request`).
+        ClientMessage::UploadPart(req) => host
+            .upload_part(req)
+            .await
+            .map(ServerMessage::UploadProgress),
         other => Err(HostError::bad_request(format!(
             "Unexpected \"{}\"",
             other.kind()
@@ -1586,6 +1593,11 @@ struct Session {
     snapshots_pending: u32,
     queries_in_flight: u8,
     held_events: Vec<HostEvent>,
+    /// Files this phone has part-way up (`upload_part`), by upload id: at most
+    /// [`MAX_UPLOADS_IN_FLIGHT`]. One leaves when its last piece is in or a piece is refused.
+    uploads: HashSet<String>,
+    /// The upload each `upload_part` not answered yet is for, by its request id.
+    upload_requests: HashMap<String, String>,
 }
 
 impl Session {
@@ -1642,6 +1654,38 @@ impl Session {
                     None => Vec::new(),
                 }
             }
+            ClientMessage::UploadPart(part) => {
+                // Its reply says how far the file got: without an id, the phone can't tell.
+                let Some(re) = re else {
+                    return vec![error(
+                        None,
+                        ErrorCode::BadRequest,
+                        "\"upload_part\" needs an \"id\"",
+                    )];
+                };
+                // Checked here, whatever the host does: an upload id, a usable name, the sizes in
+                // bounds.
+                if let Err(why) = part.check() {
+                    return vec![error(Some(re), ErrorCode::BadRequest, why)];
+                }
+                let id = part.upload_id.to_ascii_lowercase();
+                if !self.uploads.contains(&id) && self.uploads.len() >= MAX_UPLOADS_IN_FLIGHT {
+                    return vec![error(
+                        Some(re),
+                        ErrorCode::RateLimited,
+                        format!(
+                            "Already sending {MAX_UPLOADS_IN_FLIGHT} files: send this one once one of them is in"
+                        ),
+                    )];
+                }
+                self.uploads.insert(id.clone());
+                self.upload_requests.insert(re.clone(), id);
+                let _ = jobs.send(Job::Call {
+                    re: Some(re),
+                    msg: ClientMessage::UploadPart(part),
+                });
+                Vec::new()
+            }
             msg if msg.is_query() && self.queries_in_flight >= 8 => {
                 vec![error(
                     re,
@@ -1677,6 +1721,15 @@ impl Session {
             Done::Reply { envelope, query } => {
                 if query {
                     self.queries_in_flight = self.queries_in_flight.saturating_sub(1);
+                }
+                // A file whose last piece is in, or whose piece was refused, is up no more.
+                if let Some(id) = envelope
+                    .re
+                    .as_ref()
+                    .and_then(|re| self.upload_requests.remove(re))
+                    && !matches!(&envelope.msg, ServerMessage::UploadProgress(p) if !p.done)
+                {
+                    self.uploads.remove(&id);
                 }
                 vec![envelope]
             }

@@ -11,11 +11,13 @@ mod machines;
 mod parity;
 mod phone_update;
 mod thread_parity;
+mod uploads;
 pub use cards::*;
 pub use machines::*;
 pub use parity::*;
 pub use phone_update::*;
 pub use thread_parity::*;
+pub use uploads::*;
 
 /// The protocol version this crate speaks (`hello`/`pair` carry the phone's, `welcome`/`paired`
 /// the Mac's).
@@ -237,6 +239,9 @@ pub enum ClientMessage {
     /// What the confirmation before an undo, retry or rewind says (answered with `turn_preview`;
     /// feature `turn_preview`).
     TurnPreview(TurnPreviewRequest),
+    /// A piece of a file sent with a message (answered with `upload_progress`; feature
+    /// `uploads`, `uploads.rs`).
+    UploadPart(UploadPart),
 }
 
 impl ClientMessage {
@@ -293,6 +298,7 @@ impl ClientMessage {
             Self::Media(_) => "media",
             Self::ContextCard { .. } => "context_card",
             Self::TurnPreview(_) => "turn_preview",
+            Self::UploadPart(_) => "upload_part",
         }
     }
 }
@@ -387,6 +393,10 @@ pub struct SendRequest {
     /// Send it with consultants, as the Mac's composer does (feature `consult`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consult: Option<ConsultRequest>,
+    /// Files sent up first (`upload_part`, feature `uploads`), by their upload ids: the Mac
+    /// mentions each after the text (`@path`), as its composer mentions a file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 /// A photo sent from the phone: JPEG or PNG, base64. The Mac saves it with its snapshots and
@@ -585,6 +595,9 @@ pub mod feature {
     pub const CONSULT: &str = "consult";
     /// `ThreadSummary::cut_short` and `thread_action` `resume_interrupted`, `dismiss_interrupted`.
     pub const RESUME_INTERRUPTED: &str = "resume_interrupted";
+    /// `upload_part`, and `send.files` / `new_thread.files`: videos and other files from the
+    /// phone, sent in pieces, mentioned in the message.
+    pub const UPLOADS: &str = "uploads";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -611,6 +624,7 @@ pub mod feature {
         TURN_PREVIEW,
         CONSULT,
         RESUME_INTERRUPTED,
+        UPLOADS,
     ];
 }
 
@@ -794,6 +808,9 @@ pub struct NewThreadRequest {
     pub plan: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageUpload>,
+    /// As in `send` (feature `uploads`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 /// `answer`: respond to a pending approval, question or plan.
@@ -969,6 +986,8 @@ pub enum ServerMessage {
     ContextCard(ContextCard),
     /// The reply to `turn_preview`.
     TurnPreview(TurnPreview),
+    /// The reply to `upload_part`.
+    UploadProgress(UploadProgress),
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.

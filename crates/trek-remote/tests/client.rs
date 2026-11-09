@@ -742,6 +742,7 @@ async fn messages_over_the_limit_are_not_sent() {
         mode: None,
         images: vec![],
         consult: None,
+        files: vec![],
     };
     assert!(matches!(
         client.request(ClientMessage::Send(huge)).await,

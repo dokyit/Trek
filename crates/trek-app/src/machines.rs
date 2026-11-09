@@ -1658,6 +1658,7 @@ impl Workspace {
                     mode,
                     images,
                     consult: None,
+                    files: vec![],
                 })
             },
             cx,
@@ -1973,6 +1974,7 @@ impl Workspace {
             access: Some(access_of(prefs.hand_holding)),
             plan: prefs.plan,
             images: uploads(&images),
+            files: vec![],
         };
         let host = host.to_string();
         cx.spawn(async move |this, cx| {

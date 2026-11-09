@@ -157,10 +157,11 @@ nonisolated extension ClientMessage {
             return ["type": "context_card", "thread_id": threadId]
         case .turnPreview(let threadId, let itemId, let action):
             return ["type": "turn_preview", "thread_id": threadId, "item_id": itemId, "action": action.rawValue]
-        case .sendConsult(let threadId, let text, let mode, let images, let consult):
+        case .sendConsult(let threadId, let text, let mode, let images, let consult, let files):
             var o: [String: Any] = ["type": "send", "thread_id": threadId, "text": text, "mode": mode?.rawValue ?? NSNull(),
                                     "consult": consult.json]
             if !images.isEmpty { o["images"] = images.map(\.json) }
+            if !files.isEmpty { o["files"] = files }
             return o
         default:
             return [:]

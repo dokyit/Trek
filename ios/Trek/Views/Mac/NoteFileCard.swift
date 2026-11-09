@@ -294,11 +294,12 @@ struct NoteFileCard: View {
     private var isFailed: Bool { if case .failed = phase { true } else { false } }
 }
 
-/// How much of a file is here: a ring filling clockwise.
-private struct ProgressRing: View {
+/// How much of a file is here (or, sending one, there): a ring filling clockwise.
+struct ProgressRing: View {
     var fraction: Double
     var size: CGFloat = 34
     var on: Color = Trek.foreground
+    var label = "Downloading"
 
     var body: some View {
         ZStack {
@@ -310,7 +311,7 @@ private struct ProgressRing: View {
                 .animation(.easeOut(duration: 0.2), value: fraction)
         }
         .frame(width: size, height: size)
-        .accessibilityLabel("Downloading")
+        .accessibilityLabel(label)
         .accessibilityValue("\(Int(fraction * 100)) percent")
     }
 }
