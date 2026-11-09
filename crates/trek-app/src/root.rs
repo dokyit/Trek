@@ -1256,12 +1256,12 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         px(crate::window_place::MAIN_MIN_HEIGHT_PX),
     );
     // Where it was left, unless a size is asked for (or it's a capture run, which wants the same
-    // window every time).
+    // window every time). A test run with a display of its own opens there, centred.
+    let same_every_time =
+        std::env::var_os("TREK_SHOT_DIR").is_some() || crate::test_display::id().is_some();
     let (display_id, window_bounds) = match launch_size() {
-        Some(asked) => (None, WindowBounds::centered(asked, cx)),
-        None if std::env::var_os("TREK_SHOT_DIR").is_some() => {
-            (None, WindowBounds::centered(size(px(1280.), px(820.)), cx))
-        }
+        Some(asked) => crate::test_display::centered(asked, cx),
+        None if same_every_time => crate::test_display::centered(size(px(1280.), px(820.)), cx),
         None => crate::window_place::initial(size(px(1280.), px(820.)), min, focus, cx),
     };
     let options = WindowOptions {
@@ -1434,20 +1434,36 @@ pub fn quit_with_main_window(cx: &mut App) {
 /// panics with "Exited with leaked handles" there). A window being updated can't be removed from
 /// inside that update, so the work waits for the current one to finish; and a window closed by its
 /// own close button has its task queued already, which the moment lets run.
+///
+/// A test run on a display of its own (`test_display`) does the same on a Mac: its windows close,
+/// then the display goes, then the app. A display that went with a window still on it (one macOS
+/// is still drawing as it closes counts) would have macOS put that window on the owner's screen
+/// for what's left of the quit, so the moment is as long as that takes, three seconds at most;
+/// and the display is given a moment to leave before the app does (see `test_display::end`).
 pub fn quit(cx: &mut App) {
     crate::workspace::workspace_global(cx).update(cx, |ws, _| {
         ws.quitting = true;
         ws.shutdown_sessions()
     });
-    if cfg!(windows) {
+    if cfg!(windows) || crate::test_display::id().is_some() {
         cx.defer(|cx| {
             for window in cx.windows() {
                 let _ = window.update(cx, |_, window, _| window.remove_window());
             }
             cx.spawn(async |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(150))
-                    .await;
+                for _ in 0..20 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(150))
+                        .await;
+                    if !cx.update(|_| crate::test_display::windows_up()) {
+                        break;
+                    }
+                }
+                if cx.update(|_| crate::test_display::end()) {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                }
                 cx.update(|cx| cx.quit());
             })
             .detach();

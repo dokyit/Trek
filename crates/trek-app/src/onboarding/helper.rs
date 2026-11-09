@@ -25,8 +25,7 @@ pub fn open(
     onboarding: WeakEntity<Onboarding>,
     cx: &mut App,
 ) -> Option<AnyWindowHandle> {
-    let screen = cx
-        .primary_display()
+    let screen = crate::test_display::display(cx)
         .map(|d| d.visible_bounds())
         .unwrap_or(Bounds {
             origin: point(px(0.), px(0.)),
@@ -42,6 +41,7 @@ pub fn open(
             origin,
             size: shape,
         })),
+        display_id: crate::test_display::id(),
         titlebar: None,
         // Floats over System Settings, and never takes the keyboard from it.
         kind: WindowKind::PopUp,

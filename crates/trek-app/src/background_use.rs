@@ -327,8 +327,7 @@ impl BackgroundUse {
     fn options(&self, cx: &App) -> WindowOptions {
         let shape = Self::size(self.folded);
         let origin = self.origin.unwrap_or_else(|| {
-            let screen = cx
-                .primary_display()
+            let screen = crate::test_display::display(cx)
                 .map(|d| d.visible_bounds())
                 .unwrap_or(Bounds {
                     origin: point(px(0.), px(0.)),
@@ -344,6 +343,7 @@ impl BackgroundUse {
                 origin,
                 size: shape,
             })),
+            display_id: crate::test_display::id(),
             titlebar: None,
             // Floats over every app and Space, and never takes the keyboard from the user.
             kind: WindowKind::PopUp,

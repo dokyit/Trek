@@ -69,6 +69,7 @@ pub mod study;
 pub mod system;
 pub mod tabs;
 pub mod terminal_dock;
+pub mod test_display;
 pub mod thinking_timeline;
 pub mod thread_menu;
 pub mod thread_view;
@@ -300,6 +301,9 @@ pub fn run() {
                 .setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
         }
     }
+    // A test run's own display (`TREK_TEST_DISPLAY=1`), there before any window opens.
+    #[cfg(all(feature = "shots", target_os = "macos"))]
+    test_display::start();
     app.on_open_urls(move |urls| {
         for url in urls {
             let _ = links_tx.try_send(url);
@@ -393,6 +397,8 @@ pub fn run() {
         single_instance::hear(forwarded, own, ws.clone(), forwarded_links, cx);
         #[cfg(feature = "shots")]
         shots::init(ws.clone(), cx);
+        #[cfg(all(feature = "shots", target_os = "macos"))]
+        test_display::watch(cx);
         // TREK_OPEN_THREAD_WINDOW=<thread id> also opens that thread in a window of its own, for
         // design review of thread windows; `mock`, the thread TREK_MOCK_PROMPT just started.
         if let Ok(id) = std::env::var("TREK_OPEN_THREAD_WINDOW") {

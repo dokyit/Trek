@@ -23,6 +23,11 @@
 //! (an ACP Registry install's row, without downloading), `toast [undo|error] <message>` (a toast, with
 //! an Undo or the error icon), `shot <name>`, `quit`.
 //!
+//! On a Mac, `TREK_TEST_DISPLAY=1` gives the run a display of its own, so none of its windows is
+//! on the owner's screens and macOS keeps drawing them (`test_display.rs`); `windows` writes
+//! every window's number, display and frame to `windows.json`, for a capture of real pixels
+//! (`trek-dev screenshot --real`: `screencapture` of the window's rectangle there).
+//!
 //! Interactive artifacts (`trek-html` cards; their pages are native views too): `artifacts` writes
 //! each card's state and frame, and the window's frame on screen, to `artifacts.json`.
 //!
@@ -131,6 +136,8 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     }),
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
                     "perf" => perf(&workspace, arg, cx).await,
+                    #[cfg(target_os = "macos")]
+                    "windows" => cx.update(|cx| windows(&workspace, &dir, cx)),
                     "quit" => quit(cx),
                     _ => cx.update(|cx| run(&workspace, verb, arg, cx)),
                 };
@@ -1223,6 +1230,34 @@ async fn painted_within(
 fn quit(cx: &mut AsyncApp) -> anyhow::Result<()> {
     // As the Quit menu item does.
     cx.update(crate::root::quit);
+    Ok(())
+}
+
+/// `windows`: every window of the app as the window server has it, to `windows.json`: its
+/// number (what `screencapture -l` takes), the display it's on, its frame on the desktop and
+/// whether macOS is drawing it. The main window is marked.
+#[cfg(target_os = "macos")]
+fn windows(ws: &Entity<Workspace>, dir: &Path, cx: &mut App) -> anyhow::Result<()> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let main = ws.read(cx).main_window.and_then(|main| {
+        main.update(cx, |_, window, _| {
+            let handle = HasWindowHandle::window_handle(&*window).ok()?;
+            let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                return None;
+            };
+            // SAFETY: `ns_view` is the live NSView GPUI created for this window; `window` is a
+            // plain AppKit getter, on the main thread.
+            let ns_window: *mut AnyObject =
+                unsafe { msg_send![appkit.ns_view.as_ptr().cast::<AnyObject>(), window] };
+            (!ns_window.is_null()).then_some(ns_window.cast_const().cast())
+        })
+        .ok()
+        .flatten()
+    });
+    let list = crate::test_display::windows(main);
+    std::fs::write(dir.join("windows.json"), format!("{list:#}\n"))?;
     Ok(())
 }
 

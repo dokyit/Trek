@@ -43,10 +43,13 @@ pub fn open_with_focus(workspace: Entity<Workspace>, id: &str, focus: bool, cx: 
     }
     // Each new window steps down and right from the last so they don't stack exactly.
     let step = px(28. * (open_count % 6) as f32);
-    let mut bounds = Bounds::centered(None, size(px(880.), px(780.)), cx);
+    // On the display the main window is on in a test run with one of its own; else the primary.
+    let display_id = crate::test_display::id();
+    let mut bounds = Bounds::centered(display_id, size(px(880.), px(780.)), cx);
     bounds.origin = bounds.origin + point(step, step);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        display_id,
         window_min_size: Some(size(px(520.), px(440.))),
         app_id: Some("dev.trek.Trek".into()),
         focus,
