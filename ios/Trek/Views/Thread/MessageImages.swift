@@ -127,13 +127,21 @@ enum ViewerImage: Hashable {
     }
 }
 
+/// How far an image has been pulled down to close the viewer, 0 to 1: what the black behind it and
+/// the buttons over it follow, read only by them (a drag doesn't redraw the pages).
+@Observable
+final class ViewerDrag {
+    var progress: CGFloat = 0
+}
+
 /// Images full screen: a message's, or a note's pictures. Swipe between them, pinch or
-/// double-tap to zoom.
+/// double-tap to zoom, pull one down to close: what's behind shows through as it goes.
 struct ImageViewer: View {
     var images: [ViewerImage]
     var start: Int
     @Environment(\.dismiss) private var dismiss
     @State private var page = 0
+    @State private var drag = ViewerDrag()
 
     init(images: [ViewerImage], start: Int) {
         self.images = images
@@ -149,15 +157,15 @@ struct ImageViewer: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Backdrop(drag: drag)
             TabView(selection: $page) {
                 ForEach(Array(images.enumerated()), id: \.offset) { i, image in
-                    FullImage(image: image).tag(i)
+                    FullImage(image: image, drag: drag).tag(i)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: count > 1 ? .automatic : .never))
             .ignoresSafeArea()
-            HStack {
+            Chrome(drag: drag) {
                 Button { dismiss() } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))
@@ -174,26 +182,56 @@ struct ImageViewer: View {
                         .glassEffect(.regular, in: .capsule)
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
         }
         .preferredColorScheme(.dark)
         .statusBarHidden()
+        // Clear, so the thread shows through as the black behind the image fades with a pull.
+        .presentationBackground(.clear)
         .onAppear { page = start }
+    }
+
+    /// The black behind the image: it fades as the image is pulled down, all gone by half way.
+    private struct Backdrop: View {
+        let drag: ViewerDrag
+
+        var body: some View {
+            Color.black.opacity(1 - drag.progress).ignoresSafeArea()
+        }
+    }
+
+    /// The buttons over the image: out of the way as soon as it's pulled.
+    private struct Chrome<Content: View>: View {
+        let drag: ViewerDrag
+        @ViewBuilder var content: Content
+
+        var body: some View {
+            HStack { content }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .opacity(max(0, 1 - drag.progress * 3))
+        }
     }
 }
 
 private struct FullImage: View {
     var image: ViewerImage
+    let drag: ViewerDrag
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @MotionAllowed private var motion
     @State private var loaded: UIImage?
     @State private var failed = false
 
     var body: some View {
         Group {
             if let loaded {
-                ZoomableImage(image: loaded, onClose: { dismiss() })
+                ZoomableImage(image: loaded, drag: drag, motion: motion) {
+                    // It has gone off the screen already: the cover goes without sliding again.
+                    var t = Transaction()
+                    t.disablesAnimations = true
+                    withTransaction(t) { dismiss() }
+                }
+                .transition(.opacity)
             } else if failed {
                 ContentUnavailableView("Couldn't load this image", systemImage: "photo",
                                        description: Text("It may not be on the Mac any more."))
@@ -205,24 +243,42 @@ private struct FullImage: View {
                     }
                     ProgressView().tint(.white)
                 }
+                .transition(.opacity)
             }
         }
         .task {
             let got = await image.load(model)
-            loaded = got
-            failed = got == nil
+            // The sharp image over the blurred one, not in its place at once.
+            withAnimation(.easeOut(duration: 0.2)) {
+                loaded = got
+                failed = got == nil
+            }
         }
     }
 }
 
-/// An image that pinches and double-taps to zoom, pans when zoomed, and closes on a swipe down
-/// when it isn't.
+/// An image that pinches and double-taps to zoom, pans when zoomed, and closes on a pull down
+/// when it isn't: it follows the finger, shrinking a little as it goes, and, let go, either
+/// carries on off the screen at the finger's speed or springs back.
 private struct ZoomableImage: UIViewRepresentable {
     var image: UIImage
+    let drag: ViewerDrag
+    /// Movement welcome (not Reduce Motion): let go, it flies off or springs back with a little
+    /// give; without, it fades out or settles back with none.
+    var motion: Bool
+    /// It has left the screen.
     var onClose: () -> Void
 
-    func makeUIView(context: Context) -> UIScrollView {
-        let scroll = UIScrollView()
+    /// The scroll view sits in a plain view of its own: SwiftUI places the view it's handed (and
+    /// puts its transform back as it lays out, which a pull now makes it do every frame), so the
+    /// pull moves the one inside.
+    func makeUIView(context: Context) -> UIView {
+        let box = UIView()
+        box.backgroundColor = .clear
+        let scroll = UIScrollView(frame: box.bounds)
+        scroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        box.addSubview(scroll)
+        context.coordinator.scroll = scroll
         scroll.delegate = context.coordinator
         scroll.minimumZoomScale = 1
         scroll.maximumZoomScale = 5
@@ -240,22 +296,32 @@ private struct ZoomableImage: UIViewRepresentable {
         tap.numberOfTapsRequired = 2
         scroll.addGestureRecognizer(tap)
         let swipe = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swiped(_:)))
+        // One finger: a second (a pinch starting) mustn't move it.
+        swipe.maximumNumberOfTouches = 1
         swipe.delegate = context.coordinator
         scroll.addGestureRecognizer(swipe)
-        return scroll
+        return box
     }
 
-    func updateUIView(_ scroll: UIScrollView, context: Context) {
-        context.coordinator.view?.image = image
-        context.coordinator.onClose = onClose
-        DispatchQueue.main.async { context.coordinator.layout(scroll) }
+    func updateUIView(_ box: UIView, context: Context) {
+        let c = context.coordinator
+        c.view?.image = image
+        c.onClose = onClose
+        c.drag = drag
+        c.motion = motion
+        DispatchQueue.main.async { if let scroll = c.scroll { c.layout(scroll) } }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         weak var view: UIImageView?
+        weak var scroll: UIScrollView?
         var onClose: () -> Void = {}
+        var drag: ViewerDrag?
+        var motion = true
+        /// Gone: the pull let go of it past the point of no return.
+        private var leaving = false
 
         /// Only straight down, and only with nothing to pan: sideways is the next photo, and a
         /// zoomed image pans.
@@ -270,19 +336,73 @@ private struct ZoomableImage: UIViewRepresentable {
             true
         }
 
+        /// The image `y` points down from its place: moved, and a little smaller the further it is
+        /// (85 % by half the screen), with what's behind it following (`ViewerDrag`).
+        private func place(_ scroll: UIScrollView, at y: CGFloat, height: CGFloat) {
+            let progress = min(1, max(0, y / (height * 0.5)))
+            let scale = 1 - 0.15 * progress
+            scroll.transform = CGAffineTransform(translationX: 0, y: y).scaledBy(x: scale, y: scale)
+            drag?.progress = progress
+        }
+
+        /// Where the image was, on screen, as this pull took hold of it: caught springing back, it
+        /// carries on from there rather than jumping to its place first.
+        private var base: CGFloat = 0
+
         @objc func swiped(_ pan: UIPanGestureRecognizer) {
-            guard let scroll = pan.view as? UIScrollView else { return }
-            let down = max(0, pan.translation(in: scroll).y)
+            guard let scroll = pan.view as? UIScrollView, !leaving else { return }
+            // Measured in the scroll view's parent: the scroll view itself moves with the finger.
+            let space = scroll.superview ?? scroll
+            let height = max(1, scroll.bounds.height)
+            if pan.state == .began {
+                base = scroll.layer.presentation()?.affineTransform().ty ?? 0
+                scroll.layer.removeAllAnimations()
+            }
+            let pulled = base + pan.translation(in: space).y
+            // Down follows the finger one to one; up, past where it started, gives less and less.
+            let y = pulled >= 0 ? pulled : Fling.rubberBand(pulled, size: height)
             switch pan.state {
-            case .changed:
-                scroll.transform = CGAffineTransform(translationX: 0, y: down)
-            case .ended where down > 120 || pan.velocity(in: scroll).y > 900:
-                onClose()
+            case .began, .changed:
+                place(scroll, at: y, height: height)
             case .ended, .cancelled, .failed:
-                UIView.animate(withDuration: 0.2) { scroll.transform = .identity }
+                let v = pan.velocity(in: space).y
+                // Where a flick would carry it, and which way the finger was going as it lifted:
+                // a pull that ends going back up stays, however far it went.
+                let resting = y + Fling.carry(v)
+                if pan.state == .ended, v > -60, y > 110 || resting > height * 0.35 {
+                    leave(scroll, from: y, velocity: v, height: height)
+                } else {
+                    settle(scroll, from: y, velocity: v)
+                }
             default:
                 break
             }
+        }
+
+        /// Off the bottom at the finger's speed, the black behind it gone with it; then closed.
+        private func leave(_ scroll: UIScrollView, from y: CGFloat, velocity v: CGFloat, height: CGFloat) {
+            leaving = true
+            let close: (Bool) -> Void = { [weak self] _ in self?.onClose() }
+            withAnimation(.easeOut(duration: 0.25)) { drag?.progress = 1 }
+            guard motion else {
+                UIView.animate(withDuration: 0.2, delay: 0, options: .curveEaseOut, animations: { scroll.alpha = 0 }, completion: close)
+                return
+            }
+            let to = height * 1.05
+            UIView.animate(springDuration: 0.35, bounce: 0, initialSpringVelocity: Fling.relative(max(v, 600), over: to - y),
+                           options: [.beginFromCurrentState], animations: {
+                scroll.transform = CGAffineTransform(translationX: 0, y: to).scaledBy(x: 0.85, y: 0.85)
+            }, completion: close)
+        }
+
+        /// Back where it was, carrying on from the finger's speed (a touch of give, as a thing let go
+        /// of has; none with Reduce Motion).
+        private func settle(_ scroll: UIScrollView, from y: CGFloat, velocity v: CGFloat) {
+            withAnimation(.snappy(duration: 0.3)) { drag?.progress = 0 }
+            UIView.animate(springDuration: 0.4, bounce: motion ? 0.15 : 0, initialSpringVelocity: motion ? Fling.relative(v, over: -y) : 0,
+                           options: [.beginFromCurrentState, .allowUserInteraction], animations: {
+                scroll.transform = .identity
+            })
         }
 
         func layout(_ scroll: UIScrollView) {
