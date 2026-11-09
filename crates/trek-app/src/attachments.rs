@@ -755,7 +755,8 @@ pub fn sent_file_chip(id: impl Into<ElementId>, path: &Path, cx: &App) -> AnyEle
             .h(size * 1.62)
             .px(size * 0.42)
             .gap(size * 0.34)
-            .rounded(if cfg!(windows) { px(4.) } else { size * 0.42 })
+            // The shape of `file_icon::chip` beside it, a pill scaled to its text.
+            .rounded(if cfg!(windows) { px(4.) } else { size * 0.42 }) // scale: ok
             .border_1()
             .border_color(t.edge)
             .bg(t.fill)
