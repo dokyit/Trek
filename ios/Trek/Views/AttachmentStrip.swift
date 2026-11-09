@@ -10,8 +10,15 @@ struct AttachmentStrip: View {
     @Binding var files: [PickedFile]
     var locked = false
     @State private var open: Int?
+    @MotionAllowed private var motion
 
     static let tile: CGFloat = 56
+
+    /// A tile grows in from a little smaller as it's added and shrinks away as it's taken off, the
+    /// others closing up after it (never from nothing: 0.9).
+    private var tileTransition: AnyTransition {
+        motion ? .scale(scale: 0.9).combined(with: .opacity) : .opacity
+    }
 
     var body: some View {
         SidewaysScroll {
@@ -26,13 +33,14 @@ struct AttachmentStrip: View {
                             // The tile, not the whole picture its fill crops: taps stay on their own photo.
                             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.press)
                     .accessibilityLabel("Attached photo")
                     .accessibilityHint("Opens it full screen")
                     // Beside the button, not in its label: a tap here only removes.
                     .overlay(alignment: .topTrailing) {
                         remove("Remove photo") { photos.removeAll { $0.id == p.id } }
                     }
+                    .transition(tileTransition)
                 }
                 ForEach(files) { f in
                     Group {
@@ -47,6 +55,7 @@ struct AttachmentStrip: View {
                             f.discard()
                         }
                     }
+                    .transition(tileTransition)
                 }
             }
             .padding(.top, 8)
@@ -68,7 +77,7 @@ struct AttachmentStrip: View {
                     .symbolRenderingMode(.palette)
                     .foregroundStyle(.white, .black.opacity(0.6))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressRound)
             .offset(x: 6, y: -6)
             .accessibilityLabel(label)
             .transition(.opacity)

@@ -921,8 +921,16 @@ final class AppModel {
         act(.interrupt(threadId: tid))
     }
 
-    func answer(_ tid: String, requestId: String, _ response: AnswerResponse) {
-        act(.answer(threadId: tid, requestId: requestId, response: response))
+    /// `done` hears whether the host took it (false: refused, or never sent; the toast says why).
+    func answer(_ tid: String, requestId: String, _ response: AnswerResponse, done: ((Bool) -> Void)? = nil) {
+        request(.answer(threadId: tid, requestId: requestId, response: response)) { [weak self] reply in
+            if case .error(_, _, let text) = reply {
+                self?.show(text, error: true)
+                done?(false)
+            } else {
+                done?(true)
+            }
+        }
     }
 
     func newThread(project: String, agent: String, model: String?, text: String, worktree: Bool,
@@ -1246,11 +1254,32 @@ final class AppModel {
         }
     }
 
+    /// A toast for a moment: 3 s, or 5 s for something that went wrong (two lines take longer to
+    /// read than "Copied").
     func show(_ text: String, error: Bool = false) {
         withAnimation(.snappy) { toast = Toast(text: text, isError: error) }
+        endToast(after: error ? 5 : 3)
+    }
+
+    /// A finger on the toast keeps it up; let go of it, it stays a moment longer.
+    func holdToast(_ held: Bool) {
+        toastHeld = held
+        if !held { endToast(after: 2) }
+    }
+
+    /// Swiped away: gone now (the view animates it away at the finger's speed).
+    func dismissToast() {
+        toastHeld = false
+        toast = nil
+    }
+
+    @ObservationIgnored private var toastHeld = false
+
+    private func endToast(after seconds: TimeInterval) {
         let id = toast?.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            if self?.toast?.id == id { withAnimation(.snappy) { self?.toast = nil } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self, self.toast?.id == id, !self.toastHeld else { return }
+            withAnimation(.snappy) { self.toast = nil }
         }
     }
 

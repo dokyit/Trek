@@ -119,7 +119,7 @@ struct Composer: View {
                                 .frame(width: 34, height: 34)
                                 .background(Circle().fill(Trek.foreground.opacity(0.12)))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressRound)
                         .padding(5)
                         .accessibilityLabel("Discard dictation")
                         Button {
@@ -131,7 +131,7 @@ struct Composer: View {
                                 .frame(width: 34, height: 34)
                                 .background(Circle().fill(Trek.foreground))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressRound)
                         .padding(5)
                         .accessibilityLabel("Keep dictation")
                     } else {
@@ -149,7 +149,7 @@ struct Composer: View {
                                 .frame(width: 34, height: 34)
                                 .background(Circle().fill(Trek.foreground.opacity(0.08)))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressRound)
                         .padding(.vertical, 5)
                         .padding(.trailing, -6)
                         .disabled(uploading)
@@ -170,7 +170,7 @@ struct Composer: View {
                             .frame(width: 34, height: 34)
                             .background(Circle().fill(!working && empty ? Trek.muted.opacity(0.35) : Trek.foreground))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressRound)
                         .disabled(!working && empty || uploading)
                         .padding(5)
                         .accessibilityLabel(uploading ? "Sending its files" : working && empty ? "Stop" : "Send")

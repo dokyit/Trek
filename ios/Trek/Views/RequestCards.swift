@@ -285,7 +285,7 @@ struct QuestionCard: View {
                             .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(on ? Trek.ember.opacity(0.7) : Trek.foreground.opacity(0.1), lineWidth: 1))
                             .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.press)
                     }
                     AnswerField(secret: q.secret, text: Binding(get: { other[qi] ?? "" }, set: { other[qi] = $0 }))
                         .font(.ui(.subheadline))
@@ -306,6 +306,8 @@ struct QuestionCard: View {
             .controlSize(.large)
             .disabled(answers.count < request.questions.count)
         }
+        // An option ticked or cleared is felt, as a picker's wheel is.
+        .sensoryFeedback(.selection, trigger: picks)
         .onChange(of: typing) {
             if let qi = typing { scroller?.reveal(fieldID(qi)) }
         }

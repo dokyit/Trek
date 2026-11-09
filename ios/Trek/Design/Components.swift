@@ -250,6 +250,69 @@ struct RidgeBackdrop: View {
     }
 }
 
+/// The toast over everything. It comes in from the top and goes back up the way it came, by
+/// itself or flicked: the finger moves it one to one, a flick carries it off at the finger's speed,
+/// pulled down it gives a little and springs back. While a finger is on it, it stays. Something
+/// that went wrong is felt as well as shown.
+struct ToastOverlay: View {
+    @Environment(AppModel.self) private var model
+    /// How far the finger has it from its place (up is negative).
+    @State private var drag: CGFloat = 0
+    @State private var holding = false
+    @MotionAllowed private var motion
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if let toast = model.toast {
+                ToastView(toast: toast)
+                    .offset(y: drag)
+                    .gesture(swipe)
+                    .accessibilityAction(named: "Dismiss") { model.dismissToast() }
+                    .transition(motion ? .move(edge: .top).combined(with: .opacity) : .opacity)
+                    .padding(.top, 6)
+            }
+        }
+        .sensoryFeedback(trigger: model.toast) { _, new in new?.isError == true ? .error : nil }
+        .onChange(of: model.toast?.id) { _, id in
+            // A new toast starts in its place, wherever the finger left the last one.
+            guard id != nil, drag != 0 else { return }
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { drag = 0 }
+        }
+    }
+
+    private var swipe: some Gesture {
+        DragGesture(minimumDistance: 4)
+            .onChanged { value in
+                if !holding {
+                    holding = true
+                    model.holdToast(true)
+                }
+                let dy = value.translation.height
+                // Up, the way out, follows the finger; down there's nowhere to go: it gives less
+                // the further it's pulled.
+                drag = dy < 0 ? dy : Fling.rubberBand(dy, size: 80)
+            }
+            .onEnded { value in
+                holding = false
+                let v = value.velocity.height
+                let resting = value.translation.height + Fling.carry(v)
+                if v <= 0, value.translation.height < -28 || resting < -80 {
+                    // Off the way it was going, at the speed it was going.
+                    withAnimation(motion ? .interpolatingSpring(duration: 0.3, bounce: 0, initialVelocity: Fling.relative(-v, over: 80)) : .easeOut(duration: 0.15)) {
+                        model.dismissToast()
+                    }
+                } else {
+                    model.holdToast(false)
+                    withAnimation(motion ? .interpolatingSpring(duration: 0.35, bounce: 0.2, initialVelocity: Fling.relative(v, over: -drag)) : .snappy(duration: 0.2)) {
+                        drag = 0
+                    }
+                }
+            }
+    }
+}
+
 /// A floating message at the top: pairing done, an action that failed.
 struct ToastView: View {
     var toast: Toast

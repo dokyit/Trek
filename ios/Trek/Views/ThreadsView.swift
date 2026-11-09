@@ -458,6 +458,8 @@ private struct NeedsHeader: View {
             Text("Needs you").font(.ui(.subheadline).weight(.semibold))
             Text("\(count)")
                 .font(.ui(.footnote).weight(.semibold).monospacedDigit())
+                // One more or one fewer rolls to it, as a row comes in or goes.
+                .contentTransition(.numericText(value: Double(count)))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 1)
                 .background(Trek.approval.opacity(0.16), in: Capsule())
@@ -501,6 +503,7 @@ private struct SectionHeader: View {
             HStack(spacing: 7) {
                 Text(title).font(.ui(.subheadline).weight(.semibold)).foregroundStyle(Trek.muted)
                 Text("\(count)").font(.ui(.subheadline).monospacedDigit()).foregroundStyle(Trek.muted.opacity(0.7))
+                    .contentTransition(.numericText(value: Double(count)))
                 Spacer()
                 FoldChevron(folded: folded)
             }

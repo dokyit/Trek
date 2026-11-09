@@ -133,9 +133,11 @@ struct NewThreadSheet: View {
                     .frame(width: 36, height: 36)
                     .background(Circle().fill(empty ? Trek.muted.opacity(0.35) : Trek.foreground))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressRound)
                 .disabled(empty || sending)
                 .accessibilityLabel(uploading ? "Sending its files" : "Start thread")
+                // Felt as it goes, as a message sent in a thread is.
+                .sensoryFeedback(.impact(weight: .light), trigger: sending) { _, now in now }
             }
         }
         .padding(12)
@@ -147,7 +149,7 @@ struct NewThreadSheet: View {
         AttachPicker(photos: $photos, files: $files, uploads: link?.serves(.uploads) == true) {
             chip { Image(systemName: link?.serves(.uploads) == true ? "paperclip" : "photo.on.rectangle").font(.system(size: 14, weight: .medium)) }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .disabled(uploading)
     }
 
@@ -176,7 +178,7 @@ struct NewThreadSheet: View {
                 Text("Plan")
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .accessibilityLabel(plan ? "Plan first: on" : "Plan first: off")
     }
 
@@ -230,7 +232,7 @@ struct NewThreadSheet: View {
         Button { choosingModel = true } label: {
             chip { ModelChipLabel(agentKey: agent?.key ?? "", agentLogo: agent?.logo, model: modelLabel, effort: effort, logo: 17) }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .accessibilityLabel("Model: \(modelLabel)")
         .sheet(isPresented: $choosingModel) {
             ModelPickerSheet(
@@ -257,7 +259,7 @@ struct NewThreadSheet: View {
                 Text(worktree ? "New worktree" : "Local")
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
     }
 
     /// A chip on a neutral wash (the Mac's composer pills), a shade darker when `selected`.

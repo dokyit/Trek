@@ -179,13 +179,7 @@ struct RootView: View {
             if phase == .active { model.foregrounded() }
             if phase == .background { model.backgrounded() }
         }
-        .overlay(alignment: .top) {
-            if let toast = model.toast {
-                ToastView(toast: toast)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .padding(.top, 6)
-            }
-        }
+        .overlay(alignment: .top) { ToastOverlay() }
         .tint(Trek.foreground)
         .font(.ui(.body))
         .sheet(item: $model.pendingLink) { link in
@@ -383,6 +377,7 @@ struct NewThreadAccessory: View {
                     Button(action: openWaiting) {
                         Label("\(needsYou)", systemImage: "hand.raised.fill")
                             .font(.ui(.footnote).weight(.semibold))
+                            .contentTransition(.numericText(value: Double(needsYou)))
                             .foregroundStyle(Trek.approval)
                             .labelStyle(.titleAndIcon)
                             .padding(.horizontal, 8)
@@ -397,6 +392,7 @@ struct NewThreadAccessory: View {
                     HStack(spacing: 6) {
                         BeaconDot(color: Trek.working, pulses: true, size: 6)
                         Text("\(working) working").font(.ui(.footnote).weight(.medium)).foregroundStyle(Trek.muted)
+                            .contentTransition(.numericText(value: Double(working)))
                     }
                     .accessibilityElement(children: .combine)
                 }

@@ -340,7 +340,7 @@ private struct TranscriptList: View, nonisolated Equatable {
                             .overlay(Circle().strokeBorder(Trek.border, lineWidth: 0.75))
                             .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressRound)
                     .accessibilityLabel("Jump to the latest")
                     .padding(.trailing, 14)
                     .padding(.bottom, 12)
@@ -816,8 +816,28 @@ private struct ComposerArea: View {
     @State private var requestsHeight: CGFloat = 0
     @State private var restHeight: CGFloat = 0
     @State private var scroller = RequestScroller()
+    /// Requests answered here and on their way to the Mac: a card goes as the tap is felt, not a
+    /// round trip later when the Mac's word comes back. One the Mac refuses comes back.
+    @State private var answered: Set<String> = []
+    /// What the last tap here is felt as: a message going, a turn stopped, a request answered.
+    @State private var felt: Felt?
+    @MotionAllowed private var motion
+
+    private struct Felt: Equatable {
+        let id = UUID()
+        var feedback: SensoryFeedback
+    }
 
     private var threadID: String { store.id }
+
+    /// A request comes up from behind the composer, a little way and fading in. Answered, it stays
+    /// where it is, settles a touch and fades, softening into the transcript its answer joins: it
+    /// doesn't slide down through the composer.
+    private var requestTransition: AnyTransition {
+        guard motion else { return .opacity }
+        return .asymmetric(insertion: .offset(y: 24).combined(with: .opacity),
+                           removal: .scale(scale: 0.96, anchor: .bottom).combined(with: .opacity).combined(with: .soften))
+    }
 
     /// What the requests may take: the room left over the composer, with a strip of the
     /// transcript still showing above them.
@@ -830,8 +850,9 @@ private struct ComposerArea: View {
         let query = CommandPicker.query(composer.draft)
         let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
         let needsKid = thread?.needsThread.flatMap { model.serves(.subAgents, on: threadID) ? $0 : nil }
+        let pending = store.pending.filter { !answered.contains($0.id) }
         VStack(spacing: 10) {
-            if needsKid != nil || !store.pending.isEmpty {
+            if needsKid != nil || !pending.isEmpty {
                 // Requests can be taller than the screen (many questions, each with its options):
                 // they scroll on their own, under the strip and over the composer, and the field
                 // being typed in comes into view over the keyboard.
@@ -840,13 +861,13 @@ private struct ComposerArea: View {
                         VStack(spacing: 10) {
                             if let kid = needsKid {
                                 SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
-                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                                    .transition(requestTransition)
                             }
-                            ForEach(store.pending) { item in
+                            ForEach(pending) { item in
                                 PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent", threadID: threadID) { response in
-                                    if let rid = Self.requestId(item) { model.answer(threadID, requestId: rid, response) }
+                                    if let rid = Self.requestId(item) { answer(item.id, requestId: rid, response) }
                                 }
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                                .transition(requestTransition)
                             }
                         }
                         // Room for the cards' shadows, inside what clips them.
@@ -863,7 +884,7 @@ private struct ComposerArea: View {
                     .environment(\.requestScroller, scroller)
                     .onAppear { scroller.proxy = proxy }
                 }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .transition(requestTransition)
             }
             // What stays under the requests, measured for the room it leaves them.
             VStack(spacing: 10) {
@@ -871,11 +892,11 @@ private struct ComposerArea: View {
                 // above its composer.
                 if let thread, thread.runsInBackground {
                     BackgroundStrip(thread: thread)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .transition(.rise(motion))
                 }
                 // The newest card's chip, as the Mac's composer has it; it waits while a request
                 // is pinned here.
-                if needsKid == nil, store.pending.isEmpty {
+                if needsKid == nil, pending.isEmpty {
                     CardChipRow(store: store)
                 }
                 if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction, on: threadID) {
@@ -883,23 +904,23 @@ private struct ComposerArea: View {
                         composer.put(composer.draft.isEmpty ? text : composer.draft + "\n\n" + text)
                         composer.focusRequest += 1
                     }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(.rise(motion))
                 }
                 // Paused at the agent's usage limit: the Mac's limit bar.
                 if let thread, let pause = thread.pause, thread.runState != .working {
                     LimitBar(thread: thread, pause: pause) { composer.pickModelRequest += 1 }
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .transition(.rise(motion))
                 }
                 // Cut off when Trek closed on the Mac: its offer to carry on.
                 if let thread, let cut = thread.cutShort, thread.runState != .working, model.serves(.resumeInterrupted, on: threadID) {
                     CutShortBar(thread: thread, cut: cut)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .transition(.rise(motion))
                 }
                 if !commands.isEmpty {
                     CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
                         composer.draft = "/\(cmd.name) "
                     }
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(.rise(motion))
                 } else if let thread {
                     if thread.sharesFolder == true { FolderSharedLine() }
                     if let consult = composer.consult {
@@ -913,9 +934,14 @@ private struct ComposerArea: View {
                 Composer(text: $c.draft.timed("keystroke"), mode: $c.mode, photos: $c.photos, files: $c.files,
                          placeholder: "Message \(thread?.agent.name ?? "the agent")",
                          working: working, uploads: model.serves(.uploads, on: threadID), uploading: composer.uploading,
-                         focusRequest: composer.focusRequest, send: send, stop: { model.interrupt(threadID) })
+                         focusRequest: composer.focusRequest, send: send, stop: {
+                             felt = Felt(feedback: .impact(weight: .medium))
+                             model.interrupt(threadID)
+                         })
             }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { restHeight = $0 }
+            // Over the requests: one coming up comes from behind the composer, not across it.
+            .zIndex(1)
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 6)
@@ -935,12 +961,17 @@ private struct ComposerArea: View {
             .ignoresSafeArea(edges: .bottom)
             .allowsHitTesting(false)
         }
-        .animation(.smooth(duration: 0.3), value: store.pending.map(\.id))
+        .animation(.smooth(duration: 0.3), value: pending.map(\.id))
         .animation(.smooth(duration: 0.3), value: thread?.needsThread)
         .animation(.smooth(duration: 0.3), value: thread?.queued)
         .animation(.smooth(duration: 0.3), value: thread?.runsInBackground)
         .animation(.smooth(duration: 0.3), value: thread?.cutShort)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
+        .sensoryFeedback(trigger: felt) { _, new in new?.feedback }
+        // What the Mac has closed needn't be kept back any more.
+        .onChange(of: store.pending.map(\.id)) { _, ids in
+            if !answered.isEmpty { answered.formIntersection(ids) }
+        }
         .onChange(of: composer.draft) {
             // The keyboard put back the message just sent: it stays gone.
             if composer.dropEcho() { return }
@@ -962,6 +993,30 @@ private struct ComposerArea: View {
         }
     }
 
+    /// Felt, and the card gone, as the finger lifts; the Mac's word decides whether it stays gone.
+    private func answer(_ id: String, requestId rid: String, _ response: AnswerResponse) {
+        felt = Felt(feedback: Self.goesAhead(response) ? .impact(weight: .medium) : .impact(weight: .light))
+        answered.insert(id)
+        let store = store
+        model.answer(threadID, requestId: rid, response) { ok in
+            // Refused (the toast says why): back, to be answered again.
+            guard ok else { answered.remove(id); return }
+            // Taken, yet still asking a moment later: back rather than lost.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                if store.pending.contains(where: { $0.id == id }) { answered.remove(id) }
+            }
+        }
+    }
+
+    /// Allow, approve, an answer: the agent goes ahead. Deny, or the plan sent back: it doesn't.
+    private static func goesAhead(_ response: AnswerResponse) -> Bool {
+        switch response {
+        case .approval(let d): d != .deny
+        case .plan(let approve, _): approve
+        case .questions: true
+        }
+    }
+
     private func send() {
         let text = composer.draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !composer.uploading, !text.isEmpty || !composer.photos.isEmpty || !composer.files.isEmpty else { return }
@@ -970,6 +1025,7 @@ private struct ComposerArea: View {
             model.show(AppModel.notConnected, error: true)
             return
         }
+        felt = Felt(feedback: .impact(weight: .light))
         let uploads = composer.photos.compactMap(\.upload)
         // `/new` and `/clear` open the new-thread sheet: what follows them is its prompt.
         var prompt = ""
