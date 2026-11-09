@@ -493,39 +493,109 @@ fn the_file_picker_sees_files_made_since_it_first_looked() {
     });
 }
 
-/// A file with a space in its path is mentioned in quotes, so the mention isn't cut at the space.
+/// Files picked or dropped that aren't images (a PDF, a video) go on the strip as tiles, not into
+/// the text; as the message goes they're mentioned after it as `@path` (in quotes when the path
+/// has a space), which is what the agent, the transcript and the queue get.
 #[test]
-fn attached_files_with_spaces_are_quoted() {
+fn picked_files_are_tiles_and_go_after_the_message_as_mentions() {
     run(async |cx| {
         let trek = open(cx);
+        let id = trek.quiet_thread(cx);
         let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
-        let file = trek.project.join("Quarterly Report.pdf");
-        trek.window(cx, |window, cx| {
-            composer.update(cx, |c, cx| {
-                c.append_file_refs(std::slice::from_ref(&file), window, cx)
-            })
-        });
-        assert_eq!(trek.composer_text(cx), format!("@\"{}\" ", file.display()));
+        let (pdf, clip) = files(&trek, ["Quarterly Report.pdf", "clip.mov"]);
+        trek.type_text(cx, "please review");
+        composer.update(cx, |c, cx| c.add_files(&[pdf.clone(), clip.clone()], cx));
+        assert_eq!(trek.composer_text(cx), "please review");
+        assert_eq!(tiles(&trek, cx), [pdf.clone(), clip.clone()]);
+        // The caret stays where it was.
+        trek.type_text(cx, " thanks");
+        let want = format!(
+            "please review thanks @\"{}\" @{} ",
+            pdf.display(),
+            clip.display()
+        );
+        assert_eq!(cx.read(|cx| composer.read(cx).written_text(cx)), want);
+        trek.press(cx, "enter");
+        assert_eq!(trek.composer_text(cx), "");
+        assert!(tiles(&trek, cx).is_empty());
+        let sent = trek.item_ix(
+            cx,
+            &id,
+            |i| matches!(i, trek_core::store::Item::User { text, .. } if text.trim() == want.trim()),
+        );
+        // The transcript shows the PDF as a chip under the message (the video plays there).
+        trek.thread_view(cx).update(cx, |v, cx| v.scroll_to_top(cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, ("user-file", sent * 100)));
+        assert!(!trek.visible(cx, ("user-file", sent * 100 + 1)));
     });
 }
 
-/// "Add photos & files" appends `@path` references and leaves the caret after them.
+/// A tile's × takes the file off; a file only once.
 #[test]
-fn attached_files_leave_the_caret_after_their_references() {
+fn a_tile_comes_off_with_its_x() {
     run(async |cx| {
         let trek = open(cx);
-        trek.type_text(cx, "please review");
         let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
-        let file = trek.project.join("notes.md");
+        let (pdf, clip) = files(&trek, ["a.pdf", "b.mp4"]);
+        composer.update(cx, |c, cx| {
+            c.add_files(&[pdf.clone(), clip.clone(), pdf.clone()], cx)
+        });
+        assert_eq!(tiles(&trek, cx), [pdf.clone(), clip.clone()]);
+        trek.window(cx, |window, cx| {
+            gpui_kit::test::TestWindowExt::hover(window, ("attachment-file", 0usize), cx)
+        });
+        trek.click(cx, ("att-file-x", 0usize));
+        assert_eq!(tiles(&trek, cx), [clip]);
+    });
+}
+
+/// Tiles stay with the thread they were added in, as typed text does, and come back with it.
+#[test]
+fn tiles_stay_with_their_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let (pdf, _) = files(&trek, ["spec.pdf", "unused.txt"]);
+        let a = trek.quiet_thread(cx);
+        trek.type_text(cx, "for A");
+        composer.update(cx, |c, cx| c.add_files(std::slice::from_ref(&pdf), cx));
+        trek.quiet_thread(cx);
+        assert_eq!(trek.composer_text(cx), "");
+        assert!(tiles(&trek, cx).is_empty());
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a), cx));
+        assert_eq!(trek.composer_text(cx), "for A");
+        assert_eq!(tiles(&trek, cx), [pdf]);
+    });
+}
+
+/// A message that comes back (a rewind, a follow-up that never went out, an edit) has its files
+/// back as tiles, and its words in the prompt.
+#[test]
+fn a_message_put_back_has_its_files_as_tiles() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let (pdf, clip) = files(&trek, ["Q3 report.pdf", "demo.mov"]);
+        let sent = format!("look at these @\"{}\" @{} ", pdf.display(), clip.display());
+        trek.window(cx, |window, cx| {
+            composer.update(cx, |c, cx| c.restore(&sent, &[], window, cx))
+        });
+        assert_eq!(trek.composer_text(cx), "look at these");
+        assert_eq!(tiles(&trek, cx), [pdf.clone(), clip.clone()]);
+        assert_eq!(cx.read(|cx| composer.read(cx).written_text(cx)), sent);
+        // Editing a sent message: the same, and cancelling brings back what was there.
         trek.window(cx, |window, cx| {
             composer.update(cx, |c, cx| {
-                c.append_file_refs(std::slice::from_ref(&file), window, cx)
+                c.compose(&id, "again", &[], Some("u1".into()), window, cx)
             })
         });
-        let want = format!("please review @{} ", file.display());
-        assert_eq!(trek.composer_text(cx), want);
-        trek.type_text(cx, "thanks");
-        assert_eq!(trek.composer_text(cx), format!("{want}thanks"));
+        assert_eq!(trek.composer_text(cx), "again");
+        assert!(tiles(&trek, cx).is_empty());
+        trek.press(cx, "escape");
+        assert_eq!(trek.composer_text(cx), "look at these");
+        assert_eq!(tiles(&trek, cx), [pdf, clip]);
     });
 }
 
@@ -1060,10 +1130,10 @@ fn kept(path: &std::path::Path, photo: bool) -> Result<Pick, Failed> {
 use trek_app::photos::{Failed, Pick, Picked};
 
 /// While picks are copied out of the library the strip shows them saving; then photos go on the
-/// strip and videos are mentioned with `@` after what's typed, in the order picked, and one that
-/// couldn't be had says so.
+/// strip as thumbnails and videos as tiles, in the order picked, and one that couldn't be had says
+/// so.
 #[test]
-fn picked_photos_go_on_the_strip_and_videos_are_mentioned() {
+fn picked_photos_and_videos_go_on_the_strip() {
     run(async |cx| {
         let trek = open(cx);
         let said = toasts(&trek, cx);
@@ -1092,8 +1162,10 @@ fn picked_photos_go_on_the_strip_and_videos_are_mentioned() {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(cx.read(|cx| composer.read(cx).attached()), (vec![a, b], 0));
+        assert_eq!(trek.composer_text(cx), "what's in these");
+        assert_eq!(tiles(&trek, cx), [clip.clone()]);
         assert_eq!(
-            trek.composer_text(cx),
+            cx.read(|cx| composer.read(cx).written_text(cx)),
             format!("what's in these @{} ", clip.display())
         );
         assert_eq!(
@@ -1121,7 +1193,7 @@ fn a_cancelled_photos_pick_changes_nothing() {
 }
 
 /// Picks that come in after the user moved to another thread belong to the draft they were
-/// picked for: the photo and the video's mention are there on coming back, not in the thread.
+/// picked for: the photo and the video are there on coming back, not in the thread.
 #[test]
 fn photos_picked_for_a_draft_stay_with_it() {
     run(async |cx| {
@@ -1151,8 +1223,25 @@ fn photos_picked_for_a_draft_stay_with_it() {
             )
         });
         assert_eq!(cx.read(|cx| composer.read(cx).attached().0), [photo]);
-        assert_eq!(trek.composer_text(cx), format!("@{} ", clip.display()));
+        assert_eq!(trek.composer_text(cx), "");
+        assert_eq!(tiles(&trek, cx), [clip]);
         trek.update(cx, |ws, cx| ws.navigate(Route::Thread(a), cx));
         assert!(cx.read(|cx| composer.read(cx).attached().0).is_empty());
+        assert!(tiles(&trek, cx).is_empty());
     });
+}
+
+/// Two files made in the project, by name.
+fn files(trek: &Trek, names: [&str; 2]) -> (std::path::PathBuf, std::path::PathBuf) {
+    let [a, b] = names.map(|n| {
+        let p = trek.project.join(n);
+        std::fs::write(&p, b"x").unwrap();
+        p
+    });
+    (a, b)
+}
+
+/// The files on the composer's strip as tiles.
+fn tiles(trek: &Trek, cx: &gpui_kit::TestAppContext) -> Vec<std::path::PathBuf> {
+    cx.read(|cx| trek.root.read(cx).composer.read(cx).attached_files())
 }

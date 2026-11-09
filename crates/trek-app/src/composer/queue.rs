@@ -26,13 +26,28 @@ pub(super) struct QueueEdit {
 }
 
 /// What a row says of a message: its first line as the user wrote it (without what Trek adds for
-/// consultants or a restatement), or its images when it has no text.
+/// consultants or a restatement, or the files mentioned after it), or what goes with it when it
+/// has no text: its images, a file's name, or how many files.
 pub(super) fn first_line(text: &str, images: usize) -> String {
     let (text, _) = trek_core::orchestrate::split_consult(text);
     let (text, _) = trek_core::restate::split_restate(text);
-    match text.lines().find(|l| !l.trim().is_empty()) {
-        Some(line) => line.trim().to_string(),
-        None => format!("{images} image{}", if images == 1 { "" } else { "s" }),
+    let (text, files) = trek_core::media::split_attached(text, std::path::Path::exists);
+    if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
+        return line.trim().to_string();
+    }
+    let images = format!("{images} image{}", if images == 1 { "" } else { "s" });
+    let files = match files.as_slice() {
+        [] => return images,
+        [one] => one.file_name().map_or_else(
+            || one.display().to_string(),
+            |n| n.to_string_lossy().to_string(),
+        ),
+        many => format!("{} files", many.len()),
+    };
+    if images.starts_with("0 ") {
+        files
+    } else {
+        format!("{images}, {files}")
     }
 }
 
@@ -65,10 +80,7 @@ impl Composer {
         else {
             return;
         };
-        let draft = (
-            self.input.read(cx).value().to_string(),
-            std::mem::take(&mut self.outbox.paths),
-        );
+        let draft = self.take_written(cx);
         self.queue_edit = Some(QueueEdit {
             thread: thread.to_string(),
             ix,
@@ -84,12 +96,7 @@ impl Composer {
         let (written, restate) = trek_core::restate::split_restate(written);
         self.restate |= restate;
         let written = written.to_string();
-        self.outbox.paths = images;
-        self.input.update(cx, |s, cx| {
-            let end = written.len();
-            s.set_value(written, window, cx);
-            s.set_selected_range(end..end, cx);
-        });
+        self.put_back(&written, images, Some(written.len()), window, cx);
         self.pickers.trigger = None;
         self.sync_overlay(cx);
         self.focus(window, cx);
@@ -112,6 +119,9 @@ impl Composer {
         } else {
             let (draft, images) = e.draft;
             self.outbox.paths.extend(images);
+            // Its files go back on the strip, beside the edited message's.
+            let (draft, files) = trek_core::media::split_attached(&draft, std::path::Path::exists);
+            self.outbox.add_files(files);
             if !draft.is_empty() {
                 self.input.update(cx, |s, cx| {
                     let text = format!("{}\n\n{draft}", s.value());
@@ -172,12 +182,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.outbox.paths = images;
-        let end = text.len();
-        self.input.update(cx, |s, cx| {
-            s.set_value(text, window, cx);
-            s.set_selected_range(end..end, cx);
-        });
+        self.put_back(&text, images, Some(text.len()), window, cx);
     }
 
     /// The rows, while anything is queued behind `id`'s turn.
@@ -370,5 +375,27 @@ mod tests {
             first_line(&trek_core::restate::with_restate("then the docs"), 0),
             "then the docs"
         );
+    }
+
+    #[test]
+    fn a_row_of_files_alone_names_them() {
+        let dir = std::env::temp_dir().join(format!("trek-queue-row-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (clip, pdf) = (dir.join("clip.mov"), dir.join("Q3 report.pdf"));
+        for f in [&clip, &pdf] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let at = |p: &std::path::Path| trek_core::media::mention_of(&p.display().to_string());
+        // The files mentioned after the words aren't the first line.
+        assert_eq!(
+            first_line(&format!("look at this {} ", at(&clip)), 0),
+            "look at this"
+        );
+        assert_eq!(first_line(&format!("{} ", at(&clip)), 0), "clip.mov");
+        assert_eq!(
+            first_line(&format!("{} {}", at(&clip), at(&pdf)), 1),
+            "1 image, 2 files"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

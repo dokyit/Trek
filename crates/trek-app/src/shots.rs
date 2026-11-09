@@ -12,7 +12,7 @@
 //! atomically (a temp file renamed into place) so a half-written batch is never run.
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
-//! `send <prompt>`, `attach <image>` (into the main composer's outbox), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
+//! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
 //! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
@@ -1826,6 +1826,33 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // Files in the composer, as a drop puts them there: images as thumbnails, the rest (videos,
+    // PDFs, folders) as tiles. Paths are separated by `|` (they may have spaces).
+    if verb == "attach" && !arg.is_empty() {
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let paths: Vec<PathBuf> = arg.split('|').map(|p| PathBuf::from(p.trim())).collect();
+        main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+            let trek = root
+                .downcast::<gpui_kit::component::Root>()
+                .ok()
+                .and_then(|r| {
+                    r.read(cx)
+                        .view()
+                        .clone()
+                        .downcast::<crate::root::TrekWindow>()
+                        .ok()
+                })
+                .ok_or_else(|| anyhow::anyhow!("attach: no Trek window"))?;
+            let composer = trek.read(cx).composer.clone();
+            composer.update(cx, |c, cx| c.add_paths(&paths, window, cx));
+            Ok(())
+        })??;
+        cx.refresh_windows();
+        return Ok(());
+    }
     if verb == "agent-install" {
         // How an install from the ACP Registry looks under way or failed, without downloading:
         // `agent-install <id> <percent>|fail <message>|clear`.
@@ -2008,11 +2035,8 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 ws.navigate(Route::Thread(other["thread:".len()..].to_string()), cx)
             }
             ("route", other) => anyhow::bail!("route: unknown route {other:?}"),
-            // An image in the composer's outbox, as a drop or paste attaches it.
-            ("attach", "") => anyhow::bail!("attach needs an image path"),
-            ("attach", path) => cx.emit(crate::workspace::WorkspaceEvent::AttachImage(
-                PathBuf::from(path),
-            )),
+            // Files in the composer: handled above, with the window.
+            ("attach", _) => anyhow::bail!("attach needs a path (several: a|b)"),
             ("send", "") => anyhow::bail!("send needs a prompt"),
             ("send", text) => ws.send(text.to_string(), vec![], cx),
             ("project", "") => anyhow::bail!("project needs a folder"),

@@ -220,6 +220,59 @@ pub fn mentioned_dirs(text: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     mentioned_paths(text, cwd, Path::is_dir)
 }
 
+/// A message's own words, and the files sent with it: the `@path` mentions at its end that name
+/// an absolute (or `~/`) path `exists` says is there, which is how the composer adds files to a
+/// message. What's left is the words as written, without trailing whitespace. A mention among the
+/// words (typed with the `@` picker, a relative path, one that's gone) stays in them, and so does
+/// every mention before it.
+pub fn split_attached(text: &str, exists: impl Fn(&Path) -> bool) -> (&str, Vec<PathBuf>) {
+    let mut rest = text.trim_end();
+    let mut found = Vec::new();
+    loop {
+        let (start, raw) = match rest.strip_suffix('"') {
+            // `@"a path with spaces"`.
+            Some(body) => {
+                let Some(open) = body.rfind("@\"") else { break };
+                let raw = &body[open + 2..];
+                if raw.contains('"') {
+                    break;
+                }
+                (open, raw)
+            }
+            None => {
+                let start = rest
+                    .char_indices()
+                    .rev()
+                    .find(|(_, c)| c.is_whitespace())
+                    .map_or(0, |(i, c)| i + c.len_utf8());
+                let Some(raw) = rest[start..].strip_prefix('@') else {
+                    break;
+                };
+                (start, raw)
+            }
+        };
+        // Only at the start of a word: `me@host` isn't a mention.
+        let word_start = rest[..start]
+            .chars()
+            .next_back()
+            .is_none_or(char::is_whitespace);
+        let path = if let Some(home_relative) = raw.strip_prefix("~/") {
+            crate::paths::home().join(home_relative)
+        } else if Path::new(raw).is_absolute() {
+            PathBuf::from(raw)
+        } else {
+            break;
+        };
+        if !word_start || !exists(&path) {
+            break;
+        }
+        found.push(path);
+        rest = rest[..start].trim_end();
+    }
+    found.reverse();
+    (rest, found)
+}
+
 fn mentioned_paths(text: &str, cwd: Option<&Path>, keep: fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for raw in mention_words(text) {
@@ -254,6 +307,56 @@ pub fn clock(secs: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_sent_with_a_message_are_the_mentions_at_its_end() {
+        let here = |p: &Path| !p.to_string_lossy().contains("gone");
+        // Absolute on every platform.
+        let dir = std::env::temp_dir().join("x");
+        let (a, b, gone) = (
+            dir.join("clip.mov"),
+            dir.join("Quarterly Report.pdf"),
+            dir.join("gone.mov"),
+        );
+        let at = |p: &PathBuf| mention_of(&p.display().to_string());
+        // As the composer writes them: after the words, the quoted one with its space.
+        let text = format!("what's in these? {} {} ", at(&a), at(&b));
+        assert!(at(&b).starts_with("@\""));
+        assert_eq!(
+            split_attached(&text, here),
+            ("what's in these?", vec![a.clone(), b.clone()])
+        );
+        // Only files: no words left.
+        assert_eq!(
+            split_attached(&format!("{}\n", at(&a)), here),
+            ("", vec![a.clone()])
+        );
+        // A mention among the words is part of them, and so is all before it.
+        let inline = format!("see {} first, then", at(&a));
+        assert_eq!(
+            split_attached(&format!("{inline} {}", at(&a)), here),
+            (inline.as_str(), vec![a.clone()])
+        );
+        // The `@` picker's relative mentions, a file that's gone and an address stay words.
+        let gone_one = format!("the old one {}", at(&gone));
+        let address = format!("mail me{}", at(&a));
+        for text in [
+            "fix @src/main.rs",
+            gone_one.as_str(),
+            address.as_str(),
+            "plain words",
+            "",
+        ] {
+            assert_eq!(split_attached(text, here), (text, vec![]), "{text:?}");
+        }
+        // A gone one stops the peeling: what's before it stays too.
+        let stuck = format!("hi {} {}", at(&a), at(&gone));
+        assert_eq!(split_attached(&stuck, here), (stuck.as_str(), vec![]));
+        assert_eq!(
+            split_attached("@~/Movies/a.mov", |_| true),
+            ("", vec![crate::paths::home().join("Movies/a.mov")])
+        );
+    }
 
     #[test]
     fn watch_calls_are_known_by_any_agents_name_for_them() {

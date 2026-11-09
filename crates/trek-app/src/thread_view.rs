@@ -2119,15 +2119,24 @@ impl ThreadView {
                         line,
                     )
                 });
-                // Videos attached to it (`@path`) play under it.
+                // Videos attached to it (`@path`) play under it. Files sent with it (mentioned
+                // after its words, as the composer sends them) are chips under it rather than
+                // paths in it: the bubble has the words.
                 let videos = trek_core::media::mentioned_videos(said, at.cwd.as_deref());
-                let text = SharedString::from(said.to_string());
+                let (words, sent_files) =
+                    trek_core::media::split_attached(said, std::path::Path::exists);
+                let sent_files: Vec<std::path::PathBuf> = sent_files
+                    .into_iter()
+                    .filter(|f| !videos.contains(f))
+                    .collect();
+                let text = SharedString::from(words.to_string());
                 // A study session's first message shows what the learner asked for and what came
                 // with it, not the instructions Trek wrote the tutor.
                 let intro = trek_core::study::intro(said);
                 let long = intro.is_none() && (text.len() > 700 || text.lines().count() > 10);
-                let has_text = !text.trim().is_empty();
-                let copy_text = text.clone();
+                let has_text = !text.trim().is_empty() || intro.is_some();
+                // Copy takes the message as sent, files and all.
+                let copy_text = SharedString::from(said.to_string());
                 let rewinding = asking
                     .as_ref()
                     .is_some_and(|(a, ask)| *a == *key && *ask == Ask::Rewind);
@@ -2333,6 +2342,24 @@ impl ThreadView {
                                                     .on_click(toggle(key.clone())),
                                             )
                                         }),
+                                )
+                            })
+                            .when(!sent_files.is_empty(), |el| {
+                                el.child(
+                                    h_flex()
+                                        .max_w(relative(0.78))
+                                        .gap(px(6.))
+                                        .flex_wrap()
+                                        .justify_end()
+                                        .children(sent_files.into_iter().enumerate().map(
+                                            |(i, f)| {
+                                                crate::attachments::sent_file_chip(
+                                                    ("user-file", ix * 100 + i),
+                                                    &f,
+                                                    cx,
+                                                )
+                                            },
+                                        )),
                                 )
                             })
                             .when(!videos.is_empty(), |el| {

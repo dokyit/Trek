@@ -529,7 +529,8 @@ impl Composer {
             cx.notify();
             return;
         }
-        let text = state.read(cx).value().to_string();
+        // Files on the strip go as `@path` mentions after what's typed, as agents read them.
+        let text = with_files(&state.read(cx).value(), &self.outbox.files);
         if text.trim().is_empty() && self.outbox.paths.is_empty() {
             return;
         }
@@ -662,6 +663,7 @@ impl Composer {
         self.pickers.trigger = None;
         self.sync_overlay(cx);
         let images = std::mem::take(&mut self.outbox.paths);
+        self.outbox.files.clear();
         // A queued follow-up being changed goes back in its place, not out.
         if self.send_queue_edit(&text, &images, window, cx) {
             self.note_unsent(cx);
@@ -686,8 +688,7 @@ impl Composer {
                 } else {
                     (plain, images)
                 };
-                self.outbox.paths = images;
-                state.update(cx, |s, cx| s.set_value(text, window, cx));
+                self.put_back(&text, images, None, window, cx);
                 if !sent {
                     self.editing = Some(e);
                 }
@@ -750,10 +751,7 @@ impl Composer {
         };
         let draft = match self.editing.take() {
             Some(e) => e.draft,
-            None => (
-                self.input.read(cx).value().to_string(),
-                std::mem::take(&mut self.outbox.paths),
-            ),
+            None => self.take_written(cx),
         };
         let ws = self.workspace.read(cx);
         let checkpoint = ws.rewind_files(thread, &item);
@@ -789,11 +787,7 @@ impl Composer {
             draft,
             _check: check,
         });
-        self.outbox.paths = images.to_vec();
-        self.input.update(cx, |s, cx| {
-            s.set_value(text, window, cx);
-            s.set_selected_range(text.len()..text.len(), cx);
-        });
+        self.put_back(text, images.to_vec(), Some(text.len()), window, cx);
         self.pickers.trigger = None;
         self.sync_overlay(cx);
         self.focus(window, cx);
@@ -831,9 +825,8 @@ impl Composer {
         if self.voice.phase != voice::Phase::Idle {
             self.voice_step(voice::Event::Cancel, window, cx);
         }
-        let text = self.input.read(cx).value().to_string();
         let cursor = self.input.read(cx).cursor();
-        let images = std::mem::take(&mut self.outbox.paths);
+        let (text, images) = self.take_written(cx);
         let restate = std::mem::take(&mut self.restate);
         let old = std::mem::replace(&mut self.draft_key, key.clone());
         if !text.is_empty() || !images.is_empty() {
@@ -863,14 +856,9 @@ impl Composer {
             images: Vec::new(),
             restate: false,
         });
-        self.outbox.paths = next.images;
         self.restate = next.restate;
         self.pickers.trigger = None;
-        let cursor = next.cursor.min(next.text.len());
-        self.input.update(cx, |s, cx| {
-            s.set_value(next.text, window, cx);
-            s.set_selected_range(cursor..cursor, cx);
-        });
+        self.put_back(&next.text, next.images, Some(next.cursor), window, cx);
         self.sync_overlay(cx);
     }
 
@@ -889,19 +877,14 @@ impl Composer {
     /// Bring in what's been put away for the thread on screen, when the prompt is empty: the
     /// thread came here from the pane beside, whose composer put it away as this one looked.
     pub fn take_up_parked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.input.read(cx).value().is_empty() || !self.outbox.paths.is_empty() {
+        if !self.input.read(cx).value().is_empty() || !self.outbox.is_empty() {
             return;
         }
         let Some(draft) = self.drafts.borrow_mut().remove(&self.draft_key) else {
             return;
         };
-        self.outbox.paths = draft.images;
         self.restate = draft.restate;
-        let cursor = draft.cursor.min(draft.text.len());
-        self.input.update(cx, |s, cx| {
-            s.set_value(draft.text, window, cx);
-            s.set_selected_range(cursor..cursor, cx);
-        });
+        self.put_back(&draft.text, draft.images, Some(draft.cursor), window, cx);
         // It's this composer's message now (`set_value` says nothing of a change): sent from
         // here, it's no message in progress, whichever pane first had it.
         self.note_unsent(cx);
@@ -925,7 +908,7 @@ impl Composer {
         if self.editing.is_some() {
             return;
         }
-        let mut text = self.input.read(cx).value().to_string();
+        let mut text = self.written(cx);
         let mut images = self.outbox.paths.clone();
         // A queued message being changed is in the prompt, and what was there before waits to
         // come back: both are what would be lost.
@@ -1156,8 +1139,7 @@ impl Composer {
     fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(e) = self.editing.take() else { return };
         let (text, images) = e.draft;
-        self.outbox.paths = images;
-        self.input.update(cx, |s, cx| s.set_value(text, window, cx));
+        self.put_back(&text, images, None, window, cx);
         cx.notify();
     }
 
@@ -2047,6 +2029,18 @@ impl Composer {
         (self.outbox.paths.clone(), self.outbox.saving)
     }
 
+    /// The other files on the strip (tiles), in order.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attached_files(&self) -> Vec<PathBuf> {
+        self.outbox.files.clone()
+    }
+
+    /// What sending now would send as text: what's typed, the files mentioned after it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn written_text(&self, cx: &App) -> String {
+        self.written(cx)
+    }
+
     /// A snapshot is waiting on Snipping Tool.
     #[cfg(any(test, feature = "test-support"))]
     pub fn snapshot_waiting(&self) -> bool {
@@ -2352,15 +2346,20 @@ impl Composer {
         }
         let (text, restate) = trek_core::restate::split_restate(text);
         self.restate |= restate;
+        // Files it went with go back on the strip.
+        let (text, files) = trek_core::media::split_attached(text, std::path::Path::exists);
         if !text.is_empty() {
             self.insert_text(text, window, cx);
         }
         for path in images {
             self.attach_image(path.clone(), cx);
         }
+        self.outbox.add_files(files);
+        cx.notify();
     }
 
-    /// Attach files by inserting @-references into the prompt.
+    /// Attach files and folders from the open panel: images on the strip as thumbnails, the rest
+    /// as tiles beside them.
     pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -2377,27 +2376,54 @@ impl Composer {
                 if files.is_empty() {
                     return;
                 }
-                let _ = this.update_in(cx, |this, window, cx| {
-                    this.append_file_refs(&files, window, cx)
-                });
+                let _ = this.update(cx, |this, cx| this.add_files(&files, cx));
             }
         })
         .detach();
     }
 
-    /// `@path` references after what's typed, the caret behind them.
-    pub fn append_file_refs(
+    /// Files going with the next message that aren't images (videos, PDFs, folders): tiles on the
+    /// strip beside the images, mentioned after the message as `@path` as it goes.
+    pub fn add_files(&mut self, files: &[PathBuf], cx: &mut Context<Self>) {
+        self.outbox.add_files(files.iter().cloned());
+        cx.notify();
+    }
+
+    /// What's in the prompt as it's kept or sent: what's typed, with the strip's files mentioned
+    /// after it, as agents, the transcript, the queue and drafts have them.
+    fn written(&self, cx: &App) -> String {
+        with_files(&self.input.read(cx).value(), &self.outbox.files)
+    }
+
+    /// `written`, and the images, taken out of the strip (what's typed stays).
+    pub(crate) fn take_written(&mut self, cx: &App) -> (String, Vec<PathBuf>) {
+        let written = self.written(cx);
+        self.outbox.files.clear();
+        (written, std::mem::take(&mut self.outbox.paths))
+    }
+
+    /// Put a message `written` had (and its images) in the prompt: the files mentioned at its end
+    /// go back on the strip as tiles. The caret goes to `caret` (in what's left), or where a new
+    /// value puts it.
+    pub(crate) fn put_back(
         &mut self,
-        files: &[PathBuf],
+        text: &str,
+        images: Vec<PathBuf>,
+        caret: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let (words, files) = trek_core::media::split_attached(text, std::path::Path::exists);
+        self.outbox.paths = images;
+        self.outbox.files = files;
+        let words = words.to_string();
+        // The text it came from starts with these words, so a caret in them is on a boundary.
+        let caret = caret.map(|c| c.min(words.len()));
         self.input.update(cx, |s, cx| {
-            let v = with_refs(&s.value(), files);
-            let end = v.len();
-            // A multi-line input puts the caret at the start of a new value.
-            s.set_value(v, window, cx);
-            s.set_selected_range(end..end, cx);
+            s.set_value(words, window, cx);
+            if let Some(c) = caret {
+                s.set_selected_range(c..c, cx);
+            }
         });
     }
 
@@ -2417,8 +2443,8 @@ impl Composer {
     }
 
     /// What the Photos picker hands over (`photos::Picked`): the strip shows the picks as
-    /// saving while they're copied out of the library, then photos go on it and videos are
-    /// mentioned with `@`, as files picked in Finder are. A send meanwhile waits for them; a
+    /// saving while they're copied out of the library, then photos go on it as thumbnails and
+    /// videos as tiles, as files picked in Finder do. A send meanwhile waits for them; a
     /// thread switched to meanwhile leaves them in the draft they were picked for.
     pub fn take_photos(
         &mut self,
@@ -2477,16 +2503,14 @@ impl Composer {
         let (photos, videos, failed) = crate::photos::sort(done);
         if meant_for == self.target(cx) {
             self.outbox.add(photos);
-            if !videos.is_empty() {
-                self.append_file_refs(&videos, window, cx);
-            }
+            self.outbox.add_files(videos);
         } else {
+            // A draft put away keeps its files mentioned after its text (`written`).
             self.land_elsewhere(meant_for, photos);
             if !videos.is_empty() {
                 let mut drafts = self.drafts.borrow_mut();
                 if let Some(draft) = drafts.get_mut(meant_for) {
-                    draft.text = with_refs(&draft.text, &videos);
-                    draft.cursor = draft.text.len();
+                    draft.text = with_files(&draft.text, &videos);
                 }
             }
         }
@@ -2643,22 +2667,11 @@ impl Composer {
         }));
     }
 
-    fn add_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+    /// Files dropped on the composer: images on the strip as thumbnails, the rest as tiles.
+    pub fn add_paths(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         let (images, files) = attachments::split_files(paths.iter().cloned());
         attachments::attach_files(self, images, window, cx);
-        if !files.is_empty() {
-            let refs: Vec<String> = files
-                .iter()
-                .map(|p| {
-                    format!(
-                        "{} ",
-                        trek_core::media::mention_of(&p.display().to_string())
-                    )
-                })
-                .collect();
-            self.input
-                .update(cx, |s, cx| s.insert(refs.concat(), window, cx));
-        }
+        self.outbox.add_files(files);
         cx.notify();
     }
 
@@ -2695,7 +2708,7 @@ impl Composer {
     }
 
     fn attachment_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.outbox.paths.is_empty() && !self.snapshotting && self.outbox.saving == 0 {
+        if self.outbox.is_empty() && !self.snapshotting && self.outbox.saving == 0 {
             return None;
         }
         let me = cx.entity().downgrade();
@@ -2718,8 +2731,9 @@ impl Composer {
             div()
                 .px(px(14.))
                 .pt(px(12.))
-                .child(attachments::thumbnails(
+                .child(attachments::strip(
                     &self.outbox.paths,
+                    &self.outbox.files,
                     px(56.),
                     self.snapshotting || self.outbox.saving > 0,
                     remove,
@@ -4115,8 +4129,12 @@ impl PickerHost for Composer {
     }
 }
 
-/// `text` with `@path` references to `files` after it, and a space after them.
-fn with_refs(text: &str, files: &[PathBuf]) -> String {
+/// `text` with `@path` references to `files` after it, and a space after them (`text` as it is
+/// without files). `media::split_attached` reads them back off.
+pub fn with_files(text: &str, files: &[PathBuf]) -> String {
+    if files.is_empty() {
+        return text.to_string();
+    }
     let refs: Vec<String> = files
         .iter()
         .map(|p| trek_core::media::mention_of(&p.display().to_string()))
@@ -4154,6 +4172,10 @@ impl Attaching for Composer {
     fn send_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.input.clone();
         self.submit(input, window, cx);
+    }
+
+    fn tiles_files(&self) -> bool {
+        true
     }
 
     fn land_elsewhere(&mut self, target: &str, paths: Vec<PathBuf>) {
@@ -4218,7 +4240,7 @@ impl Render for Composer {
         let billing_tip = crate::cost::billing_note(billing.as_ref());
         let theme = cx.theme().clone();
         let empty = self.input.read(cx).value().trim().is_empty()
-            && self.outbox.paths.is_empty()
+            && self.outbox.is_empty()
             && self.outbox.saving == 0;
         // Stop also ends sub-agents still at work after their parent's turn, unless there's a
         // message to send: the parent is free to take it.
@@ -4513,7 +4535,7 @@ impl Render for Composer {
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
-            .child(div().px(px(if self.voice.active() { look::PAD } else { look::PAD - look::INPUT_INSET })).pt(px(if is_draft || session || !self.outbox.paths.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
+            .child(div().px(px(if self.voice.active() { look::PAD } else { look::PAD - look::INPUT_INSET })).pt(px(if is_draft || session || !self.outbox.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
                 // An accepted `/` command or skill: plain blue text, no pill.
                 div().text_color(crate::palette::token(cx)).child(token.token().label().clone())
             }).on_paste({

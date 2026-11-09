@@ -1,10 +1,13 @@
-//! Images going out with the next message: what a paste attaches instead of inserting as text,
-//! saving clipboard image data (and converting image files agents can't read) to disk, and the
-//! thumbnail strip above the prompt (a click previews them; see `image_preview`).
+//! Images and files going out with the next message: what a paste attaches instead of inserting
+//! as text, saving clipboard image data (and converting image files agents can't read) to disk,
+//! and the strip above the prompt: thumbnails of the images (a click previews them; see
+//! `image_preview`), and a tile for each other file (a video's poster frame, or the file's icon,
+//! with its name and size). Files are mentioned after the message as `@path` as it goes
+//! (`trek_core::media::split_attached` reads them back off it).
 
 use crate::fluent::{self, PillExt as _};
 use crate::mentions;
-use crate::scale::radius;
+use crate::scale::{radius, text};
 use crate::workspace::WorkspaceEvent;
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::component::input::TextareaState;
@@ -14,10 +17,14 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
 
-/// Images going out with a view's next message.
+/// Images and files going out with a view's next message.
 #[derive(Debug, Default)]
 pub struct Outbox {
+    /// Images, sent as images.
     pub paths: Vec<PathBuf>,
+    /// Other files and folders (videos, PDFs…), as tiles beside the images until the message
+    /// goes, when they're mentioned after it as `@path`.
+    pub files: Vec<PathBuf>,
     /// Images still being saved or converted.
     pub saving: usize,
     /// The user sent while some were still being saved: the send goes once they land, if the
@@ -35,9 +42,24 @@ impl Outbox {
         }
     }
 
-    /// Take `path` back out (its thumbnail's ×, or Remove in the preview).
+    /// Attach other files as tiles, skipping ones already attached.
+    pub fn add_files(&mut self, files: impl IntoIterator<Item = PathBuf>) {
+        for file in files {
+            if !self.files.contains(&file) {
+                self.files.push(file);
+            }
+        }
+    }
+
+    /// Take `path` back out (its thumbnail's or tile's ×, or Remove in the preview).
     pub fn remove(&mut self, path: &Path) {
         self.paths.retain(|p| p != path);
+        self.files.retain(|p| p != path);
+    }
+
+    /// Nothing attached.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty() && self.files.is_empty()
     }
 
     /// Hold a send to `target` while images are still being saved (⌘V then Return straight
@@ -92,6 +114,11 @@ pub trait Attaching: Sized + 'static {
     /// default attaches them to what it shows now.
     fn land_elsewhere(&mut self, _target: &str, paths: Vec<PathBuf>) {
         self.outbox().add(paths);
+    }
+    /// Pasted files that aren't images go on the strip as tiles (`Outbox::files`); a view that
+    /// doesn't draw them has them mentioned in its text where they're pasted.
+    fn tiles_files(&self) -> bool {
+        false
     }
 }
 
@@ -414,7 +441,9 @@ pub fn paste<T: Attaching>(
     match pasted {
         Pasted::Files { images, others } => {
             attach_files(this, images, window, cx);
-            if !others.is_empty() {
+            if this.tiles_files() {
+                this.outbox().add_files(others);
+            } else if !others.is_empty() {
                 let refs: String = others
                     .iter()
                     .map(|p| {
@@ -459,9 +488,26 @@ pub fn thumbnails(
     on_remove: impl Fn(&Path, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> AnyElement {
+    strip(paths, &[], size, busy, on_remove, cx)
+}
+
+/// `thumbnails` of the images, then a tile for each of `files` (`file_tile`), as tall as they are.
+pub fn strip(
+    paths: &[PathBuf],
+    files: &[PathBuf],
+    size: Pixels,
+    busy: bool,
+    on_remove: impl Fn(&Path, &mut Window, &mut App) + Clone + 'static,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme().clone();
     let radius = px(fluent::control(radius::BUTTON));
     let all: std::rc::Rc<[PathBuf]> = paths.into();
+    let tiles: Vec<AnyElement> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| file_tile(i, f, size, on_remove.clone(), cx))
+        .collect();
     h_flex()
         .gap_2()
         .flex_wrap()
@@ -530,6 +576,7 @@ pub fn thumbnails(
                         }),
                 )
         }))
+        .children(tiles)
         .when(busy, |el| {
             el.child(
                 div()
@@ -548,10 +595,329 @@ pub fn thumbnails(
         .into_any_element()
 }
 
+/// A file going with the message that isn't an image, `size` tall: a video's poster frame with a
+/// play badge (the Mac's; its icon elsewhere, or until the frame is made), or the file's or
+/// folder's icon; then its name, cut in the middle so its kind still shows, and its kind and size.
+/// The full path is its tooltip. A click opens it (Quick Look on the Mac, its app on Windows, a
+/// folder in the file manager); the × on hover takes it off (`on_remove`).
+fn file_tile(
+    i: usize,
+    path: &Path,
+    size: Pixels,
+    on_remove: impl Fn(&Path, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme().clone();
+    let radius = px(fluent::control(radius::BUTTON));
+    let name = file_name(path);
+    let shown = path.to_string_lossy().to_string();
+    let folder = path.is_dir();
+    let video = !folder && trek_core::media::is_video_name(&name);
+    let icon = if folder {
+        crate::file_icon::folder(&shown, false, px(22.), cx)
+    } else {
+        crate::file_icon::badge(&shown, px(22.), cx)
+    };
+    let preview = div()
+        .relative()
+        .flex_none()
+        .size(size)
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.muted)
+        .child(icon)
+        .when(video, |el| {
+            let poster = path.to_path_buf();
+            // Over the icon, which shows until the frame is made (or where it can't be).
+            el.child(
+                img(move |window: &mut Window, cx: &mut App| {
+                    window.use_asset::<Poster>(&poster, cx)
+                })
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .with_fallback(|| div().into_any_element()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .size(px(20.))
+                    .rounded_pill()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui_kit::black().opacity(0.55))
+                    .child(
+                        Icon::new(crate::assets::Lucide::Play)
+                            .size(px(10.))
+                            .text_color(gpui_kit::white()),
+                    ),
+            )
+        });
+    let (open, remove_path) = (path.to_path_buf(), path.to_path_buf());
+    div()
+        .id(("attachment-file", i))
+        .test_support()
+        .group("att")
+        .relative()
+        .flex_none()
+        .h(size)
+        .max_w(px(240.))
+        .rounded(radius)
+        .overflow_hidden()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.secondary)
+        .cursor_pointer()
+        .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(shown.clone()).build(window, cx)
+        })
+        .child(
+            h_flex().h_full().min_w_0().child(preview).child(
+                gpui_kit::component::v_flex()
+                    .min_w_0()
+                    .pl(px(10.))
+                    .pr(px(26.))
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_size(px(text::LABEL))
+                            .text_color(theme.foreground)
+                            .child(middle_cut(&name, 26)),
+                    )
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_size(px(text::META))
+                            .text_color(theme.muted_foreground)
+                            .child(kind_and_size(path, folder)),
+                    ),
+            ),
+        )
+        .on_click(move |_, window, cx| {
+            if open.is_dir() {
+                cx.open_with_system(&open);
+            } else {
+                crate::image_preview::open(vec![open.clone()], 0, window, cx);
+            }
+        })
+        .child(
+            div()
+                .id(("att-file-x", i))
+                .test_support()
+                .absolute()
+                .top(px(3.))
+                .right(px(3.))
+                .size(px(18.))
+                .rounded_pill()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::black().opacity(0.65))
+                .invisible()
+                .group_hover("att", |s| s.visible())
+                .cursor_pointer()
+                .child(
+                    Icon::new(IconName::Close)
+                        .xsmall()
+                        .text_color(gpui_kit::white()),
+                )
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_remove(&remove_path, window, cx);
+                }),
+        )
+        .into_any_element()
+}
+
+/// A file sent with a message, under it in the transcript: its icon and name in a chip of its
+/// type's colour, the full path as its tooltip; a click opens it as a tile's does.
+pub fn sent_file_chip(id: impl Into<ElementId>, path: &Path, cx: &App) -> AnyElement {
+    let shown = path.to_string_lossy().to_string();
+    let name = middle_cut(&file_name(path), 40);
+    let open = path.to_path_buf();
+    let tip = shown.clone();
+    let size = px(text::LABEL);
+    let chip = if path.is_dir() {
+        let t = crate::file_icon::tint(&shown, cx);
+        div()
+            .id(id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .h(size * 1.62)
+            .px(size * 0.42)
+            .gap(size * 0.34)
+            .rounded(if cfg!(windows) { px(4.) } else { size * 0.42 })
+            .border_1()
+            .border_color(t.edge)
+            .bg(t.fill)
+            .text_color(t.ink)
+            .text_size(size)
+            .font_family(cx.theme().mono_font_family.clone())
+            .child(crate::file_icon::folder(&shown, false, size * 1.02, cx))
+            .child(div().min_w_0().truncate().child(name))
+    } else {
+        crate::file_icon::chip(id, &shown, name, size, cx)
+    };
+    chip.test_support()
+        .cursor_pointer()
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
+        .on_click(move |_, window, cx| {
+            if open.is_dir() {
+                cx.open_with_system(&open);
+            } else {
+                crate::image_preview::open(vec![open.clone()], 0, window, cx);
+            }
+        })
+        .into_any_element()
+}
+
+/// The last part of `path`, as a tile names it.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// `name` in at most `max` characters: cut in the middle with an ellipsis, keeping its extension
+/// and a few characters before it (`Quarterly rep…2026-Q3.pdf`).
+pub fn middle_cut(name: &str, max: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max || max < 5 {
+        return name.to_string();
+    }
+    let ext = name
+        .rfind('.')
+        .filter(|&dot| dot > 0)
+        .map_or(0, |dot| name[dot..].chars().count());
+    let tail = (ext + 4).min(max / 2);
+    let head = max - 1 - tail;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
+/// A size as a tile says it: `512 bytes`, `13 KB`, `5.3 MB`, `1.2 GB`.
+pub fn size_label(bytes: u64) -> String {
+    const K: u64 = 1024;
+    match bytes {
+        b if b >= K * K * K => format!("{:.1} GB", b as f64 / (K * K * K) as f64),
+        b if b >= K * K => format!("{:.1} MB", b as f64 / (K * K) as f64),
+        b if b >= K => format!("{} KB", b.div_ceil(K)),
+        b => format!("{b} bytes"),
+    }
+}
+
+/// What a tile says under a file's name: `PDF · 13 KB`, `Folder`, or that it's gone.
+fn kind_and_size(path: &Path, folder: bool) -> String {
+    if folder {
+        return "Folder".into();
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return "Not found".into();
+    };
+    let size = size_label(meta.len());
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{} · {size}", ext.to_uppercase()),
+        _ => size,
+    }
+}
+
+/// A video's poster frame, as Quick Look draws its thumbnail, made once into Trek's cache and read
+/// as any image. The Mac's (`qlmanage`); elsewhere, and in tests, there is none, and the tile
+/// keeps the file's icon.
+pub enum Poster {}
+
+impl Asset for Poster {
+    type Source = PathBuf;
+    type Output = std::result::Result<std::sync::Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        video: Self::Source,
+        cx: &mut App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        let png = poster_file(&video);
+        let read = ImageAssetLoader::load(Resource::Path(png.as_path().into()), cx);
+        async move {
+            make_poster(&video, &png)?;
+            read.await
+        }
+    }
+}
+
+/// Where `video`'s poster frame is kept: by its path, size and time changed, so an edited file
+/// gets a new one.
+fn poster_file(video: &Path) -> PathBuf {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    video.hash(&mut h);
+    if let Ok(meta) = std::fs::metadata(video) {
+        meta.len().hash(&mut h);
+        meta.modified().ok().hash(&mut h);
+    }
+    trek_core::paths::data_dir()
+        .join("cache")
+        .join("posters")
+        .join(format!("{:016x}.png", h.finish()))
+}
+
+/// Make `video`'s poster frame at `png`, unless it's there already.
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+fn make_poster(video: &Path, png: &Path) -> Result<()> {
+    if png.is_file() {
+        return Ok(());
+    }
+    // `qlmanage -t` writes `<name>.png` into the folder it's given: one of its own, then moved.
+    let work = png.with_extension("making");
+    std::fs::create_dir_all(&work)?;
+    let made = std::process::Command::new("/usr/bin/qlmanage")
+        .args(["-t", "-s", "256", "-o"])
+        .arg(&work)
+        .arg(video)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let out = std::fs::read_dir(&work)?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "png"));
+    let result = match (made, out) {
+        (Ok(status), Some(out)) if status.success() => {
+            std::fs::rename(&out, png).map_err(anyhow::Error::from)
+        }
+        _ => Err(anyhow::anyhow!(
+            "Quick Look made no frame of {}",
+            video.display()
+        )),
+    };
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+#[cfg(not(all(target_os = "macos", not(any(test, feature = "test-support")))))]
+fn make_poster(video: &Path, _png: &Path) -> Result<()> {
+    bail!("no poster frame for {} here", video.display())
+}
+
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob import brings its own `test` attribute.
-    use super::{Outbox, Pasted, convert_file, needs_conversion, pasted, save_image, split_files};
+    use super::{
+        Outbox, Pasted, convert_file, middle_cut, needs_conversion, pasted, save_image, size_label,
+        split_files,
+    };
     use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
     use std::path::PathBuf;
 
@@ -653,6 +1019,51 @@ mod tests {
                 vec![PathBuf::from("/d/x.svg")]
             )
         );
+    }
+
+    #[test]
+    fn tiles_cut_long_names_in_the_middle_and_say_sizes_shortly() {
+        assert_eq!(middle_cut("notes.md", 26), "notes.md");
+        // The kind still shows at the end.
+        assert_eq!(
+            middle_cut("ScreenRecording_11-06-2026-17-49-53_1.mp4", 26),
+            "ScreenRecording_1…53_1.mp4"
+        );
+        assert_eq!(
+            middle_cut("ScreenRecording_11-06-2026-17-49-53_1.mp4", 26)
+                .chars()
+                .count(),
+            26
+        );
+        assert_eq!(
+            middle_cut("a-very-long-name-without-an-extension", 20),
+            "a-very-long-nam…sion"
+        );
+        assert_eq!(
+            middle_cut("Été à Paris, le grand voyage.mov", 20),
+            "Été à Paris…yage.mov"
+        );
+        assert_eq!(size_label(512), "512 bytes");
+        assert_eq!(size_label(13_779), "14 KB");
+        assert_eq!(size_label(5_577_009), "5.3 MB");
+        assert_eq!(size_label(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
+    }
+
+    #[test]
+    fn files_go_beside_the_images_and_come_off_with_their_x() {
+        let mut outbox = Outbox::default();
+        assert!(outbox.is_empty());
+        outbox.add_files([PathBuf::from("/d/clip.mov"), PathBuf::from("/d/a.pdf")]);
+        outbox.add_files([PathBuf::from("/d/clip.mov")]);
+        outbox.add([PathBuf::from("/d/shot.png")]);
+        assert_eq!(
+            outbox.files,
+            vec![PathBuf::from("/d/clip.mov"), PathBuf::from("/d/a.pdf")]
+        );
+        outbox.remove(&PathBuf::from("/d/clip.mov"));
+        outbox.remove(&PathBuf::from("/d/shot.png"));
+        assert_eq!(outbox.files, vec![PathBuf::from("/d/a.pdf")]);
+        assert!(outbox.paths.is_empty() && !outbox.is_empty());
     }
 
     #[test]
