@@ -7,11 +7,13 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::desktop::{
-    self, AppBundle, Button, Desktop, Input, RunningApp, Whereabouts, WindowInfo,
+    self, AppBundle, Button, Desktop, Input, Performed, Reading, RunningApp, Whereabouts,
+    WindowInfo,
 };
 use crate::keys;
+use crate::outline::{self, Action, Checked, Frame, Node, Refs, View};
 use crate::rpc::{
-    self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, point_schema, text,
+    self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, opt_str, point_schema, text,
 };
 use crate::util::{MAX_IMAGE_SIDE, fmt_num};
 
@@ -27,24 +29,28 @@ to verify the result. Prefer `key` shortcuts (ctrl+c, alt+tab, win+r) and `open_
 Trek's own windows are off limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front \
 (bring the app you mean forward first)."
 } else {
-    "macOS computer use for the main display. Call `screenshot` first: it returns an image plus \
-the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel coordinates in the most recent \
-full-screen screenshot (origin top-left); trek-mcp converts them to screen points. Take a new screenshot after acting \
-to verify the result. Prefer `key` shortcuts and `open_app` over hunting for UI when possible. Trek's own windows \
-are off limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front (bring the app \
-you mean forward first)."
+    "macOS computer use for the main display. Read the window in front with `elements` first: an outline whose \
+controls carry refs (e12) that `press`, `click` and `type_text` act on (a ref lasts while its element stays; read \
+again after the window changes); `wait` waits for text or an element. Take a `screenshot` when looks matter: it \
+returns an image plus the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel \
+coordinates in the most recent full-screen screenshot (origin top-left), as frames are; trek-mcp converts them to \
+screen points. Prefer `key` shortcuts and `open_app` over hunting for UI when possible. Trek's own windows are off \
+limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front (bring the app you mean \
+forward first)."
 };
 
 /// Background use (macOS): the agent works in one window of its own, behind the user's.
 const BACKGROUND_INSTRUCTIONS: &str = "macOS computer use in the background: you work in one app window of your own while the \
 user keeps working in theirs. Your clicks, keys and scrolls reach only that window (the user's pointer and keyboard stay \
-theirs, so never ask them to keep off the mouse). Pick the window first: open_app, or screenshot with a window_id from \
-list_windows. A screenshot shows just that window, even when others cover it; x/y for click, move_mouse, drag and scroll \
-are pixels in its latest screenshot (origin top-left). Take a new screenshot after acting. Trek's own windows are off \
-limits. Work only in apps the user isn't using: the app in front is theirs while they're at the Mac, if only reading, and \
-acting there is refused until they switch. While they're away (screen locked or asleep, or 5 minutes idle) any app will \
-do. Some apps (games, canvases) ignore input not from the real mouse: if one doesn't respond, say so rather than \
-retrying; the user can switch computer use to work in front in Trek's settings.";
+theirs, so never ask them to keep off the mouse). Pick the window first: open_app, or elements or screenshot with a \
+window_id from list_windows. Read it with elements first: an outline whose controls carry refs (e12) that press, click \
+and type_text act on (a ref lasts while its element stays; read again after the window changes); wait waits for text \
+or an element. Take a screenshot when looks matter: it shows just that window, even when others cover it; x/y for \
+click, move_mouse, drag and scroll are pixels in its latest screenshot (origin top-left), as frames are. Trek's own \
+windows are off limits. Work only in apps the user isn't using: the app in front is theirs while they're at the Mac, \
+if only reading, and acting there is refused until they switch. While they're away (screen locked or asleep, or 5 \
+minutes idle) any app will do. Some apps (games, canvases) ignore input not from the real mouse: if one doesn't \
+respond, say so rather than retrying; the user can switch computer use to work in front in Trek's settings.";
 
 /// What a screen coordinate is: macOS moves the mouse in points, Windows (per-monitor DPI aware)
 /// in pixels.
@@ -157,6 +163,10 @@ pub struct Computer {
     /// went to: a window of that app in front of it since, while the user did nothing, came up
     /// because of that input (`put_back_in_front`).
     front: Option<(WindowInfo, i64)>,
+    /// The refs `elements` has given out, and the window they're of: another window's start
+    /// afresh.
+    refs: Refs,
+    listed: Option<i64>,
 }
 
 /// The window background use works in. An app with no window yet has `id` 0: keys reach it,
@@ -212,6 +222,8 @@ impl Default for Computer {
             report,
             posted: None,
             front: None,
+            refs: Refs::new("elements"),
+            listed: None,
         }
     }
 }
@@ -367,13 +379,21 @@ impl Computer {
     }
 }
 
-/// Tools that post mouse or keyboard events, and so need Accessibility. Screenshots need Screen
-/// Recording instead (checked when capturing); the rest need nothing.
-fn needs_accessibility(tool: &str) -> bool {
+/// Tools that post mouse or keyboard events or read a window's elements, and so need
+/// Accessibility (`wait` only when it waits on the elements). Screenshots need Screen Recording
+/// instead (checked when capturing); the rest need nothing.
+fn needs_accessibility(tool: &str, args: &Value) -> bool {
     matches!(
         tool,
-        "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "key"
-    )
+        "click" | "move_mouse" | "drag" | "scroll" | "type_text" | "key" | "elements" | "press"
+    ) || (tool == "wait" && waits_on_elements(args))
+}
+
+/// Whether a `wait` is for text or an element rather than for a time.
+fn waits_on_elements(args: &Value) -> bool {
+    ["text", "element"]
+        .iter()
+        .any(|k| args.get(k).is_some_and(|v| !v.is_null()))
 }
 
 /// Longest side of a full-screen screenshot: the display's size in points (so one screenshot
@@ -777,6 +797,37 @@ impl Computer {
         Ok((w, m))
     }
 
+    /// Work in window `id` from now on (a `window_id` given to `screenshot` or `elements`):
+    /// refused for Trek's own, and for one that's closed or put away.
+    fn pick_window(&mut self, id: i64) -> Result<(), String> {
+        let found = self.find(id)?;
+        let w = match &found {
+            Whereabouts::OnScreen(w) | Whereabouts::OtherSpace { window: w, .. } => w.clone(),
+            Whereabouts::Closed => {
+                return Err(format!(
+                    "No window {id} is open. list_windows shows the windows there are."
+                ));
+            }
+            Whereabouts::Minimised(w) | Whereabouts::Hidden(w) | Whereabouts::NotShowing(w) => {
+                if is_trek(w) {
+                    return Err(OWN_WINDOW_BEHIND.into());
+                }
+                return Err(gone(&w.owner, &w.title, &found));
+            }
+        };
+        if is_trek(&w) {
+            return Err(OWN_WINDOW_BEHIND.into());
+        }
+        if self.target.as_ref().is_none_or(|t| t.window.id != id) {
+            self.target = Some(Target {
+                window: w,
+                shot: None,
+                place: Place::Here,
+            });
+        }
+        Ok(())
+    }
+
     fn bg_screenshot(&mut self, args: &Value) -> ToolResult {
         let region = match args.get("region") {
             None | Some(Value::Null) => None,
@@ -788,32 +839,7 @@ impl Computer {
             )),
         };
         if let Some(id) = opt_f64(args, "window_id")? {
-            let id = id as i64;
-            let found = self.find(id)?;
-            let w = match &found {
-                Whereabouts::OnScreen(w) | Whereabouts::OtherSpace { window: w, .. } => w.clone(),
-                Whereabouts::Closed => {
-                    return Err(format!(
-                        "No window {id} is open. list_windows shows the windows there are."
-                    ));
-                }
-                Whereabouts::Minimised(w) | Whereabouts::Hidden(w) | Whereabouts::NotShowing(w) => {
-                    if is_trek(w) {
-                        return Err(OWN_WINDOW_BEHIND.into());
-                    }
-                    return Err(gone(&w.owner, &w.title, &found));
-                }
-            };
-            if is_trek(&w) {
-                return Err(OWN_WINDOW_BEHIND.into());
-            }
-            if self.target.as_ref().is_none_or(|t| t.window.id != id) {
-                self.target = Some(Target {
-                    window: w,
-                    shot: None,
-                    place: Place::Here,
-                });
-            }
+            self.pick_window(id as i64)?;
         }
         // Nothing picked yet: the whole screen, for finding the way.
         if self.target.as_ref().is_none_or(|t| t.window.id == 0) {
@@ -1129,13 +1155,27 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
     /// what came up since the last one, and what this one brings up, is put back behind the
     /// window the user has in front. What was put back, for the reply.
     fn post_watched(&mut self, w: &WindowInfo, input: &Input) -> Result<String, String> {
+        self.watched(w, |desktop| desktop.behind(w, input))
+            .map(|((), said)| said)
+    }
+
+    /// Do `act` to `w`'s app behind (input posted to it, or an element's own action), watching
+    /// for the app raising itself over the user's window as `post_watched` says. What `act`
+    /// answered, and what was put back.
+    fn watched<T>(
+        &mut self,
+        w: &WindowInfo,
+        act: impl FnOnce(&dyn Desktop) -> Result<T, String>,
+    ) -> Result<(T, String), String> {
         let mut said = self.put_back_in_front();
         let front = self.desktop.key_window().ok().flatten();
-        self.post(w, input)?;
+        let before = self.user_idle();
+        let done = act(self.desktop.as_ref())?;
+        self.posted = Some((std::time::Instant::now(), before));
         self.front = front.map(|f| (f, w.pid));
         std::thread::sleep(AFTER_INPUT);
         said.push_str(&self.put_back_in_front());
-        Ok(said)
+        Ok((done, said))
     }
 
     /// When a window of the app the agent works in has come in front of another app's window
@@ -1341,7 +1381,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         }
         if !new_window && let Some(w) = theirs.first().cloned() {
             let reply = format!(
-                "{was}, so nothing was launched. Working in its window{} (window_id {}), behind the user's: take a screenshot to see it.",
+                "{was}, so nothing was launched. Working in its window{} (window_id {}), behind the user's: read it with elements, or take a screenshot to see it.",
                 titled(&w),
                 w.id
             );
@@ -1394,7 +1434,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             Some(w) => {
                 let order = self.keep_behind(&w, front.as_ref()).unwrap_or_default();
                 let reply = format!(
-                    "{was}, so nothing was launched: {asked}. Working in its new window{} (window_id {}): take a screenshot to see it.{order}{second}",
+                    "{was}, so nothing was launched: {asked}. Working in its new window{} (window_id {}): read it with elements, or take a screenshot to see it.{order}{second}",
                     titled(&w),
                     w.id
                 );
@@ -1445,7 +1485,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             Some(w) => {
                 let order = self.keep_behind(&w, front.as_ref()).unwrap_or_default();
                 let reply = format!(
-                    "{launched}. Working in its window{} (window_id {}): take a screenshot to see it.{order}",
+                    "{launched}. Working in its window{} (window_id {}): read it with elements, or take a screenshot to see it.{order}",
                     titled(&w),
                     w.id
                 );
@@ -1461,6 +1501,610 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             None => Err(format!(
                 "{launched}, but no window of it has appeared yet. Call list_windows in a moment, then screenshot with its window_id."
             )),
+        }
+    }
+}
+
+/// The window whose elements are read and acted on, and how its frames map to the pixels the
+/// x/y tools take.
+struct Scope {
+    w: WindowInfo,
+    /// Where the window's corner is in the screenshot those pixels are of, in screen units:
+    /// nowhere in the background (the screenshot is of the window), its place on screen in front.
+    origin: (f64, f64),
+    /// Screen units per screenshot pixel.
+    scale: f64,
+    /// The screenshot's size in pixels.
+    image: (u32, u32),
+}
+
+/// A click's button and count from its arguments, and the word for the button.
+fn click_kind(args: &Value) -> Result<(Button, i64), String> {
+    let count = opt_f64(args, "count")?.unwrap_or(1.0) as i64;
+    if !(1..=3).contains(&count) {
+        return Err("count must be 1 (single), 2 (double) or 3 (triple)".into());
+    }
+    match args.get("button").and_then(Value::as_str).unwrap_or("left") {
+        "left" => Ok((Button::Left, count)),
+        "right" => Ok((Button::Right, count)),
+        other => Err(format!(
+            "Unknown button {other:?}; use \"left\" or \"right\""
+        )),
+    }
+}
+
+/// How a reply says a click was done.
+fn clicked(count: i64, button: Button) -> &'static str {
+    match (count, button) {
+        (_, Button::Right) => "Right-clicked",
+        (2, _) => "Double-clicked",
+        (3, _) => "Triple-clicked",
+        _ => "Clicked",
+    }
+}
+
+/// Text as a reply quotes it: on one line, cut when long.
+fn quoted(s: &str) -> String {
+    Value::from(outline::clip(s, 200)).to_string()
+}
+
+/// What an element reads as after its own action, where that differs from `before`: for the
+/// reply. Empty when nothing it says about itself changed.
+fn after_action(before: &Node, after: Option<&Node>) -> String {
+    let Some(after) = after.filter(|a| a.role == before.role) else {
+        return " It's no longer where it was (the window changed): read the elements again before using a ref.".into();
+    };
+    if after.name != before.name {
+        return format!(" It's now {}.", after.describe());
+    }
+    if after.checked != before.checked {
+        return match after.checked {
+            Some(Checked::Yes) => " It's now checked.".into(),
+            Some(Checked::No) => " It's now unchecked.".into(),
+            Some(Checked::Mixed) => " It's now mixed.".into(),
+            // A menu item's check mark, taken off.
+            None => " It's no longer checked.".into(),
+        };
+    }
+    if after.expanded != before.expanded {
+        return match after.expanded {
+            Some(true) => " It's now expanded.".into(),
+            Some(false) => " It's now collapsed.".into(),
+            None => String::new(),
+        };
+    }
+    if after.selected != before.selected {
+        return if after.selected {
+            " It's now selected.".into()
+        } else {
+            " It's no longer selected.".into()
+        };
+    }
+    if after.value != before.value && !after.secure {
+        return format!(
+            " It now reads {}.",
+            quoted(after.value.as_deref().unwrap_or_default())
+        );
+    }
+    String::new()
+}
+
+/// How often `wait` looks again for the text or element it waits for, and how long a field
+/// clicked for the focus gets to say it has it.
+const WAIT_POLL: Duration = Duration::from_millis(if cfg!(test) { 1 } else { 400 });
+const FOCUS_SETTLE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 200 });
+
+/// Elements: the window read as an outline, and its controls acted on by ref.
+impl Computer {
+    /// The window elements are read from and acted in: in the background the one worked in, in
+    /// front the one in front (never Trek's).
+    fn scope(&mut self) -> Result<Scope, String> {
+        if !self.desktop.has_elements() {
+            return Err(desktop::NO_ELEMENTS.into());
+        }
+        match self.mode {
+            Mode::Background => {
+                let w = self.working_window()?;
+                // Its latest screenshot's pixels, or those a screenshot of it would have.
+                let m = self
+                    .target
+                    .as_ref()
+                    .and_then(|t| t.shot)
+                    .filter(|m| {
+                        (m.logical_w - w.w).abs() <= 1.0 && (m.logical_h - w.h).abs() <= 1.0
+                    })
+                    .unwrap_or_else(|| Mapping::for_display(w.w, w.h));
+                Ok(Scope {
+                    origin: (0.0, 0.0),
+                    scale: m.scale,
+                    image: (m.image_w, m.image_h),
+                    w,
+                })
+            }
+            Mode::Front => {
+                let w = self
+                    .desktop
+                    .key_window()
+                    .map_err(|e| {
+                        format!(
+                            "Couldn't check which window is in front ({e}), so nothing was done."
+                        )
+                    })?
+                    .ok_or("No window is in front to read.")?;
+                if is_trek(&w) {
+                    return Err(OWN_WINDOW.into());
+                }
+                let m = self.mapping();
+                Ok(Scope {
+                    origin: (w.x, w.y),
+                    scale: m.scale,
+                    image: (m.image_w, m.image_h),
+                    w,
+                })
+            }
+        }
+    }
+
+    /// Read `scope`'s elements. Refs given for another window are dropped first: a ref names an
+    /// element of the window it was read from.
+    fn read(&mut self, scope: &Scope, menu_bar: bool) -> Result<desktop::Elements, String> {
+        if self.listed != Some(scope.w.id) {
+            self.refs.clear();
+            self.listed = Some(scope.w.id);
+        }
+        self.desktop.elements(
+            &scope.w,
+            &Reading {
+                menu_bar,
+                ..Reading::default()
+            },
+        )
+    }
+
+    /// How `scope`'s elements are written: frames in the pixels x/y tools take.
+    fn view<'a>(
+        scope: &Scope,
+        filter: Option<&'a str>,
+        interactive_only: bool,
+        max: usize,
+    ) -> View<'a> {
+        View {
+            filter,
+            interactive_only,
+            max,
+            scale: scope.scale,
+            origin: scope.origin,
+            shows: Some(Frame {
+                x: 0.0,
+                y: 0.0,
+                w: scope.w.w,
+                h: scope.w.h,
+            }),
+        }
+    }
+
+    /// What `elements` answers: whose they are and how a frame reads, then the outline.
+    fn outlined(&mut self, scope: &Scope, read: &desktop::Elements, view: &View) -> String {
+        let out = self.refs.outline(&read.roots, view);
+        let w = &scope.w;
+        let mut said = match self.mode {
+            Mode::Background => format!(
+                "Elements of {}'s window{} (window_id {}). frame=x,y,width,height in pixels of its screenshot ({}x{}).\n",
+                w.owner,
+                titled(w),
+                w.id,
+                scope.image.0,
+                scope.image.1
+            ),
+            Mode::Front => format!(
+                "Elements of {}'s window{}, the one in front. frame=x,y,width,height in pixels of the full-screen screenshot.\n",
+                w.owner,
+                titled(w)
+            ),
+        };
+        if let Some(focused) = &out.focused {
+            said.push_str(&format!("Focused: {focused}\n"));
+        }
+        said.push('\n');
+        match (out.shown + out.more, view.filter) {
+            (0, Some(filter)) => said.push_str(&format!(
+                "(No element's role or name contains {filter:?}.)\n"
+            )),
+            (0, None) => said.push_str(
+                "(Nothing here to read or act on: the app may draw everything itself. A screenshot shows it.)\n",
+            ),
+            _ => said.push_str(&out.text),
+        }
+        if let Some(cut) = read.cut {
+            said.push_str(&format!(
+                "… (There's more: the reading stopped early because {cut}.)\n"
+            ));
+        }
+        said
+    }
+
+    fn elements(&mut self, args: &Value) -> ToolResult {
+        if self.mode == Mode::Background
+            && let Some(id) = opt_f64(args, "window_id")?
+        {
+            self.pick_window(id as i64)?;
+        }
+        let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
+        let max = opt_f64(args, "max")?.map_or(outline::DEFAULT_MAX, |m| {
+            (m.max(1.0) as usize).min(outline::MOST)
+        });
+        let scope = self.scope()?;
+        let read = self.read(&scope, flag("menu_bar"))?;
+        let view = Self::view(
+            &scope,
+            opt_str(args, "filter"),
+            flag("interactive_only"),
+            max,
+        );
+        let mut said = self.outlined(&scope, &read, &view);
+        if self.mode == Mode::Background {
+            let w = &scope.w;
+            if self.users_window().is_some_and(|f| f.pid == w.pid) {
+                said.push_str(&format!(
+                    "{} is the app the user is using right now (it's in front and they're at the Mac): acting there is refused until they switch to another app or step away (ask them, or wait).\n",
+                    w.owner
+                ));
+            }
+            said.push_str(self.elsewhere().trim_start());
+            self.tell(activity("elements", "Reading".into(), w, None, None));
+        }
+        Ok(vec![text(said.trim_end())])
+    }
+
+    /// The element ref `r` names, found again in the window its elements were read from and
+    /// proven the same one (`Refs::prove`): nothing is done to anything else.
+    fn found_again(&mut self, r: &str) -> Result<(Scope, Node), String> {
+        let scope = self.scope()?;
+        if self.listed.is_some_and(|id| id != scope.w.id) {
+            return Err(format!(
+                "Ref {r} is from another window's elements; {}'s window{} is the one {} now. Read its elements and use a ref from that. Nothing was done.",
+                scope.w.owner,
+                titled(&scope.w),
+                match self.mode {
+                    Mode::Background => "you work in",
+                    Mode::Front => "in front",
+                }
+            ));
+        }
+        let place = self.refs.get(r)?.place.clone();
+        let now = self.desktop.element_at(&scope.w, &place)?;
+        self.refs.prove(r, now.as_ref())?;
+        let now = now.ok_or("That element isn't there any more. Read the elements again.")?;
+        Ok((scope, now))
+    }
+
+    /// Whether the centre of `frame` (an element's, in the window's own coordinates) is within
+    /// the window: where a click on it goes.
+    fn centre_in(w: &WindowInfo, frame: Option<Frame>) -> Option<(f64, f64)> {
+        let window = Frame {
+            x: 0.0,
+            y: 0.0,
+            w: w.w,
+            h: w.h,
+        };
+        frame.map(Frame::centre).filter(|c| window.holds(*c))
+    }
+
+    /// Click at (`cx`, `cy`) in `w`'s own coordinates, the way the mode clicks: behind, or with
+    /// the real pointer where no other window is over the point. What was put back, for the reply.
+    fn click_in(
+        &mut self,
+        w: &WindowInfo,
+        (cx, cy): (f64, f64),
+        button: Button,
+        count: i64,
+        what: &str,
+    ) -> Result<String, String> {
+        match self.mode {
+            Mode::Background => self.post_watched(
+                w,
+                &Input::Click {
+                    x: cx,
+                    y: cy,
+                    button,
+                    count: count as u32,
+                },
+            ),
+            Mode::Front => {
+                let (sx, sy) = (w.x + cx, w.y + cy);
+                self.keep_off_trek(&[(sx, sy)])?;
+                let windows = self.desktop.windows().unwrap_or_default();
+                if window_at(&windows, sx, sy).is_some_and(|top| top.id != w.id) {
+                    return Err(format!(
+                        "Another window covers {what} now, so the click would land there. Nothing was done."
+                    ));
+                }
+                self.desktop.click(sx, sy, button, count as u32)?;
+                Ok(String::new())
+            }
+        }
+    }
+
+    /// `press`: an element's own accessibility action, by ref. No pointer or key event is made
+    /// and nothing is given the focus.
+    fn press(&mut self, args: &Value) -> ToolResult {
+        let r = arg_str(args, "ref")?;
+        let action = match opt_str(args, "action") {
+            None => Action::Press,
+            Some(a) => Action::parse(a).ok_or_else(|| {
+                format!(
+                    "Unknown action {a:?}; use press, show_menu, increment, decrement, confirm or cancel"
+                )
+            })?,
+        };
+        let (scope, now) = self.found_again(r)?;
+        let w = scope.w.clone();
+        if self.mode == Mode::Background {
+            self.keep_out_of_users_app(&w)?;
+        }
+        let what = now.describe();
+        if now.disabled {
+            return Err(format!("{what} is disabled, so nothing was done."));
+        }
+        let identity = now.identity.filter(|_| now.actions.contains(&action));
+        let Some(identity) = identity else {
+            let has: Vec<&str> = now.actions.iter().map(|a| a.name()).collect();
+            return Err(format!(
+                "{what} has no {} action of its own ({}). Nothing was done: click it instead (click with its ref).",
+                action.name(),
+                if has.is_empty() {
+                    "it has none".to_string()
+                } else {
+                    format!("it has {}", has.join(", "))
+                }
+            ));
+        };
+        let failed = |e: String| format!("{what} wasn't acted on: {e} Nothing was done.");
+        let (done, raised) = match self.mode {
+            Mode::Background => self
+                .watched(&w, |desktop| desktop.perform(&w, identity, action))
+                .map_err(failed)?,
+            Mode::Front => (
+                self.desktop.perform(&w, identity, action).map_err(failed)?,
+                String::new(),
+            ),
+        };
+        if self.mode == Mode::Background {
+            let at = now.frame.map(Frame::centre);
+            self.tell(activity(
+                "press",
+                format!("Pressing {}", outline::clip(&now.name, 32)),
+                &w,
+                at,
+                None,
+            ));
+        }
+        let place = self.elsewhere();
+        match done {
+            Performed::Done => {
+                let after = self.desktop.element_at(&w, &now.place).ok().flatten();
+                Ok(vec![text(format!(
+                    "{} {what} by its own accessibility action: no pointer or key was sent.{}{raised}{place}",
+                    action.did(),
+                    after_action(&now, after.as_ref())
+                ))])
+            }
+            // Not an error and not retried: whether it happened is for the agent to look at.
+            Performed::Unknown(why) => Ok(vec![text(format!(
+                "Outcome unknown: {what} was asked to {} by its own accessibility action, but {why}, so it may or may not have happened (an action that opens a dialog often ends this way). It was not tried again: read the elements, or take a screenshot, to see what happened before doing anything more.{raised}{place}",
+                action.name()
+            ))]),
+        }
+    }
+
+    /// `click` with a ref: the element's centre, for a control that ignores `press`.
+    fn click_ref(&mut self, args: &Value, r: &str) -> ToolResult {
+        if ["x", "y"]
+            .iter()
+            .any(|k| args.get(k).is_some_and(|v| !v.is_null()))
+        {
+            return Err("Give ref, or x and y, not both.".into());
+        }
+        let (button, count) = click_kind(args)?;
+        let (scope, now) = self.found_again(r)?;
+        let w = scope.w.clone();
+        if self.mode == Mode::Background {
+            self.keep_out_of_users_app(&w)?;
+        }
+        let what = now.describe();
+        let Some(frame) = now.frame else {
+            return Err(format!(
+                "{what} doesn't say where it is, so there's nowhere to click. Nothing was done: use press with its ref."
+            ));
+        };
+        let Some((cx, cy)) = Self::centre_in(&w, Some(frame)) else {
+            return Err(format!(
+                "{what} is outside what the window shows (scrolled out of view), so there's nowhere to click. Nothing was done: scroll it into view and read the elements again, or use press with its ref."
+            ));
+        };
+        let raised = self.click_in(&w, (cx, cy), button, count, &what)?;
+        let (px, py) = (
+            ((scope.origin.0 + cx) / scope.scale).round(),
+            ((scope.origin.1 + cy) / scope.scale).round(),
+        );
+        let did = clicked(count, button);
+        match self.mode {
+            Mode::Background => {
+                self.tell(activity(
+                    "click",
+                    "Clicking".into(),
+                    &w,
+                    Some((cx, cy)),
+                    None,
+                ));
+                Ok(vec![text(format!(
+                    "{did} {what} at its centre ({}, {}) in {}'s window, in the background.{raised}{}",
+                    fmt_num(px),
+                    fmt_num(py),
+                    w.owner,
+                    self.elsewhere()
+                ))])
+            }
+            Mode::Front => Ok(vec![text(format!(
+                "{did} {what} at its centre ({}, {}).",
+                fmt_num(px),
+                fmt_num(py)
+            ))]),
+        }
+    }
+
+    /// `type_text` with a ref: the field is given the focus first (asked through accessibility,
+    /// else by a click in it), and only once it says it has it is anything typed.
+    fn type_ref(&mut self, args: &Value, r: &str) -> ToolResult {
+        let s = arg_str(args, "text")?;
+        if s.is_empty() {
+            return Err("text is empty".into());
+        }
+        let (scope, now) = self.found_again(r)?;
+        let w = scope.w.clone();
+        match self.mode {
+            Mode::Background => self.keep_out_of_users_app(&w)?,
+            Mode::Front => self.keep_keys_off_trek()?,
+        }
+        let what = now.describe();
+        if now.disabled {
+            return Err(format!("{what} is disabled, so nothing was typed."));
+        }
+        let mut raised = String::new();
+        let mut how = "";
+        let mut focused = now.focused;
+        if !focused && let Some(identity) = now.identity {
+            focused = self.desktop.focus(&w, identity).unwrap_or(false);
+        }
+        if !focused && let Some(centre) = Self::centre_in(&w, now.frame) {
+            raised = self.click_in(&w, centre, Button::Left, 1, &what)?;
+            std::thread::sleep(FOCUS_SETTLE);
+            focused = self
+                .desktop
+                .element_at(&w, &now.place)?
+                .is_some_and(|n| n.focused);
+            how = " (it took the focus from a click in it, not when asked)";
+        }
+        if !focused {
+            return Err(format!(
+                "{what} didn't take the keyboard focus (asked through accessibility, then by a click in it), so nothing was typed: the text could have gone somewhere else. Read the elements to see what's [focused]; to type where the focus is, call type_text without ref."
+            ));
+        }
+        match self.mode {
+            Mode::Background => {
+                raised.push_str(&self.post_watched(&w, &Input::Type(s.to_string()))?);
+                self.tell(activity("type", typing(s), &w, None, None));
+            }
+            Mode::Front => {
+                self.desktop.type_text(s)?;
+                std::thread::sleep(AFTER_INPUT);
+            }
+        }
+        let after = self.desktop.element_at(&w, &now.place).ok().flatten();
+        let reads = match after.filter(|a| a.role == now.role && a.name == now.name) {
+            _ if now.secure => ". It's a secure field, so what it holds isn't read.".to_string(),
+            None => ". It's no longer where it was (the window changed), so what it holds now isn't known: read the elements again.".to_string(),
+            Some(a) if a.value == now.value => format!(
+                ", but it reads as it did before ({}): the text may not have reached it. It wasn't typed again: look (elements, or a screenshot) before retrying.",
+                quoted(a.value.as_deref().unwrap_or_default())
+            ),
+            Some(a) => format!(
+                "; it now reads {}.",
+                quoted(a.value.as_deref().unwrap_or_default())
+            ),
+        };
+        Ok(vec![text(format!(
+            "Typed {} characters into {what}{how}{reads}{raised}{}",
+            s.chars().count(),
+            if self.mode == Mode::Background {
+                self.elsewhere()
+            } else {
+                String::new()
+            }
+        ))])
+    }
+
+    /// `wait`: for a time, or until text or an element shows (or goes) in the window, answered
+    /// with its fresh elements either way.
+    fn wait(&mut self, args: &Value) -> ToolResult {
+        if !waits_on_elements(args) {
+            let ms = arg_f64(args, "ms")?;
+            if !(0.0..=10_000.0).contains(&ms) {
+                return Err("ms must be between 0 and 10000".into());
+            }
+            std::thread::sleep(Duration::from_millis(ms as u64));
+            return Ok(vec![text(format!("Waited {} ms.", ms as u64))]);
+        }
+        let (needle, by_text) = match (opt_str(args, "text"), opt_str(args, "element")) {
+            (Some(t), None) => (t, true),
+            (None, Some(e)) => (e, false),
+            (Some(_), Some(_)) => return Err("Give text or element, not both.".into()),
+            (None, None) => return Err("text or element is empty".into()),
+        };
+        let what = if by_text {
+            format!("the text {needle:?}")
+        } else {
+            format!("an element matching {needle:?}")
+        };
+        let gone = args.get("gone").and_then(Value::as_bool).unwrap_or(false);
+        let within = opt_f64(args, "timeout_ms")?.unwrap_or(10_000.0);
+        if !(0.0..=60_000.0).contains(&within) {
+            return Err("timeout_ms must be between 0 and 60000".into());
+        }
+        let within = Duration::from_millis(within as u64);
+        let started = std::time::Instant::now();
+        loop {
+            let scope = self.scope()?;
+            let read = match self.read(&scope, false) {
+                Ok(read) => read,
+                // An app too busy to answer has said nothing either way: it's asked again
+                // until the time is up.
+                Err(_) if started.elapsed() < within => {
+                    std::thread::sleep(WAIT_POLL);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let there = if by_text {
+                outline::has_text(&read.roots, needle)
+            } else {
+                outline::has_element(&read.roots, needle)
+            };
+            // Only a reading that got to the end shows that something has gone.
+            let met = if gone {
+                !there && read.cut.is_none()
+            } else {
+                there
+            };
+            let waited = started.elapsed();
+            if met || waited >= within {
+                let view = Self::view(&scope, None, false, outline::DEFAULT_MAX);
+                let outlined = self.outlined(&scope, &read, &view);
+                let outlined = outlined.trim_end();
+                return if met {
+                    Ok(vec![text(format!(
+                        "{} after {:.1} s.\n\n{outlined}",
+                        if gone {
+                            format!("Gone: {what}")
+                        } else {
+                            format!("Found {what}")
+                        },
+                        waited.as_secs_f32()
+                    ))])
+                } else {
+                    Err(format!(
+                        "Waited {:.0} s, and {what} {}.\n\n{outlined}",
+                        within.as_secs_f32(),
+                        match (gone, there) {
+                            (true, true) => "is still there",
+                            (true, false) =>
+                                "wasn't in what could be read, but the window couldn't be read to its end, so whether it has gone isn't known",
+                            (false, _) => "never showed",
+                        }
+                    ))
+                };
+            }
+            std::thread::sleep(WAIT_POLL);
         }
     }
 }
@@ -1690,6 +2334,24 @@ impl rpc::ToolSet for Computer {
             json!({"type": "integer", "default": 0, "description": "Vertical scroll in lines; positive scrolls down (reveals content below)"}),
         );
         let behind = self.mode == Mode::Background;
+        // Where windows have elements to read, `click` and `type_text` take a ref as well.
+        let elements = self.desktop.has_elements();
+        let mut type_props = json!({"text": {"type": "string", "description": "Text to type"}});
+        let mut wait_props = json!({"ms": {"type": "integer", "minimum": 0, "maximum": 10000}});
+        if elements {
+            click_props.insert(
+                "ref".into(),
+                json!({"type": "string", "description": "An element's ref, instead of x and y"}),
+            );
+            type_props["ref"] = json!({"type": "string", "description": "The field's ref"});
+            wait_props["text"] =
+                json!({"type": "string", "description": "In an element's name or value"});
+            wait_props["element"] =
+                json!({"type": "string", "description": "In an element's role or name"});
+            wait_props["gone"] = json!({"type": "boolean"});
+            wait_props["timeout_ms"] =
+                json!({"type": "integer", "description": "Default 10000, at most 60000"});
+        }
         let mut shot_props = json!({
             "region": {
                 "type": "object",
@@ -1706,7 +2368,10 @@ impl rpc::ToolSet for Computer {
         }
         let pick =
             |front: &'static str, background: &'static str| if behind { background } else { front };
-        vec![
+        // What a tool says where there are elements, and where there aren't.
+        let with =
+            |plain: &'static str, by_ref: &'static str| if elements { by_ref } else { plain };
+        let mut tools = vec![
             ToolDef {
                 name: "screenshot",
                 description: pick(
@@ -1724,10 +2389,20 @@ for finding your way.",
             ToolDef {
                 name: "click",
                 description: pick(
-                    "Move the pointer to (x, y) in screenshot pixels and click. Supports right-click and double/triple-click.",
-                    "Click at (x, y) in pixels of the window's screenshot, in the background: the user's pointer doesn't move. Supports right-click and double/triple-click.",
+                    with(
+                        "Move the pointer to (x, y) in screenshot pixels and click. Supports right-click and double/triple-click.",
+                        "Move the pointer to (x, y) in screenshot pixels, or to the centre of the element `ref` names, and click. Supports right-click and double/triple-click.",
+                    ),
+                    with(
+                        "Click at (x, y) in pixels of the window's screenshot, in the background: the user's pointer doesn't move. Supports right-click and double/triple-click.",
+                        "Click at (x, y) in pixels of the window's screenshot, or at the centre of the element `ref` names, in the background: the user's pointer doesn't move. Supports right-click and double/triple-click.",
+                    ),
                 ),
-                input_schema: json!({"type": "object", "properties": click_props, "required": ["x", "y"]}),
+                input_schema: if elements {
+                    json!({"type": "object", "properties": click_props})
+                } else {
+                    json!({"type": "object", "properties": click_props, "required": ["x", "y"]})
+                },
             },
             ToolDef {
                 name: "move_mouse",
@@ -1763,12 +2438,18 @@ for finding your way.",
             ToolDef {
                 name: "type_text",
                 description: pick(
-                    "Type text into the focused element as keyboard input (Unicode-safe; newlines press Return, tabs press Tab). Click the field first to focus it.",
-                    "Type text into the focused element of the window you work in (Unicode-safe; newlines press Return, tabs press Tab), in the background: the user's own typing isn't affected. Click the field first to focus it.",
+                    with(
+                        "Type text into the focused element as keyboard input (Unicode-safe; newlines press Return, tabs press Tab). Click the field first to focus it.",
+                        "Type text into the focused element as keyboard input (Unicode-safe; newlines press Return, tabs press Tab). Pass a field's `ref` to focus it first, or click it first.",
+                    ),
+                    with(
+                        "Type text into the focused element of the window you work in (Unicode-safe; newlines press Return, tabs press Tab), in the background: the user's own typing isn't affected. Click the field first to focus it.",
+                        "Type text into the focused element of the window you work in (Unicode-safe; newlines press Return, tabs press Tab), in the background: the user's own typing isn't affected. Pass a field's `ref` to focus it first, or click it first.",
+                    ),
                 ),
                 input_schema: json!({
                     "type": "object",
-                    "properties": {"text": {"type": "string", "description": "Text to type"}},
+                    "properties": type_props,
                     "required": ["text"],
                 }),
             },
@@ -1785,7 +2466,7 @@ for finding your way.",
                 name: "open_app",
                 description: pick(
                     OPEN_APP_DESCRIPTION,
-                    "Work in a macOS app, by name, e.g. \"Safari\", \"Notes\", \"TextEdit\", behind the user's windows. Running already: its frontmost window is used and nothing is launched. Not running: it's launched behind (never brought forward). Refused while it's the app the user is using. Take a screenshot next.",
+                    "Work in a macOS app, by name, e.g. \"Safari\", \"Notes\", \"TextEdit\", behind the user's windows. Running already: its frontmost window is used and nothing is launched. Not running: it's launched behind (never brought forward). Refused while it's the app the user is using. Read its elements next.",
                 ),
                 input_schema: if behind {
                     json!({
@@ -1811,23 +2492,68 @@ for finding your way.",
             },
             ToolDef {
                 name: "wait",
-                description: "Pause for `ms` milliseconds (max 10000), e.g. to let an app finish loading before the next screenshot.",
+                description: with(
+                    "Pause for `ms` milliseconds (max 10000), e.g. to let an app finish loading before the next screenshot.",
+                    "Wait until `text` or an `element` shows in the window (`gone`: until it goes), answered with the window's fresh elements; or pause for `ms` milliseconds (max 10000).",
+                ),
+                input_schema: if elements {
+                    json!({"type": "object", "properties": wait_props})
+                } else {
+                    json!({"type": "object", "properties": wait_props, "required": ["ms"]})
+                },
+            },
+        ];
+        if elements {
+            let mut props = json!({
+                "filter": {"type": "string", "description": "Only elements whose role or name contains this"},
+                "interactive_only": {"type": "boolean", "description": "Only those you can act on"},
+                "menu_bar": {"type": "boolean", "description": "Also the app's menus and their items (press an item by ref: no menu opens)"},
+                "max": {"type": "integer", "description": "Most elements shown (default 150)"},
+            });
+            if behind {
+                props["window_id"] = json!({"type": "integer", "description": "The window to work in, from list_windows"});
+            }
+            tools.push(ToolDef {
+                name: "elements",
+                description: pick(
+                    "The window in front as an outline, one element a line: role, name, value, state and frame (x,y,width,height in screenshot pixels), with a ref like [ref=e12] on each one you can act on. Read it before a screenshot: names and places are exact.",
+                    "The window you work in as an outline, one element a line: role, name, value, state and frame (x,y,width,height in pixels of its screenshot), with a ref like [ref=e12] on each one you can act on. Read it before a screenshot: names and places are exact.",
+                ),
+                input_schema: json!({"type": "object", "properties": props}),
+            });
+            tools.push(ToolDef {
+                name: "press",
+                description: "An element's own action (a button's press), by its ref: no pointer or key is sent and nothing takes the focus. Refused if the element changed since you read it. If a control ignores it, click with its ref.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": {"ms": {"type": "integer", "minimum": 0, "maximum": 10000}},
-                    "required": ["ms"],
+                    "properties": {
+                        "ref": {"type": "string", "description": "From elements, e.g. \"e12\""},
+                        "action": {"type": "string", "enum": ["press", "show_menu", "increment", "decrement", "confirm", "cancel"], "default": "press", "description": "show_menu: its context menu. The rest: for an element whose line lists them"},
+                    },
+                    "required": ["ref"],
                 }),
-            },
-        ]
+            });
+        }
+        tools
     }
 
     fn call(&mut self, name: &str, args: &Value) -> ToolResult {
-        if needs_accessibility(name) && !self.desktop.may_post_input() {
+        if needs_accessibility(name, args) && !self.desktop.may_post_input() {
             self.desktop.ask_to_post_input();
             return Err(format!(
                 "{ACCESSIBILITY_ERROR}{}",
                 self.desktop.permissions_note()
             ));
+        }
+        // By ref, in either mode: the element's own window, found again first.
+        let by_ref = opt_str(args, "ref");
+        match (name, by_ref) {
+            ("elements", _) => return self.elements(args),
+            ("press", _) => return self.press(args),
+            ("click", Some(r)) => return self.click_ref(args, r),
+            ("type_text", Some(r)) => return self.type_ref(args, r),
+            ("wait", _) => return self.wait(args),
+            _ => {}
         }
         if self.mode == Mode::Background {
             match name {
@@ -1852,14 +2578,6 @@ for finding your way.",
             "key" => self.key(args),
             "open_app" => self.open_app(args),
             "list_windows" => self.list_windows(),
-            "wait" => {
-                let ms = arg_f64(args, "ms")?;
-                if !(0.0..=10_000.0).contains(&ms) {
-                    return Err("ms must be between 0 and 10000".into());
-                }
-                std::thread::sleep(Duration::from_millis(ms as u64));
-                Ok(vec![text(format!("Waited {} ms.", ms as u64))])
-            }
             other => Err(format!("Unknown tool {other}")),
         }
     }
@@ -1881,6 +2599,8 @@ mod tests {
             report: None,
             posted: None,
             front: None,
+            refs: Refs::new("elements"),
+            listed: None,
         }
     }
 
@@ -1935,7 +2655,7 @@ mod tests {
         };
         let mut c = on(&fake);
         for tool in ["click", "move_mouse", "drag", "scroll", "type_text", "key"] {
-            assert!(needs_accessibility(tool));
+            assert!(needs_accessibility(tool, &json!({})));
             assert_eq!(
                 c.call(tool, &acting_args(tool)),
                 Err(ACCESSIBILITY_ERROR.to_string()),
@@ -1945,7 +2665,7 @@ mod tests {
         assert_eq!(fake.events(), vec![], "nothing was posted");
         // Looking, launching and waiting need no Accessibility.
         for tool in ["screenshot", "list_windows", "open_app", "wait"] {
-            assert!(!needs_accessibility(tool), "{tool}");
+            assert!(!needs_accessibility(tool, &json!({"ms": 0})), "{tool}");
         }
         assert_eq!(
             c.call("wait", &json!({"ms": 0})),
@@ -3640,5 +4360,733 @@ mod tests {
         assert_eq!(told[1]["window"]["app"], "Safari");
         #[cfg(unix)]
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A control as a platform reads it: something to press, known by `identity`.
+    fn control(role: &str, name: &str, identity: u64, (x, y, w, h): (f64, f64, f64, f64)) -> Node {
+        Node {
+            role: role.into(),
+            name: name.into(),
+            identity: Some(identity),
+            acts: true,
+            actions: vec![Action::Press],
+            frame: Some(Frame { x, y, w, h }),
+            ..Node::default()
+        }
+    }
+
+    /// What a window 800x600 points reads as (a form), and its app's menu bar.
+    fn form() -> Vec<Node> {
+        let mut name = control("text field", "Name", 1, (20.0, 40.0, 200.0, 22.0));
+        name.actions = vec![Action::Confirm];
+        name.value = Some("Ada".into());
+        let mut agree = control("checkbox", "Agree", 2, (20.0, 80.0, 100.0, 18.0));
+        agree.checked = Some(Checked::No);
+        let save = control("button", "Save", 3, (700.0, 560.0, 80.0, 24.0));
+        let mut publish = control("button", "Publish", 4, (600.0, 560.0, 80.0, 24.0));
+        publish.disabled = true;
+        let mut password = control("text field", "Password", 5, (20.0, 120.0, 200.0, 22.0));
+        password.secure = true;
+        password.actions = vec![];
+        let far = control("button", "Far down", 6, (20.0, 900.0, 80.0, 24.0));
+        let status = Node {
+            role: "text".into(),
+            name: "Saved 2 minutes ago".into(),
+            frame: Some(Frame {
+                x: 20.0,
+                y: 570.0,
+                w: 200.0,
+                h: 16.0,
+            }),
+            ..Node::default()
+        };
+        let window = Node {
+            role: "window".into(),
+            name: "Docs".into(),
+            frame: Some(Frame {
+                x: 0.0,
+                y: 0.0,
+                w: 800.0,
+                h: 600.0,
+            }),
+            children: vec![name, agree, save, publish, password, far, status],
+            ..Node::default()
+        };
+        let mut item = control("menu item", "Save…", 10, (0.0, 0.0, 1.0, 1.0));
+        item.frame = None;
+        let menu = Node {
+            role: "menu".into(),
+            name: "File".into(),
+            children: vec![item],
+            ..Node::default()
+        };
+        let bar = Node {
+            role: "menu bar".into(),
+            children: vec![menu],
+            ..Node::default()
+        };
+        vec![window, bar]
+    }
+
+    /// Safari's window behind the user's, reading as the form, picked and read once.
+    fn reading_the_form() -> (Recording, Computer, String) {
+        let fake = behind_the_users().with_elements(form());
+        let mut c = behind(&fake);
+        let read = reply(c.call("elements", &json!({"window_id": 7})));
+        (fake, c, read)
+    }
+
+    /// What the desktop was asked to do to an element or post to a window.
+    fn acted(fake: &Recording) -> Vec<Event> {
+        fake.events()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Behind { .. }
+                        | Event::Perform { .. }
+                        | Event::Focus { .. }
+                        | Event::Click { .. }
+                        | Event::Type(_)
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn elements_read_the_window_worked_in_as_an_outline() {
+        let fake = behind_the_users().with_elements(form());
+        let mut c = behind(&fake);
+        // No window picked: there's nothing to read.
+        assert_eq!(c.call("elements", &json!({})), Err(NO_WINDOW.to_string()));
+        // Picked by its id, as a screenshot picks it: no screenshot is needed first.
+        let read = reply(c.call("elements", &json!({"window_id": 7})));
+        assert_eq!(
+            read,
+            "Elements of Safari's window “Docs” (window_id 7). frame=x,y,width,height in pixels of its screenshot (800x600).
+
+- window \"Docs\" [frame=0,0,800,600]:
+  - text field \"Name\" [ref=e1] [actions=confirm] [frame=20,40,200,22]: Ada
+  - checkbox \"Agree\" [ref=e2] [unchecked] [frame=20,80,100,18]
+  - button \"Save\" [ref=e3] [frame=700,560,80,24]
+  - button \"Publish\" [ref=e4] [disabled] [frame=600,560,80,24]
+  - text field \"Password\" [ref=e5] [secure] [frame=20,120,200,22]
+  - button \"Far down\" [ref=e6] [offscreen] [frame=20,900,80,24]
+  - text \"Saved 2 minutes ago\" [frame=20,570,200,16]"
+        );
+        // Reading posts nothing and asks no element to do anything.
+        assert_eq!(acted(&fake), vec![]);
+        // Narrowed, capped, and with the app's menus when asked.
+        let read = reply(c.call("elements", &json!({"filter": "SAVE"})));
+        assert!(
+            read.ends_with(
+                "\n\n- button \"Save\" [ref=e3] [frame=700,560,80,24]\n- text \"Saved 2 minutes ago\" [frame=20,570,200,16]"
+            ),
+            "{read}"
+        );
+        let read = reply(c.call("elements", &json!({"interactive_only": true, "max": 2})));
+        assert!(
+            read.contains("[ref=e2]") && !read.contains("[ref=e3]"),
+            "{read}"
+        );
+        assert!(read.contains("… (4 more not shown"), "{read}");
+        let read = reply(c.call("elements", &json!({"menu_bar": true, "filter": "menu"})));
+        assert!(
+            read.ends_with("- menu bar\n- menu \"File\"\n- menu item \"Save…\" [ref=e7]"),
+            "{read}"
+        );
+        assert!(
+            reply(c.call("elements", &json!({"filter": "nothing like it"})))
+                .ends_with("(No element's role or name contains \"nothing like it\".)")
+        );
+        // A reading that stopped early says so, and why.
+        let mut cut = behind_the_users().with_elements(form());
+        cut.cut = Some("its app was slow to answer");
+        c.desktop = Box::new(cut);
+        assert!(reply(c.call("elements", &json!({}))).ends_with(
+            "… (There's more: the reading stopped early because its app was slow to answer.)"
+        ));
+        // Trek's own windows aren't read.
+        assert_eq!(
+            c.call("elements", &json!({"window_id": 3})),
+            Err(OWN_WINDOW_BEHIND.to_string())
+        );
+        // A window larger than a screenshot's pixels: frames are in the screenshot's.
+        let mut big = behind_the_users().with_elements(form());
+        if let Ok(ws) = &mut big.windows {
+            (ws[1].w, ws[1].h) = (3136.0, 2000.0);
+        }
+        let mut c = behind(&big);
+        let read = reply(c.call("elements", &json!({"window_id": 7})));
+        assert!(
+            read.contains("in pixels of its screenshot (1568x1000)"),
+            "{read}"
+        );
+        assert!(
+            read.contains("button \"Save\" [ref=e3] [frame=350,280,40,12]"),
+            "{read}"
+        );
+    }
+
+    #[test]
+    fn elements_need_accessibility_and_a_platform_that_has_them() {
+        let mut blind = behind_the_users().with_elements(form());
+        blind.trusted = false;
+        let mut c = behind(&blind);
+        for (tool, args) in [
+            ("elements", json!({"window_id": 7})),
+            ("press", json!({"ref": "e1"})),
+            ("wait", json!({"text": "Saved"})),
+        ] {
+            assert_eq!(
+                c.call(tool, &args),
+                Err(ACCESSIBILITY_ERROR.to_string()),
+                "{tool}"
+            );
+        }
+        // Where windows have no elements to read the tools aren't offered, and a ref is refused.
+        let none = behind_the_users();
+        let mut c = behind(&none);
+        let names: Vec<&str> = c.tools().iter().map(|t| t.name).collect();
+        assert!(!names.contains(&"elements") && !names.contains(&"press"));
+        c.call("screenshot", &json!({"window_id": 7})).unwrap();
+        assert_eq!(
+            c.call("click", &json!({"ref": "e1"})),
+            Err(desktop::NO_ELEMENTS.to_string())
+        );
+        // Where they have, the tools are there, and click, type_text and wait take a ref or a
+        // condition in place of what they needed before.
+        let c = behind(&behind_the_users().with_elements(form()));
+        let tools = c.tools();
+        let tool = |name: &str| tools.iter().find(|t| t.name == name).unwrap();
+        assert_eq!(tool("press").input_schema["required"], json!(["ref"]));
+        assert!(tool("elements").input_schema["properties"]["window_id"].is_object());
+        for (name, takes) in [("click", "ref"), ("type_text", "ref"), ("wait", "text")] {
+            assert!(
+                tool(name).input_schema["properties"][takes].is_object(),
+                "{name}"
+            );
+        }
+        assert!(tool("click").input_schema.get("required").is_none());
+        assert!(tool("wait").input_schema.get("required").is_none());
+        // In front there's no window to pick.
+        let c = on(&behind_the_users().with_elements(form()));
+        let tools = c.tools();
+        let elements = tools.iter().find(|t| t.name == "elements").unwrap();
+        assert!(
+            elements.input_schema["properties"]
+                .get("window_id")
+                .is_none()
+        );
+        // Both modes' instructions point at elements before screenshots.
+        for said in [INSTRUCTIONS, BACKGROUND_INSTRUCTIONS] {
+            if cfg!(target_os = "macos") {
+                assert!(
+                    said.contains("elements") && said.contains("refs (e12)"),
+                    "{said}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn press_asks_the_element_itself_and_sends_no_pointer_or_key() {
+        let (fake, mut c, _) = reading_the_form();
+        let said = reply(c.call("press", &json!({"ref": "e2"})));
+        assert_eq!(
+            said,
+            "Pressed checkbox \"Agree\" by its own accessibility action: no pointer or key was sent. It's now checked."
+        );
+        // The element's own action and nothing else: no input was posted, nothing was focused.
+        assert_eq!(
+            acted(&fake),
+            vec![Event::Perform {
+                window: 7,
+                identity: 2,
+                action: Action::Press
+            }]
+        );
+        // Another of its actions, when it has it.
+        let said = reply(c.call("press", &json!({"ref": "[ref=e1]", "action": "confirm"})));
+        assert!(
+            said.starts_with("Confirmed text field \"Name\" by its own"),
+            "{said}"
+        );
+        assert_eq!(
+            acted(&fake).last(),
+            Some(&Event::Perform {
+                window: 7,
+                identity: 1,
+                action: Action::Confirm
+            })
+        );
+        // A menu item, read with the menu bar: pressed without a menu opening.
+        reply(c.call("elements", &json!({"menu_bar": true})));
+        let said = reply(c.call("press", &json!({"ref": "e7"})));
+        assert!(said.starts_with("Pressed menu item \"Save…\""), "{said}");
+        // What can't be done is said, and nothing is done.
+        let before = acted(&fake).len();
+        let refused = |c: &mut Computer, args: Value| c.call("press", &args).unwrap_err();
+        assert_eq!(
+            refused(&mut c, json!({"ref": "e4"})),
+            "button \"Publish\" is disabled, so nothing was done."
+        );
+        assert_eq!(
+            refused(&mut c, json!({"ref": "e3", "action": "increment"})),
+            "button \"Save\" has no increment action of its own (it has press). Nothing was done: click it instead (click with its ref)."
+        );
+        assert!(
+            refused(&mut c, json!({"ref": "e5"}))
+                .contains("has no press action of its own (it has none)")
+        );
+        assert!(
+            refused(&mut c, json!({"ref": "e3", "action": "smash"})).contains("Unknown action")
+        );
+        assert!(refused(&mut c, json!({"ref": "e99"})).contains("No element with ref \"e99\""));
+        assert!(refused(&mut c, json!({})).contains("`ref`"));
+        assert_eq!(acted(&fake).len(), before);
+    }
+
+    #[test]
+    fn a_ref_is_acted_on_only_once_its_element_is_found_again_and_proven_the_same() {
+        let again =
+            "Nothing was done. Read the elements again (elements) and use the ref it has now.";
+        // Renamed, moved, replaced by its twin, or gone since it was read: refused, each for what
+        // changed, and for every tool that takes a ref.
+        let changes: [(&str, fn(&mut Vec<Node>)); 4] = [
+            (
+                "Where button \"Save\" was there's now button \"Saved\".",
+                |roots| roots[0].children[2].name = "Saved".into(),
+            ),
+            ("button \"Save\" has moved since you read it.", |roots| {
+                roots[0].children[2].frame.as_mut().unwrap().y -= 100.0
+            }),
+            (
+                "Another button \"Save\" is where the one you read was (things have moved).",
+                |roots| roots[0].children[2].identity = Some(33),
+            ),
+            (
+                "button \"Save\" isn't where it was any more: what's there has changed.",
+                |roots| roots[0].children.truncate(2),
+            ),
+        ];
+        for (why, change) in changes {
+            let (fake, mut c, _) = reading_the_form();
+            fake.redraw(change);
+            for (tool, args) in [
+                ("press", json!({"ref": "e3"})),
+                ("click", json!({"ref": "e3"})),
+                ("type_text", json!({"ref": "e3", "text": "hi"})),
+            ] {
+                assert_eq!(c.call(tool, &args), Err(format!("{why} {again}")), "{tool}");
+            }
+            assert_eq!(acted(&fake), vec![], "{why}");
+            // Read again, the ref names what's there now (or is gone with it).
+            reply(c.call("elements", &json!({})));
+            let pressed = c.call("press", &json!({"ref": "e3"}));
+            match why {
+                w if w.contains("Another") => {
+                    assert!(pressed.unwrap_err().contains("Another button"))
+                }
+                w if w.contains("isn't where it was") => {
+                    assert!(pressed.unwrap_err().contains("isn't where it was"))
+                }
+                _ => assert!(pressed.is_ok(), "{why}"),
+            }
+        }
+        // A ref belongs to the window it was read from.
+        let (fake, mut c, _) = reading_the_form();
+        c.call("screenshot", &json!({"window_id": 1})).unwrap();
+        let err = c.call("press", &json!({"ref": "e3"})).unwrap_err();
+        assert!(
+            err.starts_with("Ref e3 is from another window's elements; Notes's window is the one you work in now."),
+            "{err}"
+        );
+        // …and that window's elements start afresh: no old ref names one of them.
+        let read = reply(c.call("elements", &json!({})));
+        assert!(
+            read.contains("\"Name\" [ref=e7]") && !read.contains("[ref=e1]"),
+            "{read}"
+        );
+        assert_eq!(acted(&fake), vec![]);
+    }
+
+    #[test]
+    fn an_outcome_that_cant_be_known_is_said_so_and_never_tried_again() {
+        let (mut fake, mut c, _) = reading_the_form();
+        fake.performs = Ok(Performed::Unknown("its app didn't answer in time".into()));
+        c.desktop = Box::new(fake.clone());
+        // Not an error: the press may have happened.
+        let said = reply(c.call("press", &json!({"ref": "e3"})));
+        assert!(
+            said.starts_with("Outcome unknown: button \"Save\" was asked to press by its own accessibility action, but its app didn't answer in time, so it may or may not have happened")
+                && said.contains("It was not tried again"),
+            "{said}"
+        );
+        assert_eq!(acted(&fake).len(), 1, "asked once");
+        // A refusal by the app is an error, with nothing done.
+        fake.performs = Err("It's gone from its window.".into());
+        c.desktop = Box::new(fake.clone());
+        assert_eq!(
+            c.call("press", &json!({"ref": "e3"})),
+            Err(
+                "button \"Save\" wasn't acted on: It's gone from its window. Nothing was done."
+                    .into()
+            )
+        );
+        assert_eq!(acted(&fake).len(), 2);
+    }
+
+    #[test]
+    fn click_by_ref_clicks_the_elements_centre_behind() {
+        let (fake, mut c, _) = reading_the_form();
+        assert_eq!(
+            reply(c.call("click", &json!({"ref": "e3", "count": 2}))),
+            "Double-clicked button \"Save\" at its centre (740, 572) in Safari's window, in the background."
+        );
+        // Through the same path as a click at x and y: to the window, in its own points.
+        assert_eq!(
+            acted(&fake),
+            vec![Event::Behind {
+                window: 7,
+                input: Input::Click {
+                    x: 740.0,
+                    y: 572.0,
+                    button: Button::Left,
+                    count: 2
+                }
+            }]
+        );
+        let refused = |c: &mut Computer, args: Value| c.call("click", &args).unwrap_err();
+        assert_eq!(
+            refused(&mut c, json!({"ref": "e3", "x": 1, "y": 1})),
+            "Give ref, or x and y, not both."
+        );
+        assert!(
+            refused(&mut c, json!({"ref": "e3", "button": "middle"})).contains("Unknown button")
+        );
+        // Scrolled out of what the window shows: there's nowhere to click.
+        assert!(refused(&mut c, json!({"ref": "e6"})).starts_with(
+            "button \"Far down\" is outside what the window shows (scrolled out of view)"
+        ));
+        assert_eq!(acted(&fake).len(), 1);
+        // In a window pictured smaller than it is, the reply's point is in the picture's pixels
+        // and the click in the window's points.
+        let mut big = behind_the_users().with_elements(form());
+        if let Ok(ws) = &mut big.windows {
+            (ws[1].w, ws[1].h) = (3136.0, 2000.0);
+        }
+        let mut c = behind(&big);
+        reply(c.call("elements", &json!({"window_id": 7})));
+        assert!(reply(c.call("click", &json!({"ref": "e3"}))).contains("at its centre (370, 286)"));
+        assert_eq!(
+            acted(&big),
+            vec![Event::Behind {
+                window: 7,
+                input: Input::Click {
+                    x: 740.0,
+                    y: 572.0,
+                    button: Button::Left,
+                    count: 1
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn type_text_by_ref_types_only_once_the_field_has_the_focus() {
+        let (fake, mut c, _) = reading_the_form();
+        assert_eq!(
+            reply(c.call("type_text", &json!({"ref": "e1", "text": " L."}))),
+            "Typed 3 characters into text field \"Name\"; it now reads \"Ada L.\"."
+        );
+        // Asked for the focus through accessibility (no click), then typed to its window.
+        assert_eq!(
+            acted(&fake),
+            vec![
+                Event::Focus {
+                    window: 7,
+                    identity: 1
+                },
+                Event::Behind {
+                    window: 7,
+                    input: Input::Type(" L.".into())
+                },
+            ]
+        );
+        // It has the focus already: nothing more is asked.
+        reply(c.call("type_text", &json!({"ref": "e1", "text": "!"})));
+        assert_eq!(acted(&fake).len(), 3);
+        // A secure field's value is never read back.
+        assert_eq!(
+            reply(c.call("type_text", &json!({"ref": "e5", "text": "hunter2"}))),
+            "Typed 7 characters into text field \"Password\". It's a secure field, so what it holds isn't read."
+        );
+        assert!(
+            c.call("type_text", &json!({"ref": "e1", "text": ""}))
+                .is_err()
+        );
+
+        // A field that doesn't take the focus when asked is clicked, as a person would.
+        let (mut fake, mut c, _) = reading_the_form();
+        fake.focuses = false;
+        fake.click_focuses = true;
+        c.desktop = Box::new(fake.clone());
+        let said = reply(c.call("type_text", &json!({"ref": "e1", "text": "x"})));
+        assert_eq!(
+            said,
+            "Typed 1 characters into text field \"Name\" (it took the focus from a click in it, not when asked); it now reads \"Adax\"."
+        );
+        assert_eq!(
+            acted(&fake)[1],
+            Event::Behind {
+                window: 7,
+                input: Input::Click {
+                    x: 120.0,
+                    y: 51.0,
+                    button: Button::Left,
+                    count: 1
+                }
+            }
+        );
+        // One that never says it has the focus is typed nothing: the text could land elsewhere.
+        let (mut fake, mut c, _) = reading_the_form();
+        fake.focuses = false;
+        c.desktop = Box::new(fake.clone());
+        let err = c
+            .call("type_text", &json!({"ref": "e1", "text": "x"}))
+            .unwrap_err();
+        assert!(
+            err.starts_with("text field \"Name\" didn't take the keyboard focus")
+                && err.contains("nothing was typed"),
+            "{err}"
+        );
+        assert!(!acted(&fake).iter().any(|e| matches!(
+            e,
+            Event::Behind {
+                input: Input::Type(_),
+                ..
+            }
+        )));
+        // Typed, but the field reads as before (an app that takes no keys posted behind): said,
+        // and not typed again.
+        let (mut fake, mut c, _) = reading_the_form();
+        fake.deaf = true;
+        c.desktop = Box::new(fake.clone());
+        let said = reply(c.call("type_text", &json!({"ref": "e1", "text": "x"})));
+        assert!(
+            said.starts_with("Typed 1 characters into text field \"Name\", but it reads as it did before (\"Ada\"): the text may not have reached it. It wasn't typed again"),
+            "{said}"
+        );
+        assert_eq!(
+            acted(&fake)
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    Event::Behind {
+                        input: Input::Type(_),
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_users_own_app_is_read_but_not_acted_in_by_ref() {
+        // TextEdit in front, typed in 5 s ago, its window picked by id.
+        let fake = using_textedit(5).with_elements(form());
+        let mut c = behind(&fake);
+        let read = reply(c.call("elements", &json!({"window_id": 11})));
+        assert!(read.contains("button \"Save\" [ref=e3]"), "{read}");
+        assert!(
+            read.ends_with("TextEdit is the app the user is using right now (it's in front and they're at the Mac): acting there is refused until they switch to another app or step away (ask them, or wait)."),
+            "{read}"
+        );
+        for (tool, args) in [
+            ("press", json!({"ref": "e3"})),
+            ("click", json!({"ref": "e3"})),
+            ("type_text", json!({"ref": "e1", "text": "hi"})),
+        ] {
+            assert_eq!(c.call(tool, &args), Err(in_use("TextEdit")), "{tool}");
+        }
+        assert_eq!(acted(&fake), vec![], "nothing reached the user's app");
+        // Once they're away, it's the agent's to work in.
+        let away = Recording {
+            idle: Some(Duration::from_secs(600)),
+            ..fake.clone()
+        };
+        c.desktop = Box::new(away.clone());
+        assert!(c.call("press", &json!({"ref": "e3"})).is_ok());
+    }
+
+    #[test]
+    fn wait_answers_with_the_fresh_elements_when_text_or_an_element_shows_or_goes() {
+        let (fake, mut c, _) = reading_the_form();
+        // There already.
+        let said = reply(c.call("wait", &json!({"text": "saved 2 MINUTES"})));
+        assert!(said.starts_with("Found the text \"saved 2 MINUTES\" after 0.0 s.\n\nElements of Safari's window “Docs” (window_id 7)."), "{said}");
+        assert!(
+            said.contains("- button \"Save\" [ref=e3]"),
+            "the outline, with the refs as they were: {said}"
+        );
+        // Shows a few readings later.
+        *fake.shows_later.borrow_mut() = Some((
+            3,
+            control("sheet", "Save as", 20, (100.0, 100.0, 400.0, 300.0)),
+        ));
+        let said = reply(c.call("wait", &json!({"element": "sheet"})));
+        assert!(
+            said.starts_with("Found an element matching \"sheet\" after"),
+            "{said}"
+        );
+        assert!(said.contains("- sheet \"Save as\" [ref=e7]"), "{said}");
+        // Goes: here it never does, and the wait gives up, with what there is instead.
+        let err = c
+            .call(
+                "wait",
+                &json!({"element": "sheet", "gone": true, "timeout_ms": 20}),
+            )
+            .unwrap_err();
+        assert!(
+            err.starts_with("Waited 0 s, and an element matching \"sheet\" is still there.\n\nElements of Safari's window"),
+            "{err}"
+        );
+        fake.redraw(|roots| roots[0].children.truncate(7));
+        assert!(
+            reply(c.call("wait", &json!({"element": "sheet", "gone": true})))
+                .starts_with("Gone: an element matching \"sheet\" after")
+        );
+        let err = c
+            .call("wait", &json!({"text": "Never", "timeout_ms": 0}))
+            .unwrap_err();
+        assert!(
+            err.starts_with("Waited 0 s, and the text \"Never\" never showed."),
+            "{err}"
+        );
+        // A time alone is still just a pause.
+        assert_eq!(
+            c.call("wait", &json!({"ms": 0})),
+            Ok(vec![text("Waited 0 ms.")])
+        );
+        let refused = |c: &mut Computer, args: Value| c.call("wait", &args).unwrap_err();
+        assert_eq!(
+            refused(&mut c, json!({"text": "a", "element": "b"})),
+            "Give text or element, not both."
+        );
+        assert!(
+            refused(&mut c, json!({"text": "a", "timeout_ms": 90_000}))
+                .contains("between 0 and 60000")
+        );
+        // An app too busy to answer has said nothing either way: it's asked again, and only
+        // when the time is up is its silence the answer.
+        *fake.busy.borrow_mut() = 3;
+        assert!(reply(c.call("wait", &json!({"text": "Saved"}))).starts_with("Found the text"));
+        *fake.busy.borrow_mut() = 1000;
+        assert_eq!(
+            c.call("wait", &json!({"text": "Saved", "timeout_ms": 5})),
+            Err("Safari didn't answer when asked for its elements.".into())
+        );
+        *fake.busy.borrow_mut() = 0;
+        // A reading that stopped early can show that something is there, never that it's gone.
+        let mut cut = fake.clone();
+        cut.cut = Some("its app was slow to answer");
+        c.desktop = Box::new(cut);
+        assert!(reply(c.call("wait", &json!({"text": "Saved"}))).starts_with("Found the text"));
+        let err = c
+            .call(
+                "wait",
+                &json!({"element": "sheet", "gone": true, "timeout_ms": 5}),
+            )
+            .unwrap_err();
+        assert!(
+            err.starts_with("Waited 0 s, and an element matching \"sheet\" wasn't in what could be read, but the window couldn't be read to its end, so whether it has gone isn't known."),
+            "{err}"
+        );
+        assert_eq!(acted(&fake), vec![], "waiting only reads");
+    }
+
+    #[test]
+    fn in_front_elements_are_of_the_window_in_front_in_full_screen_pixels() {
+        // Safari in front at (400, 100); the screenshot is of the whole screen, a point a pixel.
+        let mut fake = behind_the_users().with_elements(form());
+        if let Ok(ws) = &mut fake.windows {
+            ws.remove(0);
+        }
+        let mut c = on(&fake);
+        let read = reply(c.call("elements", &json!({})));
+        assert!(
+            read.starts_with("Elements of Safari's window “Docs”, the one in front. frame=x,y,width,height in pixels of the full-screen screenshot."),
+            "{read}"
+        );
+        assert!(
+            read.contains("button \"Save\" [ref=e3] [frame=1100,660,80,24]"),
+            "{read}"
+        );
+        // press is the element's own action; click by ref is the real pointer at its centre;
+        // type_text by ref asks for the focus, then types with the real keyboard.
+        reply(c.call("press", &json!({"ref": "e2"})));
+        assert_eq!(
+            reply(c.call("click", &json!({"ref": "e3"}))),
+            "Clicked button \"Save\" at its centre (1140, 672)."
+        );
+        assert_eq!(
+            reply(c.call("type_text", &json!({"ref": "e1", "text": "hi"}))),
+            "Typed 2 characters into text field \"Name\", but it reads as it did before (\"Ada\"): the text may not have reached it. It wasn't typed again: look (elements, or a screenshot) before retrying."
+        );
+        assert_eq!(
+            acted(&fake),
+            vec![
+                Event::Perform {
+                    window: 7,
+                    identity: 2,
+                    action: Action::Press
+                },
+                Event::Click {
+                    x: 1140.0,
+                    y: 672.0,
+                    button: Button::Left,
+                    count: 1
+                },
+                Event::Focus {
+                    window: 7,
+                    identity: 1
+                },
+                Event::Type("hi".into()),
+            ]
+        );
+        // Another window in front since: the refs aren't its.
+        let mut other = fake.clone();
+        if let Ok(ws) = &mut other.windows {
+            ws.insert(0, window("Notes", 0.0, 0.0, 700.0, 900.0));
+        }
+        c.desktop = Box::new(other);
+        assert!(
+            c.call("press", &json!({"ref": "e3"}))
+                .unwrap_err()
+                .starts_with("Ref e3 is from another window's elements; Notes's window is the one in front now.")
+        );
+        // Trek in front: its elements aren't read.
+        let trek = Recording {
+            windows: Ok(vec![window("Trek", 0.0, 0.0, 800.0, 900.0)]),
+            ..Recording::new().with_elements(form())
+        };
+        assert_eq!(
+            on(&trek).call("elements", &json!({})),
+            Err(OWN_WINDOW.to_string())
+        );
+        // A window over the element would take the click: refused.
+        let mut covered = fake.clone();
+        covered.key_window = Some(Ok(covered.windows.clone().unwrap().first().cloned()));
+        if let Ok(ws) = &mut covered.windows {
+            ws.insert(0, window("Notes", 1000.0, 600.0, 400.0, 300.0));
+        }
+        let mut c = on(&covered);
+        reply(c.call("elements", &json!({})));
+        assert_eq!(
+            c.call("click", &json!({"ref": "e3"})),
+            Err("Another window covers button \"Save\" now, so the click would land there. Nothing was done.".into())
+        );
     }
 }

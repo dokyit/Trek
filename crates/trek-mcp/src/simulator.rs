@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::outline::{self, Checked, Frame, Node, Refs, View};
 use crate::rpc::{
     self, ToolDef, ToolResult, arg_f64, arg_point, arg_str, opt_f64, opt_str, point_schema, text,
 };
@@ -14,12 +15,14 @@ use crate::util::{self, MAX_IMAGE_SIDE, TempFile, fmt_num};
 
 pub const AXE_MISSING: &str = "Touch input needs AXe. Turn on 'Simulator touch input' in Trek ▸ Settings ▸ Tools to install it.";
 
-const INSTRUCTIONS: &str = "iOS Simulator control. Use `sim_list` to find devices and `sim_boot` to start one. \
-`sim_screenshot` returns an image sized in device points (downscaled further only if very large) and reports the \
-mapping; x/y for sim_tap and sim_swipe are pixel coordinates in that screenshot. Every tool takes an optional `udid` \
-(default: the booted simulator). Take a fresh screenshot after acting to verify the result. Run XCTest or Swift \
-Testing suites with `sim_test` rather than `xcodebuild test` in a shell: the user watches each test pass or fail live \
-in Trek's Simulator tool, and you get a short report of the failures.";
+const INSTRUCTIONS: &str = "iOS Simulator control. Use `sim_list` to find devices and `sim_boot` to start one. Read \
+the screen with `sim_elements` first: an outline whose tappable elements carry refs (e12) for `sim_tap` (a ref lasts \
+while its element stays; read again after the screen changes); `sim_wait` waits for text or an element. Take a \
+`sim_screenshot` when looks matter: it's sized in device points (downscaled further only if very large) and reports \
+the mapping; x/y for sim_tap and sim_swipe are pixel coordinates in that screenshot, as frames are. Every tool takes \
+an optional `udid` (default: the booted simulator). Run XCTest or Swift Testing suites with `sim_test` rather than \
+`xcodebuild test` in a shell: the user watches each test pass or fail live in Trek's Simulator tool, and you get a \
+short report of the failures.";
 
 const SIMCTL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest a `sim_test` run may take before it's stopped.
@@ -48,6 +51,210 @@ struct SimMapping {
 pub struct Simulator {
     mappings: HashMap<String, SimMapping>,
     scale_cache: HashMap<String, f64>,
+    /// The refs `sim_elements` has given out, per simulator.
+    refs: HashMap<String, Refs>,
+}
+
+/// How often `sim_wait` reads the screen again.
+const WAIT_POLL: Duration = Duration::from_millis(500);
+
+/// A simulator's screen as AXe's `describe-ui` gives it (the accessibility tree as JSON, frames
+/// in device points), as outline nodes numbered by where they sit.
+pub fn parse_tree(json_text: &str) -> Result<Vec<Node>, String> {
+    let v: Value = serde_json::from_str(json_text)
+        .map_err(|e| format!("AXe's describe-ui answered with something that isn't JSON: {e}"))?;
+    let mut roots: Vec<Node> = match &v {
+        Value::Array(items) => items.iter().filter_map(element).collect(),
+        other => element(other).into_iter().collect(),
+    };
+    outline::number(&mut roots);
+    Ok(roots)
+}
+
+/// One element of AXe's tree. Keys as AXe 1.x writes them, with the names idb and
+/// WebDriverAgent use for the same things read too.
+fn element(v: &Value) -> Option<Node> {
+    let o = v.as_object()?;
+    let string = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| o.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let kind = string(&["type", "role"]).unwrap_or_default();
+    let kind = kind
+        .trim_start_matches("XCUIElementType")
+        .trim_start_matches("AX");
+    let subrole = string(&["subrole"]).unwrap_or_default();
+    let secure = kind.to_lowercase().contains("secure") || subrole == "AXSecureTextField";
+    let role = if subrole == "AXSearchField" {
+        "search field".to_string()
+    } else {
+        role_words(kind)
+    };
+    let value = string(&["AXValue", "value"]).filter(|_| !secure);
+    let frame = o.get("frame").or_else(|| o.get("rect")).and_then(|f| {
+        let n = |k: &str| f.get(k).and_then(Value::as_f64);
+        Some(Frame {
+            x: n("x")?,
+            y: n("y")?,
+            w: n("width")?,
+            h: n("height")?,
+        })
+    });
+    let children: Vec<Node> = o
+        .get("children")
+        .and_then(Value::as_array)
+        .map(|c| c.iter().filter_map(element).collect())
+        .unwrap_or_default();
+    let has_actions = o
+        .get("custom_actions")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    // What a tap does something to: a control, or a named thing that holds nothing else (a
+    // custom view is often all a row is). Words and pictures aren't given a ref: their frame
+    // says where they are.
+    let control = matches!(
+        role.as_str(),
+        "button"
+            | "link"
+            | "text field"
+            | "search field"
+            | "text view"
+            | "switch"
+            | "toggle"
+            | "slider"
+            | "stepper"
+            | "cell"
+            | "tab"
+            | "key"
+            | "checkbox"
+            | "radio button"
+            | "menu item"
+            | "picker wheel"
+            | "segmented control"
+            | "pop up button"
+            | "disclosure triangle"
+    );
+    // Its label; with none, a control or a thing with nothing inside goes by the identifier its
+    // app gave it (a container's identifier names nothing an agent reads).
+    let name = string(&["AXLabel", "label", "title", "name"])
+        .or_else(|| {
+            string(&["AXUniqueId", "identifier"]).filter(|_| control || children.is_empty())
+        })
+        .unwrap_or_default();
+    let leaf_thing = children.is_empty()
+        && !name.is_empty()
+        && matches!(role.as_str(), "other" | "group" | "generic");
+    let checked = matches!(role.as_str(), "switch" | "toggle" | "checkbox")
+        .then(|| match value.as_deref() {
+            Some("1") | Some("true") | Some("on") => Some(Checked::Yes),
+            Some("0") | Some("false") | Some("off") => Some(Checked::No),
+            _ => None,
+        })
+        .flatten();
+    let off = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| o.get(*k))
+            .is_some_and(|v| v.as_bool() == Some(false) || v.as_str() == Some("false"))
+    };
+    Some(Node {
+        role,
+        name,
+        // A switch's 1 or 0 is its state, said as checked.
+        value: value.filter(|_| checked.is_none()),
+        secure,
+        disabled: off(&["enabled", "isEnabled"]),
+        checked,
+        frame,
+        acts: control || has_actions || leaf_thing,
+        children,
+        ..Node::default()
+    })
+}
+
+/// An element type in plain words: `StaticText` is `text`, `NavigationBar` a `navigation bar`.
+fn role_words(kind: &str) -> String {
+    match kind {
+        "StaticText" | "Text" => return "text".into(),
+        "SecureTextField" => return "text field".into(),
+        "" => return "unknown".into(),
+        _ => {}
+    }
+    let mut words = String::new();
+    let mut after_lower = false;
+    for c in kind.chars() {
+        if c.is_uppercase() && after_lower {
+            words.push(' ');
+        }
+        after_lower = c.is_lowercase();
+        words.extend(c.to_lowercase());
+    }
+    words
+}
+
+/// The screen's size in device points: the application's own frame, which holds everything.
+fn screen(roots: &[Node]) -> Option<Frame> {
+    roots.iter().find_map(|n| n.frame)
+}
+
+/// Device points per `sim_screenshot` pixel for a screen of `points`, as `sim_screenshot` fits
+/// it: a point a pixel, unless its long side passes `MAX_IMAGE_SIDE`.
+fn fitted(points: Frame) -> f64 {
+    let long = points.w.max(points.h).max(1.0);
+    long / long.round().min(MAX_IMAGE_SIDE as f64)
+}
+
+/// Where ref `r` is tapped on a screen read afresh as `roots`: the centre of the element it
+/// names, in device points, once it's found again and proven the same; and what it is, for the
+/// reply. Refused when it changed, is disabled, or isn't on screen.
+fn tap_point(refs: &Refs, r: &str, roots: &[Node]) -> Result<(String, (f64, f64)), String> {
+    let (seen, now) = refs.find(r, roots)?;
+    let what = seen.describe();
+    if now.disabled {
+        return Err(format!("{what} is disabled, so nothing was tapped."));
+    }
+    let Some(frame) = now.frame else {
+        return Err(format!(
+            "{what} doesn't say where it is, so there's nowhere to tap. Nothing was done."
+        ));
+    };
+    let centre = frame.centre();
+    if screen(roots).is_some_and(|s| !s.holds(centre)) {
+        return Err(format!(
+            "{what} is off the screen (scrolled out of view), so there's nowhere to tap. Nothing was done: swipe it into view and read the elements again."
+        ));
+    }
+    Ok((what, centre))
+}
+
+/// What a wait is for, from a tool's arguments: text (in a name or value) or an element (role
+/// or name), to show or to go.
+struct Awaited<'a> {
+    needle: &'a str,
+    by_text: bool,
+    gone: bool,
+}
+
+impl Awaited<'_> {
+    fn what(&self) -> String {
+        if self.by_text {
+            format!("the text {:?}", self.needle)
+        } else {
+            format!("an element matching {:?}", self.needle)
+        }
+    }
+
+    /// Whether `roots` is the screen it waits for.
+    fn met(&self, roots: &[Node]) -> bool {
+        let there = if self.by_text {
+            outline::has_text(roots, self.needle)
+        } else {
+            outline::has_element(roots, self.needle)
+        };
+        there != self.gone
+    }
 }
 
 fn simctl(args: &[&str]) -> Result<String, String> {
@@ -461,29 +668,213 @@ impl Simulator {
         Ok(vec![text(out)])
     }
 
-    fn sim_tap(&self, args: &Value) -> ToolResult {
-        let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
+    /// The screen of `udid` now, read through AXe.
+    fn describe(udid: &str) -> Result<Vec<Node>, String> {
+        parse_tree(&axe(&["describe-ui", "--udid", udid], None)?)
+    }
+
+    /// Device points per `sim_screenshot` pixel: the latest screenshot's, else what one of this
+    /// screen would get.
+    fn factor(&self, udid: &str, roots: &[Node]) -> f64 {
+        self.mappings
+            .get(udid)
+            .map(|m| m.factor)
+            .or_else(|| screen(roots).map(fitted))
+            .unwrap_or(1.0)
+    }
+
+    /// What `sim_elements` answers for a screen read as `roots`: whose it is and how a frame
+    /// reads, then the outline, with the simulator's refs given out.
+    fn outlined(
+        &mut self,
+        dev: &Device,
+        roots: &[Node],
+        filter: Option<&str>,
+        interactive_only: bool,
+        max: usize,
+    ) -> String {
+        let view = View {
+            filter,
+            interactive_only,
+            max,
+            scale: self.factor(&dev.udid, roots),
+            origin: (0.0, 0.0),
+            shows: screen(roots),
+        };
+        let out = self
+            .refs
+            .entry(dev.udid.clone())
+            .or_insert_with(|| Refs::new("sim_elements"))
+            .outline(roots, &view);
+        let mut said = format!(
+            "Elements of {} ({}). frame=x,y,width,height in sim_screenshot pixels.\n",
+            dev.name, dev.runtime
+        );
+        if let Some(focused) = &out.focused {
+            said.push_str(&format!("Focused: {focused}\n"));
+        }
+        said.push('\n');
+        match (out.shown + out.more, filter) {
+            (0, Some(filter)) => said.push_str(&format!(
+                "(No element's role or name contains {filter:?}.)"
+            )),
+            (0, None) => said.push_str(
+                "(Nothing here to read or tap: the app may draw everything itself. sim_screenshot shows it.)",
+            ),
+            _ => said.push_str(out.text.trim_end()),
+        }
+        said
+    }
+
+    fn sim_elements(&mut self, args: &Value) -> ToolResult {
         find_axe().ok_or(AXE_MISSING)?;
         let dev = self.resolve_booted(args)?;
-        let (px, py) = self.to_points(&dev.udid, x, y);
-        axe(
-            &[
-                "tap",
-                "-x",
-                &coord(px),
-                "-y",
-                &coord(py),
-                "--udid",
-                &dev.udid,
-            ],
-            None,
-        )?;
-        Ok(vec![text(format!(
-            "Tapped ({}, {}) on {}.",
-            fmt_num(x),
-            fmt_num(y),
-            dev.name
+        let roots = Self::describe(&dev.udid)?;
+        let max = opt_f64(args, "max")?.map_or(outline::DEFAULT_MAX, |m| {
+            (m.max(1.0) as usize).min(outline::MOST)
+        });
+        let interactive_only = args
+            .get("interactive_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Ok(vec![text(self.outlined(
+            &dev,
+            &roots,
+            opt_str(args, "filter"),
+            interactive_only,
+            max,
         ))])
+    }
+
+    /// Tap at (`px`, `py`) in device points. `Ok(false)`: AXe didn't come back in time, so
+    /// whether the tap reached the simulator isn't known.
+    fn tap_at(udid: &str, px: f64, py: f64) -> Result<bool, String> {
+        match axe(
+            &["tap", "-x", &coord(px), "-y", &coord(py), "--udid", udid],
+            None,
+        ) {
+            Ok(_) => Ok(true),
+            Err(e) if e.contains("timed out or killed") => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn sim_tap(&mut self, args: &Value) -> ToolResult {
+        let by_ref = opt_str(args, "ref");
+        let at = ["x", "y"]
+            .iter()
+            .any(|k| args.get(k).is_some_and(|v| !v.is_null()));
+        if by_ref.is_some() && at {
+            return Err("Give ref, or x and y, not both.".into());
+        }
+        find_axe().ok_or(AXE_MISSING)?;
+        let dev = self.resolve_booted(args)?;
+        let (what, (px, py)) = match by_ref {
+            // By ref: the screen is read again, and the element found there and proven the same.
+            Some(r) => {
+                let roots = Self::describe(&dev.udid)?;
+                let refs = self
+                    .refs
+                    .entry(dev.udid.clone())
+                    .or_insert_with(|| Refs::new("sim_elements"));
+                let (what, (px, py)) = tap_point(refs, r, &roots)?;
+                let f = self.factor(&dev.udid, &roots);
+                (
+                    format!(
+                        "{what} at its centre ({}, {})",
+                        fmt_num((px / f).round()),
+                        fmt_num((py / f).round())
+                    ),
+                    (px, py),
+                )
+            }
+            None => {
+                let (x, y) = (arg_f64(args, "x")?, arg_f64(args, "y")?);
+                (
+                    format!("({}, {})", fmt_num(x), fmt_num(y)),
+                    self.to_points(&dev.udid, x, y),
+                )
+            }
+        };
+        if Self::tap_at(&dev.udid, px, py)? {
+            Ok(vec![text(format!("Tapped {what} on {}.", dev.name))])
+        } else {
+            // Not an error and not retried: a second tap could do the thing twice.
+            Ok(vec![text(format!(
+                "Outcome unknown: the tap on {what} was sent to {}, but AXe didn't answer in time, so it may or may not have landed. It was not tried again: read the elements, or take a screenshot, to see what happened before tapping again.",
+                dev.name
+            ))])
+        }
+    }
+
+    /// `sim_wait`: for a time, or until text or an element shows (or goes) on the screen,
+    /// answered with the screen's fresh elements either way.
+    fn sim_wait(&mut self, args: &Value) -> ToolResult {
+        let awaited = match (opt_str(args, "text"), opt_str(args, "element")) {
+            (None, None) => {
+                let ms = arg_f64(args, "ms").map_err(|_| {
+                    "Wait for what? Give text or element (or ms, to just pause).".to_string()
+                })?;
+                if !(0.0..=10_000.0).contains(&ms) {
+                    return Err("ms must be between 0 and 10000".into());
+                }
+                std::thread::sleep(Duration::from_millis(ms as u64));
+                return Ok(vec![text(format!("Waited {} ms.", ms as u64))]);
+            }
+            (Some(_), Some(_)) => return Err("Give text or element, not both.".into()),
+            (text, element) => Awaited {
+                needle: text.or(element).unwrap_or_default(),
+                by_text: text.is_some(),
+                gone: args.get("gone").and_then(Value::as_bool).unwrap_or(false),
+            },
+        };
+        let within = opt_f64(args, "timeout_ms")?.unwrap_or(10_000.0);
+        if !(0.0..=60_000.0).contains(&within) {
+            return Err("timeout_ms must be between 0 and 60000".into());
+        }
+        let within = Duration::from_millis(within as u64);
+        find_axe().ok_or(AXE_MISSING)?;
+        let dev = self.resolve_booted(args)?;
+        let what = awaited.what();
+        let started = std::time::Instant::now();
+        loop {
+            let roots = match Self::describe(&dev.udid) {
+                Ok(roots) => roots,
+                // A reading AXe couldn't make (it times out now and then) has shown nothing
+                // either way: it's asked again until the time is up.
+                Err(_) if started.elapsed() < within => {
+                    std::thread::sleep(WAIT_POLL);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let (met, waited) = (awaited.met(&roots), started.elapsed());
+            if met || waited >= within {
+                let outlined = self.outlined(&dev, &roots, None, false, outline::DEFAULT_MAX);
+                return if met {
+                    Ok(vec![text(format!(
+                        "{} after {:.1} s.\n\n{outlined}",
+                        if awaited.gone {
+                            format!("Gone: {what}")
+                        } else {
+                            format!("Found {what}")
+                        },
+                        waited.as_secs_f32()
+                    ))])
+                } else {
+                    Err(format!(
+                        "Waited {:.0} s, and {what} {}.\n\n{outlined}",
+                        within.as_secs_f32(),
+                        if awaited.gone {
+                            "is still there"
+                        } else {
+                            "never showed"
+                        }
+                    ))
+                };
+            }
+            std::thread::sleep(WAIT_POLL);
+        }
     }
 
     fn sim_swipe(&self, args: &Value) -> ToolResult {
@@ -684,16 +1075,44 @@ so its pixel coordinates are what sim_tap and sim_swipe expect. The text block r
                 }),
             },
             ToolDef {
-                name: "sim_tap",
-                description: "Tap at (x, y) in sim_screenshot pixel coordinates (device points). Requires AXe.",
+                name: "sim_elements",
+                description: "A booted simulator's screen as an outline, one element a line: role, name, value, state and frame (x,y,width,height in sim_screenshot pixels), with a ref like [ref=e12] on each one you can tap. Read it before a screenshot: names and places are exact. Requires AXe.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
+                        "filter": {"type": "string", "description": "Only elements whose role or name contains this"},
+                        "interactive_only": {"type": "boolean", "description": "Only those you can tap"},
+                        "max": {"type": "integer", "description": "Most elements shown (default 150)"},
+                        "udid": udid_prop(),
+                    },
+                }),
+            },
+            ToolDef {
+                name: "sim_tap",
+                description: "Tap the element `ref` names (refused if it changed since you read it), or at (x, y) in sim_screenshot pixel coordinates. Requires AXe.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string", "description": "From sim_elements, e.g. \"e12\""},
                         "x": {"type": "number"},
                         "y": {"type": "number"},
                         "udid": udid_prop(),
                     },
-                    "required": ["x", "y"],
+                }),
+            },
+            ToolDef {
+                name: "sim_wait",
+                description: "Wait until `text` or an `element` shows on the screen (`gone`: until it goes), answered with the screen's fresh elements; or pause for `ms` milliseconds (max 10000). Requires AXe.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "In an element's name or value"},
+                        "element": {"type": "string", "description": "In an element's role or name"},
+                        "gone": {"type": "boolean"},
+                        "timeout_ms": {"type": "integer", "description": "Default 10000, at most 60000"},
+                        "ms": {"type": "integer", "minimum": 0, "maximum": 10000},
+                        "udid": udid_prop(),
+                    },
                 }),
             },
             ToolDef {
@@ -760,7 +1179,9 @@ the run ended, the counts and every failure with its message, and the path of th
             "sim_open_url" => self.sim_open_url(args),
             "sim_install" => self.sim_install(args),
             "sim_launch" => self.sim_launch(args),
+            "sim_elements" => self.sim_elements(args),
             "sim_tap" => self.sim_tap(args),
+            "sim_wait" => self.sim_wait(args),
             "sim_swipe" => self.sim_swipe(args),
             "sim_type" => self.sim_type(args),
             "sim_button" => self.sim_button(args),
@@ -799,5 +1220,287 @@ mod tests {
         assert_eq!(ids, ["C", "B", "A"]);
         assert_eq!(d[2].runtime, "iOS 18.0");
         assert_eq!(d[2].device_type, "t1");
+    }
+
+    /// The Settings app's first screen as AXe 1.8 describes it (iOS 27, an iPhone 17e), cut down
+    /// to a few rows and with a switch, a disabled row, a row scrolled off the screen, a custom
+    /// view and a passcode field put in.
+    const SETTINGS: &str = r#"[{"AXFrame":"{{0, 0}, {390, 844}}","AXUniqueId":null,"frame":{"y":0,"x":0,"width":390,"height":844},
+      "role_description":"application","AXLabel":"Settings","content_required":false,"type":"Application","title":null,"help":null,
+      "custom_actions":[],"AXValue":null,"enabled":true,"role":"AXApplication","subrole":null,"pid":64278,"traits":[],"children":[
+      {"type":"Group","role":"AXGroup","AXLabel":null,"AXUniqueId":"com.apple.settings.sidebar.collectionView","subrole":null,
+       "frame":{"x":0,"y":0,"width":390,"height":844},"enabled":true,"AXValue":null,"custom_actions":[],"traits":[],"children":[
+        {"type":"Heading","role":"AXHeading","AXLabel":"Settings","AXUniqueId":null,"frame":{"x":16,"y":105,"width":133,"height":41},"enabled":true,"AXValue":null,"custom_actions":[],"children":[]},
+        {"type":"Button","role":"AXButton","AXLabel":"General","AXUniqueId":"com.apple.settings.general","role_description":"button",
+         "frame":{"height":52,"width":358,"x":16,"y":365.33333333333337},"AXFrame":"{{16, 365.33333333333337}, {358, 52}}","enabled":true,"AXValue":null,"custom_actions":[],"children":[
+          {"type":"Image","role":"AXImage","AXLabel":null,"AXUniqueId":null,"frame":{"x":30,"y":377.3333435058594,"width":28,"height":28},"enabled":true,"AXValue":null,"children":[]},
+          {"type":"StaticText","role":"AXStaticText","AXLabel":"General","AXUniqueId":null,"frame":{"height":28,"width":101.33332824707031,"x":70,"y":377.3333435058594},"enabled":true,"AXValue":null,"children":[]},
+          {"type":"Image","role":"AXImage","AXLabel":"chevron.forward","AXUniqueId":null,"frame":{"x":349,"y":385,"width":7,"height":12},"enabled":true,"AXValue":null,"children":[]}]},
+        {"type":"Button","role":"AXButton","AXLabel":"Accessibility","AXUniqueId":"com.apple.settings.accessibility","frame":{"height":52,"width":358,"x":16,"y":417.33333333333337},"enabled":true,"AXValue":null,"custom_actions":[],"children":[]},
+        {"type":"Switch","role":"AXSwitch","AXLabel":"Airplane Mode","AXUniqueId":null,"frame":{"x":16,"y":469,"width":358,"height":52},"enabled":true,"AXValue":"0","custom_actions":[],"children":[]},
+        {"type":"Button","role":"AXButton","AXLabel":"Software Update","AXUniqueId":null,"frame":{"x":16,"y":521,"width":358,"height":52},"enabled":false,"AXValue":null,"custom_actions":[],"children":[]},
+        {"type":"Button","role":"AXButton","AXLabel":"StandBy","AXUniqueId":null,"frame":{"x":16,"y":885,"width":358,"height":52},"enabled":true,"AXValue":null,"custom_actions":[],"children":[]},
+        {"type":"Other","role":"AXGroup","AXLabel":null,"AXUniqueId":"com.example.banner","frame":{"x":16,"y":580,"width":358,"height":40},"enabled":true,"AXValue":null,"custom_actions":[],"children":[]}]},
+      {"type":"Group","role":"AXGroup","AXLabel":"Toolbar","AXUniqueId":null,"frame":{"x":0,"y":730,"width":390,"height":114},"enabled":true,"AXValue":null,"custom_actions":[],"children":[
+        {"AXValue":"Search","AXFrame":"{{28, 778}, {334, 28}}","content_required":false,"pid":64278,"AXUniqueId":null,"subrole":"AXSearchField","AXLabel":"Search","enabled":true,
+         "frame":{"x":28,"width":334,"y":778,"height":28},"title":null,"traits":[],"role":"AXTextField","type":"TextField","custom_actions":[],"help":null,"role_description":"search text field","children":[]},
+        {"type":"SecureTextField","role":"AXTextField","AXLabel":"Passcode","AXUniqueId":null,"frame":{"x":28,"y":740,"width":334,"height":28},"enabled":true,"AXValue":"••••","custom_actions":[],"children":[]}]}]}]"#;
+
+    fn iphone() -> Device {
+        Device {
+            name: "iPhone 17e".into(),
+            udid: "U".into(),
+            runtime: "iOS 27.0".into(),
+            state: "Booted".into(),
+            device_type: String::new(),
+        }
+    }
+
+    /// A simulator whose Settings screen has been read once.
+    fn read_settings() -> (Simulator, Vec<Node>, String) {
+        let mut sim = Simulator::default();
+        let roots = parse_tree(SETTINGS).unwrap();
+        let read = sim.outlined(&iphone(), &roots, None, false, outline::DEFAULT_MAX);
+        (sim, roots, read)
+    }
+
+    #[test]
+    fn the_screen_reads_as_an_outline_from_axes_tree() {
+        let (mut sim, roots, read) = read_settings();
+        assert_eq!(
+            read,
+            "Elements of iPhone 17e (iOS 27.0). frame=x,y,width,height in sim_screenshot pixels.
+
+- application \"Settings\" [frame=0,0,390,844]:
+  - heading \"Settings\" [frame=16,105,133,41]
+  - button \"General\" [ref=e1] [frame=16,365,358,52]:
+    - image \"chevron.forward\" [frame=349,385,7,12]
+  - button \"Accessibility\" [ref=e2] [frame=16,417,358,52]
+  - switch \"Airplane Mode\" [ref=e3] [unchecked] [frame=16,469,358,52]
+  - button \"Software Update\" [ref=e4] [disabled] [frame=16,521,358,52]
+  - button \"StandBy\" [ref=e5] [offscreen] [frame=16,885,358,52]
+  - other \"com.example.banner\" [ref=e6] [frame=16,580,358,40]
+  - group \"Toolbar\" [frame=0,730,390,114]:
+    - search field \"Search\" [ref=e7] [frame=28,778,334,28]
+    - text field \"Passcode\" [ref=e8] [secure] [frame=28,740,334,28]"
+        );
+        assert!(
+            !read.contains('•'),
+            "a passcode field's value is never read"
+        );
+        // Read again, every element has the ref it had; narrowed, the same refs.
+        assert_eq!(
+            sim.outlined(&iphone(), &roots, None, false, outline::DEFAULT_MAX),
+            read
+        );
+        let narrowed = sim.outlined(&iphone(), &roots, Some("access"), true, 5);
+        assert!(
+            narrowed.ends_with("\n\n- button \"Accessibility\" [ref=e2] [frame=16,417,358,52]"),
+            "{narrowed}"
+        );
+        assert!(
+            sim.outlined(&iphone(), &roots, Some("wallet"), false, 5)
+                .ends_with("(No element's role or name contains \"wallet\".)")
+        );
+        // Frames are in the latest screenshot's pixels: here one that's two points to a pixel.
+        sim.mappings.insert("U".into(), SimMapping { factor: 2.0 });
+        let halved = sim.outlined(&iphone(), &roots, Some("general"), false, 5);
+        assert!(
+            halved.contains("button \"General\" [ref=e1] [frame=8,183,179,26]"),
+            "{halved}"
+        );
+        // With no screenshot yet, the pixels are those one would have: a point each, unless
+        // the screen's long side passes the largest image.
+        assert_eq!(
+            fitted(Frame {
+                x: 0.0,
+                y: 0.0,
+                w: 390.0,
+                h: 844.0
+            }),
+            1.0
+        );
+        assert_eq!(
+            fitted(Frame {
+                x: 0.0,
+                y: 0.0,
+                w: 1024.0,
+                h: 1366.0
+            }),
+            1.0
+        );
+        assert_eq!(
+            fitted(Frame {
+                x: 0.0,
+                y: 0.0,
+                w: 2000.0,
+                h: 3136.0
+            }),
+            2.0
+        );
+        // Something that isn't AXe's JSON says so; an empty screen reads as empty.
+        assert!(
+            parse_tree("Error: no simulator")
+                .unwrap_err()
+                .contains("isn't JSON")
+        );
+        let mut empty = Simulator::default();
+        assert!(
+            empty
+                .outlined(&iphone(), &parse_tree("[]").unwrap(), None, false, 5)
+                .ends_with("(Nothing here to read or tap: the app may draw everything itself. sim_screenshot shows it.)")
+        );
+    }
+
+    #[test]
+    fn a_tap_by_ref_goes_to_the_element_found_again_and_proven_the_same() {
+        let (sim, roots, _) = read_settings();
+        let refs = &sim.refs["U"];
+        // As it was read: its centre, in device points.
+        let (what, (x, y)) = tap_point(refs, "e1", &roots).unwrap();
+        assert_eq!(what, "button \"General\"");
+        assert!(
+            (x - 195.0).abs() < 0.01 && (y - 391.33).abs() < 0.01,
+            "{x}, {y}"
+        );
+        let again =
+            "Nothing was done. Read the elements again (sim_elements) and use the ref it has now.";
+        fn rows(roots: &mut [Node]) -> &mut Vec<Node> {
+            &mut roots[0].children[0].children
+        }
+        // Another screen's row at its place.
+        let mut renamed = roots.clone();
+        rows(&mut renamed)[1].name = "About".into();
+        assert_eq!(
+            tap_point(refs, "e1", &renamed).unwrap_err(),
+            format!("Where button \"General\" was there's now button \"About\". {again}")
+        );
+        // The list moved under it: the same name at the same place, among other rows.
+        let mut scrolled = roots.clone();
+        rows(&mut scrolled)[2].name = "Action Button".into();
+        assert!(
+            tap_point(refs, "e1", &scrolled)
+                .unwrap_err()
+                .starts_with("What's around button \"General\" has changed since you read it")
+        );
+        let mut moved = roots.clone();
+        rows(&mut moved)[1].frame.as_mut().unwrap().y += 60.0;
+        assert!(
+            tap_point(refs, "e1", &moved)
+                .unwrap_err()
+                .contains("has moved since you read it")
+        );
+        let mut gone = roots.clone();
+        rows(&mut gone).truncate(1);
+        assert!(
+            tap_point(refs, "e1", &gone)
+                .unwrap_err()
+                .contains("isn't where it was any more")
+        );
+        // A row that can't be tapped, or isn't on the screen.
+        assert_eq!(
+            tap_point(refs, "e4", &roots).unwrap_err(),
+            "button \"Software Update\" is disabled, so nothing was tapped."
+        );
+        assert!(
+            tap_point(refs, "e5", &roots)
+                .unwrap_err()
+                .starts_with("button \"StandBy\" is off the screen (scrolled out of view)")
+        );
+        let err = tap_point(refs, "e99", &roots).unwrap_err();
+        assert!(
+            err.contains("No element with ref \"e99\"") && err.contains("sim_elements"),
+            "{err}"
+        );
+        // After the screen changed and was read again, a ref names what's there now.
+        let mut sim = sim;
+        sim.outlined(&iphone(), &renamed, None, false, outline::DEFAULT_MAX);
+        assert!(
+            tap_point(&sim.refs["U"], "e1", &renamed).is_err(),
+            "the old row's ref stays the old row's"
+        );
+        let about = sim.outlined(&iphone(), &renamed, Some("about"), false, 5);
+        let r = about
+            .split("[ref=")
+            .nth(1)
+            .unwrap()
+            .split(']')
+            .next()
+            .unwrap();
+        assert_eq!(
+            tap_point(&sim.refs["U"], r, &renamed).unwrap().0,
+            "button \"About\""
+        );
+    }
+
+    #[test]
+    fn a_wait_is_for_text_or_an_element_to_show_or_go() {
+        use crate::rpc::ToolSet as _;
+        let roots = parse_tree(SETTINGS).unwrap();
+        let wait = |needle, by_text, gone| Awaited {
+            needle,
+            by_text,
+            gone,
+        };
+        assert!(wait("airplane mode", true, false).met(&roots));
+        assert!(!wait("Wi-Fi", true, false).met(&roots) && wait("Wi-Fi", true, true).met(&roots));
+        assert!(
+            wait("switch", false, false).met(&roots) && !wait("switch", false, true).met(&roots)
+        );
+        assert!(
+            !wait("••", true, false).met(&roots),
+            "nor is a passcode waited on"
+        );
+        assert_eq!(wait("General", true, false).what(), "the text \"General\"");
+        assert_eq!(
+            wait("button", false, true).what(),
+            "an element matching \"button\""
+        );
+        // What's asked wrongly is refused before the simulator is touched.
+        let mut sim = Simulator::default();
+        let mut refused = |tool: &str, args: Value| sim.call(tool, &args).unwrap_err();
+        assert_eq!(
+            refused("sim_wait", json!({"text": "a", "element": "b"})),
+            "Give text or element, not both."
+        );
+        assert!(refused("sim_wait", json!({})).starts_with("Wait for what?"));
+        assert!(refused("sim_wait", json!({"ms": 20_000})).contains("between 0 and 10000"));
+        assert!(
+            refused("sim_wait", json!({"text": "a", "timeout_ms": 90_000}))
+                .contains("between 0 and 60000")
+        );
+        assert_eq!(
+            refused("sim_tap", json!({"ref": "e1", "x": 1, "y": 2})),
+            "Give ref, or x and y, not both."
+        );
+        assert_eq!(
+            sim.call("sim_wait", &json!({"ms": 0})),
+            Ok(vec![text("Waited 0 ms.")])
+        );
+    }
+
+    #[test]
+    fn the_tools_offer_elements_before_screenshots() {
+        use crate::rpc::ToolSet as _;
+        let sim = Simulator::default();
+        let tools = sim.tools();
+        let tool = |name: &str| tools.iter().find(|t| t.name == name).unwrap();
+        for name in ["sim_elements", "sim_tap", "sim_wait"] {
+            let schema = &tool(name).input_schema;
+            assert_eq!(schema["type"], "object", "{name}");
+            assert!(
+                schema.get("required").is_none(),
+                "{name} needs a ref or a point, text or a time"
+            );
+            assert!(schema["properties"]["udid"].is_object(), "{name}");
+        }
+        assert!(tool("sim_tap").input_schema["properties"]["ref"].is_object());
+        assert!(tool("sim_elements").description.contains("[ref=e12]"));
+        let said = sim.instructions();
+        let (elements, screenshot) = (
+            said.find("sim_elements").unwrap(),
+            said.find("sim_screenshot").unwrap(),
+        );
+        assert!(elements < screenshot, "{said}");
     }
 }

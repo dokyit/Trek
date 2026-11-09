@@ -4,6 +4,8 @@
 //! mouse, keyboard or screen.
 
 #[cfg(target_os = "macos")]
+mod ax;
+#[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 mod skylight;
@@ -18,6 +20,7 @@ pub use macos::Mac as Native;
 pub use windows::Win as Native;
 
 use crate::keys::Combo;
+use crate::outline::{Action, Node};
 
 /// One window on screen. Bounds are in screen coordinates: points on macOS, pixels on Windows.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +128,54 @@ pub enum Whereabouts {
     /// There's no such window any more.
     Closed,
 }
+
+/// How far `Desktop::elements` reads a window's accessibility tree: it's bounded, so a huge or
+/// slow one costs a known amount.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct Reading {
+    /// The app's menu bar as well (its menus and their items), as a second root.
+    pub menu_bar: bool,
+    pub max_nodes: usize,
+    pub max_depth: usize,
+    pub within: std::time::Duration,
+}
+
+impl Default for Reading {
+    fn default() -> Self {
+        Self {
+            menu_bar: false,
+            max_nodes: 3000,
+            max_depth: 60,
+            within: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+/// A window's elements as read: the window (place `[0]`), then its app's menu bar (place `[1]`)
+/// when asked for. Frames are in the window's own coordinates.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct Elements {
+    pub roots: Vec<Node>,
+    /// Why the reading stopped early (a bound of `Reading` was reached); `None` when it's whole.
+    pub cut: Option<&'static str>,
+}
+
+/// How an element's own action went, as far as the app said.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum Performed {
+    /// The app took it.
+    Done,
+    /// The app didn't answer in time: it may have done it or not (an action that opens a dialog
+    /// often ends this way). Why, for the reply.
+    Unknown(String),
+}
+
+/// Said by a platform that can't read a window's elements.
+pub const NO_ELEMENTS: &str =
+    "Elements aren't available here: work from screenshots, with x and y.";
 
 /// Said by a platform that can't work behind the user's windows.
 pub const NOT_BEHIND: &str = "Background use isn't available here: computer use works in front, with the real pointer and keyboard.";
@@ -238,6 +289,38 @@ pub trait Desktop {
     fn bring_forward(&self, _w: &WindowInfo) -> Result<(), String> {
         Err(NOT_BEHIND.into())
     }
+
+    // Elements: a window's accessibility tree, and its elements' own actions. Reading and acting
+    // go to the window's app alone: nothing is activated or raised, no pointer or key is posted.
+
+    /// Whether this platform can read a window's elements.
+    fn has_elements(&self) -> bool {
+        false
+    }
+    /// The accessibility tree of `w`, read as far as `reading` allows. An app that builds its
+    /// tree only when asked (Chromium, Electron) is asked, here and nowhere else.
+    fn elements(&self, _w: &WindowInfo, _reading: &Reading) -> Result<Elements, String> {
+        Err(NO_ELEMENTS.into())
+    }
+    /// The element at `place` in `w`'s tree as it is now, without its children; `None` when
+    /// nothing is there any more.
+    fn element_at(&self, _w: &WindowInfo, _place: &[usize]) -> Result<Option<Node>, String> {
+        Err(NO_ELEMENTS.into())
+    }
+    /// Ask the element read with `identity` to do `action` itself.
+    fn perform(
+        &self,
+        _w: &WindowInfo,
+        _identity: u64,
+        _action: Action,
+    ) -> Result<Performed, String> {
+        Err(NO_ELEMENTS.into())
+    }
+    /// Give the element read with `identity` the keyboard focus within its own app (the app
+    /// isn't activated). Whether it says it has it afterwards.
+    fn focus(&self, _w: &WindowInfo, _identity: u64) -> Result<bool, String> {
+        Err(NO_ELEMENTS.into())
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +373,17 @@ pub mod fake {
         Reopen(i64),
         /// `bring_forward`, by window id.
         BringForward(i64),
+        /// `perform`: an element's own action, by its identity.
+        Perform {
+            window: i64,
+            identity: u64,
+            action: Action,
+        },
+        /// `focus`, by the element's identity.
+        Focus {
+            window: i64,
+            identity: u64,
+        },
     }
 
     #[derive(Clone)]
@@ -336,6 +430,24 @@ pub mod fake {
         /// A window on another Space can't be captured (`capture_window` fails for it).
         pub blind_off_space: bool,
         pub dark: bool,
+        /// What every window's elements read as now: the window, then its app's menu bar.
+        /// `None`: a platform with no elements.
+        pub tree: Rc<RefCell<Option<Vec<Node>>>>,
+        /// Why a reading of them stopped early.
+        pub cut: Option<&'static str>,
+        /// How an element's own action goes. Done, a checkbox pressed is checked or unchecked.
+        pub performs: Result<Performed, String>,
+        /// An element asked to take the focus takes it (and says so).
+        pub focuses: bool,
+        /// A click behind gives the focus to the element under it.
+        pub click_focuses: bool,
+        /// What's typed behind changes nothing (an app that takes no keys posted to it).
+        pub deaf: bool,
+        /// The next this-many readings fail, as an app too busy to answer makes them.
+        pub busy: Rc<RefCell<u32>>,
+        /// After this many more readings, the node joins the window's children (something that
+        /// shows a moment later).
+        pub shows_later: Rc<RefCell<Option<(u32, Node)>>>,
     }
 
     impl Recording {
@@ -369,7 +481,43 @@ pub mod fake {
                 opening: Rc::default(),
                 blind_off_space: false,
                 dark: false,
+                tree: Rc::default(),
+                cut: None,
+                performs: Ok(Performed::Done),
+                focuses: true,
+                click_focuses: false,
+                deaf: false,
+                busy: Rc::default(),
+                shows_later: Rc::default(),
             }
+        }
+
+        /// Every node of the windows' elements, to change what one of them says.
+        fn each_node(&self, mut change: impl FnMut(&mut Node)) {
+            fn walk(nodes: &mut [Node], change: &mut dyn FnMut(&mut Node)) {
+                for n in nodes {
+                    change(n);
+                    walk(&mut n.children, change);
+                }
+            }
+            if let Some(roots) = self.tree.borrow_mut().as_mut() {
+                walk(roots, &mut change);
+            }
+        }
+
+        /// A desktop whose windows all read as `roots` (numbered here by where they sit).
+        pub fn with_elements(mut self, mut roots: Vec<Node>) -> Self {
+            crate::outline::number(&mut roots);
+            self.tree = Rc::new(RefCell::new(Some(roots)));
+            self
+        }
+
+        /// Change what the windows read as (the app redrew), keeping each node where it sits.
+        pub fn redraw(&self, change: impl FnOnce(&mut Vec<Node>)) {
+            let mut tree = self.tree.borrow_mut();
+            let roots = tree.get_or_insert_with(Vec::new);
+            change(roots);
+            crate::outline::number(roots);
         }
 
         pub fn events(&self) -> Vec<Event> {
@@ -504,6 +652,18 @@ pub mod fake {
             {
                 *self.opened.borrow_mut() = true;
             }
+            // What's typed lands in the element with the focus; a click can give it.
+            match input {
+                Input::Type(typed) if !self.deaf => self.each_node(|n| {
+                    if n.focused && n.acts {
+                        n.value = Some(format!("{}{typed}", n.value.as_deref().unwrap_or("")));
+                    }
+                }),
+                Input::Click { x, y, .. } if self.click_focuses => self.each_node(|n| {
+                    n.focused = n.acts && n.frame.is_some_and(|f| f.holds((*x, *y)));
+                }),
+                _ => {}
+            }
             *self.last_post.borrow_mut() = Some(std::time::Instant::now());
             self.record(Event::Behind {
                 window: w.id,
@@ -570,6 +730,75 @@ pub mod fake {
         }
         fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
             self.record(Event::BringForward(w.id))
+        }
+        fn has_elements(&self) -> bool {
+            self.tree.borrow().is_some()
+        }
+        fn elements(&self, w: &WindowInfo, reading: &Reading) -> Result<Elements, String> {
+            if *self.busy.borrow() > 0 {
+                *self.busy.borrow_mut() -= 1;
+                return Err(format!(
+                    "{} didn't answer when asked for its elements.",
+                    w.owner
+                ));
+            }
+            let mut later = self.shows_later.borrow_mut();
+            if matches!(*later, Some((0, _))) {
+                if let Some((_, node)) = later.take() {
+                    self.redraw(|roots| roots[0].children.push(node));
+                }
+            } else if let Some((readings, _)) = later.as_mut() {
+                *readings -= 1;
+            }
+            drop(later);
+            let roots = self.tree.borrow().clone().ok_or(NO_ELEMENTS)?;
+            let take = if reading.menu_bar { roots.len() } else { 1 };
+            Ok(Elements {
+                roots: roots.into_iter().take(take).collect(),
+                cut: self.cut,
+            })
+        }
+        fn element_at(&self, _w: &WindowInfo, place: &[usize]) -> Result<Option<Node>, String> {
+            let tree = self.tree.borrow();
+            let roots = tree.as_ref().ok_or(NO_ELEMENTS)?;
+            Ok(crate::outline::at(roots, place).map(|n| Node {
+                children: vec![],
+                ..n.clone()
+            }))
+        }
+        fn perform(
+            &self,
+            w: &WindowInfo,
+            identity: u64,
+            action: Action,
+        ) -> Result<Performed, String> {
+            self.record(Event::Perform {
+                window: w.id,
+                identity,
+                action,
+            })?;
+            if self.performs == Ok(Performed::Done) && action == Action::Press {
+                self.each_node(|n| {
+                    if n.identity == Some(identity) {
+                        n.checked = n.checked.map(|c| match c {
+                            crate::outline::Checked::Yes => crate::outline::Checked::No,
+                            _ => crate::outline::Checked::Yes,
+                        });
+                    }
+                });
+            }
+            self.performs.clone()
+        }
+        /// The element takes the focus from whichever had it, when `focuses`.
+        fn focus(&self, w: &WindowInfo, identity: u64) -> Result<bool, String> {
+            self.record(Event::Focus {
+                window: w.id,
+                identity,
+            })?;
+            if self.focuses {
+                self.each_node(|n| n.focused = n.identity == Some(identity));
+            }
+            Ok(self.focuses)
         }
     }
 }

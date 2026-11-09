@@ -18,6 +18,8 @@ mod desktop;
 #[cfg(any(target_os = "macos", windows))]
 mod keys;
 mod orchestrate;
+#[cfg(any(target_os = "macos", windows))]
+mod outline;
 #[cfg(target_os = "macos")]
 mod phone;
 mod rpc;
@@ -205,9 +207,9 @@ mod prompt_budget {
 
     /// (family, instructions' chars, tool schemas' chars as MCP JSON) at most.
     const BUDGETS: &[(&str, usize, usize)] = &[
-        ("computer", 650, 4_600),
-        ("computer-background", 1_000, 5_400),
-        ("simulator", 680, 5_100),
+        ("computer", 885, 6_450),
+        ("computer-background", 1_365, 7_775),
+        ("simulator", 890, 6_670),
         ("video", 240, 1_250),
         ("orchestrate", 1_050, 11_000),
         ("browser", 950, 7_300),
@@ -216,8 +218,8 @@ mod prompt_budget {
         ("phone", 1_620, 8_150),
     ];
     /// Everything on (computer use in the background and every default family) together
-    /// (41,054 measured with the phone's elements).
-    const ALL_CHARS: usize = 42_200;
+    /// (44,765 measured with elements on the computer, the Simulator and the iPhone).
+    const ALL_CHARS: usize = 46_200;
 
     fn families() -> Vec<(&'static str, Box<dyn ToolSet>)> {
         vec![

@@ -190,6 +190,42 @@ Nothing was removed that an agent needs to do something; the parsers and tools b
   finishes too" (things the agent can't act on) dropped. −88 schema tokens.
 - **trek-simulator:** the `udid` description repeated on nine tools is shorter. −27 schema tokens.
 
+## 2026-11-09: elements (trek-computer, trek-simulator)
+
+Computer use and the Simulator learned to read the screen as an outline with refs, as the Browser
+does: `elements` and `press` for trek-computer (macOS), `sim_elements` and `sim_wait` for
+trek-simulator, a `ref` on `click`, `type_text` and `sim_tap`, and waiting for text or an element on
+`wait`. The budgets were raised on purpose. Measured as above (tiktoken 0.14.0, `o200k_base`),
+"before" from the trek-mcp in the released Trek 0.4.46, which had drifted a little from the tables
+above:
+
+| Server | Tools | Instructions | Names | Schemas | Function wire | Chars: instructions, schemas |
+| --- | --- | --- | --- | --- | --- | --- |
+| trek-computer (in front) | 10 → 12 | 128 → 185 | 104 → 124 | 1,012 → 1,444 | 1,122 → 1,564 | 583 → 804, 4,139 → 5,884 |
+| trek-computer (background) | 10 → 12 | 220 → 274 | 104 → 124 | 1,255 → 1,710 | 1,365 → 1,830 | 1,000 → 1,240, 5,245 → 7,087 |
+| trek-simulator | 12 → 14 | 141 → 193 | 135 → 157 | 1,125 → 1,491 | 1,257 → 1,631 | 612 → 808, 4,648 → 6,081 |
+
+What it costs each request, in o200k tokens (not measured live):
+
+- Claude Code (instructions and deferred tool names): +74 by default (the Simulator), +148 with
+  computer use on.
+- OpenCode and ACP agents (every schema): +374 by default, +839 with computer use on, and the
+  instructions' +52 and +106 if the agent passes them on.
+- Codex: nothing up front (it defers every MCP tool).
+
+What it buys: an outline gives names, states and places exactly where a screenshot leaves them to
+be read off pixels, and a press or a tap by ref needs no screenshot before it. An outline's own
+cost, measured on two checked live: 645 tokens for a TextEdit document window (28 lines) and 741
+for the Simulator's Settings screen (35 lines). That doesn't grow with the window's size as a screenshot's does, so it's the cheaper of the
+two for a large window and not for a small one; `filter` and `interactive_only` cut it further.
+
+The wording was cut before the budgets were raised (the first draft was 876 / 6,265, 1,312 / 7,503
+and 865 / 6,318 chars): each tool says what only it knows, the server instructions say once how the
+pieces fit (elements first, refs, a screenshot when looks matter), and argument descriptions are a
+few words. Windows has no elements, so its tool list and schemas are as they were. New budgets
+(size plus about 10%): computer 885 / 6,450, computer-background 1,365 / 7,775, simulator
+890 / 6,670; all families together 44,300 (43,107 today).
+
 ## The budget tests
 
 - `crates/trek-app/src/workspace/prompt_budget.rs` builds the notes with `agent_notes`, the function
@@ -199,7 +235,7 @@ Nothing was removed that an agent needs to do something; the parsers and tools b
   tool-search line is held to 220 chars and Codex's notes with everything on to 4,650.
 - `crates/trek-mcp/src/main.rs`, `prompt_budget`: each family's server instructions and tool schemas,
   as `initialize` and `tools/list` return them, against a per-family budget, and all of them
-  together (40,500 chars).
+  together (44,300 chars since elements, below; 40,500 before).
 - `trek_core::visualization`'s and `trek_core::artifact`'s own compactness tests now stop at 1,750
   and 1,150 chars.
 

@@ -203,6 +203,15 @@ fn put_away(w: &WindowInfo) -> Option<PutAway> {
     None
 }
 
+/// The window list's number for an AX window element (`_AXUIElementGetWindow`); `None` when this
+/// macOS has no such call or the element is no window.
+pub(super) fn ax_window_number(element: CFTypeRef) -> Option<u32> {
+    let number = calls()?.ax_window_number?;
+    let mut id = 0u32;
+    // SAFETY: a live AX element and a number to write the answer to.
+    (unsafe { number(element, &mut id) } == 0).then_some(id)
+}
+
 /// An AX element's attribute, when it has it.
 fn attribute(element: &CFType, name: &'static str) -> Option<CFType> {
     let mut value: CFTypeRef = std::ptr::null();

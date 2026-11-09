@@ -453,6 +453,7 @@ mod tests {
             ("skylight.rs", include_str!("skylight.rs")),
             ("macos.rs", include_str!("macos.rs")),
             ("spaces.rs", include_str!("spaces.rs")),
+            ("ax.rs", include_str!("ax.rs")),
             ("desktop.rs", include_str!("../desktop.rs")),
             ("computer.rs", include_str!("../computer.rs")),
         ];

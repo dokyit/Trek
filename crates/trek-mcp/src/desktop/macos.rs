@@ -20,9 +20,11 @@ use core_graphics::window::{
 };
 
 use super::{
-    AppBundle, Button, Capture, Desktop, Display, Input, Rect, RunningApp, Whereabouts, WindowInfo,
+    AppBundle, Button, Capture, Desktop, Display, Elements, Input, Performed, Reading, Rect,
+    RunningApp, Whereabouts, WindowInfo,
 };
 use crate::keys::{self, KeyCombo};
+use crate::outline::{Action, Node};
 use crate::util::{self, TempFile};
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -78,7 +80,10 @@ fn host_replaced_on_disk() -> bool {
 }
 
 #[derive(Default)]
-pub struct Mac;
+pub struct Mac {
+    /// Windows' elements, and the ones kept to act on (`ax`).
+    ax: super::ax::Ax,
+}
 
 impl Desktop for Mac {
     fn may_post_input(&self) -> bool {
@@ -569,6 +574,26 @@ impl Desktop for Mac {
 
     fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
         super::skylight::bring_forward(w)
+    }
+
+    fn has_elements(&self) -> bool {
+        true
+    }
+
+    fn elements(&self, w: &WindowInfo, reading: &Reading) -> Result<Elements, String> {
+        self.ax.elements(w, reading)
+    }
+
+    fn element_at(&self, w: &WindowInfo, place: &[usize]) -> Result<Option<Node>, String> {
+        self.ax.element_at(w, place)
+    }
+
+    fn perform(&self, _w: &WindowInfo, identity: u64, action: Action) -> Result<Performed, String> {
+        self.ax.perform(identity, action)
+    }
+
+    fn focus(&self, _w: &WindowInfo, identity: u64) -> Result<bool, String> {
+        self.ax.focus(identity)
     }
 }
 
