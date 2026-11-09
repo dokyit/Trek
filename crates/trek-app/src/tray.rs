@@ -287,13 +287,13 @@ impl Tray {
                     if id == ids.0 {
                         open_trek(&ws, cx);
                     } else if id == ids.1 {
-                        cx.activate(true);
+                        crate::system::activate(cx);
                         ws.update(cx, |ws, cx| {
                             ws.new_thread(cx);
                             cx.emit(WorkspaceEvent::ActivateMain);
                         });
                     } else if id == ids.2 {
-                        cx.activate(true);
+                        crate::system::activate(cx);
                         ws.update(cx, |ws, cx| {
                             ws.show_in_main(Route::Settings(SettingsPage::General), cx)
                         });
@@ -428,7 +428,7 @@ impl Tray {
 /// app to activate (GPUI's `activate` does nothing there), so the main window is brought forward
 /// itself.
 pub fn open_trek(ws: &Entity<Workspace>, cx: &mut App) {
-    cx.activate(true);
+    crate::system::activate(cx);
     if cfg!(windows) || ws.read(cx).main_window.is_none() {
         crate::root::show_main(ws.clone(), cx);
     }

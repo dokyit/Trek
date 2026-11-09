@@ -1371,7 +1371,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
             return;
         };
         let Some(ws) = ws.upgrade() else { return };
-        cx.activate(true);
+        crate::system::activate(cx);
         // Not deferred: no window is busy here, and nothing would run a deferred call until
         // the next event.
         reveal_now(&ws, thread, cx);

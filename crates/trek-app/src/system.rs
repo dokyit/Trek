@@ -667,6 +667,22 @@ pub fn order_front_quietly(_: &Window) -> bool {
     false
 }
 
+/// A test run that keeps out of the owner's way (`trek-dev`: `TREK_SHOT_DIR` with
+/// `TREK_BACKGROUND=1`): its windows are on a display nobody sees (`test_display`), or behind
+/// the owner's.
+pub fn quiet_test_run() -> bool {
+    std::env::var_os("TREK_SHOT_DIR").is_some()
+        && std::env::var("TREK_BACKGROUND").is_ok_and(|v| v == "1")
+}
+
+/// Bring Trek forward, as a click on something of its own asks for. Not in a quiet test run:
+/// there it would take the owner's keyboard to a window they can't see.
+pub fn activate(cx: &mut App) {
+    if !quiet_test_run() {
+        cx.activate(true);
+    }
+}
+
 /// With `TREK_FORCE_ACTIVE`, a display link's worth of frame requests (60 Hz) for `window` while
 /// macOS hides it, so measurements and screenshots of a window kept behind others
 /// (`TREK_BACKGROUND`) cover drawing too. Every Trek window keeps one for as long as it's open.

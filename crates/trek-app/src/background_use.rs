@@ -451,7 +451,7 @@ impl BackgroundUse {
         else {
             return;
         };
-        cx.activate(true);
+        crate::system::activate(cx);
         ws.update(cx, |ws, cx| ws.show_in_main(Route::Thread(thread), cx));
     }
 }

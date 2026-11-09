@@ -2581,7 +2581,7 @@ impl Composer {
             let _ = this.update(cx, |this, cx| {
                 this.snapshotting = false;
                 if prefs.hide_trek {
-                    cx.activate(true);
+                    crate::system::activate(cx);
                 }
                 if ok {
                     this.outbox.add([path]);
