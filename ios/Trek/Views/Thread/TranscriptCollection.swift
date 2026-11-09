@@ -233,10 +233,12 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         // was built from (a layout it skipped), a batch update would be inconsistent and UIKit
         // stops the app; it is drawn afresh instead.
         let counted = collectionView.numberOfItems(inSection: 0)
+        var batched = false
         if old.isEmpty || counted != old.count || deleted.count + inserted.count > 3000 {
             if counted != old.count { ScrollProbe.note("rows redrawn: the view counted \(counted), the list had \(old.count)") }
             collectionView.reloadData()
         } else {
+            batched = true
             UIView.performWithoutAnimation {
                 collectionView.performBatchUpdates {
                     collectionView.deleteItems(at: deleted)
@@ -254,7 +256,26 @@ final class TranscriptController: UIViewController, UICollectionViewDataSource, 
         // The rows at the new offset drawn now, not at the next pass.
         collectionView.layoutIfNeeded()
         if inserted.count > 0, p <= 2 { ScrollProbe.note("\(inserted.count) rows in above, kept \(anchor?.id ?? "the bottom")") }
+        // New at the end (only the footer after them), with the reader there to see them.
+        if batched, pinned, s <= 1 { reveal(inserted, after: old) }
         checkEarlier()
+    }
+
+    /// Rows new to the transcript at its end (a message just sent, an answer begun, a request
+    /// answered) come in rather than appear: a fade, and a rise of a few points. Only what they
+    /// draw moves, never their place in the list, so the bottom and the reader's place stay exactly
+    /// where the list put them. A fade alone with Reduce Motion; nothing for a block already shown
+    /// under another row id (an answer cut into parts).
+    private func reveal(_ paths: [IndexPath], after old: [TranscriptRow]) {
+        guard !paths.isEmpty, paths.count <= 12 else { return }
+        var shown = Set<String>()
+        for row in old { if case .block(let r) = row { shown.insert(r.block.id) } }
+        let still = (environment?.calm ?? false) || UIAccessibility.isReduceMotionEnabled
+        for path in paths where path.item < rows.count {
+            guard case .block(let r) = rows[path.item], !shown.contains(r.block.id),
+                  let cell = collectionView.cellForItem(at: path) as? TranscriptCell else { continue }
+            cell.reveal(rise: still ? 0 : 12)
+        }
     }
 
     /// The turn's last rows are coming in, and the working line under them is going: its room goes
@@ -710,6 +731,32 @@ final class TranscriptCell: UICollectionViewCell {
 
     /// Its content is about to change: what it measured before doesn't stand.
     func measureAgain() { size = nil }
+
+    /// Comes in: from clear, eased out (a strong ease-out, 0.25 s), and from `rise` points low on a
+    /// spring with no bounce. Drawn only: the layer's model stays where the layout put it, so
+    /// nothing the list measures or places sees it.
+    func reveal(rise: CGFloat) {
+        let layer = contentView.layer
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        fade.duration = 0.25
+        fade.timingFunction = CAMediaTimingFunction(controlPoints: 0.23, 1, 0.32, 1)
+        layer.add(fade, forKey: "reveal.fade")
+        guard rise > 0 else { return }
+        let up = CASpringAnimation(perceptualDuration: 0.32, bounce: 0)
+        up.keyPath = "transform.translation.y"
+        up.fromValue = rise
+        up.toValue = 0
+        up.duration = up.settlingDuration
+        layer.add(up, forKey: "reveal.rise")
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        contentView.layer.removeAnimation(forKey: "reveal.fade")
+        contentView.layer.removeAnimation(forKey: "reveal.rise")
+    }
 
     /// The row's content laid out at `height`: when that isn't the height the cell was given (it
     /// grew or shrank by itself), it's measured again.
