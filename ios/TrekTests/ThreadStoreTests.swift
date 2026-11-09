@@ -29,6 +29,26 @@ struct ThreadStoreTests {
         #expect(s.items.count == 4)
     }
 
+    private func question(_ id: String, seq: Int64, _ state: QuestionState) -> TItem {
+        TItem(id: id, seq: seq, body: .question(QuestionRequest(requestId: String(id.dropFirst()), questions: [], state: state, answers: nil)))
+    }
+
+    /// A page sent whole carries every request still open: a card kept from before that isn't
+    /// among them was answered while the phone wasn't listening, and stops asking; one the
+    /// page still has open keeps asking.
+    @Test func aWholePageClosesRequestsAnsweredWhileAway() {
+        let s = ThreadStore(id: "h:t1", host: "h", summary: nil)
+        s.restore(items: [user("i0", seq: 10, "first"), question("rgone", seq: 11, .pending),
+                          question("rstill", seq: 12, .pending), user("i1", seq: 13, "next")],
+                  seq: 13, more: false)
+        #expect(s.pending.map(\.id) == ["rgone", "rstill"])
+        s.applyReply(reset: true, seq: 50, items: [user("i1", seq: 40, "next"), user("i2", seq: 41, "later"),
+                                                   question("rstill", seq: 42, .pending)], more: false)
+        #expect(s.pending.map(\.id) == ["rstill"])
+        #expect(s.item("rgone")?.isPendingRequest == false)
+        #expect(s.items.map(\.id) == ["i0", "rgone", "rstill", "i1", "i2"])
+    }
+
     /// A reply after the phone's seq adds what's newer and keeps the rest.
     @Test func aReplyAfterTheSeqAppends() {
         let s = ThreadStore(id: "h:t1", host: "h", summary: nil)

@@ -690,6 +690,19 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         default: false
         }
     }
+
+    /// The request no longer waiting: closed somewhere else (answered on the Mac, or its turn
+    /// ended), as the Mac sends a request it closed without a phone's answer.
+    var closed: TItem {
+        var item = self
+        switch body {
+        case .approval(var a): a.state = .resolved; item.body = .approval(a)
+        case .question(var q): q.state = .resolved; item.body = .question(q)
+        case .plan(var p): p.state = .resolved; item.body = .plan(p)
+        default: break
+        }
+        return item
+    }
 }
 
 // MARK: Server → phone

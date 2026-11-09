@@ -171,6 +171,9 @@ pub struct Watched {
     from: usize,
     /// Requests shown as cards, by id, as last sent, with their seq.
     requests: Vec<(String, tr::ItemBody, u64)>,
+    /// Requests closed since, as their resolved cards, with the seq they closed at (the last
+    /// [`CLOSED_KEPT`]): a phone catching up gets those it missed (`remote_transcript`).
+    closed: Vec<(String, tr::ItemBody, u64)>,
     /// The files each turn changed, by the index of its turn end, as last sent.
     changes: HashMap<usize, Sent>,
     /// What the transcript was last looked at with: its revision, the item streaming, the
@@ -215,6 +218,7 @@ impl Watched {
             items: vec![Sent { seq, hash: None }; len],
             from: len,
             requests: vec![],
+            closed: vec![],
             changes: HashMap::new(),
             revision: 0,
             streaming: None,
@@ -239,9 +243,13 @@ impl Watched {
         ];
         self.from = len;
         self.requests.clear();
+        self.closed.clear();
         self.changes.clear();
     }
 }
+
+/// How many closed requests a followed thread remembers for phones catching up.
+const CLOSED_KEPT: usize = 32;
 
 /// This Mac's IPv4 addresses a phone could reach.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -2195,14 +2203,13 @@ impl Workspace {
                     .remote
                     .as_mut()
                     .and_then(|r| r.answered.remove(&(id.to_string(), rid.clone())));
-                out.push(item_event(
-                    id,
-                    format!("r{rid}"),
-                    w.seq,
-                    None,
-                    resolved(last.clone(), answer),
-                ));
+                let body = resolved(last.clone(), answer);
+                w.closed.retain(|(r, ..)| r != rid);
+                w.closed.push((rid.clone(), body.clone(), w.seq));
+                out.push(item_event(id, format!("r{rid}"), w.seq, None, body));
             }
+            let over = w.closed.len().saturating_sub(CLOSED_KEPT);
+            w.closed.drain(..over);
             w.requests.retain(|(r, ..)| open.contains(r.as_str()));
             for (rid, body) in requests {
                 if w.requests.iter().any(|(r, x, _)| *r == rid && *x == body) {
@@ -2210,6 +2217,7 @@ impl Workspace {
                 }
                 w.seq += 1;
                 w.requests.retain(|(r, ..)| *r != rid);
+                w.closed.retain(|(r, ..)| *r != rid);
                 w.requests.push((rid.clone(), body.clone(), w.seq));
                 out.push(item_event(id, format!("r{rid}"), w.seq, None, body));
             }
@@ -2405,6 +2413,23 @@ impl Workspace {
                     at: None,
                     body: body.clone(),
                 });
+            }
+        }
+        // Requests closed since the phone last heard (answered on the Mac, or the turn ended), as
+        // resolved cards: they aren't among the open ones above, and their pushes (while the phone
+        // was away, or just now while it subscribed, numbered at or before this reply's seq) never
+        // reached it, so it went on showing them as waiting. A phone reading the thread whole
+        // (no delta) holds no card from before to close.
+        if delta.is_some() {
+            for (rid, body, seq) in &w.closed {
+                if newer(*seq) {
+                    items.push(tr::Item {
+                        id: format!("r{rid}"),
+                        seq: *seq,
+                        at: None,
+                        body: body.clone(),
+                    });
+                }
             }
         }
         let out = tr::Transcript {

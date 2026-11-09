@@ -233,7 +233,11 @@ final class ThreadStore {
         flushQueued()
         if reset, !rewritten, loaded, let first = new.first, let at = index[first.id],
            Self.linesUp(items[at...].map(\.id), with: new.map(\.id)) {
-            replaceAll(Array(items[..<at]) + new, more: self.more)
+            // The page carries every request still open: one kept from before that isn't among
+            // them was closed while this phone wasn't listening (it went on asking for an
+            // answer the Mac had long had).
+            let kept = Self.closingMissed(Array(items[..<at]), open: new)
+            replaceAll(kept + new, more: self.more)
         } else if reset {
             replaceAll(new, more: more)
             if loaded, !items.isEmpty { generation += 1 }
@@ -243,6 +247,13 @@ final class ThreadStore {
         self.seq = max(reset ? seq : self.seq, seq)
         if !loaded { loaded = true }
         onChange?()
+    }
+
+    /// `kept` with each request still waiting there but not open in `open` (a page sent whole,
+    /// which carries every open request) closed.
+    nonisolated static func closingMissed(_ kept: [TItem], open: [TItem]) -> [TItem] {
+        let stillOpen = Set(open.filter(\.isPendingRequest).map(\.id))
+        return kept.map { $0.isPendingRequest && !stillOpen.contains($0.id) ? $0.closed : $0 }
     }
 
     /// Whether a page sent whole continues what's here from the same item: the ids here, from

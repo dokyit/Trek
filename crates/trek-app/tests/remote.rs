@@ -5577,3 +5577,110 @@ fn part_files_a_day_old_are_swept_when_the_server_starts() {
     assert!(kept.exists(), "a finished file stays: a message names it");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A question pending on the Mac, as a card, for `id`.
+fn ask_a_question(ws: &mut trek_app::workspace::Workspace, id: &str, request_id: &str) {
+    let live = ws.live.get_mut(id).unwrap();
+    live.permissions
+        .push(trek_app::workspace::PendingPermission {
+            request_id: request_id.into(),
+            title: String::new(),
+            detail: String::new(),
+            prompt: Some(trek_agents::Prompt::Questions(vec![
+                trek_agents::Question {
+                    question: "Skip postings for other graduation windows?".into(),
+                    header: "Grad window".into(),
+                    options: vec![("Skip those".into(), "Saves applications".into())],
+                    multi: false,
+                    secret: false,
+                },
+            ])),
+            after_turn: false,
+            call: None,
+        });
+    live.revision += 1;
+}
+
+fn question_state(t: &tr::Transcript, item_id: &str) -> Option<tr::QuestionState> {
+    t.items
+        .iter()
+        .rev()
+        .find(|i| i.id == item_id)
+        .map(|i| match &i.body {
+            tr::ItemBody::Question { state, .. } => *state,
+            other => panic!("{item_id} isn't a question: {other:?}"),
+        })
+}
+
+/// A question answered on the Mac while the phone was away reaches the phone as answered when it
+/// catches up, whether the thread went unfollowed meanwhile (the close is noticed as it
+/// subscribes) or was still followed (the close was pushed to a phone no longer listening).
+#[test]
+fn a_question_answered_on_the_mac_while_the_phone_was_away_closes_on_the_phone() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| {
+            ask_a_question(ws, &id, "away");
+            ws.start_test_remote();
+        });
+        let seen = ask(&trek, cx, transcript_req(&id, None, Some(10))).unwrap();
+        assert_eq!(
+            question_state(&seen, "raway"),
+            Some(tr::QuestionState::Pending)
+        );
+
+        // The phone goes; the question is answered on the Mac.
+        trek.update(cx, |ws, cx| {
+            ws.remote_request(
+                tr::HostRequest::Unwatch {
+                    thread_id: id.clone(),
+                },
+                cx,
+            )
+        });
+        trek.update(cx, |ws, _| {
+            let live = ws.live.get_mut(&id).unwrap();
+            live.permissions.clear();
+            live.revision += 1;
+        });
+        let back = ask(&trek, cx, transcript_req(&id, Some(seen.seq), Some(10))).unwrap();
+        assert!(back.seq > seen.seq);
+        assert_eq!(
+            question_state(&back, "raway"),
+            Some(tr::QuestionState::Resolved),
+            "the card closes: {:?}",
+            back.items.iter().map(|i| &i.id).collect::<Vec<_>>()
+        );
+
+        // Still followed (the phone was suspended, its socket not yet closed): the close goes
+        // out on a tick that never reaches it, and its catch-up brings it.
+        trek.update(cx, |ws, _| ask_a_question(ws, &id, "suspended"));
+        trek.update(cx, |ws, cx| ws.push_remote_changes(cx));
+        let open = ask(&trek, cx, transcript_req(&id, Some(back.seq), Some(10))).unwrap();
+        assert_eq!(
+            question_state(&open, "rsuspended"),
+            Some(tr::QuestionState::Pending)
+        );
+        trek.update(cx, |ws, cx| {
+            let live = ws.live.get_mut(&id).unwrap();
+            live.permissions.clear();
+            live.revision += 1;
+            ws.push_remote_changes(cx);
+        });
+        let caught_up = ask(&trek, cx, transcript_req(&id, Some(open.seq), Some(10))).unwrap();
+        assert_eq!(
+            question_state(&caught_up, "rsuspended"),
+            Some(tr::QuestionState::Resolved)
+        );
+        // Up to date already: nothing closed again.
+        let again = ask(
+            &trek,
+            cx,
+            transcript_req(&id, Some(caught_up.seq), Some(10)),
+        )
+        .unwrap();
+        assert!(again.items.iter().all(|i| !i.id.starts_with('r')));
+    });
+}
