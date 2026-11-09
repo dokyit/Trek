@@ -13,7 +13,7 @@ research_notes/
 __pycache__/
 
 # Design explorations, internal tooling and planning notes (kept local, not published)
-design/
+/design/
 .agents/skills/trek-bug-finder/
 docs/NEXT-WAVE.md
 
