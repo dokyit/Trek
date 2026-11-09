@@ -777,9 +777,62 @@ fn shorten(text: &str) -> Option<String> {
     Some(clip_words(&line, TITLE_MAX))
 }
 
+/// `line` with its `@path` file mentions (`@src/main.rs`, `@"/Users/me/My Files/cv.pdf"`) as a
+/// title reads them: those before and after the words go, those among them become the file's
+/// name, and a line of only files is their names. A thread started with a file attached was
+/// titled `@"/Users/me/Library/Mobile…`.
+fn file_mentions_named(line: &str) -> String {
+    // The line in pieces: words as they are, and each mention as its file's name.
+    let mut parts: Vec<(bool, String)> = vec![];
+    let mut rest = line.trim();
+    while !rest.is_empty() {
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (piece, used) = match rest.strip_prefix('@') {
+            Some(quoted) if quoted.starts_with('"') => match quoted[1..].find('"') {
+                Some(end) => (Some(&quoted[1..1 + end]), end + 3),
+                None => (None, word_end),
+            },
+            Some(word) => (Some(&word[..word_end - 1]), word_end),
+            None => (None, word_end),
+        };
+        let used = used.min(rest.len());
+        match piece.and_then(file_name_of) {
+            Some(name) => parts.push((true, name)),
+            None => parts.push((false, rest[..used].to_string())),
+        }
+        rest = rest[used..].trim_start();
+    }
+    let first = parts.iter().position(|(file, _)| !file);
+    let last = parts.iter().rposition(|(file, _)| !file);
+    let kept = match (first, last) {
+        (Some(a), Some(b)) => &parts[a..=b],
+        _ => &parts[..],
+    };
+    kept.iter()
+        .map(|(_, s)| s.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The file a mention names, by its name: only for what reads as a path (`a/b`, `x.pdf`), not
+/// `@someone`.
+fn file_name_of(path: &str) -> Option<String> {
+    let path = path.trim_end_matches(['/', '\\']);
+    if !(path.contains(['/', '\\'])
+        || path
+            .rsplit_once('.')
+            .is_some_and(|(s, e)| !s.is_empty() && !e.is_empty()))
+    {
+        return None;
+    }
+    let name = path.rsplit(['/', '\\']).next()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// One line without heading/quote/list markers, emphasis, code ticks or link targets.
 fn clean_line(line: &str) -> String {
-    let l = strip_markers(line);
+    let l = file_mentions_named(&strip_markers(line));
+    let l = l.as_str();
     let mut out = String::with_capacity(l.len());
     let mut rest = l;
     // [text](target) → text. A '[' opens a link only when its ']' is followed by '('.
@@ -1077,6 +1130,35 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn files_in_a_first_message_title_by_name() {
+        // Attached before the words, as a drop or the phone does: the words are the title.
+        assert_eq!(
+            title_from(
+                "@\"/Users/tobias/Library/Mobile Documents/com~apple~CloudDocs/Resume 2026.pdf\" apply to these jobs for me"
+            ),
+            "apply to these jobs for me"
+        );
+        assert_eq!(
+            title_from(
+                "What breaks at 0:03? @\"/Users/me/Library/Application Support/dev.trek.Trek/uploads/iPhone clip.mov\""
+            ),
+            "What breaks at 0:03?"
+        );
+        // Among the words: the file's name.
+        assert_eq!(
+            title_from("compare @src/old.rs with @src/new.rs please"),
+            "compare old.rs with new.rs please"
+        );
+        // Only files: their names.
+        assert_eq!(
+            title_from("@\"/Users/me/My Files/cv.pdf\" @/tmp/notes.md"),
+            "cv.pdf notes.md"
+        );
+        // Not a path: left as typed.
+        assert_eq!(title_from("ask @tobias about it"), "ask @tobias about it");
+    }
 
     #[test]
     fn titles_come_from_what_the_user_typed() {
