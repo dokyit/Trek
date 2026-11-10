@@ -10,9 +10,9 @@
 //! ```
 //!
 //! The elements are trek-mcp's to read (`trek-mcp/src/phone.rs`): Trek answers `phone_elements`
-//! with Trek Driver's list as it is, and trek-mcp makes the outline and keeps its refs. A tap
-//! by `ref` and `phone_wait` never reach Trek as such: trek-mcp asks for `phone_elements`, then
-//! taps at x/y.
+//! with Trek Driver's list as it is, and trek-mcp makes the outline (the one its computer and
+//! Simulator tools give, `trek-mcp/src/outline.rs`) and keeps its refs. A tap by `ref` and
+//! `phone_wait` never reach Trek as such: trek-mcp asks for `phone_elements`, then taps at x/y.
 
 use serde_json::{Value, json};
 
@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 pub const SERVER: &str = "trek-phone";
 
 /// What the agent is told about the tools as a whole (MCP `instructions`).
-pub const INSTRUCTIONS: &str = "The user's real iPhone, plugged into this Mac or on its Wi-Fi. Trek taps and types on it through Trek Driver while it's unlocked (over the cable, or over Wi-Fi with no cable; if Trek's iPhone app was built here), as a Bluetooth keyboard and mouse (an iPhone on another Apple Account), or through macOS's iPhone Mirroring (connects only while the iPhone is locked and nearby); phone_status says which, and where the screen comes from. If a tool says the user must lock or unlock something, ask them rather than retrying. The user watches in Trek's iPhone tool, so act as you would with them looking over your shoulder. Start with phone_elements: the screen as an outline in which what you can tap carries a ref (e12) for phone_tap, kept while it stays on screen; take fresh elements after acting, or phone_wait. Take a phone_screenshot when how it looks matters, or when there are no elements (they need Trek Driver); x/y for phone_tap and phone_swipe are pixels in the latest one. If a tool says the outcome is unknown, look before repeating it. Apps and files go over the cable (or Wi-Fi): phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file. One agent drives the phone at a time: call phone_release when you're done with it. This is the user's own phone: never send messages, buy, delete things, or change settings unless the user asked for exactly that. If a tool says the user took over the iPhone, stop using it and wait for them.";
+pub const INSTRUCTIONS: &str = "The user's real iPhone, plugged into this Mac or on its Wi-Fi. Trek taps and types on it through Trek Driver while it's unlocked (over the cable, or over Wi-Fi with no cable; if Trek's iPhone app was built here), as a Bluetooth keyboard and mouse (an iPhone on another Apple Account), or through macOS's iPhone Mirroring (connects only while the iPhone is locked and nearby); phone_status says which, and where the screen comes from. If a tool says the user must lock or unlock something, ask them rather than retrying. The user watches in Trek's iPhone tool, so act as you would with them looking over your shoulder. Start with phone_elements: the screen as an outline in which what you can tap carries a ref (e12) for phone_tap, kept while it stays on screen; take fresh elements after acting, or phone_wait. Take a phone_screenshot when how it looks matters, or when there are no elements (they need Trek Driver); x/y for phone_tap and phone_swipe are pixels in the latest one, as the outline's frames are. If a tool says the outcome is unknown, look before repeating it. Apps and files go over the cable (or Wi-Fi): phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file. One agent drives the phone at a time: call phone_release when you're done with it. This is the user's own phone: never send messages, buy, delete things, or change settings unless the user asked for exactly that. If a tool says the user took over the iPhone, stop using it and wait for them.";
 
 fn object(props: Value, required: &[&str]) -> Value {
     json!({
@@ -51,15 +51,19 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "phone_elements",
-            "The iPhone's screen as an accessibility outline: the app in front (or the Home Screen, or a system alert), then a line per control or text with its type, label, state and value. What can be tapped carries a ref like [ref=e12] for phone_tap; each line has its box in phone_screenshot's pixels, (left,top width×height). A secure field's value is never shown. Needs Trek Driver.",
+            "The iPhone's screen as an outline, one element a line: the app in front (or the Home Screen, or a system alert), then each control or text with its role, name, id, value, state and frame (x,y,width,height in phone_screenshot pixels), with a ref like [ref=e12] on each one you can tap. A secure field's value is never shown. Needs Trek Driver.",
             object(
-                json!({ "filter": { "type": "string", "description": "Only elements whose type, label, value or identifier contains this (any case)." } }),
+                json!({
+                    "filter": { "type": "string", "description": "Only elements whose role, name or id contains this" },
+                    "interactive_only": { "type": "boolean", "description": "Only those you can tap" },
+                    "max": { "type": "integer", "description": "Most elements shown (default 150)" }
+                }),
                 &[],
             ),
         ),
         (
             "phone_tap",
-            "Tap an element by its ref from phone_elements (its centre; refused if it's gone or changed: take fresh elements), or the screen at (x, y), pixels in the latest phone_screenshot. hold_ms makes it a long press (600 or more opens context menus).",
+            "Tap an element by its ref from phone_elements (its centre; refused if it's gone, moved or changed: take fresh elements), or the screen at (x, y), pixels in the latest phone_screenshot. hold_ms makes it a long press (600 or more opens context menus).",
             object(
                 json!({
                     "ref": { "type": "string", "description": "An element's ref, e.g. \"e12\", instead of x and y." },
@@ -72,7 +76,7 @@ pub fn tools() -> Vec<(&'static str, &'static str, Value)> {
         ),
         (
             "phone_wait",
-            "Wait until text shows on the iPhone's screen (in an element's label, value or identifier, any case) or the element with ref is there; with gone, until it isn't. Gives up after timeout_ms (default 10000, at most 60000); returns the fresh outline either way. Needs Trek Driver.",
+            "Wait until text shows on the iPhone's screen (in an element's name, value or id, any case) or the element with ref is there; with gone, until it isn't. Gives up after timeout_ms (default 10000, at most 60000); returns the fresh outline either way. Needs Trek Driver.",
             object(
                 json!({
                     "text": { "type": "string" },

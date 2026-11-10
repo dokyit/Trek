@@ -91,7 +91,7 @@ fn element(v: &Value) -> Option<Node> {
     let role = if subrole == "AXSearchField" {
         "search field".to_string()
     } else {
-        role_words(kind)
+        outline::role_words(kind)
     };
     let value = string(&["AXValue", "value"]).filter(|_| !secure);
     let frame = o.get("frame").or_else(|| o.get("rect")).and_then(|f| {
@@ -148,11 +148,7 @@ fn element(v: &Value) -> Option<Node> {
         && !name.is_empty()
         && matches!(role.as_str(), "other" | "group" | "generic");
     let checked = matches!(role.as_str(), "switch" | "toggle" | "checkbox")
-        .then(|| match value.as_deref() {
-            Some("1") | Some("true") | Some("on") => Some(Checked::Yes),
-            Some("0") | Some("false") | Some("off") => Some(Checked::No),
-            _ => None,
-        })
+        .then(|| Checked::of(value.as_deref()))
         .flatten();
     let off = |keys: &[&str]| {
         keys.iter()
@@ -172,26 +168,6 @@ fn element(v: &Value) -> Option<Node> {
         children,
         ..Node::default()
     })
-}
-
-/// An element type in plain words: `StaticText` is `text`, `NavigationBar` a `navigation bar`.
-fn role_words(kind: &str) -> String {
-    match kind {
-        "StaticText" | "Text" => return "text".into(),
-        "SecureTextField" => return "text field".into(),
-        "" => return "unknown".into(),
-        _ => {}
-    }
-    let mut words = String::new();
-    let mut after_lower = false;
-    for c in kind.chars() {
-        if c.is_uppercase() && after_lower {
-            words.push(' ');
-        }
-        after_lower = c.is_lowercase();
-        words.extend(c.to_lowercase());
-    }
-    words
 }
 
 /// The screen's size in device points: the application's own frame, which holds everything.

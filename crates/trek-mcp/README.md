@@ -39,8 +39,9 @@ agent never has to think about Retina or downscaling. An element's frame is in t
 Elements follow the Browser tools' `browser_snapshot`: an element keeps its ref while it stays, and a
 ref is acted on only after the element is found again and proven the same (the same object, role and
 name, at its place in the tree, about where it was). The outline and its refs are `src/outline.rs`,
-shared with the Simulator; reading a Mac window's tree is `src/desktop/ax.rs`. Windows has no elements
-yet: `elements` and `press` aren't listed there, and `click`, `type_text` and `wait` take no ref.
+shared with the Simulator and the iPhone (`sim_elements`, `phone_elements`: one format, one set of
+checks); reading a Mac window's tree is `src/desktop/ax.rs`. Windows has no elements yet: `elements`
+and `press` aren't listed there, and `click`, `type_text` and `wait` take no ref.
 
 Permissions belong to the process that launched trek-mcp (Trek, or the terminal running the agent):
 
@@ -88,6 +89,30 @@ Trek runs it in the main window's Browser. The tools and their arguments are in
 `browser_screenshot`, `browser_text`, `browser_eval`). A screenshot comes back from Trek as a PNG file,
 which trek-mcp reads into an image block and removes. Approvals (passwords, forms sent to another
 site, downloads, `browser_eval`) are Trek's, on the thread's approval card, by its access level.
+
+### `phone`
+
+The user's real iPhone, through Trek's iPhone tool (macOS). As with `browser`, every call goes to the
+Trek that started the session; the tools and their arguments are in `crates/trek-ipc/src/phone.rs`.
+Trek answers `phone_elements` with Trek Driver's list of the screen as it is, and trek-mcp
+(`src/phone.rs`) reads it into the same outline as `elements` and `sim_elements`, frames in
+`phone_screenshot` pixels:
+
+```text
+Elements of the iPhone's screen. frame=x,y,width,height in phone_screenshot pixels (552x1200).
+App: Settings (com.apple.Preferences)
+
+- application "Settings" [id=com.apple.Preferences] [frame=0,0,552,1200]:
+  - collection view [id=sidebar] [frame=0,0,552,1200]:
+    - button "General" [ref=e2] [id=com.apple.settings.general] [frame=22,522,508,71]
+    - switch "Airplane Mode" [ref=e3] [unchecked] [frame=22,594,508,71]
+```
+
+What the phone adds: the app in front by name and bundle id, and `[id=…]`, an element's
+accessibility identifier (`outline::Ids`; `filter` and `phone_wait`'s `text` find it too). A secure
+field is `[secure]` and never has a value. `phone_tap` by `ref` reads the screen again and taps the
+element's centre only when `Refs::find` proves it the same one; `phone_wait` waits for `text`, or for
+the element a `ref` names wherever on the screen it is (`Refs::has`).
 
 ## How Trek passes it to agents
 

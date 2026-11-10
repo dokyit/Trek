@@ -1,5 +1,5 @@
 //! Elements as an outline: what an accessibility tree (a Mac window's for computer use, an iOS
-//! Simulator's screen) reads as for an agent, in the style of the Browser tools'
+//! Simulator's screen, the iPhone's) reads as for an agent, in the style of the Browser tools'
 //! `browser_snapshot`: one line per element with its role, name, value, state and frame, and a
 //! ref (`e12`) on each one that can be acted on.
 //!
@@ -20,11 +20,16 @@
 //! neighbours. Anything else is refused, with what changed and the advice to read the elements
 //! again.
 //!
-//! To use it for another target (a phone, say): read the tree into `Node`s, with `number` for
-//! their places when the tree is read whole each time; keep one `Refs::new("<the tool that
-//! lists>")` per target; answer the listing tool with `Refs::outline` (a `View` says how frames
-//! map to the screenshot's pixels and what's shown); before acting on a ref, read again and take
-//! the node from `Refs::find`; wait with `has_text` and `has_element`.
+//! To use it for another target (as the iPhone's tools do, in `phone.rs`): read the tree into
+//! `Node`s (`role_words` for an iOS type's name), with `number` for their places when the tree is
+//! read whole each time; keep one `Refs::new("<the tool that lists>")` per target; answer the
+//! listing tool with `Refs::outline` (a `View` says how frames map to the screenshot's pixels and
+//! what's shown); before acting on a ref, read again and take the node from `Refs::find`; wait
+//! with `has_text` and `has_element`, or for one element by its ref with `Refs::has`.
+//!
+//! A target whose elements have accessibility identifiers (what an app's developer named them)
+//! gives them beside the tree, as [`Ids`], to `Refs::outline_with`: each is written as `[id=…]`.
+//! The others give none and read as they did.
 // Windows computer use has no elements yet: the types are part of `Desktop`, the rest is unused.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
@@ -37,9 +42,10 @@ use serde_json::Value;
 pub const DEFAULT_MAX: usize = 150;
 pub const MOST: usize = 1000;
 
-/// The longest name and value shown, in characters.
+/// The longest name, value and identifier shown, in characters.
 const NAME_MAX: usize = 120;
 const VALUE_MAX: usize = 200;
+const ID_MAX: usize = 80;
 
 /// How many refs are remembered: past it, those listed longest ago are forgotten.
 const KEPT_MAX: usize = 4000;
@@ -76,6 +82,17 @@ pub enum Checked {
     Yes,
     No,
     Mixed,
+}
+
+impl Checked {
+    /// What a switch's value says of it, as iOS gives one: `1` or `0`.
+    pub fn of(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("1" | "true" | "on") => Some(Checked::Yes),
+            Some("0" | "false" | "off") => Some(Checked::No),
+            _ => None,
+        }
+    }
 }
 
 /// What an element can be asked to do itself, through accessibility: no pointer, no key.
@@ -186,6 +203,59 @@ impl Node {
     }
 }
 
+/// An iOS element type in plain words, as a `Node`'s role: `StaticText` is `text`,
+/// `NavigationBar` a `navigation bar`. (A secure text field is a `text field`: `Node::secure`
+/// says the rest.)
+pub fn role_words(kind: &str) -> String {
+    match kind {
+        "StaticText" | "Text" => return "text".into(),
+        "SecureTextField" => return "text field".into(),
+        "" => return "unknown".into(),
+        _ => {}
+    }
+    let mut words = String::new();
+    let mut after_lower = false;
+    for c in kind.chars() {
+        if c.is_uppercase() && after_lower {
+            words.push(' ');
+        }
+        after_lower = c.is_lowercase();
+        words.extend(c.to_lowercase());
+    }
+    words
+}
+
+/// The accessibility identifiers of a tree's elements (what an app's developer named them:
+/// `com.apple.settings.general`), where a platform reads them, by each element's `place`. An
+/// outline given them (`Refs::outline_with`) writes `[id=…]` on the element's line, its filter
+/// finds them, and an element with nothing but one still says something. They sit beside the
+/// tree, not in `Node`, so a platform without them builds its nodes as it did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Ids(HashMap<Vec<usize>, String>);
+
+impl Ids {
+    /// The element at `place` goes by `id` (an empty one is none).
+    pub fn set(&mut self, place: &[usize], id: &str) {
+        let id = id.trim();
+        if !id.is_empty() {
+            self.0.insert(place.to_vec(), id.to_string());
+        }
+    }
+
+    /// `n`'s identifier; empty when it has none.
+    pub fn of(&self, n: &Node) -> &str {
+        self.0.get(&n.place).map_or("", String::as_str)
+    }
+
+    /// Whether any identifier contains `text`, whatever its case: beside `has_text`, for a wait.
+    pub fn has_text(&self, text: &str) -> bool {
+        let needle = text.trim().to_lowercase();
+        self.0
+            .values()
+            .any(|id| id.to_lowercase().contains(&needle))
+    }
+}
+
 fn described(role: &str, name: &str) -> String {
     let role = if role.is_empty() { "element" } else { role };
     if name.is_empty() {
@@ -219,6 +289,16 @@ pub fn at<'a>(roots: &'a [Node], place: &[usize]) -> Option<&'a Node> {
     Some(node)
 }
 
+/// The elements beside the one at `place`, itself among them, in a tree numbered by position.
+fn siblings<'a>(roots: &'a [Node], place: &[usize]) -> &'a [Node] {
+    match place.split_last() {
+        Some((_, parent)) if !parent.is_empty() => {
+            at(roots, parent).map_or(&[][..], |p| p.children.as_slice())
+        }
+        _ => roots,
+    }
+}
+
 fn any(roots: &[Node], test: &dyn Fn(&Node) -> bool) -> bool {
     roots.iter().any(|n| test(n) || any(&n.children, test))
 }
@@ -243,7 +323,7 @@ pub fn has_element(roots: &[Node], what: &str) -> bool {
 /// How an outline is written.
 #[derive(Debug, Clone, Copy)]
 pub struct View<'a> {
-    /// Only elements whose role or name contains this, listed flat.
+    /// Only elements whose role or name (or identifier, given `Ids`) contains this, listed flat.
     pub filter: Option<&'a str>,
     /// Only elements that can be acted on (and headings), listed flat.
     pub interactive_only: bool,
@@ -337,6 +417,8 @@ struct Line<'a> {
     /// Lines of its children follow.
     parent: bool,
     around: u64,
+    /// Its identifier, where the platform gave one (`Ids`); else empty.
+    id: &'a str,
 }
 
 /// The roles and names of `siblings`, as one number.
@@ -353,12 +435,15 @@ fn collect<'a>(
     nodes: &'a [Node],
     depth: usize,
     parent: Option<&'a Node>,
+    ids: &'a Ids,
     lines: &mut Vec<Line<'a>>,
 ) {
     let around = around(nodes);
     for n in nodes {
-        if n.is_plain() {
-            collect(&n.children, depth, parent, lines);
+        // An identifier is something said: what has one is listed, whatever else it lacks.
+        let id = ids.of(n);
+        if n.is_plain() && id.is_empty() {
+            collect(&n.children, depth, parent, ids, lines);
             continue;
         }
         // Its parent's own label said again inside it (in whole, or for a control whose label
@@ -367,7 +452,8 @@ fn collect<'a>(
             let (mine, theirs) = (n.name.trim(), p.name.trim());
             mine == theirs || (p.acts && theirs.contains(mine))
         });
-        let mute = n.name.is_empty() && n.value.as_deref().is_none_or(str::is_empty);
+        let mute =
+            n.name.is_empty() && n.value.as_deref().is_none_or(str::is_empty) && id.is_empty();
         if (n.is_text() && (mute || says_again))
             || (n.role == "image" && mute && !n.acts && n.children.is_empty())
         {
@@ -377,7 +463,8 @@ fn collect<'a>(
             [only]
                 if only.is_text()
                     && n.name.is_empty()
-                    && n.value.as_deref().is_none_or(str::is_empty) =>
+                    && n.value.as_deref().is_none_or(str::is_empty)
+                    && ids.of(only).is_empty() =>
             {
                 Some(only.name.as_str())
             }
@@ -390,9 +477,10 @@ fn collect<'a>(
             words,
             parent: false,
             around,
+            id,
         });
         if words.is_none() {
-            collect(&n.children, depth + 1, Some(n), lines);
+            collect(&n.children, depth + 1, Some(n), ids, lines);
             lines[at].parent = lines.len() > at + 1;
         }
     }
@@ -402,14 +490,16 @@ fn collect_flat<'a>(
     nodes: &'a [Node],
     view: &View,
     needle: Option<&str>,
+    ids: &'a Ids,
     lines: &mut Vec<Line<'a>>,
 ) {
     let around = around(nodes);
     for n in nodes {
+        let id = ids.of(n);
         let wanted = (!view.interactive_only || n.acts || n.role == "heading")
             && match needle {
-                Some(needle) => n.matches(needle),
-                None => !n.is_plain(),
+                Some(needle) => n.matches(needle) || id.to_lowercase().contains(needle),
+                None => !(n.is_plain() && id.is_empty()),
             };
         if wanted {
             lines.push(Line {
@@ -418,9 +508,10 @@ fn collect_flat<'a>(
                 words: None,
                 parent: false,
                 around,
+                id,
             });
         }
-        collect_flat(&n.children, view, needle, lines);
+        collect_flat(&n.children, view, needle, ids, lines);
     }
 }
 
@@ -447,6 +538,12 @@ impl Refs {
     /// Write `roots` out, giving each element shown that can be acted on its ref: the one it had
     /// if it was listed before, else a new one.
     pub fn outline(&mut self, roots: &[Node], view: &View) -> Outline {
+        self.outline_with(roots, view, &Ids::default())
+    }
+
+    /// `outline`, for a tree whose elements have identifiers: each is written after the ref, as
+    /// `[id=…]` (unless it only repeats the name), and `view`'s filter finds them too.
+    pub fn outline_with(&mut self, roots: &[Node], view: &View, ids: &Ids) -> Outline {
         self.round += 1;
         let needle = view
             .filter
@@ -454,9 +551,9 @@ impl Refs {
             .filter(|f| !f.is_empty());
         let mut lines = vec![];
         if needle.is_some() || view.interactive_only {
-            collect_flat(roots, view, needle.as_deref(), &mut lines);
+            collect_flat(roots, view, needle.as_deref(), ids, &mut lines);
         } else {
-            collect(roots, 0, None, &mut lines);
+            collect(roots, 0, None, ids, &mut lines);
         }
         let shown = lines.len().min(view.max.max(1));
         let more = lines.len() - shown;
@@ -479,6 +576,9 @@ impl Refs {
             let id = n.acts.then(|| self.give(n, line.around));
             if let Some(id) = id {
                 s.push_str(&format!(" [ref=e{id}]"));
+            }
+            if !line.id.is_empty() && line.id != n.name.trim() {
+                s.push_str(&format!(" [id={}]", clip(line.id, ID_MAX)));
             }
             if n.focused {
                 focused = Some(match id {
@@ -666,13 +766,10 @@ impl Refs {
         let now = at(roots, &seen.place);
         self.prove(r, now)?;
         let now = now.expect("proven to be there");
-        let siblings = match seen.place.split_last() {
-            Some((_, parent)) if !parent.is_empty() => {
-                at(roots, parent).map_or(&[][..], |p| p.children.as_slice())
-            }
-            _ => roots,
-        };
-        if seen.around.is_some_and(|was| was != around(siblings)) {
+        if seen
+            .around
+            .is_some_and(|was| was != around(siblings(roots, &seen.place)))
+        {
             return Err(format!(
                 "What's around {} has changed since you read it, so it may not be the same one. Nothing was done. Read the elements again ({}) and use the ref it has now.",
                 seen.describe(),
@@ -680,6 +777,23 @@ impl Refs {
             ));
         }
         Ok((seen, now))
+    }
+
+    /// Whether the element ref `r` names is in `roots`, a fresh reading of the whole tree
+    /// numbered by position: the one a new outline would give the same ref, wherever on the
+    /// screen it is now (the same object where the platform can tell, else the same role and
+    /// name at its place among the same neighbours). For waiting on an element to show or go:
+    /// before acting on one, `find` also wants it where it was. `Err`: no such ref.
+    pub fn has(&self, r: &str, roots: &[Node]) -> Result<bool, String> {
+        let seen = self.get(r)?;
+        Ok(match seen.identity {
+            Some(identity) => any(roots, &|n| n.identity == Some(identity)),
+            None => at(roots, &seen.place).is_some_and(|now| {
+                now.role == seen.role
+                    && now.name == seen.name
+                    && seen.around == Some(around(siblings(roots, &seen.place)))
+            }),
+        })
     }
 }
 
@@ -1208,6 +1322,132 @@ mod tests {
         assert!(!has_text(&roots, "hunter2") && !has_text(&roots, "Welcome home"));
         assert!(has_element(&roots, "sign in") && has_element(&roots, "Checkbox"));
         assert!(!has_element(&roots, "ada@example"), "a value isn't a name");
+    }
+
+    #[test]
+    fn identifiers_are_written_and_found_where_a_platform_has_them() {
+        let mut roots = sign_in();
+        // An app's own names for its things: on a field, on the group that says nothing else
+        // (so it's listed now), on a row's only words, and one that only repeats a name.
+        roots[0]
+            .children
+            .insert(0, with(node("group", ""), vec![node("text", "Beta")]));
+        number(&mut roots);
+        let mut ids = Ids::default();
+        ids.set(&[0, 2, 0], "login.email");
+        ids.set(&[0, 2], "login.form");
+        ids.set(&[0, 4, 0], "login.status");
+        ids.set(&[0, 3], " Help ");
+        ids.set(&[0, 0], "");
+        let mut refs = Refs::new("elements");
+        let out = refs.outline_with(&roots, &View::default(), &ids);
+        let expected = "\
+- window \"Sign in\" [frame=0,0,400,300]:
+  - text \"Beta\"
+  - heading \"Welcome back\" [frame=20,10,200,20]
+  - group [id=login.form]:
+    - text field \"Email\" [ref=e1] [id=login.email] [focused] [actions=confirm] [frame=20,40,200,22]: ada@example.com
+    - text field \"Password\" [ref=e2] [secure] [frame=20,70,200,22]
+    - checkbox \"Remember me\" [ref=e3] [unchecked] [frame=20,100,120,18]
+  - button \"Help\" [ref=e4] [frame=340,10,40,20]
+  - row [frame=20,160,360,20]:
+    - text \"Signed out 2 minutes ago\" [id=login.status]
+  - button \"More\" [ref=e5] [collapsed] [frame=20,130,60,24]
+  - button \"Sign in\" [ref=e6] [disabled] [frame=240,130,80,24]
+";
+        assert_eq!(out.text, expected);
+        // A filter finds an identifier as it finds a role or a name, and a wait's text does.
+        let filtered = refs.outline_with(
+            &roots,
+            &View {
+                filter: Some("LOGIN.E"),
+                ..View::default()
+            },
+            &ids,
+        );
+        assert_eq!(
+            filtered.text,
+            "- text field \"Email\" [ref=e1] [id=login.email] [focused] [actions=confirm] [frame=20,40,200,22]: ada@example.com\n"
+        );
+        assert!(ids.has_text("Login.Status") && !ids.has_text("logout"));
+        assert!(!has_text(&roots, "login.status"), "not a name or a value");
+        assert_eq!(ids.of(&roots[0].children[2]), "login.form");
+        assert_eq!(ids.of(&roots[0]), "");
+        // Without them the same tree reads as it always did, with the same refs.
+        let plain = refs.outline(&roots, &View::default());
+        assert!(!plain.text.contains("[id=") && !plain.text.contains("- group"));
+        assert!(
+            plain
+                .text
+                .contains("  - text field \"Email\" [ref=e1] [focused]"),
+            "{}",
+            plain.text
+        );
+        assert!(
+            plain
+                .text
+                .contains("  - row [frame=20,160,360,20]: Signed out 2 minutes ago\n")
+        );
+    }
+
+    #[test]
+    fn an_element_is_waited_on_by_its_ref_wherever_it_is() {
+        let mut refs = Refs::new("elements");
+        let mut roots = sign_in();
+        roots[0].children[5].identity = Some(77);
+        refs.outline(&roots, &View::default());
+        // As read: both there, to act on and to wait for.
+        assert_eq!(refs.has("e3", &roots), Ok(true));
+        assert_eq!(refs.has("[ref=e6]", &roots), Ok(true));
+        assert!(refs.has("e99", &roots).unwrap_err().contains("No element"));
+        // Moved down the window: not to be acted on unseen, but it hasn't gone.
+        let mut lower = roots.clone();
+        lower[0].children[1].children[2].frame.as_mut().unwrap().y += 30.0;
+        lower[0].children[5].frame.as_mut().unwrap().y += 30.0;
+        assert!(refs.find("e3", &lower).is_err() && refs.find("e6", &lower).is_err());
+        assert_eq!(refs.has("e3", &lower), Ok(true));
+        assert_eq!(refs.has("e6", &lower), Ok(true));
+        // The same object at another place in the tree is still it. One known only by its place
+        // and neighbours is there while a new outline would give it the same ref: not at
+        // another place, nor beside another neighbour.
+        let mut shifted = roots.clone();
+        shifted[0].children.insert(0, node("heading", "New"));
+        number(&mut shifted);
+        assert_eq!(refs.has("e6", &shifted), Ok(true));
+        assert_eq!(refs.has("e3", &shifted), Ok(false));
+        let mut renamed = roots.clone();
+        renamed[0].children[1].children[0].name = "Phone".into();
+        assert_eq!(refs.has("e3", &renamed), Ok(false));
+        let out = refs.outline(&renamed, &View::default());
+        assert!(
+            out.text.contains("\"Remember me\" [ref=e9]") && out.text.contains("[ref=e6]"),
+            "{}",
+            out.text
+        );
+        // Gone.
+        let mut gone = roots.clone();
+        gone[0].children.truncate(1);
+        assert_eq!(refs.has("e3", &gone), Ok(false));
+        assert_eq!(refs.has("e6", &gone), Ok(false));
+    }
+
+    #[test]
+    fn ios_types_read_in_plain_words() {
+        for (kind, words) in [
+            ("StaticText", "text"),
+            ("Button", "button"),
+            ("NavigationBar", "navigation bar"),
+            ("CollectionView", "collection view"),
+            ("SecureTextField", "text field"),
+            ("ActivityIndicator", "activity indicator"),
+            ("", "unknown"),
+        ] {
+            assert_eq!(role_words(kind), words);
+        }
+        assert_eq!(Checked::of(Some("1")), Some(Checked::Yes));
+        assert_eq!(Checked::of(Some("0")), Some(Checked::No));
+        assert_eq!(Checked::of(Some("50%")), None);
+        assert_eq!(Checked::of(None), None);
     }
 
     #[test]

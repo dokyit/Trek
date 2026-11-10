@@ -3,20 +3,24 @@
 //! for one agent at a time, shows it live, and decides what needs the user's approval. See
 //! `trek_ipc::phone` for the tools.
 //!
-//! The screen's elements are read here ([`outline`]): Trek answers `phone_elements` with Trek
-//! Driver's list as it is, and this makes the outline agents read, gives what can be tapped its
-//! refs and keeps them from one reading to the next (an element keeps its ref while it stays,
-//! as in the Browser's snapshot). `phone_tap` with a `ref` reads the screen again, finds the
-//! element, and taps its centre only when it's still the same one; `phone_wait` reads until
-//! what's waited for shows or goes. Both end as plain `phone_elements` and `phone_tap` (x, y)
-//! calls to Trek, so the lease, the strip and Stop work as for any other call. Nothing here
-//! sends a tap twice: one whose outcome Trek couldn't tell comes back saying so.
+//! The screen's elements are read here: Trek answers `phone_elements` with Trek Driver's list as
+//! it is, [`Screen::parse`] reads that into the tree `outline.rs` writes out (the outline computer
+//! use and the Simulator give, so the three read the same way), and its `Refs` give what can be
+//! tapped its refs and keep them from one reading to the next. `phone_tap` with a `ref` reads the
+//! screen again, finds the element, and taps its centre only when it's still the same one;
+//! `phone_wait` reads until what's waited for shows or goes. Both end as plain `phone_elements`
+//! and `phone_tap` (x, y) calls to Trek, so the lease, the strip and Stop work as for any other
+//! call. Nothing here sends a tap twice: one whose outcome Trek couldn't tell comes back saying
+//! so.
 //!
 //! `trek-mcp phone-device …` is the same phone's apps and files from a shell, without Trek or
 //! Xcode (the phone updater installs with it).
 
-use crate::rpc::{self, ToolDef, ToolSet};
+use crate::outline::{self, Checked, Frame, Ids, Node, Refs, View};
+use crate::rpc::{self, ToolDef, ToolSet, opt_f64, opt_str};
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -33,8 +37,8 @@ impl Ask for trek_ipc::Client {
 
 pub struct Phone {
     trek: Option<Box<dyn Ask>>,
-    /// The refs given to what was on the screen when it was last read.
-    refs: outline::Refs,
+    /// The refs `phone_elements` has given out.
+    refs: Refs,
     /// How long `phone_wait` rests between two readings of the screen.
     pause: Duration,
 }
@@ -51,7 +55,7 @@ impl Phone {
     fn with(trek: Option<Box<dyn Ask>>) -> Self {
         Self {
             trek,
-            refs: outline::Refs::default(),
+            refs: Refs::new("phone_elements"),
             pause: Duration::from_millis(400),
         }
     }
@@ -65,38 +69,83 @@ impl Phone {
 
     /// The screen as Trek Driver lists it now. On the Bluetooth and iPhone Mirroring routes
     /// Trek's answer is the error saying elements need the driver.
-    fn read(&mut self) -> Result<outline::Screen, String> {
+    fn read(&mut self) -> Result<Screen, String> {
         let listed = self.ask("phone_elements", &json!({}))?;
-        outline::Screen::parse(&listed)
+        Screen::parse(&listed)
+    }
+
+    /// What `phone_elements` answers for a screen read as `screen`: how a frame reads and the
+    /// app in front, then the outline, with the phone's refs given out.
+    fn outlined(
+        &mut self,
+        screen: &Screen,
+        filter: Option<&str>,
+        interactive_only: bool,
+        max: usize,
+    ) -> String {
+        let view = screen.view(filter, interactive_only, max);
+        let out = self.refs.outline_with(&screen.roots, &view, &screen.ids);
+        let mut said = format!(
+            "Elements of the iPhone's screen. frame=x,y,width,height in phone_screenshot pixels ({}x{}).\n",
+            screen.picture.0.round(),
+            screen.picture.1.round()
+        );
+        if let Some(app) = screen.front() {
+            said.push_str(&format!("App: {app}\n"));
+        }
+        if let Some(focused) = &out.focused {
+            said.push_str(&format!("Focused: {focused}\n"));
+        }
+        said.push('\n');
+        match (out.shown + out.more, filter) {
+            (0, Some(filter)) => said.push_str(&format!(
+                "(No element's role, name or id contains {filter:?}.)\n"
+            )),
+            (0, None) => said.push_str(
+                "(Nothing here to read or tap: the app may draw everything itself. phone_screenshot shows it.)\n",
+            ),
+            _ => said.push_str(&out.text),
+        }
+        if screen.more > 0 {
+            said.push_str(&format!(
+                "… ({} more on the screen weren't read: scroll, and read the elements again.)\n",
+                screen.more
+            ));
+        }
+        if screen.partial {
+            said.push_str("… (The screen took too long to read: this may not be all of it.)\n");
+        }
+        said
     }
 
     /// `phone_elements`: the outline, each element that can be tapped with its ref.
     fn elements(&mut self, args: &Value) -> Result<String, String> {
+        let max = opt_f64(args, "max")?.map_or(outline::DEFAULT_MAX, |m| {
+            (m.max(1.0) as usize).min(outline::MOST)
+        });
+        let interactive_only = args["interactive_only"].as_bool() == Some(true);
         let screen = self.read()?;
-        let refs = self.refs.assign(&screen);
-        let filter = args["filter"]
-            .as_str()
-            .map(str::trim)
-            .filter(|f| !f.is_empty());
-        Ok(outline::text(&screen, &refs, filter))
+        Ok(self.outlined(&screen, opt_str(args, "filter"), interactive_only, max))
     }
 
-    /// `phone_tap` with a `ref`: the screen read again, the element found in it, and its centre
-    /// tapped when it's still the same one. Otherwise nothing is tapped.
-    fn tap_ref(&mut self, name: &str, args: &Value) -> Result<String, String> {
-        let name = name.trim();
+    /// `phone_tap` with a `ref`: the screen read again, the element found in it and proven the
+    /// same (`Refs::find`), and its centre tapped. Otherwise nothing is tapped.
+    fn tap_ref(&mut self, r: &str, args: &Value) -> Result<String, String> {
+        let r = r.trim();
         let screen = self.read()?;
-        let at = self.refs.find(name, &screen);
-        // What was just read is what the refs stand for from here on.
-        self.refs.assign(&screen);
-        let element = &screen.elements[at?];
-        let what = outline::what(element);
-        if !element.enabled {
+        let (_, now) = self.refs.find(r, &screen.roots)?;
+        let what = screen.what(now);
+        if now.disabled {
             return Err(format!(
-                "{name} ({what}) is disabled now, so a tap would do nothing: nothing was tapped. Take fresh phone_elements to see why, or tap by x/y if you mean it."
+                "{r} ({what}) is disabled now, so a tap would do nothing: nothing was tapped. Take fresh phone_elements to see why, or tap by x/y if you mean it."
             ));
         }
-        let (x, y) = screen.centre(element.frame);
+        let Some(frame) = now.frame else {
+            return Err(format!(
+                "{r} ({what}) doesn't say where it is, so there's nowhere to tap: nothing was tapped."
+            ));
+        };
+        let (x, y) = screen.centre(frame);
         let mut params = json!({ "x": x, "y": y, "what": what });
         if let Some(hold) = args.get("hold_ms").filter(|h| !h.is_null()) {
             params["hold_ms"] = hold.clone();
@@ -115,8 +164,8 @@ impl Phone {
     /// outline as last read comes back either way, as an error when the time ran out.
     fn wait(&mut self, args: &Value) -> Result<String, String> {
         let wanted = |key: &str| args[key].as_str().map(str::trim).filter(|v| !v.is_empty());
-        let (text, name) = (wanted("text"), wanted("ref"));
-        if text.is_none() && name.is_none() {
+        let (text, r) = (wanted("text"), wanted("ref"));
+        if text.is_none() && r.is_none() {
             return Err(
                 "phone_wait takes text (to find in an element) or ref, and gone to wait for it to go."
                     .into(),
@@ -130,32 +179,23 @@ impl Phone {
                 .clamp(200, WAIT_MAX_MS),
         );
         let started = Instant::now();
-        let mut what = match (name, text) {
-            (Some(name), _) => name.to_string(),
-            (None, text) => Value::from(text.unwrap_or_default()).to_string(),
-        };
         loop {
             let screen = self.read()?;
-            let there = match name {
-                Some(name) => match self.refs.find(name, &screen) {
-                    Ok(at) => {
-                        what = format!("{name} ({})", outline::what(&screen.elements[at]));
-                        true
-                    }
-                    // One that left the screen at an earlier reading is gone, which is what
-                    // `gone` waits for; one never given, or gone and waited for to show, can't
-                    // be found whatever comes.
-                    Err(why) if !self.refs.knows(name) && !(gone && self.refs.gave(name)) => {
-                        return Err(why);
-                    }
-                    Err(_) => false,
-                },
-                None => screen.says(text.unwrap_or_default()),
+            let (what, there) = match r {
+                // The element the ref names, wherever on the screen it is now. A ref never
+                // given can't be waited for, whatever comes.
+                Some(r) => (
+                    format!("{r} ({})", self.refs.get(r)?.describe()),
+                    self.refs.has(r, &screen.roots)?,
+                ),
+                None => {
+                    let text = text.unwrap_or_default();
+                    (Value::from(text).to_string(), screen.says(text))
+                }
             };
             let late = started.elapsed() >= limit;
             if there != gone || late {
-                let refs = self.refs.assign(&screen);
-                let outline = outline::text(&screen, &refs, None);
+                let outline = self.outlined(&screen, None, false, outline::DEFAULT_MAX);
                 let after = format!("{:.1} s", started.elapsed().as_secs_f32());
                 return if there != gone {
                     Ok(format!(
@@ -204,8 +244,8 @@ impl ToolSet for Phone {
             "phone_elements" => self.elements(args)?,
             "phone_wait" => self.wait(args)?,
             "phone_tap" if given("ref") => {
-                let name = args["ref"].as_str().unwrap_or_default().to_string();
-                self.tap_ref(&name, args)?
+                let r = args["ref"].as_str().unwrap_or_default().to_string();
+                self.tap_ref(&r, args)?
             }
             "phone_tap" if !(given("x") && given("y")) => {
                 return Err("phone_tap takes ref (from phone_elements), or x and y (pixels in the latest phone_screenshot).".into());
@@ -216,532 +256,322 @@ impl ToolSet for Phone {
     }
 }
 
-/// The iPhone's screen as an outline, in the Browser snapshot's manner: a line per element
-/// with its type, label, state and value; what can be tapped carries a ref; each line has its
-/// box in the pixels of `phone_screenshot`'s picture, so a ref, the outline's numbers and a
-/// screenshot all point at the same place.
-mod outline {
-    use serde_json::Value;
+/// The iPhone's screen as Trek Driver listed it, read into the tree `outline.rs` writes out:
+/// frames stay in screen points, and [`Screen::view`] says how they read in the pixels of
+/// `phone_screenshot`'s picture, so a ref, the outline's numbers and a screenshot all point at
+/// the same place.
+#[derive(Debug)]
+struct Screen {
+    /// The apps listed (the one in front; SpringBoard for the Home Screen, and alone under a
+    /// system alert), each with what's in it, numbered by place.
+    roots: Vec<Node>,
+    /// What their apps named the elements (accessibility identifiers).
+    ids: Ids,
+    /// The screen's size in points (what the driver's frames are in).
+    points: (f64, f64),
+    /// The size in pixels of the picture `phone_screenshot` gives, which x/y are read in.
+    picture: (f64, f64),
+    /// The app in front, by bundle id.
+    app: String,
+    /// Elements the driver left out past its count.
+    more: u64,
+    /// The driver's time ran out before it had read everything.
+    partial: bool,
+}
 
-    /// The most elements one outline shows; the rest are counted.
-    pub const MAX_LINES: usize = 150;
-    /// Labels and values are shown up to this many characters.
-    const MAX_TEXT: usize = 120;
-    /// How far (in points) an element may sit from where it was and still be the one that
-    /// can't be told from others by what it says.
-    const SAME_PLACE: f64 = 2.;
+/// One element of the driver's list while those inside it are still being read.
+struct Open {
+    /// How deep the driver listed it.
+    depth: u64,
+    /// The element; none when it's left out (what's inside it then belongs to the one above).
+    node: Option<Node>,
+    /// What it adds to the path of what's inside it (nothing, for an app).
+    step: String,
+}
 
-    /// One element Trek Driver listed.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Element {
-        /// Its type in lower case (`button`, `cell`, `text` for static text).
-        pub kind: String,
-        pub label: String,
-        pub identifier: String,
-        /// Never a secure field's: the driver leaves it out and says `secure`.
-        pub value: Option<String>,
-        pub secure: bool,
-        /// Its box in screen points: left, top, width, height.
-        pub frame: [f64; 4],
-        pub enabled: bool,
-        pub selected: bool,
-        pub focused: bool,
-        /// How many listed elements it sits inside.
-        pub depth: usize,
-        /// The app it belongs to, by bundle id.
-        pub app: String,
-        /// The elements it sits inside (below its app), outermost first: part of what makes it
-        /// the same element at the next reading.
-        pub path: String,
+/// The innermost open element is read whole: it goes into the one it sits in.
+fn close(open: &mut Vec<Open>, roots: &mut Vec<Node>) {
+    let Some(Open {
+        node: Some(done), ..
+    }) = open.pop()
+    else {
+        return;
+    };
+    match open.iter_mut().rev().find_map(|o| o.node.as_mut()) {
+        Some(above) => above.children.push(done),
+        None => roots.push(done),
     }
+}
 
-    impl Element {
-        /// What it's known by from one reading to the next. Not its value (a switch that
-        /// flipped is the same switch), nor where it is.
-        fn signature(&self) -> (&str, &str, &str, &str, &str) {
-            (
-                &self.app,
-                &self.path,
-                &self.kind,
-                &self.identifier,
-                &self.label,
-            )
+impl Screen {
+    /// From Trek's answer to `phone_elements`: the driver's list (flat, nested by `depth`) as a
+    /// tree, less what only repeats the control it's in (a button's own text, listed again
+    /// inside it) and scroll indicators.
+    ///
+    /// The driver has no name for an element that lasts from one reading to the next, so what
+    /// an element says stands in for one (`Node::identity`): its app, the containers it sits
+    /// in, its type, identifier and label, when no other element on the screen says the same.
+    /// Such an element keeps its ref wherever it goes. Those that say the same as another are
+    /// told apart as the outline tells them without an identity: by their place among the same
+    /// neighbours.
+    fn parse(v: &Value) -> Result<Screen, String> {
+        let listed = v["elements"]
+            .as_array()
+            .ok_or("Trek's answer has no elements (is Trek older than this trek-mcp?).")?;
+        let points = (
+            v["width"].as_f64().unwrap_or(0.),
+            v["height"].as_f64().unwrap_or(0.),
+        );
+        if points.0 < 1. || points.1 < 1. {
+            return Err("Trek Driver didn't say the screen's size.".into());
         }
-
-        fn near(&self, other: &Element) -> bool {
-            self.frame
-                .iter()
-                .zip(other.frame.iter())
-                .all(|(a, b)| (a - b).abs() <= SAME_PLACE)
-        }
-
-        /// The name it adds to the path of what's inside it.
-        fn step(&self) -> String {
-            let name = if self.identifier.is_empty() {
-                &self.label
-            } else {
-                &self.identifier
+        let picture = (
+            v["picture"]["width"]
+                .as_f64()
+                .filter(|w| *w >= 1.)
+                .unwrap_or(points.0),
+            v["picture"]["height"]
+                .as_f64()
+                .filter(|h| *h >= 1.)
+                .unwrap_or(points.1),
+        );
+        let (mut roots, mut ids) = (vec![], Ids::default());
+        // The elements the one being read sits inside, outermost first.
+        let mut open: Vec<Open> = vec![];
+        // How many elements say each thing said (`said`).
+        let mut alike: HashMap<u64, usize> = HashMap::new();
+        let mut app = String::new();
+        for e in listed {
+            let text = |k: &str| e[k].as_str().unwrap_or_default().trim().to_string();
+            let depth = e["depth"].as_u64().unwrap_or(0);
+            while open.last().is_some_and(|o| o.depth >= depth) {
+                close(&mut open, &mut roots);
+            }
+            let (kind, label, id) = (text("type"), text("label"), text("identifier"));
+            let role = outline::role_words(&kind);
+            if role == "application" {
+                app.clone_from(&id);
+            }
+            // Never a secure field's value: the driver leaves it out and says `secure`.
+            let secure = e["secure"].as_bool() == Some(true) || kind == "SecureTextField";
+            let value = e["value"].as_str().map(str::to_string).filter(|_| !secure);
+            // A switch's 1 or 0 is its state, said as checked.
+            let checked = matches!(role.as_str(), "switch" | "toggle")
+                .then(|| Checked::of(value.as_deref()))
+                .flatten();
+            let mut node = Node {
+                acts: tappable(&role, &label),
+                role,
+                name: label,
+                value: value.filter(|_| checked.is_none()),
+                secure,
+                disabled: e["enabled"].as_bool() == Some(false),
+                focused: e["focused"].as_bool() == Some(true),
+                selected: e["selected"].as_bool() == Some(true),
+                checked,
+                frame: frame(e),
+                ..Node::default()
             };
-            format!("{}#{}", self.kind, clip(name, 40))
-        }
-    }
-
-    /// The screen as last read.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Screen {
-        pub elements: Vec<Element>,
-        /// The screen's size in points (what the driver's frames are in).
-        pub points: (f64, f64),
-        /// The size in pixels of the picture `phone_screenshot` gives, which x/y are read in.
-        pub picture: (f64, f64),
-        /// The app in front, by bundle id.
-        pub app: String,
-        /// Elements the driver left out past its count.
-        pub more: u64,
-        /// The driver's time ran out before it had read everything.
-        pub partial: bool,
-    }
-
-    impl Screen {
-        /// From Trek's answer to `phone_elements`: the driver's list, less what only repeats
-        /// the line above it (a button's own text, listed again inside it) and scroll
-        /// indicators.
-        pub fn parse(v: &Value) -> Result<Screen, String> {
-            let listed = v["elements"]
-                .as_array()
-                .ok_or("Trek's answer has no elements (is Trek older than this trek-mcp?).")?;
-            let points = (
-                v["width"].as_f64().unwrap_or(0.),
-                v["height"].as_f64().unwrap_or(0.),
-            );
-            if points.0 < 1. || points.1 < 1. {
-                return Err("Trek Driver didn't say the screen's size.".into());
+            let above = open.iter().rev().find_map(|o| o.node.as_ref());
+            if repeats(&node, above) {
+                open.push(Open {
+                    depth,
+                    node: None,
+                    step: String::new(),
+                });
+                continue;
             }
-            let picture = (
-                v["picture"]["width"]
-                    .as_f64()
-                    .filter(|w| *w >= 1.)
-                    .unwrap_or(points.0),
-                v["picture"]["height"]
-                    .as_f64()
-                    .filter(|h| *h >= 1.)
-                    .unwrap_or(points.1),
-            );
-            let mut elements: Vec<Element> = vec![];
-            // What the element being read sits inside: its depth as the driver gave it, and
-            // where it is in `elements` (none when it was left out).
-            let mut inside: Vec<(u64, Option<usize>)> = vec![];
-            let mut app = String::new();
-            for e in listed {
-                let text = |k: &str| e[k].as_str().unwrap_or_default().trim().to_string();
-                let depth = e["depth"].as_u64().unwrap_or(0);
-                while inside.last().is_some_and(|(d, _)| *d >= depth) {
-                    inside.pop();
-                }
-                let kind = kind(&text("type"));
-                if kind == "application" {
-                    app = text("identifier");
-                }
-                let frame = e["frame"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-                let side = |i: usize| frame.get(i).and_then(Value::as_f64).unwrap_or(0.);
-                let kept: Vec<usize> = inside.iter().filter_map(|(_, at)| *at).collect();
-                let path = kept
+            // Those listed before it in the same element are read whole by now.
+            node.place = match above {
+                Some(above) => [above.place.as_slice(), &[above.children.len()]].concat(),
+                None => vec![roots.len()],
+            };
+            ids.set(&node.place, &id);
+            if node.acts {
+                let within: Vec<&str> = open
                     .iter()
-                    .map(|at| &elements[*at])
-                    .filter(|e| e.kind != "application")
-                    .map(Element::step)
-                    .collect::<Vec<_>>()
-                    .join("/");
-                let element = Element {
-                    label: text("label"),
-                    identifier: text("identifier"),
-                    value: e["value"].as_str().map(str::to_string),
-                    secure: e["secure"].as_bool() == Some(true),
-                    frame: [side(0), side(1), side(2), side(3)],
-                    enabled: e["enabled"].as_bool() != Some(false),
-                    selected: e["selected"].as_bool() == Some(true),
-                    focused: e["focused"].as_bool() == Some(true),
-                    depth: kept.len(),
-                    app: app.clone(),
-                    path,
-                    kind,
-                };
-                let above = kept.last().map(|at| &elements[*at]);
-                if repeats(&element, above) {
-                    inside.push((depth, None));
-                } else {
-                    inside.push((depth, Some(elements.len())));
-                    elements.push(element);
-                }
+                    .filter(|o| o.node.is_some() && !o.step.is_empty())
+                    .map(|o| o.step.as_str())
+                    .collect();
+                let says = said(&app, &within, &node.role, &id, &node.name);
+                *alike.entry(says).or_default() += 1;
+                node.identity = Some(says);
             }
-            Ok(Screen {
-                elements,
-                points,
-                picture,
-                app: v["app"].as_str().unwrap_or_default().to_string(),
-                more: v["more"].as_u64().unwrap_or(0),
-                partial: v["partial"].as_bool() == Some(true),
-            })
-        }
-
-        /// A box in screen points as left, top, width, height in the picture's pixels.
-        pub fn to_picture(&self, frame: [f64; 4]) -> [i64; 4] {
-            let (sx, sy) = (
-                self.picture.0 / self.points.0,
-                self.picture.1 / self.points.1,
-            );
-            [
-                (frame[0] * sx).round() as i64,
-                (frame[1] * sy).round() as i64,
-                (frame[2] * sx).round() as i64,
-                (frame[3] * sy).round() as i64,
-            ]
-        }
-
-        /// Where to tap a box given in screen points: the middle of the part of it that's on
-        /// the screen, in the picture's pixels (what `phone_tap`'s x and y are).
-        pub fn centre(&self, frame: [f64; 4]) -> (f64, f64) {
-            let middle = |from: f64, size: f64, screen: f64| {
-                let (lo, hi) = (from.max(0.), (from + size).min(screen));
-                if hi > lo {
-                    (lo + hi) / 2.
-                } else {
-                    (from + size / 2.).clamp(0., screen)
+            let step = match node.role.as_str() {
+                "application" => String::new(),
+                role => {
+                    let name = if id.is_empty() { &node.name } else { &id };
+                    format!("{role}#{}", outline::clip(name, 40))
                 }
             };
-            let x = middle(frame[0], frame[2], self.points.0) * self.picture.0 / self.points.0;
-            let y = middle(frame[1], frame[3], self.points.1) * self.picture.1 / self.points.1;
-            ((x * 10.).round() / 10., (y * 10.).round() / 10.)
-        }
-
-        /// Whether any element's label, value or identifier contains `text`, in any case.
-        pub fn says(&self, text: &str) -> bool {
-            let want = text.to_lowercase();
-            self.elements.iter().any(|e| {
-                [
-                    e.label.as_str(),
-                    e.identifier.as_str(),
-                    e.value.as_deref().unwrap_or(""),
-                ]
-                .iter()
-                .any(|t| t.to_lowercase().contains(&want))
-            })
-        }
-    }
-
-    /// An element type as the outline names it: XCTest's name in lower case, static text as
-    /// plain `text`.
-    fn kind(name: &str) -> String {
-        match name.to_ascii_lowercase().as_str() {
-            "statictext" => "text".into(),
-            "" => "other".into(),
-            other => other.to_string(),
-        }
-    }
-
-    /// Whether `e` adds nothing to the outline: a text or picture that only says what the
-    /// control it's in already says (a button's label is listed again as text inside it), or
-    /// one of the scroll indicators XCTest lists beside whatever scrolls.
-    fn repeats(e: &Element, above: Option<&Element>) -> bool {
-        if e.kind == "other" && e.value.as_deref().is_some_and(|v| v.ends_with('%')) {
-            let label = e.label.to_ascii_lowercase();
-            if label.starts_with("vertical scroll bar")
-                || label.starts_with("horizontal scroll bar")
-            {
-                return true;
-            }
-        }
-        matches!(e.kind.as_str(), "text" | "image")
-            && !e.label.is_empty()
-            && above.is_some_and(|a| tappable(a) && a.label.contains(&e.label))
-    }
-
-    /// Whether an element is something to tap (and so gets a ref): anything but the containers
-    /// that only hold other elements.
-    pub fn tappable(e: &Element) -> bool {
-        !matches!(
-            e.kind.as_str(),
-            "any"
-                | "application"
-                | "window"
-                | "navigationbar"
-                | "tabbar"
-                | "toolbar"
-                | "statusbar"
-                | "table"
-                | "collectionview"
-                | "scrollview"
-                | "outline"
-                | "browser"
-                | "grid"
-                | "keyboard"
-                | "alert"
-                | "sheet"
-                | "dialog"
-                | "popover"
-                | "drawer"
-                | "group"
-                | "tabgroup"
-                | "splitgroup"
-                | "layoutarea"
-                | "segmentedcontrol"
-                | "webview"
-                | "menu"
-                | "menubar"
-        ) && !(e.kind == "other" && e.label.is_empty())
-    }
-
-    fn clip(text: &str, max: usize) -> String {
-        if text.chars().count() <= max {
-            return text.to_string();
-        }
-        text.chars().take(max).chain(['…']).collect()
-    }
-
-    /// An element in a few words, for messages: `button "General"`.
-    pub fn what(e: &Element) -> String {
-        let name = if e.label.is_empty() {
-            &e.identifier
-        } else {
-            &e.label
-        };
-        if name.is_empty() {
-            e.kind.clone()
-        } else {
-            format!("{} {}", e.kind, Value::from(clip(name, 60)))
-        }
-    }
-
-    /// Why an element once given a ref isn't found again.
-    enum Lost {
-        /// Nothing on the screen says what it said, where it was.
-        Gone,
-        /// This many say the same, and none is where it was.
-        Alike(usize),
-    }
-
-    /// Where `wanted` is among `pool`, when it's there as the same element: by what it says
-    /// (`Element::signature`) when that names one element both where it was read (`peers`
-    /// elements said the same there, itself included) and in `pool`; else it must also still be
-    /// in the same place, as one of several alike that moved can't be told from the others.
-    fn again<'a>(
-        wanted: &Element,
-        peers: usize,
-        pool: impl Iterator<Item = (usize, &'a Element)>,
-    ) -> Result<usize, Lost> {
-        let alike: Vec<(usize, &Element)> = pool
-            .filter(|(_, e)| tappable(e) && e.signature() == wanted.signature())
-            .collect();
-        match alike.as_slice() {
-            [] => Err(Lost::Gone),
-            [(at, _)] if peers <= 1 => Ok(*at),
-            many => {
-                let mut near = many.iter().filter(|(_, e)| e.near(wanted));
-                match (near.next(), near.next()) {
-                    (Some((at, _)), None) => Ok(*at),
-                    _ => Err(Lost::Alike(many.len())),
-                }
-            }
-        }
-    }
-
-    /// The refs given to the elements of the screen as last read. A ref is `e` and a number
-    /// that's never given twice in a session.
-    #[derive(Debug, Default)]
-    pub struct Refs {
-        given: u32,
-        /// Each ref with the element it stands for, as it was when read.
-        known: Vec<(String, Element)>,
-    }
-
-    impl Refs {
-        /// Give each element of `screen` that can be tapped its ref, in order: the one it had
-        /// when it was on the screen at the last reading (`again`), a new one otherwise. What's
-        /// no longer there loses its ref.
-        pub fn assign(&mut self, screen: &Screen) -> Vec<Option<String>> {
-            let before = std::mem::take(&mut self.known);
-            let mut taken = vec![false; before.len()];
-            let mut out = Vec::with_capacity(screen.elements.len());
-            for e in &screen.elements {
-                if !tappable(e) {
-                    out.push(None);
-                    continue;
-                }
-                let peers = screen
-                    .elements
-                    .iter()
-                    .filter(|o| tappable(o) && o.signature() == e.signature())
-                    .count();
-                let free = before
-                    .iter()
-                    .enumerate()
-                    .filter(|(at, _)| !taken[*at])
-                    .map(|(at, (_, old))| (at, old));
-                let name = match again(e, peers, free) {
-                    Ok(at) => {
-                        taken[at] = true;
-                        before[at].0.clone()
-                    }
-                    Err(_) => {
-                        self.given += 1;
-                        format!("e{}", self.given)
-                    }
-                };
-                self.known.push((name.clone(), e.clone()));
-                out.push(Some(name));
-            }
-            out
-        }
-
-        /// Whether `name` is a ref of the screen as last read.
-        pub fn knows(&self, name: &str) -> bool {
-            self.known.iter().any(|(n, _)| n == name)
-        }
-
-        /// Whether `name` is a ref this session gave at some reading, on the screen still or
-        /// not.
-        pub fn gave(&self, name: &str) -> bool {
-            name.strip_prefix('e')
-                .and_then(|n| n.parse::<u32>().ok())
-                .is_some_and(|n| n >= 1 && n <= self.given)
-        }
-
-        /// The element `name` was given to, found again in `screen` (just read): where it is
-        /// there. `Err` says why not, and to read the elements again.
-        pub fn find(&self, name: &str, screen: &Screen) -> Result<usize, String> {
-            let Some((_, wanted)) = self.known.iter().find(|(n, _)| n == name) else {
-                return Err(format!(
-                    "{name} isn't a ref of what's on the iPhone's screen (it's gone, or was never given): nothing was done. Take fresh phone_elements and use a ref from it."
-                ));
-            };
-            let peers = self
-                .known
-                .iter()
-                .filter(|(_, e)| e.signature() == wanted.signature())
-                .count();
-            again(wanted, peers, screen.elements.iter().enumerate()).map_err(|lost| {
-                let what = what(wanted);
-                match lost {
-                    Lost::Gone => format!(
-                        "{name} ({what}) isn't on the iPhone's screen any more: nothing was done. Take fresh phone_elements."
-                    ),
-                    Lost::Alike(n) => format!(
-                        "{name} ({what}) can't be told from the {n} like it on the screen now (they moved): nothing was done. Take fresh phone_elements."
-                    ),
-                }
-            })
-        }
-    }
-
-    /// The outline of `screen`, `refs` as `Refs::assign` gave them. With `filter`, only the
-    /// elements whose type, label, value or identifier contains it (any case), unnested. At
-    /// most `MAX_LINES` elements; the rest are counted in a last line.
-    pub fn text(screen: &Screen, refs: &[Option<String>], filter: Option<&str>) -> String {
-        let (w, h) = (screen.picture.0.round(), screen.picture.1.round());
-        let front = screen
-            .elements
-            .iter()
-            .find(|e| e.kind == "application" && e.identifier == screen.app);
-        let name = front.map(|e| e.label.as_str()).filter(|l| !l.is_empty());
-        let mut out = match (name, screen.app.as_str()) {
-            (_, "com.apple.springboard") => {
-                "iPhone: SpringBoard (the Home Screen, or a system alert over an app)".to_string()
-            }
-            (Some(name), app) => format!("iPhone: {name} ({app})"),
-            (None, "") => "iPhone".to_string(),
-            (None, app) => format!("iPhone: {app}"),
-        };
-        out.push_str(&format!(
-            "\nBoxes: (left,top width×height) in phone_screenshot's pixels, {w}×{h}\n"
-        ));
-        if let Some(at) = screen.elements.iter().position(|e| e.focused) {
-            let e = &screen.elements[at];
-            out.push_str(&format!("Focused: {}", what(e)));
-            if let Some(Some(name)) = refs.get(at) {
-                out.push_str(&format!(" [ref={name}]"));
-            }
-            out.push('\n');
-        }
-        let want = filter.map(str::to_lowercase);
-        let matches = |e: &Element| {
-            want.as_ref().is_none_or(|want| {
-                [
-                    e.kind.as_str(),
-                    e.label.as_str(),
-                    e.identifier.as_str(),
-                    e.value.as_deref().unwrap_or(""),
-                ]
-                .iter()
-                .any(|t| t.to_lowercase().contains(want.as_str()))
-            })
-        };
-        let chosen: Vec<usize> = (0..screen.elements.len())
-            .filter(|at| matches(&screen.elements[*at]))
-            .collect();
-        if let Some(filter) = filter {
-            out.push_str(&format!(
-                "Filter {}: {} of {} elements\n",
-                Value::from(filter),
-                chosen.len(),
-                screen.elements.len()
-            ));
-        }
-        out.push('\n');
-        for at in chosen.iter().take(MAX_LINES) {
-            let e = &screen.elements[*at];
-            let depth = if filter.is_some() { 0 } else { e.depth };
-            out.push_str(&"  ".repeat(depth));
-            out.push_str(&line(screen, e, refs.get(*at).and_then(Option::as_ref)));
-            out.push('\n');
-        }
-        if chosen.is_empty() {
-            out.push_str(if filter.is_some() {
-                "(Nothing on the screen matches the filter.)\n"
-            } else {
-                "(Nothing on the screen to read: it may be drawn without accessibility, as a game is. phone_screenshot shows it.)\n"
+            open.push(Open {
+                depth,
+                node: Some(node),
+                step,
             });
         }
-        let hidden = chosen.len().saturating_sub(MAX_LINES) as u64 + screen.more;
-        if hidden > 0 {
-            out.push_str(&format!(
-                "… {hidden} more not shown: pass filter to narrow it down, or scroll and take fresh elements.\n"
-            ));
+        while !open.is_empty() {
+            close(&mut open, &mut roots);
         }
-        if screen.partial {
-            out.push_str("… (The screen took too long to read: this may not be all of it.)\n");
-        }
-        out
+        only_ones(&mut roots, &alike);
+        Ok(Screen {
+            roots,
+            ids,
+            points,
+            picture,
+            app: v["app"].as_str().unwrap_or_default().to_string(),
+            more: v["more"].as_u64().unwrap_or(0),
+            partial: v["partial"].as_bool() == Some(true),
+        })
     }
 
-    /// One element's line: `- button "General" [ref=e3] [id=…] (22,522 508×71): value`.
-    fn line(screen: &Screen, e: &Element, name: Option<&String>) -> String {
-        let mut line = format!("- {}", e.kind);
-        if !e.label.is_empty() {
-            line.push_str(&format!(" {}", Value::from(clip(&e.label, MAX_TEXT))));
+    /// How the outline is written: frames in the picture's pixels. The picture is the screen
+    /// scaled to its width (its height then rounded to a whole pixel), so that is the scale.
+    fn view<'a>(&self, filter: Option<&'a str>, interactive_only: bool, max: usize) -> View<'a> {
+        View {
+            filter,
+            interactive_only,
+            max,
+            scale: self.points.0 / self.picture.0,
+            shows: Some(Frame {
+                x: 0.0,
+                y: 0.0,
+                w: self.points.0,
+                h: self.points.1,
+            }),
+            ..View::default()
         }
-        if let Some(name) = name {
-            line.push_str(&format!(" [ref={name}]"));
-        }
-        for (flag, on) in [
-            ("disabled", !e.enabled),
-            ("selected", e.selected),
-            ("focused", e.focused),
-            ("secure", e.secure),
-        ] {
-            if on {
-                line.push_str(&format!(" [{flag}]"));
-            }
-        }
-        if !e.identifier.is_empty() && e.identifier != e.label {
-            line.push_str(&format!(" [id={}]", clip(&e.identifier, 80)));
-        }
-        let [x, y, w, h] = screen.to_picture(e.frame);
-        line.push_str(&format!(" ({x},{y} {w}×{h})"));
-        if let Some(value) = e.value.as_deref().filter(|v| !v.is_empty()) {
-            line.push_str(&format!(": {}", clip(&value.replace('\n', " "), MAX_TEXT)));
-        }
-        line
     }
+
+    /// Where to tap a frame given in screen points: the middle of the part of it that's on
+    /// the screen, in the picture's pixels (what `phone_tap`'s x and y are; Trek reads them as
+    /// fractions of the picture, each way).
+    fn centre(&self, frame: Frame) -> (f64, f64) {
+        let middle = |from: f64, size: f64, screen: f64| {
+            let (lo, hi) = (from.max(0.), (from + size).min(screen));
+            if hi > lo {
+                (lo + hi) / 2.
+            } else {
+                (from + size / 2.).clamp(0., screen)
+            }
+        };
+        let x = middle(frame.x, frame.w, self.points.0) * self.picture.0 / self.points.0;
+        let y = middle(frame.y, frame.h, self.points.1) * self.picture.1 / self.points.1;
+        ((x * 10.).round() / 10., (y * 10.).round() / 10.)
+    }
+
+    /// Whether any element's label, value or identifier contains `text`, in any case.
+    fn says(&self, text: &str) -> bool {
+        outline::has_text(&self.roots, text) || self.ids.has_text(text)
+    }
+
+    /// An element in a few words, for replies and the strip: `button "General"`; one with no
+    /// label goes by its identifier.
+    fn what(&self, n: &Node) -> String {
+        match self.ids.of(n) {
+            id if n.name.is_empty() && !id.is_empty() => {
+                format!("{} {}", n.role, Value::from(outline::clip(id, 60)))
+            }
+            _ => n.describe(),
+        }
+    }
+
+    /// The app in front, as the outline's header names it: its name and bundle id.
+    fn front(&self) -> Option<String> {
+        let listed = self
+            .roots
+            .iter()
+            .find(|n| n.role == "application" && self.ids.of(n) == self.app);
+        let name = listed.map(|n| n.name.as_str()).filter(|l| !l.is_empty());
+        match (name, self.app.as_str()) {
+            (_, "com.apple.springboard") => {
+                Some("SpringBoard (the Home Screen, or a system alert over an app)".into())
+            }
+            (Some(name), app) => Some(format!("{name} ({app})")),
+            (None, "") => None,
+            (None, app) => Some(app.to_string()),
+        }
+    }
+}
+
+/// An element's frame as the driver gives it: `[x, y, width, height]` in screen points.
+fn frame(e: &Value) -> Option<Frame> {
+    let side = |i: usize| e["frame"].get(i).and_then(Value::as_f64);
+    Some(Frame {
+        x: side(0)?,
+        y: side(1)?,
+        w: side(2)?,
+        h: side(3)?,
+    })
+}
+
+/// What an element says of itself, as one number: the app it's in (by bundle id), the elements
+/// it sits inside (`within`, outermost first), its role, identifier and label. Not its value (a
+/// switch that flipped is the same switch), nor where it is.
+fn said(app: &str, within: &[&str], role: &str, id: &str, label: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (app, within, role, id, label).hash(&mut h);
+    h.finish()
+}
+
+/// Leave an identity only on the elements that alone say what they say (`alike` counts each
+/// thing said): one of several alike can't be told from the others by it.
+fn only_ones(nodes: &mut [Node], alike: &HashMap<u64, usize>) {
+    for n in nodes {
+        n.identity = n.identity.filter(|said| alike.get(said) == Some(&1));
+        only_ones(&mut n.children, alike);
+    }
+}
+
+/// Whether `e` adds nothing to the outline: a text or picture that only says what the control
+/// it's in already says (a button's label is listed again as text inside it), or one of the
+/// scroll indicators XCTest lists beside whatever scrolls.
+fn repeats(e: &Node, above: Option<&Node>) -> bool {
+    if e.role == "other" && e.value.as_deref().is_some_and(|v| v.ends_with('%')) {
+        let label = e.name.to_ascii_lowercase();
+        if label.starts_with("vertical scroll bar") || label.starts_with("horizontal scroll bar") {
+            return true;
+        }
+    }
+    matches!(e.role.as_str(), "text" | "image")
+        && !e.name.is_empty()
+        && above.is_some_and(|a| a.acts && a.name.contains(&e.name))
+}
+
+/// Whether an element is something to tap (and so gets a ref): anything but the containers
+/// that only hold other elements. On an iPhone a row is often no more than its text, so words
+/// and pictures are tapped too.
+fn tappable(role: &str, label: &str) -> bool {
+    !matches!(
+        role,
+        "any"
+            | "application"
+            | "window"
+            | "navigation bar"
+            | "tab bar"
+            | "toolbar"
+            | "status bar"
+            | "table"
+            | "collection view"
+            | "scroll view"
+            | "outline"
+            | "browser"
+            | "grid"
+            | "keyboard"
+            | "alert"
+            | "sheet"
+            | "dialog"
+            | "popover"
+            | "drawer"
+            | "group"
+            | "tab group"
+            | "split group"
+            | "layout area"
+            | "segmented control"
+            | "web view"
+            | "menu"
+            | "menu bar"
+    ) && !(matches!(role, "other" | "unknown") && label.is_empty())
 }
 
 const DEVICE_USAGE: &str = "\
@@ -895,6 +725,24 @@ mod tests {
         );
         assert!(elements < shot);
         assert!(instructions.contains("outcome is unknown, look before repeating"));
+        // The outline is the one computer use and the Simulator give, and says so the same way.
+        let all = tools.tools();
+        let elements = all.iter().find(|t| t.name == "phone_elements").unwrap();
+        assert!(elements.description.contains("[ref=e12]"));
+        assert!(
+            elements
+                .description
+                .contains("frame (x,y,width,height in phone_screenshot pixels)")
+        );
+        for arg in ["filter", "interactive_only", "max"] {
+            assert!(
+                elements.input_schema["properties"][arg].is_object(),
+                "{arg}"
+            );
+        }
+        for tool in &all {
+            assert!(!tool.description.contains('×'), "{}", tool.name);
+        }
     }
 
     #[test]
@@ -995,17 +843,26 @@ mod tests {
         result.unwrap()[0]["text"].as_str().unwrap().to_string()
     }
 
+    /// How many elements an outline lists.
+    fn lines(outline: &str) -> usize {
+        let listed = outline.lines().filter(|l| l.trim_start().starts_with("- "));
+        listed.count()
+    }
+
+    /// The header every outline of `screen`'s phone starts with.
+    const HEADER: &str = "Elements of the iPhone's screen. frame=x,y,width,height in phone_screenshot pixels (552x1200).\n";
+
     #[test]
-    fn the_outline_reads_like_the_browsers_snapshot() {
+    fn the_outline_reads_as_computer_use_and_the_simulator_do() {
         let mut email = el("TextField", "Email", 1, [20., 300., 362., 44.]);
         email["value"] = "ada@example.com".into();
         email["focused"] = true.into();
         let mut password = el("SecureTextField", "Password", 1, [20., 360., 362., 44.]);
         password["secure"] = true.into();
-        let mut wifi = el("Switch", "Wi-Fi", 2, [331., 432.3, 51., 31.]);
+        let mut wifi = el("Switch", "Wi-Fi", 3, [331., 432.3, 51., 31.]);
         wifi["value"] = "1".into();
         wifi["selected"] = true.into();
-        let mut general = row("General", 380.3);
+        let mut general = el("Button", "General", 2, [16., 380.3, 370., 52.]);
         general["identifier"] = "com.apple.settings.general".into();
         let mut sign_in = el("Button", "Sign in", 1, [20., 500., 362., 52.]);
         sign_in["enabled"] = false.into();
@@ -1024,41 +881,39 @@ mod tests {
             el("StaticText", "Settings", 2, [16., 119.7, 133., 40.7]),
             list,
             // Inside the list: a row whose own text is listed again under it by XCTest…
-            {
-                general["depth"] = 2.into();
-                general
-            },
+            general,
             el("StaticText", "General", 3, [30., 392.3, 101.3, 28.]),
             // …one with more to say than its label, and a scroll indicator.
             el("Cell", "Wi-Fi", 2, [16., 432.3, 370., 52.]),
             el("StaticText", "Home network", 3, [200., 444., 120., 28.]),
-            {
-                wifi["depth"] = 3.into();
-                wifi
-            },
+            wifi,
             bar,
             email,
             password,
             sign_in,
         ]))]);
         let outline = text_of(phone.call("phone_elements", &json!({})));
-        let expected = "iPhone: Settings (com.apple.Preferences)
-Boxes: (left,top width×height) in phone_screenshot's pixels, 552×1200
-Focused: textfield \"Email\" [ref=e6]
+        // The shared outline's lines (roles in plain words, state as flags, a switch's 1 as
+        // checked, frames as [frame=x,y,width,height]), with what the phone adds: the app in
+        // front by name and bundle id, and [id=…] where an element has an identifier.
+        let expected = "Elements of the iPhone's screen. frame=x,y,width,height in phone_screenshot pixels (552x1200).
+App: Settings (com.apple.Preferences)
+Focused: text field \"Email\" [ref=e6]
 
-- application \"Settings\" [id=com.apple.Preferences] (0,0 552×1200)
-  - navigationbar \"Settings\" (0,85 552×146)
-    - text \"Settings\" [ref=e1] (22,164 183×56)
-  - collectionview [id=sidebar] (0,0 552×1200)
-    - button \"General\" [ref=e2] [id=com.apple.settings.general] (22,522 508×71)
-    - cell \"Wi-Fi\" [ref=e3] (22,594 508×71)
-      - text \"Home network\" [ref=e4] (275,610 165×38)
-      - switch \"Wi-Fi\" [ref=e5] [selected] (455,594 70×43): 1
-  - textfield \"Email\" [ref=e6] [focused] (27,412 497×60): ada@example.com
-  - securetextfield \"Password\" [ref=e7] [secure] (27,494 497×60)
-  - button \"Sign in\" [ref=e8] [disabled] (27,686 497×71)
+- application \"Settings\" [id=com.apple.Preferences] [frame=0,0,552,1200]:
+  - navigation bar \"Settings\" [frame=0,85,552,146]:
+    - text \"Settings\" [ref=e1] [frame=22,164,183,56]
+  - collection view [id=sidebar] [frame=0,0,552,1200]:
+    - button \"General\" [ref=e2] [id=com.apple.settings.general] [frame=22,522,508,71]
+    - cell \"Wi-Fi\" [ref=e3] [frame=22,594,508,71]:
+      - text \"Home network\" [ref=e4] [frame=275,610,165,38]
+      - switch \"Wi-Fi\" [ref=e5] [selected] [checked] [frame=455,594,70,43]
+  - text field \"Email\" [ref=e6] [focused] [frame=27,412,497,60]: ada@example.com
+  - text field \"Password\" [ref=e7] [secure] [frame=27,494,497,60]
+  - button \"Sign in\" [ref=e8] [disabled] [frame=27,687,497,71]
 ";
         assert_eq!(outline, expected);
+        assert!(expected.starts_with(HEADER));
         // The Home Screen, where SpringBoard is the app; and a screen with nothing to read.
         let mut home = screen(vec![el("Icon", "Maps", 1, [28., 88., 68., 90.])]);
         home["app"] = "com.apple.springboard".into();
@@ -1067,50 +922,107 @@ Focused: textfield \"Email\" [ref=e6]
         let (_, mut phone) = Trek::showing(vec![Ok(home)]);
         let outline = text_of(phone.call("phone_elements", &json!({})));
         assert!(
-            outline.starts_with("iPhone: SpringBoard (the Home Screen"),
+            outline.starts_with(&format!(
+                "{HEADER}App: SpringBoard (the Home Screen, or a system alert over an app)\n\n"
+            )),
             "{outline}"
         );
         assert!(
-            outline.contains("- application [id=com.apple.springboard]"),
+            outline.contains("- application [id=com.apple.springboard] [frame=0,0,552,1200]:"),
             "{outline}"
         );
         assert!(
-            outline.contains("  - icon \"Maps\" [ref=e1] (38,121 93×124)"),
+            outline.contains("  - icon \"Maps\" [ref=e1] [frame=38,121,93,124]"),
             "{outline}"
         );
         let mut empty = screen(vec![]);
         empty["elements"] = json!([]);
         let (_, mut phone) = Trek::showing(vec![Ok(empty)]);
         let outline = text_of(phone.call("phone_elements", &json!({})));
+        assert_eq!(
+            outline,
+            format!(
+                "{HEADER}App: com.apple.Preferences\n\n(Nothing here to read or tap: the app may draw everything itself. phone_screenshot shows it.)\n"
+            )
+        );
+        // What has only an identifier is listed by it; a container, without a ref.
+        let mut banner = el("Other", "", 1, [16., 580., 370., 40.]);
+        banner["identifier"] = "com.example.banner".into();
+        let mut logo = el("Image", "", 2, [20., 584., 32., 32.]);
+        logo["identifier"] = "logo".into();
+        let (trek, mut phone) = Trek::showing(vec![Ok(screen(vec![banner, logo]))]);
+        let outline = text_of(phone.call("phone_elements", &json!({})));
         assert!(
-            outline.contains("Nothing on the screen to read"),
+            outline.ends_with(
+                "  - other [id=com.example.banner] [frame=22,796,508,55]:\n    - image [ref=e1] [id=logo] [frame=27,802,44,44]\n"
+            ),
             "{outline}"
         );
+        // …and a tap on it says what it is by that identifier.
+        let said = text_of(phone.call("phone_tap", &json!({"ref": "e1"})));
+        assert!(said.starts_with("Tapped image \"logo\"."), "{said}");
+        assert_eq!(trek.taps()[0]["what"], "image \"logo\"");
     }
 
     #[test]
-    fn boxes_and_taps_are_in_the_screenshots_pixels() {
+    fn a_secure_fields_value_is_never_shown_or_waited_on() {
+        // Even if a driver sent one, and whether it says `secure` or only the type does.
+        let mut flagged = el("SecureTextField", "Password", 1, [20., 360., 362., 44.]);
+        flagged["secure"] = true.into();
+        flagged["value"] = "hunter2".into();
+        let mut by_type = el("SecureTextField", "Passcode", 1, [20., 420., 362., 44.]);
+        by_type["value"] = "hunter2".into();
+        let (_, mut phone) = Trek::showing(vec![Ok(screen(vec![flagged, by_type]))]);
+        let outline = text_of(phone.call("phone_elements", &json!({})));
+        assert!(!outline.contains("hunter2"), "{outline}");
+        assert!(
+            outline.contains("- text field \"Password\" [ref=e1] [secure] [frame=27,494,497,60]\n"),
+            "{outline}"
+        );
+        assert!(
+            outline.contains("- text field \"Passcode\" [ref=e2] [secure] [frame="),
+            "{outline}"
+        );
+        let filtered = text_of(phone.call("phone_elements", &json!({"filter": "hunter2"})));
+        assert!(filtered.contains("(No element's role, name or id contains \"hunter2\".)"));
+        let err = phone
+            .call("phone_wait", &json!({"text": "hunter2", "timeout_ms": 200}))
+            .unwrap_err();
+        assert!(err.starts_with("\"hunter2\" hadn't shown after "), "{err}");
+    }
+
+    #[test]
+    fn frames_and_taps_are_in_the_screenshots_pixels() {
         // 402×874 points shown as a 552×1200 picture (what phone_screenshot gives by default).
         let listed = screen(vec![
             row("General", 380.3),
             // Half off the bottom of the screen: tapped in the part that shows.
             row("Privacy", 850.),
         ]);
-        let parsed = outline::Screen::parse(&listed).unwrap();
+        let parsed = Screen::parse(&listed).unwrap();
         assert_eq!(parsed.points, (402., 874.));
         assert_eq!(parsed.picture, (552., 1200.));
-        let general = parsed.elements[1].frame;
-        assert_eq!(parsed.to_picture(general), [22, 522, 508, 71]);
+        let rows = &parsed.roots[0].children;
+        let general = rows[0].frame.unwrap();
+        // As the outline writes it: left, top, width, height in the picture's pixels.
+        let view = parsed.view(None, false, outline::DEFAULT_MAX);
+        assert_eq!(view.pixels(general), (22, 522, 508, 71));
         // Its centre, (201, 406.3) in points, as pixels of the picture…
         let (x, y) = parsed.centre(general);
         assert_eq!((x, y), (276., 557.8));
         // …which Trek turns back into the same point (a fraction of the picture, of the screen).
         assert!((x / 552. * 402. - 201.).abs() < 0.1 && (y / 1200. * 874. - 406.3).abs() < 0.1);
-        let (_, y) = parsed.centre(parsed.elements[2].frame);
+        // …and which is the middle of the frame the outline gave, to the pixel.
+        assert!((x - (22. + 508. / 2.)).abs() <= 1. && (y - (522. + 71. / 2.)).abs() <= 1.);
+        let (_, y) = parsed.centre(rows[1].frame.unwrap());
         assert_eq!(y, ((850. + 874.) / 2. * 1200. / 874. * 10f64).round() / 10.);
         // A tap by ref sends that centre, and what it taps for the strip.
         let (trek, mut phone) = Trek::showing(vec![Ok(listed)]);
-        phone.call("phone_elements", &json!({})).unwrap();
+        let outline = text_of(phone.call("phone_elements", &json!({})));
+        assert!(
+            outline.contains("- button \"General\" [ref=e1] [frame=22,522,508,71]\n"),
+            "{outline}"
+        );
         let said = text_of(phone.call("phone_tap", &json!({"ref": "e1", "hold_ms": 700})));
         assert!(said.starts_with("Tapped button \"General\"."), "{said}");
         assert_eq!(
@@ -1124,10 +1036,20 @@ Focused: textfield \"Email\" [ref=e6]
         // Without a picture's size (an older Trek), the points themselves.
         let mut bare = screen(vec![row("General", 380.3)]);
         bare.as_object_mut().unwrap().remove("picture");
-        let parsed = outline::Screen::parse(&bare).unwrap();
+        let parsed = Screen::parse(&bare).unwrap();
         assert_eq!(
-            parsed.to_picture(parsed.elements[1].frame),
-            [16, 380, 370, 52]
+            parsed
+                .view(None, false, outline::DEFAULT_MAX)
+                .pixels(parsed.roots[0].children[0].frame.unwrap()),
+            (16, 380, 370, 52)
+        );
+        // A screen that doesn't say its size can't be mapped at all.
+        let mut sizeless = screen(vec![]);
+        sizeless["width"] = 0.into();
+        assert!(
+            Screen::parse(&sizeless)
+                .unwrap_err()
+                .contains("didn't say the screen's size")
         );
         // x and y still go to Trek as they are, and one of the two is asked for.
         let (trek, mut phone) = Trek::showing(vec![Ok(screen(vec![]))]);
@@ -1163,72 +1085,90 @@ Focused: textfield \"Email\" [ref=e6]
         assert!(after.contains("\"General\" [ref=e1]"), "{after}");
         assert!(after.contains("\"Siri\" [ref=e3]"), "{after}");
         assert!(after.contains("\"Software Update\" [ref=e4]"), "{after}");
-        assert!(!after.contains("e2"), "{after}");
+        assert!(!after.contains("[ref=e2]"), "{after}");
+        // Read again, nothing touched: word for word the same.
+        assert_eq!(text_of(phone.call("phone_elements", &json!({}))), after);
         // A value that changed is the same element.
         let mut off = el("Switch", "Wi-Fi", 1, [331., 432., 51., 31.]);
         off["value"] = "0".into();
         let mut on = off.clone();
         on["value"] = "1".into();
         let (_, mut phone) = Trek::showing(vec![Ok(screen(vec![off])), Ok(screen(vec![on]))]);
-        assert!(text_of(phone.call("phone_elements", &json!({}))).contains("[ref=e1]"));
+        let was = text_of(phone.call("phone_elements", &json!({})));
+        assert!(
+            was.contains("switch \"Wi-Fi\" [ref=e1] [unchecked]"),
+            "{was}"
+        );
         let flipped = text_of(phone.call("phone_elements", &json!({})));
         assert!(
-            flipped.contains("switch \"Wi-Fi\" [ref=e1]") && flipped.ends_with(": 1\n"),
+            flipped.contains("switch \"Wi-Fi\" [ref=e1] [checked]"),
             "{flipped}"
         );
-        // Several that say the same keep their refs by where they are.
+        // Several that say the same can't be told apart by it: they keep their refs by their
+        // place among the same neighbours, as in the other outlines.
         let twins = |ys: [f64; 2]| {
             screen(vec![
                 el("Button", "Delete", 1, [300., ys[0], 80., 44.]),
                 el("Button", "Delete", 1, [300., ys[1], 80., 44.]),
             ])
         };
-        let (_, mut phone) = Trek::showing(vec![
+        let (trek, mut phone) = Trek::showing(vec![
             Ok(twins([200., 260.])),
             Ok(twins([200., 260.])),
             // The list scrolled by a row: which is which can't be told any more.
             Ok(twins([260., 320.])),
+            Ok(twins([260., 320.])),
         ]);
         let first = text_of(phone.call("phone_elements", &json!({})));
         assert!(
-            first.contains("[ref=e1] (412,275") && first.contains("[ref=e2] (412,357"),
+            first.contains("[ref=e1] [frame=412,275,110,60]")
+                && first.contains("[ref=e2] [frame=412,357,110,60]"),
             "{first}"
         );
         assert_eq!(text_of(phone.call("phone_elements", &json!({}))), first);
+        // So a ref from before the scroll is refused, where the one that was first is now where
+        // the second was…
+        let err = phone.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
+        assert!(err.contains("has moved since you read it"), "{err}");
+        assert!(trek.taps().is_empty());
+        // …and fresh elements say which is where now.
         let scrolled = text_of(phone.call("phone_elements", &json!({})));
-        // The one now where e2 was keeps e2 (it's there, and says the same); the other is new.
         assert!(
-            scrolled.contains("[ref=e2] (412,357") && scrolled.contains("[ref=e3] (412,439"),
+            scrolled.contains("[ref=e1] [frame=412,357,110,60]")
+                && scrolled.contains("[ref=e2] [frame=412,439,110,60]"),
             "{scrolled}"
         );
-        assert!(!scrolled.contains("[ref=e1]"), "{scrolled}");
     }
 
     #[test]
     fn a_stale_ref_is_refused_and_nothing_is_tapped() {
+        let again = "Nothing was done. Read the elements again (phone_elements) and use the ref it has now.";
         let settings = screen(vec![row("General", 380.), row("Reset", 432.)]);
         // The screen went on to General's own page: Reset is gone.
         let general = screen(vec![row("About", 380.)]);
         let (trek, mut phone) = Trek::showing(vec![Ok(settings), Ok(general)]);
         phone.call("phone_elements", &json!({})).unwrap();
         let err = phone.call("phone_tap", &json!({"ref": "e2"})).unwrap_err();
-        assert!(
-            err.contains("e2 (button \"Reset\") isn't on the iPhone's screen any more"),
-            "{err}"
-        );
-        assert!(
-            err.contains("nothing was done") && err.contains("Take fresh phone_elements"),
-            "{err}"
+        assert_eq!(
+            err,
+            format!(
+                "button \"Reset\" isn't where it was any more: what's there has changed. {again}"
+            )
         );
         assert!(trek.taps().is_empty(), "nothing tapped");
-        // After that reading e1 is gone too, and a ref never given is no ref.
-        for name in ["e1", "e99", "General"] {
+        // Where General was there's another row now, and a ref never given is no ref.
+        let err = phone.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
+        assert_eq!(
+            err,
+            format!("Where button \"General\" was there's now button \"About\". {again}")
+        );
+        for name in ["e99", "General"] {
             let err = phone.call("phone_tap", &json!({"ref": name})).unwrap_err();
             assert!(
-                err.contains("isn't a ref of what's on the iPhone's screen"),
+                err.starts_with(&format!("No element with ref {name:?}"))
+                    && err.contains("Refs come from phone_elements"),
                 "{err}"
             );
-            assert!(err.contains("Take fresh phone_elements"), "{err}");
         }
         assert!(trek.taps().is_empty());
         // The same words in another place, among others like it: not the same one for sure.
@@ -1242,7 +1182,27 @@ Focused: textfield \"Email\" [ref=e6]
             Trek::showing(vec![Ok(twins([200., 260.])), Ok(twins([230., 290.]))]);
         phone.call("phone_elements", &json!({})).unwrap();
         let err = phone.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
-        assert!(err.contains("can't be told from the 2 like it"), "{err}");
+        assert_eq!(
+            err,
+            format!("button \"Delete\" has moved since you read it. {again}")
+        );
+        assert!(trek.taps().is_empty());
+        // One of them gone: what's around the other isn't what it was.
+        let (trek, mut phone) = Trek::showing(vec![
+            Ok(twins([200., 260.])),
+            Ok(screen(vec![el(
+                "Button",
+                "Delete",
+                1,
+                [300., 200., 80., 44.],
+            )])),
+        ]);
+        phone.call("phone_elements", &json!({})).unwrap();
+        let err = phone.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
+        assert!(
+            err.starts_with("What's around button \"Delete\" has changed since you read it"),
+            "{err}"
+        );
         assert!(trek.taps().is_empty());
         // The same words under another heading (another list's Delete) isn't it either.
         let under = |list: &str| {
@@ -1256,9 +1216,11 @@ Focused: textfield \"Email\" [ref=e6]
         let (trek, mut phone) = Trek::showing(vec![Ok(under("photos")), Ok(under("notes"))]);
         phone.call("phone_elements", &json!({})).unwrap();
         let err = phone.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
-        assert!(
-            err.contains("isn't on the iPhone's screen any more"),
-            "{err}"
+        assert_eq!(
+            err,
+            format!(
+                "Another button \"Delete\" is where the one you read was (things have moved). {again}"
+            )
         );
         assert!(trek.taps().is_empty());
         // Still there but greyed out: said, not tapped.
@@ -1271,20 +1233,36 @@ Focused: textfield \"Email\" [ref=e6]
         phone.call("phone_elements", &json!({})).unwrap();
         let err = phone.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
         assert!(
-            err.contains("is disabled now") && err.contains("nothing was tapped"),
+            err.starts_with("e1 (button \"General\") is disabled now")
+                && err.contains("nothing was tapped"),
             "{err}"
         );
         assert!(trek.taps().is_empty());
-        // And when it's there as it was, it's tapped where it is now.
+        // Gone a row down the screen since it was read: not tapped where it is now, unseen.
         let (trek, mut phone) = Trek::showing(vec![
             Ok(screen(vec![row("General", 380.)])),
             Ok(screen(vec![row("General", 500.)])),
+            Ok(screen(vec![row("General", 500.)])),
+            Ok(screen(vec![row("General", 503.)])),
         ]);
         phone.call("phone_elements", &json!({})).unwrap();
-        phone.call("phone_tap", &json!({"ref": " e1 "})).unwrap();
+        let err = phone.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
+        assert_eq!(
+            err,
+            format!("button \"General\" has moved since you read it. {again}")
+        );
+        assert!(trek.taps().is_empty());
+        // Read again, it has the ref it had, and is tapped where it is: a few points' shift
+        // since (a bounce settling) is the same place. A ref is read however it's written.
+        let fresh = text_of(phone.call("phone_elements", &json!({})));
+        assert!(fresh.contains("button \"General\" [ref=e1]"), "{fresh}");
+        phone
+            .call("phone_tap", &json!({"ref": " [ref=e1] "}))
+            .unwrap();
+        assert_eq!(trek.taps().len(), 1);
         assert_eq!(
             trek.taps()[0]["y"],
-            ((500. + 26.) * 1200. / 874. * 10f64).round() / 10.
+            ((503. + 26.) * 1200. / 874. * 10f64).round() / 10.
         );
     }
 
@@ -1306,42 +1284,72 @@ Focused: textfield \"Email\" [ref=e6]
         long["partial"] = true.into();
         let (_, mut phone) = Trek::showing(vec![Ok(long)]);
         let outline = text_of(phone.call("phone_elements", &json!({})));
-        let shown = outline
-            .lines()
-            .filter(|l| l.trim_start().starts_with("- "))
-            .count();
-        assert_eq!(shown, outline::MAX_LINES);
-        // 201 elements (the app's line and 200 rows), 150 shown, and the driver's 12.
+        assert_eq!(lines(&outline), outline::DEFAULT_MAX);
+        // 201 elements (the app's line and 200 rows), 150 shown; then the driver's 12.
         assert!(
-            outline.contains("… 63 more not shown: pass filter to narrow it down"),
+            outline.ends_with(
+                "… (51 more not shown: raise max, or narrow it with filter or interactive_only.)\n\
+                 … (12 more on the screen weren't read: scroll, and read the elements again.)\n\
+                 … (The screen took too long to read: this may not be all of it.)\n"
+            ),
             "{outline}"
         );
-        assert!(outline.contains("took too long to read"), "{outline}");
-        // Every row has its ref all the same, shown or not.
+        // A filter narrows it, flat, on role, name or identifier, in any case. What was listed
+        // before has the ref it had; what wasn't shown gets its ref when it is.
         let narrowed = text_of(phone.call("phone_elements", &json!({"filter": "ROW 19"})));
+        assert_eq!(lines(&narrowed), 11, "{narrowed}");
         assert!(
-            narrowed.contains("Filter \"ROW 19\": 11 of 201 elements"),
+            narrowed.contains("\n- button \"Row 19\" [ref=e20] [frame="),
             "{narrowed}"
         );
         assert!(
-            narrowed.contains("\n- button \"Row 19\" [ref=e20]"),
-            "{narrowed}"
-        );
-        assert!(
-            narrowed.contains("- button \"Row 199\" [ref=e200]"),
+            narrowed.contains("\n- button \"Row 199\" [ref=e159] [frame="),
             "{narrowed}"
         );
         assert!(!narrowed.contains("Row 20\""), "{narrowed}");
         // Only the driver's own are left uncounted for.
-        assert!(narrowed.contains("… 12 more not shown"), "{narrowed}");
-        // By type, by identifier; and nothing found says so.
-        let by_type = text_of(phone.call("phone_elements", &json!({"filter": "application"})));
+        assert!(!narrowed.contains("more not shown"), "{narrowed}");
         assert!(
-            by_type.contains("1 of 201 elements") && by_type.contains("- application \"Settings\"")
+            narrowed.contains("… (12 more on the screen weren't read"),
+            "{narrowed}"
         );
+        for filter in ["application", "apple.PREFERENCES"] {
+            let found = text_of(phone.call("phone_elements", &json!({"filter": filter})));
+            assert_eq!(lines(&found), 1, "{found}");
+            assert!(
+                found.contains(
+                    "\n- application \"Settings\" [id=com.apple.Preferences] [frame=0,0,552,1200]\n"
+                ),
+                "{found}"
+            );
+        }
         let none = text_of(phone.call("phone_elements", &json!({"filter": "zebra"})));
         assert!(
-            none.contains("0 of 201 elements") && none.contains("Nothing on the screen matches")
+            none.contains("\n\n(No element's role, name or id contains \"zebra\".)\n"),
+            "{none}"
+        );
+        // max shows more, or fewer; interactive_only leaves the containers out.
+        let all = text_of(phone.call("phone_elements", &json!({"max": 500})));
+        assert_eq!(lines(&all), 201);
+        assert!(!all.contains("more not shown"), "{all}");
+        assert!(all.contains("- button \"Row 199\" [ref=e159]"), "{all}");
+        let few = text_of(phone.call("phone_elements", &json!({"max": 5})));
+        assert_eq!(lines(&few), 5);
+        assert!(few.contains("… (196 more not shown"), "{few}");
+        let tappable = text_of(phone.call(
+            "phone_elements",
+            &json!({"interactive_only": true, "max": 500}),
+        ));
+        assert_eq!(lines(&tappable), 200);
+        assert!(
+            tappable.contains("\n\n- button \"Row 0\" [ref=e1] [frame="),
+            "{tappable}"
+        );
+        assert!(
+            phone
+                .call("phone_elements", &json!({"max": "many"}))
+                .unwrap_err()
+                .contains("`max` must be a number")
         );
     }
 
@@ -1353,8 +1361,10 @@ Focused: textfield \"Email\" [ref=e6]
             1,
             [180., 400., 40., 40.],
         )]);
+        let mut done_row = row("Done", 400.);
+        done_row["identifier"] = "export.done".into();
         let done = screen(vec![
-            row("Done", 400.),
+            done_row,
             el("StaticText", "Saved to Photos", 1, [16., 300., 300., 30.]),
         ]);
         // Text shows at the third reading.
@@ -1369,8 +1379,12 @@ Focused: textfield \"Email\" [ref=e6]
         ));
         assert!(said.starts_with("\"saved to\" was there after "), "{said}");
         assert!(
-            said.contains("- button \"Done\" [ref=e1]"),
+            said.contains(&format!(" s.\n\n{HEADER}App: Settings")),
             "the fresh outline: {said}"
+        );
+        assert!(
+            said.contains("- button \"Done\" [ref=e1] [id=export.done]"),
+            "{said}"
         );
         assert_eq!(trek.asked(), ["phone_elements"; 3]);
         // An element by its ref, until it goes.
@@ -1382,11 +1396,34 @@ Focused: textfield \"Email\" [ref=e6]
         phone.call("phone_elements", &json!({})).unwrap();
         let said = text_of(phone.call("phone_wait", &json!({"ref": "e1", "gone": true})));
         assert!(
-            said.starts_with("e1 (activityindicator \"Loading\") was gone after "),
+            said.starts_with("e1 (activity indicator \"Loading\") was gone after "),
             "{said}"
         );
         assert!(said.contains("- button \"Done\" [ref=e2]"), "{said}");
         assert_eq!(trek.asked().len(), 3);
+        // One that only moved hasn't gone: it's waited on wherever it is on the screen.
+        let lower = screen(vec![el(
+            "ActivityIndicator",
+            "Loading",
+            1,
+            [180., 600., 40., 40.],
+        )]);
+        let (_, mut phone) = Trek::showing(vec![Ok(loading.clone()), Ok(lower)]);
+        phone.call("phone_elements", &json!({})).unwrap();
+        let err = phone
+            .call(
+                "phone_wait",
+                &json!({"ref": "e1", "gone": true, "timeout_ms": 200}),
+            )
+            .unwrap_err();
+        assert!(
+            err.starts_with("e1 (activity indicator \"Loading\") was still there after "),
+            "{err}"
+        );
+        assert!(
+            err.contains("- activity indicator \"Loading\" [ref=e1]"),
+            "{err}"
+        );
         // It never comes: an error after the time given, with the screen as it is.
         let (trek, mut phone) = Trek::showing(vec![Ok(loading.clone())]);
         let started = Instant::now();
@@ -1397,7 +1434,7 @@ Focused: textfield \"Email\" [ref=e6]
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(err.starts_with("\"Done\" hadn't shown after "), "{err}");
         assert!(
-            err.contains("The screen now:") && err.contains("activityindicator \"Loading\""),
+            err.contains("The screen now:") && err.contains("activity indicator \"Loading\""),
             "{err}"
         );
         assert!(trek.asked().len() > 1);
@@ -1413,10 +1450,13 @@ Focused: textfield \"Email\" [ref=e6]
             err.starts_with("\"loading\" was still there after "),
             "{err}"
         );
-        // Already there: one reading.
+        // Already there: one reading. An identifier is text to wait for too.
         let (trek, mut phone) = Trek::showing(vec![Ok(done.clone())]);
         phone.call("phone_wait", &json!({"text": "Done"})).unwrap();
-        assert_eq!(trek.asked().len(), 1);
+        phone
+            .call("phone_wait", &json!({"text": "EXPORT.done"}))
+            .unwrap();
+        assert_eq!(trek.asked().len(), 2);
         // What to wait for must be said; a ref never given can't be waited for, and one that
         // left the screen earlier is gone already.
         let (_, mut phone) = Trek::showing(vec![
@@ -1432,11 +1472,25 @@ Focused: textfield \"Email\" [ref=e6]
                 .contains("takes text")
         );
         let err = phone.call("phone_wait", &json!({"ref": "e7"})).unwrap_err();
-        assert!(err.contains("isn't a ref"), "{err}");
+        assert!(
+            err.starts_with("No element with ref \"e7\"") && err.contains("phone_elements"),
+            "{err}"
+        );
         phone.call("phone_elements", &json!({})).unwrap();
         phone.call("phone_elements", &json!({})).unwrap();
         let said = text_of(phone.call("phone_wait", &json!({"ref": "e1", "gone": true})));
-        assert!(said.starts_with("e1 was gone after "), "{said}");
+        assert!(
+            said.starts_with("e1 (activity indicator \"Loading\") was gone after "),
+            "{said}"
+        );
+        // …and waited on to show, it's given the time to come back.
+        let err = phone
+            .call("phone_wait", &json!({"ref": "e1", "timeout_ms": 200}))
+            .unwrap_err();
+        assert!(
+            err.starts_with("e1 (activity indicator \"Loading\") hadn't shown after "),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1595,7 +1649,11 @@ Focused: textfield \"Email\" [ref=e6]
         }
         let home = text_of(phone.call("phone_elements", &json!({})));
         println!("{home}");
-        assert!(home.starts_with("iPhone: SpringBoard"), "{home}");
+        assert!(
+            home.starts_with("Elements of the iPhone's screen. frame=x,y,width,height in phone_screenshot pixels (")
+                && home.contains("\nApp: SpringBoard (the Home Screen"),
+            "{home}"
+        );
         // Read again, nothing touched: every element has the ref it had.
         let again = text_of(phone.call("phone_elements", &json!({})));
         assert_eq!(again, home, "refs hold on a still screen");
@@ -1603,6 +1661,7 @@ Focused: textfield \"Email\" [ref=e6]
             .lines()
             .find(|l| l.contains("icon \"Settings\""))
             .expect("Settings on the Home Screen's first page");
+        assert!(line.contains("] [frame="), "{line}");
         let name = line
             .split("[ref=")
             .nth(1)
@@ -1618,13 +1677,38 @@ Focused: textfield \"Email\" [ref=e6]
         ));
         println!("{settings}");
         assert!(settings.contains("(com.apple.Preferences)"), "{settings}");
-        // A filter narrows it, and the icon behind the app is no longer there to tap.
+        // The icon is behind the app: waited on by its ref, it has gone.
+        let gone = text_of(phone.call(
+            "phone_wait",
+            &json!({"ref": name, "gone": true, "timeout_ms": 5000}),
+        ));
+        assert!(
+            gone.starts_with(&format!("{name} (icon \"Settings\") was gone after ")),
+            "{gone}"
+        );
+        // A filter narrows it (by an identifier too), only what can be tapped leaves the
+        // containers out, and the icon is no longer there to tap.
         let narrowed = text_of(phone.call("phone_elements", &json!({"filter": "general"})));
         println!("{narrowed}");
         assert!(narrowed.contains("button \"General\" [ref="), "{narrowed}");
+        let by_id = text_of(phone.call(
+            "phone_elements",
+            &json!({"filter": "com.apple.settings.general"}),
+        ));
+        assert_eq!(lines(&by_id), 1, "{by_id}");
+        assert!(by_id.contains("[id=com.apple.settings.general] [frame="));
+        let tappable = text_of(phone.call("phone_elements", &json!({"interactive_only": true})));
+        assert!(
+            tappable.contains("\n- button \"General\" [ref=")
+                && !tappable.contains("- application"),
+            "{tappable}"
+        );
         let err = phone.call("phone_tap", &json!({"ref": name})).unwrap_err();
         println!("{err}");
-        assert!(err.contains("Take fresh phone_elements"), "{err}");
+        assert!(
+            err.contains("Read the elements again (phone_elements)"),
+            "{err}"
+        );
         phone.call("phone_home", &json!({})).unwrap();
     }
 

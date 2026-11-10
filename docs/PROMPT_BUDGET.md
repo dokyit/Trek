@@ -94,6 +94,10 @@ Since this table (2026-11-09, counted in characters, not measured again in token
 say to read elements first and take a screenshot when looks matter. Instructions 1,178 → 1,475
 characters, schemas 6,033 → 7,413 (about +75 and +345 tokens by chars/4); the `phone` budget and
 `ALL_CHARS` in `prompt_budget` (`crates/trek-mcp/src/main.rs`) were raised to that plus headroom.
+Then the iPhone's outline moved onto the one computer use and the Simulator share: its descriptions
+say `frame` as theirs do, and `phone_elements` takes `interactive_only` and `max` beside `filter`
+(the outline's own cap line names them). Instructions 1,475 → 1,504, schemas 7,413 → 7,502; no
+budget moved.
 
 ## Per agent, per request
 
@@ -224,8 +228,8 @@ and 865 / 6,318 chars): each tool says what only it knows, the server instructio
 pieces fit (elements first, refs, a screenshot when looks matter), and argument descriptions are a
 few words. Windows has no elements, so its tool list and schemas are as they were. New budgets
 (size plus about 10%): computer 885 / 6,450, computer-background 1,365 / 7,775, simulator
-890 / 6,670; all families together 46,200 (44,765 today, with the iPhone's elements: its
-family is 1,475 / 7,413 against a budget of 1,620 / 8,150).
+890 / 6,670; all families together 46,200 (44,883 today, with the iPhone's elements: its
+family is 1,504 / 7,502 against a budget of 1,620 / 8,150).
 
 ## The budget tests
 

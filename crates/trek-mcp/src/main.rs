@@ -214,11 +214,12 @@ mod prompt_budget {
         ("orchestrate", 1_050, 11_000),
         ("browser", 950, 7_300),
         // Raised for phone_elements and phone_wait, phone_tap's ref, and the instructions'
-        // "elements first" (1,178 and 6,033 before; 1,475 and 7,413 measured with them).
+        // "elements first" (1,178 and 6,033 before; 1,504 and 7,502 measured with them, in the
+        // shared outline's words and with its interactive_only and max).
         ("phone", 1_620, 8_150),
     ];
     /// Everything on (computer use in the background and every default family) together
-    /// (44,765 measured with elements on the computer, the Simulator and the iPhone).
+    /// (44,883 measured with elements on the computer, the Simulator and the iPhone).
     const ALL_CHARS: usize = 46_200;
 
     fn families() -> Vec<(&'static str, Box<dyn ToolSet>)> {
