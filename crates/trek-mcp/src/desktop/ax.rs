@@ -864,6 +864,30 @@ impl Raised {
     }
 }
 
+/// Where the Dock's icons are on screen: the frame (x, y, width, height) of the list that its
+/// app (`pid`) holds, as accessibility gives it. A hidden Dock's is just past the screen's edge,
+/// and comes on screen with it. Reading only.
+pub fn dock_icons(pid: i32) -> Option<(f64, f64, f64, f64)> {
+    // SAFETY: a +1 AX element for the process, released by the wrapper; null when there's none.
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return None;
+    }
+    let app = unsafe { CFType::wrap_under_create_rule(app) };
+    // SAFETY: a live AX element.
+    unsafe { AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), RAISE_TIMEOUT) };
+    let children = attribute(&app, "AXChildren").ok()?;
+    elements_in(&children).into_iter().find_map(|el| {
+        let role = attribute(&el, "AXRole").ok().and_then(|v| string(&v))?;
+        if role != "AXList" {
+            return None;
+        }
+        let (x, y) = attribute(&el, "AXPosition").ok().and_then(|v| point(&v))?;
+        let (w, h) = attribute(&el, "AXSize").ok().and_then(|v| size(&v))?;
+        Some((x, y, w, h))
+    })
+}
+
 /// The AX element of window `wid` of process `pid` when its app names it nowhere: a window on a
 /// Space that isn't showing, which isn't its app's main window either. Accessibility has no
 /// public way to it, so its element is made from what an AppKit element's token holds (the pid,

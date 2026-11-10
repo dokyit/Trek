@@ -57,6 +57,8 @@ type SetWindowLocation = unsafe extern "C" fn(*mut c_void, f64, f64);
 type PostEventRecordTo = unsafe extern "C" fn(*const c_void, *const u8) -> i32;
 /// `_SLPSSetFrontProcessWithOptions(psn, window, mode)`.
 type SetFrontProcess = unsafe extern "C" fn(*const c_void, u32, u32) -> i32;
+/// The window server's own answer to which process is in front: it fills in a serial number.
+type FrontProcess = unsafe extern "C" fn(*mut c_void) -> i32;
 
 struct Calls {
     post: Option<PostToPid>,
@@ -64,6 +66,7 @@ struct Calls {
     set_window_location: Option<SetWindowLocation>,
     post_record: Option<PostEventRecordTo>,
     set_front: Option<SetFrontProcess>,
+    front: Option<FrontProcess>,
 }
 
 fn calls() -> &'static Calls {
@@ -85,6 +88,8 @@ fn calls() -> &'static Calls {
                     .map(|p| std::mem::transmute::<*mut c_void, PostEventRecordTo>(p)),
                 set_front: find(c"_SLPSSetFrontProcessWithOptions")
                     .map(|p| std::mem::transmute::<*mut c_void, SetFrontProcess>(p)),
+                front: find(c"_SLPSGetFrontProcess")
+                    .map(|p| std::mem::transmute::<*mut c_void, FrontProcess>(p)),
             }
         }
     })
@@ -203,49 +208,34 @@ impl Theirs {
     }
 }
 
-/// The pid of the app that's active (frontmost: it has the menu bar and the keyboard), as
-/// Launch Services has it: `lsappinfo front` names it by its ASN, `lsappinfo info` gives that
-/// one's pid. `known` keeps the pids already asked for.
-pub fn active_app(known: &mut std::collections::HashMap<String, i32>) -> Option<i32> {
-    let quick = Duration::from_secs(2);
-    let asn = crate::util::run_ok("/usr/bin/lsappinfo", &["front"], None, quick).ok()?;
-    let asn = asn.trim();
-    if !asn.starts_with("ASN:") {
-        return None;
+/// The serial number of the app that's active (frontmost: it has the menu bar and the
+/// keyboard), as the window server has it: the reading counterpart of the call that puts a
+/// window back, answered in microseconds, so it can be asked at every look. Like that call it's
+/// SkyLight's own and no Process Manager call: a tool that makes it isn't checked in as an app
+/// (measured on macOS 27, where it agreed with `lsappinfo front` each time). Without it,
+/// `lsappinfo front` is asked: a process run, 3 ms on a quiet Mac and, by the timings of a
+/// cold Chrome launch, tens of ms while one goes on.
+pub fn front_psn() -> Option<[u8; 8]> {
+    if let Some(front) = calls().front {
+        let mut psn = [0u8; 8];
+        // SAFETY: an 8-byte `ProcessSerialNumber` for the window server to fill in.
+        if unsafe { front(psn.as_mut_ptr().cast()) } == 0 && psn != [0u8; 8] {
+            return Some(psn);
+        }
     }
-    if let Some(pid) = known.get(asn) {
-        return Some(*pid);
-    }
-    let info = crate::util::run_ok(
+    let out = crate::util::run_ok(
         "/usr/bin/lsappinfo",
-        &["info", "-only", "pid", asn],
+        &["front"],
         None,
-        quick,
+        Duration::from_secs(2),
     )
     .ok()?;
-    let pid = parse_pid(&info)?;
-    if known.len() > 64 {
-        known.clear();
-    }
-    known.insert(asn.to_string(), pid);
-    Some(pid)
-}
-
-/// The pid in what `lsappinfo info -only pid` prints: `"pid"=2706`, or `pid = 2706 …` among the
-/// rest of its layout.
-fn parse_pid(info: &str) -> Option<i32> {
-    let rest = &info[info.find("pid")? + 3..];
-    let digits: String = rest
-        .trim_start_matches(['"', ' ', '='])
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().ok().filter(|pid| *pid > 0)
+    parse_asn(&out)
 }
 
 /// Process `pid`'s serial number, as the 8 bytes of a `ProcessSerialNumber`, from its Launch
 /// Services ASN (`lsappinfo find pid=…` says `ASN:0x0-0x1acaac9-"TextEdit":`).
-fn psn(pid: i32) -> Option<[u8; 8]> {
+pub fn psn(pid: i32) -> Option<[u8; 8]> {
     let out = crate::util::run_ok(
         "/usr/bin/lsappinfo",
         &["find", &format!("pid={pid}")],
@@ -555,15 +545,10 @@ mod tests {
         assert_eq!(psn, [0, 0, 0, 0, 0xc9, 0xaa, 0xac, 0x01]);
         assert_eq!(super::parse_asn(""), None);
         assert_eq!(super::parse_asn("ASN:garbage"), None);
-    }
-
-    #[test]
-    fn the_active_apps_pid_from_lsappinfo() {
-        // As macOS 27 prints `lsappinfo info -only pid <ASN>`, and as older ones did.
-        let now = "[ NULL ]  [ NULL ]  \n    bundleID=[ NULL ] \n    bundle path=[ NULL ] \n    executable path=[ NULL ] \n    pid = 2706 !cgsConnection !signalled type=[ NULL ]  flavor=[ NULL ]  Version=[ NULL ]  Arch=!!none \n";
-        assert_eq!(super::parse_pid(now), Some(2706));
-        assert_eq!(super::parse_pid("\"pid\"=431\n"), Some(431));
-        assert_eq!(super::parse_pid(""), None);
-        assert_eq!(super::parse_pid("pid = [ NULL ]"), None);
+        // As `lsappinfo front` says the active app: the same bytes the window server fills in
+        // for it, so the two can be compared.
+        let front = super::parse_asn("ASN:0x0-0x4136132:\n").unwrap();
+        assert_eq!(front, [0, 0, 0, 0, 0x32, 0x61, 0x13, 0x04]);
+        assert_eq!(super::parse_asn("[ NULL ]\n"), None);
     }
 }

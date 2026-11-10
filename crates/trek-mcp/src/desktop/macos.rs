@@ -40,6 +40,8 @@ unsafe extern "C" {
     fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
     fn CGEventCreate(source: *const std::ffi::c_void) -> *const std::ffi::c_void;
     fn CGEventGetLocation(event: *const std::ffi::c_void) -> CGPoint;
+    fn CGEventSourceFlagsState(state: i32) -> u64;
+    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
 }
 
 const SCREEN_RECORDING_ERROR: &str = "Screen Recording permission is missing, so trek-mcp cannot capture the screen. \
@@ -88,8 +90,12 @@ pub struct Mac {
     /// The user's window that's ready to be put back in front (`ready_front`): what makes its
     /// app active again, and its own element to raise it by (none when its app gave none).
     theirs: std::cell::RefCell<Option<(super::skylight::Theirs, Option<super::ax::Raised>)>>,
-    /// Apps' pids by their ASN, as `active_app` learned them.
-    asns: std::cell::RefCell<std::collections::HashMap<String, i32>>,
+    /// Apps' serial numbers by pid, as `is_active` looked them up, and the pid that last had
+    /// none, with when.
+    psns: std::cell::RefCell<std::collections::HashMap<i32, [u8; 8]>>,
+    no_psn: std::cell::Cell<Option<(i32, std::time::Instant)>>,
+    /// The Dock's pid, once `on_dock` has found it.
+    dock: std::cell::Cell<Option<i32>>,
 }
 
 impl Mac {
@@ -642,8 +648,37 @@ impl Desktop for Mac {
         *self.theirs.borrow_mut() = ready;
     }
 
-    fn active_app(&self) -> Option<i64> {
-        super::skylight::active_app(&mut self.asns.borrow_mut()).map(i64::from)
+    /// The window server's front process against `pid`'s serial number, which is looked up
+    /// once (a call to `lsappinfo`) and kept: after that, no process is run for the answer.
+    fn is_active(&self, pid: i64) -> Option<bool> {
+        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
+        let known = self.psns.borrow().get(&pid).copied();
+        let psn = match known {
+            Some(psn) => psn,
+            None => {
+                // An app with none (it isn't listed yet, or has quit) isn't asked after again
+                // at every look.
+                let lately = Duration::from_millis(500);
+                if self
+                    .no_psn
+                    .get()
+                    .is_some_and(|(missed, at)| missed == pid && at.elapsed() < lately)
+                {
+                    return None;
+                }
+                let Some(psn) = super::skylight::psn(pid) else {
+                    self.no_psn.set(Some((pid, std::time::Instant::now())));
+                    return None;
+                };
+                let mut psns = self.psns.borrow_mut();
+                if psns.len() > 64 {
+                    psns.clear();
+                }
+                psns.insert(pid, psn);
+                psn
+            }
+        };
+        Some(super::skylight::front_psn()? == psn)
     }
 
     /// The HID system's count since the last mouse button went down, and the pointer's place as
@@ -671,6 +706,41 @@ impl Desktop for Mac {
         Some((Duration::from_secs_f64(secs), (at.x, at.y)))
     }
 
+    /// The Dock's own window covers the whole screen, so the window list can't say: it's the
+    /// frame of the Dock's icons that's asked for (`ax::dock_icons`), where they are now. A
+    /// hidden Dock's are past the screen's edge, where no pointer is, until it shows.
+    fn on_dock(&self, x: f64, y: f64) -> bool {
+        let find = || {
+            self.running_apps()
+                .into_iter()
+                .find(|a| a.bundle_id.as_deref() == Some("com.apple.dock"))
+                .map(|dock| dock.pid as i32)
+        };
+        // The Dock's pid is kept (finding it lists every app); a Dock that restarted since is
+        // found again.
+        let kept = self.dock.get();
+        let icons = kept.and_then(super::ax::dock_icons).or_else(|| {
+            let pid = find().filter(|pid| Some(*pid) != kept)?;
+            self.dock.set(Some(pid));
+            super::ax::dock_icons(pid)
+        });
+        icons.is_some_and(|icons| holds(icons, x, y))
+    }
+
+    fn switch_keys(&self) -> Option<(bool, bool)> {
+        const HID: i32 = 1; // kCGEventSourceStateHIDSystemState: the keyboard, not posted events
+        const COMMAND: u64 = 0x0010_0000; // kCGEventFlagMaskCommand
+        const TAB: u16 = 48;
+        const GRAVE: u16 = 50;
+        // SAFETY: readings of the keyboard's state; nothing is posted or changed.
+        unsafe {
+            Some((
+                CGEventSourceFlagsState(HID) & COMMAND != 0,
+                CGEventSourceKeyState(HID, TAB) || CGEventSourceKeyState(HID, GRAVE),
+            ))
+        }
+    }
+
     fn has_elements(&self) -> bool {
         true
     }
@@ -690,6 +760,11 @@ impl Desktop for Mac {
     fn focus(&self, _w: &WindowInfo, identity: u64) -> Result<bool, String> {
         self.ax.focus(identity)
     }
+}
+
+/// Whether the rectangle (x, y, width, height) holds the point.
+fn holds((rx, ry, rw, rh): Rect, x: f64, y: f64) -> bool {
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
 /// A bundle id rather than an app's name: `com.apple.TextEdit`.
@@ -956,6 +1031,52 @@ mod tests {
             looks_like_bundle_id("com.apple.TextEdit") && !looks_like_bundle_id("TextEdit.app")
         );
         assert!(!looks_like_bundle_id("Touchline 27") && !looks_like_bundle_id("Notes"));
+    }
+
+    #[test]
+    fn a_hidden_docks_icons_are_under_no_pointer() {
+        // The Dock's list as accessibility gave it, hidden, on a 1710x1107 screen (macOS 27):
+        // it starts at the screen's bottom edge, which no pointer is past. Showing, it's taken
+        // to be its own height further up (not read: the Dock stayed hidden).
+        let hidden = (182.0, 1107.0, 1346.0, 60.0);
+        let showing = (182.0, 1047.0, 1346.0, 60.0);
+        assert!(!holds(hidden, 800.0, 1106.9));
+        assert!(holds(showing, 800.0, 1080.0));
+        assert!(!holds(showing, 100.0, 1080.0) && !holds(showing, 800.0, 1040.0));
+    }
+
+    /// On a real desk: `cargo test -p trek-mcp the_real_desk -- --ignored --nocapture`. Reads
+    /// only: nothing is posted, raised or made active.
+    #[test]
+    #[ignore = "reads the real desktop"]
+    fn the_real_desk_says_who_is_active_where_the_dock_is_and_what_the_keyboard_holds() {
+        let mac = Mac::default();
+        // One app is the active one, and it has a window on screen or it doesn't; the window
+        // server and Launch Services name the same one.
+        let front = super::super::skylight::front_psn().expect("a front process");
+        let windows = mac.windows().unwrap();
+        let active: Vec<&WindowInfo> = windows
+            .iter()
+            .filter(|w| mac.is_active(w.pid) == Some(true))
+            .collect();
+        eprintln!(
+            "front psn {front:?}; active app's windows: {:?}",
+            active.iter().map(|w| (&w.owner, w.id)).collect::<Vec<_>>()
+        );
+        assert!(active.windows(2).all(|pair| pair[0].pid == pair[1].pid));
+        // The Dock's icons have a place, on screen or just past its edge.
+        let (ago, (x, y)) = mac.last_click().expect("a pointer");
+        let on_dock = mac.on_dock(x, y);
+        let dock = mac.dock.get().expect("the Dock is running");
+        let (dx, dy, dw, dh) = super::super::ax::dock_icons(dock).expect("the Dock's icons");
+        eprintln!(
+            "pointer {x},{y} (last click {ago:?} ago) on the Dock: {on_dock}; its icons at {dx},{dy} {dw}x{dh}"
+        );
+        assert!(dw > 0.0 && dh > 0.0);
+        assert_eq!(on_dock, holds((dx, dy, dw, dh), x, y));
+        // Nobody is at the app switcher while this runs unattended.
+        eprintln!("Command, Tab or `: {:?}", mac.switch_keys());
+        assert!(mac.switch_keys().is_some());
     }
 
     #[test]
