@@ -136,10 +136,16 @@ fn post(pid: i32, event: &CGEvent) {
 /// window; then give the app a moment to act on it. Best effort: without the private call, or
 /// when the window server won't take the records, events are still posted.
 fn make_key(pid: i32, wid: u32) {
-    let Some(post_record) = calls().post_record else {
+    let Some(psn) = psn(pid) else {
         return;
     };
-    let Some(psn) = psn(pid) else {
+    key_records(&psn, wid);
+    std::thread::sleep(Duration::from_millis(50));
+}
+
+/// The records that make window `wid` the key window of the app with serial number `psn`.
+fn key_records(psn: &[u8; 8], wid: u32) {
+    let Some(post_record) = calls().post_record else {
         return;
     };
     let mut focus = record(wid);
@@ -155,25 +161,86 @@ fn make_key(pid: i32, wid: u32) {
         // SAFETY: as above.
         unsafe { post_record(psn.as_ptr().cast(), key.as_ptr()) };
     }
-    std::thread::sleep(Duration::from_millis(50));
 }
 
-/// Put the user's window `w` back in front, its app active and the window key, as a click on it
-/// would (`kCPSUserGenerated`): for when an app the agent opened came forward over it.
-pub fn bring_forward(w: &WindowInfo) -> Result<(), String> {
-    let Some(set_front) = calls().set_front else {
-        return Err("This macOS has no way to put a window back in front.".into());
-    };
-    let (pid, wid) = (w.pid as i32, u32::try_from(w.id).unwrap_or(0));
-    let psn = psn(pid).ok_or_else(|| format!("{} isn't running any more.", w.owner))?;
-    const USER_GENERATED: u32 = 0x200;
-    // SAFETY: the PSN just filled in, and a window number of that process.
-    let err = unsafe { set_front(psn.as_ptr().cast(), wid, USER_GENERATED) };
-    if err != 0 {
-        return Err(format!("The window server refused ({err})."));
+/// The user's window, and what making its app the active one again takes: looked up ahead of
+/// need (the serial number is a call to `lsappinfo`), so that it costs nothing at the moment an
+/// app the agent opened takes the front.
+pub struct Theirs {
+    pub pid: i32,
+    pub wid: u32,
+    psn: [u8; 8],
+}
+
+impl Theirs {
+    pub fn of(w: &WindowInfo) -> Result<Self, String> {
+        let pid = w.pid as i32;
+        let psn = psn(pid).ok_or_else(|| format!("{} isn't running any more.", w.owner))?;
+        Ok(Self {
+            pid,
+            wid: u32::try_from(w.id).unwrap_or(0),
+            psn,
+        })
     }
-    make_key(pid, wid);
-    Ok(())
+
+    /// Make the window's app the active one again, and the window its key window, as a click
+    /// on it would (`kCPSUserGenerated`): the menu bar and the keyboard are the user's app's
+    /// again. That alone leaves the windows in the order they were (measured on macOS 27: the
+    /// app that came forward stays on top, of an app that's active again): the window is raised
+    /// by its own app, asked through accessibility (`ax::Raised`), after this.
+    pub fn activate(&self) -> Result<(), String> {
+        let Some(set_front) = calls().set_front else {
+            return Err("This macOS has no way to put a window back in front.".into());
+        };
+        const USER_GENERATED: u32 = 0x200;
+        // SAFETY: the PSN looked up for this process, and a window number of it.
+        let err = unsafe { set_front(self.psn.as_ptr().cast(), self.wid, USER_GENERATED) };
+        if err != 0 {
+            return Err(format!("The window server refused ({err})."));
+        }
+        key_records(&self.psn, self.wid);
+        Ok(())
+    }
+}
+
+/// The pid of the app that's active (frontmost: it has the menu bar and the keyboard), as
+/// Launch Services has it: `lsappinfo front` names it by its ASN, `lsappinfo info` gives that
+/// one's pid. `known` keeps the pids already asked for.
+pub fn active_app(known: &mut std::collections::HashMap<String, i32>) -> Option<i32> {
+    let quick = Duration::from_secs(2);
+    let asn = crate::util::run_ok("/usr/bin/lsappinfo", &["front"], None, quick).ok()?;
+    let asn = asn.trim();
+    if !asn.starts_with("ASN:") {
+        return None;
+    }
+    if let Some(pid) = known.get(asn) {
+        return Some(*pid);
+    }
+    let info = crate::util::run_ok(
+        "/usr/bin/lsappinfo",
+        &["info", "-only", "pid", asn],
+        None,
+        quick,
+    )
+    .ok()?;
+    let pid = parse_pid(&info)?;
+    if known.len() > 64 {
+        known.clear();
+    }
+    known.insert(asn.to_string(), pid);
+    Some(pid)
+}
+
+/// The pid in what `lsappinfo info -only pid` prints: `"pid"=2706`, or `pid = 2706 …` among the
+/// rest of its layout.
+fn parse_pid(info: &str) -> Option<i32> {
+    let rest = &info[info.find("pid")? + 3..];
+    let digits: String = rest
+        .trim_start_matches(['"', ' ', '='])
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok().filter(|pid| *pid > 0)
 }
 
 /// Process `pid`'s serial number, as the 8 bytes of a `ProcessSerialNumber`, from its Launch
@@ -488,5 +555,15 @@ mod tests {
         assert_eq!(psn, [0, 0, 0, 0, 0xc9, 0xaa, 0xac, 0x01]);
         assert_eq!(super::parse_asn(""), None);
         assert_eq!(super::parse_asn("ASN:garbage"), None);
+    }
+
+    #[test]
+    fn the_active_apps_pid_from_lsappinfo() {
+        // As macOS 27 prints `lsappinfo info -only pid <ASN>`, and as older ones did.
+        let now = "[ NULL ]  [ NULL ]  \n    bundleID=[ NULL ] \n    bundle path=[ NULL ] \n    executable path=[ NULL ] \n    pid = 2706 !cgsConnection !signalled type=[ NULL ]  flavor=[ NULL ]  Version=[ NULL ]  Arch=!!none \n";
+        assert_eq!(super::parse_pid(now), Some(2706));
+        assert_eq!(super::parse_pid("\"pid\"=431\n"), Some(431));
+        assert_eq!(super::parse_pid(""), None);
+        assert_eq!(super::parse_pid("pid = [ NULL ]"), None);
     }
 }

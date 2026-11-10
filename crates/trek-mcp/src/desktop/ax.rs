@@ -1,6 +1,8 @@
 //! Elements: an app window's accessibility tree read for an outline (`crate::outline`), and its
 //! elements' own actions. All of it goes through Accessibility's public calls to the window's
-//! process alone: nothing is activated or raised, and no pointer or key event is made.
+//! process alone: nothing is activated or raised, and no pointer or key event is made. (The one
+//! window ever raised from here is the user's own, put back in front of one that an app the
+//! agent opened brought forward: `Raised`.)
 //!
 //! - **Which window**: the app's `AXWindows` entry whose window number (`_AXUIElementGetWindow`,
 //!   as `spaces` uses it) is the window's; without that call, the one with its frame.
@@ -804,6 +806,61 @@ impl Ax {
             }
         }
         Ok(false)
+    }
+}
+
+/// How long the user's app has to answer when its window is looked for, and when it's raised.
+/// Short: at that moment another app's window may be sitting over theirs.
+const RAISE_TIMEOUT: f32 = 0.3;
+
+/// The user's own window, found through its app's accessibility ahead of need, to be raised
+/// over a window that an app the agent opened brought forward. The one thing in this file that
+/// reorders windows, and only ever to put the user's front window back where it was.
+pub struct Raised(CFType);
+
+impl Raised {
+    /// `w`'s element: the one of its app's windows (those it lists, its main and its focused
+    /// one) with its number. `None` when its app has no accessibility, doesn't answer in time,
+    /// or names no such window.
+    pub fn of(w: &WindowInfo) -> Option<Self> {
+        let pid = i32::try_from(w.pid).ok().filter(|p| *p > 0)?;
+        let wid = u32::try_from(w.id).ok().filter(|id| *id > 0)?;
+        // SAFETY: a +1 AX element for the process, released by the wrapper; null when there's none.
+        let app = unsafe { AXUIElementCreateApplication(pid) };
+        if app.is_null() {
+            return None;
+        }
+        let app = unsafe { CFType::wrap_under_create_rule(app) };
+        // SAFETY: a live AX element.
+        unsafe { AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), RAISE_TIMEOUT) };
+        let mut windows = attribute(&app, "AXWindows")
+            .map(|v| elements_in(&v))
+            .unwrap_or_default();
+        windows.extend(attribute(&app, "AXMainWindow"));
+        windows.extend(attribute(&app, "AXFocusedWindow"));
+        let window = windows
+            .into_iter()
+            .find(|el| super::spaces::ax_window_number(el.as_CFTypeRef()) == Some(wid))?;
+        // SAFETY: as above.
+        unsafe { AXUIElementSetMessagingTimeout(window.as_CFTypeRef(), RAISE_TIMEOUT) };
+        Some(Self(window))
+    }
+
+    /// Ask the window's app to raise it (`AXRaise`). An app raises a window over another
+    /// app's only while it's the active one, so its app is made active first
+    /// (`skylight::Theirs::activate`); raised before that, it stays under (measured on macOS 27).
+    pub fn raise(&self) -> Result<(), String> {
+        let name = CFString::from_static_string("AXRaise");
+        // SAFETY: a live element and an action's name.
+        let err =
+            unsafe { AXUIElementPerformAction(self.0.as_CFTypeRef(), name.as_concrete_TypeRef()) };
+        match err {
+            0 => Ok(()),
+            CANNOT_COMPLETE => Err("its app didn't answer in time".into()),
+            INVALID_ELEMENT => Err("the window is gone".into()),
+            API_DISABLED => Err("Accessibility permission is missing".into()),
+            other => Err(format!("accessibility refused to raise it (error {other})")),
+        }
     }
 }
 

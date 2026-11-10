@@ -94,6 +94,9 @@ pub fn run(
     });
 
     let deadline = Instant::now() + timeout;
+    // Looked at every millisecond at first, then less often: a quick lookup (`lsappinfo` answers
+    // in 3 ms) isn't held for a full 20 ms, and a long run costs no more than before.
+    let mut looks = 0u32;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.code(),
@@ -102,7 +105,10 @@ pub fn run(
                 let _ = child.wait();
                 break None;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(wait_ms(looks)));
+                looks += 1;
+            }
             Err(e) => return Err(format!("Failed waiting for {program}: {e}")),
         }
     };
@@ -113,6 +119,16 @@ pub fn run(
         stdout,
         stderr,
     })
+}
+
+/// How long `run` sleeps before its next look at the child, having looked `looks` times: 1 ms
+/// for the first 8 ms, doubling from there to 20 ms.
+fn wait_ms(looks: u32) -> u64 {
+    match looks {
+        0..8 => 1,
+        8..12 => 2 << (looks - 8),
+        _ => 20,
+    }
 }
 
 /// Run and require success, returning stdout.

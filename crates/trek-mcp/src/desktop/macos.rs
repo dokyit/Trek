@@ -38,6 +38,8 @@ unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
     fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
+    fn CGEventCreate(source: *const std::ffi::c_void) -> *const std::ffi::c_void;
+    fn CGEventGetLocation(event: *const std::ffi::c_void) -> CGPoint;
 }
 
 const SCREEN_RECORDING_ERROR: &str = "Screen Recording permission is missing, so trek-mcp cannot capture the screen. \
@@ -83,6 +85,56 @@ fn host_replaced_on_disk() -> bool {
 pub struct Mac {
     /// Windows' elements, and the ones kept to act on (`ax`).
     ax: super::ax::Ax,
+    /// The user's window that's ready to be put back in front (`ready_front`): what makes its
+    /// app active again, and its own element to raise it by (none when its app gave none).
+    theirs: std::cell::RefCell<Option<(super::skylight::Theirs, Option<super::ax::Raised>)>>,
+    /// Apps' pids by their ASN, as `active_app` learned them.
+    asns: std::cell::RefCell<std::collections::HashMap<String, i32>>,
+}
+
+impl Mac {
+    /// Whether `w` is the window that's ready to be put back.
+    fn is_ready(&self, w: &WindowInfo) -> bool {
+        self.theirs
+            .borrow()
+            .as_ref()
+            .is_some_and(|(app, _)| i64::from(app.pid) == w.pid && i64::from(app.wid) == w.id)
+    }
+
+    /// Put the user's window `w` back in front of a window that came forward over it. Two
+    /// steps, in this order (measured on macOS 27): with `activate`, the window server makes
+    /// the window's app the active one and the window its key window, which gives the user the
+    /// menu bar and the keyboard back but leaves the other app's window on top; then the
+    /// window's own app raises it (`AXRaise`), which an app does over another's only while
+    /// that other isn't the active one. The order shows 15 to 60 ms later.
+    fn put_back(&self, w: &WindowInfo, activate: bool) -> Result<(), String> {
+        self.ready_front(w);
+        let mut theirs = self.theirs.borrow_mut();
+        let Some((app, window)) = theirs.as_mut() else {
+            return Err(format!("{} isn't running any more.", w.owner));
+        };
+        if activate && let Err(e) = app.activate() {
+            // What was looked up may be stale: it's looked up afresh next time.
+            *theirs = None;
+            return Err(e);
+        }
+        // Its app may not have answered when it was first asked for the window.
+        if window.is_none() {
+            *window = super::ax::Raised::of(w);
+        }
+        let raised = match window {
+            Some(window) => window.raise(),
+            None => Err("its app names no such window to accessibility".into()),
+        };
+        // Whether the window is on top now is the caller's to see, and to say.
+        if let Err(e) = raised {
+            eprintln!(
+                "trek-mcp computer: {}'s window {} couldn't be raised: {e}",
+                w.owner, w.id
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Desktop for Mac {
@@ -573,7 +625,50 @@ impl Desktop for Mac {
     }
 
     fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
-        super::skylight::bring_forward(w)
+        self.put_back(w, true)
+    }
+
+    fn raise(&self, w: &WindowInfo) -> Result<(), String> {
+        self.put_back(w, false)
+    }
+
+    fn ready_front(&self, w: &WindowInfo) {
+        if self.is_ready(w) {
+            return;
+        }
+        let ready = super::skylight::Theirs::of(w)
+            .ok()
+            .map(|app| (app, super::ax::Raised::of(w)));
+        *self.theirs.borrow_mut() = ready;
+    }
+
+    fn active_app(&self) -> Option<i64> {
+        super::skylight::active_app(&mut self.asns.borrow_mut()).map(i64::from)
+    }
+
+    /// The HID system's count since the last mouse button went down, and the pointer's place as
+    /// a new event has it (nothing is posted, and the pointer isn't touched).
+    fn last_click(&self) -> Option<(Duration, (f64, f64))> {
+        // kCGEventSourceStateHIDSystemState; kCGEventLeftMouseDown, kCGEventRightMouseDown.
+        let secs = [1u32, 3]
+            .into_iter()
+            .map(|button| unsafe { CGEventSourceSecondsSinceLastEventType(1, button) })
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .fold(f64::INFINITY, f64::min);
+        if !secs.is_finite() {
+            return None;
+        }
+        // SAFETY: an event from no source holds where the pointer is; released right after.
+        let at = unsafe {
+            let event = CGEventCreate(std::ptr::null());
+            if event.is_null() {
+                return None;
+            }
+            let at = CGEventGetLocation(event);
+            core_foundation::base::CFRelease(event);
+            at
+        };
+        Some((Duration::from_secs_f64(secs), (at.x, at.y)))
     }
 
     fn has_elements(&self) -> bool {

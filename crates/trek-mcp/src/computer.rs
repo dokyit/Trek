@@ -159,6 +159,9 @@ pub struct Computer {
     report: Option<Reporter>,
     /// When input was last posted behind, and how idle the user was just before (`user_idle`).
     posted: Option<(std::time::Instant, Option<Duration>)>,
+    /// When a click or drag was last posted behind: the system may count it as a mouse press of
+    /// the user's (`users_doing`).
+    clicked: Option<std::time::Instant>,
     /// The window in front when a click or key was last posted behind, and the pid of the app it
     /// went to: a window of that app in front of it since, while the user did nothing, came up
     /// because of that input (`put_back_in_front`).
@@ -200,6 +203,153 @@ impl Place {
     }
 }
 
+/// The watch kept on an app the agent opens, or has just clicked or typed in, so that it doesn't
+/// take the front from the user (`Computer::look`): their window, the app, and what's been seen
+/// of it so far.
+struct Watch {
+    /// The user's window: the one in front before the app could come forward.
+    front: WindowInfo,
+    /// The agent's app: its pid (0 until it's known, for one just launched) and its name.
+    pid: i64,
+    name: String,
+    /// It was the active app before the watch began: staying so takes nothing from the user.
+    was_active: bool,
+    /// The app is being opened (else it was clicked or typed in): the reply says which.
+    opening: bool,
+    started: std::time::Instant,
+    /// The windows as they lay when the app was last seen behind.
+    behind: Vec<WindowInfo>,
+    /// When the active app was last asked for.
+    asked_active: Option<std::time::Instant>,
+    /// In front since (as far as it was seen), and whether with a window over the user's or
+    /// only as the active app.
+    since: Option<std::time::Instant>,
+    by_window: bool,
+    /// The put-backs asked for since it came forward, the last of them when, and the looks
+    /// since that one.
+    tries: u32,
+    tried: Option<std::time::Instant>,
+    looks: u32,
+    /// How many times it came forward, and how long it was in front in all before it was
+    /// seen behind again.
+    came: u32,
+    in_front: Duration,
+    /// When it was last seen in front, and the looks that have found it behind since.
+    last: Option<std::time::Instant>,
+    quiet: u32,
+    /// Why the watch ended before its time.
+    end: Option<End>,
+}
+
+/// How a `Watch` ended, when not with the app behind and quiet.
+enum End {
+    /// The user clicked the app's window forward themselves: it's theirs now.
+    Users,
+    /// Put back `TRIES` times and still in front: with a window `above` the user's or only as
+    /// the active app, and with the keyboard the user's app's again or not (`None`: unknown).
+    Stays {
+        above: bool,
+        users_keyboard: Option<bool>,
+    },
+    /// Putting the user's window back failed.
+    Failed(String),
+    /// Still coming forward when the watch ran out (`WATCH_MAX`): put back each time so far.
+    Keeps,
+}
+
+impl Watch {
+    /// Whether `w` is a window of the agent's app (and not the user's own window, when the app
+    /// is one and the same).
+    fn is_apps(&self, w: &WindowInfo) -> bool {
+        w.id != self.front.id
+            && !is_trek(w)
+            && if self.pid > 0 {
+                w.pid == self.pid
+            } else {
+                is_app(&w.owner, &self.name)
+            }
+    }
+
+    /// What the watch saw, for the reply, of the app called `app`: nothing when it never came
+    /// forward.
+    fn said(&self, app: &str) -> String {
+        let theirs = &self.front.owner;
+        let opened = if self.opening { " when it opened" } else { "" };
+        match &self.end {
+            Some(End::Users) => format!(
+                " The user clicked {app}'s window forward themselves, so it was left in front: it's theirs to use now."
+            ),
+            Some(End::Failed(e)) => format!(
+                " Note: {app}'s window came to the front{opened}, in front of the user's {theirs} window, and couldn't be put back ({e}). Tell the user it's in their way."
+            ),
+            Some(End::Stays {
+                above: true,
+                users_keyboard,
+            }) => {
+                let keyboard = match users_keyboard {
+                    Some(true) => {
+                        format!(
+                            " ({app} isn't the active app, so the keyboard is still the user's)"
+                        )
+                    }
+                    Some(false) => {
+                        format!(" ({app} is the active app too, so what the user types goes to it)")
+                    }
+                    None => String::new(),
+                };
+                format!(
+                    " Note: {app}'s window came to the front{opened} and stays there, in front of the user's {theirs} window rather than behind it{keyboard}. Tell the user it's in their way."
+                )
+            }
+            Some(End::Stays { above: false, .. }) => format!(
+                " Note: {app} made itself the active app{opened} and stays so: what the user types goes to it, not to their {theirs} window. Tell the user."
+            ),
+            None | Some(End::Keeps) if self.came == 0 => String::new(),
+            end => {
+                let (did, undone, was) = if self.by_window {
+                    (
+                        "brought its window forward",
+                        format!("it was put back behind the user's {theirs} window"),
+                        "in front",
+                    )
+                } else {
+                    (
+                        "made itself the active app",
+                        format!("the user's {theirs} window was made active again"),
+                        "the active app",
+                    )
+                };
+                let time = about(self.in_front);
+                let mut said = match self.came {
+                    1 => format!(" {app} {did}; {undone}. It was {was} for {time}."),
+                    n => format!(
+                        " {app} {did} {n} times; each time {undone}. It was {was} for {time} in all."
+                    ),
+                };
+                if matches!(end, Some(End::Keeps)) {
+                    said.push_str(" It may do so again: tell the user if it stays in their way.");
+                }
+                said
+            }
+        }
+    }
+}
+
+/// A short time as a reply says it: "about 40 ms", "under 10 ms".
+fn about(time: Duration) -> String {
+    match time.as_millis() {
+        0..10 => "under 10 ms".into(),
+        ms => format!("about {} ms", (ms + 5) / 10 * 10),
+    }
+}
+
+/// Sleep, unless for no time at all (as tests have it).
+fn sleep(time: Duration) {
+    if !time.is_zero() {
+        std::thread::sleep(time);
+    }
+}
+
 impl Default for Computer {
     fn default() -> Self {
         let desktop: Box<dyn Desktop> = Box::new(desktop::Native::default());
@@ -221,6 +371,7 @@ impl Default for Computer {
             target: None,
             report,
             posted: None,
+            clicked: None,
             front: None,
             refs: Refs::new("elements"),
             listed: None,
@@ -1147,42 +1298,65 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
     fn post(&mut self, w: &WindowInfo, input: &Input) -> Result<(), String> {
         let before = self.user_idle();
         self.desktop.behind(w, input)?;
-        self.posted = Some((std::time::Instant::now(), before));
+        self.note_posted(input, before);
         Ok(())
+    }
+
+    /// Input was posted behind just now: when, for `user_idle` and `users_doing`.
+    fn note_posted(&mut self, input: &Input, idle_before: Option<Duration>) {
+        let now = std::time::Instant::now();
+        self.posted = Some((now, idle_before));
+        if matches!(input, Input::Click { .. } | Input::Drag { .. }) {
+            self.clicked = Some(now);
+        }
     }
 
     /// `post` a click, key or typing, which can make the app raise itself over the user's window:
     /// what came up since the last one, and what this one brings up, is put back behind the
     /// window the user has in front. What was put back, for the reply.
     fn post_watched(&mut self, w: &WindowInfo, input: &Input) -> Result<String, String> {
-        self.watched(w, |desktop| desktop.behind(w, input))
+        let clicks = matches!(input, Input::Click { .. } | Input::Drag { .. });
+        self.watched(w, clicks, |desktop| desktop.behind(w, input))
             .map(|((), said)| said)
     }
 
     /// Do `act` to `w`'s app behind (input posted to it, or an element's own action), watching
-    /// for the app raising itself over the user's window as `post_watched` says. What `act`
-    /// answered, and what was put back.
+    /// for the app raising itself over the user's window. What had come up since the last
+    /// input is put back first, if the user did nothing meanwhile (`put_back_in_front`). Then
+    /// the app is watched from before `act` until `AFTER_INPUT` after it (an app that
+    /// activates itself does within that; a slower one is caught at the next input): a window
+    /// it brings forward goes back behind the user's within a moment, whether they're typing
+    /// in their own app or not. What `act` answered, and what was put back. `clicks`: `act`
+    /// posts a click or drag.
     fn watched<T>(
         &mut self,
         w: &WindowInfo,
+        clicks: bool,
         act: impl FnOnce(&dyn Desktop) -> Result<T, String>,
     ) -> Result<(T, String), String> {
         let mut said = self.put_back_in_front();
         let front = self.desktop.key_window().ok().flatten();
         let before = self.user_idle();
+        // Nothing to watch for when the window in front is the app's own.
+        let theirs = front.clone().filter(|f| f.pid != w.pid);
+        let mut watch = self.watch(theirs, w.pid, &w.owner, false);
         let done = act(self.desktop.as_ref())?;
-        self.posted = Some((std::time::Instant::now(), before));
+        let now = std::time::Instant::now();
+        self.posted = Some((now, before));
+        if clicks {
+            self.clicked = Some(now);
+        }
         self.front = front.map(|f| (f, w.pid));
-        std::thread::sleep(AFTER_INPUT);
-        said.push_str(&self.put_back_in_front());
+        self.settle(watch.as_mut(), AFTER_INPUT);
+        said.push_str(&watch.map(|x| x.said(&w.owner)).unwrap_or_default());
         Ok((done, said))
     }
 
     /// When a window of the app the agent works in has come in front of another app's window
     /// that was in front at its last click or key (`self.front`), and the user has given no input
-    /// since, the agent's input raised it: the user's window goes back in front (`keep_behind`).
-    /// Nothing else is touched: apps reorder their own windows, other apps' windows come and go,
-    /// and once the user has acted, what's in front is theirs.
+    /// since, the agent's input raised it, too late for `watched` to see: the user's window
+    /// goes back in front. Nothing else is touched: apps reorder their own windows, other
+    /// apps' windows come and go, and once the user has acted, what's in front is theirs.
     fn put_back_in_front(&mut self) -> String {
         let (Some((front, agents)), Some((at, _))) = (self.front.clone(), self.posted) else {
             return String::new();
@@ -1205,7 +1379,9 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         if !order.iter().any(|x| x.id == front.id) {
             return String::new();
         }
-        self.keep_behind(&first, Some(&front)).unwrap_or_default()
+        let mut watch = self.watch(Some(front), agents, &first.owner, false);
+        self.settle(watch.as_mut(), SETTLE);
+        watch.map(|w| w.said(&first.owner)).unwrap_or_default()
     }
 
     /// Refuses to drive `w` while it belongs to the app the user is using right now: their
@@ -1219,51 +1395,198 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         Err(in_use(&w.owner))
     }
 
-    /// Keeps `w` behind `front`, the window that was in front before `w` opened: apps often bring
-    /// a new window forward themselves, the moment it appears or a little after. Up to three
-    /// times it's put back. What happened, for the reply: `None` when nothing needed doing.
-    fn keep_behind(&self, w: &WindowInfo, front: Option<&WindowInfo>) -> Option<String> {
-        let front = front.filter(|f| f.id != w.id)?;
-        let deadline = std::time::Instant::now() + SETTLE;
-        let mut put_back = 0;
-        loop {
-            let order = self.desktop.windows().unwrap_or_default();
-            let at = |id: i64| order.iter().position(|x| x.id == id);
-            let (Some(theirs), Some(ours)) = (at(front.id), at(w.id)) else {
-                return None;
-            };
-            if ours < theirs {
-                if put_back == 3 {
-                    return Some(format!(
-                        " Note: {}'s window came to the front when it opened and stays there, in front of the user's {} window rather than behind it. Tell the user it's in their way.",
-                        w.owner, front.owner
-                    ));
-                }
-                if let Err(e) = self.desktop.bring_forward(front) {
-                    return Some(format!(
-                        " Note: {}'s window came to the front when it opened, in front of the user's {} window, and couldn't be put back ({e}). Tell the user it's in their way.",
-                        w.owner, front.owner
-                    ));
-                }
-                put_back += 1;
-                continue;
+    /// Starts a watch on the app the agent is opening (`opening`) or has just acted in, for the
+    /// sake of `front`, the window the user has in front; with none there's nothing to keep in
+    /// front, and no watch. What putting their window back takes is got ready now, before the
+    /// app can be in its way. `pid` 0: an app just launched, known by `name` until its pid is.
+    fn watch(
+        &self,
+        front: Option<WindowInfo>,
+        pid: i64,
+        name: &str,
+        opening: bool,
+    ) -> Option<Watch> {
+        let front = front?;
+        self.desktop.ready_front(&front);
+        let now = std::time::Instant::now();
+        Some(Watch {
+            // An app that's active already takes nothing by staying so.
+            was_active: pid > 0 && self.desktop.active_app() == Some(pid),
+            front,
+            pid,
+            name: name.to_string(),
+            opening,
+            started: now,
+            behind: self.desktop.windows().unwrap_or_default(),
+            asked_active: None,
+            since: None,
+            by_window: false,
+            tries: 0,
+            tried: None,
+            looks: 0,
+            came: 0,
+            in_front: Duration::ZERO,
+            last: None,
+            quiet: 0,
+            end: None,
+        })
+    }
+
+    /// One look at the windows while `watch` is kept. When a window of the agent's app has come
+    /// in front of the user's window, or the app has made itself the active one in their app's
+    /// place, the user's window is put back (`Desktop::bring_forward`, or `raise` when the
+    /// keyboard wasn't taken): at once, then again when a moment later (`SHOWS`) that doesn't
+    /// show, `TRIES` times in all before it's taken to stay. The windows as they are, front to
+    /// back.
+    fn look(&self, watch: Option<&mut Watch>) -> Vec<WindowInfo> {
+        let order = self.desktop.windows().unwrap_or_default();
+        let Some(watch) = watch.filter(|w| w.end.is_none()) else {
+            return order;
+        };
+        let now = std::time::Instant::now();
+        let theirs = order.iter().position(|x| x.id == watch.front.id);
+        let above = theirs.is_some_and(|at| order[..at].iter().any(|x| watch.is_apps(x)));
+        // The active app is asked for less often than the windows (it's a process run), and not
+        // of one app whose own window the user's is: its windows' order is all there is to that.
+        let may_be_active = !above
+            && !watch.was_active
+            && watch.pid > 0
+            && watch.pid != watch.front.pid
+            && (watch.since.is_some()
+                || watch
+                    .asked_active
+                    .is_none_or(|at| at.elapsed() >= ACTIVE_EVERY));
+        let active = may_be_active && {
+            watch.asked_active = Some(now);
+            self.desktop.active_app() == Some(watch.pid)
+        };
+        if !above && !active {
+            if let Some(since) = watch.since.take() {
+                let was = now.saturating_duration_since(since);
+                watch.in_front += was;
+                eprintln!(
+                    "trek-mcp computer: {} came in front of the user's {} window; put back after {} ms",
+                    watch.name,
+                    watch.front.owner,
+                    was.as_millis()
+                );
             }
-            if std::time::Instant::now() >= deadline {
-                return (put_back > 0).then(|| {
-                    format!(
-                        " {} brought its window forward; it was put back behind the user's {} window.",
-                        w.owner, front.owner
-                    )
+            watch.tries = 0;
+            watch.tried = None;
+            watch.quiet += 1;
+            watch.behind = order.clone();
+            return order;
+        }
+        watch.quiet = 0;
+        watch.last = Some(now);
+        if watch.since.is_none() {
+            if self.users_doing(watch) {
+                watch.end = Some(End::Users);
+                return order;
+            }
+            watch.since = Some(now);
+            watch.came += 1;
+        }
+        watch.by_window |= above;
+        if let Some(tried) = watch.tried {
+            watch.looks += 1;
+            if tried.elapsed() < SHOWS || watch.looks < SHOWS_LOOKS {
+                return order;
+            }
+            if watch.tries >= TRIES {
+                // Where the keyboard is, when the window won't go back: the agent's app has
+                // it, or not (the window server gave it back to the user's).
+                let keyboard = (watch.pid != watch.front.pid)
+                    .then(|| self.desktop.active_app())
+                    .flatten()
+                    .map(|pid| pid != watch.pid);
+                watch.end = Some(End::Stays {
+                    above,
+                    users_keyboard: keyboard,
                 });
+                return order;
             }
-            std::thread::sleep(Duration::from_millis(150));
+        }
+        // Who has the keyboard decides how it's put back. The agent's app took it (or that
+        // can't be told): the user's app is made the active one again, and their window key and
+        // on top. It didn't (their app is still active, or a third is: an alert, a launcher's
+        // panel): their window is raised and nothing else, so whoever is active stays so.
+        let took = active
+            || watch.pid == 0
+            || watch.pid == watch.front.pid
+            || self.desktop.active_app().is_none_or(|pid| pid == watch.pid);
+        let put_back = if took {
+            self.desktop.bring_forward(&watch.front)
+        } else {
+            self.desktop.raise(&watch.front)
+        };
+        match put_back {
+            Ok(()) => {
+                watch.tries += 1;
+                watch.tried = Some(std::time::Instant::now());
+                watch.looks = 0;
+            }
+            Err(e) => watch.end = Some(End::Failed(e)),
+        }
+        order
+    }
+
+    /// Whether the user brought the watched app forward themselves: they pressed a mouse button
+    /// a moment ago, since the watch began, with the pointer on one of the app's windows as
+    /// they lay behind theirs. Then it's theirs. Their typing in their own app says nothing of
+    /// the kind: an app that takes the front while they type is put back all the same. A click
+    /// that falls when the agent's own last input did may be that input, as the system counts
+    /// it (`user_idle`), and isn't taken for theirs.
+    fn users_doing(&self, watch: &Watch) -> bool {
+        let Some((ago, (x, y))) = self.desktop.last_click() else {
+            return false;
+        };
+        let ours = self.clicked.is_some_and(|at| {
+            let since = at.elapsed();
+            ago + Duration::from_millis(50) >= since && ago <= since + Duration::from_millis(500)
+        });
+        !ours
+            && ago < CLICKED
+            && ago < watch.started.elapsed()
+            && window_at(&watch.behind, x, y).is_some_and(|w| watch.is_apps(w))
+    }
+
+    /// Keeps `watch` for at least `least`, and until the app has stayed behind for `QUIET`
+    /// since it last came forward (an app can come forward more than once as it starts: Chrome
+    /// does), `WATCH_MAX` at most.
+    fn settle(&self, watch: Option<&mut Watch>, least: Duration) {
+        let Some(watch) = watch else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        loop {
+            self.look(Some(watch));
+            if watch.end.is_some() {
+                return;
+            }
+            let now = std::time::Instant::now();
+            let until = watch
+                .last
+                .map_or(started + least, |last| (last + QUIET).max(started + least));
+            if watch.since.is_none() {
+                if now >= until && watch.quiet >= QUIET_LOOKS {
+                    return;
+                }
+                if now >= started + WATCH_MAX {
+                    watch.end = Some(End::Keeps);
+                    return;
+                }
+            }
+            sleep(LOOK);
         }
     }
 
-    /// Waits up to `wait` for a window of process `pid` that isn't one of `before`. `pid` 0: any
-    /// window of an app called `name`.
+    /// Waits up to `wait` for a window of process `pid` that isn't one of `before` (`pid` 0: any
+    /// window of an app called `name`), keeping `watch` all the while: the window can come up
+    /// in front of the user's the moment it appears.
     fn new_window_of(
         &self,
+        watch: &mut Option<Watch>,
         pid: i64,
         name: &str,
         before: &[i64],
@@ -1272,9 +1595,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         let deadline = std::time::Instant::now() + wait;
         loop {
             let found = self
-                .desktop
-                .windows()
-                .unwrap_or_default()
+                .look(watch.as_mut())
                 .into_iter()
                 .filter(|w| !is_trek(w) && !before.contains(&w.id))
                 .find(|w| {
@@ -1287,7 +1608,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             if found.is_some() || std::time::Instant::now() >= deadline {
                 return found;
             }
-            std::thread::sleep(Duration::from_millis(200));
+            sleep(LOOK);
         }
     }
 
@@ -1392,6 +1713,8 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
         // icon does), else its own New Window (cmd+n), sent to it alone.
         let front = self.desktop.key_window().ok().flatten();
         let before: Vec<i64> = theirs.iter().map(|w| w.id).collect();
+        // Watched from before it's asked: the new window can come up in front at once.
+        let mut watch = self.watch(front, app.pid, &app.name, true);
         let asked = if theirs.is_empty() {
             self.desktop
                 .reopen_behind(&app)
@@ -1412,6 +1735,11 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
                 .map(|()| "pressed cmd+n in it for one more window")
         }
         .map_err(|e| format!("{was}, but asking it for a window failed: {e}"))?;
+        let found = self.new_window_of(&mut watch, app.pid, &app.name, &before, WINDOW_WAIT);
+        if found.is_some() {
+            self.settle(watch.as_mut(), SETTLE);
+        }
+        let order = watch.map(|w| w.said(&app.name)).unwrap_or_default();
         // Never a second instance: say so if the system started one anyway.
         let others = |apps: &[RunningApp]| -> Vec<i64> {
             apps.iter()
@@ -1430,9 +1758,8 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
                 )
             })
             .unwrap_or_default();
-        match self.new_window_of(app.pid, &app.name, &before, WINDOW_WAIT) {
+        match found {
             Some(w) => {
-                let order = self.keep_behind(&w, front.as_ref()).unwrap_or_default();
                 let reply = format!(
                     "{was}, so nothing was launched: {asked}. Working in its new window{} (window_id {}): read it with elements, or take a screenshot to see it.{order}{second}",
                     titled(&w),
@@ -1444,7 +1771,7 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             None => {
                 self.work_in_windowless(&app.name, app.pid);
                 Ok(vec![text(format!(
-                    "{was}, so nothing was launched: {asked}, but no new window has appeared. {NO_WINDOW_YET}{second}"
+                    "{was}, so nothing was launched: {asked}, but no new window has appeared. {NO_WINDOW_YET}{order}{second}"
                 ))])
             }
         }
@@ -1454,6 +1781,9 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
     fn launch(&mut self, name: &str, copy: AppBundle, windows: &[WindowInfo]) -> ToolResult {
         let front = self.desktop.key_window().ok().flatten();
         let before: Vec<i64> = windows.iter().map(|w| w.id).collect();
+        // Watched from before it starts: an app can take the front a tenth of a second into
+        // its launch, and again as it goes on.
+        let mut watch = self.watch(front, 0, name, true);
         self.desktop
             .launch_behind(&copy)
             .map_err(|e| format!("Could not launch {}: {e}", copy.path))?;
@@ -1472,18 +1802,30 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             .into_iter()
             .find(|a| a.path.as_deref() == Some(copy.path.as_str()));
         let pid = started.as_ref().map_or(0, |a| a.pid);
+        if let (Some(watch), Some(app)) = (watch.as_mut(), &started) {
+            watch.pid = app.pid;
+            watch.name = app.name.clone();
+        }
         // Launched behind, some apps open no window until asked (TextEdit skips its Open panel):
         // ask the new process once, as a click on its icon would.
-        let mut found = self.new_window_of(pid, name, &before, WINDOW_WAIT / 2);
+        let mut found = self.new_window_of(&mut watch, pid, name, &before, WINDOW_WAIT / 2);
         if found.is_none()
             && let Some(app) = &started
             && self.desktop.reopen_behind(app).is_ok()
         {
-            found = self.new_window_of(pid, name, &before, WINDOW_WAIT / 2);
+            found = self.new_window_of(&mut watch, pid, name, &before, WINDOW_WAIT / 2);
         }
+        if let Some(w) = &found {
+            if let Some(watch) = watch.as_mut() {
+                watch.pid = w.pid;
+                watch.name = w.owner.clone();
+            }
+            self.settle(watch.as_mut(), LAUNCH_SETTLE);
+        }
+        let called = found.as_ref().map_or(name, |w| w.owner.as_str());
+        let order = watch.map(|w| w.said(called)).unwrap_or_default();
         match found {
             Some(w) => {
-                let order = self.keep_behind(&w, front.as_ref()).unwrap_or_default();
                 let reply = format!(
                     "{launched}. Working in its window{} (window_id {}): read it with elements, or take a screenshot to see it.{order}",
                     titled(&w),
@@ -1495,11 +1837,11 @@ move_mouse, drag and scroll: they go to this window alone, behind the user's, wi
             None if pid > 0 => {
                 self.work_in_windowless(name, pid);
                 Ok(vec![text(format!(
-                    "{launched}. It shows no window yet. {NO_WINDOW_YET}"
+                    "{launched}. It shows no window yet. {NO_WINDOW_YET}{order}"
                 ))])
             }
             None => Err(format!(
-                "{launched}, but no window of it has appeared yet. Call list_windows in a moment, then screenshot with its window_id."
+                "{launched}, but no window of it has appeared yet. Call list_windows in a moment, then screenshot with its window_id.{order}"
             )),
         }
     }
@@ -1862,7 +2204,7 @@ impl Computer {
         let failed = |e: String| format!("{what} wasn't acted on: {e} Nothing was done.");
         let (done, raised) = match self.mode {
             Mode::Background => self
-                .watched(&w, |desktop| desktop.perform(&w, identity, action))
+                .watched(&w, false, |desktop| desktop.perform(&w, identity, action))
                 .map_err(failed)?,
             Mode::Front => (
                 self.desktop.perform(&w, identity, action).map_err(failed)?,
@@ -2121,8 +2463,32 @@ const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
 const OPENING: Duration = Duration::from_millis(if cfg!(test) { 100 } else { 3000 });
 const OPENING_POLL: Duration = Duration::from_millis(if cfg!(test) { 1 } else { 150 });
 
-/// How long an app that was opened is watched for bringing its window forward.
+/// How long an app is watched for bringing its window forward, once it has opened one more
+/// window or a click or key has brought one up…
 const SETTLE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 1500 });
+/// …and once an app that was launched shows its window: a cold start goes on for a while, and
+/// can take the front more than once (Chrome does).
+const LAUNCH_SETTLE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 3000 });
+/// After the app last came forward it's watched this much longer, and for this many looks at
+/// least (tests go by the looks: their time is no time), but never longer than `WATCH_MAX`.
+const QUIET: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 1500 });
+const QUIET_LOOKS: u32 = 8;
+const WATCH_MAX: Duration = Duration::from_secs(10);
+/// How often the windows are looked at while an app is watched. A window that comes forward is
+/// seen within this, and its app is in front for about this long more than putting the user's
+/// back takes (15 to 60 ms, measured on macOS 27).
+const LOOK: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 6 });
+/// How often the active app is asked for while nothing has come forward: a process is run for
+/// the answer, so less often than the windows are read.
+const ACTIVE_EVERY: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 30 });
+/// How long the window server gets to show the user's window back in front (and how many looks
+/// at least) before it's asked again; asked `TRIES` times to no effect, the app's window is
+/// taken to stay.
+const SHOWS: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 150 });
+const SHOWS_LOOKS: u32 = 6;
+const TRIES: u32 = 3;
+/// How long ago a click of the user's can be and still be what brought a window forward.
+const CLICKED: Duration = Duration::from_millis(400);
 
 /// How long after a click or key behind the windows are looked at for one it brought forward
 /// (an app activating itself does within this; slower ones are caught at the next input).
@@ -2598,6 +2964,7 @@ mod tests {
             target: None,
             report: None,
             posted: None,
+            clicked: None,
             front: None,
             refs: Refs::new("elements"),
             listed: None,
@@ -3757,6 +4124,304 @@ mod tests {
         );
     }
 
+    /// TextEdit on disk, to be launched behind Notes; its window (11, pid 50) is what appears.
+    fn launching_textedit(fake: Recording) -> Recording {
+        let fake = Recording {
+            installed: vec![copy(
+                "/System/Applications/TextEdit.app",
+                "com.apple.TextEdit",
+            )],
+            ..fake
+        };
+        fake.opens.borrow_mut().push(textedit_window(50, 11));
+        fake
+    }
+
+    fn put_backs(fake: &Recording) -> usize {
+        fake.events()
+            .iter()
+            .filter(|e| matches!(e, Event::BringForward(1)))
+            .count()
+    }
+
+    #[test]
+    fn an_app_that_comes_forward_again_is_put_back_each_time() {
+        // As Chrome does while it starts: in front when its window appears, and twice more, each
+        // a few looks after it was put back.
+        let fake = launching_textedit(Recording {
+            jumps_forward: true,
+            regrab_after: 3,
+            ..behind_the_users()
+        });
+        *fake.regrabs.borrow_mut() = 2;
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(put_backs(&fake), 3, "{said}");
+        assert!(
+            said.contains("TextEdit brought its window forward 3 times; each time it was put back behind the user's Notes window. It was in front for ")
+                && !said.contains("stays there"),
+            "{said}"
+        );
+        assert_eq!(c.desktop.windows().unwrap()[0].owner, "Notes");
+        // One more window of a running app that does the same.
+        let fake = Recording {
+            jumps_forward: true,
+            regrab_after: 5,
+            ..using_textedit(600)
+        };
+        fake.opens.borrow_mut().push(WindowInfo {
+            owner: "Safari".into(),
+            id: 70,
+            ..textedit_window(42, 70)
+        });
+        *fake.regrabs.borrow_mut() = 1;
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "Safari", "new_window": true})));
+        assert!(
+            said.contains("Safari brought its window forward 2 times; each time it was put back behind the user's TextEdit window."),
+            "{said}"
+        );
+        assert_eq!(
+            fake.events()
+                .iter()
+                .filter(|e| matches!(e, Event::BringForward(11)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn an_app_that_takes_the_active_status_gives_it_back() {
+        // Its window comes forward and its app becomes the active one, as Chrome's does: the
+        // user's window goes back in front and their app is the active one again.
+        let fake = launching_textedit(Recording {
+            jumps_forward: true,
+            takes_active: true,
+            ..behind_the_users()
+        });
+        *fake.active.borrow_mut() = Some(1);
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(put_backs(&fake), 1);
+        assert_eq!(*fake.active.borrow(), Some(1), "Notes is active again");
+        assert_eq!(c.desktop.windows().unwrap()[0].owner, "Notes");
+        assert!(
+            said.contains("TextEdit brought its window forward; it was put back behind the user's Notes window."),
+            "{said}"
+        );
+        // It takes the active status with its window left behind (the menu bar and the keys
+        // are its app's, though nothing covers the user's window): given back too.
+        let fake = launching_textedit(Recording {
+            takes_active: true,
+            ..behind_the_users()
+        });
+        *fake.active.borrow_mut() = Some(1);
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(put_backs(&fake), 1);
+        assert_eq!(*fake.active.borrow(), Some(1));
+        assert!(
+            said.contains("TextEdit made itself the active app; the user's Notes window was made active again. It was the active app for "),
+            "{said}"
+        );
+        // The user's window isn't among the windows on screen (it's full screen, on a Space the
+        // system left when the app took the front): the active app alone tells, and theirs is
+        // made active again.
+        let keynote = WindowInfo {
+            owner: "Keynote".into(),
+            ..textedit_window(77, 90)
+        };
+        let fake = launching_textedit(Recording {
+            takes_active: true,
+            key_window: Some(Ok(Some(keynote))),
+            ..behind_the_users()
+        });
+        *fake.active.borrow_mut() = Some(77);
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(
+            fake.events().last(),
+            Some(&Event::BringForward(90)),
+            "{said}"
+        );
+        assert_eq!(*fake.active.borrow(), Some(77));
+        // An app that was the active one already (it has no window; the user's away) takes
+        // nothing by staying so when it's asked for one.
+        let fake = Recording {
+            takes_active: true,
+            idle: Some(Duration::from_secs(600)),
+            ..behind_the_users()
+        };
+        fake.running
+            .borrow_mut()
+            .push(running("TextEdit", "com.apple.TextEdit", 50));
+        fake.opens.borrow_mut().push(textedit_window(50, 11));
+        *fake.active.borrow_mut() = Some(50);
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(fake.events(), vec![Event::Reopen(50)], "{said}");
+        // A window that won't go back while the keyboard does: said as it is. (The keyboard is
+        // given back once; after that the window is only asked to go behind.)
+        let fake = launching_textedit(Recording {
+            jumps_forward: true,
+            takes_active: true,
+            stubborn: true,
+            ..behind_the_users()
+        });
+        *fake.active.borrow_mut() = Some(1);
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(
+            fake.events()[1..],
+            [Event::BringForward(1), Event::Raise(1), Event::Raise(1)]
+        );
+        assert_eq!(*fake.active.borrow(), Some(1));
+        assert!(
+            said.contains("Note: TextEdit's window came to the front when it opened and stays there, in front of the user's Notes window rather than behind it (TextEdit isn't the active app, so the keyboard is still the user's). Tell the user it's in their way."),
+            "{said}"
+        );
+        // Its window comes forward while a third app has the keyboard (an alert, a launcher's
+        // panel): the user's window is raised over it and that's all. The third app stays the
+        // active one.
+        let fake = launching_textedit(Recording {
+            jumps_forward: true,
+            ..behind_the_users()
+        });
+        *fake.active.borrow_mut() = Some(99);
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(
+            fake.events(),
+            vec![
+                Event::Launch("/System/Applications/TextEdit.app".into()),
+                Event::Raise(1)
+            ]
+        );
+        assert_eq!(*fake.active.borrow(), Some(99));
+        assert!(
+            said.contains("TextEdit brought its window forward; it was put back behind the user's Notes window."),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_slow_window_server_isnt_taken_for_a_window_that_stays() {
+        // The order changes only a few looks after the user's window is put back: it's asked
+        // for once, and waited for, not asked three times in a millisecond and given up on.
+        let fake = launching_textedit(Recording {
+            jumps_forward: true,
+            slow: SHOWS_LOOKS - 2,
+            ..behind_the_users()
+        });
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(put_backs(&fake), 1, "{said}");
+        assert!(
+            said.contains("it was put back behind the user's Notes window")
+                && !said.contains("stays there"),
+            "{said}"
+        );
+        assert_eq!(c.desktop.windows().unwrap()[0].owner, "Notes");
+        // Slower than it's waited for: asked again, and still not given up on.
+        let fake = launching_textedit(Recording {
+            jumps_forward: true,
+            slow: SHOWS_LOOKS + 3,
+            ..behind_the_users()
+        });
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "TextEdit"})));
+        assert_eq!(put_backs(&fake), 2, "{said}");
+        assert!(
+            said.contains("TextEdit brought its window forward; it was put back")
+                && !said.contains("stays there"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_window_the_user_clicks_forward_themselves_is_theirs() {
+        // Safari's new window opens behind, beside the user's Notes window; a moment later it's
+        // in front, and the user has just clicked with the pointer on it: left there.
+        let beside = || WindowInfo {
+            owner: "Safari".into(),
+            x: 800.0,
+            y: 100.0,
+            ..textedit_window(42, 70)
+        };
+        let clicked = |at: (f64, f64)| {
+            let fake = Recording {
+                jumps_forward: true,
+                comes_after: Some(2),
+                last_click: Some((Duration::ZERO, at)),
+                ..behind_the_users()
+            };
+            fake.running
+                .borrow_mut()
+                .push(running("Safari", "com.apple.Safari", 42));
+            fake.opens.borrow_mut().push(beside());
+            fake
+        };
+        // (Its right edge, which neither Notes nor Safari's other window reaches.)
+        let fake = clicked((1300.0, 200.0));
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "Safari", "new_window": true})));
+        assert!(
+            said.contains(
+                "The user clicked Safari's window forward themselves, so it was left in front"
+            ),
+            "{said}"
+        );
+        assert_eq!(put_backs(&fake), 0);
+        assert_eq!(c.desktop.windows().unwrap()[0].id, 70);
+        // The same click in their own Notes window, as the new window comes forward by
+        // itself: that's not their doing, and their window goes back in front.
+        let fake = clicked((300.0, 300.0));
+        let mut c = behind(&fake);
+        let said = reply(c.call("open_app", &json!({"name": "Safari", "new_window": true})));
+        assert!(
+            said.contains(
+                "Safari brought its window forward; it was put back behind the user's Notes window."
+            ),
+            "{said}"
+        );
+        assert_eq!(put_backs(&fake), 1);
+        // A window that's in front the moment it appears can't have been clicked: nothing of
+        // Safari's lay under the pointer before.
+        let fake = Recording {
+            comes_after: None,
+            ..clicked((1300.0, 200.0))
+        };
+        let mut c = behind(&fake);
+        reply(c.call("open_app", &json!({"name": "Safari", "new_window": true})));
+        assert_eq!(put_backs(&fake), 1);
+        // A click on the window Safari had already brings its app forward just as well.
+        let fake = Recording {
+            comes_after: None,
+            ..clicked((900.0, 600.0))
+        };
+        let mut c = behind(&fake);
+        reply(c.call("open_app", &json!({"name": "Safari", "new_window": true})));
+        assert_eq!(put_backs(&fake), 0);
+        // A press the system counted when the agent's own click went out may be that click:
+        // it isn't taken for the user's. One from before or after is.
+        let fake = clicked((900.0, 200.0));
+        let mut c = behind(&fake);
+        let notes = c.desktop.windows().unwrap().remove(0);
+        let watch = c.watch(Some(notes), 42, "Safari", false).unwrap();
+        assert!(c.users_doing(&watch), "on Safari's window, behind Notes");
+        c.clicked = Some(std::time::Instant::now());
+        assert!(!c.users_doing(&watch));
+        c.clicked = Some(std::time::Instant::now() - Duration::from_secs(5));
+        assert!(c.users_doing(&watch));
+    }
+
+    #[test]
+    fn short_times_as_a_reply_says_them() {
+        assert_eq!(about(Duration::from_millis(3)), "under 10 ms");
+        assert_eq!(about(Duration::from_millis(44)), "about 40 ms");
+        assert_eq!(about(Duration::from_millis(236)), "about 240 ms");
+    }
+
     /// TextEdit in front, being typed in; Safari behind it.
     fn using_textedit(idle_secs: u64) -> Recording {
         let mut fake = behind_the_users();
@@ -3893,6 +4558,32 @@ mod tests {
             "{said}"
         );
         assert_eq!(fake.events().last(), Some(&Event::BringForward(1)));
+        assert_eq!(c.desktop.windows().unwrap()[0].owner, "Notes");
+        // While the user types in their own app, too (a key 80 ms ago): their typing is no wish
+        // for Safari, whose window goes back and whose app gives the keyboard back.
+        let fake = Recording {
+            raises: true,
+            jumps_forward: true,
+            takes_active: true,
+            idle: Some(Duration::from_millis(80)),
+            ..behind_the_users()
+        };
+        *fake.active.borrow_mut() = Some(1);
+        fake.opens.borrow_mut().push(popup.clone());
+        let mut c = behind(&fake);
+        c.call("screenshot", &json!({"window_id": 7})).unwrap();
+        let said = reply(c.call("click", &json!({"x": 10, "y": 10})));
+        assert!(
+            said.contains(
+                "Safari brought its window forward; it was put back behind the user's Notes window."
+            ),
+            "{said}"
+        );
+        assert_eq!(
+            *fake.active.borrow(),
+            Some(1),
+            "Notes has the keyboard again"
+        );
         assert_eq!(c.desktop.windows().unwrap()[0].owner, "Notes");
         // The user's own doing is theirs: a window in front after their input since the agent's
         // last click (10 s ago) is left there.

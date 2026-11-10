@@ -284,10 +284,32 @@ pub trait Desktop {
     fn screen_dark(&self) -> bool {
         false
     }
-    /// Put window `w` back in front, its app active: after another app's window came forward
-    /// over it uninvited. Whether it's in front afterwards is for the caller to check.
+    /// Put window `w` back in front: its app the active one again, the window its key window
+    /// and above every other. For after another app's window came forward over it uninvited.
+    /// Whether it's in front afterwards is for the caller to check, a moment later: the window
+    /// server takes a few frames to show it.
     fn bring_forward(&self, _w: &WindowInfo) -> Result<(), String> {
         Err(NOT_BEHIND.into())
+    }
+    /// Put window `w` back above the other apps' windows and leave the active app as it is: for
+    /// when the app whose window came forward over it didn't make itself active (the user's app
+    /// still is, or a third: an alert, a launcher's panel, which keeps the keyboard).
+    fn raise(&self, _w: &WindowInfo) -> Result<(), String> {
+        Err(NOT_BEHIND.into())
+    }
+    /// Get ready to `bring_forward` (or `raise`) window `w` at once: what that takes is looked
+    /// up now, before anything is in its way.
+    fn ready_front(&self, _w: &WindowInfo) {}
+    /// The app that's active now (it has the menu bar and the keyboard), by its pid; `None` when
+    /// the platform can't say. Quick enough to ask many times a second.
+    fn active_app(&self) -> Option<i64> {
+        None
+    }
+    /// How long since the user last pressed a mouse button, and where the pointer is now (in
+    /// screen coordinates): what tells a window they clicked forward from one that came forward
+    /// by itself. `None` when the platform can't say.
+    fn last_click(&self) -> Option<(std::time::Duration, (f64, f64))> {
+        None
     }
 
     // Elements: a window's accessibility tree, and its elements' own actions. Reading and acting
@@ -373,6 +395,8 @@ pub mod fake {
         Reopen(i64),
         /// `bring_forward`, by window id.
         BringForward(i64),
+        /// `raise`, by window id.
+        Raise(i64),
         /// `perform`: an element's own action, by its identity.
         Perform {
             window: i64,
@@ -384,6 +408,19 @@ pub mod fake {
             window: i64,
             identity: u64,
         },
+    }
+
+    /// Where the windows that appeared stand, as the looks at them go by.
+    #[derive(Debug, Default)]
+    pub struct Stage {
+        /// They've been looked at once (which decides where they first stand).
+        up: bool,
+        /// They've come forward: in front of everything, or their app active, or both.
+        forward: bool,
+        /// A `bring_forward` that doesn't show yet: the looks until it does.
+        back_in: Option<u32>,
+        /// The looks until they next come forward.
+        again_in: Option<u32>,
     }
 
     #[derive(Clone)]
@@ -418,6 +455,24 @@ pub mod fake {
         pub jumps_forward: bool,
         /// …and `bring_forward` doesn't move them back.
         pub stubborn: bool,
+        /// Their app becomes the active one when they appear (with `jumps_forward`: each time
+        /// they come forward), until `bring_forward` gives that back to the window's app.
+        pub takes_active: bool,
+        /// Once put back, they come forward again `regrab_after` looks at the windows later,
+        /// this many more times.
+        pub regrabs: Rc<RefCell<u32>>,
+        pub regrab_after: u32,
+        /// They first come forward only this many looks after they appear (behind), not at once.
+        pub comes_after: Option<u32>,
+        /// A slow window server: a `bring_forward` shows only this many looks at the windows
+        /// later.
+        pub slow: u32,
+        /// The app that's active, by pid. `None`: a platform that can't say.
+        pub active: Rc<RefCell<Option<i64>>>,
+        /// How long since the user's last click, and where the pointer is.
+        pub last_click: Option<(std::time::Duration, (f64, f64))>,
+        /// Where the windows that appeared stand now.
+        pub stage: Rc<RefCell<Stage>>,
         /// A launched app shows its windows only once it's reopened (TextEdit, launched behind).
         pub shy: bool,
         /// A click behind makes `opens` appear (an app that raises a window when clicked in).
@@ -475,6 +530,14 @@ pub mod fake {
                 locked: false,
                 jumps_forward: false,
                 stubborn: false,
+                takes_active: false,
+                regrabs: Rc::default(),
+                regrab_after: 0,
+                comes_after: None,
+                slow: 0,
+                active: Rc::default(),
+                last_click: None,
+                stage: Rc::default(),
                 shy: false,
                 raises: false,
                 elsewhere: vec![],
@@ -527,6 +590,51 @@ pub mod fake {
         fn record(&self, e: Event) -> Result<(), String> {
             self.events.borrow_mut().push(e);
             Ok(())
+        }
+
+        /// The windows that came forward are asked back behind: it shows `slow` looks later,
+        /// unless they're `stubborn`. Asked again before the first asking shows, it shows no
+        /// later for that.
+        fn go_back(&self) {
+            let mut stage = self.stage.borrow_mut();
+            if stage.forward && stage.back_in.is_none() && !(self.stubborn && self.jumps_forward) {
+                stage.back_in = Some(self.slow);
+                stage.again_in = None;
+            }
+        }
+
+        /// One more look at the windows that appeared (`opened`): whether they've come forward
+        /// now. What was asked of them a few looks ago shows, and what they do next comes due.
+        fn come_forward(&self, opened: &[WindowInfo]) -> bool {
+            let mut stage = self.stage.borrow_mut();
+            let mut comes = false;
+            if !stage.up {
+                stage.up = true;
+                match self.comes_after {
+                    Some(looks) => stage.again_in = Some(looks),
+                    None => comes = self.jumps_forward || self.takes_active,
+                }
+            } else if let Some(looks) = stage.back_in {
+                stage.back_in = looks.checked_sub(1);
+                if looks == 0 {
+                    stage.forward = false;
+                    let mut regrabs = self.regrabs.borrow_mut();
+                    if *regrabs > 0 {
+                        *regrabs -= 1;
+                        stage.again_in = Some(self.regrab_after);
+                    }
+                }
+            } else if let Some(looks) = stage.again_in {
+                stage.again_in = looks.checked_sub(1);
+                comes = looks == 0;
+            }
+            if comes {
+                stage.forward = true;
+                if self.takes_active {
+                    *self.active.borrow_mut() = opened.first().map(|w| w.pid);
+                }
+            }
+            stage.forward
         }
     }
 
@@ -590,19 +698,15 @@ pub mod fake {
             self.behind
         }
         /// The windows, with those that appeared behind the first (or in front of them all, for
-        /// an app that `jumps_forward` until a window is brought forward again).
+        /// an app that `jumps_forward` until a window is brought forward again). Each call is a
+        /// look: what such an app does next, and what a slow window server shows, go by looks.
         fn windows(&self) -> Result<Vec<WindowInfo>, String> {
             let mut all = self.windows.clone()?;
             if !*self.opened.borrow() {
                 return Ok(all);
             }
             let opened = self.opens.borrow().clone();
-            let put_back = !self.stubborn
-                && self
-                    .events()
-                    .iter()
-                    .any(|e| matches!(e, Event::BringForward(_)));
-            let at = if self.jumps_forward && !put_back {
+            let at = if self.come_forward(&opened) && self.jumps_forward {
                 0
             } else {
                 all.len().min(1)
@@ -728,8 +832,26 @@ pub mod fake {
                 .find(|(i, _)| *i == id)
                 .map_or(Whereabouts::Closed, |(_, place)| place.clone()))
         }
+        /// The window's app is active again at once; the windows that came forward go back
+        /// behind `slow` looks later, unless they're `stubborn`.
         fn bring_forward(&self, w: &WindowInfo) -> Result<(), String> {
+            if self.takes_active {
+                *self.active.borrow_mut() = Some(w.pid);
+            }
+            self.go_back();
             self.record(Event::BringForward(w.id))
+        }
+        /// The windows that came forward go back behind as for `bring_forward`; the active app
+        /// stays as it is.
+        fn raise(&self, w: &WindowInfo) -> Result<(), String> {
+            self.go_back();
+            self.record(Event::Raise(w.id))
+        }
+        fn active_app(&self) -> Option<i64> {
+            *self.active.borrow()
+        }
+        fn last_click(&self) -> Option<(std::time::Duration, (f64, f64))> {
+            self.last_click
         }
         fn has_elements(&self) -> bool {
             self.tree.borrow().is_some()
