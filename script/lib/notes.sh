@@ -32,7 +32,7 @@ EOF
 EOF
   fi
   cat <<'EOF' | sed "s/@VERSION@/$1/g"
-- **Windows**: `Trek-@VERSION@-windows-x86_64.zip`. Unzip it into a folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or `%LOCALAPPDATA%\Programs\Trek` (not Documents, Desktop, Downloads or Program Files), and run `trek.exe`. SmartScreen warns once: **More info**, then **Run anyway**. Updates install in place from Settings → Updates.
+- **Windows**: run `Trek-Setup-x86_64.exe`. It installs for you alone and asks for no administrator. SmartScreen warns once: **More info**, then **Run anyway**. Updates install in place from Settings → Updates. (`Trek-@VERSION@-windows-x86_64.zip` is the same app without an installer: unzip it into a folder of its own that Windows doesn't guard, such as `C:\Users\<you>\Trek` or `%LOCALAPPDATA%\Programs\Trek`, not Documents, Desktop, Downloads or Program Files, and run `trek.exe`.)
 EOF
 }
 
