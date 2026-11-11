@@ -54,6 +54,9 @@
 //! | `mock:video`                 | makes a 6-second test clip with ffmpeg in Trek's data folder, |
 //! |                              | watches it with Trek's `watch_video` (for real, through the   |
 //! |                              | session's `trek-video` server) and links the clip in its answer|
+//! | `simulator`, `mock:simcheck` | builds an iOS app, then installs, launches, reads, taps and   |
+//! |                              | pictures it with Trek's simulator tools, as calls only: no    |
+//! |                              | simulator is touched (the Simulator tool comes forward)       |
 //! | `mock:consult` [prompt]      | asks a mock sub-agent (Trek's `delegate_task`) and waits      |
 //! | `mock:delegate` [prompt]     | starts a mock sub-agent and ends its turn; Trek wakes it      |
 //! | `mock:pair` [prompt]         | starts two mock sub-agents on the same task and ends its turn |
@@ -223,6 +226,13 @@ pub fn set_pace(pace: f32) {
     PACE.store((pace.max(0.) * 1000.) as u32, Ordering::Relaxed);
 }
 
+/// What `mock:simcheck` reads from the simulator: the top of the Threads screen of Trek's
+/// iPhone app in its demo mode, as `sim_elements` outlines a screen.
+const SIM_CHECK_OUTLINE: &str = "heading \"Threads\" [ref=e2]\nheading \"Needs you, 7\" [ref=e3]\nbutton \"Set up the release pipeline, Question\" [ref=e4]\nbutton \"Fix the flaky session refresh test, Approval\" [ref=e6]\nbutton \"Show 3 more\" [ref=e8]\nbutton \"New thread\" [ref=e14]";
+
+/// What `mock:simcheck` answers: that same screen, in words.
+const SIM_CHECK: &str = "Trek builds and runs on the iPhone 17e simulator. The Threads screen opens with **Needs you** at the top: 7 threads, each with why it waits (a question, then approvals) and its project. Opening a thread and going back returns to the same place in the list. Pinned and Active follow below.";
+
 /// What `xcodebuild test` prints for `mock:simtest`.
 const SIM_TEST_OUTPUT: &str = "Testing started
 Test Suite 'All tests' started at 2026-10-26 20:48:10.253.
@@ -308,6 +318,8 @@ enum Script {
     Browser,
     /// Run an iOS app's tests on a simulator in a shell, one failing (`mock:simtest`).
     SimTest,
+    /// Build an iOS app and check a screen of it with Trek's simulator tools (`mock:simcheck`).
+    SimCheck,
     Limit(Duration),
     /// A 5-hour window nearly used up partway through, resetting after a while (`mock:nearlimit`).
     NearLimit(Duration),
@@ -525,6 +537,8 @@ impl Script {
                 "video" if w.starts_with("mock:") => Script::Video,
                 "browser" if w.starts_with("mock:") => Script::Browser,
                 "simtest" if w.starts_with("mock:") => Script::SimTest,
+                "simcheck" if w.starts_with("mock:") => Script::SimCheck,
+                "simulator" => Script::SimCheck,
                 _ => return None,
             })
         });
@@ -594,6 +608,7 @@ pub fn title(request: &str) -> String {
         Script::Video => "Watch the demo clip",
         Script::Browser => "Check the sign-up form in the browser",
         Script::SimTest => "Run the iOS tests",
+        Script::SimCheck => "Check the Threads screen",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
         Script::Delegate { .. } => "Get a second opinion",
@@ -1251,6 +1266,7 @@ impl Session {
                 self.say("4 of the 5 tests pass; `testFailsOnPurpose` fails as written (`sum(1, 1)` is 2, not 3).")
                     .await?
             }
+            Script::SimCheck => self.sim_check().await?,
             Script::Server(until) => self.server(until).await?,
             Script::Watch(after) => self.watch(after).await?,
             Script::Dev => {
@@ -1864,6 +1880,37 @@ impl Session {
         self.tool("Run command", "cargo test", TEST_OUTPUT, 600)
             .await?;
         self.say("Added a `--verbose` flag:\n\n- `src/cli.rs` parses it into `Config::verbose`\n- `src/main.rs` raises the log level when it's set\n\nAll 14 tests pass.").await
+    }
+
+    /// `simulator` (or `mock:simcheck`): an iOS app built in a shell, then installed, launched, read, tapped and
+    /// pictured with Trek's simulator tools, named as Claude names MCP tools, so the thread shows
+    /// what such work shows and Trek brings its Simulator tool forward. The calls are scripted:
+    /// no simulator is touched. The answer describes the Threads screen of Trek's own iPhone app
+    /// in its demo mode ([`SIM_CHECK`]), which is what a frame of this scene has in the simulator.
+    async fn sim_check(&mut self) -> Step {
+        self.tool(
+            "Run command",
+            "xcodebuild -project ios/Trek.xcodeproj -scheme Trek -destination 'platform=iOS Simulator,name=iPhone 17e' build",
+            "** BUILD SUCCEEDED **",
+            900,
+        )
+        .await?;
+        for (tool, detail, output) in [
+            ("sim_install", "Trek.app", "Installed dev.trek.TrekMobile"),
+            (
+                "sim_launch",
+                "dev.trek.TrekMobile",
+                "Launched dev.trek.TrekMobile",
+            ),
+            ("sim_elements", "interactive_only", SIM_CHECK_OUTLINE),
+            ("sim_tap", "e4", "Tapped \"Set up the release pipeline\""),
+            ("sim_tap", "e1", "Tapped \"Back\""),
+            ("sim_screenshot", "", "402x874 points"),
+        ] {
+            self.tool(&format!("mcp__trek-simulator__{tool}"), detail, output, 300)
+                .await?;
+        }
+        self.say(SIM_CHECK).await
     }
 
     /// Ask a mock sub-agent, through Trek, for a second opinion on whatever follows the keyword.
@@ -4061,6 +4108,11 @@ mod tests {
             Script::Browser
         );
         assert_eq!(Script::parse("mock:simtest", false), Script::SimTest);
+        assert_eq!(Script::parse("mock:simcheck", false), Script::SimCheck);
+        assert_eq!(
+            Script::parse("Check the Threads screen on the simulator", false),
+            Script::SimCheck
+        );
         assert_eq!(
             Script::parse("what were you told", false),
             Script::Answer,
@@ -4518,6 +4570,64 @@ mod tests {
             ));
             recapped.prompt("recall").await;
             assert_eq!(text(&recapped.turn().await), "I remember: apple | cherry");
+        });
+    }
+
+    /// `mock:simcheck` shows the work as a thread would: a build in a shell, then Trek's own
+    /// simulator tools under the names Trek knows them by (so the Simulator tool comes forward),
+    /// each finished, and an answer about the screen. It runs nothing and reaches no simulator.
+    #[test]
+    fn sim_check_plays_a_build_and_the_simulator_tools_then_says_what_it_saw() {
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Auto, false);
+            m.prompt("Check the Threads screen on the simulator").await;
+            let events = m.turn().await;
+            let started: Vec<(&str, &str)> = events
+                .iter()
+                .filter_map(|e| {
+                    if let AgentEvent::ToolStarted { title, detail, .. } = e {
+                        Some((title.as_str(), detail.as_str()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(started.len(), 7, "{started:?}");
+            assert!(
+                started[0].0 == "Run command" && started[0].1.starts_with("xcodebuild "),
+                "{started:?}"
+            );
+            assert_eq!(
+                started[1..]
+                    .iter()
+                    .map(|(t, _)| t.rsplit("__").next().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "sim_install",
+                    "sim_launch",
+                    "sim_elements",
+                    "sim_tap",
+                    "sim_tap",
+                    "sim_screenshot"
+                ]
+            );
+            assert!(
+                started[1..]
+                    .iter()
+                    .all(|(t, _)| trek_ipc::simtest::is_sim_tool(t)),
+                "{started:?}"
+            );
+            let finished = events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::ToolFinished { ok: true, .. }))
+                .count();
+            assert_eq!(finished, 7, "every call ends well");
+            assert_eq!(text(&events), SIM_CHECK);
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::TurnComplete { error: None, .. })
+            ));
+            assert_eq!(title("mock:simcheck"), "Check the Threads screen");
         });
     }
 
