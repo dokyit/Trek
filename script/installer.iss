@@ -39,9 +39,35 @@ Name: "{group}\Trek"; Filename: "{app}\trek.exe"
 Name: "{autodesktop}\Trek"; Filename: "{app}\trek.exe"; Tasks: desktopicon
 
 [Code]
+const
+  // The keys Trek writes for itself at launch, in the user's classes (crates/trek-app/src/winsys.rs).
+  TrekProtocolKey = 'Software\Classes\trek';
+  TrekIdentityKey = 'Software\Classes\AppUserModelId\dev.trek.Trek';
+
 var
   FinishPage: TWizardPage;
   Option1Radio, Option2Radio, Option3Radio: TRadioButton;
+
+// Remove the trek:// link protocol while it still opens this install's trek.exe (another Trek the
+// user runs may have taken the links since, and keeps them), and the identity (AppUserModelID)
+// Trek's notifications show under. Only these keys, and only the current user's.
+procedure RemoveTrekKeys;
+var
+  Command, Exe: String;
+begin
+  Exe := Lowercase(ExpandConstant('{app}\trek.exe'));
+  // The command is `"C:\...\trek.exe" --link "%1"`.
+  if RegQueryStringValue(HKEY_CURRENT_USER, TrekProtocolKey + '\shell\open\command', '', Command) and
+     (Pos('"' + Exe + '"', Lowercase(Command)) > 0) then
+    RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, TrekProtocolKey);
+  RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, TrekIdentityKey);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RemoveTrekKeys;
+end;
 
 procedure InitializeWizard;
 begin

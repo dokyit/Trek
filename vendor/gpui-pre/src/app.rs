@@ -1639,6 +1639,19 @@ impl App {
         self.platform.show_system_notification(notification);
     }
 
+    /// Trek: posts `notification` with `launch`, a link of the app's own URL
+    /// scheme that the system opens when the notification is clicked, whether
+    /// or not the app is still running then. Where the platform can't attach
+    /// one (or needn't), the same as [`App::show_system_notification`].
+    pub fn show_system_notification_with_launch(
+        &self,
+        notification: SystemNotification,
+        launch: impl Into<SharedString>,
+    ) {
+        self.platform
+            .show_system_notification_with_launch(notification, launch.into());
+    }
+
     /// Removes the delivered or pending notification with this tag.
     ///
     /// Best-effort: some platforms cannot retract a notification once shown,

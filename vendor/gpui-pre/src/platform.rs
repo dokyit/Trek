@@ -334,6 +334,25 @@ pub trait Platform: 'static {
         _ = notification;
     }
 
+    /// Trek: posts `notification` as [`Platform::show_system_notification`]
+    /// does, with `launch`, a link of a URL scheme the app handles, that the
+    /// system opens when the notification's body is clicked: the click then
+    /// reaches the app even after it has quit, by starting it on the link (or
+    /// handing the link to the instance running). A platform that delivers a
+    /// quit app's notification clicks to it some other way, or can't open a
+    /// link from one, posts the notification without it (the default).
+    ///
+    /// Not a field of [`SystemNotification`]: GPUI Kit's notifications build
+    /// that struct whole.
+    fn show_system_notification_with_launch(
+        &self,
+        notification: SystemNotification,
+        launch: SharedString,
+    ) {
+        _ = launch;
+        self.show_system_notification(notification);
+    }
+
     /// Removes the delivered or pending notification with this tag.
     ///
     /// Best-effort: some platforms cannot retract a notification once shown,

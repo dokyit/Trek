@@ -1369,7 +1369,8 @@ pub fn show_palette(workspace: Entity<Workspace>, cx: &mut App) {
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     // A click on one of Trek's banners opens its thread. GPUI keeps one handler for the app,
     // which replaces GPUI Kit's own; that one only serves toasts delivered to the system as
-    // well, and Trek posts none (see `attention`).
+    // well, and Trek posts none (see `attention`). A Windows banner with a link opens it by
+    // starting Trek on it instead (`banner_link`), and the link reveals the thread as this does.
     let ws = workspace.downgrade();
     cx.on_system_notification_response(move |response, cx| {
         let Some(thread) = attention_thread(&response.tag) else {
@@ -1671,12 +1672,16 @@ fn attention(
         register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
-        cx.show_system_notification(SystemNotification {
+        let banner = SystemNotification {
             tag: attention_tag(thread),
             title: message.clone().into(),
             body: SharedString::default(),
             actions: Vec::new(),
-        });
+        };
+        match banner_link(thread) {
+            Some(link) => cx.show_system_notification_with_launch(banner, link),
+            None => cx.show_system_notification(banner),
+        }
     }
     if alert.toast {
         let Some(target) = notice_window(workspace, front, cx) else {
@@ -1746,6 +1751,23 @@ fn attention_tag(thread: &str) -> SharedString {
 /// The thread a banner Trek posted is about.
 fn attention_thread(tag: &str) -> Option<&str> {
     tag.strip_prefix(ATTENTION_TAG).filter(|id| !id.is_empty())
+}
+
+/// What a banner about `thread` opens when it's clicked, on Windows: its `trek://` link, which
+/// Windows hands to Trek however things stand then. Trek running, the launch it makes passes the
+/// link to it (`single_instance`); Trek quit (it does, once the work it kept going for is done),
+/// the launch is Trek, which opens on the thread. Without one, a click reaches only the Trek that
+/// posted the banner, while it runs (`init`'s handler).
+///
+/// Only from the Trek the links open (`winsys::owns_links`): a trial build's or a test's banner
+/// would open the user's own Trek. None on macOS, whose banners go as they did.
+fn banner_link(thread: &str) -> Option<String> {
+    #[cfg(windows)]
+    if crate::winsys::owns_links() {
+        return Some(crate::thread_menu::link(thread));
+    }
+    let _ = thread;
+    None
 }
 
 /// Bring `thread` on screen: its own window if it has one, else the main window (reopened if

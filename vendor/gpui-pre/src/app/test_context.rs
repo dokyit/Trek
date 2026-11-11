@@ -451,6 +451,12 @@ impl TestAppContext {
         self.test_platform.dismissed_system_notifications()
     }
 
+    /// Trek: the launch link the latest notification shown with `tag` was posted with
+    /// ([`App::show_system_notification_with_launch`]), if it had one.
+    pub fn system_notification_launch(&self, tag: &str) -> Option<SharedString> {
+        self.test_platform.system_notification_launch(tag)
+    }
+
     /// Simulates the user activating a system notification.
     pub fn simulate_system_notification_response(&self, response: SystemNotificationResponse) {
         self.test_platform

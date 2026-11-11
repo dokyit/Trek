@@ -220,9 +220,12 @@ jobs:
           }
 
       # Assertions over the release-manifest merge the Windows release runs (the step above
-      # only checks syntax).
+      # only checks syntax), and over the uninstallers' clean-up of Trek's registry keys (run
+      # against throwaway keys of the test's own).
       - name: Script tests
-        run: script\tests\release-manifest.Tests.ps1
+        run: |
+          script\tests\release-manifest.Tests.ps1
+          script\tests\uninstall-keys.Tests.ps1
 
       - uses: dtolnay/rust-toolchain@master
         with:

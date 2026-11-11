@@ -20,13 +20,13 @@ trek-mcp browser      # browser use in Trek's own Browser tool (run by Trek, mac
 | Tool | Arguments | What it does |
 |---|---|---|
 | `screenshot` | `region?: {x,y,width,height}` | PNG of the main display (longest side ≤ 1568 px) plus a text block with the logical screen size and scale. `region` returns a higher-detail zoom. |
-| `elements` | `filter?, interactive_only?, menu_bar?, max?, window_id?` | macOS: the window's accessibility tree as an outline, one element a line (role, name, value, state, `[frame=x,y,width,height]` in screenshot pixels), with a `[ref=e12]` on each one that can be acted on. `menu_bar` adds the app's menus and their items. `window_id` (background mode) picks the window. |
-| `press` | `ref, action?: press\|show_menu\|increment\|decrement\|confirm\|cancel` | macOS: the element's own accessibility action. No pointer or key event, no focus change. Refused if the element changed since it was read. |
+| `elements` | `filter?, interactive_only?, menu_bar?, max?, window_id?` | The window's accessibility tree (macOS: Accessibility; Windows: UI Automation) as an outline, one element a line (role, name, value, state, `[frame=x,y,width,height]` in screenshot pixels), with a `[ref=e12]` on each one that can be acted on. `menu_bar` adds the app's menus and their items (Windows: a classic app's Win32 menu, read without opening it). `window_id` (background mode) picks the window. |
+| `press` | `ref, action?: press\|show_menu\|increment\|decrement\|confirm\|cancel` | The element's own accessibility action (Windows: its pattern, Invoke, Toggle, SelectionItem, ExpandCollapse or RangeValue; a Win32 menu item, its command). No pointer or key event, no focus change. Refused if the element changed since it was read. |
 | `click` | `x, y` or `ref`; `button?: left\|right, count?: 1\|2\|3` | Click at screenshot coordinates, or at the centre of the element a ref names. |
 | `move_mouse` | `x, y` | Move the pointer. |
 | `drag` | `from: {x,y}, to: {x,y}` | Left-button drag. |
 | `scroll` | `x, y, dx?, dy?` | Scroll by lines at a point (positive `dy` = down). |
-| `type_text` | `text, ref?` | Type Unicode text (newline → Return, tab → Tab). With `ref`, the field is given the focus first and the reply says what it then holds. |
+| `type_text` | `text, ref?` | Type Unicode text (newline → Return, tab → Tab). With `ref`, the field is given the focus first and the reply says what it then holds (Windows: a field that won't take the focus gets the text after what it holds, through its Value pattern, with no key sent). |
 | `key` | `combo` | `"return"`, `"escape"`, `"cmd+shift+t"`, `"alt+left"`, `"f5"`, … |
 | `open_app` | `name` | `open -a <name>`. |
 | `list_windows` | – | On-screen windows (owner, title, pid, bounds in points and screenshot pixels). |
@@ -40,8 +40,9 @@ Elements follow the Browser tools' `browser_snapshot`: an element keeps its ref 
 ref is acted on only after the element is found again and proven the same (the same object, role and
 name, at its place in the tree, about where it was). The outline and its refs are `src/outline.rs`,
 shared with the Simulator and the iPhone (`sim_elements`, `phone_elements`: one format, one set of
-checks); reading a Mac window's tree is `src/desktop/ax.rs`. Windows has no elements yet: `elements`
-and `press` aren't listed there, and `click`, `type_text` and `wait` take no ref.
+checks); reading a Mac window's tree is `src/desktop/ax.rs`, and a Windows window's is
+`src/desktop/uia.rs` (what UI Automation's properties read as, and which pattern an action takes:
+plain data, tested on every platform) with `src/desktop/uia/com.rs` (the COM, on a thread of its own).
 
 Permissions belong to the process that launched trek-mcp (Trek, or the terminal running the agent):
 

@@ -6,8 +6,8 @@
 "crates/trek-agents/src/acp.rs" = 2
 "crates/trek-agents/src/claude.rs" = 3
 "crates/trek-agents/src/codex.rs" = 1
-"crates/trek-agents/src/direct.rs" = 21
-"crates/trek-agents/src/direct/executor.rs" = 6
+"crates/trek-agents/src/direct.rs" = 29
+"crates/trek-agents/src/direct/executor.rs" = 29
 "crates/trek-agents/src/direct/script.rs" = 1
 "crates/trek-agents/src/direct/search.rs" = 2
 "crates/trek-agents/src/lib.rs" = 32
@@ -20,7 +20,7 @@
 "crates/trek-app/src/agent_updates.rs" = 1
 "crates/trek-app/src/artifact/mod.rs" = 4
 "crates/trek-app/src/artifact/native.rs" = 8
-"crates/trek-app/src/attachments.rs" = 12
+"crates/trek-app/src/attachments.rs" = 15
 "crates/trek-app/src/background_strip.rs" = 4
 "crates/trek-app/src/background_use.rs" = 4
 "crates/trek-app/src/chrome.rs" = 19
@@ -46,10 +46,10 @@
 "crates/trek-app/src/onboarding.rs" = 1
 "crates/trek-app/src/onboarding/steps.rs" = 2
 "crates/trek-app/src/panels/branch_graph.rs" = 2
-"crates/trek-app/src/panels/browser.rs" = 102
+"crates/trek-app/src/panels/browser.rs" = 118
 "crates/trek-app/src/panels/browser/agent.rs" = 3
 "crates/trek-app/src/panels/browser/agent_core.rs" = 1
-"crates/trek-app/src/panels/browser/asks.rs" = 1
+"crates/trek-app/src/panels/browser/asks.rs" = 3
 "crates/trek-app/src/panels/browser/prompts.rs" = 2
 "crates/trek-app/src/panels/browser_adblock.rs" = 33
 "crates/trek-app/src/panels/browser_extensions.rs" = 50
@@ -70,11 +70,11 @@
 "crates/trek-app/src/remote/notes.rs" = 1
 "crates/trek-app/src/remote/phone_update.rs" = 1
 "crates/trek-app/src/remote/uploads.rs" = 3
-"crates/trek-app/src/root.rs" = 9
+"crates/trek-app/src/root.rs" = 10
 "crates/trek-app/src/settings_view.rs" = 1
 "crates/trek-app/src/settings_view/mobile.rs" = 1
 "crates/trek-app/src/settings_view/pages.rs" = 3
-"crates/trek-app/src/share.rs" = 3
+"crates/trek-app/src/share.rs" = 7
 "crates/trek-app/src/share/gist.rs" = 4
 "crates/trek-app/src/shots.rs" = 16
 "crates/trek-app/src/sidebar.rs" = 1
@@ -96,7 +96,7 @@
 "crates/trek-app/src/workspace/node_setup.rs" = 1
 "crates/trek-app/src/workspace/phone_use.rs" = 1
 "crates/trek-app/src/workspace/review.rs" = 3
-"crates/trek-app/tests/alerts.rs" = 1
+"crates/trek-app/tests/alerts.rs" = 2
 "crates/trek-app/tests/browser.rs" = 2
 "crates/trek-app/tests/common/mod.rs" = 6
 "crates/trek-app/tests/editor.rs" = 6
@@ -118,7 +118,7 @@
 "crates/trek-app/tests/scaling.rs" = 2
 "crates/trek-app/tests/screens.rs" = 3
 "crates/trek-app/tests/settings_pages.rs" = 1
-"crates/trek-app/tests/share.rs" = 2
+"crates/trek-app/tests/share.rs" = 3
 "crates/trek-app/tests/snapshots.rs" = 1
 "crates/trek-app/tests/tab_stops.rs" = 1
 "crates/trek-app/tests/tabs.rs" = 1
@@ -151,7 +151,7 @@
 "crates/trek-core/src/registry.rs" = 14
 "crates/trek-core/src/session_secrets.rs" = 7
 "crates/trek-core/src/settings.rs" = 2
-"crates/trek-core/src/skills.rs" = 8
+"crates/trek-core/src/skills.rs" = 30
 "crates/trek-core/src/store/adopted.rs" = 1
 "crates/trek-core/src/update.rs" = 69
 "crates/trek-core/src/update/closed.rs" = 2
@@ -173,8 +173,9 @@
 "crates/trek-job/src/lib.rs" = 1
 "crates/trek-logging/src/lib.rs" = 2
 "crates/trek-mcp/src/browser.rs" = 3
-"crates/trek-mcp/src/computer.rs" = 14
-"crates/trek-mcp/src/desktop.rs" = 11
+"crates/trek-mcp/src/computer.rs" = 18
+"crates/trek-mcp/src/desktop.rs" = 12
+"crates/trek-mcp/src/desktop/uia.rs" = 2
 "crates/trek-mcp/src/keys.rs" = 6
 "crates/trek-mcp/src/main.rs" = 26
 "crates/trek-mcp/src/orchestrate.rs" = 3
@@ -195,7 +196,7 @@
 "crates/trek-phone/src/pc.rs" = 3
 "crates/trek-remote/src/pairing.rs" = 1
 "crates/trek-remote/src/server.rs" = 1
-"crates/trek-remote/src/tls.rs" = 7
+"crates/trek-remote/src/tls.rs" = 16
 "crates/trek-remote/tests/server.rs" = 2
 "crates/trek-screenclip/src/lib.rs" = 6
 "crates/trek-script/examples/harness.rs" = 1

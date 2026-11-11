@@ -1,12 +1,13 @@
 //! What a page asks of the user and how the Browser words it, with no web view: the bar above a
 //! page (a JavaScript `alert`/`confirm`/`prompt`, camera, microphone and location, a link only
-//! another app opens), which addresses the view loads itself and which go to the system, what a
-//! failed load says, and how big a popup's sheet is. `webkit.rs` feeds these from WebKit's
-//! delegates; the panel shows them.
+//! another app opens), what Trek answers for an agent at work, which addresses the view loads
+//! itself and which go to the system, what a failed load says, and how big a popup's sheet is.
+//! `webkit.rs` feeds these from WebKit's delegates (macOS), `webview2.rs` from WebView2's events
+//! (Windows); the panel shows them.
 
-// The bar is fed by WebKit on the Mac (`webkit.rs`); Windows' web view has no asks yet, so
-// nothing there constructs these.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// The bar is fed by WebKit on the Mac (`webkit.rs`) and WebView2 on Windows (`webview2.rs`);
+// elsewhere nothing constructs these.
+#![cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 
 /// Something a page waits on the user for, shown in a bar above it until answered.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,7 +33,7 @@ pub enum AskKind {
     CameraAndMicrophone,
     Location,
     /// Open `url` in the app that takes its scheme (`app`: that app's name; `None`: no app on this
-    /// Mac does).
+    /// computer does).
     OpenApp {
         url: String,
         app: Option<String>,
@@ -102,6 +103,79 @@ impl Ask {
             self.kind,
             AskKind::Alert(_) | AskKind::Confirm(_) | AskKind::Prompt { .. }
         )
+    }
+
+    /// What Trek answers while an agent drives the Browser, which can't answer a page's dialog
+    /// itself (the page runs nothing, the agent's own scripts included, until it's answered): OK
+    /// to an `alert`, Cancel to a `confirm` or `prompt`, as browser drivers do, and what the agent
+    /// is told of it. `None` for what doesn't hold the page (a permission, a link): that waits on
+    /// the bar for the user.
+    pub fn for_agent(&self) -> Option<(Reply, String)> {
+        if !self.blocks_page() {
+            return None;
+        }
+        let alert = matches!(self.kind, AskKind::Alert(_));
+        let told = format!(
+            "The page showed a dialog (\"{}\"), which Trek {}: agents can't answer page dialogs.",
+            self.message().unwrap_or_default(),
+            if alert { "closed" } else { "cancelled" }
+        );
+        Some((if alert { Reply::Yes } else { Reply::No }, told))
+    }
+}
+
+impl AskKind {
+    /// Two of a site's asks the bar puts as one: camera and microphone together. WebKit asks for
+    /// both at once; WebView2 asks for each, one right after the other.
+    #[cfg_attr(not(windows), allow(dead_code))] // WebKit's come joined already.
+    pub fn joined(&self, other: &AskKind) -> Option<AskKind> {
+        match (self, other) {
+            (AskKind::Camera, AskKind::Microphone) | (AskKind::Microphone, AskKind::Camera) => {
+                Some(AskKind::CameraAndMicrophone)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The site a page at `url` is on, as the bar names it: its host, with its port when that isn't
+/// its scheme's own, or its scheme where it has no host (`file`, `data`). What WebKit's security
+/// origins give the Mac's bar, from the address WebView2 hands over.
+#[cfg_attr(not(windows), allow(dead_code))] // WebKit hands over origins.
+pub fn site_of_url(url: &str) -> String {
+    let Some(scheme) = scheme_of(url) else {
+        return String::new();
+    };
+    let rest = &url[scheme.len() + 1..];
+    let scheme = scheme.to_ascii_lowercase();
+    let authority = rest
+        .strip_prefix("//")
+        .and_then(|r| r.split(['/', '?', '#']).next())
+        .unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // The port: digits after the last colon, outside an IPv6 address's brackets.
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port))
+            if port.bytes().all(|b| b.is_ascii_digit())
+                && (!host.contains(':') || host.ends_with(']')) =>
+        {
+            (host, port)
+        }
+        _ => (authority, ""),
+    };
+    if host.is_empty() {
+        return scheme;
+    }
+    let own = match scheme.as_str() {
+        "http" | "ws" => "80",
+        "https" | "wss" => "443",
+        _ => "",
+    };
+    let host = host.to_ascii_lowercase();
+    if port.is_empty() || port == own {
+        host
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -415,5 +489,93 @@ mod tests {
             ..ask(AskKind::Location)
         };
         assert_eq!(blank.headline(), "This page wants to know your location");
+    }
+
+    #[test]
+    fn an_agent_at_work_gets_dialogs_answered_and_is_told_how() {
+        let ask = |kind| Ask {
+            id: 7,
+            tab: 1,
+            site: "shop.example".into(),
+            kind,
+        };
+        // OK to an alert (the page goes on as if read), Cancel to the rest: the safe answer.
+        let (reply, told) = ask(AskKind::Alert("Saved".into())).for_agent().unwrap();
+        assert_eq!(reply, Reply::Yes);
+        assert_eq!(
+            told,
+            "The page showed a dialog (\"Saved\"), which Trek closed: agents can't answer page dialogs."
+        );
+        let (reply, told) = ask(AskKind::Confirm("Delete everything?".into()))
+            .for_agent()
+            .unwrap();
+        assert_eq!(reply, Reply::No);
+        assert!(told.contains("\"Delete everything?\"") && told.contains("cancelled"));
+        let prompt = ask(AskKind::Prompt {
+            message: "Your name?".into(),
+            default: "Ada".into(),
+        });
+        assert_eq!(prompt.for_agent().map(|(r, _)| r), Some(Reply::No));
+        // What doesn't hold the page waits for the user, agent or not.
+        for kind in [
+            AskKind::Camera,
+            AskKind::Microphone,
+            AskKind::CameraAndMicrophone,
+            AskKind::Location,
+            AskKind::OpenApp {
+                url: "mailto:a@b.c".into(),
+                app: Some("Mail".into()),
+            },
+        ] {
+            assert_eq!(ask(kind.clone()).for_agent(), None, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn camera_and_microphone_asked_one_after_the_other_are_one_ask() {
+        assert_eq!(
+            AskKind::Camera.joined(&AskKind::Microphone),
+            Some(AskKind::CameraAndMicrophone)
+        );
+        assert_eq!(
+            AskKind::Microphone.joined(&AskKind::Camera),
+            Some(AskKind::CameraAndMicrophone)
+        );
+        assert_eq!(AskKind::Camera.joined(&AskKind::Camera), None);
+        assert_eq!(AskKind::Camera.joined(&AskKind::Location), None);
+        assert_eq!(
+            AskKind::CameraAndMicrophone.joined(&AskKind::Microphone),
+            None
+        );
+        assert_eq!(
+            AskKind::Alert("x".into()).joined(&AskKind::Alert("x".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn the_site_is_named_by_its_host_and_its_own_port() {
+        for (url, site) in [
+            ("https://meet.example/room?x=1", "meet.example"),
+            ("https://www.google.com/", "www.google.com"),
+            ("http://localhost:5173/app", "localhost:5173"),
+            ("http://127.0.0.1:47615/", "127.0.0.1:47615"),
+            // A scheme's own port is no part of the name, written or not.
+            ("https://Example.COM:443/a", "example.com"),
+            ("http://x.dev:80", "x.dev"),
+            ("https://x.dev:80/", "x.dev:80"),
+            ("https://user:secret@x.dev:8443/a", "x.dev:8443"),
+            ("http://[::1]:3000/", "[::1]:3000"),
+            ("http://[::1]/", "[::1]"),
+            ("wss://chat.example:443/socket", "chat.example"),
+            // No host: the scheme, as WebKit's origin gives it.
+            ("file:///C:/Users/a/page.html", "file"),
+            ("data:text/html,<p>hi", "data"),
+            ("about:blank", "about"),
+            ("", ""),
+            ("no scheme", ""),
+        ] {
+            assert_eq!(site_of_url(url), site, "{url}");
+        }
     }
 }

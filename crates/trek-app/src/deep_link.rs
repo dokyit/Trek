@@ -3,7 +3,8 @@
 //! - `trek://edit?path=…&line=…` — open the file in the in-app editor, caret on `line`.
 //! - `trek://ask?path=…&line=…&end=…&selection=…` — draft a thread on the file's project
 //!   with the selection quoted into the composer.
-//! - `trek://thread/<id>` — open one of this Trek's threads (a hand-off row links to it).
+//! - `trek://thread/<id>` — open one of this Trek's threads (a hand-off row links to it, and so
+//!   does a banner on Windows, which starts Trek on the link when it has quit).
 
 use std::path::{Component, Path, PathBuf};
 
@@ -68,17 +69,14 @@ fn open_link(link: Link, cx: &mut App) {
     .detach();
 }
 
-/// A `trek://thread/<id>` link: bring the window up and show the thread in it.
+/// A `trek://thread/<id>` link: the thread on screen as clicking its banner shows it, in its own
+/// window if it has one, else in the main window (reopened if it was closed), which comes up.
 fn open_thread(id: &str, cx: &mut App) {
     if !cx.has_global::<workspace::GlobalWorkspace>() {
         return;
     }
     let ws = workspace::workspace_global(cx);
-    crate::root::show_main(ws.clone(), cx);
-    ws.update(cx, |ws, cx| {
-        ws.open_thread_here(id, cx);
-        cx.emit(WorkspaceEvent::ActivateMain);
-    });
+    crate::root::reveal_thread(&ws, id, cx);
 }
 
 /// Act on a link the user trusts.

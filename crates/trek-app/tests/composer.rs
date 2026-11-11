@@ -1104,6 +1104,37 @@ fn a_refused_ask_says_why_and_opens_nothing() {
     });
 }
 
+/// Where Trek can't take dictation itself (on Windows, a Trek without package identity, whose
+/// recognizer Windows never answers), the mic asks for the system's own dictation (Windows' voice
+/// typing, Win+H) into the composer; only where that can't open does it say why Trek's isn't
+/// there. Nothing of Trek's own opens either way.
+#[test]
+fn where_trek_cant_dictate_the_mic_opens_the_systems_dictation() {
+    use trek_app::dictate::fake;
+    run(async |cx| {
+        let _windows = trek_app::words::pretend(true);
+        let why = "Windows speech recognition isn't available on this PC. Press Win+H to dictate.";
+        let dictation = fake::install();
+        dictation.unavailable(why);
+        let trek = open(cx);
+        let toasts = toasts(&trek, cx);
+        trek.type_text(cx, "keep this");
+        trek.render(cx);
+        assert!(trek.visible(cx, "dictate-elsewhere") && !trek.visible(cx, "dictate"));
+        trek.click(cx, "dictate-elsewhere");
+        assert_eq!(
+            dictation.system_opened(),
+            1,
+            "the system's dictation was asked for"
+        );
+        // The fake can't open it: the mic says why, as before.
+        assert_eq!(said(&toasts), [why]);
+        assert_eq!(dictation.takes(), 0);
+        assert!(!dictation.mic_open());
+        assert_eq!(trek.composer_text(cx), "keep this");
+    });
+}
+
 /// A take given up lets go of the mic however it's given up: ✕ while it listens, another draft
 /// mid-take, and another draft while the mic is still starting, whose ask is answered only after
 /// the take was given up (as Windows answers once its recognizer is ready) and is abandoned

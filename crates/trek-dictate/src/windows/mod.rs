@@ -38,10 +38,64 @@ mod live {
 
     /// Whether the mic button shows: Windows' recognizer is registered, and nothing has said it
     /// can't work here since.
+    /// Trek's own recognizer can take dictation: it's there, nothing has ruled it out this run,
+    /// and Trek runs with package identity. Without identity (Trek as unpacked, or installed by
+    /// its setup) Windows' recognizer listens but never answers: seen live on Windows 11, the
+    /// microphone's level moving for half a minute with no word back and no end to the session,
+    /// while Windows' own voice typing (Win+H) typed into Trek's composer. There the mic opens
+    /// that instead (`open_system_dictation`).
     pub fn available() -> bool {
         static REGISTERED: OnceLock<bool> = OnceLock::new();
+        static PACKAGED: OnceLock<bool> = OnceLock::new();
         *REGISTERED.get_or_init(hints::recognizer_registered)
+            && *PACKAGED.get_or_init(packaged)
             && GONE.lock().is_ok_and(|gone| gone.is_none())
+    }
+
+    /// This process runs with package identity (an MSIX, or a sparse package for its exe).
+    pub(crate) fn packaged() -> bool {
+        use ::windows::Win32::Foundation::APPMODEL_ERROR_NO_PACKAGE;
+        use ::windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
+        let mut len = 0u32;
+        // SAFETY: asks only for the length (no buffer): an unpackaged process answers
+        // APPMODEL_ERROR_NO_PACKAGE, a packaged one ERROR_INSUFFICIENT_BUFFER.
+        let answer = unsafe { GetCurrentPackageFullName(&mut len, None) };
+        answer != APPMODEL_ERROR_NO_PACKAGE
+    }
+
+    /// Open Windows' own voice typing (Win+H) into the text field that has the focus: the way
+    /// in where Trek's recognizer can't answer (`available`). False when the keys couldn't be
+    /// sent.
+    pub fn open_system_dictation() -> bool {
+        use ::windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+            SendInput, VIRTUAL_KEY, VK_H, VK_LWIN,
+        };
+        let key = |vk: VIRTUAL_KEY, up: bool| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if up {
+                        KEYEVENTF_KEYUP
+                    } else {
+                        KEYBD_EVENT_FLAGS(0)
+                    },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let keys = [
+            key(VK_LWIN, false),
+            key(VK_H, false),
+            key(VK_H, true),
+            key(VK_LWIN, true),
+        ];
+        // SAFETY: four keyboard inputs, each the size SendInput is told.
+        let sent = unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32) };
+        sent as usize == keys.len()
     }
 
     /// Where Trek can't dictate, Windows' own dictation still can: the dimmed mic's tip.

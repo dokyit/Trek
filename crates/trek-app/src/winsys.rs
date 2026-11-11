@@ -470,10 +470,30 @@ pub fn register_trek_protocol() {
         Err(e) => return tracing::warn!("trek:// links: where Trek is: {e}"),
     };
     match register_protocol(CLASSES, &exe) {
-        Ok(Registered::Written) => tracing::info!("trek:// links now open {}", exe.display()),
-        Ok(Registered::Already) => {}
+        Ok(Registered::Written) => {
+            tracing::info!("trek:// links now open {}", exe.display());
+            set_owns_links(true);
+        }
+        Ok(Registered::Already) => set_owns_links(true),
         Err(e) => tracing::warn!("trek:// links: couldn't register the protocol: {e}"),
     }
+}
+
+/// `trek://` links open this Trek: `register_trek_protocol` found the protocol's command, or
+/// made it, this exe's.
+static OWNS_LINKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether Windows hands `trek://` links to this very Trek, so that a link it gives out (a
+/// banner's, `root::attention`) starts or reaches it, never another Trek the user has: false for
+/// a test, a capture run or a trial build, which don't take the links, and when the protocol
+/// couldn't be registered.
+pub fn owns_links() -> bool {
+    OWNS_LINKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Say whether this Trek takes the links (`register_trek_protocol`; a test standing in for it).
+pub fn set_owns_links(owns: bool) {
+    OWNS_LINKS.store(owns, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(windows)]

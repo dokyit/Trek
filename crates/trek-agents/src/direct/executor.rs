@@ -60,6 +60,17 @@ pub trait ToolExecutor: Send + Sync {
     /// Write `bytes` to `path`, making its folders first. A file already there keeps its mode;
     /// a new one is 0644.
     fn write<'a>(&'a self, path: &'a Path, bytes: &'a [u8]) -> BoxFuture<'a, Result<()>>;
+    /// `exec` for a command that starts something in the background and returns (the `bash`
+    /// tool's `background`), with what that something stays tied to: the session keeps the
+    /// [`Held`], and dropping it ends what the command left running.
+    fn exec_background<'a>(
+        &'a self,
+        command: &'a str,
+        cwd: &'a Path,
+        timeout: Option<Duration>,
+    ) -> BoxFuture<'a, Result<(ExecOutput, Held)>> {
+        Box::pin(async move { Ok((self.exec(command, cwd, timeout).await?, Held::default())) })
+    }
     /// Whether the tools run on this machine, where a search can run in-process and folders can be
     /// looked at directly.
     fn is_local(&self) -> bool {
@@ -138,6 +149,242 @@ fn shell_program() -> &'static str {
     })
 }
 
+/// The shell commands run in on Windows: Git for Windows' bash when it's installed (the tool is
+/// called `bash`, and models write bash far more reliably than cmd.exe), else cmd.exe.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WindowsShell {
+    GitBash(&'static Path),
+    Cmd,
+}
+
+#[cfg(windows)]
+fn windows_shell() -> WindowsShell {
+    git_bash().map_or(WindowsShell::Cmd, WindowsShell::GitBash)
+}
+
+/// Whether commands on this machine run in Git Bash on Windows, rather than in the bash of a Mac
+/// or Linux or in cmd.exe: the system prompt says which, and how its paths and flags go.
+pub(crate) fn runs_git_bash() -> bool {
+    #[cfg(windows)]
+    let found = git_bash().is_some();
+    #[cfg(not(windows))]
+    let found = false;
+    found
+}
+
+/// Git for Windows' `bin\bash.exe`, found once: in the Git folder of the `git` on the PATH, else
+/// in the folders Git installs to. That `bash.exe` starts the real one (`usr\bin\bash.exe`) with
+/// Git's own tools (`ls`, `grep`, `sed`) first on the PATH. Never `System32\bash.exe`, which is
+/// WSL's: a Linux machine of its own, with other paths and other programs.
+#[cfg(windows)]
+pub(crate) fn git_bash() -> Option<&'static Path> {
+    static BASH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    BASH.get_or_init(|| {
+        find_git_bash(trek_core::detect::which("git").as_deref(), |name| {
+            std::env::var_os(name)
+        })
+    })
+    .as_deref()
+}
+
+/// `git_bash` with `git` the `git` found on the PATH, and `var` reading the environment. Git's
+/// folder is up to two above its `git.exe` (`cmd\git.exe`, `bin\git.exe`, `mingw64\bin\git.exe`);
+/// it counts when it holds both the launcher and the shell it starts, and isn't in Windows' own
+/// folder.
+#[cfg(windows)]
+fn find_git_bash(
+    git: Option<&Path>,
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let dir = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let system = dir("SystemRoot").unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let beside_git = git
+        .into_iter()
+        .flat_map(|git| git.ancestors().skip(1).take(3))
+        .map(Path::to_path_buf);
+    let scoop = |var_name: &str, default: Option<PathBuf>| {
+        dir(var_name)
+            .or(default)
+            .map(|s| s.join(r"apps\git\current"))
+    };
+    let installed = [
+        dir("ProgramFiles").map(|p| p.join("Git")),
+        dir("ProgramW6432").map(|p| p.join("Git")),
+        dir("ProgramFiles(x86)").map(|p| p.join("Git")),
+        // A per-user install, as winget's user scope makes.
+        dir("LOCALAPPDATA").map(|p| p.join(r"Programs\Git")),
+        scoop("SCOOP", dir("USERPROFILE").map(|p| p.join("scoop"))),
+        scoop("SCOOP_GLOBAL", dir("ProgramData").map(|p| p.join("scoop"))),
+    ];
+    beside_git
+        .chain(installed.into_iter().flatten())
+        .find(|root| {
+            !is_inside(root, &system)
+                && root.join(r"bin\bash.exe").is_file()
+                && root.join(r"usr\bin\bash.exe").is_file()
+        })
+        .map(|root| root.join(r"bin\bash.exe"))
+}
+
+/// `path` is `folder` or inside it, in any case (Windows paths are case-blind).
+#[cfg(windows)]
+fn is_inside(path: &Path, folder: &Path) -> bool {
+    let key = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    let (path, folder) = (key(path), key(folder));
+    path == folder || path.starts_with(&format!("{folder}\\"))
+}
+
+/// The variable Git Bash finds its script in, and the command line that runs it. The script goes
+/// in the environment, where it arrives exactly as written: Git Bash reads its command line by
+/// rules of its own (a backslash escapes any backslash after it, not only one before a quote),
+/// and cuts an argument past about 8,000 characters short. `export -n` keeps the script out of
+/// the environment of whatever it runs.
+#[cfg(windows)]
+const SCRIPT_VAR: &str = "TREK_COMMAND";
+#[cfg(windows)]
+const RUN_SCRIPT_VAR: &str = r#"-c "export -n TREK_COMMAND; eval \"$TREK_COMMAND\"""#;
+
+/// The command that runs `command` in the shell, before its folder and environment are set.
+#[cfg(unix)]
+fn shell_command(command: &str) -> tokio::process::Command {
+    let mut shell = trek_core::procs::async_command(shell_program());
+    shell.arg("-c").arg(command);
+    shell
+}
+
+#[cfg(windows)]
+fn shell_command(windows: WindowsShell, command: &str) -> tokio::process::Command {
+    match windows {
+        WindowsShell::GitBash(bash) => {
+            let mut shell = trek_core::procs::async_command(bash);
+            shell.raw_arg(RUN_SCRIPT_VAR).env(SCRIPT_VAR, command);
+            shell
+        }
+        WindowsShell::Cmd => {
+            let mut shell = trek_core::procs::async_command("cmd.exe");
+            // As written, not with Rust's argument quoting: cmd.exe doesn't read `\"`, so
+            // `git commit -m "a b"` would reach git as two words. `/s` with the outer quotes makes
+            // it take everything between them literally.
+            shell.raw_arg(format!("/s /c \"{command}\""));
+            shell
+        }
+    }
+}
+
+/// What a command started in the background stays tied to, ended when this is dropped. On
+/// Windows with Git Bash it's a job holding all the command started: Git Bash's processes can't
+/// all be found from the first by parent ids (one that runs another of Git's programs hands its
+/// place to it and exits), and a job closed with Trek, however Trek ends, ends what's in it.
+/// Otherwise it holds nothing: a process group is ended by its id.
+#[derive(Default)]
+pub struct Held {
+    #[cfg(windows)]
+    _job: Option<crate::job::Job>,
+}
+
+/// A job of its own for `child`, the shell of a command that starts something in the background,
+/// besides the one `spawn_group` put it in (that one is let go once the shell is done). The child
+/// has been running since it was spawned, a few microseconds, and what it started in that time
+/// isn't in this job: a shell has to load and get going before it starts anything.
+#[cfg(windows)]
+fn hold(child: &tokio::process::Child) -> Held {
+    let job = crate::job::Job::new().and_then(|job| {
+        let handle = child
+            .raw_handle()
+            .ok_or_else(|| std::io::Error::other("it has exited"))?;
+        job.assign(handle)?;
+        Ok(job)
+    });
+    match job {
+        Ok(job) => Held { _job: Some(job) },
+        Err(e) => {
+            tracing::warn!(
+                "couldn't hold background command {:?} in a job; it will outlive the session: {e}",
+                child.id()
+            );
+            Held::default()
+        }
+    }
+}
+
+/// Run `shell` (a `shell_command`) in `cwd` for at most `timeout`, and with `keep` hold what it
+/// leaves running (on Windows; see [`Held`]).
+async fn run_local(
+    mut shell: tokio::process::Command,
+    cwd: &Path,
+    timeout: Option<Duration>,
+    keep: bool,
+) -> Result<(ExecOutput, Held)> {
+    shell
+        .current_dir(cwd)
+        // The user's real PATH, as every other agent gets: an app started from the Dock
+        // has a bare one, and "node: command not found" sends a model down the wrong road.
+        .env("PATH", trek_core::detect::login_path())
+        // Nothing waits on a person who isn't there.
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    // In a group of its own (a job on Windows), so a Stop or a timeout ends what the
+    // command started too, not just the shell: dropping `child` does that.
+    let mut child = crate::spawn_group(&mut shell)?;
+    #[cfg(windows)]
+    let held = if keep { hold(&child) } else { Held::default() };
+    #[cfg(not(windows))]
+    let held = {
+        let _ = keep;
+        Held::default()
+    };
+
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+    let out = Arc::new(Mutex::new(Capped::default()));
+    let err = Arc::new(Mutex::new(Capped::default()));
+    let read_out = tokio::spawn(drain(stdout, out.clone()));
+    let read_err = tokio::spawn(drain(stderr, err.clone()));
+    let status = {
+        let run = async {
+            let status = child.wait().await?;
+            let readers = async {
+                let _ = read_out.await;
+                let _ = read_err.await;
+            };
+            let _ = tokio::time::timeout(PIPE_GRACE, readers).await;
+            anyhow::Ok(status)
+        };
+        match timeout {
+            None => Some(run.await?),
+            Some(limit) => tokio::time::timeout(limit, run).await.ok().transpose()?,
+        }
+    };
+    match status {
+        // A command that finished may leave something running on purpose (a server it
+        // started in the background), so nothing is ended then.
+        Some(_) => child.release(),
+        // A timed-out one is ended now, group and all; what it wrote so far is kept.
+        None => child.kill_now().await,
+    }
+    let stdout = out.lock().expect("output").text();
+    let stderr = err.lock().expect("output").text();
+    let ran = ExecOutput {
+        stdout,
+        stderr,
+        exit_code: status.and_then(|s| s.code()),
+        timed_out: status.is_none(),
+    };
+    Ok((ran, held))
+}
+
 /// The tools on this machine: what Trek's own Direct sessions use.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LocalExecutor;
@@ -159,70 +406,33 @@ impl ToolExecutor for LocalExecutor {
     ) -> BoxFuture<'a, Result<ExecOutput>> {
         Box::pin(async move {
             #[cfg(unix)]
-            let mut shell = trek_core::procs::async_command(shell_program());
-            #[cfg(unix)]
-            shell.arg("-c").arg(command);
+            let shell = shell_command(command);
             #[cfg(windows)]
-            let mut shell = trek_core::procs::async_command("cmd.exe");
-            // As written, not with Rust's argument quoting: cmd.exe doesn't read `\"`, so
-            // `git commit -m "a b"` would reach git as two words. `/s` with the outer quotes makes
-            // it take everything between them literally.
-            #[cfg(windows)]
-            shell.raw_arg(format!("/s /c \"{command}\""));
-            shell
-                .current_dir(cwd)
-                // The user's real PATH, as every other agent gets: an app started from the Dock
-                // has a bare one, and "node: command not found" sends a model down the wrong road.
-                .env("PATH", trek_core::detect::login_path())
-                // Nothing waits on a person who isn't there.
-                .env("PAGER", "cat")
-                .env("GIT_PAGER", "cat")
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .env("NO_COLOR", "1")
-                .env("TERM", "dumb")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            // In a group of its own (a job on Windows), so a Stop or a timeout ends what the
-            // command started too, not just the shell: dropping `child` does that.
-            let mut child = crate::spawn_group(&mut shell)?;
+            let shell = shell_command(windows_shell(), command);
+            Ok(run_local(shell, cwd, timeout, false).await?.0)
+        })
+    }
 
-            let stdout = child.stdout.take().expect("stdout");
-            let stderr = child.stderr.take().expect("stderr");
-            let out = Arc::new(Mutex::new(Capped::default()));
-            let err = Arc::new(Mutex::new(Capped::default()));
-            let read_out = tokio::spawn(drain(stdout, out.clone()));
-            let read_err = tokio::spawn(drain(stderr, err.clone()));
-            let status = {
-                let run = async {
-                    let status = child.wait().await?;
-                    let readers = async {
-                        let _ = read_out.await;
-                        let _ = read_err.await;
-                    };
-                    let _ = tokio::time::timeout(PIPE_GRACE, readers).await;
-                    anyhow::Ok(status)
-                };
-                match timeout {
-                    None => Some(run.await?),
-                    Some(limit) => tokio::time::timeout(limit, run).await.ok().transpose()?,
-                }
+    /// On Windows with Git Bash, what the command leaves running is held in a job (see
+    /// [`Held`]). With cmd.exe nothing is: what `start` began goes on as it always has.
+    fn exec_background<'a>(
+        &'a self,
+        command: &'a str,
+        cwd: &'a Path,
+        timeout: Option<Duration>,
+    ) -> BoxFuture<'a, Result<(ExecOutput, Held)>> {
+        Box::pin(async move {
+            #[cfg(unix)]
+            let (shell, keep) = (shell_command(command), false);
+            #[cfg(windows)]
+            let (shell, keep) = {
+                let windows = windows_shell();
+                (
+                    shell_command(windows, command),
+                    matches!(windows, WindowsShell::GitBash(_)),
+                )
             };
-            match status {
-                // A command that finished may leave something running on purpose (a server it
-                // started in the background), so nothing is ended then.
-                Some(_) => child.release(),
-                // A timed-out one is ended now, group and all; what it wrote so far is kept.
-                None => child.kill_now().await,
-            }
-            let stdout = out.lock().expect("output").text();
-            let stderr = err.lock().expect("output").text();
-            Ok(ExecOutput {
-                stdout,
-                stderr,
-                exit_code: status.and_then(|s| s.code()),
-                timed_out: status.is_none(),
-            })
+            run_local(shell, cwd, timeout, keep).await
         })
     }
 
@@ -596,7 +806,7 @@ impl ToolExecutor for StdioExecutor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt as _;
 
@@ -790,8 +1000,12 @@ mod tests {
         LocalExecutor.write(&file, b"one\n").await.unwrap();
         assert_eq!(LocalExecutor.read(&file).await.unwrap().unwrap(), b"one\n");
 
+        // The same in Git Bash on Windows; cmd.exe has its own test below.
+        #[cfg(windows)]
+        let shell = git_bash_here();
         #[cfg(unix)]
-        {
+        let shell = true;
+        if shell {
             let out = LocalExecutor
                 .exec("cat deep/er/a.txt; echo oops >&2; exit 4", &dir, None)
                 .await
@@ -819,5 +1033,172 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10));
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whether Git Bash is here for a Windows test that needs it, saying so when it isn't.
+    #[cfg(windows)]
+    pub(crate) fn git_bash_here() -> bool {
+        let found = git_bash().is_some();
+        if !found {
+            eprintln!("Git for Windows isn't installed here; skipped");
+        }
+        found
+    }
+
+    /// A process held open by id, so the id stays its own while a test watches it end.
+    #[cfg(windows)]
+    pub(crate) struct Watched(std::os::windows::io::OwnedHandle);
+
+    #[cfg(windows)]
+    impl Watched {
+        /// Process `pid`, which must still be running.
+        pub(crate) fn open(pid: u32) -> Watched {
+            use std::os::windows::io::FromRawHandle as _;
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+            // SAFETY: a plain call; a null handle is checked for.
+            let h = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            assert!(!h.is_null(), "process {pid} isn't running");
+            let watched = Watched(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(h) });
+            assert!(
+                !watched.ends_within(Duration::ZERO),
+                "process {pid} has exited"
+            );
+            watched
+        }
+
+        /// It has ended, or does within `limit`.
+        pub(crate) fn ends_within(&self, limit: Duration) -> bool {
+            use std::os::windows::io::AsRawHandle as _;
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            let ms = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX);
+            // SAFETY: a process handle this owns, opened with SYNCHRONIZE.
+            unsafe { WaitForSingleObject(self.0.as_raw_handle(), ms) == WAIT_OBJECT_0 }
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_script_reaches_git_bash_exactly_as_written() {
+        if !git_bash_here() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("trek_git_bash_{}", super::super::next_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("one.txt"), "").unwrap();
+        // What a command line would change: a backslash before one that isn't before a quote,
+        // quotes, what globs and braces expand, a line break, and past 8,000 characters.
+        let tricky = format!(
+            "C:\\\\x \\\" \\ \"q\" 'q' *.txt {{a,b}} ~ é 日本\nline two {}",
+            "y".repeat(20_000)
+        );
+        let script = format!("cat <<'EOF'\n{tricky}\nEOF\nexit 7");
+        let out = LocalExecutor.exec(&script, &dir, None).await.unwrap();
+        assert_eq!(out.exit_code, Some(7), "{}", out.stderr);
+        assert_eq!(out.stdout, format!("{tricky}\n"));
+        // Nothing the script runs sees it in its environment.
+        let out = LocalExecutor
+            .exec("env | grep -c TREK_COMMAND", &dir, None)
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.trim(), "0", "{out:?}");
+        // A syntax error is told as bash tells it, and nothing after it runs.
+        let out = LocalExecutor
+            .exec("echo before\nif then fi\necho after", &dir, None)
+            .await
+            .unwrap();
+        assert_eq!((out.stdout.as_str(), out.exit_code), ("before\n", Some(2)));
+        assert!(out.stderr.contains("syntax error"), "{}", out.stderr);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn without_git_bash_commands_run_in_cmd_exe_as_before() {
+        let dir = std::env::temp_dir();
+        let shell = shell_command(
+            WindowsShell::Cmd,
+            r#"echo "a b"& echo oops 1>&2& exit /b 3"#,
+        );
+        let (out, _) = run_local(shell, &dir, None, false).await.unwrap();
+        assert_eq!(
+            (out.stdout.as_str(), out.stderr.trim(), out.exit_code),
+            ("\"a b\"\r\n", "oops", Some(3))
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn what_a_background_command_leaves_running_ends_with_its_hold() {
+        if !git_bash_here() {
+            return;
+        }
+        // `sleep` is one of Git Bash's programs: the shell forked to run it has handed it its
+        // place and gone (give it a second to), so no parent id leads to it from the command's
+        // shell. `/proc/…/winpid` then says the `sleep`'s Windows id.
+        let (out, held) = LocalExecutor
+            .exec_background(
+                "sleep 30 > /dev/null 2>&1 &\nsleep 1; cat /proc/$!/winpid",
+                &std::env::temp_dir(),
+                Some(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+        assert!(out.success(), "{out:?}");
+        let pid: u32 = out.stdout.trim().parse().expect("a pid");
+        let sleep = Watched::open(pid);
+        // The command is done, and what it left goes on...
+        assert!(!sleep.ends_within(Duration::from_millis(500)));
+        // ...until the hold goes.
+        drop(held);
+        assert!(sleep.ends_within(Duration::from_secs(5)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_is_found_beside_git_or_where_git_installs_never_wsls() {
+        let root = std::env::temp_dir().join(format!("trek_find_bash_{}", super::super::next_id()));
+        let make = |files: &[&str]| {
+            for f in files {
+                let path = root.join(f);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "").unwrap();
+            }
+        };
+        make(&[
+            r"Portable\bin\bash.exe",
+            r"Portable\usr\bin\bash.exe",
+            r"Portable\cmd\git.exe",
+            r"Portable\mingw64\bin\git.exe",
+            r"Programs\Git\bin\bash.exe",
+            r"Programs\Git\usr\bin\bash.exe",
+            // WSL's bash, what looks like Git in Windows' own folder, and a Git folder that's
+            // only the launcher, with no shell behind it.
+            r"Windows\System32\bash.exe",
+            r"Windows\System32\git.exe",
+            r"Windows\bin\bash.exe",
+            r"Windows\usr\bin\bash.exe",
+            r"Half\bin\bash.exe",
+            r"Half\cmd\git.exe",
+        ]);
+        let vars = |name: &str| match name {
+            "SystemRoot" => Some(root.join("Windows").into_os_string()),
+            "LOCALAPPDATA" => Some(root.clone().into_os_string()),
+            _ => None,
+        };
+        let found = |git: &str| find_git_bash(Some(&root.join(git)), vars);
+        // Beside the git on the PATH, whichever of Git's folders that one is in.
+        let portable = Some(root.join(r"Portable\bin\bash.exe"));
+        assert_eq!(found(r"Portable\cmd\git.exe"), portable);
+        assert_eq!(found(r"Portable\mingw64\bin\git.exe"), portable);
+        // Else where Git installs (here the per-user one): not WSL's, nor half of Git.
+        let installed = Some(root.join(r"Programs\Git\bin\bash.exe"));
+        assert_eq!(found(r"Windows\System32\git.exe"), installed);
+        assert_eq!(found(r"Half\cmd\git.exe"), installed);
+        assert_eq!(find_git_bash(None, vars), installed);
+        // No git, and nowhere to look.
+        assert_eq!(find_git_bash(None, |_| None), None);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(find_git_bash(None, vars), None);
     }
 }

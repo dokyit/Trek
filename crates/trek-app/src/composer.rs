@@ -4401,9 +4401,10 @@ impl Render for Composer {
         };
 
         // The mic opens voice mode where Trek can dictate (see dictate::available): a Mac bundle
-        // that can ask, or Windows with its speech recognizer. Where Trek can't but the system
-        // can (Windows without the recognizer, or an organization's policy against it), a dimmed
-        // mic points to Win+H, and pressing it says why Trek's own isn't there.
+        // that can ask, or a packaged Trek on Windows with its speech recognizer. Where Trek
+        // can't but the system can (an unpackaged Trek, whose recognizer Windows doesn't answer;
+        // no recognizer; an organization's policy), the mic opens Windows' voice typing (Win+H)
+        // into the composer, and says why Trek's own isn't there only if that can't open.
         let asking = self.voice.phase == voice::Phase::Asking;
         let elsewhere = dictate::fallback().map(|tip| {
             square("dictate-elsewhere")
@@ -4415,11 +4416,15 @@ impl Render for Composer {
                 .child(
                     Icon::new(crate::assets::Lucide::Mic)
                         .size(px(look::ICON))
-                        .text_color(theme.muted_foreground.opacity(0.45)),
+                        .text_color(theme.muted_foreground),
                 )
+                // The system's dictation types into the field with the focus: the composer's.
+                // Where it can't be opened, the toast says why Trek's own isn't there.
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.focus(window, cx);
-                    this.dictate(window, cx)
+                    if !dictate::open_system_dictation() {
+                        this.dictate(window, cx)
+                    }
                 }))
                 .into_any_element()
         });

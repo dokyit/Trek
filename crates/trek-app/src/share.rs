@@ -2,13 +2,16 @@
 //! read-only copy of the thread, three ways. **Link** makes a secret GitHub gist with the GitHub
 //! CLI and remembers it, so it can be copied, opened, updated or deleted later; **Export** saves the
 //! thread as Markdown, a self-contained HTML page or its items as JSON; **Send to** hands it to the
-//! paired iPhone (a notification that opens it there), continues it on a paired machine, or, on a
-//! Mac, gives it to the system's share sheet. What a copy carries (tool calls, thinking, paths and
-//! secrets) is chosen once and goes for each (`render`).
+//! paired iPhone (a notification that opens it there), continues it on a paired machine, or gives
+//! it to the system's share (More…: the Mac's share menu, Windows' share window). What a copy
+//! carries (tool calls, thinking, paths and secrets) is chosen once and goes for each (`render`).
 
 pub mod gist;
 pub mod render;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+mod system;
+#[cfg(windows)]
+#[path = "share/windows.rs"]
 mod system;
 
 use crate::composer::look;
@@ -58,8 +61,23 @@ impl Format {
 pub enum Target {
     Phone,
     Machine(String),
-    /// The system's share sheet (macOS).
+    /// The system's share: the Mac's share menu, Windows' share window.
     System,
+}
+
+/// What More… says it reaches, as the platform's share has it.
+const SYSTEM_SHARE: &str = if cfg!(windows) {
+    "Nearby Sharing, Outlook, Teams and the other apps in Windows' share window."
+} else {
+    "AirDrop, Messages, Mail, Notes and the rest of the share menu."
+};
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// What tests would have handed the system's share, as (title, text): each GPUI test runs on
+    /// a thread of its own.
+    pub static SYSTEM_SHARES: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Open the Share sheet for thread `id`.
@@ -330,11 +348,36 @@ impl ShareSheet {
                 });
                 window.close_dialog(cx);
             }
-            Target::System => {
-                #[cfg(target_os = "macos")]
-                system::share_text(window, &self.markdown(cx));
-            }
+            Target::System => self.share_through_system(window, cx),
         }
+    }
+
+    /// More…: the thread as Markdown to the system's share, over this window. The sheet stays up
+    /// behind it, as it does on the Mac.
+    fn share_through_system(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, text) = (self.title(cx), self.markdown(cx));
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let _ = window;
+            SYSTEM_SHARES.with(|s| s.borrow_mut().push((title, text)));
+        }
+        #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
+        {
+            let _ = title;
+            system::share_text(window, &text);
+        }
+        #[cfg(all(windows, not(any(test, feature = "test-support"))))]
+        if let Err(e) = system::share_text(window, &title, &text) {
+            tracing::warn!("share: Windows' share window: {e}");
+            self.workspace.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message: "Windows' share window couldn't open".into(),
+                    undo: None,
+                })
+            });
+        }
+        #[cfg(not(any(target_os = "macos", windows, test, feature = "test-support")))]
+        let _ = (window, title, text);
     }
 
     fn primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -718,12 +761,12 @@ impl ShareSheet {
                 cx,
             ));
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", windows)) {
             list = list.child(choice(
                 "share-to-system",
                 icon(crate::assets::Lucide::Share, cx),
                 "More…",
-                "AirDrop, Messages, Mail, Notes and the rest of the share menu.",
+                SYSTEM_SHARE,
                 self.target == Some(Target::System),
                 |this, _, _| this.target = Some(Target::System),
                 cx,

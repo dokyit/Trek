@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
-// Trek: vendored for the tooltip fix in window.rs (see "Trek:"); its own warnings stay its own
+// Trek: vendored for the tooltip fix in window.rs, and system notifications posted with a launch
+// link (`show_system_notification_with_launch`, see "Trek:"); its own warnings stay its own
 // under the workspace's -D warnings.
 #![allow(warnings)]
 #![warn(missing_docs)]

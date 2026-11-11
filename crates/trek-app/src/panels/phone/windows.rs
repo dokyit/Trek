@@ -307,9 +307,13 @@ fn source() -> Arc<dyn Source> {
     if let Some(made_up) = tests {
         return made_up;
     }
-    // An isolated capture run never reaches for the user's real phone.
+    // An isolated capture run never reaches for the user's real phone, unless it's asked to
+    // (`TREK_SHOT_PHONE=real`: checking the tool with a phone on the cable, everything else of
+    // the run still isolated).
     #[cfg(feature = "shots")]
-    if std::env::var_os("TREK_SHOT_DIR").is_some() {
+    if std::env::var_os("TREK_SHOT_DIR").is_some()
+        && std::env::var("TREK_SHOT_PHONE").as_deref() != Ok("real")
+    {
         return MadeUp::ready();
     }
     Arc::new(Services)
