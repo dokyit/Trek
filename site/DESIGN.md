@@ -35,6 +35,9 @@ another product's site.
   that shows staged content carries an "Example" tag and says what was staged.
 - **No "Mock" in any picture.** The test app's scripted agent names itself in the composer and under
   it. Every picture is cut above that, or taken from a view without it.
+- **One retouch.** In the window pictures the three title-bar buttons are painted in macOS's own
+  colours, where and as large as they were captured: the test window is never the key window, so
+  macOS draws them grey. Nothing else in any picture is retouched.
 - **Motion is the trail.** The only moving things are the hiker on the line down the page and the
   three hikers of "How it works", both driven by scrolling, never by a timer, so there is nothing to
   pause. With Reduce Motion on, or with JavaScript off, they stand still and the page reads the same.
