@@ -18,6 +18,8 @@ mod text_view;
 mod utils;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
+// Trek: for measurements, see `RETAINED_IDLE` in inline.rs.
+pub use inline::{forget_idle_layouts, hold_layouts, release_layouts, retained_layouts};
 pub use inline_element::*;
 pub use markdown_ext::*;
 pub use node::{CodeBlock, TableData};

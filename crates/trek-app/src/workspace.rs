@@ -8658,6 +8658,10 @@ impl Workspace {
                     this.tidy_inbox(now, cx);
                     // Agent processes idle for a while are shut down (150–250 MB each); they resume on the next message.
                     this.reap_idle_sessions(cx.background_executor().now());
+                    // And the pictures of threads no longer shown, and text shaped for frames
+                    // that never came (a window that stopped drawing).
+                    crate::pictures::forget_idle(cx);
+                    gpui_kit::base::text::forget_idle_layouts();
                     if now - this.status_fetched_at > this.usage_every() {
                         this.refresh_usage(cx);
                     }

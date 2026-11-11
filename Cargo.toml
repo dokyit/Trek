@@ -61,6 +61,8 @@ lto = false
 # and a few opt-in style knobs for rendered markdown (bold colour, a measure for running text,
 # list spacing and marker colour), and coloured text and highlights from inline `<span style="color: …">`
 # and `<mark>` (for notes). See "Trek:" in vendor/gpui-base/src/text/{node,style}.rs and format/markdown.rs.
+# And text shaped for the next frame is let go of when no next frame takes it (it was kept for as
+# long as its document lived: 450 MB after eight long threads). See "Trek:" in text/inline.rs.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
 # And to gpui-pre-macos: an app that set the Accessory activation policy before launching keeps

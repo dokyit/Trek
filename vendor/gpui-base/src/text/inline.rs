@@ -253,15 +253,152 @@ struct RetainedLayout {
     text: SharedString,
     runs: Vec<TextRun>,
     text_style: TextStyle,
+    /// Trek: the sweep it was handed over in (`RetainedSweeps::round`).
+    round: u64,
+    /// Trek: kept whatever the sweeps say, until `release_layouts` or `RETAINED_HOLD_TICKS`
+    /// (`hold_layouts`): the hold, and the tick it was taken at.
+    hold: Option<(u64, u64)>,
 }
 
 thread_local! {
     static RETAINED_LAYOUTS: RefCell<HashMap<usize, RetainedLayout>> = RefCell::new(HashMap::new());
+    /// Trek: see `RETAINED_IDLE`.
+    static RETAINED_SWEEPS: std::cell::Cell<RetainedSweeps> = const {
+        std::cell::Cell::new(RetainedSweeps { round: 0, last: None })
+    };
+    /// Trek: the last hold given out (`hold_layouts`).
+    static RETAINED_HOLDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Trek: how many times `forget_idle_layouts` has been called.
+    static RETAINED_TICKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Dead entries (states that were dropped without a final paint, e.g. a
 /// replaced document) are swept once the table grows past this many.
 const RETAINED_SWEEP_AT: usize = 4096;
+
+/// Trek: a layout is kept for the next frame's element of the same text. One that no frame has
+/// taken back for a while belongs to text that isn't drawn any more: scrolled out of a list,
+/// in a document off screen, or its state replaced by a longer one as an answer streams in.
+/// Upstream kept those for as long as the state lived, and dead ones until the table reached
+/// `RETAINED_SWEEP_AT`: every paragraph and code block ever scrolled past stayed shaped, with a
+/// run per highlighted token (450 MB after reading through eight long threads;
+/// `docs/PERFORMANCE.md`, "Memory over a session").
+///
+/// So the table is swept about this often, while text is being drawn, of what wasn't handed
+/// over since the sweep before last (and of dead states). That's two to three of these periods
+/// of drawing, never a count of idle time: a window left alone draws no frames and sweeps
+/// nothing here (what it drew last is its owner's to let go of: `forget_idle_layouts`). Text
+/// that comes back after its layout went is shaped again, as it was when it first came into view.
+const RETAINED_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[derive(Clone, Copy)]
+struct RetainedSweeps {
+    /// Counts the sweeps: an entry handed over in this round or the one before is kept.
+    round: u64,
+    last: Option<std::time::Instant>,
+}
+
+/// Trek: drop the layouts no element has handed over since the sweep before this one, and
+/// those of dead states, if a sweep is due at `now`. Returns the round entries are handed
+/// over in from here on.
+fn sweep_retained_layouts(
+    layouts: &mut HashMap<usize, RetainedLayout>,
+    now: std::time::Instant,
+) -> u64 {
+    let mut sweeps = RETAINED_SWEEPS.get();
+    let due = match sweeps.last {
+        Some(last) => now.saturating_duration_since(last) >= RETAINED_IDLE,
+        None => true,
+    };
+    if due {
+        let round = sweeps.round;
+        layouts.retain(|_, retained| {
+            retained.state.strong_count() > 0
+                && (retained.hold.is_some() || retained.round + 1 >= round)
+        });
+        sweeps = RetainedSweeps {
+            round: round + 1,
+            last: Some(now),
+        };
+        RETAINED_SWEEPS.set(sweeps);
+    } else if layouts.len() >= RETAINED_SWEEP_AT {
+        layouts.retain(|_, retained| retained.state.strong_count() > 0);
+    }
+    sweeps.round
+}
+
+/// Trek: a hold (`hold_layouts`) lasts this many calls of `forget_idle_layouts`: five minutes,
+/// as Trek calls it. Text away for longer than that is shaped again when it's back.
+const RETAINED_HOLD_TICKS: u64 = 5;
+
+/// Trek: drop the layouts no element has handed over since this was last called. For an owner
+/// with a clock of its own (Trek calls it once a minute): a window that stops drawing stops
+/// sweeping too (`RETAINED_IDLE`), and what it drew in its last second or two would stay for
+/// as long as it sits there. Text that's still on screen is shaped again at its next frame.
+pub fn forget_idle_layouts() {
+    let tick = RETAINED_TICKS.get() + 1;
+    RETAINED_TICKS.set(tick);
+    RETAINED_LAYOUTS.with(|layouts| {
+        let mut sweeps = RETAINED_SWEEPS.get();
+        let round = sweeps.round;
+        layouts.borrow_mut().retain(|_, retained| {
+            // A hold that has lasted long enough is over: its layouts have until the next call.
+            if retained.hold.is_some_and(|(_, at)| tick - at > RETAINED_HOLD_TICKS) {
+                retained.hold = None;
+                retained.round = round;
+            }
+            retained.state.strong_count() > 0 && (retained.hold.is_some() || retained.round >= round)
+        });
+        sweeps.round = round + 1;
+        RETAINED_SWEEPS.set(sweeps);
+    });
+}
+
+/// Trek: keep the layouts handed over lately (what's on screen now) until `release_layouts`
+/// is given what this returns, whatever the sweeps say: for text about to leave the screen that
+/// will be back (a thread switched away from), so it isn't shaped again when it is. Not for
+/// good: a hold ends by itself after `RETAINED_HOLD_TICKS`, and the layouts of text that stops
+/// existing meanwhile go at the next sweep as always.
+pub fn hold_layouts() -> u64 {
+    let hold = RETAINED_HOLDS.get() + 1;
+    RETAINED_HOLDS.set(hold);
+    let (round, tick) = (RETAINED_SWEEPS.get().round, RETAINED_TICKS.get());
+    RETAINED_LAYOUTS.with(|layouts| {
+        for retained in layouts.borrow_mut().values_mut() {
+            if retained.hold.is_none() && retained.round + 1 >= round {
+                retained.hold = Some((hold, tick));
+            }
+        }
+    });
+    hold
+}
+
+/// Trek: let go of a hold: its layouts are as if just handed over, there for the frames that
+/// take them back and swept like any other if none does.
+pub fn release_layouts(hold: u64) {
+    let round = RETAINED_SWEEPS.get().round;
+    RETAINED_LAYOUTS.with(|layouts| {
+        for retained in layouts.borrow_mut().values_mut() {
+            if retained.hold.is_some_and(|(held, _)| held == hold) {
+                retained.hold = None;
+                retained.round = round;
+            }
+        }
+    });
+}
+
+/// Trek: how many shaped layouts are kept for the next frame, and how many of those belong to
+/// text that still exists. For measurements (`perf mem`).
+pub fn retained_layouts() -> (usize, usize) {
+    RETAINED_LAYOUTS.with(|layouts| {
+        let layouts = layouts.borrow();
+        let alive = layouts
+            .values()
+            .filter(|retained| retained.state.strong_count() > 0)
+            .count();
+        (layouts.len(), alive)
+    })
+}
 
 fn state_key(state: &Arc<Mutex<InlineState>>) -> usize {
     Arc::as_ptr(state) as usize
@@ -287,12 +424,11 @@ fn has_retained_layout(state: &Arc<Mutex<InlineState>>) -> bool {
     RETAINED_LAYOUTS.with(|layouts| layouts.borrow().contains_key(&state_key(state)))
 }
 
-fn retain_layout(state: &Arc<Mutex<InlineState>>, retained: RetainedLayout) {
+fn retain_layout(state: &Arc<Mutex<InlineState>>, mut retained: RetainedLayout) {
     RETAINED_LAYOUTS.with(|layouts| {
         let mut layouts = layouts.borrow_mut();
-        if layouts.len() >= RETAINED_SWEEP_AT {
-            layouts.retain(|_, retained| retained.state.strong_count() > 0);
-        }
+        // Trek: see `RETAINED_IDLE`.
+        retained.round = sweep_retained_layouts(&mut layouts, std::time::Instant::now());
         layouts.insert(state_key(state), retained);
     });
 }
@@ -329,6 +465,8 @@ impl Inline {
                 text: self.text.clone(),
                 runs,
                 text_style,
+                round: 0,
+                hold: None,
             },
         );
         self.handed_over = true;
@@ -2400,6 +2538,141 @@ mod retained_layout_tests {
             alive, 3,
             "every retained layout belongs to a live fragment state"
         );
+    }
+
+    /// Trek: two documents, the second drawn only while `both`.
+    struct Two {
+        first: Entity<TextViewState>,
+        second: Entity<TextViewState>,
+        both: bool,
+    }
+
+    impl Render for Two {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(300.))
+                .child(TextView::new(&self.first))
+                .children(self.both.then(|| TextView::new(&self.second)))
+        }
+    }
+
+    /// Trek: how many layouts the table holds for `state`'s text (its paragraphs are alive
+    /// for as long as the document is, drawn or not).
+    fn retained() -> usize {
+        RETAINED_LAYOUTS.with(|layouts| layouts.borrow().len())
+    }
+
+    /// Trek: as if `RETAINED_IDLE` had passed since the last sweep.
+    fn a_sweep_is_due() {
+        let sweeps = super::RETAINED_SWEEPS.get();
+        super::RETAINED_SWEEPS.set(super::RetainedSweeps {
+            last: None,
+            ..sweeps
+        });
+    }
+
+    /// Trek: upstream kept a layout for as long as its text existed, drawn or not: every
+    /// paragraph ever scrolled past stayed shaped. One that isn't handed over again while
+    /// drawing goes on is let go, and shaped again when its text is next drawn.
+    #[gpui::test]
+    fn a_layout_nobody_takes_back_is_let_go_while_drawing_goes_on(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) = cx.add_window_view(|_, cx| Two {
+            first: cx.new(|cx| TextViewState::markdown("Still on screen.", cx)),
+            second: cx
+                .new(|cx| TextViewState::markdown("Scrolled away.\n\nBoth paragraphs.", cx)),
+            both: true,
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(retained(), 3, "one layout per paragraph drawn");
+
+        // The second document leaves the screen. Its text is still there (the view holds it).
+        view.update(cx, |view, cx| {
+            view.both = false;
+            cx.notify();
+        });
+        // Drawn again soon after: its layouts are still there to take back, sweep or no sweep.
+        a_sweep_is_due();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(retained(), 3, "not let go of at the first sweep after it was drawn");
+        // Drawing goes on without it: a couple of sweeps later only what's drawn is kept.
+        for _ in 0..2 {
+            a_sweep_is_due();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(retained(), 1, "the paragraph on screen keeps its layout");
+
+        // Idle doesn't count: with no sweep due, any number of frames lets go of nothing.
+        for _ in 0..5 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(retained(), 1);
+
+        // Back on screen: shaped again, drawn, and kept as before.
+        view.update(cx, |view, cx| {
+            view.both = true;
+            cx.notify();
+        });
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(retained(), 3);
+
+        // Text about to leave the screen that will be back (a thread switched away from): held,
+        // it outlasts sweeps and ticks alike, and is taken back without being shaped again.
+        let hold = super::hold_layouts();
+        view.update(cx, |view, cx| {
+            view.both = false;
+            cx.notify();
+        });
+        for _ in 0..4 {
+            a_sweep_is_due();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            super::forget_idle_layouts();
+        }
+        assert_eq!(retained(), 3, "the two held, and the one still drawn");
+        view.update(cx, |view, cx| {
+            view.both = true;
+            cx.notify();
+        });
+        super::release_layouts(hold);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(retained(), 3);
+
+        // A hold isn't for good: text away for longer than it lasts gives its layouts back.
+        let _never_released = super::hold_layouts();
+        view.update(cx, |view, cx| {
+            view.both = false;
+            cx.notify();
+        });
+        for _ in 0..super::RETAINED_HOLD_TICKS + 3 {
+            a_sweep_is_due();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            super::forget_idle_layouts();
+        }
+        assert_eq!(retained(), 1, "only what's still drawn");
+        view.update(cx, |view, cx| {
+            view.both = true;
+            cx.notify();
+        });
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(retained(), 3);
+
+        // The window stops drawing altogether: its owner's own clock lets go of what nothing
+        // handed over between two of its ticks, and the next frame shapes its text again.
+        super::forget_idle_layouts();
+        assert_eq!(retained(), 3, "handed over since the tick before");
+        super::forget_idle_layouts();
+        assert_eq!(retained(), 0);
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(retained(), 3);
     }
 
     #[gpui::test]

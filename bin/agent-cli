@@ -1092,7 +1092,7 @@ def emit(data, as_json):
 
 # ---------------------------------------------------------------- perf
 
-PERF_WHAT = ("launch", "idle", "stream", "long", "checkpoint")
+PERF_WHAT = ("launch", "idle", "stream", "long", "checkpoint", "memory")
 # The same settings as verify-trek's isolated profile: the mock agent only, nothing imported.
 PERF_SETTINGS = """[general]
 default_agent = "direct:mock"
@@ -1125,7 +1125,7 @@ def median(values):
 class PerfTrek:
     """One isolated Trek: a throwaway data folder, the mock agent, driven through the shots harness."""
 
-    def __init__(self, binary, work, name, seed=None, force_active=False, size="1280x820", poll_ms=None):
+    def __init__(self, binary, work, name, seed=None, force_active=False, size="1280x820", poll_ms=None, test_display=False):
         self.binary = binary
         self.dir = Path(work) / name
         self.data = self.dir / "data"
@@ -1144,6 +1144,10 @@ class PerfTrek:
         # 60 Hz of frame requests behind other windows: for frame times, never for idle numbers.
         if force_active:
             self.env["TREK_FORCE_ACTIVE"] = "1"
+        # A display of its own that nobody sees (verify-trek's "Trek Test Display"): macOS draws
+        # the window there at the display's rate, and none of it is on the owner's screens.
+        if test_display:
+            self.env["TREK_TEST_DISPLAY"] = "1"
         # The harness looks for commands every 300 ms: slower when counting Trek's own wakeups.
         if poll_ms:
             self.env["TREK_SHOT_POLL_MS"] = str(poll_ms)
@@ -1212,6 +1216,18 @@ class PerfTrek:
         if rc != 0 or not m:
             return None
         return float(m.group(1)) * {"KB": 1 / 1024, "MB": 1, "GB": 1024}[m.group(2)]
+
+    def footprint_parts(self, top=6):
+        """(footprint in MB, its largest categories as {name: MB}): where the memory is. Decoded
+        pictures and text are under the Malloc rows, textures under IOAccelerator/IOSurface."""
+        rc, out = run(["footprint", str(self.proc.pid)], timeout=60)
+        unit = {"B": 1 / 2**20, "KB": 1 / 1024, "MB": 1, "GB": 1024}
+        m = re.search(r"phys_footprint:\s*([\d.]+)\s*(KB|MB|GB)", out) or re.search(r"Footprint:\s*([\d.]+)\s*(KB|MB|GB)", out)
+        if rc != 0 or not m:
+            return None, {}
+        rows = re.findall(r"^\s*([\d.]+) (B|KB|MB|GB)\s+[\d.]+ (?:B|KB|MB|GB)\s+[\d.]+ (?:B|KB|MB|GB)\s+\d+\s+(\S.*?)\s*$", out, re.M)
+        parts = sorted(((name, float(n) * unit[u]) for n, u, name in rows if name != "TOTAL"), key=lambda r: -r[1])
+        return float(m.group(1)) * unit[m.group(2)], {name: round(mb, 1) for name, mb in parts[:top] if mb >= 1}
 
     def over(self, secs):
         """Average CPU (% of one core) and context switches a second over `secs`, Trek left alone."""
@@ -1459,6 +1475,123 @@ def perf_checkpoint(a, trek_bin, seed_bin, work, say):
     return out
 
 
+def perf_png(path, width, height):
+    """A `width`×`height` RGB PNG the size a screenshot is on disk: a gradient, with noise in part of each row."""
+    import struct
+    import zlib
+    base = bytes((x * 255 // width + c * 40) % 256 for x in range(width) for c in range(3))
+    noisy = min(width // 8, 400) * 3
+    raw = bytearray()
+    for y in range(height):
+        raw += b"\x00" + os.urandom(noisy) + base[noisy:] if y % 4 == 0 else b"\x02" + bytes(noisy) + base[noisy:]
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    Path(path).write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                           + chunk(b"IDAT", zlib.compress(bytes(raw), 1)) + chunk(b"IEND", b""))
+
+
+# The pictures the memory stress attaches: the sizes screenshots come in (a 15" and a 14" Retina
+# screen, a 3000×2000 photo, a 1080p-class window, a small one).
+MEMORY_PICTURES = ((3000, 2000), (2880, 1800), (3024, 1964), (1920, 1200), (1280, 800))
+
+
+def perf_memory(a, trek_bin, seed_bin, work, say):
+    """What a session of many threads, long answers and pictures leaves in memory, phase by phase."""
+    heavy, picture_threads, rounds = a.mem_heavy, a.mem_picture_threads, 5
+    pictures = Path(work) / "pictures"
+    pictures.mkdir()
+    decoded = 0
+    for n in range(picture_threads * rounds * 3):
+        w, h = MEMORY_PICTURES[n % len(MEMORY_PICTURES)]
+        perf_png(pictures / f"shot-{n:03}.png", w, h)
+        decoded += w * h * 4
+    seed = Path(work) / "seed-memory"
+    env = {**os.environ, "TREK_DATA_DIR": str(seed), "SEED_THREADS": "20", "SEED_LONG": "4", "SEED_HEAVY": str(heavy),
+           "SEED_IMAGE_THREADS": str(picture_threads), "SEED_IMAGE_ROUNDS": str(rounds), "SEED_IMAGE_DIR": str(pictures),
+           "SEED_ARTIFACTS": "1"}
+    rc, said = run([str(seed_bin)], env=env, timeout=600)
+    if rc != 0:
+        raise CliError(f"perf_seed: {said.strip()[-300:]}")
+    heavy_titles = [f"Heavy thread #{i:02}" for i in range(heavy)]
+    picture_titles = [f"Image thread #{i:02}" for i in range(picture_threads)]
+    out = {"heavy_threads": heavy, "picture_threads": picture_threads, "pictures": picture_threads * rounds * 3,
+           "pictures_decoded_mb": round(decoded / 2**20), "phases": {}}
+    # On a display of its own, drawn at its rate: pictures are only uploaded to the GPU when drawn.
+    with PerfTrek(trek_bin, work, "memory", seed, force_active=True, test_display=IS_MAC) as t:
+        t.wait_line("startup")
+
+        def phase(name, settle=4):
+            time.sleep(settle)
+            foot, parts = t.footprint_parts()
+            rss, _ = t.sample()
+            # What Trek itself counts: transcripts in memory, parsed answers, pictures, snapshots.
+            t.batch([f"perf mem {name}"], timeout=60)
+            held = {k: int(v) for k, v in t.wait_line("mem", label=name).items() if k not in ("kind", "label")}
+            out["phases"][name] = {"footprint_mb": foot and round(foot), "rss_mb": round(rss), "largest_mb": parts, "held": held}
+            say(f"memory, {name}: footprint {foot and round(foot)} MB, RSS {round(rss)} MB; {', '.join(f'{k} {v}' for k, v in parts.items())}")
+            say(f"        {' '.join(f'{k}={v}' for k, v in held.items())}")
+
+        # There and back through a transcript, a screenful a frame: every row is drawn once.
+        def read(title, steps):
+            t.batch([f"perf open {title}", "wait 400", f"perf scroll @center -600 {steps} mem-up",
+                     f"perf scroll @center 600 {steps} mem-down", "wait 200"], timeout=600)
+
+        phase("idle", a.settle)
+        for title in heavy_titles:
+            t.batch([f"perf open {title}", "wait 400"], timeout=120)
+        phase("long_threads_opened")
+        for title in heavy_titles:
+            read(title, a.mem_scroll_steps)
+        phase("long_threads_read")
+        for title in picture_titles:
+            t.batch([f"perf open {title}", "wait 1500"], timeout=120)
+        phase("picture_threads_opened")
+        for title in picture_titles:
+            read(title, 12)
+        phase("picture_threads_read")
+        read("Artifact thread #00", 6)
+        phase("artifact_thread_read")
+        # Round the threads again, as someone going between them does: how long each takes to show.
+        before = len(t.lines())
+        for _ in range(a.mem_rounds):
+            for title in heavy_titles + picture_titles:
+                t.batch([f"perf open {title}", "wait 250"], timeout=120)
+        switches = sorted(float(l["painted"]) for l in t.lines()[before:] if l["kind"] == "open")
+        out["switches"] = len(switches)
+        out["switch_painted_p50_ms"] = median(switches)
+        out["switch_painted_p95_ms"] = switches[int((len(switches) - 1) * 0.95)] if switches else None
+        say(f"memory, switching {len(switches)} times: shown in {out['switch_painted_p50_ms']} ms (median), {out['switch_painted_p95_ms']} ms (p95)")
+        phase("threads_switched")
+        # Back up a picture thread seen a while ago: its frames, and whether pictures were read again.
+        before = len(t.lines())
+        t.batch([f"perf open {picture_titles[0]}", "wait 400", "perf scroll @center -600 12 back-up", "wait 400",
+                 "perf scroll @center 600 12 back-down", "wait 200"], timeout=120)
+        s = [l for l in t.lines()[before:] if l["kind"] == "scroll" and l.get("label") == "back-up"][-1]
+        out["scroll_back_frame_p50_ms"], out["scroll_back_frame_p95_ms"] = float(s["frame_p50"]), float(s["frame_p95"])
+        phase("scrolled_back")
+        loads = [out["phases"][n]["held"].get("picture_loads") for n in ("threads_switched", "scrolled_back")]
+        out["pictures_read_again_scrolling_back"] = None if None in loads else loads[1] - loads[0]
+        # A streamed answer on top of it all, then nothing on screen but a new thread.
+        if a.mem_stream_secs:
+            t.batch(["pace 1", f"route project:{seed}/projects/atlas-api", f"send mock:stream {a.mem_stream_secs}s",
+                     f"wait idle {(a.mem_stream_secs + 120) * 1000}", "wait 500"], timeout=a.mem_stream_secs + 180)
+            phase("answer_streamed")
+        t.batch(["route draft", "wait 500"], timeout=60)
+        phase("at_rest", a.settle)
+        # Left alone: pictures of threads no longer shown go some minutes after they left the screen.
+        if a.mem_idle_secs:
+            phase("left_alone", a.mem_idle_secs)
+    rest, idle = out["phases"]["at_rest"]["footprint_mb"], out["phases"]["idle"]["footprint_mb"]
+    out["peak_mb"] = max(ph["footprint_mb"] or 0 for ph in out["phases"].values())
+    out["kept_mb"] = rest - idle if rest is not None and idle is not None else None
+    out["limit_mb"] = a.mem_limit
+    out["within_limit"] = out["kept_mb"] is not None and out["kept_mb"] <= a.mem_limit
+    say(f"memory: peak {out['peak_mb']} MB; {out['kept_mb']} MB kept over idle with nothing on screen (limit {a.mem_limit} MB: {'ok' if out['within_limit'] else 'OVER'})")
+    return out
+
+
 def cmd_perf(a):
     """Trek's launch, memory, CPU, long-thread and checkpoint numbers, measured on this machine (docs/PERFORMANCE.md)."""
     what = list(a.what) or list(PERF_WHAT)
@@ -1498,7 +1631,8 @@ def cmd_perf(a):
                            "cores": out_of(["sysctl", "-n", "hw.ncpu"]), "memory_gb": round(int(out_of(["sysctl", "-n", "hw.memsize"]) or 0) / 2**30),
                            "macos": out_of(["sw_vers", "-productVersion"]), "load": os.getloadavg()[0]},
                "binary": {"arch": out_of(["lipo", "-archs", str(trek_bin)]), "mb": round(trek_bin.stat().st_size / 2**20)}}
-    measure = {"launch": perf_launch, "idle": perf_idle, "stream": perf_stream, "long": perf_long, "checkpoint": perf_checkpoint}
+    measure = {"launch": perf_launch, "idle": perf_idle, "stream": perf_stream, "long": perf_long, "checkpoint": perf_checkpoint,
+               "memory": perf_memory}
     say(f"Trek {results['binary']['arch']}, {results['binary']['mb']} MB, load {results['machine']['load']:.0f} on {results['machine']['cores']} cores, in {work}")
     try:
         for w in what:
@@ -1512,6 +1646,10 @@ def cmd_perf(a):
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(results, indent=2) + "\n")
+    # The guard: a cache that has lost its budget shows here long before anyone feels it.
+    memory = results.get("memory")
+    if memory and not memory["within_limit"]:
+        raise CliError(f"memory: the session left {memory['kept_mb']} MB over idle, more than the {memory['limit_mb']} MB allowed (docs/PERFORMANCE.md, \"Memory over a session\")")
     return {**results, "_text": [f"load {results['machine']['load']:.0f} before, {results['load_after']:.0f} after"] + ([f"wrote {a.out}"] if a.out else [])}
 
 
@@ -1620,6 +1758,13 @@ def build_parser():
     s.add_argument("--long-items", type=int, default=10000, help="items in the long thread (default 10000)")
     s.add_argument("--big-repo-files", type=int, default=100000, help="files in the repo checkpoints are also timed on (default 100000)")
     s.add_argument("--big-repo", help="time checkpoints on this repo instead of making one")
+    s.add_argument("--mem-heavy", type=int, default=8, help="memory: threads of long answers (default 8, 200 items each)")
+    s.add_argument("--mem-picture-threads", type=int, default=3, help="memory: threads of screenshots, 15 pictures each (default 3)")
+    s.add_argument("--mem-scroll-steps", type=int, default=450, help="memory: screenfuls scrolled up each long thread, and back (default 450)")
+    s.add_argument("--mem-rounds", type=int, default=3, help="memory: times round all the threads (default 3)")
+    s.add_argument("--mem-stream-secs", type=int, default=60, help="memory: seconds of a streamed answer at the end, 0 for none (default 60)")
+    s.add_argument("--mem-idle-secs", type=int, default=0, help="memory: seconds left alone at the end, for what goes when nothing is shown (default 0: skipped; 540 covers it)")
+    s.add_argument("--mem-limit", type=int, default=600, help="memory: MB the session may leave over idle with nothing on screen; more fails the run (default 600: it leaves 190 to 340, and left 3,560 before its caches had budgets)")
     s.add_argument("--out", help="write the results here as JSON too")
     s.add_argument("--keep", action="store_true", help="keep the scratch folder")
     s.add_argument("--dry-run", action="store_true", help="print what would be built and measured, run nothing")

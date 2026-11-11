@@ -713,6 +713,35 @@ impl Layout {
     }
 }
 
+/// How a picture fills a frame that isn't in its proportions.
+#[derive(Clone, Copy)]
+enum Filling {
+    /// Cropped to cover it (growing out of its thumbnail, which crops it the same).
+    Cover,
+    /// Whole, inside it.
+    Contain,
+    /// As an image does by itself: the frame is in its proportions.
+    Own,
+}
+
+/// `path` at its full size, filling its frame. The transcript drew it from a small copy, so the
+/// whole picture is read when it's first shown here: until it is, the small copy stands in,
+/// drawn under it.
+fn whole(path: &Path, filling: Filling, cx: &App) -> impl IntoElement + use<> {
+    let fitted = |image: Img| match filling {
+        Filling::Cover => image.object_fit(ObjectFit::Cover),
+        Filling::Contain => image.object_fit(ObjectFit::Contain),
+        Filling::Own => image,
+    };
+    let under = crate::pictures::decoded(path, cx)
+        .map(|small| fitted(small.absolute().top_0().left_0().size_full()));
+    div()
+        .relative()
+        .size_full()
+        .children(under)
+        .child(fitted(crate::pictures::whole(path).size_full()))
+}
+
 /// A press that lands on something over the backdrop stops there: it isn't a click beside the
 /// image. (Not `occlude`: the pointer over these still counts as over the preview, so the
 /// chevrons stay up.)
@@ -890,7 +919,7 @@ impl ImagePreview {
                                 el.opacity(0.55).hover(|s| s.opacity(0.9)).cursor_pointer()
                             })
                             .child(
-                                img(item.path.clone())
+                                crate::pictures::picture(&item.path, crate::pictures::Fit::Tile)
                                     .size_full()
                                     .object_fit(ObjectFit::Cover),
                             )
@@ -944,11 +973,7 @@ impl ImagePreview {
                 .child(
                     keep_press(div().id("preview-image").test_support())
                         .size_full()
-                        .child(
-                            img(item.path.clone())
-                                .size_full()
-                                .object_fit(ObjectFit::Contain),
-                        ),
+                        .child(whole(&item.path, Filling::Contain, cx)),
                 )
                 .into_any_element();
         };
@@ -984,7 +1009,7 @@ impl ImagePreview {
                             } else {
                                 CursorStyle::OpenHand
                             })
-                            .child(img(item.path.clone()).size_full())
+                            .child(whole(&item.path, Filling::Own, cx))
                             .on_mouse_down(MouseButton::Left, press),
                     ),
                 )
@@ -1024,11 +1049,11 @@ impl ImagePreview {
                 ))))
             })
             .when(layout.zoomable(), |el| el.cursor_pointer())
-            .child(
-                img(item.path.clone())
-                    .size_full()
-                    .when(moving, |i| i.object_fit(ObjectFit::Cover)),
-            )
+            .child(whole(
+                &item.path,
+                if moving { Filling::Cover } else { Filling::Own },
+                cx,
+            ))
             .on_mouse_down(MouseButton::Left, press)
             .into_any_element()
     }
@@ -1038,6 +1063,8 @@ impl Render for ImagePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // How far it has come in (1: all the way); it unmounts once it has gone all the way out.
         let Some(t) = self.showing.sample(crate::motion::now(cx), window) else {
+            // Put away: the whole pictures it showed are let go of.
+            crate::pictures::forget_whole(window, cx);
             return div().into_any_element();
         };
         let closing = !self.showing.is_present();

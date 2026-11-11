@@ -247,7 +247,11 @@ fn strip(w: &Arc<Watched>, ix: usize, cx: &App) -> AnyElement {
                     .border_1()
                     .border_color(theme.border)
                     .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
-                    .child(img(path).size_full().object_fit(ObjectFit::Cover)),
+                    .child(
+                        crate::pictures::picture(&path, crate::pictures::Fit::Tile)
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    ),
             )
             .child(
                 div()

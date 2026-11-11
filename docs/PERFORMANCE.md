@@ -7,8 +7,9 @@ story of what was slow there: [PERF.md](PERF.md).
 ## Run it again
 
 ```sh
-./bin/agent-cli perf                                 # everything (builds Trek first): about 15 minutes
-./bin/agent-cli perf launch idle                     # some of it: launch idle stream long checkpoint
+./bin/agent-cli perf                                 # everything (builds Trek first): about 25 minutes
+./bin/agent-cli perf launch idle                     # some of it: launch idle stream long checkpoint memory
+./bin/agent-cli perf memory --mem-idle-secs 540      # a session's memory, phase by phase, then left alone
 ./bin/agent-cli perf idle --front                    # idle on screen too: a small window above yours for 20 s
 ./bin/agent-cli perf --bin <trek> --tools <folder>   # a Trek you built, and the perf_seed and perf_checkpoint examples
 ./bin/agent-cli perf --out dist/perf/mac.json        # the results as JSON too
@@ -123,6 +124,121 @@ build, so each "before" run was paired with an "after" one, and only pairs whose
 (the working bar's own frames fill in), and CPU didn't move outside the spread between runs. Streaming's CPU in the table came out
 lower after this work than before (21 and 25 % against 28 and 28 %); nothing here was aimed at it, so it isn't claimed.
 
+## Memory over a session
+
+Idle memory says what Trek costs before it's used. This says what a long session leaves behind:
+`./bin/agent-cli perf memory` seeds a profile (`perf_seed`'s `SEED_HEAVY`, `SEED_IMAGE_THREADS`
+and `SEED_ARTIFACTS`), opens Trek on a display of its own (`TREK_TEST_DISPLAY`, so macOS draws it
+and pictures reach the GPU), and after each step notes `footprint` with its largest parts, and
+what Trek itself holds (`perf mem`: transcripts, parsed answers, shaped text, pictures):
+
+- eight threads of 200 items each, their answers 24 KB of prose, lists, tables and code
+  blocks, every tenth 120 KB (11 MB of transcript in all): opened, then each read from the end
+  up 270,000 px and back, a screenful a frame;
+- three threads of screenshots, 45 pictures of the sizes screens make them (3000×2000,
+  2880×1800, 3024×1964, 1920×1200, 1280×800: 702 MB decoded), two attached to each message and
+  one in each answer: opened, then read the same way;
+- a thread of four live pages;
+- round all eleven three times, as someone going between them does;
+- an answer streamed for a minute; then a new thread on screen and nothing else, for 25 seconds
+  and for nine minutes more.
+
+Taken on 2026-11-11 on the same MacBook Air, at a load of 21 to 93 (other builds). "Before" is
+0.4.48 with only the measuring hooks added. "After" was run three times (the first two before
+the hold on a left thread's shaped text and its five-minute end were added, which change nothing
+kept while threads are read), and where the runs differ by more than a few MB the range is
+given. They differ because `footprint` counts memory the allocator has been handed back and
+hasn't yet returned to macOS: what Trek held (the counts) was the same each time.
+
+| What | Before | After |
+|---|---|---|
+| Launch, 23 threads in the sidebar, the window drawn | 95 MB | 94 MB |
+| Eight long threads opened | 145 MB | 145 MB |
+| …and read through | 2,073 MB | 184 to 263 MB |
+| Three threads of screenshots opened | 2,354 MB | 245 to 326 MB |
+| …and read through | 3,630 MB | 317 to 422 MB |
+| Round the threads three times | 3,633 MB | 267 to 417 MB |
+| A one-minute answer streamed | 3,665 MB | 296 to 446 MB |
+| Nothing on screen but a new thread, 25 s on | 3,656 MB | 286 to 436 MB |
+| …nine minutes on | 3,625 MB | 186 to 242 MB |
+| A thread shown again, of those gone round: until its frame is painted (median / p95) | 12.3 / 35.3 ms | 12.5 / 33.3 ms |
+| Scrolling back up a thread of screenshots: a frame's work, p50 / p95 | 1.5 / 2.3 ms | 1.2 to 2.2 / 1.8 to 5.6 ms |
+
+(The thread-shown-again row is from the two builds taking turns on a quiet Mac, 84 switches each,
+at a load of 4 to 9: the stress's own figure moves with whatever else the Mac is doing, 5.6 / 14.5
+ms before in one run and 35 / 50 ms in another, 7.7 to 17.9 / 17 to 43 ms after. "Before" was
+left alone for the nine minutes in that second run, which had reached 3,641 MB where the first
+reached 3,656.)
+macOS had most of the 3.6 GB compressed or swapped by the end (161 MB of it resident), which is
+the cost a user meets: a Mac short of memory because of a chat window.
+
+**Where it was**, largest first:
+
+- **Parsed answers: 1,470 MB.** An answer is drawn from a parsed document (`TextViewState`), and
+  a document weighs about 150 bytes for each byte of its source: the text again as it's drawn,
+  the blocks, and for code a style for every highlighted token (a 5 KB code block's styles are
+  165 KB). The transcript kept the last 400 documents of the thread on screen and of each of
+  twelve threads left, whatever they held: 2,137 documents of 9.6 MB of answers here.
+- **Pictures: 1,550 MB.** `img(path)` decodes a file at its full size, 24 MB for a 3000×2000
+  screenshot however small it's drawn, GPUI keeps the result for the run, and each one drawn has
+  a texture as big. 45 pictures: 812 MB of heap and 738 MB of textures.
+- **Shaped text: 450 MB.** The component kit keeps each paragraph's text as shaped (its lines,
+  glyphs and a run per highlighted token) for the next frame's element of the same text. It kept
+  it for as long as the paragraph's document lived, drawn or not: everything ever scrolled past.
+- **Transcripts: 27 MB** for the 11 MB of text in the eight long threads, kept for every thread
+  opened since launch.
+- **Snapshots of live pages** weren't made in this run (a page's view is only made in a window
+  that's in front, which a measurement never is). By their size: 5 MB for a card of the default
+  height at 2×, 10 MB for the tallest, and the last 24 were kept whatever their size, up to 243 MB.
+
+**What changed.** Each of these is now kept by what it weighs, the least recently used going
+first, with a most for any one entry (`crates/trek-app/src/budget.rs`):
+
+- Shaped text is let go of when no frame takes it back within two to three seconds of drawing
+  (`RETAINED_IDLE` in `vendor/gpui-base/src/text/inline.rs`, a patch to the kit), and what a
+  window drew last, once a minute. A thread left keeps what it was showing for five minutes
+  (`hold_layouts`), so going back and forth doesn't shape it again.
+- Parsed answers: 48 MiB for the thread on screen, reckoned at 150 bytes a byte of source
+  (`MD_BUDGET` in `thread_view.rs`): some seventy parts of long answers with their code, several
+  hundred short ones. A thread left keeps the documents it was showing, and all the threads left
+  keep 24 MiB between them (`PARKED_BUDGET`), the ones left longest ago giving theirs up first.
+- Pictures are decoded into copies the size they're drawn (`crates/trek-app/src/pictures.rs`):
+  at most 2.4 MB for one in an answer (960×640), a third of a megabyte for a tile. 64 MiB of
+  copies are kept, and those of a thread no longer shown go five to eight minutes after it left
+  the screen. The viewer reads the whole picture when it opens, over the small copy, and lets go
+  of it as it closes.
+- Snapshots of live pages: 64 MiB, the last six of the tallest or thirteen of the usual.
+- On the iPhone, the caches of parsed Markdown were counts too (3,000 to 6,000 entries, all
+  dropped at once past that), keyed by the whole text, so an answer streaming in left an entry for
+  every length it had on the way; and the image cache counted a picture's file size, a tenth to
+  a thirtieth of what it takes decoded. They're kept by cost now, a streaming text replaces its
+  shorter self, and a picture costs its pixels (`ios/Trek/Model/ByteLRU.swift`). Checked by the
+  app's tests in a simulator; no memory was measured on a phone.
+
+**What it costs.** Where something was always there before, it is now sometimes made again:
+
+- Scrolled more than about thirty screens back in a thread of long answers, a row's answer is
+  parsed again as it comes into view, as it was the first time (before: past 400 answers).
+- A picture last drawn more than 64 MiB of pictures ago, or in a thread left more than five
+  minutes ago, is read again when it's next on screen: its box is empty for the tenth of a
+  second that takes. Nothing was read again in this run.
+- A picture opened in the viewer is its small copy for the moment the whole one takes to read
+  (it was already in memory before).
+- Text shaped again when it comes back into view costs a few milliseconds of a frame. A thread
+  shown again was 3 to 5 ms slower at the median (5.0 ms against 8.4 to 9.8, the builds taking
+  turns) until it kept what it was showing for five minutes; with that it's as it was, and a
+  thread left for longer pays those milliseconds once.
+
+**Left alone: transcripts.** Unloading a thread's transcript means every reader of
+`Workspace.live` has to tell "not in memory" from "empty": the phone's watchers, search results
+being revealed, sub-agents reading their parent, queued follow-ups, background work, the
+sidebar's previews (467 uses in 56 files). At 2.4 bytes kept for each byte of transcript it's
+27 MB after eight very long threads and single megabytes after a usual day, which doesn't pay for
+that yet. If it's done: unload only a thread that is off screen in every window, has no session,
+turn, permission, queue, sub-agent, git job or phone watching it, and whose rows are all saved;
+keep its `LiveThread` with `loaded` false so `ensure_loaded` brings it back as it does a thread
+never opened.
+
 ## What didn't need changing
 
 - **Idle timers.** A hidden Trek has nothing that ticks for nothing: in 20 seconds of `sample` its threads spent nearly all their
@@ -138,7 +254,11 @@ lower after this work than before (21 and 25 % against 28 and 28 %); nothing her
 - **The window active.** A measurement must never take the keyboard, so the window is never frontmost. Active, its animations
   aren't capped at the 30 frames a second of an inactive window, and a focused field's caret blinks.
 - **Real agents.** Only the mock, which costs nothing to run. A real agent's own process comes on top.
-- **Hours of use.** The longest stream here is two minutes.
+- **Hours of use.** The longest stream here is two minutes, and the memory run above is twenty
+  minutes of a session's worth of threads, not a day.
+- **Memory on Windows, or on an iPhone.** The same code bounds the same caches there; the Windows
+  growth in [PERF.md](PERF.md) has to be measured again on that laptop.
+- **Notes.** A note's pictures are still decoded whole and kept for the run (`note_images.rs`).
 
 ## Intel, under Rosetta
 

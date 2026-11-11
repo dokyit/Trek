@@ -99,6 +99,18 @@ before and after these changes alike. That is far more than the text (about 110 
 across the three), so something keeps more per update than it should; which part of the process
 it is needs a heap profile (not possible here without admin). It's the open item from this pass.
 
+**What it most likely was (2026-11-11, measured on a Mac, not here).** A heap profile on the Mac
+([PERFORMANCE.md](PERFORMANCE.md), "Memory over a session") found what an answer costs once it has
+been drawn: its parsed document, about 150 bytes for each byte of its text (a style for every
+highlighted token of its code), kept for the last 400 documents of the thread on screen and of
+each of twelve threads left; and the text as shaped for the screen, kept for as long as the
+document was. One minute of one stream left 10 MB of heap behind there. Three streams writing
+110 KB a minute between them would leave 16 MB a minute at that rate if every part were drawn;
+this run looked at one of the three once a minute, so 6 MB a minute is within what that mechanism
+gives, and "isn't given back when they end" is how it behaved. Both are bounded now (by what they
+weigh, not by count), the same code on both platforms. Whether that is all of the growth here
+hasn't been measured: the 30-minute run has to be done again on this laptop to say so.
+
 ## What was slow, and what changed
 
 **A long answer made every frame slow, and a streaming one slower each second.** The

@@ -569,7 +569,8 @@ pub fn project_badge(name: &str, look: &ProjectLook, cx: &App) -> AnyElement {
             // An image that's gone or doesn't decode shows the monogram instead of a hole.
             let name = name.to_string();
             // A hairline keeps an image as light (or as dark) as the window from losing its edge.
-            img(path)
+            // From a small copy: a photo picked for a 16 pt badge isn't kept at its full size.
+            crate::pictures::picture(&path, crate::pictures::Fit::Tile)
                 .flex_none()
                 .size(px(16.))
                 .rounded(px(radius::TAG))

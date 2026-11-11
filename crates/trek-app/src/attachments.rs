@@ -527,7 +527,11 @@ pub fn strip(
                 .border_color(theme.border)
                 .cursor_pointer()
                 .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
-                .child(img(p.clone()).size_full().object_fit(ObjectFit::Cover))
+                .child(
+                    crate::pictures::picture(p, crate::pictures::Fit::Tile)
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
                 .child(crate::image_preview::thumb(p.clone()))
                 // A faint lift under the pointer: it opens.
                 .child(

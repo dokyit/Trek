@@ -756,7 +756,7 @@ impl MarkdownPlugin for LocalImages {
             .border_color(theme.border)
             .cursor_pointer()
             .hover(|s| s.border_color(theme.foreground.opacity(0.35)))
-            .child(img(path.clone()).size_full())
+            .child(crate::pictures::picture(&path, crate::pictures::Fit::Answer).size_full())
             .child(crate::image_preview::thumb(path.clone()))
             .on_click(move |_, window, cx| {
                 crate::image_preview::open(vec![path.clone()], 0, window, cx)

@@ -66,7 +66,9 @@
 //! (a wheel step of `px` over that element each 60 Hz frame, each step timed to its paint),
 //! `perf type <count> <label>` (`count` characters typed one at a time into the focused field,
 //! each timed to its paint), `perf open <title>` (the thread with this in its title opens: until its
-//! history is loaded, and the frame that shows it) and `perf mark <label>`.
+//! history is loaded, and the frame that shows it), `perf mem <label>` (what Trek holds: the
+//! transcripts in memory and the main window's parsed answers, pictures and page snapshots) and
+//! `perf mark <label>`. `perf scroll @center …` turns the wheel over the middle of the window.
 //! Lines starting with `#` are comments.
 
 use crate::workspace::{PanelTool, Route, SettingsPage, Workspace};
@@ -1010,6 +1012,36 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
     };
     match args.first().copied() {
         Some("mark") => tracing::info!("perf: mark label={}", args.get(1).unwrap_or(&"-")),
+        // What Trek itself holds: transcripts in memory, and the main window's parsed answers.
+        Some("mem") => {
+            let label = args.get(1).unwrap_or(&"mem");
+            let held = main.update(cx, |root, _, cx| {
+                let view = root
+                    .downcast::<gpui_kit::component::Root>()
+                    .ok()
+                    .map(|r| r.read(cx).view().clone());
+                let md = view
+                    .and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())
+                    .map(|trek| trek.read(cx).thread_view.read(cx).held(cx))
+                    .unwrap_or_default();
+                let ws = ws.read(cx);
+                let loaded = ws.live.values().filter(|l| l.loaded);
+                let (threads, items, bytes) = loaded.fold((0, 0, 0), |(t, n, b), l| {
+                    let text: usize = l.items.iter().map(item_bytes).sum();
+                    (t + 1, n + l.items.len(), b + text)
+                });
+                // Shaped text kept for the next frame, and how much of it is of text that's gone.
+                let (layouts, alive) = gpui_kit::base::text::retained_layouts();
+                format!(
+                    "live_threads={threads} live_items={items} live_text_kb={} {md} layouts={layouts} layouts_dead={} {} {}",
+                    bytes / 1024,
+                    layouts - alive,
+                    crate::pictures::held(cx),
+                    crate::artifact::held(cx)
+                )
+            })?;
+            tracing::info!("perf: mem label={label} {held}");
+        }
         Some("frames") => {
             let span = num(1, "<ms>")?;
             let label = args.get(2).unwrap_or(&"frames");
@@ -1057,6 +1089,22 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             // middle of what's on screen of it (a tall row's own middle can be off the window).
             let position =
                 main.update(cx, |_, window, cx| -> anyhow::Result<Point<Pixels>> {
+                    // `@center`: the middle of the window, which is over the transcript whatever
+                    // rows it shows (a long answer's later parts have no id of their own to aim at).
+                    if id == "@center" {
+                        POINTER_SCRIPTED.store(true, Ordering::Relaxed);
+                        let size = window.viewport_size();
+                        let position = point(size.width / 2., size.height / 2.);
+                        window.dispatch_event(
+                            PlatformInput::MouseMove(MouseMoveEvent {
+                                position,
+                                pressed_button: None,
+                                modifiers: Default::default(),
+                            }),
+                            cx,
+                        );
+                        return Ok(position);
+                    }
                     pointer(window, "hover", id, cx)?;
                     let id = element_id(id);
                     let found = gpui_kit::base::test_support::snapshots(window)
@@ -1204,10 +1252,33 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             tracing::info!("perf: front visible={visible}");
         }
         _ => anyhow::bail!(
-            "perf frames <ms> <label> | scroll <element id> <px> <steps> <label> | type <count> <label> | open <title> | front | mark <label>"
+            "perf frames <ms> <label> | scroll <element id>|@center <px> <steps> <label> | type <count> <label> | open <title> | front | mark <label> | mem <label>"
         ),
     }
     Ok(())
+}
+
+/// The text a transcript item keeps in memory, in bytes (`perf mem`).
+fn item_bytes(item: &trek_core::store::Item) -> usize {
+    use trek_core::store::Item;
+    match item {
+        Item::User { text, images, .. } => {
+            text.len() + images.iter().map(String::len).sum::<usize>()
+        }
+        Item::Assistant { text }
+        | Item::Reasoning { text }
+        | Item::Notice { text }
+        | Item::Error { text }
+        | Item::Limit { text, .. } => text.len(),
+        Item::Tool {
+            id,
+            title,
+            detail,
+            output,
+            ..
+        } => id.len() + title.len() + detail.len() + output.len(),
+        Item::TurnEnd { .. } | Item::Handoff { .. } => 0,
+    }
 }
 
 /// The frame `perf::next_frame` was armed for, or `None` after `limit`.

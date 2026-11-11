@@ -446,8 +446,8 @@ pub struct ThreadView {
     revision: u64,
     count: usize,
     /// Markdown documents by item id. Built when a row is first drawn, so opening a long thread
-    /// doesn't parse all of it.
-    md: HashMap<String, Markdown>,
+    /// doesn't parse all of it; kept by what they weigh (`MD_BUDGET`).
+    md: Documents,
     /// How many times the transcript has been drawn (`Markdown::drawn`).
     draws: u64,
     /// Items (by id) opened by the user: long messages, thoughts, tool groups, tool output.
@@ -541,17 +541,50 @@ enum Files {
 /// Files a confirmation lists before "and N more".
 const FILES_SHOWN: usize = 8;
 
-/// How many parsed markdown documents a transcript keeps at most: each is an entity with its
-/// text laid out, and a day's thread has thousands of answers. Scrolled far past, a document is
-/// dropped and parsed again when its row next comes into view.
-const MD_KEPT: usize = 400;
+/// A transcript's parsed markdown documents, by item (and part): `MD_BUDGET`.
+type Documents = crate::budget::ByteLru<String, Markdown>;
+
+/// What a parsed document is reckoned to weigh for each byte of its source. A document is an
+/// entity holding its text parsed into blocks, each block's text again as it's drawn, and for
+/// code a style for every highlighted token: measured, about 150 bytes a byte of source for
+/// answers that are half code (`docs/PERFORMANCE.md`, "Memory over a session"), less for prose.
+const MD_WEIGHT_PER_BYTE: usize = 150;
+/// ...and what one weighs before its first byte: the entity, its list and its styles.
+const MD_WEIGHT_BASE: usize = 8 << 10;
+
+/// What `text`'s document is reckoned to weigh.
+fn md_weight(text: &str) -> usize {
+    MD_WEIGHT_BASE + text.len() * MD_WEIGHT_PER_BYTE
+}
+
+/// Parsed documents the thread on screen keeps, by what they're reckoned to weigh: 48 MiB, about
+/// 320 KB of answers. That's the last seventy long answers' parts with their code, or several
+/// hundred short ones: some thirty screens back in a thread of long answers, further in most.
+/// Scrolled further than that, a document is dropped and parsed again when its row next comes
+/// into view, as it was when first scrolled to. It was a count, 400 whatever they held: 240 MB
+/// for a thread of long answers read through, and as much for each of up to twelve parked.
+const MD_BUDGET: usize = 48 << 20;
+/// One document's most to be kept past its time on screen: 4 MiB, 27 KB of source. A part of an
+/// answer is 2 to 6 KB and tool output is clipped at 8; only a very long thought or sub-agent's
+/// answer passes it. It's drawn like any other, and parsed again if scrolled back to.
+const MD_CAP: usize = 4 << 20;
+/// Documents kept with the threads off screen, all of them together. A thread is parked with
+/// what it was showing (`park`), a few documents, so it's back at once; past this, the threads
+/// left longest ago give theirs up and parse what they show when they're next opened.
+const PARKED_BUDGET: usize = 24 << 20;
+/// A document drawn in the latest draw or the one before is on screen: it stays whatever it
+/// weighs, and goes with its thread when that's parked.
+const MD_ON_SCREEN: u64 = 2;
 
 /// The most threads whose view state is parked at once.
 const STASH_KEPT: usize = 12;
 
 /// What a thread's view is parked with while another is on screen.
 struct Stashed {
-    md: HashMap<String, Markdown>,
+    md: Documents,
+    /// Its text as it was shaped for the screen, kept with those documents so it's drawn
+    /// again without being shaped again. `None` once they've been given up.
+    layouts: Option<LayoutHold>,
     expanded: HashSet<String>,
     expanded_gen: u64,
     count: usize,
@@ -560,6 +593,23 @@ struct Stashed {
     scroller: Entity<MessageScrollerState>,
     rows_cache: Option<((Option<String>, u64, u64, Option<usize>), std::rc::Rc<Rows>)>,
     activity_lines: HashMap<String, usize>,
+}
+
+/// Text shaped for what was on screen, kept until this goes (the kit lets go of shaped text
+/// that isn't drawn: `hold_layouts`).
+struct LayoutHold(u64);
+
+impl LayoutHold {
+    /// What was drawn in the latest frames.
+    fn take() -> Self {
+        Self(gpui_kit::base::text::hold_layouts())
+    }
+}
+
+impl Drop for LayoutHold {
+    fn drop(&mut self) {
+        gpui_kit::base::text::release_layouts(self.0);
+    }
 }
 
 struct Markdown {
@@ -695,7 +745,7 @@ impl ThreadView {
             current: None,
             revision: 0,
             count: 0,
-            md: HashMap::new(),
+            md: Documents::new(MD_BUDGET, MD_CAP),
             draws: 0,
             expanded: HashSet::new(),
             stashed: HashMap::new(),
@@ -739,10 +789,16 @@ impl ThreadView {
             return;
         }
         self.stash_order.retain(|id| *id != old);
+        // Off screen it keeps the documents it was showing, so it's drawn at once when it's
+        // back; those scrolled past are parsed again if they're scrolled to again.
+        let mut md = std::mem::replace(&mut self.md, Documents::new(MD_BUDGET, MD_CAP));
+        let draws = self.draws;
+        drop(md.retain(|_, m| m.drawn + MD_ON_SCREEN > draws));
         self.stashed.insert(
             old.clone(),
             Stashed {
-                md: std::mem::take(&mut self.md),
+                md,
+                layouts: Some(LayoutHold::take()),
                 expanded: std::mem::take(&mut self.expanded),
                 expanded_gen: self.expanded_gen,
                 count: self.count,
@@ -757,6 +813,19 @@ impl ThreadView {
         while self.stash_order.len() > STASH_KEPT {
             if let Some(evict) = self.stash_order.pop_front() {
                 self.stashed.remove(&evict);
+            }
+        }
+        // The threads left longest ago give up their documents while all the parked ones
+        // together weigh too much. Where they were and what was open stays.
+        let mut parked: usize = self.stashed.values().map(|s| s.md.bytes()).sum();
+        for id in &self.stash_order {
+            if parked <= PARKED_BUDGET {
+                break;
+            }
+            if let Some(s) = self.stashed.get_mut(id) {
+                parked -= s.md.bytes();
+                drop(s.md.clear());
+                s.layouts = None;
             }
         }
         self.watch_scroller(cx);
@@ -905,7 +974,7 @@ impl ThreadView {
         if let Some(l) = live.filter(|_| !switched && revision != self.revision) {
             // Each answer is cut once, however many of its parts have documents.
             let mut cuts: HashMap<usize, Vec<usize>> = tail_cuts.into_iter().collect();
-            for (key, m) in &self.md {
+            for (key, m) in self.md.iter() {
                 let ix = if l.items.id_at(m.ix) == Some(m.item.as_str()) {
                     Some(m.ix)
                 } else {
@@ -948,7 +1017,7 @@ impl ThreadView {
         if switched {
             self.current = id;
             self.confirm = None;
-            self.md.clear();
+            drop(self.md.clear());
             self.expanded.clear();
             self.expanded_gen += 1;
             self.count = 0;
@@ -1016,7 +1085,8 @@ impl ThreadView {
                 self.md.remove(&key);
                 continue;
             };
-            let Some(m) = self.md.get_mut(&key) else {
+            // Following its item isn't a use: only being drawn is.
+            let Some(m) = self.md.peek_mut(&key) else {
                 continue;
             };
             m.ix = ix;
@@ -1026,7 +1096,9 @@ impl ThreadView {
                     Some(tail) => m.state.update(cx, |s, cx| s.push_str(tail, cx)),
                     None => m.state.update(cx, |s, cx| s.set_text(&text, cx)),
                 }
+                let weight = md_weight(&text);
                 m.text = text;
+                self.md.set_bytes(&key, weight);
             }
         }
         let new_count = self.rows(cx).rows.len();
@@ -1260,6 +1332,7 @@ impl ThreadView {
         };
         let state = cx.new(|cx| TextViewState::markdown(&text, cx));
         let changed = cx.observe(&state, |_, _, cx| cx.notify());
+        let weight = md_weight(&text);
         self.md.insert(
             doc,
             Markdown {
@@ -1271,16 +1344,10 @@ impl ThreadView {
                 drawn,
                 _changed: changed,
             },
+            weight,
         );
-        if self.md.len() > MD_KEPT {
-            // Down to three quarters, so this isn't done for every row scrolled into view.
-            let mut by_age: Vec<(u64, String)> =
-                self.md.iter().map(|(k, m)| (m.drawn, k.clone())).collect();
-            by_age.sort();
-            for (_, k) in by_age.into_iter().take(self.md.len() - MD_KEPT * 3 / 4) {
-                self.md.remove(&k);
-            }
-        }
+        // The documents drawn longest ago make room. What's on screen stays whatever it weighs.
+        drop(self.md.trim(|_, m| m.drawn + MD_ON_SCREEN > drawn));
         Some(state)
     }
 
@@ -2285,9 +2352,12 @@ impl ThreadView {
                                                 s.border_color(theme.foreground.opacity(0.35))
                                             })
                                             .child(
-                                                img(path.clone())
-                                                    .size_full()
-                                                    .object_fit(ObjectFit::Cover),
+                                                crate::pictures::picture(
+                                                    &path,
+                                                    crate::pictures::Fit::Tile,
+                                                )
+                                                .size_full()
+                                                .object_fit(ObjectFit::Cover),
                                             )
                                             .child(crate::image_preview::thumb(path))
                                             .on_click(move |_, window, cx| {
@@ -4999,6 +5069,9 @@ impl Render for ThreadView {
             "ThreadView"
         });
         self.draws += 1;
+        // A document too big to keep goes once it's off screen, not only when another is built.
+        let draws = self.draws;
+        drop(self.md.trim(|_, m| m.drawn + MD_ON_SCREEN > draws));
         let rows = self.rows(cx);
         let footer = self.live_footer(window, cx);
         // Where the last row ends is noted as it's laid out below; until then (and when it's out
@@ -5188,8 +5261,63 @@ impl ThreadView {
     }
 }
 
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
+impl ThreadView {
+    /// The parsed answers this view holds, as `perf mem` logs them: the thread on screen's
+    /// documents and their source text, and those parked with threads off screen.
+    pub fn held(&self, _: &App) -> String {
+        let text = |md: &Documents| md.values().map(|m| m.text.len()).sum::<usize>();
+        let parked: usize = self.stashed.values().map(|s| s.md.len()).sum();
+        let parked_text: usize = self.stashed.values().map(|s| text(&s.md)).sum();
+        let parked_weight: usize = self.stashed.values().map(|s| s.md.bytes()).sum();
+        format!(
+            "md_docs={} md_text_kb={} md_weight_kb={} md_parked_threads={} md_parked_docs={parked} md_parked_text_kb={} md_parked_weight_kb={}",
+            self.md.len(),
+            text(&self.md) / 1024,
+            self.md.bytes() / 1024,
+            self.stashed.len(),
+            parked_text / 1024,
+            parked_weight / 1024
+        )
+    }
+}
+
+/// The parsed documents a view holds, for tests: how many and what they're reckoned to weigh.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownHeld {
+    /// The thread on screen's: (documents, weight).
+    pub on_screen: (usize, usize),
+    /// Each parked thread's, the one left longest ago first: (thread, documents, weight).
+    pub parked: Vec<(String, usize, usize)>,
+    /// What the thread on screen may keep, one document's most, and what the parked ones may
+    /// keep together.
+    pub budget: usize,
+    pub cap: usize,
+    pub parked_budget: usize,
+}
+
 #[cfg(any(test, feature = "test-support"))]
 impl ThreadView {
+    pub fn markdown_held(&self) -> MarkdownHeld {
+        MarkdownHeld {
+            on_screen: (self.md.len(), self.md.bytes()),
+            parked: (self.stash_order.iter())
+                .filter_map(|id| Some((id.clone(), self.stashed.get(id)?)))
+                .map(|(id, s)| (id, s.md.len(), s.md.bytes()))
+                .collect(),
+            budget: MD_BUDGET,
+            cap: MD_CAP,
+            parked_budget: PARKED_BUDGET,
+        }
+    }
+
+    /// Scroll the transcript to row `row`, as a reader going up or down to it would.
+    pub fn scroll_to_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.scroller
+            .update(cx, |s, cx| _ = s.scroll_to_item(row, cx));
+    }
+
     /// Scroll the transcript to its first row, as a reader going back up would.
     pub fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
         self.scroller

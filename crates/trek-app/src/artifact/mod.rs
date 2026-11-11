@@ -40,8 +40,16 @@ use trek_core::artifact as core;
 const PLUGIN: &str = "trek-artifact";
 /// Live web views a window keeps at once; past this, the one farthest off screen is let go.
 const MAX_LIVE: usize = 4;
-/// Snapshots kept for cards whose views have gone (by document).
-const SHOTS_KEPT: usize = 24;
+/// Snapshots kept for cards whose views have gone (by document), by what they weigh. A snapshot
+/// is its card's page at the window's pixels: 5 MB for a card of the default height (360 pt) on
+/// the answer column (880 pt) at 2×, 10 MB for the tallest (720 pt). 64 MiB is the last thirteen
+/// of the first or six of the second: the cards of the answers just read, there at once when
+/// scrolled back to. It was the last 24 whatever their size: 243 MB of the tallest.
+const SHOTS_BUDGET: usize = 64 << 20;
+/// One snapshot's most to be kept: above the largest a card in an answer makes (the widest
+/// column, 720 pt tall, at 2×: 12.2 MB). A larger one (a card expanded over a big window) still
+/// stands in for its page while its card is drawn; it isn't kept for the card's next time.
+const SHOT_CAP: usize = 16 << 20;
 /// The card's corner radius, less its 1 px edge: the bottom corners of what's drawn in it.
 // scale: ok, inside the card's 1 px edge
 const RADIUS: f32 = radius::CARD - 1.;
@@ -900,12 +908,8 @@ impl ArtifactState {
             .get(&doc.hash)
             .copied()
             .unwrap_or(core::DEFAULT_HEIGHT);
-        let shot = registry
-            .shots
-            .iter()
-            .rev()
-            .find(|(h, _)| *h == doc.hash)
-            .map(|(_, s)| s.clone());
+        // Used again: it's the last to go.
+        let shot = registry.shots.get(&doc.hash).cloned();
         Self {
             served: Rc::new(RefCell::new(String::new())),
             doc,
@@ -1531,32 +1535,55 @@ struct WindowArtifacts {
     followup: bool,
 }
 
-#[derive(Default)]
 struct Registry {
     windows: HashMap<WindowId, WindowArtifacts>,
     /// Documents' heights as they last said, so a card made again (scrolled back, the thread
     /// shown again) takes its height at once and the transcript doesn't jump.
     heights: HashMap<u64, f32>,
-    /// Snapshots, most recent last, by document.
-    shots: Vec<(u64, Snap)>,
+    /// Snapshots by document, the least recently taken or used going first (`SHOTS_BUDGET`).
+    shots: crate::budget::ByteLru<u64, Snap>,
     /// Snapshots no longer kept, to take out of the sprite atlas at the next frame.
     retired: Vec<Arc<RenderImage>>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            windows: HashMap::new(),
+            heights: HashMap::new(),
+            shots: crate::budget::ByteLru::new(SHOTS_BUDGET, SHOT_CAP),
+            retired: Vec::new(),
+        }
+    }
 }
 
 impl Global for Registry {}
 
 impl Registry {
     fn keep_shot(&mut self, hash: u64, snap: Snap) {
-        if let Some(ix) = self.shots.iter().position(|(h, _)| *h == hash) {
-            let (_, old) = self.shots.remove(ix);
+        let bytes = crate::pictures::weight(&snap.image);
+        // Too big to keep: the card that took it has it for as long as it's drawn, and what's
+        // kept of the document already (its card in the answer's) stays.
+        if bytes > SHOT_CAP {
+            return;
+        }
+        if let Some(old) = self.shots.insert(hash, snap, bytes) {
             self.retired.push(old.image);
         }
-        self.shots.push((hash, snap));
-        if self.shots.len() > SHOTS_KEPT {
-            let (_, old) = self.shots.remove(0);
+        // A card holds its own snapshot: nothing here is in use.
+        for (_, old) in self.shots.trim(|_, _| false) {
             self.retired.push(old.image);
         }
     }
+}
+
+/// The snapshots kept, as `perf mem` logs them.
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
+pub fn held(cx: &App) -> String {
+    let (shots, kb) = cx
+        .try_global::<Registry>()
+        .map_or((0, 0), |r| (r.shots.len(), r.shots.bytes() / 1024));
+    format!("page_shots={shots} page_shot_kb={kb}")
 }
 
 /// Drawn first in a window's root: numbers the frame.
@@ -1905,7 +1932,82 @@ pub fn load_all(window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::font_stack;
+    use super::{Registry, SHOT_CAP, SHOTS_BUDGET, Snap, font_stack};
+    use gpui_kit::{RenderImage, px, size};
+    use std::sync::Arc;
+
+    /// A snapshot `w`×`h` pixels: 4 bytes each.
+    fn snap(w: u32, h: u32) -> Snap {
+        Snap {
+            image: Arc::new(RenderImage::new(vec![image::Frame::new(
+                image::RgbaImage::new(w, h),
+            )])),
+            size: size(px(w as f32 / 2.), px(h as f32 / 2.)),
+            css: String::new(),
+        }
+    }
+
+    #[test]
+    fn snapshots_are_kept_by_what_they_weigh_and_the_oldest_go_first() {
+        // The tallest card on the default column at 2×: 1760×1440, 10.1 MB.
+        let tall = || snap(1760, 1440);
+        let each = 1760 * 1440 * 4;
+        let fit = SHOTS_BUDGET / each;
+        assert!(
+            (5..=8).contains(&fit),
+            "{fit} of the tallest fit, not the 24 there were"
+        );
+        let mut registry = Registry::default();
+        for doc in 0..24u64 {
+            registry.keep_shot(doc, tall());
+        }
+        // 24 of them would be 243 MB: the budget's worth stay, the latest.
+        assert_eq!(registry.shots.len(), fit);
+        assert!(registry.shots.bytes() <= SHOTS_BUDGET);
+        assert_eq!(registry.retired.len(), 24 - fit, "the rest leave the atlas");
+        assert!((24 - fit as u64..24).all(|doc| registry.shots.contains(&doc)));
+        // Small cards are light: far more of those are kept than the 24 there were.
+        let mut registry = Registry::default();
+        for doc in 0..60u64 {
+            registry.keep_shot(doc, snap(1760, 320));
+        }
+        assert!(registry.shots.len() > 24, "{}", registry.shots.len());
+    }
+
+    #[test]
+    fn a_snapshot_used_again_is_the_last_to_go_and_a_new_one_replaces_its_documents() {
+        let each = 1760 * 1440 * 4;
+        let fit = (SHOTS_BUDGET / each) as u64;
+        let mut registry = Registry::default();
+        for doc in 0..fit {
+            registry.keep_shot(doc, snap(1760, 1440));
+        }
+        // The oldest is shown again (its card is made again): it's used, so the next one in
+        // pushes out the second oldest instead.
+        assert!(registry.shots.get(&0).is_some());
+        registry.keep_shot(100, snap(1760, 1440));
+        assert!(registry.shots.contains(&0) && !registry.shots.contains(&1));
+        // The page pictured again (a theme change): one snapshot for the document, the new one.
+        let before = registry.shots.len();
+        registry.keep_shot(0, snap(1760, 800));
+        assert_eq!(registry.shots.len(), before);
+        assert_eq!(registry.shots.peek(&0).unwrap().image.size(0).height.0, 800);
+    }
+
+    #[test]
+    fn a_snapshot_too_big_to_keep_leaves_what_is_kept_alone() {
+        let mut registry = Registry::default();
+        registry.keep_shot(1, snap(1760, 720));
+        registry.keep_shot(2, snap(1760, 720));
+        // A card expanded over a 4K window: 33 MB, over the most one may weigh. Its card holds
+        // it while it's drawn; here the document's earlier snapshot stays, with the others.
+        let huge = snap(3840, 2160);
+        assert!(crate::pictures::weight(&huge.image) > SHOT_CAP);
+        registry.keep_shot(2, huge);
+        assert_eq!(registry.shots.len(), 2);
+        assert_eq!(registry.shots.peek(&2).unwrap().image.size(0).height.0, 720);
+        assert!(registry.retired.is_empty());
+    }
 
     #[test]
     fn fonts_fall_back_to_the_systems() {
