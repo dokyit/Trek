@@ -1282,7 +1282,7 @@ impl PhonePanel {
                             .flex_shrink_0()
                             .w(px(36.))
                             .h(px(72.))
-                            .rounded(px(9.))
+                            .rounded(px(9.)) // scale: ok, an iPhone's own corners at this size
                             .bg(rgb(0x0B0B0D))
                             .border_1()
                             .border_color(theme.border)
@@ -1471,7 +1471,7 @@ impl PhonePanel {
                             div()
                                 .flex_shrink_0()
                                 .size(px(26.))
-                                .rounded(px(7.))
+                                .rounded(px(radius::CONTROL))
                                 .bg(theme.foreground.opacity(0.08))
                                 .flex()
                                 .items_center()
