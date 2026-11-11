@@ -11,5 +11,6 @@
 /DESIGN.md     https://github.com/dokyit/Trek/blob/main/site/DESIGN.md   302
 /PRODUCT.md    https://github.com/dokyit/Trek/blob/main/site/PRODUCT.md  302
 
-# The design tool's working notes are for the repository too.
-/.impeccable/*  /404.html  404
+# The design tool's working notes are for the repository too. (Pages has no 404 rule, so they go
+# where the notes above go.)
+/.impeccable/*  https://github.com/dokyit/Trek/tree/main/site/.impeccable  302
