@@ -1,18 +1,23 @@
-/* Trek: trekdesktop.com
-   1. The download block: which build is the visitor's, and where the latest release's files are.
-   2. The hiker on the trail down the page, and the stretch of trail that explains how work moves.
+/* trekdesktop.com
+   1. The download: which build is the visitor's, and where the latest release's files are.
+   2. The hiker, walking as he does in the app.
+   3. A day in the Inbox, played once.
    The page reads whole without any of this. The only request it makes is to GitHub's API. */
 (() => {
   "use strict";
+
+  const all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const still = matchMedia("(prefers-reduced-motion: reduce)");
+  const dark = matchMedia("(prefers-color-scheme: dark)");
+
+  /* ---------- 1. Download ---------- */
 
   const REPO = "dokyit/Trek";
   const LATEST = `https://github.com/${REPO}/releases/latest`;
   const API = `https://api.github.com/repos/${REPO}/releases/latest`;
   const DOWNLOADS = `https://github.com/${REPO}/releases/download/`;
 
-  /* ---------- 1. Download ---------- */
-
-  // A release's assets, by what they are. The Mac disk images carry the version in their names.
+  // A release's files, by what they are. The Mac disk images carry the version in their names.
   const BUILDS = {
     "mac-arm": /^Trek-[\w.+-]+-darwin-aarch64\.dmg$/,
     "mac-intel": /^Trek-[\w.+-]+-darwin-x86_64\.dmg$/,
@@ -20,20 +25,8 @@
     "win-zip": /^Trek-[\w.+-]+-windows-x86_64\.zip$/,
   };
   // Where each link goes until the API has answered, or if it never does.
-  const FALLBACK = {
-    "mac-arm": LATEST,
-    "mac-intel": LATEST,
-    "win-setup": `${LATEST}/download/Trek-Setup-x86_64.exe`,
-    "win-zip": LATEST,
-  };
-  const TRUST = {
-    mac: 'Signed, not yet notarized: the first time, macOS asks you to choose <b>Open Anyway</b> in Privacy &amp; Security. <a href="#install">What to click</a>.',
-    windows: 'No code signature yet: SmartScreen asks once. Choose <b>More info</b>, then <b>Run anyway</b>. <a href="#install">What to click</a>.',
-    linux: 'There is no Linux build yet. Trek runs on macOS and Windows. <a href="#install">Every build</a>.',
-    mobile: 'Trek is a desktop app. Open this page on your Mac or PC to download it. <a href="#install">Every build</a>.',
-  };
-
-  const all = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const FALLBACK = { "mac-arm": LATEST, "mac-intel": LATEST, "win-setup": `${LATEST}/download/Trek-Setup-x86_64.exe`, "win-zip": LATEST };
+  const CHIP = { "mac-arm": "Apple silicon", "mac-intel": "Intel", "win-setup": "Windows 11, x64" };
   const megabytes = (bytes) => `${Math.round(bytes / 1e6)} MB`;
 
   /** The Mac's chip from its GPU's name, where the browser gives one. Chrome and Firefox name it
@@ -100,8 +93,6 @@
     }
   }
 
-  const CHIP = { "mac-arm": "Apple silicon", "mac-intel": "Intel", "win-setup": "Windows 11, x64" };
-
   function paint(who, release) {
     const assets = (release && release.assets) || {};
     const href = (key) => (assets[key] && assets[key].url) || FALLBACK[key];
@@ -114,40 +105,38 @@
       link.classList.toggle("is-yours", key === who.build);
     }
 
-    for (const block of all("[data-download]")) {
-      const primary = block.querySelector("[data-dl-primary]");
-      const label = block.querySelector("[data-dl-label]");
-      const version = block.querySelector("[data-dl-version]");
-      const trust = block.querySelector("[data-dl-trust]");
-      if (who.build && primary && label) {
+    const primary = document.querySelector("[data-dl-primary]");
+    const label = document.querySelector("[data-dl-label]");
+    const fine = document.querySelector("[data-dl-fine]");
+    if (primary && label && fine) {
+      if (who.build) {
         primary.href = href(who.build);
         label.textContent = who.os === "windows" ? "Download for Windows" : "Download for macOS";
-      }
-      if (version && who.build) {
-        const chip = CHIP[who.build];
         const size = assets[who.build] && assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
-        version.textContent = release && release.version ? `Version ${release.version} for ${chip}${size}.` : `For ${chip}.`;
+        const version = release && release.version ? `Version ${release.version} for ${CHIP[who.build]}${size}. ` : `For ${CHIP[who.build]}. `;
+        fine.textContent = `${version}Free and open source.`;
         if (who.os === "mac" && !who.sure) {
           const other = document.createElement("a");
           other.href = href("mac-intel");
-          other.textContent = "On an Intel Mac? Take the Intel build";
-          version.append(" ", other, ".");
+          other.className = "text-link";
+          other.textContent = "Take the Intel build";
+          fine.append(" On an Intel Mac? ", other, ".");
         }
+      } else if (who.os === "mobile" || who.os === "linux") {
+        primary.href = "#install";
+        label.textContent = "See the downloads";
+        fine.textContent = who.os === "mobile"
+          ? "Trek is a desktop app. Open this page on your Mac or PC to download it."
+          : "There is no Linux build yet. Trek runs on macOS and Windows.";
       }
-      if (trust && TRUST[who.os]) trust.innerHTML = TRUST[who.os];
     }
 
     if (release && release.version) {
-      for (const el of all("[data-version]")) el.textContent = release.version;
-      const dmg = assets["mac-arm"];
-      if (dmg && dmg.size) for (const el of all('[data-stat="dmg-size"]')) el.textContent = String(Math.round(dmg.size / 1e6));
       const when = release.published ? new Date(release.published) : null;
-      for (const el of all("[data-release]")) {
-        const date = when && !Number.isNaN(when.getTime())
-          ? `, released ${when.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })}`
-          : "";
-        el.textContent = `The latest release is ${release.version}${date}.`;
-      }
+      const date = when && !Number.isNaN(when.getTime())
+        ? `, released ${when.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })}`
+        : "";
+      for (const el of all("[data-release]")) el.textContent = `The latest release is ${release.version}${date}.`;
     }
   }
 
@@ -156,96 +145,182 @@
     latestRelease().then((release) => { if (release) paint(who, release); });
   });
 
-  /* ---------- 2. The trail ---------- */
+  /* ---------- 2. The hiker ----------
+     As in the app (crates/trek-mascot/src/lib.rs): a 16-frames-a-second clock, 16 art pixels a
+     second, a pose for every 4 pixels of ground covered, a rest and a turn at each end of the
+     trail. Time moves him; scrolling only starts and stops the clock. Pressing him stops him and
+     sends him on again. */
 
-  const still = matchMedia("(prefers-reduced-motion: reduce)");
-  const clamp = (v, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, v));
+  const POSES = [
+    ["....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKs...", "EeEEKKKK....", ".EEEKKKK....", "....KKKK....", "....KKK.....", "....KKK.....", "....KKK.....", "....KKK.....", "....bbbb...."],
+    ["............", "....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKK....", "EeEEKKKK....", "EeEEsKKK....", ".EEEKKKK....", "....KKKK....", "...kkKKKK...", "..kk...KK...", ".kk.....KK..", ".b......bbb."],
+    ["....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKs...", "EeEEKKKK....", ".EEEKKKK....", "....KKKK....", "....KKkk....", "....KK.kk...", "....KK..k...", "....KK..bb..", "....bbb....."],
+    ["............", "....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKKs..", "EeEEKKKK....", ".EEEKKKK....", "....KKKK....", "...KKkkkk...", "..KK...kk...", ".KK.....kk..", ".b......bbb."],
+    ["....hhhh....", "..hhhhhhhh..", "....ssss....", "....ssos....", ".EE..ss.....", "EEEEKKKK....", "EEEEKKKKK...", "EeEEKKKKs...", "EeEEKKKK....", ".EEEKKKK....", "....kkKK....", "....kkKK....", "....kk.KK...", "....kk..K...", "....kk..bb..", "....bbb....."],
+  ];
+  // [night, paper]: the pack is ember, the body is the theme's ink at two strengths.
+  const INK = {
+    h: ["#C9A47C", "#B58A5C"], s: ["#EBC6A0", "#E9BF95"], o: ["#1A1A1C", "#1A1A1C"], K: ["#9A9AA2", "#55555B"],
+    k: ["#5C5C63", "#9C9A95"], b: ["#8A5A2E", "#6B4423"], E: ["#FF7A3D", "#E85D1F"], e: ["#C9551F", "#B8461A"],
+  };
+  const FPS = 16, WALK = 16, RAMP = 0.35, REST = 1.2, STEP = 4, WIDE = 12;
 
-  // The hiker on the line down the page: it keeps its place on the screen while the trail's
-  // switchbacks pass under its boots, so it steps left and right as the page scrolls.
-  const rail = document.querySelector(".rail");
-  const guide = rail && rail.querySelector("[data-rail-hiker]");
-  const dusk = document.querySelector(".dusk");
-  const ZIG = 96; // the switchback's height; assets/img/trail-zig.svg runs 8 → 36 → 8 across it
-
-  function walkRail(moving) {
-    if (!guide || !rail.offsetParent) return;
-    const box = rail.getBoundingClientRect();
-    const feet = guide.getBoundingClientRect().bottom;
-    const along = feet - box.top;
-    const turn = (((along % ZIG) + ZIG) % ZIG) / ZIG;
-    const down = turn < 0.5;
-    const x = 8 + 28 * (down ? turn * 2 : (1 - turn) * 2);
-    guide.style.setProperty("translate", `${(x - 22).toFixed(1)}px 0`);
-    guide.dataset.face = down ? "right" : "left";
-    guide.dataset.pose = moving ? String(1 + (Math.floor(Math.abs(along) / 9) % 4)) : "0";
-    if (dusk) guide.classList.toggle("on-dusk", feet > dusk.getBoundingClientRect().top);
-  }
-
-  // The stretch that explains how work moves: three agents on three trails. One stops at a cairn
-  // because it needs you, you answer, it carries on, and all three come in at the same place.
-  const route = document.querySelector("[data-route]");
-  const braid = route && route.querySelector("[data-braid]");
-  const lanes = braid ? {
-    a: braid.querySelector(".lane-a"),
-    b: braid.querySelector(".lane-b"),
-    c: braid.querySelector(".lane-c"),
-  } : null;
-  const steps = route ? all(".step", route) : [];
-  const WAIT_AT = 43; // where lane b's hiker stands, just short of its cairn
-  let last = { a: -1, b: -1, c: -1 };
-
-  function walkRoute(moving) {
-    if (!braid) return;
-    const box = braid.getBoundingClientRect();
-    const view = window.innerHeight;
-    // 0 as the trail comes up into the lower part of the screen, 1 as it nears the top.
-    const t = clamp((view * 0.82 - (box.top + box.height / 2)) / (view * 0.56));
-    const at = {
-      a: clamp(t / 0.86) * 100,
-      c: clamp(t / 0.6) * 100,
-      b: t < 0.26 ? (t / 0.26) * WAIT_AT : t < 0.56 ? WAIT_AT : WAIT_AT + clamp((t - 0.56) / 0.36) * (100 - WAIT_AT),
-    };
-    const waiting = t >= 0.26 && t < 0.56;
-    const state = {
-      a: at.a >= 100 ? "done" : "working",
-      b: waiting ? "needs" : at.b >= 100 ? "done" : "working",
-      c: at.c >= 100 ? "done" : "working",
-    };
-    const width = lanes.a.getBoundingClientRect().width;
-    for (const key of ["a", "b", "c"]) {
-      const lane = lanes[key];
-      const hiker = lane.querySelector(".hiker");
-      hiker.style.setProperty("--at", at[key].toFixed(2));
-      lane.dataset.state = state[key];
-      const walking = moving && at[key] !== last[key] && at[key] > 0 && at[key] < 100;
-      hiker.dataset.pose = walking ? String(1 + (Math.floor((at[key] / 100) * width / 9) % 4)) : "0";
+  // One frame on, along a trail `travel` art pixels long. Line for line the app's Walk::step.
+  function step(w, travel) {
+    const dt = 1 / FPS;
+    if (w.rest > 0) {
+      w.rest = Math.max(0, w.rest - dt / REST);
+      if (w.rest > 0) return;
     }
-    last = at;
-    if (t >= 0.56 && t < 0.74) lanes.b.dataset.flag = "answered"; else delete lanes.b.dataset.flag;
-    const now = t < 0.26 ? 1 : t < 0.56 ? 2 : t < 0.8 ? 3 : 4;
-    for (const step of steps) step.classList.toggle("is-now", Number(step.dataset.step) === now);
+    travel = Math.max(travel, 1);
+    const left = (w.right ? 1 - w.at : w.at) * travel;
+    const accel = WALK / RAMP;
+    const v = Math.min(w.speed + accel * dt, WALK, Math.sqrt(2 * accel * left));
+    const d = Math.max(v * dt, 0.25);
+    if (d >= left) {
+      w.at = w.right ? 1 : 0; w.right = !w.right; w.speed = 0; w.rest = 1; w.walked = 0;
+    } else {
+      w.at += (w.right ? d : -d) / travel; w.speed = v; w.walked += d;
+    }
+  }
+  const pose = (w) => (w.rest > 0 ? 0 : 1 + (Math.floor(w.walked / STEP) % 4));
+  const facingRight = (w) => (w.rest > 0.5 ? !w.right : w.right);
+
+  function paintHiker(canvas, p, right, night) {
+    const g = canvas.getContext("2d");
+    g.clearRect(0, 0, WIDE, 16);
+    POSES[p].forEach((row, y) => {
+      for (let x = 0; x < WIDE; x++) {
+        const ink = INK[row[x]];
+        if (!ink) continue;
+        g.fillStyle = ink[night ? 0 : 1];
+        g.fillRect(right ? x : WIDE - 1 - x, y, 1, 1);
+      }
+    });
   }
 
-  let queued = false;
-  let rest = 0;
-  function frame() {
-    queued = false;
-    walkRail(true);
-    walkRoute(true);
-    clearTimeout(rest);
-    rest = setTimeout(() => { walkRail(false); walkRoute(false); }, 170); // standing once the page is
+  for (const trail of all("[data-trail]")) {
+    const canvas = trail.querySelector("canvas");
+    const w = { at: 0, right: true, speed: 0, rest: 0.5, walked: 0 };
+    let seen = false, paused = false, timer = 0, drawn = "";
+
+    // One art pixel is a whole number of device pixels, as the app's cell_size has it.
+    const cell = () => {
+      const want = parseFloat(getComputedStyle(trail).getPropertyValue("--px")) || 3;
+      const size = Math.max(1, Math.round(want * devicePixelRatio)) / devicePixelRatio;
+      trail.style.setProperty("--cell", `${size}px`);
+      return size;
+    };
+
+    function draw() {
+      const size = cell();
+      const travel = Math.max(1, Math.floor(trail.clientWidth / size) - WIDE);
+      const p = pose(w), right = facingRight(w), night = dark.matches;
+      const key = `${p}${right}${night}`;
+      if (key !== drawn) { paintHiker(canvas, p, right, night); drawn = key; }
+      canvas.style.translate = `${Math.round(w.at * travel) * size}px 0`;
+      return travel;
+    }
+
+    function sync() {
+      const go = seen && !paused && !still.matches && document.visibilityState === "visible";
+      if (go && !timer) timer = setInterval(() => { step(w, draw()); draw(); }, 1000 / FPS);
+      if (!go && timer) { clearInterval(timer); timer = 0; }
+      // There is no button for it: pressing the hiker himself stops him and sends him on.
+      if (still.matches) {
+        canvas.removeAttribute("role"); canvas.removeAttribute("tabindex"); canvas.removeAttribute("title"); canvas.setAttribute("aria-hidden", "true");
+      } else {
+        canvas.removeAttribute("aria-hidden");
+        canvas.setAttribute("role", "button"); canvas.tabIndex = 0;
+        canvas.setAttribute("aria-label", paused ? "Let the hiker walk on" : "Stop the hiker");
+        canvas.title = paused ? "Let the hiker walk on" : "Stop the hiker";
+      }
+    }
+
+    new IntersectionObserver(([entry]) => { seen = entry.isIntersecting; sync(); }).observe(trail);
+    document.addEventListener("visibilitychange", sync);
+    still.addEventListener("change", sync);
+    dark.addEventListener("change", () => { drawn = ""; draw(); });
+    addEventListener("resize", draw);
+    const press = () => { if (!still.matches) { paused = !paused; sync(); } };
+    canvas.addEventListener("click", press);
+    canvas.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); press(); } });
+    trail.classList.add("is-live");
+    draw();
+    sync();
   }
-  function onScroll() {
-    if (!queued) { queued = true; requestAnimationFrame(frame); }
+
+  /* ---------- 3. A day in the Inbox ----------
+     Played once when it comes into view: three threads at work, one stops for an approval and goes
+     to the top, Allow sends it on, and finished work lines up to be read. Without this script, and
+     with Reduce Motion on, the page shows the waiting moment as a still. */
+
+  const day = document.querySelector("[data-day]");
+  if (day) {
+    const list = day.querySelector(".rows"), card = day.querySelector(".ask-card");
+    const replay = (day.closest("section") || document).querySelector("[data-replay]");
+    const rows = Object.fromEntries(Array.from(list.children).map((li) => [li.dataset.id, li]));
+    const base = ["tests", "migrate", "tour"];
+    const rank = { needs: 0, done: 1, stop: 1, work: 2 };
+    const project = { tests: "mobile", migrate: "mobile", tour: "atlas-web" };
+    const say = { work: "At work", done: "Finished", needs: "Waiting: run ./migrate?", stop: "Stopped: you denied the command" };
+    let timers = [], answered = null;
+
+    const at = (ms, fn) => timers.push(setTimeout(fn, ms));
+    const clear = () => { timers.forEach(clearTimeout); timers = []; };
+    const show = (on) => { card.toggleAttribute("data-off", !on); card.inert = !on; };
+
+    function set(id, state) {
+      const why = rows[id].querySelector(".why"), strong = document.createElement("b");
+      rows[id].dataset.state = state;
+      strong.textContent = say[state];
+      why.replaceChildren(strong, ` · ${project[id]}`);
+    }
+
+    // What needs you first, then what has finished, then what is still at work. Rows glide to
+    // their new places; nothing jumps.
+    function sort(glide = true) {
+      const before = new Map(base.map((id) => [id, rows[id].getBoundingClientRect().top]));
+      const order = [...base].sort((a, b) => rank[rows[a].dataset.state] - rank[rows[b].dataset.state] || base.indexOf(a) - base.indexOf(b));
+      order.forEach((id) => list.append(rows[id]));
+      if (!glide || still.matches) return;
+      for (const id of base) {
+        const d = before.get(id) - rows[id].getBoundingClientRect().top;
+        if (d) rows[id].animate([{ translate: `0 ${d}px` }, { translate: "0 0" }], { duration: 380, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+      }
+    }
+
+    function reset(glide) {
+      clear(); answered = null; show(false);
+      if (replay) replay.hidden = true;
+      base.forEach((id) => set(id, "work"));
+      sort(glide);
+    }
+
+    function answer(kind) {
+      if (answered) return;
+      answered = kind; clear();
+      const button = card.querySelector(`[data-answer="${kind}"]`);
+      button.toggleAttribute("data-down", true);
+      at(170, () => { button.removeAttribute("data-down"); show(false); set("migrate", kind === "allow" ? "work" : "stop"); sort(); });
+      at(1900, () => { set("tour", "done"); sort(); });
+      if (kind === "allow") at(3500, () => { set("migrate", "done"); sort(); });
+      at(kind === "allow" ? 4500 : 2900, () => { if (replay) replay.hidden = false; });
+    }
+
+    function play() {
+      reset(true);
+      at(1600, () => { set("migrate", "needs"); sort(); show(true); });
+      at(1600 + 3600, () => answer("allow"));
+    }
+
+    card.addEventListener("click", (e) => { const b = e.target.closest("[data-answer]"); if (b) answer(b.dataset.answer); });
+    if (replay) replay.addEventListener("click", play);
+    if (still.matches) {
+      if (replay) replay.hidden = false;
+    } else {
+      reset(false);
+      new IntersectionObserver((entries, io) => { if (entries[0].isIntersecting) { io.disconnect(); play(); } }, { threshold: 0.6 }).observe(day);
+    }
   }
-  function start() {
-    if (still.matches) return; // Reduce Motion: the trail and its hikers stay as the page drew them
-    if (route) route.classList.add("is-live");
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll, { passive: true });
-    walkRail(false);
-    walkRoute(false);
-  }
-  if (guide || braid) start();
 })();

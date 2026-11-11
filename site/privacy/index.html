@@ -7,7 +7,7 @@
 <meta name="description" content="Trek asks before it shares anonymous usage data, and never sends prompts, code, file names, paths, transcripts, keys or emails. This site has no cookies and no trackers.">
 <link rel="canonical" href="https://trekdesktop.com/privacy/">
 <meta name="theme-color" content="#F3EEE6" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#17131F" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#0E0D12" media="(prefers-color-scheme: dark)">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Trek">
 <meta property="og:url" content="https://trekdesktop.com/privacy/">
@@ -21,49 +21,35 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
-<link rel="preload" href="/assets/fonts/Inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/assets/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/HankenGrotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/assets/site.css">
 </head>
 <body>
 <a class="skip" href="#main">Skip to the page</a>
-
-<svg class="sprite" aria-hidden="true" focusable="false">
-  <symbol id="mark" viewBox="0 0 16 16">
-    <rect class="u1" x=".5" y="12" width="15" height="4" rx="2"/><rect class="s1" x=".5" y="12" width="15" height="3" rx="1.5"/>
-    <rect class="u2" x="3" y="8" width="11" height="3" rx="1.5"/><rect class="s2" x="3" y="8" width="11" height="2" rx="1"/>
-    <rect class="u3" x="3.5" y="4" width="8" height="3" rx="1.5"/><rect class="s3" x="3.5" y="4" width="8" height="2" rx="1"/>
-    <rect class="u4" x="5.5" y="0" width="5" height="3" rx="1.5"/><rect class="s4" x="5.5" y="0" width="5" height="2" rx="1"/>
-  </symbol>
-  <symbol id="i-out" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
-</svg>
-
-<header class="nav">
-  <a class="brand" href="/" aria-label="Trek, home"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Trek</a>
+<header class="nav"><div class="nav-in">
+  <a class="brand" href="/" aria-label="Trek, home"><img src="/assets/img/trek-mark.svg" width="22" height="22" alt="">Trek</a>
   <nav class="nav-links" aria-label="Trek">
-    <a href="/#how">How it works</a>
-    <a href="/#inbox">Features</a>
-    <a href="/#iphone">iPhone</a>
-    <a href="/#install">Install</a>
-    <a href="/#faq">FAQ</a>
+    <a class="link" href="/#inbox">How it works</a>
+    <a class="link" href="/#ios">iOS</a>
+    <a class="link" href="/#iphone">iPhone</a>
+    <a class="link" href="https://github.com/dokyit/Trek">GitHub</a>
   </nav>
-  <a class="nav-out" href="https://github.com/dokyit/Trek">GitHub<svg class="icon" aria-hidden="true"><use href="#i-out"/></svg></a>
-  <a class="button button-small" href="/#install">Download</a>
-</header>
+  <a class="btn btn-fill btn-small" href="/#install">Download</a>
+</div></header>
 
 <main id="main" class="page">
   <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Privacy</p></div>
-    <h1>What Trek sends, <span class="dim">and what it never does.</span></h1>
+    <h1>What Trek sends, and what it never does.</h1>
     <p class="lede">Trek asks once whether it may share anonymous usage data. Say no and it sends nothing, except feedback you choose to send. Either way it never sends your prompts, code, file names, paths, transcripts, keys or account emails.</p>
 
     <div class="doc">
       <h2>The question Trek asks</h2>
       <p>On the first launch after setup, Trek asks whether it may share anonymous usage data. If you used an earlier version, it asks you once too. You can change your answer at any time in <strong>Settings, Privacy</strong>, and that page shows exactly what was sent last.</p>
       <ul>
-        <li><strong>With a yes, Trek shares</strong> anonymous usage counts (how often Trek opens, which agents and tools are used), crash and error reports, and the app version, operating system and architecture.</li>
-        <li><strong>Trek never shares</strong> prompts, code, file names, paths, transcripts, keys or account emails.</li>
-        <li><strong>With a no,</strong> nothing is sent, ever, except feedback you send yourself.</li>
+        <li>With a yes, Trek shares anonymous usage counts (how often Trek opens, which agents and tools are used), crash and error reports, and the app version, operating system and architecture.</li>
+        <li>Trek never shares prompts, code, file names, paths, transcripts, keys or account emails.</li>
+        <li>With a no, nothing is sent, ever, except feedback you send yourself.</li>
       </ul>
       <p>Nothing is sent before you answer. Nothing is sent if the <code>DO_NOT_TRACK</code> environment variable is set; Trek then doesn't ask, and the Privacy page says why.</p>
 
@@ -110,9 +96,9 @@
 
       <h2>What else Trek connects to</h2>
       <ul>
-        <li><strong>Your agents and models.</strong> Your prompts and code go to the agents and model providers you choose, through their own tools or your API keys, as they do in a terminal. Trek never reads or stores the logins of the agent CLIs it drives.</li>
-        <li><strong>Updates.</strong> Trek checks its releases on GitHub for a new version of itself, and public package feeds for new versions of your agents' command-line tools.</li>
-        <li><strong>Your phone.</strong> The iPhone app connects straight to your computer over your Wi-Fi or Tailscale. No Trek server sits in between. Push notifications go through ntfy, only if you turn them on.</li>
+        <li>Your agents and models. Your prompts and code go to the agents and model providers you choose, through their own tools or your API keys, as they do in a terminal. Trek never reads or stores the logins of the agent CLIs it drives.</li>
+        <li>Updates. Trek checks its releases on GitHub for a new version of itself, and public package feeds for new versions of your agents' command-line tools.</li>
+        <li>Your phone. The iPhone app connects straight to your computer over your Wi-Fi or Tailscale. No Trek server sits in between. Push notifications go through ntfy, only if you turn them on.</li>
       </ul>
 
       <h2>This website</h2>
@@ -126,24 +112,18 @@
   </div>
 </main>
 
-<div class="dusk">
-<footer class="footer">
-  <div class="wrap">
-    <div class="footer-row">
-      <nav aria-label="Trek elsewhere">
-        <ul>
-          <li><a href="/">Home</a></li>
-          <li><a href="https://github.com/dokyit/Trek">GitHub</a></li>
-          <li><a href="https://github.com/dokyit/Trek/releases">Releases and changelog</a></li>
-          <li><a href="https://github.com/dokyit/Trek/blob/main/LICENSE">Apache-2.0 licence</a></li>
-          <li><a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a></li>
-        </ul>
-      </nav>
-      <p>© 2026 Toby Dokyi</p>
+<footer class="foot">
+  <div class="foot-in">
+    <div class="foot-row">
+      <a class="brand" href="/" aria-label="Trek, home"><img src="/assets/img/trek-mark.svg" width="22" height="22" alt="">Trek</a>
+      <a class="text-link" href="https://github.com/dokyit/Trek">GitHub</a>
+      <a class="text-link" href="https://github.com/dokyit/Trek/releases">Releases and changelog</a>
+      <a class="text-link" href="/privacy/">Privacy</a>
+      <a class="text-link" href="https://github.com/dokyit/Trek/blob/main/LICENSE">Apache-2.0 licence</a>
+      <a class="text-link" href="mailto:support@trekdesktop.com">support@trekdesktop.com</a>
     </div>
-    <p class="fine">Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. This site sets no cookies and carries no analytics or trackers.</p>
+    <p class="small">© 2026 Toby Dokyi. Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. Their names belong to their owners and are used only to say which agents Trek works with. This site sets no cookies and carries no analytics or trackers. Type: Bricolage Grotesque, Hanken Grotesk and JetBrains Mono, under the <a href="/assets/fonts/OFL-BricolageGrotesque.txt">SIL Open Font License</a>.</p>
   </div>
 </footer>
-</div>
 </body>
 </html>

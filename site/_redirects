@@ -9,3 +9,7 @@
 # The folder's own notes are for the repository, not for visitors.
 /README.md     https://github.com/dokyit/Trek/blob/main/site/README.md   302
 /DESIGN.md     https://github.com/dokyit/Trek/blob/main/site/DESIGN.md   302
+/PRODUCT.md    https://github.com/dokyit/Trek/blob/main/site/PRODUCT.md  302
+
+# The design tool's working notes are for the repository too.
+/.impeccable/*  /404.html  404

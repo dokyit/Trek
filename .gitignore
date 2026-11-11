@@ -26,3 +26,6 @@ docs/NEXT-WAVE.md
 *.pem
 *.mobileprovision
 .envrc
+
+# Review screenshots of the site; evidence for one pass, retaken each time.
+/site/.impeccable/review/

@@ -3,24 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Trek: the desktop app for Claude Code, Codex and more</title>
-<meta name="description" content="Trek runs Claude Code, Codex, OpenCode and other coding agents from one inbox on macOS and Windows, with an iPhone companion. Native, free and open source.">
+<title>Trek: run your coding agents from one inbox</title>
+<meta name="description" content="Trek is a native Mac and Windows app that runs Claude Code, Codex and your other coding agents side by side, and puts whatever needs you first. Free and open source.">
 <link rel="canonical" href="https://trekdesktop.com/">
 <meta name="theme-color" content="#F3EEE6" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#131428" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#0B1222" media="(prefers-color-scheme: dark)">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Trek">
 <meta property="og:url" content="https://trekdesktop.com/">
 <meta property="og:title" content="Trek runs your coding agents from one inbox">
-<meta property="og:description" content="A native app for macOS and Windows that runs Claude Code, Codex, OpenCode and other coding agents side by side, with an iPhone companion. Free and open source.">
+<meta property="og:description" content="A native app for macOS and Windows that runs Claude Code, Codex and your other coding agents side by side, with an iPhone companion. Free and open source.">
 <meta property="og:image" content="https://trekdesktop.com/assets/img/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Trek: a native desktop app that runs your coding agents from one inbox.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Trek runs your coding agents from one inbox">
-<meta name="twitter:description" content="A native app for macOS and Windows that runs Claude Code, Codex, OpenCode and other coding agents side by side. Free and open source.">
+<meta name="twitter:description" content="A native app for macOS and Windows that runs Claude Code, Codex and your other coding agents side by side. Free and open source.">
 <meta name="twitter:image" content="https://trekdesktop.com/assets/img/og.jpg">
 <meta name="twitter:image:alt" content="Trek: a native desktop app that runs your coding agents from one inbox.">
 
@@ -28,8 +28,8 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
-<link rel="preload" href="/assets/fonts/Inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/assets/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/HankenGrotesk.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/assets/site.css">
 <script src="/assets/site.js" defer></script>
 
@@ -66,415 +66,150 @@
 </head>
 <body>
 <a class="skip" href="#main">Skip to the page</a>
-
-<svg class="sprite" aria-hidden="true" focusable="false">
-  <symbol id="mark" viewBox="0 0 16 16">
-    <rect class="u1" x=".5" y="12" width="15" height="4" rx="2"/><rect class="s1" x=".5" y="12" width="15" height="3" rx="1.5"/>
-    <rect class="u2" x="3" y="8" width="11" height="3" rx="1.5"/><rect class="s2" x="3" y="8" width="11" height="2" rx="1"/>
-    <rect class="u3" x="3.5" y="4" width="8" height="3" rx="1.5"/><rect class="s3" x="3.5" y="4" width="8" height="2" rx="1"/>
-    <rect class="u4" x="5.5" y="0" width="5" height="3" rx="1.5"/><rect class="s4" x="5.5" y="0" width="5" height="2" rx="1"/>
-  </symbol>
-  <symbol id="way" viewBox="0 0 16 16"><rect x="1" y="11.5" width="14" height="4" rx="2"/><rect x="3.5" y="6.5" width="9" height="3.6" rx="1.8"/><rect x="5.5" y="2" width="5.5" height="3.2" rx="1.6"/></symbol>
-  <symbol id="stack1" viewBox="0 0 16 16"><rect x=".5" y="12" width="15" height="4" rx="2"/></symbol>
-  <symbol id="stack2" viewBox="0 0 16 16"><rect x=".5" y="12" width="15" height="4" rx="2"/><rect x="3" y="8" width="11" height="3" rx="1.5"/></symbol>
-  <symbol id="stack3" viewBox="0 0 16 16"><rect x=".5" y="12" width="15" height="4" rx="2"/><rect x="3" y="8" width="11" height="3" rx="1.5"/><rect x="3.5" y="4" width="8" height="3" rx="1.5"/></symbol>
-  <symbol id="stack4" viewBox="0 0 16 16"><rect x=".5" y="12" width="15" height="4" rx="2"/><rect x="3" y="8" width="11" height="3" rx="1.5"/><rect x="3.5" y="4" width="8" height="3" rx="1.5"/><rect x="5.5" y="0" width="5" height="3" rx="1.5"/></symbol>
-  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></symbol>
-  <symbol id="i-out" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
-  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></symbol>
-  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
-  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.5h.01"/></symbol>
-</svg>
-
-<header class="nav">
-  <a class="brand" href="/" aria-label="Trek, home"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Trek</a>
-  <nav class="nav-links" aria-label="On this page">
-    <a href="#how">How it works</a>
-    <a href="#inbox">Features</a>
-    <a href="#iphone">iPhone</a>
-    <a href="#install">Install</a>
-    <a href="#faq">FAQ</a>
+<header class="nav"><div class="nav-in">
+  <a class="brand" href="/" aria-label="Trek, home"><img src="/assets/img/trek-mark.svg" width="22" height="22" alt="">Trek</a>
+  <nav class="nav-links" aria-label="Trek">
+    <a class="link" href="#inbox">How it works</a>
+    <a class="link" href="#ios">iOS</a>
+    <a class="link" href="#iphone">iPhone</a>
+    <a class="link" href="https://github.com/dokyit/Trek">GitHub</a>
   </nav>
-  <a class="nav-out" href="https://github.com/dokyit/Trek">GitHub<svg class="icon" aria-hidden="true"><use href="#i-out"/></svg></a>
-  <a class="button button-small" href="#install">Download</a>
-</header>
+  <a class="btn btn-fill btn-small" href="#install">Download</a>
+</div></header>
 
 <main id="main">
-
-<section class="hero" aria-labelledby="hero-title">
-  <div class="hero-land" aria-hidden="true"></div>
-  <div class="wrap hero-head">
-    <p class="loop"><span class="vh">How work moves in Trek: </span><span class="c-ember"><i></i>At work</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg><span class="c-amber"><i></i>Needs you</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg><span class="c-emerald"><i></i>Finished</span></p>
-    <h1 id="hero-title">Trek runs your coding agents <span class="dim">from one inbox.</span></h1>
-    <p class="lede">A native app for macOS and Windows. Claude Code, Codex, OpenCode and the other agents you use work side by side, the ones that need you come first, and you can answer them from your iPhone.</p>
-    <div class="download" data-download>
-      <div class="download-row">
-        <a class="button" data-dl-primary href="https://github.com/dokyit/Trek/releases/latest"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span data-dl-label>Download Trek</span></a>
-        <a class="button button-glass" href="https://github.com/dokyit/Trek">Source on GitHub</a>
-      </div>
-      <p class="download-line">Free and open source under Apache-2.0, for macOS 13 or later and Windows 11. <span data-dl-version></span></p>
-      <p class="trust"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><span data-dl-trust>The first launch asks once: <b>Open Anyway</b> on a Mac, <b>Run anyway</b> on Windows. <a href="#install">Why, and what to click</a>.</span></p>
-      <ul class="builds" aria-label="Every build">
-        <li><a data-build="mac-arm" href="https://github.com/dokyit/Trek/releases/latest">macOS, Apple silicon</a></li>
-        <li><a data-build="mac-intel" href="https://github.com/dokyit/Trek/releases/latest">macOS, Intel</a></li>
-        <li><a data-build="win-setup" href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe">Windows installer</a></li>
-        <li><a data-build="win-zip" href="https://github.com/dokyit/Trek/releases/latest">Windows .zip</a></li>
-      </ul>
+<section class="hero">
+  <div class="land land-back" aria-hidden="true"></div>
+  <div class="land land-front" aria-hidden="true"></div>
+  <div class="copy">
+    <h1>Trek runs your coding agents from one inbox.</h1>
+    <p class="lede">A native Mac and Windows app where Claude Code, Codex and your other agents work side by side, and whatever needs you comes first.</p>
+    <div class="cta">
+      <a class="btn btn-fill" data-dl-primary href="https://github.com/dokyit/Trek/releases/latest"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg><span data-dl-label>Download for macOS</span></a>
+      <a class="btn btn-plain" href="https://github.com/dokyit/Trek">Source on GitHub</a>
     </div>
+    <p class="fine" data-dl-fine>Free and open source. macOS 13 or later, Windows 11.</p>
   </div>
-  <figure class="hero-shot" aria-describedby="hero-caption">
-    <div class="window">
+
+  <div class="stage" data-trail-group>
+    <div class="working">
+      <div class="trail" data-trail><canvas class="hiker" width="12" height="16" aria-hidden="true"></canvas></div>
+    </div>
+    <figure class="win">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="/assets/img/hero-night-1320.webp 1320w, /assets/img/hero-night.webp 2640w" sizes="(min-width: 1220px) 1140px, (min-width: 701px) 94vw, 720px">
-        <img src="/assets/img/hero-paper.webp" srcset="/assets/img/hero-paper-1320.webp 1320w, /assets/img/hero-paper.webp 2640w" sizes="(min-width: 1220px) 1140px, (min-width: 701px) 94vw, 720px" width="2640" height="1280" alt="Trek on macOS in its glass look. The sidebar's Inbox lists threads waiting on a plan review, a question and an approval, and one that finished; under it a thread is still working. The open thread shows an agent's answer about how an app starts, with a block of Rust." fetchpriority="high" decoding="async">
+        <source media="(prefers-color-scheme: dark)" srcset="/assets/img/window-night.webp">
+        <img src="/assets/img/window-paper.webp" width="1086" height="746" fetchpriority="high" alt="Trek on a Mac. The Inbox in the sidebar lists three threads that are waiting, with the reason for each, and one that has finished. The open thread shows an agent's plan with the buttons Keep planning and Approve and start.">
       </picture>
-    </div>
-  </figure>
-</section>
-<p class="caption hero-caption wrap" id="hero-caption"><span class="tag">Example</span>Trek on macOS, in its glass look, with a demo project and a scripted agent. Thread and file names are examples.</p>
-
-<div class="journey">
-<div class="rail" aria-hidden="true"><span class="hiker" data-rail-hiker></span></div>
-
-<section class="section" id="native" aria-labelledby="native-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>What it is</p></div>
-    <h2 class="vh" id="native-title">What Trek is</h2>
-    <p class="statement">Trek is one place for the coding agents you already use. You see which are working, which are waiting on you and which have finished, <span class="dim">and you answer from your desk or your phone. It is a native app, written in Rust and drawn on the GPU. Not Electron.</span></p>
-    <dl class="stats">
-      <div class="stat"><dd>0.2<small>s</small></dd><dt>to open</dt></div>
-      <div class="stat"><dd>55<small>MB</small></dd><dt>of memory while idle</dt></div>
-      <div class="stat"><dd><span data-stat="dmg-size">38</span><small>MB</small></dd><dt>to download</dt></div>
-      <div class="stat"><dd>0</dd><dt>accounts to create</dt></div>
-    </dl>
-    <p class="smallprint">Opening and memory were measured on 5 November 2026 on a MacBook Air (Apple M5, 24 GB, macOS 27.2) with a release build: 186 to 201 ms from starting the app to its first frame, warm, and a footprint of 55 to 57 MB 25 seconds after launch, with none to 100 threads. The Mac was not idle during the runs, and only a scripted agent was running. The download is the Apple silicon disk image of version <span data-version>0.4.49</span>. The method, every number and the command that repeats them are in <a href="https://github.com/dokyit/Trek/blob/main/docs/PERFORMANCE.md">docs/PERFORMANCE.md</a>.</p>
-    <details class="measures">
-      <summary>More of what was measured<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th scope="col">On that MacBook Air</th><th scope="col">Result</th></tr></thead>
-          <tbody>
-            <tr><th scope="row">Opening, cold, with 100 threads</th><td>559 ms <small>from a volume mounted for the first time; 235 and 243 ms after remounting it</small></td></tr>
-            <tr><th scope="row">CPU while idle, window behind others</th><td>0.02 to 0.03 % of one core <small>over 60 seconds, with none to 100 threads</small></td></tr>
-            <tr><th scope="row">CPU while idle, window on screen</th><td>0.13 to 0.20 % of one core <small>over 15 to 30 seconds, with 10 or 100 threads</small></td></tr>
-            <tr><th scope="row">Streaming a two-minute answer</th><td>21 and 25 % of one core in two runs, 57 frames a second <small>each frame's work 1.7 ms at the median, 2.3 ms at the 95th percentile</small></td></tr>
-            <tr><th scope="row">Opening a thread of 10,000 items</th><td>157 ms to its first frame <small>107 ms in an earlier run; scrolling it, 300 frames and none missed</small></td></tr>
-            <tr><th scope="row">The Intel build, under Rosetta on the same Mac</th><td>318 ms to open, warm; 60 MB idle <small>this says what Rosetta costs, not how an Intel Mac does</small></td></tr>
-            <tr><th scope="row">Not measured</th><td>A real Intel Mac, real agents (their own processes come on top), and hours of use <small>the longest run was two minutes</small></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="smallprint">Run it yourself from a clone of the repository: <code>./bin/agent-cli perf</code> builds Trek and takes about 15 minutes.</p>
-    </details>
+    </figure>
   </div>
+  <p class="staged">Pictured with staged threads.</p>
 </section>
 
-<section class="section" id="how" aria-labelledby="how-title">
-  <div class="wrap" data-route>
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>How it works</p></div>
-    <h2 id="how-title">From the first prompt <span class="dim">to finished work.</span></h2>
-    <div class="braid" aria-hidden="true" data-braid>
-      <svg viewBox="0 0 1000 268" preserveAspectRatio="none" focusable="false"><path d="M0 134C50 134 50 59 100 59H820C880 59 880 134 930 134"/><path d="M0 134H930"/><path d="M0 134C50 134 50 209 100 209H820C880 209 880 134 930 134"/></svg>
-      <div class="lane lane-a" data-state="working"><i class="state"></i><span class="hiker hiker-lg" data-pose="2"></span></div>
-      <div class="lane lane-b" data-state="needs"><i class="state"></i><span class="stop"><svg aria-hidden="true"><use href="#way"/></svg></span><span class="flag flag-needs">Needs you</span><span class="flag flag-done">Answered</span><span class="hiker hiker-lg" data-pose="0"></span></div>
-      <div class="lane lane-c" data-state="done"><i class="state"></i><span class="hiker hiker-lg" data-pose="0"></span></div>
-      <img class="camp-mark" src="/assets/img/trek-mark.svg" width="64" height="60" alt="" loading="lazy">
+<section class="band needs" id="inbox">
+  <div class="band-in">
+    <div>
+      <h2>Answer one, and it goes back to work.</h2>
+      <p>Start as many threads as you like and leave them to it. When one stops for an approval, a question or a plan, it moves to the top of the Inbox and says why. Answer it there or from your phone. Finished work waits until you have read it.</p>
+      <p class="note">An example with staged threads. <button type="button" data-replay hidden>Play it again</button></p>
     </div>
-    <ol class="steps">
-      <li class="step" data-step="1"><h3><svg aria-hidden="true"><use href="#stack1"/></svg>Agents set off</h3><p>Start a thread for each piece of work. Each one is an agent working on its own, and several run at once.</p></li>
-      <li class="step" data-step="2"><h3><svg aria-hidden="true"><use href="#stack2"/></svg>One stops and asks</h3><p>When an agent needs an approval, an answer or a plan reviewed, it waits. Its thread goes to the top of your Inbox with the reason in words.</p></li>
-      <li class="step" data-step="3"><h3><svg aria-hidden="true"><use href="#stack3"/></svg>You answer</h3><p>Allow, deny or reply at your desk or from your iPhone, and the agent carries on from where it stopped.</p></li>
-      <li class="step" data-step="4"><h3><svg aria-hidden="true"><use href="#stack4"/></svg>Work comes back to one place</h3><p>Finished threads land in the same Inbox, unread until you have looked at what was done.</p></li>
-    </ol>
-  </div>
-</section>
-
-<section class="section" id="inbox" aria-labelledby="inbox-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>The Inbox</p></div>
-    <h2 id="inbox-title">What needs you <span class="dim">comes first.</span></h2>
-    <div class="split">
-      <div class="prose">
-        <p>The sidebar is an inbox. Threads waiting on an approval, a question or a plan sit at the top, each with the reason in words. A failed turn, failing checks and a sub-agent that is asking are there too. Under them is work that finished while you were elsewhere, unread until you open it.</p>
-        <p><kbd>⌘⇧I</kbd> steps through whatever needs you (<kbd>Ctrl+Shift+I</kbd> on Windows). The menu bar icon and Dock badge on a Mac, and the tray icon and taskbar badge on Windows, say whether Trek is idle, working or needs you.</p>
+    <figure class="day" data-day>
+      <ol class="rows" aria-label="An example Inbox">
+        <li data-id="migrate" data-state="needs"><span class="dot"></span><span class="title">Migrate the schema</span><span class="when num">2m</span><span class="why"><b>Waiting: run ./migrate?</b> · mobile</span></li>
+        <li data-id="tests" data-state="work"><span class="dot"></span><span class="title">Run the full test suite</span><span class="when num">1m 29s</span><span class="why"><b>At work</b> · mobile</span></li>
+        <li data-id="tour" data-state="work"><span class="dot"></span><span class="title">Tour the startup code</span><span class="when num">3m</span><span class="why"><b>At work</b> · atlas-web</span></li>
+      </ol>
+      <div class="ask">
+        <div class="ask-card">
+          <h3>Claude Code wants to run a command</h3>
+          <code>./migrate</code>
+          <div class="pair"><button type="button" data-answer="deny">Deny</button><button type="button" data-answer="allow">Allow</button></div>
+        </div>
       </div>
-      <ul class="legend" aria-label="What the colours mean">
-        <li class="c-amber"><i></i><b>Needs you</b><span>An approval, a question or a plan to review</span></li>
-        <li class="c-red"><i></i><b>Failed</b><span>A turn that ended in an error</span></li>
-        <li class="c-ember"><i></i><b>Working</b><span>With how long it has been at it</span></li>
-        <li class="c-emerald"><i></i><b>Finished</b><span>Unread until you open it</span></li>
-      </ul>
-    </div>
-    <figure class="wide-shot">
-      <div class="shot">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/inbox-night.webp">
-          <img src="/assets/img/inbox-paper.webp" width="2640" height="960" alt="Trek's sidebar and Basecamp. The Inbox lists threads waiting on a plan review, a question and an approval, then one that finished. Basecamp repeats what needs you and what needs review, with the day's counts of threads, turns and tokens." loading="lazy" decoding="async">
-        </picture>
-      </div>
-      <figcaption class="caption"><span class="tag">Example</span>The Inbox in the sidebar, and Basecamp: the same list across a day, a week or all time, with turns, tokens and cost at API prices. A demo project; names are examples.</figcaption>
     </figure>
   </div>
 </section>
 
-<section class="section" id="agents" aria-labelledby="agents-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Agents and models</p></div>
-    <h2 id="agents-title">The agents you already use, <span class="dim">with the logins you already have.</span></h2>
-    <p class="intro">Trek drives each vendor's own command-line tool, so your subscriptions work as they do in the terminal. Trek never reads or stores those credentials. Install and log in to the agents you use, and Trek finds them on your <code>PATH</code>.</p>
-    <dl class="roster">
-      <div><dt>Agents<small>Through each one's own CLI</small></dt><dd>Claude Code, Codex, OpenCode, Cursor, GitHub Copilot, Factory Droid, Kimi, Qwen Code, Grok, Devin, Goose, Amp, Pi <span>and any agent that speaks the Agent Client Protocol.</span></dd></div>
-      <div><dt>API keys<small>Kept in the system keychain</small></dt><dd>Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, xAI, Mistral, Groq <span>and any OpenAI-compatible endpoint.</span></dd></div>
-      <div><dt>Local models<small>On your own machine</small></dt><dd>Ollama, LM Studio, llama.cpp, MLX.</dd></div>
-    </dl>
-    <p class="intro">API and local models get Trek's own tools to read, edit, write and run, behind the same approvals. And agents can consult each other: ask one to review another's plan, and read its answer in the thread.</p>
-  </div>
-</section>
-
-<section class="section" id="iphone" aria-labelledby="iphone-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Trek for iPhone</p></div>
-    <h2 id="iphone-title">Answer from your iPhone, <span class="dim">while the agents keep working at your desk.</span></h2>
-    <div class="split">
-      <div class="prose">
-        <p>The agents keep running on your computer. The phone is the inbox and the remote: every thread and its status, approvals, questions and plans, steering a running turn, starting new threads, Notes and voice input.</p>
-        <p>It pairs with a QR code and connects straight to your computer over your Wi-Fi or Tailscale, with a pinned TLS certificate. No Trek server sits in between. Push notifications go through ntfy, if you turn them on.</p>
-        <p class="note"><b>For now you build the iPhone app yourself.</b> It is built from source in Xcode and needs iOS 26. It is not on the App Store. <a href="https://github.com/dokyit/Trek/blob/main/ios/README.md">How to build it</a>.</p>
-      </div>
-      <figure>
-        <div class="phones">
-          <picture>
-            <source media="(prefers-color-scheme: dark)" srcset="/assets/img/iphone-basecamp-dark.webp">
-            <img src="/assets/img/iphone-basecamp-light.webp" width="576" height="1210" alt="Trek for iPhone, Basecamp: seven threads that need you, each marked Approval, Question, Plan to review or Failed." loading="lazy" decoding="async">
-          </picture>
-          <picture>
-            <source media="(prefers-color-scheme: dark)" srcset="/assets/img/iphone-approval-dark.webp">
-            <img src="/assets/img/iphone-approval-light.webp" width="576" height="1210" alt="Trek for iPhone, a thread where an agent asks to run a command that deletes files, with Deny and Allow buttons." loading="lazy" decoding="async">
-          </picture>
-        </div>
-        <figcaption class="caption"><span class="tag">Example</span>Trek for iPhone in its demo mode. Projects, models and costs are examples.</figcaption>
-      </figure>
+<section class="band loop" id="ios">
+  <div class="band-in">
+    <div class="head">
+      <h2>Your agent can run the app it just built.</h2>
+      <p>On a Mac, Trek hands the agent the iOS Simulator and your iPhone. It builds the app, launches it, reads the screen and taps through its own work, while you watch in the panel beside the thread.</p>
     </div>
+    <figure class="win">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="/assets/img/simulator-night.webp">
+        <img src="/assets/img/simulator-paper.webp" width="1226" height="806" loading="lazy" decoding="async" alt="Trek on a Mac. A thread asks the agent to check the Threads screen on the simulator, and its answer describes what the screen shows. Beside it, Trek's Simulator tool shows an iPhone running that app.">
+      </picture>
+    </figure>
+    <p class="note">Pictured: Trek's own iPhone app in the Simulator, in a staged thread.</p>
   </div>
 </section>
 
-<section class="section" id="ios" aria-labelledby="ios-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>For iOS developers</p></div>
-    <h2 id="ios-title">An agent can use your app <span class="dim">on a real iPhone.</span></h2>
-    <div class="split split-wide">
-      <div class="prose">
-        <p>On a Mac, plug your iPhone in and it appears beside the chat: its screen, its apps and its files. You can tap and type on the picture, and so can the agent. It can install a build, open the app, tap, swipe and type, and look at what happened.</p>
-        <p>Seeing the screen and moving apps and files needs nothing on the phone. Taps go through a small driver that is built with Trek's iPhone app (it needs Xcode and Developer Mode), or over Bluetooth, or through macOS's iPhone Mirroring.</p>
-        <p>The iOS Simulator is beside the chat too. The agent boots a device, installs and launches your app, reads the screen as an outline of elements and taps them by reference, and runs your tests with each result shown in Trek.</p>
-        <p class="note"><b>Mac only.</b> The iPhone and Simulator tools are part of Trek for macOS.</p>
-      </div>
-      <figure class="phonetool">
-        <div class="shot">
-          <picture>
-            <source media="(prefers-color-scheme: dark)" srcset="/assets/img/phonetool-night.webp">
-            <img src="/assets/img/phonetool-paper.webp" width="870" height="1596" alt="Trek's iPhone tool beside a thread: a header naming the iPhone and its iOS version over USB, a strip saying the screen is live and taps are ready, and the phone's screen with a drag being drawn across it." loading="lazy" decoding="async">
-          </picture>
-        </div>
-        <figcaption class="caption"><span class="tag">Example</span>The iPhone tool beside a thread, showing a stand-in phone screen from Trek's demo, not a real device.</figcaption>
-      </figure>
+<section class="band pocket" id="iphone">
+  <div class="band-in">
+    <div>
+      <h2>The phone is the inbox and the remote.</h2>
+      <p>The agents keep running on your computer. Trek for iPhone shows every thread and what state it is in.</p>
+      <ul>
+        <li>Answer approvals, questions and plans.</li>
+        <li>Steer a thread, or start a new one.</li>
+        <li>Use Notes and voice input.</li>
+      </ul>
+      <p class="note">Pictured with a staged thread. Built from source for now; there is no App Store build yet. <a class="text-link" href="https://github.com/dokyit/Trek/blob/main/ios/README.md">How to build it</a></p>
     </div>
+    <figure class="phone">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="/assets/img/iphone-night.webp">
+        <img src="/assets/img/iphone-paper.webp" width="1170" height="2532" loading="lazy" decoding="async" alt="Trek on an iPhone: an agent asks to run a command, with the buttons Deny and Allow.">
+      </picture>
+    </figure>
   </div>
 </section>
 
-<section class="section" id="rules" aria-labelledby="rules-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Permission rules</p></div>
-    <h2 id="rules-title">Say once <span class="dim">what an agent may do.</span></h2>
-    <div class="split split-wide">
-      <figure class="order-first">
-        <div class="shot">
-          <picture>
-            <source media="(prefers-color-scheme: dark)" srcset="/assets/img/rules-night.webp">
-            <img src="/assets/img/rules-paper.webp" width="1380" height="1550" alt="Trek's permission rules: deny git push --force, deny rm -rf, deny edits to .env, ask before git push, allow cargo test. Below, a tester reads the line cargo test and git push --force origin main and says the deny rule decides, at every level." loading="lazy" decoding="async">
-          </picture>
-        </div>
-        <figcaption class="caption"><span class="tag">Example</span>Settings, Permissions, with example rules and the tester.</figcaption>
-      </figure>
-      <div class="prose">
-        <p>Every thread has one of four levels, from <strong>Supervised</strong>, which asks before every edit and command, to <strong>Full access</strong>, which is off until you allow it. Plan mode makes the agent show a plan before it changes anything.</p>
-        <p>Rules sit on top of the levels. Each is a command, a file edit, a web fetch or a tool, set to allow, ask or deny. Deny wins, then ask, then allow, and a deny holds even at Full access.</p>
-        <p>A command rule reads a line the way a shell would, so a rule for <code>rm</code> also catches <code>echo y; rm x</code>. A line Trek can't read counts as matching a deny. The tester shows which rule decides and what happens at each level.</p>
-        <p>From an approval card, <strong>Always allow</strong> writes the rule for you, and you can edit it first.</p>
+<section class="band get" id="install">
+  <div class="band-in">
+    <div class="head">
+      <h2>Free, and yours to read.</h2>
+      <div>
+        <p>Trek is open source under Apache 2.0. It drives each agent's own command-line tool, so your subscriptions work as they do in the terminal.</p>
+        <p class="note"><span data-release>Every release and what changed in it is on GitHub.</span> <a class="text-link" href="https://github.com/dokyit/Trek/releases">All releases</a></p>
       </div>
     </div>
-  </div>
-</section>
-
-<div class="golden">
-<section class="section" id="more" aria-labelledby="more-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Also in the app</p></div>
-    <h2 id="more-title">Everything else <span class="dim">stays beside the thread.</span></h2>
-    <ul class="cards">
-      <li class="card" data-tab="In every thread">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/card-turn-night.webp">
-          <img src="/assets/img/card-turn-paper.webp" width="840" height="472" alt="An agent's turn in Trek: what it ran and read, its answer, and a card listing the two files it edited with an Undo button." loading="lazy" decoding="async">
-        </picture>
-        <div class="card-body"><h3>Undo any turn</h3><p>Each turn lists the files it changed. Review them, or undo the turn. Edit, retry or fork a message and the files roll back with it.</p></div>
+    <ul class="builds">
+      <li>
+        <h3>macOS</h3>
+        <p class="needs-os">13 or later.</p>
+        <div class="links"><a class="btn btn-plain btn-small" data-build="mac-arm" href="https://github.com/dokyit/Trek/releases/latest">Apple silicon <small data-size></small></a><a class="btn btn-plain btn-small" data-build="mac-intel" href="https://github.com/dokyit/Trek/releases/latest">Intel <small data-size></small></a></div>
+        <p class="first">The first launch: the Mac build is signed but not yet notarized, so macOS stops it once. Open System Settings, then Privacy &amp; Security, and choose <b>Open Anyway</b>.</p>
       </li>
-      <li class="card" data-tab="Notes">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/card-notes-night.webp">
-          <img src="/assets/img/card-notes-paper.webp" width="840" height="472" alt="Notes in Trek: Markdown on the left and its preview on the right, with headings, a checklist and a command." loading="lazy" decoding="async">
-        </picture>
-        <div class="card-body"><h3>Notes that stay</h3><p>A Markdown notebook that persists, with pictures, videos and files, and a preview beside what you write. It is on the iPhone too.</p></div>
+      <li>
+        <h3>Windows</h3>
+        <p class="needs-os">11, x64. Without the iOS tools.</p>
+        <div class="links"><a class="btn btn-plain btn-small" data-build="win-setup" href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe">Installer <small data-size></small></a><a class="btn btn-plain btn-small" data-build="win-zip" href="https://github.com/dokyit/Trek/releases/latest">Zip <small data-size></small></a></div>
+        <p class="first">The first launch: the Windows build has no code signature yet, so SmartScreen asks once. Choose <b>More info</b>, then <b>Run anyway</b>.</p>
       </li>
-      <li class="card" data-tab="Basecamp">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="/assets/img/card-basecamp-night.webp">
-          <img src="/assets/img/card-basecamp-paper.webp" width="840" height="472" alt="Basecamp in Trek: three threads that need you, one that needs review, and the day's threads, turns and tokens." loading="lazy" decoding="async">
-        </picture>
-        <div class="card-body"><h3>Basecamp</h3><p>Today, this week or all time across every agent: what needs you, what is ready for review, and turns, tokens, failures and agent time.</p></div>
+      <li>
+        <h3>iPhone</h3>
+        <p class="needs-os">iOS 26. Built from source for now.</p>
+        <div class="links"><a class="btn btn-plain btn-small" href="https://github.com/dokyit/Trek/blob/main/ios/README.md">How to build it</a></div>
       </li>
-    </ul>
-    <p class="caption"><span class="tag">Example</span>Screens from the app running a demo project. Names, notes and numbers are examples.</p>
-    <ul class="more">
-      <li><b>Terminal</b>A real one, next to every thread.</li>
-      <li><b>Browser</b>Element picking, devtools, and agents can drive it.</li>
-      <li><b>Editor</b>Built in. Keep or undo the agent's hunks.</li>
-      <li><b>Worktrees</b>Give a thread its own branch.</li>
-      <li><b>Pull request cards</b>Checks, conflicts and merge, live.</li>
-      <li><b>Search</b>Full-text search and a ⌘K palette.</li>
-      <li><b>Your history</b>Imports Claude Code, Codex and OpenCode.</li>
-      <li><b>Your other machines</b>Start and follow threads on them.</li>
-      <li><b>Computer use and MCP</b>Opt-in, plus your own MCP servers.</li>
-      <li><b>Two threads side by side</b>Each with its own composer and model.</li>
-      <li><b>Signed updates</b>Stable, Beta or Nightly. Never mid-turn.</li>
-      <li><b>Night, Paper and glass</b>Themes for the whole app.</li>
     </ul>
   </div>
 </section>
-</div>
+</main>
 
-<div class="dusk">
-
-<section class="section" id="install" aria-labelledby="install-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Install</p></div>
-    <div class="install-head">
-      <img class="app-icon" src="/assets/img/app-icon.webp" width="112" height="112" alt="Trek's app icon: a cairn of four pale stones on ember orange." loading="lazy" decoding="async">
-      <h2 id="install-title">Download Trek, <span class="dim">and know what the first launch looks like.</span></h2>
+<footer class="foot">
+  <div class="foot-in">
+    <div class="foot-row">
+      <a class="brand" href="/" aria-label="Trek, home"><img src="/assets/img/trek-mark.svg" width="22" height="22" alt="">Trek</a>
+      <a class="text-link" href="https://github.com/dokyit/Trek">GitHub</a>
+      <a class="text-link" href="https://github.com/dokyit/Trek/releases">Releases and changelog</a>
+      <a class="text-link" href="/privacy/">Privacy</a>
+      <a class="text-link" href="https://github.com/dokyit/Trek/blob/main/LICENSE">Apache-2.0 licence</a>
+      <a class="text-link" href="mailto:support@trekdesktop.com">support@trekdesktop.com</a>
     </div>
-    <ul class="tiles">
-      <li class="tile" data-os="mac">
-        <h3>macOS<small>13 or later, Apple silicon or Intel</small></h3>
-        <div class="tile-links">
-          <a data-build="mac-arm" href="https://github.com/dokyit/Trek/releases/latest">Apple silicon, disk image <small data-size></small></a>
-          <a data-build="mac-intel" href="https://github.com/dokyit/Trek/releases/latest">Intel, disk image <small data-size></small></a>
-        </div>
-        <p>Open the disk image and drag Trek to Applications.</p>
-        <p class="first"><b>The first launch</b>The Mac build is signed but not yet notarized, so macOS stops it once. Open System Settings, Privacy &amp; Security, and choose <b>Open Anyway</b>.</p>
-      </li>
-      <li class="tile" data-os="windows">
-        <h3>Windows<small>11, x64</small></h3>
-        <div class="tile-links">
-          <a data-build="win-setup" href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe">Installer <small data-size></small></a>
-          <a data-build="win-zip" href="https://github.com/dokyit/Trek/releases/latest">Portable .zip <small data-size></small></a>
-        </div>
-        <p>Run the installer, or unpack the .zip into a folder of its own. Windows 10 22H2 works on a best-effort basis.</p>
-        <p class="first"><b>The first launch</b>The Windows build has no code signature yet, so SmartScreen asks once. Choose <b>More info</b>, then <b>Run anyway</b>.</p>
-      </li>
-      <li class="tile" data-os="iphone">
-        <h3>iPhone<small>iOS 26, built from source</small></h3>
-        <div class="tile-links">
-          <a href="https://github.com/dokyit/Trek/blob/main/ios/README.md">Build instructions <small>GitHub</small></a>
-        </div>
-        <p>Open <code>ios/Trek.xcodeproj</code> in Xcode 26 or later and run it on your phone.</p>
-        <p class="first"><b>Then pair it</b>In Trek on your computer, open Settings, Phone &amp; Machines, and scan the QR code. The iPhone app is not on the App Store.</p>
-      </li>
-    </ul>
-    <div class="after-install">
-      <p><b>Then your agents.</b> Install and log in to the ones you use: <code>claude</code>, <code>codex</code>, <code>opencode</code> and the rest. Trek finds them on your <code>PATH</code>, and setup offers to install the ones you are missing.</p>
-      <p><b>Updates.</b> Trek updates itself from Settings, Updates, on the Stable, Beta or Nightly channel. Each update is checked against a minisign signature and installed when you restart Trek, never while an agent is working.</p>
-      <p><b>Not yet.</b> There is no Linux build. Trek is 0.x: used every day and moving fast, so expect rough edges.</p>
-    </div>
-    <p class="release"><span data-release>The latest release, its notes and every earlier one are on GitHub.</span> <a href="https://github.com/dokyit/Trek/releases">Release notes</a></p>
-  </div>
-</section>
-
-<section class="section" id="faq" aria-labelledby="faq-title">
-  <div class="wrap">
-    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Questions</p></div>
-    <h2 id="faq-title">Asked before <span class="dim">the download.</span></h2>
-    <div class="faq">
-      <details>
-        <summary>Is it another Electron app?<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-        <div class="answer"><p>No. Trek is written in Rust and drawn on the GPU with GPUI. On an M5 MacBook Air it opens in about 0.2 seconds and idles at 55 MB of memory. <a href="#native">The measurements and their conditions</a> are on this page, and the command that repeats them is in the repository.</p></div>
-      </details>
-      <details>
-        <summary>Is it free?<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-        <div class="answer"><p>Yes. Trek is free and open source under the Apache-2.0 licence. You go on paying the makers of your agents as you do today; Trek uses the logins and API keys you already have.</p></div>
-      </details>
-      <details>
-        <summary>What does it send anywhere?<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-        <div class="answer">
-          <p>Your prompts and code go where they already go: to the agents and model providers you choose, through their own tools or your API keys.</p>
-          <p>Trek asks once whether it may share anonymous usage data. With a yes it sends counts (how often Trek opens, which agents and tools are used), crash and error reports, and the app version, OS and architecture. It never sends prompts, code, file names, paths, transcripts, keys or account emails. With a no it sends nothing, except feedback you choose to send. You can change the answer in Settings, Privacy, which also shows exactly what was sent last.</p>
-          <p>Trek also checks GitHub for its own updates and public package feeds for new versions of your agents' CLIs. The iPhone app talks straight to your computer, and push notifications go through ntfy only if you turn them on. <a href="/privacy/">The privacy page</a> has all of it.</p>
-        </div>
-      </details>
-      <details>
-        <summary>Which agents does it run?<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-        <div class="answer"><p>Claude Code, Codex, OpenCode, Cursor, GitHub Copilot, Factory Droid, Kimi, Qwen Code, Grok, Devin, Goose, Amp and Pi, and any agent that speaks the Agent Client Protocol. It also runs models directly: with API keys for Anthropic, OpenAI, Gemini, OpenRouter, DeepSeek, xAI, Mistral, Groq or any OpenAI-compatible endpoint, and locally through Ollama, LM Studio, llama.cpp or MLX.</p></div>
-      </details>
-      <details>
-        <summary>Does it run on Windows?<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-        <div class="answer"><p>Yes: Windows 11 on x64, with an installer and a portable .zip. A tray icon and taskbar badge take the place of the Mac's menu bar icon and Dock badge, and every command is in the palette (<kbd>Ctrl+K</kbd>). There is no iOS Simulator tool on Windows. Windows 10 22H2 works on a best-effort basis, and there is no Linux build yet.</p></div>
-      </details>
-      <details>
-        <summary>How do I get the iPhone app?<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-        <div class="answer"><p>For now you build it from source: clone the repository, open <code>ios/Trek.xcodeproj</code> in Xcode 26 or later, run it on your iPhone (iOS 26), then pair it in Settings, Phone &amp; Machines. It is not on the App Store or TestFlight. <a href="https://github.com/dokyit/Trek/blob/main/ios/README.md">The build instructions</a> are in the repository.</p></div>
-      </details>
-      <details>
-        <summary>Do I need an account, or new API keys?<svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></summary>
-        <div class="answer"><p>No. Trek has no account of its own. It drives the agent CLIs you have already logged in to, so your subscriptions work as they do in the terminal, and it never reads or stores those credentials. API keys are only for providers you choose to add, and they are kept in the system keychain.</p></div>
-      </details>
-    </div>
-  </div>
-</section>
-
-<section class="camp" aria-labelledby="camp-title">
-  <div class="wrap">
-    <div class="camp-scene" aria-hidden="true"><span class="hiker hiker-lg on-dusk" data-pose="0"></span><img src="/assets/img/trek-mark.svg" width="132" height="123" alt="" loading="lazy"></div>
-    <h2 id="camp-title">Every agent. <span class="dim">One trail.</span></h2>
-    <p class="tagline">Trek is free, open source, and made by one developer, Toby Dokyi.</p>
-    <div class="download" data-download>
-      <div class="download-row">
-        <a class="button" data-dl-primary href="https://github.com/dokyit/Trek/releases/latest"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span data-dl-label>Download Trek</span></a>
-        <a class="button button-quiet" href="#install">Other builds</a>
-      </div>
-      <p class="download-line">Free and open source under Apache-2.0, for macOS 13 or later and Windows 11. <span data-dl-version></span></p>
-    </div>
-  </div>
-</section>
-
-<footer class="footer">
-  <div class="wrap">
-    <div class="footer-row">
-      <nav aria-label="Trek elsewhere">
-        <ul>
-          <li><a href="https://github.com/dokyit/Trek">GitHub</a></li>
-          <li><a href="https://github.com/dokyit/Trek/releases">Releases and changelog</a></li>
-          <li><a href="/privacy/">Privacy</a></li>
-          <li><a href="https://github.com/dokyit/Trek/blob/main/LICENSE">Apache-2.0 licence</a></li>
-          <li><a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a></li>
-        </ul>
-      </nav>
-      <p>© 2026 Toby Dokyi</p>
-    </div>
-    <p class="fine">Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. Their names belong to their owners and are used only to say which agents Trek works with. This site sets no cookies and carries no analytics or trackers. Type: Inter and JetBrains Mono, under the <a href="/assets/fonts/OFL-Inter.txt">SIL Open Font License</a>.</p>
+    <p class="small">© 2026 Toby Dokyi. Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. Their names belong to their owners and are used only to say which agents Trek works with. This site sets no cookies and carries no analytics or trackers. Type: Bricolage Grotesque, Hanken Grotesk and JetBrains Mono, under the <a href="/assets/fonts/OFL-BricolageGrotesque.txt">SIL Open Font License</a>.</p>
   </div>
 </footer>
-
-</div>
-</div>
-</main>
 </body>
 </html>
