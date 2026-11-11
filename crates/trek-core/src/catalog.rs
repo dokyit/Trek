@@ -137,10 +137,13 @@ pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
             ModelInfo::new("gpt-5.6-terra", "Terra", 2, CODEX_EFFORTS),
             ModelInfo::new("gpt-6-astra", "Astra", 3, CODEX_EFFORTS),
         ],
-        AgentId::Direct(p) if p == MOCK_PROVIDER => vec![
-            ModelInfo::new("mock-swift", "Mock Swift", 0, &[Low, Medium, High]),
-            ModelInfo::new("mock-deep", "Mock Deep", 1, &[Low, Medium, High, Max]),
-        ],
+        AgentId::Direct(p) if p == MOCK_PROVIDER => {
+            let names = mock_names(demo_dress().as_ref());
+            vec![
+                ModelInfo::new("mock-swift", &names.swift, 0, &[Low, Medium, High]),
+                ModelInfo::new("mock-deep", &names.deep, 1, &[Low, Medium, High, Max]),
+            ]
+        }
         AgentId::Direct(p) if p == MOCK_RELAY_PROVIDER => vec![ModelInfo::new(
             "relay-swift",
             "Relay Swift",
@@ -315,9 +318,56 @@ pub fn is_mock(provider: &str) -> bool {
     provider == MOCK_PROVIDER || provider == MOCK_RELAY_PROVIDER
 }
 
+/// The names the scripted mock agent goes by: itself and its two models.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DemoDress {
+    pub agent: String,
+    pub swift: String,
+    pub deep: String,
+}
+
+/// The demo dress, when one is on. Only a `shots` build's `dress` command sets it
+/// (`crates/trek-app/src/shots.rs`), so a whole window can be pictured for the website and the
+/// README without the word "Mock" in it. Nothing but the names changes: the agent is still the
+/// scripted one, with no process and no network, and such pictures are captioned as examples.
+static DEMO_DRESS: std::sync::RwLock<Option<DemoDress>> = std::sync::RwLock::new(None);
+
+/// Put the demo dress on (`Some`) or take it off (`None`).
+pub fn set_demo_dress(dress: Option<DemoDress>) {
+    *DEMO_DRESS.write().unwrap_or_else(|e| e.into_inner()) = dress;
+}
+
+/// The demo dress that's on, if any.
+pub fn demo_dress() -> Option<DemoDress> {
+    DEMO_DRESS.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// What the mock agent and its models are called: the dress's names, else its own.
+pub fn mock_names(dress: Option<&DemoDress>) -> DemoDress {
+    dress.cloned().unwrap_or_else(|| DemoDress {
+        agent: "Mock agent".into(),
+        swift: "Mock Swift".into(),
+        deep: "Mock Deep".into(),
+    })
+}
+
+/// A `dress` command's argument: `Agent|Fast model|Deep model`, each trimmed and none empty.
+pub fn parse_demo_dress(arg: &str) -> Option<DemoDress> {
+    let mut parts = arg.split('|').map(str::trim);
+    let (agent, swift, deep) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || [agent, swift, deep].iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    Some(DemoDress {
+        agent: agent.into(),
+        swift: swift.into(),
+        deep: deep.into(),
+    })
+}
+
 pub fn provider_display_name(id: &str) -> String {
     if id == MOCK_PROVIDER {
-        return "Mock agent".into();
+        return mock_names(demo_dress().as_ref()).agent;
     }
     if id == MOCK_RELAY_PROVIDER {
         return "Mock relay".into();
@@ -621,6 +671,42 @@ pub fn added_agent(id: &str) -> Option<AddedAgent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dress changes what the mock agent is called and nothing else, and a malformed
+    /// `dress` argument is refused. (The names are read through `mock_names`, so this doesn't
+    /// touch the dress other tests may be reading.)
+    #[test]
+    fn the_mock_agent_takes_a_demo_dress_names_and_only_names() {
+        let own = mock_names(None);
+        assert_eq!(
+            (own.agent.as_str(), own.swift.as_str(), own.deep.as_str()),
+            ("Mock agent", "Mock Swift", "Mock Deep")
+        );
+        let dress = parse_demo_dress(" Claude Code | Opus 4.8 |Fable 5 ").unwrap();
+        assert_eq!(
+            dress,
+            DemoDress {
+                agent: "Claude Code".into(),
+                swift: "Opus 4.8".into(),
+                deep: "Fable 5".into()
+            }
+        );
+        assert_eq!(mock_names(Some(&dress)), dress);
+        for bad in ["", "Claude Code", "a|b", "a||c", "a|b|c|d", " | | "] {
+            assert_eq!(parse_demo_dress(bad), None, "{bad:?}");
+        }
+        // Undressed, the catalogue says what it always has, with the same model ids.
+        assert_eq!(demo_dress(), None);
+        assert_eq!(provider_display_name(MOCK_PROVIDER), "Mock agent");
+        let models = default_models(&AgentId::Direct(MOCK_PROVIDER.into()));
+        assert_eq!(
+            models
+                .iter()
+                .map(|m| (m.id.as_str(), m.name.as_str()))
+                .collect::<Vec<_>>(),
+            [("mock-swift", "Mock Swift"), ("mock-deep", "Mock Deep")]
+        );
+    }
 
     #[test]
     fn claude_presets_run_fast_to_smart() {
