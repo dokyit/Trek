@@ -4,24 +4,35 @@
 //! the phone matches against the Mac it paired with, and its name (`name=`), so another Mac on the
 //! same Wi-Fi can offer it by name when pairing a machine; the connection is still TLS pinned to
 //! this Mac's certificate, so a record that lies gets nowhere.
+//!
+//! A Mac registers it with its mDNS responder (dns_sd's DNSServiceRegister); Windows with its own
+//! (windns's DnsServiceRegister, Windows 10 1809 and later), which answers for the PC's name on
+//! `.local` too. Elsewhere nothing is announced.
 
-// Only a Mac announces itself (DNSServiceRegister); elsewhere the record is built for the tests.
+// Elsewhere the record is built only for the tests; Windows gives the system its entries.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 /// The service type phones browse for.
 pub const SERVICE: &str = "_trek._tcp";
 
-/// The TXT record: `id=<host id>` and `name=<this Mac's name>`, as DNS-SD wants it (each entry
-/// led by its length, at most 255 bytes: a longer name is cut at a character boundary).
-pub fn txt_record(host_id: &str, name: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    for entry in [format!("id={host_id}"), format!("name={name}")] {
+/// The TXT record's entries, `id=<host id>` and `name=<this Mac's name>`, each at most the 255
+/// bytes DNS-SD allows (a longer name is cut at a character boundary).
+fn entries(host_id: &str, name: &str) -> [String; 2] {
+    [format!("id={host_id}"), format!("name={name}")].map(|entry| {
         let mut end = entry.len().min(255);
         while !entry.is_char_boundary(end) {
             end -= 1;
         }
-        out.push(end as u8);
-        out.extend_from_slice(&entry.as_bytes()[..end]);
+        entry[..end].to_string()
+    })
+}
+
+/// The TXT record as DNS-SD wants it: each of its entries led by its length.
+pub fn txt_record(host_id: &str, name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for entry in entries(host_id, name) {
+        out.push(entry.len() as u8);
+        out.extend_from_slice(entry.as_bytes());
     }
     out
 }
@@ -30,6 +41,8 @@ pub fn txt_record(host_id: &str, name: &str) -> Vec<u8> {
 pub struct Advert {
     #[cfg(target_os = "macos")]
     sd_ref: ffi::DNSServiceRef,
+    #[cfg(windows)]
+    registration: Option<win::Registration>,
 }
 
 // The handle is only deallocated, on whichever thread drops it.
@@ -70,9 +83,233 @@ impl Advert {
         Some(Self { sd_ref })
     }
 
-    #[cfg(not(target_os = "macos"))]
+    /// Announce the server on `port` under this PC's name (Windows' own responder answers for
+    /// the PC's `.local` name). `None` when it refused it, or this Windows has no
+    /// DnsServiceRegister.
+    #[cfg(windows)]
+    pub fn new(name: &str, host_id: &str, port: u16) -> Option<Self> {
+        let registration = win::Registration::new(name, host_id, port)?;
+        Some(Self {
+            registration: Some(registration),
+        })
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
     pub fn new(_name: &str, _host_id: &str, _port: u16) -> Option<Self> {
         None
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Advert {
+    fn drop(&mut self) {
+        if let Some(registration) = self.registration.take() {
+            registration.withdraw();
+        }
+    }
+}
+
+/// windns.h's service registration (dnsapi.dll), declared here as dns_sd's is for the Mac.
+#[cfg(windows)]
+mod win {
+    use std::ffi::c_void;
+    use std::mem::ManuallyDrop;
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    const DNS_QUERY_REQUEST_VERSION1: u32 = 1;
+    /// What DnsServiceRegister and DnsServiceDeRegister return when they'll answer by callback.
+    const DNS_REQUEST_PENDING: u32 = 9506;
+    /// How long a withdrawal may take to be answered before what it used is kept for good.
+    const WITHDRAW_WAIT: Duration = Duration::from_secs(5);
+
+    type Complete =
+        unsafe extern "system" fn(status: u32, context: *const c_void, instance: *const c_void);
+
+    /// DNS_SERVICE_REGISTER_REQUEST.
+    #[repr(C)]
+    struct Request {
+        version: u32,
+        interface_index: u32,
+        instance: *mut c_void,
+        callback: Option<Complete>,
+        context: *mut c_void,
+        credentials: *mut c_void,
+        unicast: i32,
+    }
+
+    #[link(name = "dnsapi", kind = "raw-dylib")]
+    unsafe extern "system" {
+        #[allow(clippy::too_many_arguments)]
+        fn DnsServiceConstructInstance(
+            service: *const u16,
+            host: *const u16,
+            ip4: *const u32,
+            ip6: *const c_void,
+            port: u16,
+            priority: u16,
+            weight: u16,
+            properties: u32,
+            keys: *const *const u16,
+            values: *const *const u16,
+        ) -> *mut c_void;
+        fn DnsServiceFreeInstance(instance: *const c_void);
+        fn DnsServiceRegister(request: *const Request, cancel: *mut c_void) -> u32;
+        fn DnsServiceDeRegister(request: *const Request, cancel: *mut c_void) -> u32;
+    }
+
+    /// What the responder's answers come back to: the registration's, then the withdrawal's.
+    struct Heard {
+        /// The instance the request carries. The responder may hand it back in an answer, which
+        /// isn't the answer's to free; an instance of its own it hands over is.
+        ours: *mut c_void,
+        answers: Mutex<u32>,
+        changed: Condvar,
+    }
+
+    /// An answer from the responder, on one of its threads.
+    unsafe extern "system" fn heard(status: u32, context: *const c_void, instance: *const c_void) {
+        // SAFETY: `context` is the registration's `Heard`, which stays until both its answers
+        // came (`withdraw`), or for good.
+        let heard = unsafe { &*context.cast::<Heard>() };
+        if !instance.is_null() && instance != heard.ours.cast_const() {
+            // SAFETY: an instance the responder made for this answer, given to us to free.
+            unsafe { DnsServiceFreeInstance(instance) };
+        }
+        if status != 0 {
+            tracing::warn!("phone server: mDNS registration answered {status}");
+        }
+        *heard.answers.lock().unwrap() += 1;
+        heard.changed.notify_all();
+    }
+
+    /// This PC's name on the network, as `.local` names it.
+    fn host_name() -> Option<String> {
+        use windows_sys::Win32::System::SystemInformation::{
+            ComputerNameDnsHostname, GetComputerNameExW,
+        };
+        let mut len = 0u32;
+        // SAFETY: a size query (no buffer), then a buffer of the size it gave.
+        unsafe { GetComputerNameExW(ComputerNameDnsHostname, std::ptr::null_mut(), &mut len) };
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize];
+        // SAFETY: as above; `len` is the buffer's size in characters.
+        let ok = unsafe { GetComputerNameExW(ComputerNameDnsHostname, buf.as_mut_ptr(), &mut len) };
+        let name = String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())]);
+        (ok != 0 && !name.is_empty()).then_some(name)
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+
+    /// The service registered: what the responder holds on to, kept until it lets go.
+    pub struct Registration {
+        request: Box<Request>,
+        heard: Box<Heard>,
+    }
+
+    // Raw pointers that only the responder's calls use, from whichever thread.
+    unsafe impl Send for Registration {}
+
+    impl Registration {
+        pub fn new(name: &str, host_id: &str, port: u16) -> Option<Self> {
+            // The instance name is the service name's first label: a dot would split it.
+            let label = name.replace(['.', '\0'], " ");
+            let service = wide(&format!("{}.{}.local", label.trim(), super::SERVICE));
+            let host = wide(&format!("{}.local", host_name()?));
+            let (keys, values): (Vec<Vec<u16>>, Vec<Vec<u16>>) = super::entries(host_id, name)
+                .iter()
+                .map(|e| {
+                    let (k, v) = e.split_once('=').unwrap_or((e.as_str(), ""));
+                    (wide(k), wide(v))
+                })
+                .unzip();
+            let keys: Vec<*const u16> = keys.iter().map(|k| k.as_ptr()).collect();
+            let values: Vec<*const u16> = values.iter().map(|v| v.as_ptr()).collect();
+            // SAFETY: every string is NUL-terminated and outlives the call, which copies them
+            // into the instance (freed with DnsServiceFreeInstance). No addresses: the system
+            // answers for the PC's own name.
+            let ours = unsafe {
+                DnsServiceConstructInstance(
+                    service.as_ptr(),
+                    host.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    port,
+                    0,
+                    0,
+                    keys.len() as u32,
+                    keys.as_ptr(),
+                    values.as_ptr(),
+                )
+            };
+            if ours.is_null() {
+                tracing::warn!("phone server: couldn't make the mDNS record");
+                return None;
+            }
+            let heard = Box::new(Heard {
+                ours,
+                answers: Mutex::new(0),
+                changed: Condvar::new(),
+            });
+            let request = Box::new(Request {
+                version: DNS_QUERY_REQUEST_VERSION1,
+                interface_index: 0,
+                instance: ours,
+                callback: Some(self::heard),
+                context: (&*heard as *const Heard).cast_mut().cast(),
+                credentials: std::ptr::null_mut(),
+                unicast: 0,
+            });
+            // SAFETY: the request, its instance and its context are boxed and live until the
+            // registration is withdrawn and that's answered (`withdraw`).
+            let status = unsafe { DnsServiceRegister(&*request, std::ptr::null_mut()) };
+            if status != DNS_REQUEST_PENDING {
+                tracing::warn!("phone server: mDNS registration failed ({status})");
+                // Nothing was registered, so nothing will answer.
+                // SAFETY: the instance made above, used by nothing now.
+                unsafe { DnsServiceFreeInstance(ours) };
+                return None;
+            }
+            Some(Self { request, heard })
+        }
+
+        /// Take the service off the network. On a thread of its own (the answer comes by
+        /// callback, and the UI mustn't wait for it); what the responder used is freed once
+        /// both answers came, else kept for good (it's small, and a late answer finds it there).
+        pub fn withdraw(self) {
+            let me = ManuallyDrop::new(self);
+            let _ = std::thread::Builder::new()
+                .name("trek-mdns-withdraw".into())
+                .spawn(move || {
+                    // SAFETY: the request that registered, still alive.
+                    let status =
+                        unsafe { DnsServiceDeRegister(&*me.request, std::ptr::null_mut()) };
+                    let deadline = Instant::now() + WITHDRAW_WAIT;
+                    let mut answers = me.heard.answers.lock().unwrap();
+                    while status == DNS_REQUEST_PENDING && *answers < 2 {
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            break;
+                        }
+                        answers = me.heard.changed.wait_timeout(answers, left).unwrap().0;
+                    }
+                    let done = status == DNS_REQUEST_PENDING && *answers >= 2;
+                    drop(answers);
+                    if !done {
+                        tracing::warn!("phone server: mDNS withdrawal unanswered ({status})");
+                        return;
+                    }
+                    let me = ManuallyDrop::into_inner(me);
+                    // SAFETY: the instance made in `new`; both answers came, so the responder
+                    // has let go of it.
+                    unsafe { DnsServiceFreeInstance(me.heard.ours) };
+                    drop(me);
+                });
+        }
     }
 }
 

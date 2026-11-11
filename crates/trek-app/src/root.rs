@@ -1290,9 +1290,10 @@ pub fn open_main(workspace: Entity<Workspace>, focus: bool, cx: &mut App) -> any
         }
         // Where the app ends with its main window, its close button is the Quit command, the
         // same way out as the menu's: `quit` closes the windows itself and ends the app after.
+        // With agents at work it asks first (`close_main`).
         if cx.has_global::<QuitWithMainWindow>() {
-            window.on_window_should_close(cx, |_, cx| {
-                quit(cx);
+            window.on_window_should_close(cx, |window, cx| {
+                close_main(window, cx);
                 false
             });
         }
@@ -1324,6 +1325,10 @@ fn database_error(error: &str, window: &mut Window, cx: &mut App) {
 
 /// Bring the main window forward, reopening it if it was closed.
 pub fn show_main(workspace: Entity<Workspace>, cx: &mut App) {
+    // Trek is on screen again: no longer working on with its windows closed.
+    if cx.has_global::<InBackground>() {
+        cx.remove_global::<InBackground>();
+    }
     let main = workspace.read(cx).main_window;
     if main.is_some_and(|m| {
         m.update(cx, |_, window, cx| {
@@ -1404,8 +1409,157 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                 }
             })
             .unwrap_or(false);
-        if closed_main && cx.has_global::<QuitWithMainWindow>() {
+        if closed_main && cx.has_global::<QuitWithMainWindow>() && !cx.has_global::<InBackground>()
+        {
             cx.dispatch_action(&crate::Quit);
+        }
+    })
+    .detach();
+}
+
+/// The main window's close button where the app ends with it (Windows, which has no Dock to keep
+/// Trek up with its windows closed): Quit. With an agent at work, or one being updated, it asks
+/// first: Trek can carry on with its windows closed and quit once that's done (`keep_working`),
+/// as closing the Mac's window lets agents carry on; or quit now, stopping it.
+pub fn close_main(window: &mut Window, cx: &mut App) {
+    let ws = crate::workspace::workspace_global(cx);
+    let (titles, updating) = {
+        let ws = ws.read(cx);
+        let titles: Vec<String> = ws
+            .working_threads()
+            .iter()
+            .map(|t| t.title.clone())
+            .collect();
+        (titles, ws.agent_updates.running())
+    };
+    // The Quit command, as the menu's is (`quit`), once the window's own update is over: an
+    // action dispatched inside it couldn't reach the window, and would be lost.
+    let Some((title, detail)) = still_working(&titles, updating) else {
+        cx.defer(|cx| cx.dispatch_action(&crate::Quit));
+        return;
+    };
+    let answer = window.prompt(
+        PromptLevel::Info,
+        &title,
+        Some(&detail),
+        &["Keep Working", "Quit", "Cancel"],
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        let choice = answer.await;
+        let _ = cx.update(|cx| match choice {
+            Ok(0) => keep_working(BACKGROUND_GRACE, cx),
+            Ok(1) => cx.defer(|cx| cx.dispatch_action(&crate::Quit)),
+            _ => {}
+        });
+    })
+    .detach();
+}
+
+/// What closing the main window would stop, as the question `close_main` asks it (title, detail):
+/// the threads at work (`titles`), and an agent's update `updating`. `None` when nothing would.
+pub fn still_working(titles: &[String], updating: bool) -> Option<(String, String)> {
+    let quoted = |t: &String| format!("“{t}”");
+    // What's at work, and the words that stand for it after.
+    let (title, work, it, done) = match titles {
+        [] if updating => (
+            "An agent is being updated",
+            "Trek is updating an agent.".to_string(),
+            "it",
+            "it's",
+        ),
+        [] => return None,
+        [one] => (
+            "An agent is still working",
+            format!("An agent is working on {}.", quoted(one)),
+            "it",
+            "it's",
+        ),
+        [a, b] => (
+            "Agents are still working",
+            format!("Agents are working on {} and {}.", quoted(a), quoted(b)),
+            "them",
+            "they're",
+        ),
+        [a, b, rest @ ..] => (
+            "Agents are still working",
+            format!(
+                "Agents are working on {}, {} and {} more.",
+                quoted(a),
+                quoted(b),
+                rest.len()
+            ),
+            "them",
+            "they're",
+        ),
+    };
+    Some((
+        title.to_string(),
+        format!(
+            "{work} Trek can keep {it} going with its windows closed, and quit once {done} done; opening Trek meanwhile brings the window back. Quitting now stops {it}."
+        ),
+    ))
+}
+
+/// Set while Trek works on with its windows closed (`keep_working`), until a window of its is
+/// back on screen: with it, the main window closing isn't the Quit command. It carries the
+/// number of the `keep_working` that set it, so a watcher from an earlier one knows to stop.
+struct InBackground(u64);
+
+impl Global for InBackground {}
+
+/// How long Trek waits, its windows closed, once its agents are done before it quits: the banners
+/// saying they're done can still bring a thread back (a click on one reaches a Trek that runs).
+pub const BACKGROUND_GRACE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// How often a Trek working in the background looks to see whether it's done.
+const BACKGROUND_TICK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Close Trek's windows and let its agents finish: it quits once nothing has been at work for
+/// `grace`, unless a window of its opens meanwhile (a launch of Trek, a banner clicked).
+pub fn keep_working(grace: std::time::Duration, cx: &mut App) {
+    static TIMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let this = TIMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    cx.set_global(InBackground(this));
+    for window in cx.windows() {
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+    }
+    cx.spawn(async move |cx| {
+        let mut idle_since: Option<std::time::Instant> = None;
+        loop {
+            cx.background_executor().timer(BACKGROUND_TICK).await;
+            let done = cx.update(|cx| {
+                // The main window is back (`show_main`), or closed again since and watched by a
+                // later `keep_working`: nothing for this one to watch.
+                if cx.try_global::<InBackground>().map(|b| b.0) != Some(this) {
+                    return true;
+                }
+                // A thread's own window is (a banner clicked): not while it's open.
+                if !cx.windows().is_empty() {
+                    idle_since = None;
+                    return false;
+                }
+                let ws = crate::workspace::workspace_global(cx);
+                let busy = {
+                    let ws = ws.read(cx);
+                    !ws.working_threads().is_empty() || ws.agent_updates.running()
+                };
+                let now = std::time::Instant::now();
+                if busy {
+                    idle_since = None;
+                    return false;
+                }
+                let since = *idle_since.get_or_insert(now);
+                if now.duration_since(since) < grace {
+                    return false;
+                }
+                cx.remove_global::<InBackground>();
+                cx.dispatch_action(&crate::Quit);
+                true
+            });
+            if done {
+                break;
+            }
         }
     })
     .detach();

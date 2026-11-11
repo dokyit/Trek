@@ -7,7 +7,8 @@
 //! - Screen & System Audio Recording: computer use's screenshots of other apps, the picture of
 //!   background computer use, and snapshots of a window.
 //! - Microphone and Speech Recognition: dictation in the composer (`trek-dictate`); Speech also
-//!   transcribes videos for `watch_video`.
+//!   transcribes videos for `watch_video`. (On Windows these are Settings switches dictation
+//!   reads for itself: the microphone for desktop apps, and online speech recognition.)
 //! - Notifications: banners when a thread needs you or finishes.
 //! - Full Disk Access (optional): agents run as Trek, so a project in Documents, Desktop or
 //!   iCloud Drive otherwise brings one macOS prompt per folder.
@@ -118,8 +119,17 @@ impl Permission {
         matches!(self, Permission::FullDiskAccess | Permission::LocalNetwork)
     }
 
-    /// The System Settings pane it's granted in.
+    /// The System Settings pane it's granted in. On Windows, the Settings page: Windows asks for
+    /// none of the Mac's others, and they open its privacy settings at large.
     pub fn pane(self) -> &'static str {
+        if cfg!(windows) {
+            return match self {
+                Permission::Microphone => "ms-settings:privacy-microphone",
+                Permission::SpeechRecognition => "ms-settings:privacy-speech",
+                Permission::Notifications => "ms-settings:notifications",
+                _ => "ms-settings:privacy",
+            };
+        }
         match self {
             Permission::Accessibility => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
@@ -464,13 +474,77 @@ mod imp {
     }
 }
 
-/// Windows and Linux: nothing to ask (the step isn't shown).
+/// Windows and Linux: nothing to ask (the step isn't shown). Windows' microphone and online
+/// speech recognition switches can be read, though, as dictation reads them: they say where
+/// they stand.
 #[cfg(all(not(target_os = "macos"), not(any(test, feature = "test-support"))))]
 mod imp {
     use super::{Permission, Status};
 
-    pub fn status(_: Permission) -> Status {
+    pub fn status(p: Permission) -> Status {
+        #[cfg(windows)]
+        {
+            let read = |a: trek_dictate::Access| match a {
+                trek_dictate::Access::Granted => Status::Granted,
+                trek_dictate::Access::NotAsked => Status::NotYet,
+                trek_dictate::Access::Denied => Status::Denied,
+                trek_dictate::Access::Unavailable => Status::Unknown,
+            };
+            match p {
+                Permission::Microphone => return read(trek_dictate::mic_access()),
+                Permission::SpeechRecognition => return read(trek_dictate::speech_access()),
+                Permission::Notifications => return notifications(),
+                _ => {}
+            }
+        }
+        let _ = p;
         Status::Granted
+    }
+
+    /// Whether Windows lets Trek's banners through: notifications off for every app (Settings ›
+    /// System › Notifications), or for Trek's app id alone, is a refusal. Do Not Disturb isn't:
+    /// banners wait in the notification center then.
+    #[cfg(windows)]
+    fn notifications() -> Status {
+        let off = |key: &str, value: &str| dword(key, value) == Some(0);
+        let app = format!(
+            r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\{}",
+            crate::winsys::APP_ID
+        );
+        if off(
+            r"Software\Microsoft\Windows\CurrentVersion\PushNotifications",
+            "ToastEnabled",
+        ) || off(&app, "Enabled")
+        {
+            Status::Denied
+        } else {
+            Status::Granted
+        }
+    }
+
+    /// A DWORD under HKEY_CURRENT_USER; `None` when it isn't there.
+    #[cfg(windows)]
+    fn dword(key: &str, value: &str) -> Option<u32> {
+        use windows_sys::Win32::System::Registry::{
+            HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW,
+        };
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (key, value) = (wide(key), wide(value));
+        let mut data = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: NUL-terminated names; `data` is the `size` bytes a DWORD takes.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_DWORD,
+                std::ptr::null_mut(),
+                (&mut data as *mut u32).cast(),
+                &mut size,
+            )
+        };
+        (status == 0).then_some(data)
     }
 
     pub fn prompt(_: Permission) {}
@@ -563,7 +637,11 @@ mod tests {
         assert!(
             Permission::ALL
                 .iter()
-                .all(|p| p.pane().starts_with("x-apple.systempreferences:"))
+                .all(|p| p.pane().starts_with(if cfg!(windows) {
+                    "ms-settings:"
+                } else {
+                    "x-apple.systempreferences:"
+                }))
         );
     }
 

@@ -927,31 +927,11 @@ fn upsert(items: &mut Vec<tr::Item>, item: tr::Item) {
     }
 }
 
-/// This computer's name, as the machines it pairs with list it among their devices.
+/// This computer's name, as the machines it pairs with list it among their devices: the one the
+/// iPhone app pairs with too (`remote::computer_name`), so the two never name it apart (Windows'
+/// `COMPUTERNAME` is the upper-case NetBIOS name, "T-BOOK" for the PC called "T-Book").
 pub(crate) fn this_name() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        let name = trek_core::procs::command("scutil")
-            .args(["--get", "ComputerName"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-        if let Some(name) = name.filter(|n| !n.is_empty()) {
-            return name;
-        }
-    }
-    for var in ["COMPUTERNAME", "HOSTNAME"] {
-        if let Some(name) = std::env::var(var).ok().filter(|n| !n.trim().is_empty()) {
-            return name;
-        }
-    }
-    let words = crate::words::words();
-    let mut name = words.computer.to_string();
-    if let Some(first) = name.get_mut(..1) {
-        first.make_ascii_uppercase();
-    }
-    name
+    crate::remote::computer_name()
 }
 
 // ---------------------------------------------------------------------------------------------

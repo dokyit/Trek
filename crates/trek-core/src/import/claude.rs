@@ -302,8 +302,13 @@ fn index_file(
                     prompts += 1;
                     first_prompt.get_or_insert(c);
                 }
-                if model.is_none() {
-                    model = v["message"]["model"].as_str().map(String::from);
+                // An API error's reply is written as model "<synthetic>": not the thread's model.
+                if model.is_none()
+                    && let Some(m) = v["message"]["model"]
+                        .as_str()
+                        .filter(|m| !m.starts_with('<'))
+                {
+                    model = Some(m.to_string());
                     effort = v["effort"].as_str().and_then(Effort::parse);
                 }
             }

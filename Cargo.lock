@@ -9363,6 +9363,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "trash",
+ "trek-job",
  "trek-test-fixtures",
  "trek-update",
  "uuid",
@@ -9383,6 +9384,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-speech",
  "trek-words",
+ "windows 0.62.2",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]
@@ -9539,6 +9542,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trek-parity"
+version = "0.4.49"
+dependencies = [
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+ "walkdir",
+]
+
+[[package]]
 name = "trek-perf"
 version = "0.4.49"
 dependencies = [
@@ -9557,6 +9569,8 @@ dependencies = [
  "plist",
  "serde_json",
  "tokio",
+ "trek-words",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -206,6 +206,102 @@ pub const TOOL_NAMES: [&str; 17] = [
     "phone_release",
 ];
 
+/// The tools a PC serves (Windows reaches the phone through Apple Mobile Device Service): its
+/// apps and files, how it's connected, and letting go. Its screen and taps need the Mac for now
+/// ([`on_a_mac`]).
+pub const PC_TOOL_NAMES: [&str; 8] = [
+    "phone_status",
+    "phone_apps",
+    "phone_install",
+    "phone_files",
+    "phone_push_file",
+    "phone_pull_file",
+    "phone_remove_file",
+    "phone_release",
+];
+
+/// What the agent is told about the tools on a PC.
+pub const PC_INSTRUCTIONS: &str = "The user's real iPhone, plugged into this PC. Here Trek reaches its apps and files over the cable (or Wi-Fi): phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file. Seeing its screen and tapping it need Trek on a Mac for now, so there are no screenshots or taps here. Start with phone_status: it says whether the iPhone is ready, or the one thing the user must do first; ask them rather than retrying. The user watches in Trek's iPhone tool. One agent uses the phone at a time: call phone_release when you're done with it. This is the user's own phone: never delete or overwrite its files unless the user asked for exactly that. If a tool says the user took over the iPhone, stop using it and wait for them.";
+
+/// The tools a PC serves, as `(name, description, input schema)`, in its words.
+pub fn pc_tools() -> Vec<(&'static str, &'static str, Value)> {
+    let none = object(json!({}), &[]);
+    let app = json!({ "type": "string", "description": "An app's bundle id, to work in its Documents instead (apps with file sharing; see phone_apps)." });
+    let mac = tools();
+    let same = |name: &str| {
+        mac.iter()
+            .find(|t| t.0 == name)
+            .cloned()
+            .expect("a phone tool")
+    };
+    vec![
+        (
+            "phone_status",
+            "What Trek's iPhone tool shows, in the same words: the phone (name, iOS, USB or Wi-Fi), that its apps and files are ready here (its screen and taps need Trek on a Mac for now), AssistiveTouch, and which agent holds it; or the one thing the user must do first, under To do.",
+            none.clone(),
+        ),
+        same("phone_apps"),
+        (
+            "phone_install",
+            "Install an app on the iPhone over the cable: a .ipa on this PC, signed for this iPhone (development, ad hoc or enterprise). App Store apps install from the App Store app instead. Asks the user first unless the thread has full access.",
+            object(
+                json!({ "path": { "type": "string", "description": "The .ipa on this PC." } }),
+                &["path"],
+            ),
+        ),
+        same("phone_files"),
+        (
+            "phone_push_file",
+            "Copy a file from this PC to the iPhone: into an app's Documents with app (it shows in that app, and in Files › On My iPhone when the app allows), or the media folder (/Downloads; not /DCIM). May ask the user first, by the thread's access level.",
+            object(
+                json!({
+                    "local": { "type": "string", "description": "The file on this PC." },
+                    "remote": { "type": "string", "description": "Where on the iPhone, e.g. /Downloads/notes.txt or /Documents/notes.txt with app." },
+                    "app": app.clone()
+                }),
+                &["local", "remote"],
+            ),
+        ),
+        (
+            "phone_pull_file",
+            "Copy a file from the iPhone to this PC (e.g. a photo under /DCIM, or a file in an app's Documents with app).",
+            object(
+                json!({
+                    "remote": { "type": "string" },
+                    "local": { "type": "string", "description": "Where on this PC." },
+                    "app": app
+                }),
+                &["remote", "local"],
+            ),
+        ),
+        same("phone_remove_file"),
+        (
+            "phone_release",
+            "Let go of the iPhone when you're done, so another agent (or the user) can use it.",
+            none,
+        ),
+    ]
+}
+
+/// Whether a PC serves `method` (its apps and files; not its screen or taps).
+pub fn pc_serves(method: &str) -> bool {
+    PC_TOOL_NAMES.contains(&method)
+}
+
+/// What a PC answers for a phone tool it doesn't serve: the iPhone's screen and taps need Trek
+/// on a Mac for now, and what there is here instead.
+pub fn on_a_mac(method: &str) -> String {
+    let what = match method {
+        "phone_screenshot" => "Seeing the iPhone's screen",
+        "phone_elements" | "phone_wait" => "Reading the iPhone's screen",
+        "phone_open_app" => "Opening an app on the iPhone",
+        _ => "Tapping and typing on the iPhone",
+    };
+    format!(
+        "{what} needs Trek on a Mac for now. On this PC Trek reaches the iPhone's apps and files (phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file), and phone_status says how it's connected."
+    )
+}
+
 /// Whether `method` is one of the phone tools (a request Trek's iPhone tool answers).
 pub fn is_method(method: &str) -> bool {
     TOOL_NAMES.contains(&method)
@@ -315,6 +411,59 @@ mod tests {
         );
         assert_eq!(label("Bash"), None);
         assert!(is_method("phone_release") && !is_method("browser_click"));
+    }
+
+    /// A PC serves the apps and files, in its own words: nothing of the Mac's routes, and the
+    /// same schemas where the words are the same.
+    #[test]
+    fn a_pc_serves_the_apps_and_files_in_its_own_words() {
+        let pc = pc_tools();
+        let names: Vec<&str> = pc.iter().map(|t| t.0).collect();
+        assert_eq!(names, PC_TOOL_NAMES);
+        assert!(PC_TOOL_NAMES.iter().all(|t| TOOL_NAMES.contains(t)));
+        let mac = tools();
+        for (name, description, schema) in &pc {
+            assert!(pc_serves(name));
+            let said = format!("{description} {schema}");
+            for word in [
+                "this Mac",
+                "Bluetooth",
+                "Mirroring",
+                ".app folder",
+                "Trek Driver",
+            ] {
+                assert!(!said.contains(word), "{name} says {word}: {said}");
+            }
+            let (_, _, mac_schema) = mac.iter().find(|t| t.0 == *name).unwrap();
+            assert_eq!(
+                schema["required"], mac_schema["required"],
+                "{name} takes what it takes on a Mac"
+            );
+        }
+        for word in ["Bluetooth", "Mirroring", "this Mac", "Trek Driver"] {
+            assert!(!PC_INSTRUCTIONS.contains(word), "{word}");
+        }
+        for word in [
+            "phone_status",
+            "phone_release",
+            "took over",
+            "need Trek on a Mac for now",
+        ] {
+            assert!(PC_INSTRUCTIONS.contains(word), "{word}");
+        }
+        assert!(PC_INSTRUCTIONS.len() < INSTRUCTIONS.len());
+        // What it doesn't serve says where it is, and what there is here instead.
+        for tool in TOOL_NAMES.iter().filter(|t| !pc_serves(t)) {
+            let said = on_a_mac(tool);
+            assert!(
+                said.contains("needs Trek on a Mac for now"),
+                "{tool}: {said}"
+            );
+            assert!(said.contains("phone_apps"), "{tool}: {said}");
+            assert!(!said.contains("only on macOS"), "{tool}: {said}");
+        }
+        assert!(on_a_mac("phone_screenshot").starts_with("Seeing the iPhone's screen"));
+        assert!(on_a_mac("phone_tap").starts_with("Tapping and typing"));
     }
 
     #[test]

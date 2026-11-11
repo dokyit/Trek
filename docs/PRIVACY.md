@@ -8,6 +8,8 @@ Trek asks once, on the first launch after onboarding (and once for anyone who us
 
 Everything goes to [PostHog](https://posthog.com) (US cloud, `us.i.posthog.com`), through its capture API, from `crates/trek-telemetry`.
 
+Dictation is apart from all of this: on Windows the composer's mic uses Windows' online speech recognition, so what it hears goes to Microsoft's speech service as it does for Windows' own voice typing, and Trek sends it nowhere itself.
+
 ## When nothing is sent
 
 - The user said no, or hasn't answered yet.

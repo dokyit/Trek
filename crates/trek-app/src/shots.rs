@@ -1447,8 +1447,8 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         return Ok(());
     }
     // The iPhone tool with a made-up phone (an isolated run never touches the real one): opens the
-    // tool, then `phone::PhonePanel::demo` puts it in `arg`'s situation.
-    #[cfg(target_os = "macos")]
+    // tool, then `phone::PhonePanel::demo` puts it in `arg`'s situation (a PC's has its own).
+    #[cfg(any(target_os = "macos", windows))]
     if verb == "phone" {
         let main = ws
             .read(cx)

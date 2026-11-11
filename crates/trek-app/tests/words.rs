@@ -357,16 +357,48 @@ fn the_updates_page_is_the_same_on_windows_and_a_mac() {
     });
 }
 
-/// There's no mic button where Trek can't take dictation, which is all of Windows: the composer
-/// is drawn, the button isn't.
-#[cfg(windows)]
+/// The mic is there where Trek can take dictation, whatever the platform: none with no dictation
+/// here (a test without a fake), the mic with it. Where Trek can't but the system can (Windows
+/// without its speech recognizer), a dimmed mic points to Win+H and pressing it says why; a Mac
+/// has nothing to point to and shows none.
 #[test]
-fn the_composer_has_no_mic_on_windows() {
+fn the_composer_has_a_mic_only_where_trek_can_dictate() {
     run(async |cx| {
         let trek = open(cx);
         trek.render(cx);
         assert!(trek.visible(cx, "send"), "the composer is on screen");
-        assert!(!trek.visible(cx, "dictate"));
+        assert!(!trek.visible(cx, "dictate") && !trek.visible(cx, "dictate-elsewhere"));
+
+        let dictation = trek_app::dictate::fake::install();
+        for windows in [true, false] {
+            let _platform = pretend(windows);
+            trek.render(cx);
+            assert!(trek.visible(cx, "dictate"), "windows: {windows}");
+            assert!(!trek.visible(cx, "dictate-elsewhere"));
+        }
+
+        let why = "Windows speech recognition isn't available on this PC. Press Win+H to dictate.";
+        dictation.unavailable(why);
+        let toasts = common::toasts(&trek, cx);
+        for windows in [true, false] {
+            let _platform = pretend(windows);
+            trek.render(cx);
+            assert!(!trek.visible(cx, "dictate"), "windows: {windows}");
+            assert_eq!(trek.visible(cx, "dictate-elsewhere"), windows);
+            assert_eq!(
+                trek_app::dictate::fallback(),
+                windows.then_some("Press Win+H to dictate")
+            );
+        }
+        let _windows = pretend(true);
+        trek.render(cx);
+        trek.click(cx, "dictate-elsewhere");
+        assert_eq!(
+            toasts.borrow().last().map(|(m, _)| m.as_str()),
+            Some(why),
+            "pressing it says why"
+        );
+        assert_eq!(dictation.takes(), 0);
     });
 }
 
@@ -454,5 +486,46 @@ fn a_mac_reads_as_it_always_has() {
         );
         let theme = commands(&trek, cx, "Theme");
         assert!(theme.iter().any(|c| c == "Theme: Match macOS"), "{theme:?}");
+    });
+}
+
+#[test]
+fn banners_the_system_turned_off_say_where_to_turn_them_on() {
+    use trek_app::permissions::{Permission, Status, fake};
+    use trek_core::settings::NotifyMode;
+    run(async |cx| {
+        let trek = open(cx);
+        let refused = |said: &[String]| has(said, "Banners are turned off");
+        // The page as it's drawn anew: another first, so nothing of the last drawing is kept.
+        let notifications = |cx: &mut TestAppContext| {
+            said(&trek, cx, SettingsPage::Appearance);
+            said(&trek, cx, SettingsPage::Notifications)
+        };
+        trek.update(cx, |ws, _| {
+            ws.settings.notifications.mode = NotifyMode::BannerAndSound
+        });
+        // Allowed: nothing said.
+        fake::set(Permission::Notifications, Status::Granted);
+        let allowed = notifications(cx);
+        assert!(!refused(&allowed), "{allowed:?}");
+        // Turned off: each platform says where, in its own words.
+        fake::set(Permission::Notifications, Status::Denied);
+        for windows in [false, true] {
+            let _platform = pretend(windows);
+            let shown = notifications(cx);
+            assert!(refused(&shown), "{shown:?}");
+            assert!(
+                has(&shown, for_platform(windows).banners_off_note),
+                "{shown:?}"
+            );
+        }
+        trek.click(cx, "open-notification-settings");
+        assert_eq!(fake::opened(), vec![Permission::Notifications]);
+        // Alerts as a sound alone want no banners: nothing to say.
+        trek.update(cx, |ws, _| {
+            ws.settings.notifications.mode = NotifyMode::Sound
+        });
+        let sound = notifications(cx);
+        assert!(!refused(&sound), "{sound:?}");
     });
 }

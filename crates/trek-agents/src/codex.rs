@@ -2414,7 +2414,7 @@ pub(crate) async fn fetch_models(
             out.push(ModelInfo {
                 name: m["displayName"]
                     .as_str()
-                    .map(String::from)
+                    .map(trek_core::catalog::codex_model_name)
                     .unwrap_or_else(|| id.clone()),
                 id,
                 efforts,

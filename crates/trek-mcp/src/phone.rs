@@ -15,6 +15,10 @@
 //!
 //! `trek-mcp phone-device …` is the same phone's apps and files from a shell, without Trek or
 //! Xcode (the phone updater installs with it).
+//!
+//! On Windows (a PC) the family is the phone's apps and files, how it's connected and letting go
+//! (`trek_ipc::phone::pc_tools`): its screen and taps need the Mac for now, and a call to one of
+//! those tools is answered so here, without asking Trek.
 
 use crate::outline::{self, Checked, Frame, Ids, Node, Refs, View};
 use crate::rpc::{self, ToolDef, ToolSet, opt_f64, opt_str};
@@ -37,11 +41,16 @@ impl Ask for trek_ipc::Client {
 
 pub struct Phone {
     trek: Option<Box<dyn Ask>>,
+    /// Serving a PC's family (`PC`): its apps and files.
+    pc: bool,
     /// The refs `phone_elements` has given out.
     refs: Refs,
     /// How long `phone_wait` rests between two readings of the screen.
     pause: Duration,
 }
+
+/// Whether this is a PC, where the family is the phone's apps and files (`pc_tools`).
+const PC: bool = cfg!(windows);
 
 /// How long `phone_wait` waits when it isn't told, and at most.
 const WAIT_DEFAULT_MS: u64 = 10_000;
@@ -55,6 +64,7 @@ impl Phone {
     fn with(trek: Option<Box<dyn Ask>>) -> Self {
         Self {
             trek,
+            pc: PC,
             refs: Refs::new("phone_elements"),
             pause: Duration::from_millis(400),
         }
@@ -224,11 +234,20 @@ impl ToolSet for Phone {
     }
 
     fn instructions(&self) -> &'static str {
-        trek_ipc::phone::INSTRUCTIONS
+        if self.pc {
+            trek_ipc::phone::PC_INSTRUCTIONS
+        } else {
+            trek_ipc::phone::INSTRUCTIONS
+        }
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        trek_ipc::phone::tools()
+        let tools = if self.pc {
+            trek_ipc::phone::pc_tools()
+        } else {
+            trek_ipc::phone::tools()
+        };
+        tools
             .into_iter()
             .map(|(name, description, input_schema)| ToolDef {
                 name,
@@ -239,6 +258,9 @@ impl ToolSet for Phone {
     }
 
     fn call(&mut self, name: &str, args: &Value) -> rpc::ToolResult {
+        if self.pc && !trek_ipc::phone::pc_serves(name) && trek_ipc::phone::is_method(name) {
+            return Err(trek_ipc::phone::on_a_mac(name));
+        }
         let given = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
         let text = match name {
             "phone_elements" => self.elements(args)?,
@@ -681,8 +703,13 @@ pub fn device_cli(args: &[String]) -> i32 {
         (Some("assistivetouch"), None, _) => device::assistive_touch(udid)
             .map(|on| format!("AssistiveTouch is {}.", if on { "on" } else { "off" })),
         // For script/bundle.sh: the iPhone tool's helper, compiled into the app bundle.
+        #[cfg(target_os = "macos")]
         (Some("build-helper"), Some(out), _) => {
             trek_phone::helper::build(Path::new(out)).map(|()| format!("Built {out}."))
+        }
+        #[cfg(not(target_os = "macos"))]
+        (Some("build-helper"), Some(_), _) => {
+            Err("The iPhone tool's helper is the Mac's (it needs swiftc).".to_string())
         }
         _ => {
             eprint!("{DEVICE_USAGE}");
@@ -711,7 +738,8 @@ mod tests {
 
     #[test]
     fn lists_the_shared_tools_with_their_instructions() {
-        let tools = Phone::with(None);
+        let mut tools = Phone::with(None);
+        tools.pc = false;
         let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
         assert_eq!(names, trek_ipc::phone::TOOL_NAMES);
         assert!(tools.instructions().contains("phone_screenshot"));
@@ -748,6 +776,7 @@ mod tests {
     #[test]
     fn without_trek_calls_say_why() {
         let mut tools = Phone::with(None);
+        tools.pc = false;
         for (tool, args) in [
             ("phone_tap", json!({"x": 1, "y": 2})),
             ("phone_tap", json!({"ref": "e1"})),
@@ -756,6 +785,55 @@ mod tests {
         ] {
             let err = tools.call(tool, &args).unwrap_err();
             assert!(err.contains("only in agents that Trek started"), "{err}");
+        }
+    }
+
+    /// On a PC the family is the phone's apps and files, in its own words; the rest of the
+    /// tools say they need Trek on a Mac for now, without asking Trek.
+    #[test]
+    fn a_pc_serves_the_apps_and_files_and_says_where_the_rest_are() {
+        let trek = Trek::default();
+        let mut tools = Phone::with(Some(Box::new(trek.clone())));
+        tools.pc = true;
+        let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
+        assert_eq!(names, trek_ipc::phone::PC_TOOL_NAMES);
+        assert_eq!(tools.instructions(), trek_ipc::phone::PC_INSTRUCTIONS);
+        for (tool, args) in [
+            ("phone_tap", json!({"x": 1, "y": 2})),
+            ("phone_tap", json!({"ref": "e1"})),
+            ("phone_elements", json!({})),
+            ("phone_wait", json!({"text": "Done"})),
+            ("phone_screenshot", json!({})),
+            ("phone_open_app", json!({"name": "Settings"})),
+        ] {
+            let err = tools.call(tool, &args).unwrap_err();
+            assert!(err.contains("needs Trek on a Mac for now"), "{tool}: {err}");
+        }
+        assert!(
+            trek.asked().is_empty(),
+            "never asked Trek: {:?}",
+            trek.asked()
+        );
+        // What it serves goes to Trek as on a Mac.
+        let said = text_of(tools.call("phone_apps", &json!({})));
+        assert_eq!(said, "phone_apps done");
+        assert_eq!(trek.asked(), ["phone_apps"]);
+        // Without Trek, those say why.
+        let mut alone = Phone::with(None);
+        alone.pc = true;
+        let err = alone.call("phone_status", &json!({})).unwrap_err();
+        assert!(err.contains("only in agents that Trek started"), "{err}");
+    }
+
+    #[test]
+    fn this_platform_gets_its_own_family() {
+        let tools = Phone::with(None);
+        assert_eq!(tools.pc, cfg!(windows));
+        let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
+        if cfg!(windows) {
+            assert_eq!(names, trek_ipc::phone::PC_TOOL_NAMES);
+        } else {
+            assert_eq!(names, trek_ipc::phone::TOOL_NAMES);
         }
     }
 
@@ -797,6 +875,8 @@ mod tests {
             *trek.screens.borrow_mut() = screens;
             let mut phone = Phone::with(Some(Box::new(trek.clone())));
             phone.pause = Duration::from_millis(1);
+            // The element tools are the Mac's (a PC answers them without asking Trek).
+            phone.pc = false;
             (trek, phone)
         }
 

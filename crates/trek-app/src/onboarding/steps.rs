@@ -1272,7 +1272,7 @@ impl Onboarding {
                 if models > 0 {
                     format!("Free, private, and offline. {models} models found on {this}: pick them in the composer like any other.")
                 } else {
-                    format!("Free, private, and offline. Trek finds Ollama, LM Studio, and llama.cpp or MLX on {this} on their usual ports; there's nothing to set up.")
+                    format!("Free, private, and offline. Trek finds {} on {this} on their usual ports; there's nothing to set up.", crate::words::words().local_servers)
                 },
                 cx,
             ))

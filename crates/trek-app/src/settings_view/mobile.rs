@@ -14,6 +14,22 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::settings::{Reach, Settings};
 
+/// What the page says of Trek's iPhone app before the phone server runs; on Windows, where it
+/// can't be built (that takes Xcode), the same without telling the user to build it.
+const PHONE_APP_NOTE: &str = "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. Build it from ios/ in Trek's repository; it isn't on the App Store yet.";
+const PHONE_APP_NOTE_PC: &str = "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. It isn't on the App Store yet: it's built from ios/ in Trek's repository, with Xcode on macOS.";
+
+/// The paired devices as the page lists them: the iPhone app's pairings (one from before devices
+/// said what they are is a phone's, as the sidebar has it), then the machines that paired with
+/// this one.
+fn phones_then_machines(
+    devices: Vec<trek_remote::DeviceInfo>,
+) -> (Vec<trek_remote::DeviceInfo>, Vec<trek_remote::DeviceInfo>) {
+    devices
+        .into_iter()
+        .partition(|d| d.platform.as_deref().is_none_or(|p| p == "ios"))
+}
+
 /// A QR code as dark squares on white, each `module` points, with the standard quiet zone.
 pub(crate) fn qr(url: &str, module: f32) -> AnyElement {
     let Ok(code) = qrcode::QrCode::new(url.as_bytes()) else {
@@ -205,10 +221,12 @@ impl SettingsView {
         out.extend(self.push_section(s, cx));
         let Some((offer, addresses, advertise, routes, devices, connected)) = running else {
             out.push(div().h(px(16.)).into_any_element());
-            out.push(Self::note(
-                "Trek on iPhone shows every thread and what it needs from you, and lets you answer approvals and questions, review plans, send follow-ups and start threads, while the agents keep running here. Build it from ios/ in Trek's repository; it isn't on the App Store yet.",
-                cx,
-            ));
+            let note = if crate::words::is_windows() {
+                PHONE_APP_NOTE_PC
+            } else {
+                PHONE_APP_NOTE
+            };
+            out.push(Self::note(note, cx));
             out.extend(self.phone_update_section(&[], cx));
             out.extend(self.machines_section(cx));
             return out;
@@ -384,44 +402,47 @@ impl SettingsView {
             }
         }
 
-        // Paired phones.
+        // Paired phones: the iPhone app's pairings. A machine that paired with this one (to start
+        // threads here) is a machine, not a phone: it's listed apart, where it can be unpaired too.
         let phone_update = self.phone_update_section(&devices, cx);
+        let (phones, machines) = phones_then_machines(devices);
+        let paired_row = |d: trek_remote::DeviceInfo, cx: &mut Context<Self>| {
+            let online = connected.contains(&d.device_id);
+            let seen = match (online, d.last_seen_at) {
+                (true, _) => "Connected now".to_string(),
+                (false, Some(at)) => format!("Last seen {}", crate::time::relative(at)),
+                (false, None) => format!("Paired {}", crate::time::relative(d.paired_at)),
+            };
+            let ws = self.workspace.clone();
+            let id = d.device_id.clone();
+            Self::row(
+                h_flex()
+                    .gap(px(8.))
+                    .child(div().size(px(7.)).rounded_full().bg(if online {
+                        palette::emerald(cx)
+                    } else {
+                        theme.foreground.opacity(0.2)
+                    }))
+                    .child(d.name.clone()),
+                seen,
+                Button::new(SharedString::from(format!("mobile-revoke-{}", d.device_id)))
+                    .small()
+                    .ghost()
+                    .label("Unpair")
+                    .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.revoke_device(&id, cx))),
+                cx,
+            )
+        };
         out.push(Self::heading("Paired phones", cx));
-        if devices.is_empty() {
+        if phones.is_empty() {
             out.push(Self::note("None yet.", cx));
         } else {
-            let rows = devices
-                .into_iter()
-                .map(|d| {
-                    let online = connected.contains(&d.device_id);
-                    let seen = match (online, d.last_seen_at) {
-                        (true, _) => "Connected now".to_string(),
-                        (false, Some(at)) => format!("Last seen {}", crate::time::relative(at)),
-                        (false, None) => format!("Paired {}", crate::time::relative(d.paired_at)),
-                    };
-                    let ws = self.workspace.clone();
-                    let id = d.device_id.clone();
-                    Self::row(
-                        h_flex()
-                            .gap(px(8.))
-                            .child(div().size(px(7.)).rounded_full().bg(if online {
-                                palette::emerald(cx)
-                            } else {
-                                theme.foreground.opacity(0.2)
-                            }))
-                            .child(d.name.clone()),
-                        seen,
-                        Button::new(SharedString::from(format!("mobile-revoke-{}", d.device_id)))
-                            .small()
-                            .ghost()
-                            .label("Unpair")
-                            .on_click(move |_, _, cx| {
-                                ws.update(cx, |ws, cx| ws.revoke_device(&id, cx))
-                            }),
-                        cx,
-                    )
-                })
-                .collect();
+            let rows = phones.into_iter().map(|d| paired_row(d, cx)).collect();
+            out.push(ui::group(rows, cx));
+        }
+        if !machines.is_empty() {
+            out.push(Self::heading(&format!("Machines paired with {this}"), cx));
+            let rows = machines.into_iter().map(|d| paired_row(d, cx)).collect();
             out.push(ui::group(rows, cx));
         }
         out.extend(phone_update);
@@ -584,5 +605,35 @@ impl SettingsView {
         out.push(div().h(px(12.)).into_any_element());
         out.push(div().text_size(px(text::LABEL)).text_color(theme.muted_foreground).child("A machine is paired like a phone: it lists this one among its paired devices, where it can be unpaired.").into_any_element());
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::phones_then_machines;
+
+    /// A Mac (or PC) that paired with this one to start threads here is listed with the
+    /// machines, not under Paired phones.
+    #[test]
+    fn paired_machines_are_not_phones() {
+        let device = |id: &str, platform: Option<&str>| trek_remote::DeviceInfo {
+            device_id: id.into(),
+            name: id.into(),
+            paired_at: 0,
+            last_seen_at: None,
+            app_version: None,
+            platform: platform.map(str::to_string),
+        };
+        let (phones, machines) = phones_then_machines(vec![
+            device("iphone", Some("ios")),
+            device("macbook", Some("macos")),
+            device("old-iphone", None),
+            device("desktop", Some("windows")),
+        ]);
+        let ids = |v: &[trek_remote::DeviceInfo]| {
+            v.iter().map(|d| d.device_id.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&phones), ["iphone", "old-iphone"]);
+        assert_eq!(ids(&machines), ["macbook", "desktop"]);
     }
 }

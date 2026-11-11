@@ -479,3 +479,114 @@ mod windows_chrome {
         });
     }
 }
+
+/// The main window's close button where the app ends with it (Windows'). Trek's own logic, given
+/// that setting: tested wherever the tests run, not only on Windows.
+mod ends_with_its_main_window {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// Whether the app's Quit handler ran: the harness installs none, so a test brings its own.
+    fn quit_heard(cx: &mut TestAppContext) -> Arc<AtomicBool> {
+        let heard = Arc::new(AtomicBool::new(false));
+        let seen = heard.clone();
+        cx.update(|cx| {
+            cx.on_action(move |_: &trek_app::Quit, _| seen.store(true, Ordering::SeqCst));
+        });
+        heard
+    }
+
+    fn ending_with_main_window(trek: &Trek, cx: &mut TestAppContext) -> Arc<AtomicBool> {
+        let quit = quit_heard(cx);
+        cx.update(|cx| {
+            trek_app::root::init(trek.ws.clone(), cx);
+            trek_app::root::quit_with_main_window(cx);
+        });
+        quit
+    }
+
+    #[test]
+    fn closing_it_with_an_agent_at_work_asks_and_can_keep_the_work_going() {
+        run(async |cx| {
+            let trek = open(cx);
+            let quit = ending_with_main_window(&trek, cx);
+            // Nothing at work: the close button is the Quit command, with nothing asked.
+            trek.window(cx, |window, cx| trek_app::root::close_main(window, cx));
+            cx.run_until_parked();
+            assert!(!cx.has_pending_prompt());
+            assert!(quit.swap(false, Ordering::SeqCst), "it quits");
+            // A turn running: it asks, and Cancel leaves it all be.
+            let id = trek.send(cx, "mock:long 8s");
+            let tid = id.clone();
+            trek.wait(cx, "the turn to start", |ws| ws.turn_running(&tid))
+                .await;
+            trek.window(cx, |window, cx| trek_app::root::close_main(window, cx));
+            cx.run_until_parked();
+            assert!(cx.has_pending_prompt(), "it asks first");
+            cx.simulate_prompt_answer("Cancel");
+            cx.run_until_parked();
+            assert!(!quit.load(Ordering::SeqCst));
+            assert!(!cx.windows().is_empty());
+            // Keep Working: Trek's windows close, and the turn carries on without a quit.
+            trek.window(cx, |window, cx| trek_app::root::close_main(window, cx));
+            cx.run_until_parked();
+            cx.simulate_prompt_answer("Keep Working");
+            cx.run_until_parked();
+            assert!(cx.windows().is_empty(), "its windows are closed");
+            assert!(
+                !quit.load(Ordering::SeqCst),
+                "the main window closing isn't the Quit command meanwhile"
+            );
+            assert!(trek.read(cx, |ws, _| ws.turn_running(&id)));
+        });
+    }
+
+    #[test]
+    fn working_in_the_background_quits_once_nothing_is_at_work() {
+        run(async |cx| {
+            let trek = open(cx);
+            let quit = ending_with_main_window(&trek, cx);
+            let id = trek.send(cx, "mock:long 3s");
+            let tid = id.clone();
+            trek.wait(cx, "the turn to start", |ws| ws.turn_running(&tid))
+                .await;
+            cx.update(|cx| trek_app::root::keep_working(Duration::from_millis(300), cx));
+            cx.run_until_parked();
+            assert!(cx.windows().is_empty());
+            let tid = id.clone();
+            trek.wait(cx, "the turn to end", |ws| !ws.turn_running(&tid))
+                .await;
+            let heard = quit.clone();
+            trek.wait(cx, "Trek to quit once it's done", move |_| {
+                heard.load(Ordering::SeqCst)
+            })
+            .await;
+        });
+    }
+
+    #[test]
+    fn what_closing_would_stop_is_said_in_words() {
+        let t = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(trek_app::root::still_working(&[], false), None);
+        let (title, one) =
+            trek_app::root::still_working(&t(&["Fix the login bug"]), false).unwrap();
+        assert_eq!(title, "An agent is still working");
+        assert_eq!(
+            one,
+            "An agent is working on “Fix the login bug”. Trek can keep it going with its windows closed, and quit once it's done; opening Trek meanwhile brings the window back. Quitting now stops it."
+        );
+        let (title, many) = trek_app::root::still_working(&t(&["A", "B", "C", "D"]), true).unwrap();
+        assert_eq!(title, "Agents are still working");
+        assert!(
+            many.starts_with(
+                "Agents are working on “A”, “B” and 2 more. Trek can keep them going with its windows closed, and quit once they're done;"
+            ),
+            "{many}"
+        );
+        let (title, update) = trek_app::root::still_working(&[], true).unwrap();
+        assert_eq!(title, "An agent is being updated");
+        assert!(update.starts_with("Trek is updating an agent."), "{update}");
+    }
+}

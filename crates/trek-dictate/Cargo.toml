@@ -20,3 +20,21 @@ objc2 = "0.6"
 objc2-avf-audio = "0.3"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSBundle", "NSData", "NSGeometry", "objc2-core-foundation"] }
 objc2-speech = "0.3"
+
+# Windows' own speech recognition (Windows.Media.SpeechRecognition) and the capture endpoint's
+# meter for the waveform; the registry for what Settings has turned off.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Globalization",
+    "Media_SpeechRecognition",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-registry = "0.6"

@@ -4,7 +4,8 @@
 //! until ✓, so a draft put away mid-take never holds words that weren't confirmed.
 //!
 //! The state machine, the preview and the level smoothing here are pure, so tests drive them
-//! without a microphone; `composer.rs` does the effects and `dictate.rs` the audio.
+//! without a microphone; `composer.rs` does the effects and `trek-dictate` the audio (macOS's
+//! Speech framework, or Windows' speech recognition).
 
 use gpui_kit::*;
 use std::collections::VecDeque;
@@ -15,7 +16,8 @@ use std::ops::Range;
 pub enum Phase {
     /// The usual toolbar, with the mic.
     Idle,
-    /// The mic was pressed and macOS is asked for the mic and Speech; the mic spins.
+    /// The mic was pressed and the system is asked for the mic and speech recognition (macOS's
+    /// prompts; on Windows, its recognizer readied and the mic opened); the mic spins.
     Asking,
     /// The waveform, ✕ and ✓: the take is open and partial text comes in.
     Listening,
@@ -28,9 +30,10 @@ pub enum Phase {
 pub enum Event {
     /// The mic button (or the shots harness's `dictate`): start a take, or confirm the open one.
     Mic,
-    /// The take is recording. `live`: partial text will come (the audio-buffer request); else
-    /// the text arrives once, after ✓ (the recorded-file fallback). `value` and `cursor` are the
-    /// composer's text and caret at that moment: the preview splices into them.
+    /// The take is recording. `live`: partial text will come (the Mac's audio-buffer request, and
+    /// Windows always); else the text arrives once, after ✓ (the Mac's recorded-file fallback).
+    /// `value` and `cursor` are the composer's text and caret at that moment: the preview
+    /// splices into them.
     Started {
         live: bool,
         value: String,
@@ -55,7 +58,8 @@ pub enum Event {
 /// What the composer does about an [`Event`].
 #[derive(Debug, Default, PartialEq)]
 pub struct Effect {
-    /// Ask for the mic and Speech, then start a take (`Started`) or say why not (`Failed`).
+    /// Ask for the mic and speech recognition, then start a take (`Started`) or say why not
+    /// (`Failed`).
     pub ask: bool,
     /// Stop the mic; the final text follows (and, for a live take, arm [`GRACE`]).
     pub finish: bool,

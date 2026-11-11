@@ -1,7 +1,8 @@
-//! iPhone use, the workspace's part: the `trek-phone` server every session gets on macOS, its
-//! calls (over Trek's local channel, as the browser tools' are) handed to the main window's iPhone
-//! tool (`panels::phone::PhoneCall`). What needs the user's approval goes to the thread's card
-//! through the same plumbing as the Browser's (`Workspace::browser_ask`).
+//! iPhone use, the workspace's part: the `trek-phone` server every session gets on macOS and
+//! Windows (there, the phone's apps and files), its calls (over Trek's local channel, as the
+//! browser tools' are) handed to the main window's iPhone tool (`panels::phone::PhoneCall`). What
+//! needs the user's approval goes to the thread's card through the same plumbing as the Browser's
+//! (`Workspace::browser_ask`).
 
 use super::{Mode, Workspace, WorkspaceEvent};
 use crate::ipc::{Call, Reply};
@@ -35,10 +36,10 @@ impl PhoneCall {
     }
 }
 
-#[cfg(feature = "shots")]
+#[cfg(any(feature = "shots", feature = "test-support"))]
 impl PhoneCall {
-    /// A call from the shots harness (`control phone call <method> <json>`), as an agent of a
-    /// thread on full access would make it; answered on the returned channel.
+    /// A call from the shots harness (`control phone call <method> <json>`), or a test, as an
+    /// agent of a thread on full access would make it; answered on the returned channel.
     pub fn probe(
         method: &str,
         params: serde_json::Value,
@@ -81,9 +82,10 @@ pub(super) fn server(bin: String, env: Vec<(String, String)>) -> McpServer {
 }
 
 impl Workspace {
-    /// Whether sessions get Trek's iPhone tools: on in settings, on a Mac.
+    /// Whether sessions get Trek's iPhone tools: on in settings, on a Mac or a PC (where they're
+    /// the phone's apps and files).
     pub(super) fn phone_tools(&self) -> bool {
-        self.settings.tools.phone && cfg!(target_os = "macos")
+        self.settings.tools.phone && cfg!(any(target_os = "macos", windows))
     }
 
     /// A phone tool call from `call.thread`'s agent: to the main window's iPhone tool.
@@ -97,7 +99,7 @@ impl Workspace {
         if !self.phone_tools() {
             return fail(
                 call,
-                "The iPhone tools are off in Trek's settings (Tools & MCP), or this isn't a Mac.",
+                "The iPhone tools are off in Trek's settings (Tools & MCP), or Trek has none on this system.",
             );
         }
         if self.main_window.is_none() {

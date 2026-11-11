@@ -286,7 +286,27 @@ fn free_bytes(dir: &Path) -> Option<u64> {
     ok.then(|| u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
 }
 
-#[cfg(not(unix))]
+/// The bytes free to this user on `dir`'s volume (a quota counts), as Windows says.
+#[cfg(windows)]
+fn free_bytes(dir: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let mut free = 0u64;
+    // SAFETY: `wide` is a NUL-terminated path; the one count asked for is written to `free`,
+    // and the other two may be null.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } != 0;
+    ok.then_some(free)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn free_bytes(_dir: &Path) -> Option<u64> {
     None
 }
@@ -384,4 +404,16 @@ pub fn sweep_stale(dir: &Path, older_than: Duration) -> usize {
         })
         .filter(|e| std::fs::remove_file(e.path()).is_ok())
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_folder_says_how_much_room_it_has() {
+        let free = super::free_bytes(&std::env::temp_dir());
+        assert!(free.is_some_and(|f| f > 0), "{free:?}");
+        // One that isn't there says nothing: the upload isn't held back on a guess.
+        let gone = std::env::temp_dir().join(format!("trek-no-such-folder-{}", std::process::id()));
+        assert_eq!(super::free_bytes(&gone), None);
+    }
 }

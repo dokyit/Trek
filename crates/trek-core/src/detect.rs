@@ -172,6 +172,9 @@ fn extra_dirs(home: &Path) -> Vec<PathBuf> {
 /// that takes its arguments without cmd.exe is found (`claude.exe` from Claude's installer before
 /// npm's `claude.cmd`; see `which`).
 #[cfg(windows)]
+const WINGET_SOURCE: &str = "Microsoft.Winget.Source_8wekyb3d8bbwe";
+
+#[cfg(windows)]
 fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
     let dir = |name: &str| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
     let local = dir("LOCALAPPDATA").unwrap_or_else(|| home.join(r"AppData\Local"));
@@ -213,6 +216,20 @@ fn windows_dirs(home: &Path, var: impl Fn(&str) -> Option<std::ffi::OsString>) -
         // WinGet's links to the portable packages it installs, for the user and for the machine.
         local.join(r"Microsoft\WinGet\Links"),
         program_files.join(r"WinGet\Links"),
+    ]);
+    // A portable package WinGet can't link (a link needs Developer Mode, or an administrator)
+    // has its own folder put on the PATH instead, which Trek's PATH, read at launch, lacks after
+    // an install while it runs (Trek's own `winget install GitHub.Copilot`, say). The folder is
+    // named after the package and the source it came from.
+    for id in crate::agent_update::HARNESSES
+        .iter()
+        .flat_map(|h| h.winget())
+    {
+        let folder = format!(r"WinGet\Packages\{id}_{WINGET_SOURCE}");
+        dirs.push(local.join(r"Microsoft").join(&folder));
+        dirs.push(program_files.join(&folder));
+    }
+    dirs.extend([
         dir("ChocolateyInstall")
             .unwrap_or_else(|| program_data.join("chocolatey"))
             .join("bin"),
@@ -390,8 +407,18 @@ pub fn is_bare_name_on(command: &str, windows: bool) -> bool {
 fn find_in(path: &str, binary: &str, pathext: &str) -> Option<PathBuf> {
     let names = candidate_names(binary, pathext);
     std::env::split_paths(path)
-        .filter(|dir| !dir.as_os_str().is_empty())
+        .filter(|dir| !dir.as_os_str().is_empty() && !launcher_dir(dir))
         .find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
+}
+
+/// A folder of programs that stand in for others and aren't them: VS Code's `copilot-shim`
+/// (`…\Microsoft VS Code\bin\copilot-shim`, on the machine's PATH), whose `copilot.exe` runs the
+/// Copilot CLI it finds further along the PATH, or offers to install one in a terminal. What it
+/// stands for is found instead: that's the CLI Trek runs, asks its version and updates. With
+/// none behind it, there's no Copilot to run.
+fn launcher_dir(dir: &Path) -> bool {
+    dir.file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("copilot-shim"))
 }
 
 /// The file names to try for `binary` in one folder, best first. Unix has just the name.
@@ -436,27 +463,60 @@ pub fn opencode() -> Option<PathBuf> {
     which(OPENCODE).or_else(|| which("opencode2"))
 }
 
+/// The first line `path --version` prints, within a few seconds: what detection waits for.
 pub async fn version_of(path: &Path) -> Option<String> {
-    let out = tokio::time::timeout(
-        Duration::from_secs(4),
-        crate::procs::async_command(path)
-            .arg("--version")
-            .env("PATH", login_path())
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = text
-        .lines()
-        .find(|l| !l.trim().is_empty())?
-        .trim()
-        .to_string();
-    Some(line)
+    version_within(path, Duration::from_secs(4)).await
 }
+
+/// `version_of`, waiting up to `limit` for the line. It's taken as soon as it's printed: a CLI
+/// that leaves a helper running keeps its output open, and waiting for the end of it would
+/// wait out `limit` and lose the line. On Windows a probe that doesn't answer in time ends with
+/// all it started (a `.cmd` shim's `node.exe`, a CLI's workers): ending the program alone would
+/// leave them holding its files open, and an update couldn't replace them. One that answers
+/// is let go with whatever it left running.
+pub async fn version_within(path: &Path, limit: Duration) -> Option<String> {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut child = crate::procs::async_command(path)
+        .arg("--version")
+        .env("PATH", login_path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    #[cfg(windows)]
+    let job = trek_job::hold(&child).ok();
+    let stdout = child.stdout.take()?;
+    let first_line = async {
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line).await.ok()? == 0 {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&line).trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    };
+    let line = tokio::time::timeout(limit, first_line).await.ok().flatten();
+    if line.is_some() {
+        // It ends as it would have, not cut off as it goes: a CLI may still be writing its own
+        // files (Claude Code its `.claude.json`) after the line.
+        let _ = tokio::time::timeout(EXIT_GRACE, child.wait()).await;
+        #[cfg(windows)]
+        if let Some(job) = job {
+            job.release();
+        }
+    }
+    line
+}
+
+/// How long a CLI that has said its version is given to exit before it's ended.
+const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 async fn cli_agent(agent: AgentId, binary: &str, hint: &str) -> DetectedAgent {
     let name = agent.display_name();
@@ -830,6 +890,10 @@ mod tests_paths {
                 r"C:\ProgramData\scoop\shims",
                 r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links",
                 r"C:\Program Files\WinGet\Links",
+                r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe",
+                r"C:\Program Files\WinGet\Packages\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe",
+                r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe",
+                r"C:\Program Files\WinGet\Packages\GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe",
                 r"C:\ProgramData\chocolatey\bin",
                 r"C:\Users\me\AppData\Roaming\npm",
                 r"C:\Users\me\AppData\Local\pnpm",
@@ -1087,6 +1151,23 @@ mod tests_paths {
             find_in(&join(&[first.path(), second.path()]), "tool", ""),
             Some(wanted)
         );
+    }
+
+    #[test]
+    fn vs_codes_copilot_launcher_is_passed_over_for_the_cli_behind_it() {
+        // VS Code puts `bin\copilot-shim` on the machine's PATH, ahead of the user's folders
+        // where WinGet's Copilot is: Trek finds that one.
+        let (vscode, winget) = (TempDir::new(), TempDir::new());
+        let shim = vscode.path().join(r"bin").join("copilot-shim");
+        std::fs::create_dir_all(&shim).unwrap();
+        touch_executable(&shim, tool_name());
+        let cli = touch_executable(winget.path(), tool_name());
+        assert_eq!(
+            find_in(&join(&[shim.as_path(), winget.path()]), "tool", ""),
+            Some(cli)
+        );
+        // With no CLI behind it, there's none to run.
+        assert_eq!(find_in(&join(&[shim.as_path()]), "tool", ""), None);
     }
 
     #[cfg(windows)]

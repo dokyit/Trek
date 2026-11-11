@@ -1042,7 +1042,8 @@ pub enum PanelTool {
     Browser,
     SideChat,
     Simulator,
-    /// The user's real iPhone (macOS): its screen live, and agents driving it.
+    /// The user's real iPhone: on a Mac its screen live and agents driving it; on Windows its
+    /// apps and files.
     Phone,
 }
 
@@ -1057,8 +1058,9 @@ impl PanelTool {
         PanelTool::Git,
     ];
 
-    /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools and
-    /// the iPhone tool macOS's capture and Bluetooth, so Windows has neither tab.
+    /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
+    /// Windows has no Simulator tab. Its iPhone tab is the phone's apps and files (its screen and
+    /// taps need the Mac's capture and Bluetooth for now).
     pub fn offered() -> Vec<PanelTool> {
         Self::offered_on(crate::words::is_windows())
     }
@@ -1066,7 +1068,7 @@ impl PanelTool {
     pub fn offered_on(windows: bool) -> Vec<PanelTool> {
         Self::ALL
             .into_iter()
-            .filter(|t| !(windows && matches!(t, PanelTool::Simulator | PanelTool::Phone)))
+            .filter(|t| !(windows && *t == PanelTool::Simulator))
             .collect()
     }
     pub fn label(self) -> &'static str {
@@ -11075,18 +11077,18 @@ mod tests {
     }
 
     #[test]
-    fn windows_has_no_simulator_or_iphone_tab() {
+    fn windows_offers_the_iphone_not_the_simulator() {
         assert_eq!(PanelTool::offered_on(false), PanelTool::ALL);
         let windows = PanelTool::offered_on(true);
         assert!(!windows.contains(&PanelTool::Simulator));
-        assert!(!windows.contains(&PanelTool::Phone));
-        assert_eq!(windows.len(), PanelTool::ALL.len() - 2);
+        assert!(windows.contains(&PanelTool::Phone), "its apps and files");
+        assert_eq!(windows.len(), PanelTool::ALL.len() - 1);
         // The others keep their order.
         assert_eq!(
             windows,
             PanelTool::ALL
                 .into_iter()
-                .filter(|t| !matches!(t, PanelTool::Simulator | PanelTool::Phone))
+                .filter(|t| *t != PanelTool::Simulator)
                 .collect::<Vec<_>>()
         );
     }

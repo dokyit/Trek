@@ -232,9 +232,10 @@ pub fn image_bytes(image: &Image) -> Result<(&'static str, Vec<u8>)> {
     })
 }
 
-/// Copy an image file agents can't read (see `needs_conversion`) into `dir` as PNG. `sips` is
-/// asked first (it reads HEIC, which the `image` crate doesn't); where there is no `sips`
-/// (Windows), or it turned the file down, the `image` crate reads TIFF and BMP.
+/// Copy an image file agents can't read (see `needs_conversion`) into `dir` as PNG. The system's
+/// own codecs are asked first, as they read HEIC, which the `image` crate doesn't: `sips` on a
+/// Mac, WIC on Windows (where the HEIF Image Extensions are installed). Then the `image` crate
+/// reads TIFF and BMP.
 pub fn convert_file(path: &Path, dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)
         .with_context(|| format!("{} couldn't be created", dir.display()))?;
@@ -249,12 +250,169 @@ pub fn convert_file(path: &Path, dir: &Path) -> Result<PathBuf> {
 
 /// `path` as a PNG at `out` (see `convert_file`).
 pub fn convert_to(path: &Path, out: &Path) -> Result<()> {
-    let converted = sips_png(path, out) || image_crate_png(path, out);
+    let converted = sips_png(path, out) || wic_png(path, out) || image_crate_png(path, out);
     if !converted || !out.is_file() {
         let _ = std::fs::remove_file(out);
+        // A photo Windows could read with an extension it doesn't have: say which.
+        #[cfg(windows)]
+        if is_heif(path) && !wic::reads_heif() {
+            bail!(
+                "Windows reads HEIC photos only with the HEIF Image Extensions from the Microsoft Store"
+            );
+        }
         bail!("it couldn't be converted to PNG");
     }
     Ok(())
+}
+
+/// A HEIC or HEIF photo, by its name.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_heif(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("heic") || e.eq_ignore_ascii_case("heif"))
+}
+
+/// `path` as PNG at `out`, by Windows' own image codecs (WIC). There are none off Windows.
+fn wic_png(path: &Path, out: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        match wic::to_png(path, out) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::info!("WIC couldn't convert {}: {e}", path.display());
+                false
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, out);
+        false
+    }
+}
+
+/// Windows Imaging Component: a photo's first frame decoded by whatever codec Windows has for
+/// it (HEIF's comes with the HEIF Image Extensions, with HEVC's for HEIC), written out as PNG.
+#[cfg(windows)]
+mod wic {
+    use std::path::Path;
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows::Win32::Graphics::Imaging::{
+        CLSID_WICImagingFactory, GUID_ContainerFormatHeif, GUID_ContainerFormatPng,
+        GUID_WICPixelFormat32bppBGRA, IWICImagingFactory, WICBitmapDitherTypeNone,
+        WICBitmapEncoderNoCache, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
+    };
+    use windows::core::{HSTRING, Result};
+
+    /// `f` with COM ready on this thread, and the imaging factory.
+    fn with_factory<T>(f: impl FnOnce(&IWICImagingFactory) -> Result<T>) -> Result<T> {
+        // SAFETY: plain calls. A thread already in an apartment of another kind answers with an
+        // error and stays as it is; it's left uninitialized only when this call initialized it.
+        let joined = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+        // SAFETY: the factory's class id, in-process.
+        let result = unsafe {
+            CoCreateInstance::<_, IWICImagingFactory>(
+                &CLSID_WICImagingFactory,
+                None,
+                CLSCTX_INPROC_SERVER,
+            )
+        }
+        .and_then(|factory| f(&factory));
+        if joined {
+            // SAFETY: balances the successful CoInitializeEx above, on the same thread.
+            unsafe { CoUninitialize() };
+        }
+        result
+    }
+
+    /// Windows has a codec that reads HEIF (and so HEIC) photos.
+    pub fn reads_heif() -> bool {
+        // SAFETY: asks for a decoder by container format; none installed is an error.
+        with_factory(|factory| unsafe {
+            factory.CreateDecoder(&GUID_ContainerFormatHeif, std::ptr::null())
+        })
+        .is_ok()
+    }
+
+    pub fn to_png(path: &Path, out: &Path) -> Result<()> {
+        with_factory(|factory| {
+            // SAFETY: WIC's documented sequence: decode the first frame, convert it to 32-bit
+            // BGRA, and encode that as a PNG frame into a stream on `out`. Every interface is
+            // released when it drops.
+            unsafe {
+                let decoder = factory.CreateDecoderFromFilename(
+                    &HSTRING::from(path.as_os_str()),
+                    None,
+                    GENERIC_READ,
+                    WICDecodeMetadataCacheOnDemand,
+                )?;
+                let frame = decoder.GetFrame(0)?;
+                let pixels = factory.CreateFormatConverter()?;
+                pixels.Initialize(
+                    &frame,
+                    &GUID_WICPixelFormat32bppBGRA,
+                    WICBitmapDitherTypeNone,
+                    None,
+                    0.0,
+                    WICBitmapPaletteTypeCustom,
+                )?;
+                let (mut width, mut height) = (0, 0);
+                pixels.GetSize(&mut width, &mut height)?;
+                let stream = factory.CreateStream()?;
+                stream.InitializeFromFilename(&HSTRING::from(out.as_os_str()), GENERIC_WRITE.0)?;
+                let encoder = factory.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;
+                encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+                let (mut png, mut options) = (None, None);
+                encoder.CreateNewFrame(&mut png, &mut options)?;
+                let png =
+                    png.ok_or_else(|| windows::core::Error::from(windows::core::HRESULT(-1)))?;
+                png.Initialize(options.as_ref())?;
+                png.SetSize(width, height)?;
+                let mut format = GUID_WICPixelFormat32bppBGRA;
+                png.SetPixelFormat(&mut format)?;
+                png.WriteSource(&pixels, std::ptr::null())?;
+                png.Commit()?;
+                encoder.Commit()?;
+            }
+            Ok(())
+        })
+    }
+
+    /// A photo encoded as HEIF by Windows' own codec, for tests: `None` where it has none.
+    #[cfg(test)]
+    pub fn heif_of(width: u32, height: u32, out: &Path) -> Option<()> {
+        use windows::Win32::Graphics::Imaging::GUID_WICPixelFormat32bppBGRA as BGRA;
+        with_factory(|factory| unsafe {
+            // SAFETY: the same sequence as `to_png`, from a bitmap made of `pixels`.
+            let pixels: Vec<u8> = (0..width * height)
+                .flat_map(|i| [(i * 40 % 256) as u8, 120, 200, 255])
+                .collect();
+            let bitmap =
+                factory.CreateBitmapFromMemory(width, height, &BGRA, width * 4, &pixels)?;
+            let stream = factory.CreateStream()?;
+            stream.InitializeFromFilename(&HSTRING::from(out.as_os_str()), GENERIC_WRITE.0)?;
+            let encoder = factory.CreateEncoder(&GUID_ContainerFormatHeif, std::ptr::null())?;
+            encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+            let (mut frame, mut options) = (None, None);
+            encoder.CreateNewFrame(&mut frame, &mut options)?;
+            let frame =
+                frame.ok_or_else(|| windows::core::Error::from(windows::core::HRESULT(-1)))?;
+            frame.Initialize(options.as_ref())?;
+            frame.SetSize(width, height)?;
+            let mut format = BGRA;
+            frame.SetPixelFormat(&mut format)?;
+            frame.WriteSource(&bitmap, std::ptr::null())?;
+            frame.Commit()?;
+            encoder.Commit()?;
+            Ok(())
+        })
+        .ok()
+    }
 }
 
 /// `path` as PNG at `out`, by macOS's own `sips` (HEIC included). There is none off macOS.
@@ -1150,12 +1308,55 @@ mod tests {
 
         let bad = dir.join("broken.heic");
         std::fs::write(&bad, b"not an image").unwrap();
-        assert_eq!(
-            convert_file(&bad, &dir.join("snapshots"))
-                .unwrap_err()
-                .to_string(),
-            "it couldn't be converted to PNG"
+        let said = convert_file(&bad, &dir.join("snapshots"))
+            .unwrap_err()
+            .to_string();
+        // A Windows without HEIF's codec says where to get it instead (CI's has none).
+        assert!(
+            said == "it couldn't be converted to PNG"
+                || (cfg!(windows) && said.starts_with("Windows reads HEIC photos only with")),
+            "{said}"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A real HEIC photo (an iPhone's, or a sample) converted where this OS can:
+    /// `TREK_HEIC=C:\path\IMG_0001.HEIC cargo test -p trek-app --lib a_real_heic -- --ignored`.
+    #[test]
+    #[ignore = "needs a HEIC photo, named by TREK_HEIC"]
+    fn a_real_heic_photo_converts() {
+        let photo = PathBuf::from(std::env::var("TREK_HEIC").expect("TREK_HEIC names a photo"));
+        let dir = temp_dir("real-heic");
+        let out = convert_file(&photo, &dir).unwrap();
+        let back = image::open(&out).unwrap();
+        println!(
+            "{} → {}x{} PNG",
+            photo.display(),
+            back.width(),
+            back.height()
+        );
+        assert!(back.width() > 0 && back.height() > 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An iPhone's HEIC photo, made by Windows' own HEIF codec, comes out as a PNG agents read.
+    #[cfg(windows)]
+    #[test]
+    fn a_heic_photo_is_read_by_windows_own_codec() {
+        let dir = temp_dir("heic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("IMG_0001.HEIC");
+        if super::wic::heif_of(64, 48, &photo).is_none() {
+            // No HEIF encoder here (a PC without the HEIF and HEVC extensions, as CI's): nothing
+            // to read back.
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        assert!(super::wic::reads_heif());
+        let out = convert_file(&photo, &dir.join("snapshots")).unwrap();
+        let back = image::open(&out).unwrap().to_rgba8();
+        assert_eq!((back.width(), back.height()), (64, 48));
+        assert!(crate::mentions::is_image(&out));
         let _ = std::fs::remove_dir_all(dir);
     }
 

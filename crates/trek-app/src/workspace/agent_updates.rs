@@ -109,6 +109,19 @@ impl Workspace {
         }
     }
 
+    /// The threads whose agents are at work, as an agent's update would wait for them: a turn
+    /// running, or work in the background. What quitting would stop (`root::close_main`).
+    pub fn working_threads(&self) -> Vec<&trek_core::store::Thread> {
+        self.threads
+            .iter()
+            .filter(|t| {
+                self.live.get(&t.id).is_some_and(|l| {
+                    l.turn_started.is_some() || (l.commands.is_some() && !l.background.is_empty())
+                })
+            })
+            .collect()
+    }
+
     /// `agent`'s CLI is being replaced: its sessions and messages wait.
     pub fn agent_updating(&self, agent: &str) -> bool {
         self.agent_updates.updating(agent)

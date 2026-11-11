@@ -155,7 +155,7 @@ pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         )
         .into(),
         SettingsPage::ApiKeys => w.api_keys_blurb.into(),
-        SettingsPage::LocalModels => format!("Model servers running on {}: Ollama, LM Studio, and llama.cpp or MLX. Trek finds them on their usual ports.", w.this_computer).into(),
+        SettingsPage::LocalModels => format!("Model servers running on {}: {}. Trek finds them on their usual ports.", w.this_computer, w.local_servers).into(),
         SettingsPage::Import => format!("Trek reads, and never changes, the threads other agents keep on {}, so you can browse and continue them here.", w.this_computer).into(),
         SettingsPage::Project | SettingsPage::About => "".into(),
         SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.".into(),
@@ -2230,19 +2230,35 @@ impl SettingsView {
             .collect(),
             cx,
         ));
-        if cfg!(target_os = "macos") {
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            // On Windows the tools are the phone's apps and files: its screen and taps are the
+            // Mac's for now, and its words say so (`trek_phone::pc`).
+            let pc = crate::words::is_windows();
             out.push(Self::heading("iPhone", cx));
             out.push(ui::group(
                 vec![
                     Self::row(
                         "iPhone tools",
-                        "Agents use your real iPhone on the cable: its screen over USB, taps and typing as a Bluetooth keyboard and mouse you pair once, and apps and files over the cable. No Xcode, no Developer Mode. One agent at a time; installing and changing files follow the thread's access level. Applies to new sessions.",
+                        if pc {
+                            trek_phone::pc::SETTINGS_TOOLS
+                        } else {
+                            "Agents use your real iPhone on the cable: its screen over USB, taps and typing as a Bluetooth keyboard and mouse you pair once, and apps and files over the cable. No Xcode, no Developer Mode. One agent at a time; installing and changing files follow the thread's access level. Applies to new sessions."
+                        },
                         self.switch("phone-tools", s.tools.phone, |s, v| s.tools.phone = v),
                         cx,
                     ),
                     Self::row(
-                        "Show the iPhone live",
-                        "When the agent of the thread you're on starts using the iPhone, the iPhone tool opens beside the chat with its screen live and a Stop button to take the phone back.",
+                        if pc {
+                            trek_phone::pc::SETTINGS_FOLLOW_LABEL
+                        } else {
+                            "Show the iPhone live"
+                        },
+                        if pc {
+                            trek_phone::pc::SETTINGS_FOLLOW
+                        } else {
+                            "When the agent of the thread you're on starts using the iPhone, the iPhone tool opens beside the chat with its screen live and a Stop button to take the phone back."
+                        },
                         self.switch("phone-follow", s.tools.phone_follow, |s, v| {
                             s.tools.phone_follow = v
                         }),
@@ -2275,11 +2291,16 @@ impl SettingsView {
             vec![
                 Self::row(
                     "Video watcher",
-                    "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp; transcripts use whisper when it's installed, else the Mac's speech recognition. Applies to new sessions.",
+                    crate::words::words().video_watcher_note,
                     self.switch("video-tools", s.tools.video, |s, v| s.tools.video = v),
                     cx,
                 ),
-                Self::row("ffmpeg", "Reads the video, takes its frames and its audio. Trek doesn't bundle it.", ffmpeg_control, cx),
+                Self::row(
+                    "ffmpeg",
+                    "Reads the video, takes its frames and its audio. Trek doesn't bundle it.",
+                    ffmpeg_control,
+                    cx,
+                ),
             ],
             cx,
         ));
@@ -2616,10 +2637,10 @@ impl SettingsView {
                 let up = locals.iter().any(|a| a.availability == Availability::Ready);
                 if !up {
                     out.push(Self::note(
-                        if detecting {
-                            "Looking for model servers…"
+                        &if detecting {
+                            "Looking for model servers…".to_string()
                         } else {
-                            "No model servers running. Ollama, LM Studio, and llama.cpp or MLX show up here on their own once they're running on their usual ports — there's nothing to set up."
+                            format!("No model servers running. {} show up here on their own once they're running on their usual ports — there's nothing to set up.", crate::words::words().local_servers)
                         },
                         cx,
                     ));

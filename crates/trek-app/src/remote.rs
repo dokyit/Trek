@@ -711,7 +711,7 @@ fn uuid_like() -> String {
 
 /// The PC's name: its DNS host name (`COMPUTERNAME` when Windows doesn't answer).
 #[cfg(windows)]
-fn computer_name() -> String {
+pub(crate) fn computer_name() -> String {
     use windows_sys::Win32::System::SystemInformation::{
         ComputerNameDnsHostname, GetComputerNameExW,
     };
@@ -734,7 +734,7 @@ fn computer_name() -> String {
 
 /// "Tobias's MacBook Pro", as Sharing settings name it.
 #[cfg(not(windows))]
-fn computer_name() -> String {
+pub(crate) fn computer_name() -> String {
     trek_core::procs::command("scutil")
         .args(["--get", "ComputerName"])
         .output()

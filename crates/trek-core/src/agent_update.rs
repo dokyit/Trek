@@ -144,6 +144,11 @@ impl Harness {
         }
     }
 
+    /// It replaces its own files when it updates (`SELF_UPDATING`), with a command of its own.
+    pub fn updates_itself(&self) -> bool {
+        self.self_update.is_some() && SELF_UPDATING.contains(&self.agent)
+    }
+
     /// `install` as it applies to this agent: a WinGet package that isn't one of its known ids
     /// is read as the vendor's own install (its CLI's `update`), not as a package Trek would
     /// `winget upgrade` on a guess.
@@ -955,6 +960,9 @@ pub fn source(h: &Harness, install: &Install, installed: Option<&str>) -> Option
         }),
         Install::Cask { cask, .. } => Some(Source::Cask(cask.clone())),
         Install::Volta => h.npm_for(installed).map(|p| Source::Npm(p.into())),
+        // One that replaces its own files (`SELF_UPDATING`) updates with its own command, from
+        // its vendor's releases: WinGet's list has no say in it.
+        Install::Winget { .. } if h.updates_itself() => vendor_source(h, installed),
         // What the package manager has, not what the vendor released: an update it can't install
         // yet isn't one to offer (Claude Code 2.1.296 was out while WinGet still had 2.1.292,
         // and `winget upgrade` of the install said so by failing).
@@ -964,10 +972,16 @@ pub fn source(h: &Harness, install: &Install, installed: Option<&str>) -> Option
         }
         // Scoop's buckets are git repositories it pulls before updating: they follow the
         // vendor's release closely.
-        Install::Native | Install::Scoop { .. } => match h.feed {
-            Feed::Npm => h.npm_for(installed).map(|p| Source::Npm(p.into())),
-            feed => Some(Source::Feed(feed)),
-        },
+        Install::Native | Install::Scoop { .. } => vendor_source(h, installed),
+    }
+}
+
+/// Where `h`'s vendor publishes its releases: the npm package of the version `installed` for a
+/// CLI published there, its own feed otherwise.
+fn vendor_source(h: &Harness, installed: Option<&str>) -> Option<Source> {
+    match h.feed {
+        Feed::Npm => h.npm_for(installed).map(|p| Source::Npm(p.into())),
+        feed => Some(Source::Feed(feed)),
     }
 }
 
@@ -1331,6 +1345,14 @@ pub const LOST: i32 = 76;
 /// Agents whose own updater is a terminal program (`UpdateCommand::terminal`).
 const TERMINAL_UPDATERS: &[&str] = &["acp:devin"];
 
+/// Agents that replace their own files however they were installed. Copilot CLI puts each new
+/// version over its executable, the old one kept beside it (`copilot.exe.old-…`), when it updates
+/// itself as it runs or is told to (`copilot update`). WinGet then no longer recognizes the files
+/// it installed, and refuses to upgrade them (0x8A150057, a portable package that was changed):
+/// for that version and every later one. Such an install updates the way it already does, with
+/// the agent's own command.
+const SELF_UPDATING: &[&str] = &["acp:github-copilot"];
+
 pub fn update_command(
     h: &Harness,
     install: &Install,
@@ -1471,6 +1493,15 @@ pub fn update_command(
                 &["upgrade", "--cask", cask],
             )),
         },
+        // One that replaces its own files (`SELF_UPDATING`) is past what `winget upgrade` can
+        // upgrade: its own command updates it, as an administrator if it's every user's.
+        Install::Winget { .. } if h.updates_itself() => own().map(|cmd| {
+            if needs_admin(binary) {
+                cmd.as_admin()
+            } else {
+                cmd
+            }
+        }),
         // `winget upgrade`, as Claude Code's documentation says: WinGet's installs don't update
         // themselves. One installed for every user (Program Files) upgrades as an administrator.
         Install::Winget { id } => {
@@ -1484,6 +1515,10 @@ pub fn update_command(
                         "--id",
                         id,
                         "--exact",
+                        // The source the check asked (`winget::latest`): with the Store's source
+                        // offline, an upgrade from every source fails for want of it (0x8A15004B).
+                        "--source",
+                        "winget",
                         "--accept-package-agreements",
                         "--accept-source-agreements",
                         "--disable-interactivity",
@@ -1558,6 +1593,16 @@ fn winget_exits(h: &Harness) -> Vec<(i32, String)> {
         (0x8A15004Bu32 as i32, "WinGet couldn't open its package sources: offline, or they're busy. Try again in a minute.".into()),
         (0x8A150101u32 as i32, format!("{name} is running somewhere else (a terminal?). Close it and try again.")),
         (0x8A150103u32 as i32, format!("{name}'s files are in use by something else. Close it and try again.")),
+        (0x8A150102u32 as i32, "Another installation is under way on this computer. Try again once it's done.".into()),
+        // A portable package whose files aren't the ones WinGet put there: it updated itself, or
+        // something else replaced them. WinGet won't remove them, so it can't put the new ones in.
+        (0x8A150057u32 as i32, format!("WinGet won't replace {name}: its files have changed since WinGet installed them (it may have updated itself), so WinGet no longer recognizes them.")),
+        (0x8A150054u32 as i32, format!("WinGet found another copy of {name} where it installs its own, and won't overwrite it.")),
+        (0x8A150068u32 as i32, format!("{name} is pinned to its version in WinGet, so WinGet won't upgrade it.")),
+        (0x8A15008Eu32 as i32, format!("WinGet can't upgrade {name} in place: its new version installs a different way from the one installed.")),
+        (0x8A150014u32 as i32, format!("WinGet doesn't find {name} among the packages it installed.")),
+        // `--disable-interactivity` and the agreements' flags are newer than the oldest WinGets.
+        (0x8A150002u32 as i32, "This WinGet is older than the options Trek runs it with. Updating App Installer from the Microsoft Store brings a newer one.".into()),
     ]
 }
 
@@ -1714,12 +1759,17 @@ async fn fetch_from(
     Err(last)
 }
 
+/// How long a check waits for `--version`: longer than detection does. Nothing waits on a check,
+/// and a CLI may be slow to answer just after an update: a new 190 MB `copilot.exe` is read
+/// (and scanned by an antivirus) the first time it runs.
+const VERSION_WAIT: Duration = Duration::from_secs(10);
+
 /// The version of `h` installed at `binary`: what `--version` says, or its npm package's
 /// `package.json` when it says nothing. ACP adapters aren't asked at all: they don't answer
 /// `--version`, they start serving ACP.
 pub async fn installed_version(h: &Harness, binary: &Path) -> Option<String> {
     if !h.adapter
-        && let Some(v) = crate::detect::version_of(binary)
+        && let Some(v) = crate::detect::version_within(binary, VERSION_WAIT)
             .await
             .and_then(|out| parse_version(&out))
     {
@@ -1841,7 +1891,8 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
             .pop()
             .unwrap_or_else(|| no_command(v));
     }
-    run_update_settling(
+    wait_for_exit(std::slice::from_ref(v)).await;
+    let outcome = run_update_settling(
         v,
         if cfg!(windows) {
             SETTLE
@@ -1849,7 +1900,65 @@ pub async fn run_update(v: &AgentVersion) -> Outcome {
             (0, Duration::ZERO)
         },
     )
-    .await
+    .await;
+    log_outcome(v, &outcome);
+    outcome
+}
+
+/// An update's outcome in Trek's log, beside what the user is shown: a failure says what ran.
+fn log_outcome(v: &AgentVersion, outcome: &Outcome) {
+    match outcome {
+        Outcome::Updated { version, .. } => {
+            tracing::info!("updated {} to {version}", v.id);
+        }
+        Outcome::Failed { summary, .. } => {
+            let ran = v
+                .command
+                .as_ref()
+                .map(UpdateCommand::shown)
+                .unwrap_or_default();
+            tracing::warn!("couldn't update {} ({ran}): {summary}", v.id);
+        }
+    }
+}
+
+/// How long an update waits for copies of the agent to end before their files are replaced:
+/// Trek has just asked its sessions to go, and on Windows a running program's files can't be
+/// replaced. One still running after that is left to the updater, which says so in its words
+/// (WinGet's 0x8A150101, npm's EBUSY), or copes (Copilot's `update` moves the running one aside).
+const EXIT_WAIT: Duration = Duration::from_secs(10);
+
+/// The places of `v`'s install a running copy runs from: its program, and the folder that's all
+/// its package's (a WinGet package's; an npm package's, where Codex's `codex.exe` is).
+fn running_places(v: &AgentVersion) -> Vec<PathBuf> {
+    let resolved = std::fs::canonicalize(&v.binary).unwrap_or_else(|_| v.binary.clone());
+    let mut places = vec![resolved.clone()];
+    match &v.install {
+        Install::Winget { .. } => places.extend(resolved.parent().map(Path::to_path_buf)),
+        Install::Npm { .. } | Install::Bun { .. } | Install::Pnpm { .. } => {
+            places.extend(package_dir(&script_of(&resolved)))
+        }
+        _ => {}
+    }
+    places
+}
+
+/// Wait, up to `EXIT_WAIT`, for what runs from `vs`' installs to end. Never on macOS, where
+/// nothing does (`procs::running_from`).
+async fn wait_for_exit(vs: &[AgentVersion]) {
+    let places: Vec<PathBuf> = vs.iter().flat_map(running_places).collect();
+    let deadline = std::time::Instant::now() + EXIT_WAIT;
+    loop {
+        let running = crate::procs::running_from(&places);
+        if running.is_empty() {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            tracing::info!("updating with processes {running:?} still running from the install");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// `run_update`, waiting for a version that hasn't changed yet `settle` (polls, and the time
@@ -1988,9 +2097,19 @@ async fn conclude(
                 output,
             };
         }
+        if let Some(said) = npm_failure(&v.name, &output) {
+            return Outcome::Failed {
+                summary: said,
+                output,
+            };
+        }
         let code = code.map_or("a signal".to_string(), code_words);
+        // What it printed last is often the reason (WinGet's "Failed to uninstall portable package").
+        let said = failure_lines(&output)
+            .map(|l| format!(" It said: {l}"))
+            .unwrap_or_default();
         return Outcome::Failed {
-            summary: format!("{} stopped with {code}.", cmd.shown()),
+            summary: format!("{} stopped with {code}.{said}", cmd.shown()),
             output,
         };
     }
@@ -2263,6 +2382,7 @@ pub const UNANSWERED: &str = "Windows's prompt went unanswered for two minutes. 
 /// one script, so Windows asks once. Each is then told apart (its own output and exit code) and
 /// verified as `run_update` verifies. The outcomes are in `vs`' order.
 pub async fn run_elevated(vs: &[AgentVersion]) -> Vec<Outcome> {
+    wait_for_exit(vs).await;
     // Only what Trek works out itself goes to an administrator; the rest is answered, not run.
     let fit: Vec<bool> = vs.iter().map(is_what_trek_would_run).collect();
     let rows: Vec<AgentVersion> = vs
@@ -2293,6 +2413,7 @@ pub async fn run_elevated(vs: &[AgentVersion]) -> Vec<Outcome> {
         if !fit && v.command.is_some() {
             *outcome = not_trek_command(v);
         }
+        log_outcome(v, outcome);
     }
     outcomes
 }
@@ -2492,6 +2613,46 @@ fn last_lines(output: &str) -> Option<String> {
         .collect();
     let tail = &lines[lines.len().saturating_sub(3)..];
     (!tail.is_empty()).then(|| tail.join(" / "))
+}
+
+/// The last lines of a failed updater's output, which often say why: without npm's pointer to
+/// its log, nor its lines that say nothing past "npm error". Each is cut short: a summary is a
+/// sentence or two, and the whole output is a click away.
+fn failure_lines(output: &str) -> Option<String> {
+    const MAX: usize = 200;
+    let telling: Vec<String> = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.contains("A complete log of this run can be found in"))
+        .filter(|l| {
+            !l.trim_start_matches("npm error")
+                .trim_start_matches("npm ERR!")
+                .trim()
+                .is_empty()
+        })
+        .map(|l| match l.char_indices().nth(MAX) {
+            Some((at, _)) => format!("{}…", &l[..at]),
+            None => l.to_string(),
+        })
+        .collect();
+    last_lines(&telling.join("\n"))
+}
+
+/// npm's words for files it couldn't replace because something has them open: EBUSY, and on
+/// Windows EPERM, which is how Windows refuses to delete or rename a file in use (a running
+/// agent's executable, or one an antivirus is scanning). `None` for any other failure.
+fn npm_failure(name: &str, output: &str) -> Option<String> {
+    let code = |c: &str| {
+        output.lines().any(|l| {
+            let l = l.trim();
+            l == format!("npm error code {c}") || l == format!("npm ERR! code {c}")
+        })
+    };
+    (code("EBUSY") || (cfg!(windows) && code("EPERM"))).then(|| {
+        format!(
+            "npm couldn't replace {name}'s files because something has them open: {name} running in a terminal or an editor, or an antivirus scan. Close it and try again."
+        )
+    })
 }
 
 /// What an update that ran without error came to, given the version installed afterwards.
@@ -3595,9 +3756,10 @@ mod tests {
         let Outcome::Failed { summary, .. } = outcome else {
             panic!()
         };
+        // What npm said comes after: why it failed, as far as it says.
         assert_eq!(
             summary,
-            "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest stopped with code 1."
+            "npm uninstall -g @mariozechner/pi-coding-agent && npm install -g @earendil-works/pi-coding-agent@latest stopped with code 1. It said: npm error uninstall -g @mariozechner/pi-coding-agent"
         );
     }
 
@@ -4087,7 +4249,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             machine.shown(),
-            "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity"
+            "winget upgrade --id Anthropic.ClaudeCode --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity"
         );
         assert!(machine.elevated && machine.on_exit.iter().any(|(code, _)| *code == -1978335189));
         // The native installer's own `claude update` is run by Trek as before.
@@ -4198,9 +4360,17 @@ mod tests {
         );
         for code in [
             0x8A150019, 0x8A150010, 0x8A150008, 0x8A150045, 0x8A15004B, 0x8A150101, 0x8A150103,
+            0x8A150102, 0x8A150057, 0x8A150054, 0x8A150068, 0x8A15008E, 0x8A150014, 0x8A150002,
         ] {
             assert!(said(code).is_some_and(|m| !m.is_empty()), "{code:#X}");
         }
+        // The one Copilot hit: a portable package whose files changed since WinGet put them there.
+        assert_eq!(
+            said(0x8A150057).as_deref(),
+            Some(
+                "WinGet won't replace Claude Code: its files have changed since WinGet installed them (it may have updated itself), so WinGet no longer recognizes them."
+            )
+        );
         // Nothing for the user to type.
         assert!(
             winget_exits(claude).iter().all(|(_, m)| !m.contains('`')),
@@ -4211,6 +4381,53 @@ mod tests {
         assert_eq!(code_words(-1978335189), "code 0x8A15002B (-1978335189)");
         assert_eq!(code_words(1), "code 1");
         assert_eq!(code_words(243), "code 243");
+    }
+
+    #[test]
+    fn a_failed_update_says_what_the_updater_said_last() {
+        // npm's pointer to its log, and its empty "npm error" lines, aren't the reason.
+        let npm = "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@x%2fy - Not found\nnpm error\nnpm error 404 '@x/y@latest' is not in this registry.\nnpm error A complete log of this run can be found in: C:\\Users\\me\\AppData\\Local\\npm-cache\\_logs\\debug-0.log\n";
+        assert_eq!(
+            failure_lines(npm).as_deref(),
+            Some(
+                "npm error code E404 / npm error 404 Not Found - GET https://registry.npmjs.org/@x%2fy - Not found / npm error 404 '@x/y@latest' is not in this registry."
+            )
+        );
+        // WinGet's last words on a code nobody gave words to.
+        let winget = "Found GitHub Copilot CLI [GitHub.Copilot] Version 1.0.109\nStarting package install...\n\nPortable install failed\n";
+        assert_eq!(
+            failure_lines(winget).as_deref(),
+            Some(
+                "Found GitHub Copilot CLI [GitHub.Copilot] Version 1.0.109 / Starting package install... / Portable install failed"
+            )
+        );
+        assert_eq!(failure_lines("\n  \n"), None);
+        // A runaway line is cut short.
+        let long = "x".repeat(500);
+        assert_eq!(failure_lines(&long).map(|l| l.chars().count()), Some(201));
+    }
+
+    #[test]
+    fn npm_says_when_the_files_it_would_replace_are_open() {
+        let busy = "npm error code EBUSY\nnpm error syscall rename\nnpm error path C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\n";
+        assert_eq!(
+            npm_failure("Codex", busy).as_deref(),
+            Some(
+                "npm couldn't replace Codex's files because something has them open: Codex running in a terminal or an editor, or an antivirus scan. Close it and try again."
+            )
+        );
+        // EPERM is Windows refusing a file in use; on macOS it's a permission, not this.
+        let perm = "npm ERR! code EPERM\nnpm ERR! syscall unlink\n";
+        assert_eq!(npm_failure("Codex", perm).is_some(), cfg!(windows));
+        assert_eq!(npm_failure("Codex", "npm error code E404\n"), None);
+        // A line that only mentions the code isn't npm saying it.
+        assert_eq!(
+            npm_failure(
+                "Codex",
+                "see https://docs.npmjs.com/cli/errors#npm-error-code-EBUSY\n"
+            ),
+            None
+        );
     }
 
     #[test]
@@ -5045,8 +5262,11 @@ mod tests {
         let Outcome::Failed { summary, .. } = crate::runtime().block_on(run_update(&other)) else {
             panic!()
         };
+        // Then the last of what it printed, which is often why.
         assert!(
-            summary.ends_with("stopped with code 0x8A15005C (-1978335140)."),
+            summary.ends_with(
+                "stopped with code 0x8A15005C (-1978335140). It said: some output / some error"
+            ),
             "{summary}"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -5219,7 +5439,40 @@ mod tests {
         assert_eq!(cmd.program, Path::new("winget"));
         assert_eq!(
             cmd.shown(),
-            "winget upgrade --id Anthropic.ClaudeCode --exact --accept-package-agreements --accept-source-agreements --disable-interactivity"
+            "winget upgrade --id Anthropic.ClaudeCode --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity"
+        );
+    }
+
+    #[test]
+    fn copilot_from_winget_updates_itself_as_it_already_does() {
+        // Copilot CLI replaces its own executable (keeping `copilot.exe.old-…` beside it), after
+        // which `winget upgrade` refuses the package for good (0x8A150057): `copilot update` it is,
+        // compared with Copilot's own releases rather than WinGet's list.
+        let copilot = h("acp:github-copilot");
+        assert!(copilot.updates_itself() && !h("claude-code").updates_itself());
+        let winget = Install::Winget {
+            id: "GitHub.Copilot".into(),
+        };
+        assert_eq!(
+            source(copilot, &winget, Some("1.0.108")),
+            Some(Source::Npm("@github/copilot".into()))
+        );
+        let exe = |dir: &str| {
+            PathBuf::from(format!(
+                r"{dir}\GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe\copilot.exe"
+            ))
+        };
+        let user = exe(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages");
+        let cmd = update_command(copilot, &winget, &user, false, Some("1.0.108")).unwrap();
+        assert_eq!(cmd.program, user);
+        assert_eq!(cmd.args, ["update"]);
+        assert!(cmd.on_exit.is_empty(), "WinGet's codes aren't its");
+        // Every user's copy (Program Files) updates as an administrator, on Windows.
+        let machine = exe(r"C:\Program Files\WinGet\Packages");
+        let cmd = update_command(copilot, &winget, &machine, false, None).unwrap();
+        assert_eq!(
+            (cmd.args.as_slice(), cmd.elevated),
+            (["update".to_string()].as_slice(), cfg!(windows))
         );
     }
 
