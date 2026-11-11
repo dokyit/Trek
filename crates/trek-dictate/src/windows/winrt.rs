@@ -18,7 +18,7 @@ use ::windows::Media::SpeechRecognition::{
     SpeechRecognitionResultStatus, SpeechRecognitionScenario, SpeechRecognitionTopicConstraint,
     SpeechRecognizer,
 };
-use ::windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
+use ::windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use ::windows::Win32::Media::Audio::{
     IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole,
 };
@@ -40,6 +40,10 @@ const START: Duration = Duration::from_secs(10);
 const CANCEL: Duration = Duration::from_secs(2);
 /// How long an open session waits for its take before it lets go of the mic.
 const CLAIM: Duration = Duration::from_secs(3);
+/// How long a stopped session waits for Windows to complete it (`Completed`) before its take ends
+/// with what was heard, and the session is called off: Windows doesn't always say (seen with
+/// online recognition still busy with the last words).
+const SETTLE: Duration = Duration::from_secs(5);
 /// How often the meter is read while a take listens: faster than the waveform's 20 fps, which
 /// takes the loudest reading since its last.
 const TICK: Duration = Duration::from_millis(25);
@@ -139,6 +143,8 @@ struct Session {
     /// the take as it claims the session.
     take: Option<Take>,
     opened: Instant,
+    /// When its take was finished (✓): Windows completes it soon after, or `SETTLE` ends it.
+    stopped: Option<Instant>,
     recognizer: SpeechRecognizer,
     session: SpeechContinuousRecognitionSession,
     /// The handlers' registrations: HypothesisGenerated, ResultGenerated, Completed.
@@ -234,6 +240,7 @@ impl Worker {
                 };
                 let s = &mut self.sessions[i];
                 s.phrases.finish();
+                s.stopped = Some(Instant::now());
                 // Windows settles what it heard last, then completes the session (`Completed`).
                 if s.session.StopAsync().is_err() {
                     // It can't be stopped (it ended already): what was heard is the take's text.
@@ -289,6 +296,17 @@ impl Worker {
         {
             self.sessions.remove(i).cancel();
         }
+        // Finished, and Windows never completed it: what was heard is the take's text.
+        while let Some(i) = self
+            .sessions
+            .iter()
+            .position(|s| s.stopped.is_some_and(|at| at.elapsed() > SETTLE))
+        {
+            let mut s = self.sessions.remove(i);
+            let said = s.phrases.completed(logic::status::SUCCESS, &s.language);
+            s.tell(said);
+            s.cancel();
+        }
         if self.sessions.is_empty() {
             self.meter = None;
             return;
@@ -315,6 +333,10 @@ impl Worker {
         let problem = |e: ::windows::core::Error| Problem::from_code(e.code().0);
         // No capture endpoint, no point loading the engine.
         microphone().map_err(problem)?;
+        // Nor in listening to a muted one: it hears silence, and the take ends with nothing.
+        if microphone_muted() {
+            return Err(Problem::MicrophoneMuted);
+        }
         let recognizer = SpeechRecognizer::new().map_err(problem)?;
         let language = recognizer
             .CurrentLanguage()
@@ -329,6 +351,7 @@ impl Worker {
                     n,
                     take: None,
                     opened: Instant::now(),
+                    stopped: None,
                     recognizer,
                     session,
                     tokens,
@@ -501,6 +524,16 @@ fn microphone() -> ::windows::core::Result<IMMDevice> {
         let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
         devices.GetDefaultAudioEndpoint(eCapture, eConsole)
     }
+}
+
+/// The default microphone is muted in Windows. One whose state can't be read counts as not.
+fn microphone_muted() -> bool {
+    microphone()
+        // SAFETY: on the thread that made `device`; `Activate` makes the interface its type
+        // names, with no activation parameters, and `GetMute` only reads.
+        .and_then(|device| unsafe { device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) })
+        .and_then(|volume| unsafe { volume.GetMute() })
+        .is_ok_and(|muted| muted.as_bool())
 }
 
 /// The default microphone's endpoint id, for the probe: whether Windows has one at all.

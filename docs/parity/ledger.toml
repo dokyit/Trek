@@ -122,8 +122,9 @@ id = "dictation"
 area = "Composer"
 what = "Dictate a message with the mic button, with live words and a level meter"
 macos = "yes"
-windows = "yes"
-how = { macos = "AVAudioEngine into Apple's Speech framework (on the device when it can).", windows = "Windows' own speech recognizer (Windows.Media.SpeechRecognition), which is online: it follows the Speech privacy setting. Where Windows lacks it, Win+H is offered instead." }
+windows = "partial"
+how = { macos = "AVAudioEngine into Apple's Speech framework (on the device when it can).", windows = "Windows' own speech recognizer (Windows.Media.SpeechRecognition), which is online: it follows the Speech privacy setting, and says when that's off, when the microphone is muted, and when it's unavailable (then Win+H)." }
+note = "Checked live on a Windows 11 PC up to the words: the privacy switch and a muted microphone are said in words, the session opens unpackaged, the mic's level moves and the take completes. No words came back from a sentence played through the PC's own speakers (its echo cancellation likely removes them): a test with a person speaking is still owed."
 code = ["crates/trek-dictate/src/lib.rs", "crates/trek-app/src/composer.rs"]
 tests = ["crates/trek-dictate/src/windows/logic.rs", "crates/trek-app/tests/composer.rs"]
 

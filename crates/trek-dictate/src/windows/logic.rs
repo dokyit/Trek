@@ -165,6 +165,9 @@ pub enum Problem {
     NoMicrophone,
     /// Another app has the microphone to itself (`AUDCLNT_E_DEVICE_IN_USE`).
     MicrophoneBusy,
+    /// The microphone is muted in Windows (its key, or Sound settings): it would hear only
+    /// silence, and the take would end with nothing and no word why.
+    MicrophoneMuted,
     /// The speech service couldn't be reached (`NetworkFailure`, or WinINet's errors).
     Offline,
     /// Windows can't dictate in its speech language (named, when Windows said).
@@ -245,6 +248,7 @@ impl Problem {
             Problem::MicrophoneOff => "Windows isn't letting Trek use the microphone. Turn on microphone access for desktop apps in Settings › Privacy & security › Microphone.".into(),
             Problem::NoMicrophone => "There's no microphone to listen with. Connect one, or choose one in Settings › System › Sound.".into(),
             Problem::MicrophoneBusy => "Another app has the microphone to itself. Close it, then try again.".into(),
+            Problem::MicrophoneMuted => "The microphone is muted in Windows. Unmute it (its key, or Settings › System › Sound › Input), then try again.".into(),
             Problem::Offline => "Windows' online speech recognition couldn't be reached. Check the internet connection, then try again.".into(),
             Problem::Language(name) if name.is_empty() => "Windows can't dictate in its speech language. Choose another in Settings › Time & language › Speech.".into(),
             Problem::Language(name) => format!("Windows can't dictate in {name}. Choose another speech language in Settings › Time & language › Speech."),
@@ -518,6 +522,7 @@ mod tests {
             Problem::MicrophoneOff,
             Problem::NoMicrophone,
             Problem::MicrophoneBusy,
+            Problem::MicrophoneMuted,
             Problem::Offline,
             Problem::Language("Welsh".into()),
             Problem::Unavailable,
@@ -541,11 +546,13 @@ mod tests {
             Problem::MicrophoneOff,
             Problem::NoMicrophone,
             Problem::MicrophoneBusy,
+            Problem::MicrophoneMuted,
             Problem::Offline,
             Problem::NoAnswer,
         ] {
             assert!(!p.lasting(), "{p:?} can be fixed and tried again");
         }
+        assert_eq!(Problem::MicrophoneMuted.switch(), None);
         assert_eq!(Problem::OnlineSpeechOff.switch(), Some(SPEECH_PAGE));
         assert_eq!(Problem::MicrophoneOff.switch(), Some(MICROPHONE_PAGE));
         assert_eq!(Problem::OnlineSpeechManaged.switch(), None);
