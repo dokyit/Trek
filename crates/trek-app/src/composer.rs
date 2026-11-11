@@ -117,7 +117,7 @@ pub struct Composer {
     restate: bool,
     /// Voice mode (`voice`): the toolbar row while dictating, the text heard so far, the levels.
     voice: voice::Voice,
-    /// The take in flight: the mic and the Speech task.
+    /// The take in flight: the mic and the recognizer listening to it.
     dictation: Option<dictate::Dictation>,
     /// While a take is open: what reads its results, the waveform's 20 fps tick, the wait after ✓.
     voice_tasks: Vec<Task<()>>,
@@ -174,12 +174,15 @@ pub fn same_model(id: &str, candidate: &str) -> bool {
             .is_some_and(|date| date.len() == 8 && date.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// Display name for a model id.
+/// Display name for a model id. One the list doesn't have (an older thread's, a list still loading,
+/// a 1M-context list without the plain id) is named from its id when it's Claude's, as the list
+/// would name it, else shown as it is.
 pub fn model_name(models: &[ModelInfo], id: &str) -> String {
     models
         .iter()
         .find(|i| same_model(id, &i.id))
         .map(|i| i.name.clone())
+        .or_else(|| trek_core::catalog::claude_model_name(id))
         .unwrap_or_else(|| id.to_string())
 }
 
@@ -2138,8 +2141,10 @@ impl Composer {
         cx.notify();
     }
 
-    /// Ask for the mic and Speech; once both are allowed, open the take (unless it was
-    /// abandoned while macOS asked).
+    /// Ask for the mic and speech recognition (on Windows that readies the recognizer and opens
+    /// the mic, so the mic spins until it listens); once allowed, open the take. A take given up
+    /// while it started (another draft, the composer closed) is abandoned instead, so whatever
+    /// was opened for it lets go of the mic.
     fn ask_to_dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let take = self.voice.take;
         let (tx, rx) = async_channel::bounded(1);
@@ -2149,9 +2154,10 @@ impl Composer {
                 .recv()
                 .await
                 .unwrap_or_else(|_| Err("Dictation ended.".into()));
-            let _ = this.update_in(cx, |c, window, cx| {
+            let opened = allowed.is_ok();
+            let started = this.update_in(cx, |c, window, cx| {
                 if c.voice.take != take || c.voice.phase != voice::Phase::Asking {
-                    return;
+                    return false;
                 }
                 let (heard, results) = async_channel::unbounded();
                 match allowed.and_then(|()| dictate::start(heard)) {
@@ -2159,10 +2165,17 @@ impl Composer {
                         let live = d.live();
                         c.dictation = Some(d);
                         c.begin_voice(live, results, window, cx);
+                        true
                     }
-                    Err(e) => c.voice_step(voice::Event::Failed(e), window, cx),
+                    Err(e) => {
+                        c.voice_step(voice::Event::Failed(e), window, cx);
+                        false
+                    }
                 }
             });
+            if opened && !started.unwrap_or(false) {
+                dictate::abandon();
+            }
         })
         .detach();
     }
@@ -2359,11 +2372,30 @@ impl Composer {
     }
 
     /// Attach files and folders from the open panel: images on the strip as thumbnails, the rest
-    /// as tiles beside them.
+    /// as tiles beside them. Windows' open dialog picks files or folders, not both (asked for
+    /// both, it shows folders alone): there it's files, and folders have an item of their own
+    /// (`attach_folders`).
     pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let directories = cx.can_select_mixed_files_and_dirs();
+        self.attach_picked(true, directories, window, cx);
+    }
+
+    /// Attach folders from the open panel, as tiles: for Windows, whose dialog can't offer them
+    /// beside files (`attach`).
+    pub fn attach_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attach_picked(false, true, window, cx);
+    }
+
+    fn attach_picked(
+        &mut self,
+        files: bool,
+        directories: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
+            files,
+            directories,
             multiple: true,
             prompt: Some("Attach".into()),
         });
@@ -2815,17 +2847,21 @@ impl Composer {
                 // The Mac's open panel can't reach the Photos library: the Mac has its picker
                 // beside it (`photos::menu`).
                 let sources = crate::photos::menu();
+                let photos_beside = sources.iter().any(|(_, s)| *s == Source::Photos);
                 for &(label, source) in sources {
                     let me = a.clone();
                     let icon = match source {
-                        Source::Files if sources.len() > 1 => crate::assets::Lucide::Paperclip,
-                        _ => crate::assets::Lucide::Image,
+                        // Files beside the Photos picker; alone, photos are picked there too.
+                        Source::Files if photos_beside => crate::assets::Lucide::Paperclip,
+                        Source::Photos | Source::Files => crate::assets::Lucide::Image,
+                        Source::Folders => crate::assets::Lucide::FolderOpen,
                     };
                     menu = menu.item(PopupMenuItem::new(label).icon(icon).on_click(
                         move |_, window, cx| {
                             me.update(cx, |c, cx| match source {
                                 Source::Photos => c.attach_photos(window, cx),
                                 Source::Files => c.attach(window, cx),
+                                Source::Folders => c.attach_folders(window, cx),
                             })
                         },
                     ));
@@ -4267,7 +4303,11 @@ impl Render for Composer {
         // button takes room from them.
         let narrow_below = NARROW
             + if ring_out { RING_ROOM } else { 0. }
-            + if dictate::available() { MIC_ROOM } else { 0. };
+            + if dictate::available() || dictate::fallback().is_some() {
+                MIC_ROOM
+            } else {
+                0.
+            };
         let narrow = self.width.get() < px(narrow_below);
         let plan = prefs.plan;
         let preparing = live.is_some_and(|l| l.preparing);
@@ -4360,9 +4400,29 @@ impl Render for Composer {
                 .into_any_element()
         };
 
-        // The mic opens voice mode when the bundle can ask for it (see dictate::available). Windows
-        // has no mic button: Win+H is its own dictation, which types into the input.
+        // The mic opens voice mode where Trek can dictate (see dictate::available): a Mac bundle
+        // that can ask, or Windows with its speech recognizer. Where Trek can't but the system
+        // can (Windows without the recognizer, or an organization's policy against it), a dimmed
+        // mic points to Win+H, and pressing it says why Trek's own isn't there.
         let asking = self.voice.phase == voice::Phase::Asking;
+        let elsewhere = dictate::fallback().map(|tip| {
+            square("dictate-elsewhere")
+                .test_support()
+                .cursor_pointer()
+                .tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+                })
+                .child(
+                    Icon::new(crate::assets::Lucide::Mic)
+                        .size(px(look::ICON))
+                        .text_color(theme.muted_foreground.opacity(0.45)),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.focus(window, cx);
+                    this.dictate(window, cx)
+                }))
+                .into_any_element()
+        });
         let mic = dictate::available().then(|| {
             square("dictate")
                 .test_support()
@@ -4392,6 +4452,7 @@ impl Render for Composer {
                 })
                 .into_any_element()
         });
+        let mic = mic.or(elsewhere);
         // Voice mode: the waveform, ✕ and ✓ in place of the toolbar.
         let voice_row = self.voice.active().then(|| {
             let finishing = self.voice.phase == voice::Phase::Finishing;
@@ -5127,7 +5188,33 @@ fn cost_breakdown(b: &crate::cost::Breakdown, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{consult_split, restate_command};
+    use super::{consult_split, model_name, restate_command};
+
+    #[test]
+    fn a_model_the_list_lacks_is_still_named() {
+        let fable_1m = trek_core::catalog::ModelInfo {
+            id: "claude-fable-5-1[1m]".into(),
+            name: "Fable 5.1 (1M context)".into(),
+            efforts: vec![],
+            tier: 0,
+            fast: None,
+            context: None,
+            caps: None,
+        };
+        // A thread on the plain id, with only the 1M one listed: named, not shown raw.
+        assert_eq!(
+            model_name(&[fable_1m.clone()], "claude-fable-5-1"),
+            "Fable 5.1"
+        );
+        assert_eq!(
+            model_name(&[fable_1m], "claude-fable-5-1[1m]"),
+            "Fable 5.1 (1M context)"
+        );
+        // A list still loading.
+        assert_eq!(model_name(&[], "claude-opus-5-5-20261001"), "Opus 5.5");
+        // Not Claude's: as it is.
+        assert_eq!(model_name(&[], "big-pickle"), "big-pickle");
+    }
 
     #[test]
     fn restate_takes_a_message_or_none() {

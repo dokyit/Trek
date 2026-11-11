@@ -101,6 +101,60 @@ impl PowerPreset {
     }
 }
 
+/// A Claude model's name from its id, as Claude Code names it once its downloaded model catalog is
+/// in: `claude-opus-5-5` is "Opus 5.5", `claude-haiku-4-5-20251001` "Haiku 4.5", the older
+/// `claude-3-5-sonnet-20241022` "Sonnet 3.5", and `claude-fable-5-1[1m]` "Fable 5.1 (1M context)".
+/// `None` for an id that isn't a Claude model's.
+pub fn claude_model_name(id: &str) -> Option<String> {
+    let (base, million) = match id.strip_suffix("[1m]") {
+        Some(base) => (base, true),
+        None => (id, false),
+    };
+    let mut parts: Vec<&str> = base.strip_prefix("claude-")?.split('-').collect();
+    // A release date at the end: "-20251001".
+    if parts
+        .last()
+        .is_some_and(|p| p.len() == 8 && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        parts.pop();
+    }
+    let number = |p: &&str| (1..=2).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit());
+    let word = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphabetic());
+    // "opus-5-5" (or "opus-5"), else the older "3-5-sonnet".
+    let (family, version) = match parts.as_slice() {
+        [family, version @ ..] if word(family) && !version.is_empty() => (*family, version),
+        [version @ .., family] if word(family) && !version.is_empty() => (*family, version),
+        _ => return None,
+    };
+    if version.len() > 2 || !version.iter().all(number) {
+        return None;
+    }
+    let mut name = family[..1].to_ascii_uppercase() + &family[1..];
+    name.push(' ');
+    name.push_str(&version.join("."));
+    if million {
+        name.push_str(" (1M context)");
+    }
+    Some(name)
+}
+
+/// A Codex model's name as Codex gives it, with one separator: it sends "GPT-6.1-Sol" beside
+/// "GPT-6.1 Terra", and Trek shows both as the latter.
+pub fn codex_model_name(name: &str) -> String {
+    let Some(rest) = name.strip_prefix("GPT-") else {
+        return name.to_string();
+    };
+    let version = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len());
+    match rest[version..].strip_prefix('-') {
+        Some(tail) if version > 0 && tail.starts_with(|c: char| c.is_ascii_alphabetic()) => {
+            format!("GPT-{} {tail}", &rest[..version])
+        }
+        _ => name.to_string(),
+    }
+}
+
 use Effort::*;
 const CLAUDE_EFFORTS: &[Effort] = &[Low, Medium, High, XHigh, Max];
 const CODEX_EFFORTS: &[Effort] = &[Low, Medium, High, XHigh, Max];
@@ -131,11 +185,13 @@ pub fn default_models(agent: &AgentId) -> Vec<ModelInfo> {
                 ..ModelInfo::new("claude-opus-4-8", "Opus 4.8", 2, CLAUDE_EFFORTS)
             },
         ],
+        // Named as Codex names them (`codex_model_name`), so the button reads the same before
+        // its list arrives and after.
         AgentId::Codex => vec![
-            ModelInfo::new("gpt-5.6-luna", "Luna", 0, CODEX_EFFORTS),
-            ModelInfo::new("gpt-5.6-sol", "Sol", 1, CODEX_EFFORTS),
-            ModelInfo::new("gpt-5.6-terra", "Terra", 2, CODEX_EFFORTS),
-            ModelInfo::new("gpt-6-astra", "Astra", 3, CODEX_EFFORTS),
+            ModelInfo::new("gpt-5.6-luna", "GPT-5.6 Luna", 0, CODEX_EFFORTS),
+            ModelInfo::new("gpt-5.6-sol", "GPT-5.6 Sol", 1, CODEX_EFFORTS),
+            ModelInfo::new("gpt-5.6-terra", "GPT-5.6 Terra", 2, CODEX_EFFORTS),
+            ModelInfo::new("gpt-6-astra", "GPT-6 Astra", 3, CODEX_EFFORTS),
         ],
         AgentId::Direct(p) if p == MOCK_PROVIDER => vec![
             ModelInfo::new("mock-swift", "Mock Swift", 0, &[Low, Medium, High]),
@@ -290,7 +346,12 @@ pub const DIRECT_PROVIDERS: &[DirectProvider] = &[
     },
     DirectProvider {
         id: "llamacpp",
-        name: "llama.cpp / MLX",
+        // MLX runs on Apple silicon alone.
+        name: if cfg!(target_os = "macos") {
+            "llama.cpp / MLX"
+        } else {
+            "llama.cpp"
+        },
         base_url: "http://127.0.0.1:8080/v1",
         wire: Wire::OpenAiChat,
         env_key: None,
@@ -621,6 +682,41 @@ pub fn added_agent(id: &str) -> Option<AddedAgent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_models_are_named_by_their_version() {
+        for (id, name) in [
+            ("claude-opus-5-5", "Opus 5.5"),
+            ("claude-fable-5-1", "Fable 5.1"),
+            ("claude-sonnet-5", "Sonnet 5"),
+            ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+            ("claude-3-5-sonnet-20241022", "Sonnet 3.5"),
+            ("claude-fable-5-1[1m]", "Fable 5.1 (1M context)"),
+        ] {
+            assert_eq!(claude_model_name(id).as_deref(), Some(name), "{id}");
+        }
+        for id in [
+            "gpt-6-sol",
+            "claude-x",
+            "claude-opus",
+            "claude-opus-latest",
+            "opus",
+        ] {
+            assert_eq!(claude_model_name(id), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn codex_models_get_one_separator() {
+        assert_eq!(codex_model_name("GPT-6.1-Sol"), "GPT-6.1 Sol");
+        assert_eq!(codex_model_name("GPT-6-Astra"), "GPT-6 Astra");
+        assert_eq!(codex_model_name("GPT-6.1 Terra"), "GPT-6.1 Terra");
+        assert_eq!(codex_model_name("GPT-5.4-mini"), "GPT-5.4 mini");
+        // Not a "GPT-<version>-<name>": as given.
+        assert_eq!(codex_model_name("gpt-oss-120b"), "gpt-oss-120b");
+        assert_eq!(codex_model_name("GPT-6.1-2"), "GPT-6.1-2");
+        assert_eq!(codex_model_name("Sol"), "Sol");
+    }
 
     #[test]
     fn claude_presets_run_fast_to_smart() {

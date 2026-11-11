@@ -787,8 +787,8 @@ pub struct Browser {
     /// While pages are asked for dark: darken (invert) one that stays light, having no dark
     /// scheme of its own.
     pub force_dark: bool,
-    /// macOS: block the big ad and tracker networks in pages (WebKit content rules; the
-    /// Browser's tracker list). Windows has extensions for that instead.
+    /// Block trackers in pages: on macOS the big ad and tracker networks (WebKit content rules;
+    /// the Browser's tracker list), on Windows as Edge's Strict tracking prevention does.
     pub block_trackers: bool,
     /// Block ads with the uBlock Origin the user imported (the Browser's ad blocker: on macOS its
     /// rules as WebKit content rules, on Windows the extension itself). Turned on by an import.

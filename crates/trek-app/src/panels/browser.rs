@@ -448,6 +448,33 @@ mod native {
     pub fn stop(wv: &wry::WebView) {
         let _ = unsafe { wv.webview().Stop() };
     }
+    /// Trackers blocked as Edge's Strict tracking prevention blocks them, or let through as far
+    /// as its default (Balanced) does. The level is the profile's: one call covers every tab,
+    /// from the next page each loads.
+    pub fn block_trackers(wv: &wry::WebView, on: bool) {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_BALANCED,
+            COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_STRICT, ICoreWebView2_13, ICoreWebView2Profile3,
+        };
+        use windows_61::core::Interface as _;
+        let level = if on {
+            COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_STRICT
+        } else {
+            COREWEBVIEW2_TRACKING_PREVENTION_LEVEL_BALANCED
+        };
+        // SAFETY: COM calls on the tab's own WebView2, on the thread that made it; an older
+        // runtime without these interfaces answers with an error.
+        let set = unsafe {
+            wv.webview()
+                .cast::<ICoreWebView2_13>()
+                .and_then(|w| w.Profile())
+                .and_then(|p| p.cast::<ICoreWebView2Profile3>())
+                .and_then(|p| p.SetPreferredTrackingPreventionLevel(level))
+        };
+        if let Err(e) = set {
+            tracing::warn!("couldn't set the Browser's tracking prevention: {e}");
+        }
+    }
     /// Reload past the cache, as WKWebView's `reloadFromOrigin` does.
     pub fn hard_reload(wv: &wry::WebView) {
         let done = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
@@ -1524,8 +1551,9 @@ impl BrowserPanel {
             #[cfg(not(target_os = "macos"))]
             let _ = popup;
             // Downloads (a link's `download`, a response the view can't show, a redirect to a
-            // file) go to Downloads, as wry would put them, and the panel says so.
-            #[cfg(target_os = "macos")]
+            // file) go to Downloads, as wry would put them, and the panel says so. On Windows,
+            // taking them hides WebView2's own download flyout: Trek's toasts say it instead.
+            #[cfg(any(target_os = "macos", windows))]
             let builder = {
                 let (t5, t6) = (tx.clone(), tx.clone());
                 builder
@@ -1714,6 +1742,12 @@ impl BrowserPanel {
             && let Some(tab) = self.tabs.last()
         {
             browser_extensions::blocker::set(tab.view.read(cx).raw(), true);
+        }
+        #[cfg(windows)]
+        if self.workspace.read(cx).settings.browser.block_trackers
+            && let Some(tab) = self.tabs.last()
+        {
+            native::block_trackers(tab.view.read(cx).raw(), true);
         }
         #[cfg(target_os = "macos")]
         if let Some(tab) = self.tabs.last() {
@@ -2612,9 +2646,9 @@ impl BrowserPanel {
         cx.notify();
     }
 
-    /// Block ads and trackers in every tab, or stop (macOS; `browser_extensions::blocker`), and
-    /// load the page in front again so it shows.
-    #[cfg(target_os = "macos")]
+    /// Block trackers in every tab, or stop, and load the page in front again so it shows: on
+    /// macOS the big ad and tracker networks (`browser_extensions::blocker`), on Windows as
+    /// Edge's Strict tracking prevention does (`native::block_trackers`).
     fn toggle_block_trackers(&mut self, cx: &mut Context<Self>) {
         let on = self.workspace.update(cx, |ws, cx| {
             ws.settings.browser.block_trackers = !ws.settings.browser.block_trackers;
@@ -2622,7 +2656,10 @@ impl BrowserPanel {
             ws.settings.browser.block_trackers
         });
         for tab in &self.tabs {
+            #[cfg(target_os = "macos")]
             browser_extensions::blocker::set(tab.view.read(cx).raw(), on);
+            #[cfg(windows)]
+            native::block_trackers(tab.view.read(cx).raw(), on);
         }
         if let Some(tab) = self
             .active_tab()
@@ -3066,14 +3103,20 @@ impl BrowserPanel {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_force_dark(cx)))
             .into_any_element();
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let block_row = {
             let blocking = self.workspace.read(cx).settings.browser.block_trackers;
+            // The Mac's list takes in ad networks too; Edge's tracking prevention, trackers.
+            let label = if cfg!(target_os = "macos") {
+                "Block ads and trackers"
+            } else {
+                "Block trackers"
+            };
             Some(
                 ui::menu_row("browser-block-trackers", false, cx)
                     .test_support()
                     .child(Icon::new(Lucide::ShieldCheck).small().text_color(muted))
-                    .child(div().flex_1().child("Block ads and trackers"))
+                    .child(div().flex_1().child(label))
                     .when(blocking, |el| {
                         el.child(
                             Icon::new(IconName::Check)
@@ -3085,7 +3128,7 @@ impl BrowserPanel {
                     .into_any_element(),
             )
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         let block_row: Option<AnyElement> = None;
         let adblock_rows = self.adblock_rows(cx);
 

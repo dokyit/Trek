@@ -18,16 +18,21 @@
 //!   install an app signed for the phone, list apps, copy files to and from its media folder or
 //!   a file-sharing app's Documents, switch AssistiveTouch on and off.
 //! - **One agent at a time** (`lease`).
+//!
+//! On Windows usbmuxd is Apple Mobile Device Service (which Apple Devices installs), so the apps
+//! and files work there too, and Trek Driver's client builds; what the iPhone tool says there,
+//! where the screen and taps aren't yet, is `pc`'s. Capturing the screen, the Bluetooth keyboard
+//! and mouse, iPhone Mirroring and starting Trek Driver (Xcode) are the Mac's.
 
 pub mod files;
 pub mod hid;
 pub mod lease;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod device;
 #[cfg(target_os = "macos")]
 pub mod diagnose;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub mod driver;
 #[cfg(target_os = "macos")]
 pub mod gesture;
@@ -35,5 +40,7 @@ pub mod gesture;
 pub mod helper;
 #[cfg(target_os = "macos")]
 pub mod mirror;
+#[cfg(any(target_os = "macos", windows))]
+pub mod pc;
 #[cfg(target_os = "macos")]
 pub mod route;

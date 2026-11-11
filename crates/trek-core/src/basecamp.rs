@@ -1270,6 +1270,10 @@ pub fn model_label(agent: &AgentId, model: Option<&str>) -> String {
     };
     // OpenCode and gateways name models `provider/model`.
     let id = model_key(model.rsplit('/').next().unwrap_or(model));
+    // Claude's ids, as the model picker names them (a `[1m]` one says so in words).
+    if let Some(name) = catalog::claude_model_name(&id) {
+        return format!("Claude {name}");
+    }
     if !id.starts_with("claude-") && !id.starts_with("gpt-") {
         let known = [agent.clone(), AgentId::ClaudeCode, AgentId::Codex]
             .into_iter()
@@ -2316,6 +2320,11 @@ mod tests {
         assert_eq!(
             model_label(&AgentId::OpenCode, Some("big-pickle")),
             "Big Pickle"
+        );
+        // A 1M-context id says so in words, not as "5 1[1m]".
+        assert_eq!(
+            model_label(&AgentId::ClaudeCode, Some("claude-fable-5-1[1m]")),
+            "Claude Fable 5.1 (1M context)"
         );
     }
 

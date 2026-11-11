@@ -5,6 +5,9 @@
 //! this phone, list apps).
 //!
 //! Every call is blocking: it runs its own small tokio runtime, so call it off the UI thread.
+//!
+//! On Windows usbmuxd is Apple Mobile Device Service, at 127.0.0.1:27015 (Apple Devices installs
+//! it, as iTunes did), and the pairing records are its own: the same calls work there.
 
 use idevice::IdeviceService as _;
 use idevice::afc::AfcClient;
@@ -37,6 +40,43 @@ pub struct Phone {
     pub usb: bool,
 }
 
+/// An iPhone's marketing name from its model identifier, for the recent ones iPhone Mirroring
+/// works with (it names the phone by model when connecting), and the iPhone tool's header on a PC.
+pub fn model_name(product_type: &str) -> Option<&'static str> {
+    Some(match product_type {
+        "iPhone11,2" => "iPhone XS",
+        "iPhone11,4" | "iPhone11,6" => "iPhone XS Max",
+        "iPhone11,8" => "iPhone XR",
+        "iPhone12,1" => "iPhone 11",
+        "iPhone12,3" => "iPhone 11 Pro",
+        "iPhone12,5" => "iPhone 11 Pro Max",
+        "iPhone12,8" => "iPhone SE",
+        "iPhone13,1" => "iPhone 12 mini",
+        "iPhone13,2" => "iPhone 12",
+        "iPhone13,3" => "iPhone 12 Pro",
+        "iPhone13,4" => "iPhone 12 Pro Max",
+        "iPhone14,4" => "iPhone 13 mini",
+        "iPhone14,5" => "iPhone 13",
+        "iPhone14,2" => "iPhone 13 Pro",
+        "iPhone14,3" => "iPhone 13 Pro Max",
+        "iPhone14,6" => "iPhone SE",
+        "iPhone14,7" => "iPhone 14",
+        "iPhone14,8" => "iPhone 14 Plus",
+        "iPhone15,2" => "iPhone 14 Pro",
+        "iPhone15,3" => "iPhone 14 Pro Max",
+        "iPhone15,4" => "iPhone 15",
+        "iPhone15,5" => "iPhone 15 Plus",
+        "iPhone16,1" => "iPhone 15 Pro",
+        "iPhone16,2" => "iPhone 15 Pro Max",
+        "iPhone17,1" => "iPhone 16 Pro",
+        "iPhone17,2" => "iPhone 16 Pro Max",
+        "iPhone17,3" => "iPhone 16",
+        "iPhone17,4" => "iPhone 16 Plus",
+        "iPhone17,5" => "iPhone 16e",
+        _ => return None,
+    })
+}
+
 /// An app on the phone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct App {
@@ -53,6 +93,44 @@ fn err(what: &str) -> impl Fn(idevice::IdeviceError) -> String + '_ {
     move |e| format!("{what}: {e}")
 }
 
+/// usbmuxd, connected: the socket `/var/run/usbmuxd` on a Mac, Apple Mobile Device Service on
+/// Windows.
+async fn usbmuxd() -> Result<UsbmuxdConnection, String> {
+    UsbmuxdConnection::default().await.map_err(unreachable)
+}
+
+/// What it means that usbmuxd can't be reached, as the thing to do: on Windows a refused
+/// connection is Apple Mobile Device Service missing or stopped (`crate::pc`).
+fn unreachable(e: idevice::IdeviceError) -> String {
+    match e {
+        idevice::IdeviceError::Socket(io) if cfg!(windows) && refused(&io) => {
+            crate::pc::no_service(crate::pc::service()).to_string()
+        }
+        // Its own words say only "device socket io failed".
+        idevice::IdeviceError::Socket(io) => {
+            format!("Couldn't reach usbmuxd (Apple Mobile Device service): {io}")
+        }
+        e => format!("Couldn't reach usbmuxd (Apple Mobile Device service): {e}"),
+    }
+}
+
+/// Whether connecting failed because nothing listens there (no socket file, on a Mac).
+fn refused(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+    )
+}
+
+/// What to do when usbmuxd doesn't list the phone: plug it in, unlock it, trust this computer.
+fn plug_in(udid: Option<&str>) -> String {
+    let this = trek_words::words().this_computer;
+    match udid {
+        Some(u) => format!("No iPhone {u} is connected: plug it in, unlock it and trust {this}."),
+        None => format!("No iPhone is connected: plug it in, unlock it and trust {this}."),
+    }
+}
+
 fn block_on<F: std::future::Future>(f: F) -> Result<F::Output, String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -64,9 +142,7 @@ fn block_on<F: std::future::Future>(f: F) -> Result<F::Output, String> {
 /// usbmuxd's devices, the cable first, then each one's name and iOS version.
 pub fn list() -> Result<Vec<Phone>, String> {
     block_on(async {
-        let mut mux = UsbmuxdConnection::default()
-            .await
-            .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+        let mut mux = usbmuxd().await?;
         let mut devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
         // One entry a phone: the cable's when it has both.
         devices.sort_by_key(|d| d.connection_type != Connection::Usb);
@@ -104,19 +180,14 @@ pub fn list() -> Result<Vec<Phone>, String> {
 
 /// The phone `udid` (the first, cable first, when `None`), to connect to its services.
 async fn provider(udid: Option<&str>) -> Result<UsbmuxdProvider, String> {
-    let mut mux = UsbmuxdConnection::default()
-        .await
-        .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+    let mut mux = usbmuxd().await?;
     let mut devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
     devices.sort_by_key(|d| d.connection_type != Connection::Usb);
     let device = match udid {
         Some(u) => devices.into_iter().find(|d| d.udid == u),
         None => devices.into_iter().next(),
     }
-    .ok_or_else(|| match udid {
-        Some(u) => format!("No iPhone {u} is connected: plug it in, unlock it and trust this Mac."),
-        None => "No iPhone is connected: plug it in, unlock it and trust this Mac.".to_string(),
-    })?;
+    .ok_or_else(|| plug_in(udid))?;
     Ok(device.to_provider(UsbmuxdAddr::default(), LABEL))
 }
 
@@ -125,14 +196,134 @@ async fn lockdown(provider: &UsbmuxdProvider) -> Result<LockdownClient, String> 
     let mut lockdown = LockdownClient::connect(provider)
         .await
         .map_err(err("Couldn't open lockdown"))?;
-    let pairing = provider.get_pairing_file().await.map_err(err(
-        "This Mac isn't paired with the iPhone (unlock it and tap Trust)",
-    ))?;
+    let pairing = provider.get_pairing_file().await.map_err(|e| {
+        format!(
+            "This {} isn't paired with the iPhone (unlock it and tap Trust): {e}",
+            trek_words::words().computer
+        )
+    })?;
     lockdown
         .start_session(&pairing)
         .await
         .map_err(err("Couldn't start a lockdown session"))?;
     Ok(lockdown)
+}
+
+/// What usbmuxd shows now, for the iPhone tool to say what to do next (`crate::pc`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Seen {
+    /// usbmuxd isn't there: on Windows, Apple Mobile Device Service isn't installed, or is
+    /// stopped (`crate::pc::service` tells which).
+    NoService(crate::pc::Service),
+    /// It answers, and lists no iPhone.
+    NoPhone,
+    /// An iPhone that hasn't trusted this computer: there's no pairing record for it, or the
+    /// phone no longer takes the one there is. What it says of itself without one (its name and
+    /// model may be blank).
+    Untrusted(Phone),
+    /// Paired, but it wants its passcode before it lets a session start (it hasn't been unlocked
+    /// since it restarted).
+    Locked(Phone),
+    /// Paired and answering: its apps and files can be reached.
+    Ready(Phone),
+    /// Something else went wrong, in its words.
+    Failed(String),
+}
+
+/// Look at the phones usbmuxd lists (the cable's first) and say where the first one stands:
+/// paired and answering, waiting for Trust, or nothing there at all. Reads only: nothing is
+/// paired, written or started on the phone.
+pub fn probe() -> Seen {
+    probe_at(UsbmuxdAddr::default())
+}
+
+/// [`probe`], of the usbmuxd at `addr` (a made-up one in the tests).
+fn probe_at(addr: UsbmuxdAddr) -> Seen {
+    block_on(async {
+        let mut mux = match addr.connect(0).await {
+            Ok(mux) => mux,
+            Err(idevice::IdeviceError::Socket(io)) if refused(&io) => {
+                return Seen::NoService(crate::pc::service());
+            }
+            Err(e) => return Seen::Failed(unreachable(e)),
+        };
+        let mut devices = match mux.get_devices().await {
+            Ok(d) => d,
+            Err(e) => return Seen::Failed(format!("usbmuxd: {e}")),
+        };
+        devices.sort_by_key(|d| d.connection_type != Connection::Usb);
+        let Some(d) = devices.into_iter().next() else {
+            return Seen::NoPhone;
+        };
+        let provider = d.to_provider(addr.clone(), LABEL);
+        let mut phone = Phone {
+            udid: d.udid.clone(),
+            name: String::new(),
+            ios: String::new(),
+            model: String::new(),
+            usb: d.connection_type == Connection::Usb,
+        };
+        let mut lockdown = match LockdownClient::connect(&provider).await {
+            Ok(l) => l,
+            Err(e) => return Seen::Failed(format!("Couldn't open lockdown: {e}")),
+        };
+        // What it says before a session (a phone that hasn't trusted this computer says less).
+        for (key, into) in [
+            ("DeviceName", &mut phone.name),
+            ("ProductVersion", &mut phone.ios),
+            ("ProductType", &mut phone.model),
+        ] {
+            if let Ok(v) = lockdown.get_value(Some(key), None).await
+                && let Some(s) = v.as_string()
+            {
+                *into = s.to_string();
+            }
+        }
+        let Ok(pairing) = provider.get_pairing_file().await else {
+            return Seen::Untrusted(phone);
+        };
+        match lockdown.start_session(&pairing).await {
+            Ok(_) => {}
+            Err(e) => {
+                return match session_refused(&e) {
+                    Some(Refused::Trust) => Seen::Untrusted(phone),
+                    Some(Refused::Locked) => Seen::Locked(phone),
+                    None => Seen::Failed(format!("Couldn't start a lockdown session: {e}")),
+                };
+            }
+        }
+        // In a session the name is there whatever iOS gives without one.
+        if phone.name.is_empty()
+            && let Ok(v) = lockdown.get_value(Some("DeviceName"), None).await
+            && let Some(s) = v.as_string()
+        {
+            phone.name = s.to_string();
+        }
+        Seen::Ready(phone)
+    })
+    .unwrap_or_else(Seen::Failed)
+}
+
+/// Why a phone wouldn't start a lockdown session with a pairing record this computer holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refused {
+    /// It doesn't know the record (its trust was reset, or it was erased): it must trust this
+    /// computer again.
+    Trust,
+    /// It wants its passcode first.
+    Locked,
+}
+
+fn session_refused(e: &idevice::IdeviceError) -> Option<Refused> {
+    use idevice::IdeviceError as E;
+    match e {
+        E::InvalidHostID => Some(Refused::Trust),
+        E::DeviceLocked => Some(Refused::Locked),
+        // Named by lockdown, but typed by idevice only with its `pair` feature.
+        e if e.to_string().contains("PasswordProtected") => Some(Refused::Locked),
+        e if e.to_string().contains("InvalidHostID") => Some(Refused::Trust),
+        _ => None,
+    }
 }
 
 /// The phone on the Mac's own network, as usbmuxd finds it over Wi-Fi (Bonjour): its address
@@ -186,9 +377,7 @@ pub enum Link {
 /// `None` when usbmuxd doesn't see it at all. No lockdown session: just usbmuxd's list.
 pub fn link(udid: &str) -> Result<Option<Link>, String> {
     block_on(async {
-        let mut mux = UsbmuxdConnection::default()
-            .await
-            .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+        let mut mux = usbmuxd().await?;
         let devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
         let mine = || devices.iter().filter(|d| d.udid == udid);
         if mine().any(|d| d.connection_type == Connection::Usb) {
@@ -408,16 +597,14 @@ pub fn exchange_told(
     let sent = AtomicBool::new(false);
     let answer = block_on(async {
         let work = async {
-            let mut mux = UsbmuxdConnection::default()
-                .await
-                .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+            let mut mux = usbmuxd().await?;
             let mut devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
             devices.sort_by_key(|d| d.connection_type != Connection::Usb);
             let device = match udid {
                 Some(u) => devices.into_iter().find(|d| d.udid == u),
                 None => devices.into_iter().next(),
             }
-            .ok_or("No iPhone is connected: plug it in, unlock it and trust this Mac.")?;
+            .ok_or_else(|| plug_in(None))?;
             // Over the network usbmuxd carries only the phone's own services (its lockdown
             // port), not a port an app listens on: Trek Driver's is reached straight over TCP,
             // at the phone's address; the driver takes only this Mac's connections there.
@@ -425,9 +612,7 @@ pub fn exchange_told(
                 return exchange_tcp(phone_socket(ip, port), request, &sent).await;
             }
             // A connection of its own: after Connect it carries only the phone's port.
-            let tunnel = UsbmuxdConnection::default()
-                .await
-                .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+            let tunnel = usbmuxd().await?;
             let mut conn = tunnel
                 .connect_to_device(device.device_id, port, LABEL)
                 .await
@@ -584,22 +769,18 @@ pub fn stream(
     on_bytes: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Result<(), String> {
     block_on(async {
-        let mut mux = UsbmuxdConnection::default()
-            .await
-            .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+        let mut mux = usbmuxd().await?;
         let mut devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
         devices.sort_by_key(|d| d.connection_type != Connection::Usb);
         let device = match udid {
             Some(u) => devices.into_iter().find(|d| d.udid == u),
             None => devices.into_iter().next(),
         }
-        .ok_or("No iPhone is connected: plug it in, unlock it and trust this Mac.")?;
+        .ok_or_else(|| plug_in(None))?;
         if let Connection::Network(ip) = device.connection_type {
             return stream_from(phone_socket(ip, port), request, quiet, on_bytes).await;
         }
-        let tunnel = UsbmuxdConnection::default()
-            .await
-            .map_err(err("Couldn't reach usbmuxd (Apple Mobile Device service)"))?;
+        let tunnel = usbmuxd().await?;
         let mut conn = tunnel
             .connect_to_device(device.device_id, port, LABEL)
             .await
@@ -772,6 +953,222 @@ pub fn remove(udid: Option<&str>, path: &str, app: Option<&str>) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read as _, Write as _};
+
+    type Answer = Box<dyn FnOnce(&mut std::net::TcpStream) + Send>;
+
+    /// A usbmuxd of the test's own on a local port, speaking as Apple Mobile Device Service does
+    /// on Windows: the n-th connection made to it gets the n-th answer.
+    fn fake_usbmuxd(answers: Vec<Answer>) -> UsbmuxdAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for answer in answers {
+                let Ok((mut s, _)) = listener.accept() else {
+                    return;
+                };
+                std::thread::spawn(move || answer(&mut s));
+            }
+        });
+        UsbmuxdAddr::TcpSocket(addr)
+    }
+
+    fn xml(dict: plist::Dictionary) -> Vec<u8> {
+        let mut out = vec![];
+        plist::Value::Dictionary(dict)
+            .to_writer_xml(&mut out)
+            .unwrap();
+        out
+    }
+
+    fn dict(pairs: &[(&str, plist::Value)]) -> plist::Dictionary {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    /// One of usbmuxd's own messages: a 16-byte header (size, version, type, tag), then a plist.
+    fn read_mux(s: &mut std::net::TcpStream) -> plist::Dictionary {
+        let mut head = [0u8; 16];
+        s.read_exact(&mut head).unwrap();
+        let size = u32::from_le_bytes(head[..4].try_into().unwrap()) as usize;
+        let mut body = vec![0; size - 16];
+        s.read_exact(&mut body).unwrap();
+        plist::from_bytes(&body).unwrap()
+    }
+
+    fn write_mux(s: &mut std::net::TcpStream, answer: plist::Dictionary) {
+        let body = xml(answer);
+        let mut out = vec![];
+        for n in [body.len() as u32 + 16, 1, 8, 0] {
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        out.extend_from_slice(&body);
+        s.write_all(&out).unwrap();
+    }
+
+    /// One of lockdown's, once usbmuxd has connected through: a big-endian length, then a plist.
+    fn read_lockdown(s: &mut std::net::TcpStream) -> Option<plist::Dictionary> {
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).ok()?;
+        let mut body = vec![0; u32::from_be_bytes(len) as usize];
+        s.read_exact(&mut body).ok()?;
+        plist::from_bytes(&body).ok()
+    }
+
+    fn write_lockdown(s: &mut std::net::TcpStream, answer: plist::Dictionary) {
+        let body = xml(answer);
+        s.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
+        s.write_all(&body).unwrap();
+    }
+
+    /// usbmuxd's list: one iPhone on the cable, or none.
+    fn lists(udid: Option<&'static str>) -> Answer {
+        Box::new(move |s| {
+            assert_eq!(
+                read_mux(s).get("MessageType").and_then(|v| v.as_string()),
+                Some("ListDevices")
+            );
+            let devices: Vec<plist::Value> = udid
+                .map(|udid| {
+                    plist::Value::Dictionary(dict(&[
+                        ("DeviceID", 7.into()),
+                        ("MessageType", "Attached".into()),
+                        (
+                            "Properties",
+                            plist::Value::Dictionary(dict(&[
+                                ("ConnectionType", "USB".into()),
+                                ("DeviceID", 7.into()),
+                                ("SerialNumber", udid.into()),
+                            ])),
+                        ),
+                    ]))
+                })
+                .into_iter()
+                .collect();
+            write_mux(s, dict(&[("DeviceList", plist::Value::Array(devices))]));
+        })
+    }
+
+    /// usbmuxd connects through to lockdown, which answers what it's asked as a phone that
+    /// hasn't trusted this computer does: its version and model, not its name.
+    fn lockdown_before_trust() -> Answer {
+        Box::new(|s| {
+            let connect = read_mux(s);
+            assert_eq!(
+                connect.get("MessageType").and_then(|v| v.as_string()),
+                Some("Connect")
+            );
+            write_mux(
+                s,
+                dict(&[("MessageType", "Result".into()), ("Number", 0.into())]),
+            );
+            while let Some(asked) = read_lockdown(s) {
+                let key = asked
+                    .get("Key")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default()
+                    .to_string();
+                let value: Option<plist::Value> = match key.as_str() {
+                    "ProductVersion" => Some("27.2".into()),
+                    "ProductType" => Some("iPhone17,2".into()),
+                    _ => None,
+                };
+                write_lockdown(
+                    s,
+                    match value {
+                        Some(v) => dict(&[("Key", key.into()), ("Value", v)]),
+                        None => dict(&[("Error", "MissingValue".into())]),
+                    },
+                );
+            }
+        })
+    }
+
+    /// usbmuxd has no pairing record for the phone (it never tapped Trust for this computer).
+    fn no_pair_record() -> Answer {
+        Box::new(|s| {
+            assert_eq!(
+                read_mux(s).get("MessageType").and_then(|v| v.as_string()),
+                Some("ReadPairRecord")
+            );
+            write_mux(
+                s,
+                dict(&[("MessageType", "Result".into()), ("Number", 2.into())]),
+            );
+        })
+    }
+
+    /// Nothing listens where usbmuxd should be: on Windows that's Apple Mobile Device Service
+    /// missing or stopped, and the tool says to install Apple Devices (or start the service).
+    #[test]
+    fn a_refused_usbmuxd_is_apple_mobile_device_service_missing() {
+        let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = gone.local_addr().unwrap();
+        drop(gone);
+        let seen = probe_at(UsbmuxdAddr::TcpSocket(addr));
+        assert!(matches!(seen, Seen::NoService(_)), "{seen:?}");
+        let say = crate::pc::say(&seen).unwrap();
+        match seen {
+            Seen::NoService(crate::pc::Service::Stopped) => {
+                assert_eq!(say.title, "Start Apple Mobile Device Service")
+            }
+            _ => {
+                assert_eq!(say.title, "Install Apple Devices from the Microsoft Store");
+                assert!(say.store);
+            }
+        }
+        // A call to the phone's services says the same, the action first.
+        let refused = idevice::IdeviceError::Socket(std::io::ErrorKind::ConnectionRefused.into());
+        let said = unreachable(refused);
+        if cfg!(windows) {
+            assert_eq!(said, crate::pc::no_service(crate::pc::service()));
+        } else {
+            assert!(said.starts_with("Couldn't reach usbmuxd"), "{said}");
+        }
+    }
+
+    #[test]
+    fn usbmuxd_with_no_iphone_is_said_so() {
+        let addr = fake_usbmuxd(vec![lists(None)]);
+        assert_eq!(probe_at(addr), Seen::NoPhone);
+    }
+
+    /// Listed, without a pairing record: waiting for Trust, named as far as it says (lockdown
+    /// gives its version and model before a session).
+    #[test]
+    fn an_iphone_that_hasnt_trusted_this_computer_waits_for_trust() {
+        let addr = fake_usbmuxd(vec![
+            lists(Some("00008140-TEST")),
+            lockdown_before_trust(),
+            no_pair_record(),
+        ]);
+        assert_eq!(
+            probe_at(addr),
+            Seen::Untrusted(Phone {
+                udid: "00008140-TEST".into(),
+                name: String::new(),
+                ios: "27.2".into(),
+                model: "iPhone17,2".into(),
+                usb: true,
+            })
+        );
+    }
+
+    /// A pairing record the phone no longer takes means Trust again; a passcode it wants means
+    /// unlocking it (lockdown names it, idevice types it only with pairing in).
+    #[test]
+    fn a_refused_session_says_whether_to_trust_or_unlock() {
+        use idevice::IdeviceError as E;
+        assert_eq!(session_refused(&E::InvalidHostID), Some(Refused::Trust));
+        assert_eq!(session_refused(&E::DeviceLocked), Some(Refused::Locked));
+        assert_eq!(
+            session_refused(&E::UnknownErrorType("PasswordProtected".into())),
+            Some(Refused::Locked)
+        );
+        assert_eq!(session_refused(&E::SessionInactive), None);
+    }
 
     #[test]
     fn an_answer_is_whole_by_its_content_length() {

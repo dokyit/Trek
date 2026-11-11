@@ -55,3 +55,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 # Screenshots out as PNG (macOS has `screencapture` for that); already in the lockfile via trek-app.
 png = "0.18"
+# `trek-mcp phone` and `phone-device`: the iPhone's apps and files over usbmuxd, which is Apple
+# Mobile Device Service on Windows.
+trek-phone = { path = "../trek-phone" }

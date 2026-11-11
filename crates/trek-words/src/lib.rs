@@ -73,9 +73,12 @@ pub struct Words {
     /// photos), whatever the system opens that kind of file with on Windows.
     pub open_in_viewer: &'static str,
 
-    /// The mic button's tip. Windows has its own dictation, so there the button is left out and
-    /// the tip is the way to it.
+    /// The mic button's tip. On Windows it says whose recognizer listens: Windows' online one.
     pub dictate_tip: &'static str,
+    /// The system's own dictation, for where Trek's can't work (Windows without its speech
+    /// recognizer): a dimmed mic's tip, and the end of the sentence that says why. `None` where
+    /// Trek's always can (a Mac build that can't ask hides the mic instead).
+    pub dictate_fallback: Option<&'static str>,
 
     /// The Browser tool when the system's web view can't be made (WebView2 on Windows).
     pub browser_unavailable: &'static str,
@@ -85,6 +88,19 @@ pub struct Words {
 
     /// The release a platform downloads, as "the ... build" names it: "Mac", "Windows".
     pub build_name: &'static str,
+
+    /// Settings › Tools › Video watcher: what it does, and what its transcripts take. A Mac
+    /// transcribes with its own speech recognition when whisper isn't installed; Windows has none
+    /// that reads a file.
+    pub video_watcher_note: &'static str,
+
+    /// The local model servers Trek finds, as a list in a sentence. MLX runs on Apple silicon
+    /// alone: Windows names the others.
+    pub local_servers: &'static str,
+
+    /// Settings › Notifications, when the system has Trek's banners turned off: where they're
+    /// turned back on.
+    pub banners_off_note: &'static str,
 }
 
 const MACOS: Words = Words {
@@ -132,12 +148,19 @@ const MACOS: Words = Words {
     open_in_viewer: "Open in Preview",
 
     dictate_tip: "Dictate",
+    dictate_fallback: None,
 
     browser_unavailable: "The embedded browser isn't available on this system.",
 
     quit_app: "Quit Trek",
 
     build_name: "Mac",
+
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp; transcripts use whisper when it's installed, else the Mac's speech recognition. Applies to new sessions.",
+
+    local_servers: "Ollama, LM Studio, and llama.cpp or MLX",
+
+    banners_off_note: "macOS has Trek's banners turned off, so none show; sounds still play. Turn them on in System Settings › Notifications.",
 };
 
 const WINDOWS: Words = Words {
@@ -189,13 +212,20 @@ const WINDOWS: Words = Words {
 
     open_in_viewer: "Open in default app",
 
-    dictate_tip: "Press Win+H to dictate",
+    dictate_tip: "Dictate with Windows' online speech recognition",
+    dictate_fallback: Some("Press Win+H to dictate"),
 
     browser_unavailable: "The embedded browser needs Microsoft Edge WebView2, which couldn't be started on this PC.",
 
     quit_app: "Exit Trek",
 
     build_name: "Windows",
+
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp, and transcripts need whisper (pip install openai-whisper). Applies to new sessions.",
+
+    local_servers: "Ollama, LM Studio, and llama.cpp",
+
+    banners_off_note: "Windows has Trek's notifications turned off, so no banners show; sounds still play. Turn them on in Settings › System › Notifications.",
 };
 
 /// The wording for a platform: Windows, or macOS (which is also what every other platform gets).
@@ -274,9 +304,13 @@ mod tests {
             trash,
             open_in_viewer,
             dictate_tip,
+            dictate_fallback,
             browser_unavailable,
             quit_app,
             build_name,
+            video_watcher_note,
+            local_servers,
+            banners_off_note,
         } = *w;
         // Said by one platform only: the other's blank is not a blank wording.
         let nothing = "(says nothing)";
@@ -315,9 +349,13 @@ mod tests {
             ("trash", trash),
             ("open_in_viewer", open_in_viewer),
             ("dictate_tip", dictate_tip),
+            ("dictate_fallback", dictate_fallback.unwrap_or(nothing)),
             ("browser_unavailable", browser_unavailable),
             ("quit_app", quit_app),
             ("build_name", build_name),
+            ("video_watcher_note", video_watcher_note),
+            ("local_servers", local_servers),
+            ("banners_off_note", banners_off_note),
         ]
     }
 
@@ -404,6 +442,10 @@ mod tests {
         assert_eq!(w.open_in_viewer, "Open in Preview");
         assert_eq!(w.dictate_tip, "Dictate");
         assert_eq!(
+            w.dictate_fallback, None,
+            "a Mac build that can't dictate hides the mic"
+        );
+        assert_eq!(
             w.browser_unavailable,
             "The embedded browser isn't available on this system."
         );
@@ -458,7 +500,11 @@ mod tests {
             w.open_in_viewer, "Open in default app",
             "Windows has no Preview, or Quick Look"
         );
-        assert_eq!(w.dictate_tip, "Press Win+H to dictate");
+        assert_eq!(
+            w.dictate_tip,
+            "Dictate with Windows' online speech recognition"
+        );
+        assert_eq!(w.dictate_fallback, Some("Press Win+H to dictate"));
         assert_eq!(w.quit_app, "Exit Trek", "Windows apps exit; a Mac's quit");
         assert_eq!(format!("the {} build", w.build_name), "the Windows build");
         assert_eq!(

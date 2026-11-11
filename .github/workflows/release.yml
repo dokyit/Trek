@@ -58,6 +58,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_ci_check:
+        description: 'Release even though CI has not passed on this commit (an emergency fix only)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -81,8 +86,37 @@ env:
   TREK_POSTHOG_HOST: ${{ vars.TREK_POSTHOG_HOST }}
 
 jobs:
+  # A release is built from a commit CI passed on: both platforms' tests and lints. v0.4.49 went out
+  # after a red run. A dry run isn't held up (it publishes nothing), nor a release whose
+  # skip_ci_check says it can't wait.
+  ci-passed:
+    name: CI passed on this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: CI's runs of this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          SKIP: ${{ inputs.skip_ci_check }}
+        run: |
+          set -euo pipefail
+          if [[ $DRY_RUN == true || $SKIP == true ]]; then
+            echo "Not checked: dry run ($DRY_RUN), skip_ci_check ($SKIP)."
+            exit 0
+          fi
+          conclusions=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed&per_page=20" --jq '[.workflow_runs[].conclusion] | join(" ")')
+          echo "CI on $GITHUB_SHA: ${conclusions:-no completed run}"
+          if [[ " $conclusions " != *" success "* ]]; then
+            echo "::error::CI hasn't passed on $GITHUB_SHA (macOS and Windows). Release a commit it passed on, or run again with skip_ci_check for an emergency fix."
+            exit 1
+          fi
+
   macos:
     name: macOS app
+    needs: ci-passed
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -390,6 +424,7 @@ jobs:
   # out for Apple silicon and Windows, and Intel Macs hear that their build is on its way.
   intel:
     name: macOS app (Intel)
+    needs: ci-passed
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -630,6 +665,7 @@ jobs:
   # the only part that waits for the Mac's release (its manifest merge).
   build:
     name: Windows build
+    needs: ci-passed
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
@@ -829,3 +865,46 @@ jobs:
           # The archive first, the manifest that points at it last.
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$out/Trek-$version-darwin-x86_64.app.tar.gz" "$out/Trek-$version-darwin-x86_64.app.tar.gz.minisig" "$out/Trek-$version-darwin-x86_64.dmg"
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP/$CHANNEL.json"
+
+  # Every platform's downloads are on the release, and in its manifest: v0.4.6, v0.4.9 and v0.4.10
+  # went out without their Windows ones. Run whatever became of the publish jobs, so a release left
+  # without a platform says which, in red, rather than looking whole.
+  complete:
+    name: Every platform released
+    needs: [publish, publish-intel]
+    if: ${{ !cancelled() && inputs.dry_run != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Downloads and manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          version=${VERSION#v}
+          tag=$CHANNEL
+          [[ $CHANNEL == stable ]] && tag="v$version"
+          assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$CHANNEL.json" --output "$RUNNER_TEMP/release.json" --clobber
+          missing=()
+          wanted=(
+            "Trek-$version-darwin-aarch64.app.tar.gz" "Trek-$version-darwin-aarch64.app.tar.gz.minisig" "Trek-$version-darwin-aarch64.dmg"
+            "Trek-$version-darwin-x86_64.app.tar.gz" "Trek-$version-darwin-x86_64.app.tar.gz.minisig" "Trek-$version-darwin-x86_64.dmg"
+            "Trek-$version-windows-x86_64.zip" "Trek-$version-windows-x86_64.zip.minisig" "Trek-Setup-x86_64.exe"
+          )
+          for want in "${wanted[@]}"; do
+            grep -qxF "$want" <<< "$assets" || missing+=("$want")
+          done
+          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64; do
+            jq -e --arg p "$platform" --arg v "$version" '.version == $v and (.platforms[$p] != null)' "$RUNNER_TEMP/release.json" > /dev/null ||
+              missing+=("$platform in $CHANNEL.json")
+          done
+          if (( ${#missing[@]} )); then
+            for m in "${missing[@]}"; do
+              echo "::error::$tag is missing $m"
+            done
+            exit 1
+          fi
+          echo "$tag has every platform's downloads and manifest entry."

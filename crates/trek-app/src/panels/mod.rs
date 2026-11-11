@@ -10,6 +10,10 @@ pub mod git;
 pub mod ide_search;
 #[cfg(target_os = "macos")]
 pub mod phone;
+// A PC's iPhone tool: the phone's apps and files (its screen and taps are the Mac's for now).
+#[cfg(windows)]
+#[path = "phone/windows.rs"]
+pub mod phone;
 mod simhid;
 pub mod simulator;
 pub mod terminal;
@@ -71,7 +75,7 @@ enum View {
     /// The side chat: the editor's AI side bar, on `Scope::Side`.
     SideChat(Entity<crate::ide::ai::AiPane>),
     Simulator(Entity<simulator::SimulatorPanel>),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     Phone(Entity<phone::PhonePanel>),
 }
 
@@ -109,7 +113,7 @@ pub struct RightPanel {
     /// When the Browser tool last came forward for an agent (`browser_call`).
     browser_followed: Option<std::time::Instant>,
     /// When the iPhone tool last came forward for an agent (`phone_call`).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     phone_followed: Option<std::time::Instant>,
 }
 
@@ -191,10 +195,10 @@ impl RightPanel {
             PanelTool::Simulator => {
                 View::Simulator(cx.new(|cx| simulator::SimulatorPanel::new(ws, window, cx)))
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             PanelTool::Phone => View::Phone(cx.new(|cx| phone::PhonePanel::new(ws, window, cx))),
-            // Not offered off macOS.
-            #[cfg(not(target_os = "macos"))]
+            // Not offered off macOS and Windows.
+            #[cfg(not(any(target_os = "macos", windows)))]
             PanelTool::Phone => return,
         };
         let id = self.next_id;
@@ -338,7 +342,7 @@ impl RightPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         {
             let showing = self.open
                 && self
@@ -371,10 +375,10 @@ impl RightPanel {
             });
             panel.update(cx, |p, cx| p.agent_call(call, window, cx));
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             let _ = (window, cx);
-            call.answer(Err("The iPhone tools run only on macOS.".into()));
+            call.answer(Err("The iPhone tools run only on macOS and Windows.".into()));
         }
     }
 
@@ -387,8 +391,11 @@ impl RightPanel {
         })
     }
 
-    /// The iPhone tool, if it's open (the shots harness's `phone`).
-    #[cfg(all(target_os = "macos", feature = "shots"))]
+    /// The iPhone tool, if it's open (the shots harness's `phone`, and the tests').
+    #[cfg(all(
+        any(target_os = "macos", windows),
+        any(feature = "shots", feature = "test-support")
+    ))]
     pub fn phone(&self) -> Option<Entity<phone::PhonePanel>> {
         self.tabs.iter().find_map(|t| match &t.view {
             View::Phone(p) => Some(p.clone()),
@@ -465,7 +472,7 @@ impl RightPanel {
         match self.tabs.iter().find(|t| t.id == id).map(|t| &t.view) {
             Some(View::Browser(b)) => b.update(cx, |b, cx| b.set_visible(false, cx)),
             Some(View::Simulator(s)) => s.update(cx, |s, cx| s.release(window, cx)),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Some(View::Phone(p)) => p.update(cx, |p, cx| p.release(window, cx)),
             _ => {}
         }
@@ -507,7 +514,7 @@ impl RightPanel {
                     let show = open && active == Some(t.id);
                     s.update(cx, |s, cx| s.set_visible(show, cx));
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 View::Phone(p) => {
                     let show = open && active == Some(t.id);
                     p.update(cx, |p, cx| p.set_visible(show, cx));
@@ -850,7 +857,7 @@ impl Render for RightPanel {
                 View::Browser(v) => v.clone().into_any_element(),
                 View::SideChat(v) => v.clone().into_any_element(),
                 View::Simulator(v) => v.clone().into_any_element(),
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 View::Phone(v) => v.clone().into_any_element(),
             },
             None => self.tool_grid(cx),

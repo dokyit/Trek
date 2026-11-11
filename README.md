@@ -235,12 +235,15 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 
 - A tray icon and taskbar badge instead of the menu bar icon and Dock badge.
 - No menu bar: every command is in the palette (Ctrl+K), Settings or a context menu. Shortcuts use Ctrl where the Mac uses ⌘.
-- Dictation is Windows' own (Win+H). Snapshots go through Snipping Tool.
+- Dictation uses Windows' online speech recognition (Settings › Privacy & security › Speech); where Windows lacks it, the mic points to Win+H. Snapshots go through Snipping Tool.
+- Closing the window while agents are working asks first: they can carry on with the window closed, and Trek quits once they're done (opening Trek, or its tray icon, brings the window back).
+- The iPhone tool works through Apple Devices (from the Microsoft Store): the phone's apps, files and AssistiveTouch, for you and agents. Its live screen and taps need Trek on a Mac.
 - No iOS Simulator tool.
 - The first time the phone server is on, allow Trek through Windows Firewall on private networks.
 - Windows 10 22H2 works on a best-effort basis.
 - Keep Trek out of folders that Controlled folder access guards (Documents, Desktop…), or updates can't install. Settings › Updates can move it.
 - Logs: `%LOCALAPPDATA%\Trek\logs`.
+- Every feature, platform by platform: [docs/PARITY.md](docs/PARITY.md).
 
 </details>
 

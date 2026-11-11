@@ -48,6 +48,9 @@ keyring = { version = "3", features = ["windows-native", "linux-native"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # The user and machine PATH, for a GUI launch that has an older one.
 winreg = "0.55"
+# A job object for each version probe (`detect::version_within`): one that doesn't answer ends
+# with everything it started, not only itself.
+trek-job = { path = "../trek-job" }
 
 [dev-dependencies]
 trek-test-fixtures.workspace = true

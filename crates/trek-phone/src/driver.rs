@@ -55,13 +55,29 @@ const PHONE_IDLE_SECS: u64 = 15 * 60;
 /// The script that builds and installs it, as the user runs it.
 pub const INSTALL: &str = "ios/scripts/install-device.sh";
 
-/// Where `install-device.sh` leaves the driver: with the phone updater's state.
+/// Where `install-device.sh` leaves the driver: with the phone updater's state. (On Windows
+/// nothing builds it yet, which needs Xcode: the folder is where one would go, and stays empty,
+/// so the driver is never offered there.)
 pub fn dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join("Library/Application Support/dev.trek.phone-update/driver")
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        home.join("Library/Application Support/dev.trek.phone-update/driver")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        local.join("dev.trek.phone-update").join("driver")
+    }
 }
+
+/// What a start of the driver says where Xcode can't run.
+pub const NEEDS_XCODE: &str =
+    "Starting Trek Driver needs Xcode, so for now it starts only from Trek on a Mac.";
 
 /// The driver as `install-device.sh` left it.
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +176,10 @@ pub fn built_here(udid: &str) -> bool {
 /// lockState`, about 1.5 s. A screen that went dark within the passcode's grace period isn't
 /// locked by this measure (and the driver starts then). Blocks; `None` when it can't tell.
 pub fn passcode_required(udid: &str) -> Option<bool> {
+    // devicectl is Xcode's.
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
     let out = std::env::temp_dir().join(format!("trek-lock-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&out);
     let mut child = Command::new("/usr/bin/xcrun")
@@ -597,8 +617,12 @@ impl Driver {
         limit: Duration,
     ) -> Result<(f64, f64), String> {
         let _one = self.starting.lock().unwrap();
-        let link = device::link(udid)?
-            .ok_or("No iPhone is connected: plug it in, unlock it and trust this Mac.")?; // words: ok, the iPhone tool is macOS only
+        let link = device::link(udid)?.ok_or_else(|| {
+            format!(
+                "No iPhone is connected: plug it in, unlock it and trust {}.",
+                trek_words::words().this_computer
+            )
+        })?;
         let wifi = matches!(link, device::Link::Network(_));
         if self.state() == State::Ready {
             // One started over Wi-Fi answers on the cable too (its loopback); not the other way.
@@ -624,6 +648,10 @@ impl Driver {
         link: device::Link,
         limit: Duration,
     ) -> Result<(f64, f64), String> {
+        // xcodebuild starts it, and Xcode is the Mac's.
+        if !cfg!(target_os = "macos") {
+            return Err(self.fail(NEEDS_XCODE.into()));
+        }
         // Over Wi-Fi: this Mac's address on the phone's network, the one the driver serves.
         let peer = match link {
             device::Link::Usb => None,

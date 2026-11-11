@@ -336,7 +336,7 @@ fn claude_models(models: &Value) -> Vec<ModelInfo> {
             .collect();
         out.push(ModelInfo {
             id: id.to_string(),
-            name: m["displayName"].as_str().unwrap_or(id).to_string(),
+            name: claude_model_label(m, id),
             efforts,
             tier: claude_tier(id),
             fast: (m["supportsFastMode"] == true).then(|| "settings".to_string()),
@@ -345,6 +345,26 @@ fn claude_models(models: &Value) -> Vec<ModelInfo> {
         });
     }
     out
+}
+
+/// What to call a Claude model in the picker: Claude Code's own name when it says which model,
+/// else the one its id says. Before its downloaded model catalog is in (right after an update, say)
+/// Claude Code calls its rows just "Opus", "Fable"… and puts the version only in the description;
+/// a row named otherwise ("Opus Plan Mode") keeps its name.
+fn claude_model_label(m: &Value, id: &str) -> String {
+    let shown = m["displayName"].as_str().unwrap_or(id);
+    match trek_core::catalog::claude_model_name(id) {
+        Some(named)
+            if m["value"] == "default"
+                || named
+                    .split(' ')
+                    .next()
+                    .is_some_and(|family| family.eq_ignore_ascii_case(shown)) =>
+        {
+            named
+        }
+        _ => shown.to_string(),
+    }
 }
 
 fn claude_tier(id: &str) -> u8 {
@@ -1260,6 +1280,41 @@ mod tests {
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(skills, vec!["ego-browser", "pdf"]);
+    }
+
+    /// Before its downloaded model catalog is in (just after an update, say), Claude Code names
+    /// its rows by family only and keeps the version in the description: the picker still says
+    /// which model, as the button does. Recorded from Claude Code 2.1.318 on an empty config.
+    #[test]
+    fn claude_models_without_their_catalog_are_named_by_version() {
+        let models = json!([
+            {"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)","description":"Use the default model (currently Opus 5.5)"},
+            {"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus","description":"Opus 5.5 · Best for everyday, complex tasks","supportsFastMode":true},
+            {"value":"fable","resolvedModel":"claude-fable-5-1","displayName":"Fable","description":"Fable 5.1 · Most capable for your hardest and longest-running tasks"},
+            {"value":"sonnet","resolvedModel":"claude-sonnet-5-5","displayName":"Sonnet","description":"Sonnet 5.5 · Efficient for routine tasks"},
+            {"value":"haiku","resolvedModel":"claude-haiku-5-5","displayName":"Haiku","description":"Haiku 5.5 · Fastest for quick answers"},
+            {"value":"fable[1m]","resolvedModel":"claude-fable-5-1[1m]","displayName":"Fable","description":"Fable 5.1 with a 1M context"},
+            {"value":"opusplan","resolvedModel":"claude-opus-4-8","displayName":"Opus Plan Mode","description":"Opus in plan mode, else Sonnet"}
+        ]);
+        let named: Vec<(String, String)> = claude_models(&models)
+            .into_iter()
+            .map(|m| (m.id, m.name))
+            .collect();
+        let named: Vec<(&str, &str)> = named
+            .iter()
+            .map(|(i, n)| (i.as_str(), n.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("claude-opus-5-5", "Opus 5.5"),
+                ("claude-fable-5-1", "Fable 5.1"),
+                ("claude-sonnet-5-5", "Sonnet 5.5"),
+                ("claude-haiku-5-5", "Haiku 5.5"),
+                ("claude-fable-5-1[1m]", "Fable 5.1 (1M context)"),
+                ("claude-opus-4-8", "Opus Plan Mode"),
+            ]
+        );
     }
 
     #[test]

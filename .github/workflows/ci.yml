@@ -417,3 +417,61 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ steps.key.outputs.key }}
+
+  # The same lints on Windows: the Mac's clippy never reads a `#[cfg(windows)]` line, and trek-app
+  # alone has some 600 platform gates (docs/parity/gates.toml, docs/CROSS_PLATFORM.md). Its own
+  # cache, parallel with the tests as the Mac's is.
+  lint-windows:
+    name: Clippy (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
+    steps:
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+          components: clippy
+
+      - name: Cache key
+        id: key
+        run: python script/ci-cache.py key clippy
+
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python script/ci-cache.py restore
+
+      - name: Clippy (trek-app)
+        run: cargo clippy -p trek-app --all-targets --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Clippy (workspace lib and bins)
+        run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}

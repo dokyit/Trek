@@ -908,11 +908,7 @@ impl Card {
                         // No more than the segment's width holds, at 1 px and a gap each: late in
                         // the fold it's slivers wide, and they'd run on over Free.
                         let room = BAR_WIDTH * shown_messages as f32 / self.window as f32;
-                        let n = if fluent::WINDOWS {
-                            n.min((((room + 2.) / 3.) as usize).max(1))
-                        } else {
-                            n
-                        };
+                        let n = n.min((((room + 2.) / 3.) as usize).max(1));
                         // The chunk being summarized: it runs right to left while the agent
                         // works, and rests on the last one as the fold plays.
                         let at = if running && !still {
@@ -1138,9 +1134,9 @@ impl Card {
         };
         let (label, enabled, why) = match self.compact {
             Compact::Running { .. } => ("Compact now", false, None),
-            // Still folding, the footer still says it's summarizing: the design's button says
-            // Compacted only once that's done.
-            Compact::Freed { .. } if folding && fluent::WINDOWS => ("Compact now", false, None),
+            // Still folding, the footer still says it's summarizing: the button says Compacted
+            // only once that's done.
+            Compact::Freed { .. } if folding => ("Compact now", false, None),
             Compact::Freed { .. } => ("Compacted", false, None),
             Compact::Idle | Compact::Unchanged { .. } => {
                 let why = if self.no_thread {

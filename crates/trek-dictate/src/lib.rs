@@ -1,16 +1,138 @@
-//! Speak instead of type: the composer's mic opens a take that streams the microphone through an
-//! `AVAudioEngine` input tap into an `SFSpeechAudioBufferRecognitionRequest` (on-device where the
-//! recognizer supports it), so partial text arrives while the user speaks. Where that can't
-//! start, the take records to a temp `.caf` with `AVAudioRecorder` and the Speech framework
-//! transcribes the file once it stops. macOS asks for the microphone and Speech permissions the
-//! first time each is needed; a build without the usage descriptions in its Info.plist — a bare
-//! `cargo run` binary — hides the button instead of asking (TCC ends processes that ask without
-//! declaring).
-// Dictation runs on macOS only; elsewhere the composer never starts a take, so the shared types
-// and the level maths go unused there (CI builds Windows with `-D warnings`).
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+//! Speak instead of type: the composer's mic opens a take that streams the microphone into the
+//! system's speech recognizer, so partial text arrives while the user speaks.
+//!
+//! On macOS the take streams through an `AVAudioEngine` input tap into an
+//! `SFSpeechAudioBufferRecognitionRequest` (on-device where the recognizer supports it). Where
+//! that can't start, the take records to a temp `.caf` with `AVAudioRecorder` and the Speech
+//! framework transcribes the file once it stops. macOS asks for the microphone and Speech
+//! permissions the first time each is needed; a build without the usage descriptions in its
+//! Info.plist — a bare `cargo run` binary — hides the button instead of asking (TCC ends
+//! processes that ask without declaring).
+//!
+//! On Windows it's Windows' own online speech recognition, in a continuous session on a thread
+//! of its own (`windows`). Elsewhere there's no dictation, and no mic.
+//!
+//! Under `test-support` a fake stands in for all of it (`fake`), so no test reaches a real
+//! microphone; with none installed there's no dictation.
 
 use async_channel::Sender;
+
+#[cfg(feature = "test-support")]
+pub mod fake;
+#[cfg(any(windows, test))]
+#[doc(hidden)]
+pub mod windows;
+#[cfg(all(windows, not(feature = "test-support")))]
+use self::windows as imp;
+
+/// Under `test-support` each call goes to the fake, otherwise to the platform's backend.
+macro_rules! backend {
+    ($($call:tt)*) => {{
+        #[cfg(feature = "test-support")]
+        let answer = fake::$($call)*;
+        #[cfg(not(feature = "test-support"))]
+        let answer = imp::$($call)*;
+        answer
+    }};
+}
+
+/// Whether the mic button shows: Trek can take dictation here.
+pub fn available() -> bool {
+    backend!(available())
+}
+
+/// Where Trek can't take dictation but the system's own dictation can (Windows' Win+H): what a
+/// dimmed mic says instead. `None` where Trek can, or where there's nothing to point to.
+pub fn fallback() -> Option<&'static str> {
+    backend!(fallback())
+}
+
+/// `reply` hears `Ok` once dictation may start (the system's permissions are in, and on Windows
+/// the mic is open and listening), or why it may not. It can answer a while after it's called.
+pub fn ensure_permission(reply: Sender<Result<(), String>>) {
+    backend!(ensure_permission(reply))
+}
+
+/// Open a take, once [`ensure_permission`] said yes: what it hears goes to `heard`.
+pub fn start(heard: Sender<Heard>) -> Result<Dictation, String> {
+    backend!(start(heard)).map(Dictation)
+}
+
+/// A take [`ensure_permission`] said yes to but the composer gave up before it started (✕ or
+/// another draft while the mic was starting): whatever was opened for it lets go of the mic.
+/// macOS opens nothing until [`start`].
+pub fn abandon() {
+    backend!(abandon())
+}
+
+/// The microphone permission, without asking.
+pub fn mic_access() -> Access {
+    backend!(mic_access())
+}
+
+/// Speech recognition's permission (online speech recognition, on Windows), without asking.
+pub fn speech_access() -> Access {
+    backend!(speech_access())
+}
+
+/// The system's way to allow the microphone: its prompt on macOS (`done` hears the answer, on
+/// another thread), its Settings page on Windows (`done` hears where it stands now).
+pub fn ask_mic(done: impl Fn(bool) + Send + Sync + 'static) {
+    #[cfg(feature = "test-support")]
+    fake::ask(done);
+    #[cfg(not(feature = "test-support"))]
+    imp::ask_mic(done);
+}
+
+/// The same for speech recognition.
+pub fn ask_speech(done: impl Fn(bool) + Send + Sync + 'static) {
+    #[cfg(feature = "test-support")]
+    fake::ask(done);
+    #[cfg(not(feature = "test-support"))]
+    imp::ask_speech(done);
+}
+
+/// A take over an existing audio file — no mic, but Speech permission still applies. The shots
+/// harness drives this (`dictate-file`) to prove the transcription path without a clickable
+/// permission dialog.
+#[cfg(feature = "shots")]
+pub fn transcribe_file(
+    file: std::path::PathBuf,
+    heard: Sender<Heard>,
+) -> Result<Dictation, String> {
+    #[cfg(feature = "test-support")]
+    let take = {
+        let _ = (file, heard);
+        Err("No recordings in a test.".to_string())
+    };
+    #[cfg(not(feature = "test-support"))]
+    let take = imp::transcribe_file(file, heard);
+    take.map(Dictation)
+}
+
+/// One take: the mic open while it lives, and the recognizer turning it into text. Dropping it
+/// ends the take at the mic.
+pub struct Dictation(
+    #[cfg(not(feature = "test-support"))] imp::Dictation,
+    #[cfg(feature = "test-support")] fake::Take,
+);
+
+impl Dictation {
+    /// Partial text comes while the user speaks (else the text arrives once, after ✓).
+    pub fn live(&self) -> bool {
+        self.0.live()
+    }
+
+    /// How loud the mic has been since the last call, 0 to 1 (0 once it's off).
+    pub fn level(&self) -> f32 {
+        self.0.level()
+    }
+
+    /// Stop the mic; the take's text follows as [`Heard::Final`] (or `Failed`).
+    pub fn finish(&mut self) {
+        self.0.finish()
+    }
+}
 
 /// What a take says to the composer.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,7 +151,7 @@ pub enum Access {
     Granted,
     /// Never asked: asking shows the system's prompt.
     NotAsked,
-    /// Turned down (or restricted): only System Settings can change it now.
+    /// Turned down (or restricted): only the system's settings can change it now.
     Denied,
     /// This build can't ask: no usage descriptions in its Info.plist (a bare `cargo run`), or a
     /// system without the API.
@@ -55,6 +177,8 @@ pub fn loudness(samples: &[f32]) -> f32 {
 }
 
 #[cfg(target_os = "macos")]
+// Under `test-support` the fake answers every call instead.
+#[cfg_attr(feature = "test-support", allow(dead_code))]
 mod imp {
     use super::*;
     use block2::RcBlock;
@@ -81,6 +205,14 @@ mod imp {
     pub fn available() -> bool {
         packaged() || std::env::var_os("TREK_DICTATE").is_some_and(|v| v == "1")
     }
+
+    /// A build that can't ask hides the mic rather than pointing to macOS's own dictation.
+    pub fn fallback() -> Option<&'static str> {
+        None
+    }
+
+    /// Nothing is opened before `start`, so a take given up while asking holds nothing.
+    pub fn abandon() {}
 
     /// The bundle declares microphone and speech use — and AVAudioApplication asks for them,
     /// so macOS 13 and older never show the button.
@@ -515,24 +647,18 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Neither macOS nor Windows: no recognizer, so no mic.
+#[cfg(not(any(target_os = "macos", windows)))]
+// Under `test-support` the fake answers every call instead.
+#[cfg_attr(feature = "test-support", allow(dead_code))]
 mod imp {
     use super::*;
 
-    /// Dictation in Trek is macOS-only for now; Windows has its own (Win+H), which needs nothing
-    /// from Trek.
     pub struct Dictation;
 
-    /// What a dictation asked for says: that it isn't here (yet), and on Windows the way to its own.
+    /// What a dictation asked for says.
     fn unavailable() -> String {
-        if cfg!(windows) {
-            format!(
-                "Dictation isn't available on Windows yet. {}.",
-                trek_words::words().dictate_tip
-            )
-        } else {
-            "Dictation is macOS-only for now.".into()
-        }
+        "Dictation is on macOS and Windows only for now.".into()
     }
 
     impl Dictation {
@@ -554,7 +680,15 @@ mod imp {
         false
     }
 
-    pub fn ensure_permission(_: Sender<Result<(), String>>) {}
+    pub fn fallback() -> Option<&'static str> {
+        None
+    }
+
+    pub fn ensure_permission(reply: Sender<Result<(), String>>) {
+        let _ = reply.try_send(Err(unavailable()));
+    }
+
+    pub fn abandon() {}
 
     pub fn mic_access() -> Access {
         Access::Unavailable
@@ -579,21 +713,42 @@ mod imp {
     #[cfg(test)]
     mod tests {
         #[test]
-        fn windows_says_dictation_isnt_here_yet() {
+        fn there_is_no_dictation_here() {
             let said = super::unavailable();
-            if cfg!(windows) {
-                assert_eq!(
-                    said,
-                    "Dictation isn't available on Windows yet. Press Win+H to dictate."
-                );
-            } else {
-                assert_eq!(said, "Dictation is macOS-only for now.");
-            }
+            assert_eq!(said, "Dictation is on macOS and Windows only for now.");
             let (tx, _rx) = async_channel::unbounded();
-            assert_eq!(super::start(tx).err(), Some(said));
+            assert_eq!(super::start(tx).err(), Some(said.clone()));
+            let (reply, answer) = async_channel::bounded(1);
+            super::ensure_permission(reply);
+            assert_eq!(answer.try_recv().ok(), Some(Err(said)));
             assert!(!super::available(), "no mic button here");
+            assert_eq!(super::fallback(), None);
         }
     }
 }
 
-pub use imp::*;
+#[cfg(test)]
+mod tests {
+    /// Windows' backend, as Trek calls it, without opening anything: whatever this PC has, the
+    /// mic shows only where the recognizer is registered, and the dimmed one only where it isn't.
+    #[cfg(windows)]
+    #[test]
+    fn windows_shows_the_mic_where_its_recognizer_is() {
+        use crate::windows as backend;
+        let registered = crate::windows::hints::recognizer_registered();
+        assert_eq!(backend::available(), registered);
+        assert_eq!(
+            backend::fallback(),
+            (!registered).then_some("Press Win+H to dictate")
+        );
+    }
+
+    #[test]
+    fn levels_map_from_dbfs_and_samples() {
+        assert_eq!(crate::loudness_db(-160.), 0.);
+        assert_eq!(crate::loudness_db(0.), 1.);
+        assert_eq!(crate::loudness_db(f32::NAN), 0.);
+        assert_eq!(crate::loudness(&[]), 0.);
+        assert!(crate::loudness(&[0.5, -0.5]) > 0.9);
+    }
+}

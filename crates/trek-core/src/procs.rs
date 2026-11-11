@@ -414,6 +414,39 @@ pub fn children(pid: u32) -> Vec<u32> {
     win::children(pid)
 }
 
+/// The processes (other than Trek) running a program that is one of `places`, or is inside one
+/// of them: what keeps an install's files from being replaced. Windows won't delete or rename a
+/// running program; elsewhere that doesn't hold an install back, and this is always empty.
+pub fn running_from(places: &[PathBuf]) -> Vec<u32> {
+    if places.is_empty() {
+        return vec![];
+    }
+    #[cfg(windows)]
+    {
+        let places: Vec<String> = places
+            .iter()
+            .map(|p| comparable(&p.to_string_lossy()))
+            .collect();
+        win::running_from(&places)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = places;
+        vec![]
+    }
+}
+
+/// A Windows path as two spellings of one file compare: without the `\\?\` that `canonicalize`
+/// puts in front, without a trailing separator, in one case.
+#[cfg(windows)]
+fn comparable(path: &str) -> String {
+    let path = match path.strip_prefix(r"\\?\UNC\") {
+        Some(share) => format!(r"\\{share}"),
+        None => path.strip_prefix(r"\\?\").unwrap_or(path).to_string(),
+    };
+    path.trim_end_matches('\\').to_lowercase()
+}
+
 /// When process `pid` started (unix seconds), if it runs.
 #[cfg(target_os = "macos")]
 fn start_time(pid: i32) -> Option<i64> {
@@ -674,6 +707,49 @@ mod win {
         )
     }
 
+    /// The program file process `pid` runs, as Windows names it (`C:\…\copilot.exe`); `None` when
+    /// it has exited, or Trek may not look at it.
+    fn image(pid: u32) -> Option<String> {
+        use windows_sys::Win32::System::Threading::{
+            PROCESS_NAME_WIN32, QueryFullProcessImageNameW,
+        };
+        let p = i32::try_from(pid).ok().and_then(Proc::open)?;
+        let mut name = vec![0u16; 32_768];
+        let mut len = name.len() as u32;
+        // SAFETY: a process handle this owns, with query rights; `name` holds `len` units.
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                p.handle.as_raw_handle(),
+                PROCESS_NAME_WIN32,
+                name.as_mut_ptr(),
+                &mut len,
+            )
+        } != 0;
+        ok.then(|| String::from_utf16_lossy(&name[..len as usize]))
+    }
+
+    /// The ids of the processes running a program that is one of `places`, or inside one of them
+    /// (a folder): normalized (`\\?\` gone, one case), as `super::running_from` gives them.
+    pub(super) fn running_from(places: &[String]) -> Vec<u32> {
+        let Some(all) = snapshot() else { return vec![] };
+        let me = std::process::id();
+        all.into_iter()
+            .map(|(pid, _)| pid)
+            .filter(|&pid| pid != me)
+            .filter(|&pid| {
+                image(pid).is_some_and(|image| {
+                    let image = super::comparable(&image);
+                    places.iter().any(|place| {
+                        image == *place
+                            || image
+                                .strip_prefix(place.as_str())
+                                .is_some_and(|rest| rest.starts_with('\\'))
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// The ids of `pid`'s running children, created no earlier than it.
     pub(super) fn children(pid: u32) -> Vec<u32> {
         let Some(parent) = i32::try_from(pid).ok().and_then(Proc::open) else {
@@ -793,6 +869,26 @@ mod tests {
                 String::from_utf16_lossy(&buf[..n as usize]).to_lowercase()
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn what_runs_from_an_install_is_found_by_its_program_or_its_folder() {
+        let mut child = sleeper();
+        let pid = child.id();
+        let exe = PathBuf::from(image_name(pid));
+        let folder = exe.parent().unwrap().to_path_buf();
+        // As `canonicalize` spells it, and in another case: the same file.
+        let verbatim = PathBuf::from(format!(r"\\?\{}", exe.display().to_string().to_uppercase()));
+        assert!(running_from(std::slice::from_ref(&verbatim)).contains(&pid));
+        assert!(running_from(std::slice::from_ref(&folder)).contains(&pid));
+        // A folder whose name only starts the same isn't it.
+        let sibling = PathBuf::from(format!("{}32", folder.display()));
+        assert!(!running_from(&[sibling]).contains(&pid));
+        assert!(running_from(&[]).is_empty());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!running_from(&[exe]).contains(&pid));
     }
 
     #[test]

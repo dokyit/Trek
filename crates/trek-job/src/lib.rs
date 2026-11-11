@@ -20,6 +20,30 @@ use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_
 /// A job that ends what's in it when its handle closes.
 pub struct Job(OwnedHandle);
 
+impl Job {
+    /// Let the job go without ending what's in it: for a process that did what it was started
+    /// for, whatever it leaves running is its own (an update of itself it started, say). Should
+    /// Windows refuse to lift the limit, closing the job ends them after all.
+    pub fn release(self) {
+        // SAFETY: all zeroes is a valid limit information (integers only): no limits.
+        let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of_val(&info) as u32;
+        // SAFETY: a job handle this owns, with all access; `info` is the structure the class
+        // names, `size` long.
+        let lifted = unsafe {
+            SetInformationJobObject(
+                self.0.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                size,
+            )
+        } != 0;
+        if !lifted {
+            tracing::warn!("couldn't let a job go: {}", std::io::Error::last_os_error());
+        }
+    }
+}
+
 /// The jobs of the servers running, by the pid of the child in each.
 static JOBS: Mutex<Option<HashMap<u32, Job>>> = Mutex::new(None);
 

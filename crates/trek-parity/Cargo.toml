@@ -1,0 +1,12 @@
+[package]
+name = "trek-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Checks that every place Trek's platforms differ is a recorded decision (docs/parity)."
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+walkdir.workspace = true

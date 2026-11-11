@@ -20,11 +20,15 @@ pub mod picker;
 pub enum Source {
     /// The system's Photos picker (Mac).
     Photos,
-    /// The open panel: files and folders, photos among them where the panel reaches them.
+    /// The open panel: files and folders, photos among them where the panel reaches them. Where
+    /// it can't offer both at once (Windows'), files.
     Files,
+    /// The open panel for folders, where files and folders aren't offered at once (Windows).
+    Folders,
 }
 
-/// The + menu's first group, as (label, source).
+/// The + menu's first group, as (label, source). Windows' open dialog picks files or folders,
+/// never both: each has its own item.
 pub fn menu() -> &'static [(&'static str, Source)] {
     if cfg!(target_os = "macos") {
         &[
@@ -32,7 +36,10 @@ pub fn menu() -> &'static [(&'static str, Source)] {
             ("Files…", Source::Files),
         ]
     } else {
-        &[("Add photos & files", Source::Files)]
+        &[
+            ("Add photos & files", Source::Files),
+            ("Add folder", Source::Folders),
+        ]
     }
 }
 
@@ -268,8 +275,14 @@ mod tests {
                 ]
             );
         } else {
-            // Windows' open panel is how it picks photos: the menu is as it was.
-            assert_eq!(menu(), &[("Add photos & files", Source::Files)]);
+            // Windows' open dialog is how it picks photos, and picks files or folders, not both.
+            assert_eq!(
+                menu(),
+                &[
+                    ("Add photos & files", Source::Files),
+                    ("Add folder", Source::Folders)
+                ]
+            );
         }
     }
 

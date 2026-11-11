@@ -764,7 +764,34 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let n = &s.notifications;
-        vec![
+        // Banners asked for, and the system turned them off: say so, and where to turn them on.
+        let banners = matches!(n.mode, NotifyMode::BannerAndSound | NotifyMode::Banner);
+        let refused = banners
+            && crate::permissions::status(crate::permissions::Permission::Notifications)
+                == crate::permissions::Status::Denied;
+        let refused_row = refused.then(|| {
+            ui::group(
+                vec![Self::row(
+                    "Banners are turned off",
+                    crate::words::words().banners_off_note,
+                    Button::new("open-notification-settings")
+                        .small()
+                        .outline()
+                        .label("Open Settings")
+                        .on_click(|_, _, cx| {
+                            crate::permissions::open_pane(
+                                crate::permissions::Permission::Notifications,
+                                cx,
+                            )
+                        }),
+                    cx,
+                )],
+                cx,
+            )
+        });
+        refused_row
+            .into_iter()
+            .chain([
             ui::group(
                 vec![
                     Self::row(
@@ -819,7 +846,8 @@ impl SettingsView {
                 ],
                 cx,
             ),
-        ]
+        ])
+        .collect()
     }
 
     pub(super) fn shortcuts_page(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {

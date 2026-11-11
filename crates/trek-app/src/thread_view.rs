@@ -4775,7 +4775,8 @@ fn toggle_row(
                 s.remeasure_items(row_ix..row_ix + 1, cx);
                 // Pinned to the bottom, a row opening grows upward, and a timeline is tall enough
                 // to take what was just clicked off the top; so it grows down from the top instead.
-                if fluent::WINDOWS && opened && s.is_following_tail() {
+                // (Made for Windows' timeline at first; the Mac's grows the same way.)
+                if opened && s.is_following_tail() {
                     s.scroll_to_item(row_ix, cx);
                 }
             });

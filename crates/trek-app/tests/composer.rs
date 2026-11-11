@@ -998,6 +998,194 @@ fn the_voice_toolbar_moves_through_its_states() {
     assert_eq!(v.preview(), ("a x b".to_string(), 2..3));
 }
 
+/// Every toast's message, in order.
+fn said(
+    toasts: &std::rc::Rc<
+        std::cell::RefCell<Vec<(String, Option<trek_app::workspace::UndoAction>)>>,
+    >,
+) -> Vec<String> {
+    toasts.borrow().iter().map(|(m, _)| m.clone()).collect()
+}
+
+/// Where Trek can dictate (a fake recognizer standing in), the mic opens a take: it asks, the
+/// waveform comes up once the take listens, what's heard shows as it's revised, and ✓ stops the
+/// mic and puts the take's text in as typed. Nothing holds the mic after.
+#[test]
+fn the_mic_opens_a_take_and_puts_in_what_it_heard() {
+    use trek_app::composer::voice::Phase;
+    use trek_app::dictate::{Heard, fake};
+    run(async |cx| {
+        let dictation = fake::install();
+        let trek = open(cx);
+        assert!(trek.visible(cx, "dictate"), "the mic is there");
+        trek.type_text(cx, "Note:");
+        trek.click(cx, "dictate");
+        assert_eq!(dictation.asked(), 1);
+        assert_eq!(voice_phase(&trek, cx), Phase::Listening);
+        assert!(dictation.listening());
+        trek.render(cx);
+        assert!(trek.visible(cx, "voice-row") && !trek.visible(cx, "dictate"));
+
+        dictation.hear(Heard::Partial("make the buttons".into()));
+        trek.render(cx);
+        assert_eq!(
+            voice_preview(&trek, cx),
+            ("Note: make the buttons".to_string(), 6..22)
+        );
+        dictation.hear(Heard::Partial("make the buttons bigger".into()));
+        trek.render(cx);
+        assert_eq!(voice_preview(&trek, cx).0, "Note: make the buttons bigger");
+        assert_eq!(trek.composer_text(cx), "Note:", "nothing typed until ✓");
+
+        trek.click(cx, "voice-confirm");
+        assert!(
+            dictation.finished() && !dictation.listening(),
+            "✓ stops the mic"
+        );
+        assert_eq!(voice_phase(&trek, cx), Phase::Finishing);
+        dictation.hear(Heard::Final("Make the buttons bigger.".into()));
+        trek.render(cx);
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+        assert_eq!(trek.composer_text(cx), "Note: Make the buttons bigger.");
+        assert!(
+            !dictation.mic_open(),
+            "the take is over: nothing holds the mic"
+        );
+        assert!(trek.visible(cx, "dictate") && !trek.visible(cx, "voice-row"));
+
+        // A second take starts afresh, and a take that ends on its own (silence) puts its words
+        // in too.
+        trek.click(cx, "dictate");
+        assert_eq!(dictation.takes(), 2);
+        dictation.hear(Heard::Partial("thanks".into()));
+        dictation.hear(Heard::Final("Thanks.".into()));
+        trek.render(cx);
+        assert_eq!(
+            trek.composer_text(cx),
+            "Note: Make the buttons bigger. Thanks."
+        );
+        assert!(!dictation.mic_open());
+    });
+}
+
+/// Asking that's turned down says why and opens nothing: the toolbar stays, and the message is
+/// as it was. A take that fails to start says why too, and lets go of what the ask opened.
+#[test]
+fn a_refused_ask_says_why_and_opens_nothing() {
+    use trek_app::composer::voice::Phase;
+    use trek_app::dictate::fake;
+    run(async |cx| {
+        let why = "Windows isn't letting Trek use the microphone. Turn on microphone access for desktop apps in Settings › Privacy & security › Microphone.";
+        let dictation = fake::install();
+        dictation.refuse(why);
+        let trek = open(cx);
+        let toasts = toasts(&trek, cx);
+        trek.type_text(cx, "keep this");
+        trek.click(cx, "dictate");
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+        assert_eq!(said(&toasts), [why]);
+        assert_eq!(dictation.takes(), 0);
+        assert!(!dictation.mic_open());
+        trek.render(cx);
+        assert!(trek.visible(cx, "dictate") && !trek.visible(cx, "voice-row"));
+        assert_eq!(trek.composer_text(cx), "keep this");
+
+        let dictation = fake::install();
+        dictation.fail_start("Another app has the microphone to itself. Close it, then try again.");
+        trek.click(cx, "dictate");
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+        assert_eq!(
+            said(&toasts).last().map(String::as_str),
+            Some("Another app has the microphone to itself. Close it, then try again.")
+        );
+        assert_eq!(dictation.abandoned(), 1, "what the ask opened is let go of");
+        assert!(!dictation.mic_open());
+        assert_eq!(trek.composer_text(cx), "keep this");
+    });
+}
+
+/// A take given up lets go of the mic however it's given up: ✕ while it listens, another draft
+/// mid-take, and another draft while the mic is still starting, whose ask is answered only after
+/// the take was given up (as Windows answers once its recognizer is ready) and is abandoned
+/// rather than started.
+#[test]
+fn a_take_given_up_lets_go_of_the_mic() {
+    use trek_app::composer::voice::Phase;
+    use trek_app::dictate::{Heard, fake};
+    run(async |cx| {
+        let dictation = fake::install();
+        let trek = open(cx);
+        let project = trek.project.clone();
+        let draft = |trek: &Trek, cx: &mut gpui_kit::TestAppContext| {
+            let project = project.clone();
+            trek.update(cx, |ws, cx| {
+                ws.navigate(
+                    Route::Draft {
+                        project: Some(project),
+                    },
+                    cx,
+                )
+            });
+            trek.render(cx);
+        };
+
+        trek.click(cx, "dictate");
+        dictation.hear(Heard::Partial("noise".into()));
+        trek.render(cx);
+        trek.click(cx, "voice-cancel");
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+        assert!(!dictation.mic_open(), "✕");
+        assert_eq!(trek.composer_text(cx), "");
+
+        trek.click(cx, "dictate");
+        assert!(dictation.listening());
+        trek.quiet_thread(cx);
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+        assert!(!dictation.mic_open(), "another draft mid-take");
+
+        draft(&trek, cx);
+        dictation.hold();
+        trek.click(cx, "dictate");
+        assert_eq!(voice_phase(&trek, cx), Phase::Asking, "the mic spins");
+        trek.quiet_thread(cx);
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+        dictation.answer();
+        cx.run_until_parked();
+        assert_eq!(dictation.takes(), 2, "no take starts for it");
+        assert_eq!(dictation.abandoned(), 1);
+        assert!(!dictation.mic_open(), "the mic opened for it is let go of");
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+
+        // And the next take is as any other.
+        draft(&trek, cx);
+        trek.click(cx, "dictate");
+        assert!(dictation.listening());
+        assert_eq!(voice_phase(&trek, cx), Phase::Listening);
+    });
+}
+
+/// Study's Talk chip is there where Trek can dictate, and opens a take in the composer above it.
+#[test]
+fn studys_talk_chip_dictates_where_trek_can() {
+    use trek_app::composer::voice::Phase;
+    use trek_app::dictate::fake;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Study, cx));
+        trek.render(cx);
+        assert!(
+            !trek.visible(cx, "study-talk"),
+            "no dictation here, no Talk"
+        );
+        let dictation = fake::install();
+        trek.render(cx);
+        assert!(trek.visible(cx, "study-talk"));
+        trek.click(cx, "study-talk");
+        assert!(dictation.listening(), "Talk opened a take");
+        assert_eq!(voice_phase(&trek, cx), Phase::Listening);
+    });
+}
+
 /// Commands use the input's atomic token editing, but retain their source spelling on send.
 #[test]
 fn slash_ghost_tab_chip_and_send() {
