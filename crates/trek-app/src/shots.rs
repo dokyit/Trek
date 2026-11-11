@@ -14,7 +14,7 @@
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
 //! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
-//! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
+//! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
 //! to `<name>.frames/` plus `<name>.ffconcat` for ffmpeg's concat demuxer; `record stop`, `record wait`),
@@ -2229,6 +2229,15 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             // The scripted agent under other names, for a whole window with no "Mock" in it
             // (`trek_core::catalog::DemoDress`). Put it on before the threads are made.
             ("dress", "off") => trek_core::catalog::set_demo_dress(None),
+            // The thread on screen, renamed as its owner would rename it (a thread still on its
+            // first turn is otherwise titled with its whole prompt, script keywords and all).
+            ("title", text) => {
+                let Route::Thread(id) = ws.route.clone() else {
+                    anyhow::bail!("title: no thread on screen");
+                };
+                anyhow::ensure!(!text.trim().is_empty(), "title: needs a title");
+                ws.rename(&id, text.to_string(), cx);
+            }
             ("dress", names) => {
                 let dress = trek_core::catalog::parse_demo_dress(names).ok_or_else(|| {
                     anyhow::anyhow!(
