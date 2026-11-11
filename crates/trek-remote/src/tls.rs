@@ -411,6 +411,30 @@ mod tests {
         }
     }
 
+    /// Two SIDs as SDDL may write them (an alias such as `LA`, or `S-1-…`) are the same SID.
+    #[cfg(windows)]
+    fn same_sid(a: &str, b: &str) -> bool {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::EqualSid;
+        let sid = |text: &str| {
+            let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+            let mut sid = std::ptr::null_mut();
+            // SAFETY: a NUL-terminated string, and a place for the SID, freed below.
+            (unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } != 0).then_some(sid)
+        };
+        let (Some(x), Some(y)) = (sid(a), sid(b)) else {
+            return false;
+        };
+        // SAFETY: two SIDs Windows made above, each freed once after.
+        unsafe {
+            let same = EqualSid(x, y) != 0;
+            LocalFree(x.cast());
+            LocalFree(y.cast());
+            same
+        }
+    }
+
     /// The user this test runs as, as SDDL names a SID (`S-1-5-21-…`).
     #[cfg(windows)]
     fn user_sid_text() -> String {
@@ -493,8 +517,14 @@ mod tests {
                 .strip_prefix("D:")
                 .and_then(|rest| rest.find('(').map(|at| rest.split_at(at)))
                 .unwrap_or_default();
+            // The entry's SID as SDDL writes it: an alias for a well-known one (CI's user is the
+            // built-in Administrator, `LA`), else S-1-…: compared as SIDs, not as text.
+            let sid = entries
+                .strip_prefix("(A;;FA;;;")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .filter(|sid| !sid.contains('('));
             assert!(
-                flags.contains('P') && entries == format!("(A;;FA;;;{user})"),
+                flags.contains('P') && sid.is_some_and(|sid| same_sid(sid, &user)),
                 "{} isn't the user's alone: {sddl}",
                 path.display()
             );

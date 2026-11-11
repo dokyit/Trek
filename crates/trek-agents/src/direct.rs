@@ -9203,20 +9203,39 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
             .await
             .unwrap();
         let mut lines = ran.stdout.lines();
-        // Git Bash puts its own tools first; after them, every folder of the login PATH.
+        // Git Bash puts its own tools first; after them, every folder of the login PATH, in its
+        // order. Bash tidies a folder as it reads it (CI's PATH has `C:\\ghcup\bin`, a doubled
+        // separator), and Git's own folders come back as its mounts (`…\Git\bin` is `/usr/bin`):
+        // those are left out of the comparison.
         let path = lines.next().unwrap_or_default();
-        let key = |p: &str| p.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+        let key = |p: &str| {
+            let mut tidy = String::with_capacity(p.len());
+            for c in p.chars().map(|c| if c == '/' { '\\' } else { c }) {
+                if !(c == '\\' && tidy.ends_with('\\')) {
+                    tidy.push(c);
+                }
+            }
+            tidy.trim_end_matches('\\').to_lowercase()
+        };
+        let git = executor::git_bash()
+            .and_then(|bash| bash.parent()?.parent())
+            .map(|root| key(&root.to_string_lossy()))
+            .expect("Git Bash is here");
         let found: Vec<String> = path.split(';').map(key).collect();
         let login: Vec<String> = trek_core::detect::login_path()
             .split(';')
             .filter(|p| !p.trim().is_empty())
             .map(key)
+            .filter(|p| !p.starts_with(&git))
             .collect();
         assert!(!login.is_empty());
-        assert!(
-            found.ends_with(&login),
-            "{login:?} isn't the end of {found:?}"
-        );
+        let mut rest = found.iter();
+        for folder in &login {
+            assert!(
+                rest.any(|f| f == folder),
+                "{folder} isn't in bash's PATH after the folders before it: {found:?}"
+            );
+        }
         assert_eq!(lines.next(), Some("bash"));
         assert_eq!(
             lines.collect::<Vec<_>>(),

@@ -1474,6 +1474,13 @@ mod tests {
             eprintln!("this Windows has no Redirection Guard; skipped");
             return;
         }
+        // The guard trusts the junctions an administrator makes, and CI runs as one: there's no
+        // junction here it would refuse.
+        // SAFETY: a plain call.
+        if unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } != 0 {
+            eprintln!("an administrator's junctions are trusted by the guard; skipped");
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("trek-skill-guarded-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let skill = sample_skill(&dir);
@@ -1610,11 +1617,14 @@ mod tests {
         let forward = PathBuf::from(later.to_string_lossy().replace('\\', "/"));
         junction(&forward, &dir.join("forward")).unwrap();
         let followed = junctions_followed_here(&dir);
+        // The same folder however it's spelled: CI's TEMP is an 8.3 name (`RUNNER~1`), which
+        // `mklink` keeps as given and Trek writes out in full.
+        let same = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
         for link in ["early", "verbatim", "forward"] {
             assert!(is_link(&dir.join(link)), "{link}");
             assert_eq!(
-                std::fs::read_link(dir.join(link)).unwrap(),
-                theirs,
+                same(std::fs::read_link(dir.join(link)).unwrap()),
+                same(theirs.clone()),
                 "{link}"
             );
             if followed {
