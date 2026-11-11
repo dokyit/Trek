@@ -7,8 +7,10 @@
 //! | `tools`                      | commands, reads, a search and an edit, with outputs          |
 //! | `agents` / `subagents` [dur] | two background sub-agents that report back `dur` later        |
 //! | `mock:task` [dur]            | a sub-agent the turn waits on (in the foreground) for `dur`   |
-//! | `permission`                 | a command that needs approval                                |
-//! | `question`                   | multiple-choice questions                                     |
+//! | `permission`                 | a command that needs approval (`mock:run <command>` at the   |
+//! |                              | prompt's end names it)                                        |
+//! | `question`                   | multiple-choice questions (`mock:ask <question>` at the       |
+//! |                              | prompt's end words the first one)                             |
 //! | `plan` (or plan mode)        | a plan to approve before any change                          |
 //! | `mock:long` [dur]            | a long build that runs `dur` (default 30s)                   |
 //! | `mock:stream` [dur]          | one long answer streamed for `dur` (default 30s)             |
@@ -231,7 +233,7 @@ pub fn set_pace(pace: f32) {
 const SIM_CHECK_OUTLINE: &str = "heading \"Threads\" [ref=e2]\nheading \"Needs you, 7\" [ref=e3]\nbutton \"Set up the release pipeline, Question\" [ref=e4]\nbutton \"Fix the flaky session refresh test, Approval\" [ref=e6]\nbutton \"Show 3 more\" [ref=e8]\nbutton \"New thread\" [ref=e14]";
 
 /// What `mock:simcheck` answers: that same screen, in words.
-const SIM_CHECK: &str = "Trek builds and runs on the iPhone 17e simulator. The Threads screen opens with **Needs you** at the top: 7 threads, each with why it waits (a question, then approvals) and its project. Opening a thread and going back returns to the same place in the list. Pinned and Active follow below.";
+const SIM_CHECK: &str = "Trek builds and runs on the iPhone 17e simulator. The Threads screen opens with **Needs you** at the top: 7 threads, each with why it waits (a question, then approvals) and its project. Pinned and Active follow below.";
 
 /// What `xcodebuild test` prints for `mock:simtest`.
 const SIM_TEST_OUTPUT: &str = "Testing started
@@ -1293,8 +1295,8 @@ impl Session {
             Script::Tools => self.tools().await?,
             Script::Agents(after) => return self.agents(after).await,
             Script::Task(total) => self.task(total).await?,
-            Script::Permission => self.permission().await?,
-            Script::Questions => self.questions().await?,
+            Script::Permission => self.permission(text).await?,
+            Script::Questions => self.questions(text).await?,
             Script::Plan => self.plan_turn().await?,
             Script::Long(total) => self.long(total).await?,
             Script::Stream(total) => self.stream(total).await?,
@@ -3035,11 +3037,12 @@ impl Session {
             .await
     }
 
-    async fn permission(&mut self) -> Step {
+    /// Asks to run a command: its own, or the one the prompt ends with after `mock:run`.
+    async fn permission(&mut self, text: &str) -> Step {
         self.say("The schema change needs the migration script to run.")
             .await?;
         let tool = self.id("tool");
-        let command = "./scripts/migrate.sh --apply";
+        let command = after_keyword(text, &["mock:run"]).unwrap_or("./scripts/migrate.sh --apply");
         self.tool_start(&tool, "Run command", command).await?;
         // The user's rules apply here too, so the rules can be tried out on the mock.
         let call = Call::command("mock", command);
@@ -3103,12 +3106,16 @@ impl Session {
         .await
     }
 
-    async fn questions(&mut self) -> Step {
+    /// Asks two questions; the first in its own words, or in those the prompt ends with after
+    /// `mock:ask`.
+    async fn questions(&mut self, text: &str) -> Step {
         self.think("Two choices only the user can make.").await?;
         let request_id = self.id("question");
         let questions = vec![
             Question {
-                question: "Which database should the service use?".into(),
+                question: after_keyword(text, &["mock:ask"])
+                    .unwrap_or("Which database should the service use?")
+                    .into(),
                 header: "Database".into(),
                 options: vec![
                     (
@@ -4628,6 +4635,63 @@ mod tests {
                 Some(AgentEvent::TurnComplete { error: None, .. })
             ));
             assert_eq!(title("mock:simcheck"), "Check the Threads screen");
+        });
+    }
+
+    /// `mock:run` and `mock:ask` at a prompt's end name the approval's command and word the first
+    /// question; without them both scenes say what they always have.
+    #[test]
+    fn a_prompt_can_name_the_command_and_word_the_question() {
+        let command = |events: &[AgentEvent]| {
+            events.iter().find_map(|e| {
+                if let AgentEvent::ToolStarted { title, detail, .. } = e {
+                    (title == "Run command").then(|| detail.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        let asked = |events: &[AgentEvent]| {
+            events.iter().find_map(|e| {
+                if let AgentEvent::PermissionRequest {
+                    prompt: Some(Prompt::Questions(q)),
+                    ..
+                } = e
+                {
+                    Some(q[0].question.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        let waits = |e: &AgentEvent| matches!(e, AgentEvent::PermissionRequest { .. });
+        trek_core::runtime().block_on(async {
+            let m = Live::start(HandHolding::Supervised, false);
+            m.prompt("Apply the migration once I give permission mock:run make migrate")
+                .await;
+            assert_eq!(
+                command(&m.until(waits).await).as_deref(),
+                Some("make migrate")
+            );
+            let m = Live::start(HandHolding::Supervised, false);
+            m.prompt("Apply the migration once I give permission").await;
+            assert_eq!(
+                command(&m.until(waits).await).as_deref(),
+                Some("./scripts/migrate.sh --apply")
+            );
+            let m = Live::start(HandHolding::Supervised, false);
+            m.prompt("One question first mock:ask Which database?")
+                .await;
+            assert_eq!(
+                asked(&m.until(waits).await).as_deref(),
+                Some("Which database?")
+            );
+            let m = Live::start(HandHolding::Supervised, false);
+            m.prompt("One question first").await;
+            assert_eq!(
+                asked(&m.until(waits).await).as_deref(),
+                Some("Which database should the service use?")
+            );
         });
     }
 
