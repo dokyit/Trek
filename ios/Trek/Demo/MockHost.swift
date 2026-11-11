@@ -51,6 +51,7 @@ final class MockHost: Backend {
         MockHost.project("p-api", "trek-api", hue: 212, branch: "main"),
         MockHost.project("p-atlas", "atlas-web", hue: 135, branch: "develop"),
         MockHost.project("p-field", "fieldnotes-ios", hue: 275, branch: "main"),
+        MockHost.project("p-mobile", "mobile", hue: 330, branch: "main"),
     ]
 
     var agents: [AgentOption] = [
@@ -789,9 +790,10 @@ final class MockHost: Backend {
               since: 6, ago: 0, add: 86, del: 21),
             t("t-release", "Release notes for 0.3.3", "p-trek", "codex", "gpt-6-astra", .idle, section: .pinned, pinned: true,
               branch: "main", ago: 60 * 26, add: 48, del: 2),
-            t("t-flaky", "Fix the flaky session refresh test", "p-api", "claude-code", "claude-opus-5-5", .needsYou,
-              needs: Needs(kind: .approval, text: "Run rm -rf target/ && cargo test -p auth"), section: .inbox, unseen: true,
-              branch: "fix/auth-flake", worktree: true, ago: 2, add: 43, del: 3),
+            // The same thread the Mac's pictures show waiting (site/, media/): keep the two in step.
+            t("t-flaky", "Migrate the schema", "p-mobile", "claude-code", "claude-opus-5-5", .needsYou,
+              needs: Needs(kind: .approval, text: "Run ./migrate"), section: .inbox, unseen: true,
+              branch: "add-streaks", worktree: true, ago: 2, add: 38, del: 2),
             t("t-ratelimit", "Rate limit the /login endpoint", "p-api", "codex", "gpt-6-astra", .needsYou,
               needs: Needs(kind: .question, text: "Where should the counters live?"), section: .inbox, unseen: true,
               branch: "feat/login-rate-limit", worktree: true, ago: 9, add: 12, del: 0),
@@ -846,21 +848,21 @@ final class MockHost: Backend {
 
         // Needs approval
         var id = "t-flaky"
-        add(id, .user(text: "`session_refresh_keeps_user` fails about 1 in 10 runs on CI. Find out why and fix it.", images: 0), at: now - 9 * m)
-        add(id, .reasoning(text: "A flaky test around refresh usually means a race. Let me read the session code and the test."))
-        add(id, tool(.read, "Read", "src/auth/session.rs"))
-        add(id, tool(.read, "Read", "tests/session_refresh.rs"))
-        add(id, tool(.search, "Search", "\"refresh_token(\" in src/"))
-        add(id, .reasoning(text: "expires_at is read before the lock is taken."))
-        add(id, tool(.command, "Run", "cargo test -p auth session_refresh -- --test-threads=8", out: "test session_refresh_keeps_user ... FAILED\nthread 'session_refresh_keeps_user' panicked at tests/session_refresh.rs:41:5:\nassertion `left == right` failed\n  left: \"tok_2\"\n right: \"tok_3\""))
-        add(id, .assistant(text: "Found it. `refresh()` checks the token's expiry **before** taking the lock, so two concurrent refreshes can both see an expired token, and the slower one overwrites the newer token with a stale one:\n\n```rust\nlet expired = self.token.expires_at < now; // read outside the lock\nlet mut guard = self.lock.lock().await;\n```\n\nThe test hits it because it fires two requests in the same tick. I'll move the check under the lock and add a regression test that runs 50 refreshes at once.", streaming: false))
-        add(id, .reasoning(text: "Make the edit, then the test."))
-        add(id, tool(.edit, "Edit", "src/auth/session.rs", add: 12, del: 3))
-        add(id, tool(.edit, "Write", "tests/concurrent_refresh.rs", add: 31, del: 0))
-        add(id, .assistant(text: "Both edits are in. The build cache still has artifacts from the old lockfile, so I'd like to clear `target/` and run the auth tests.", streaming: false))
-        add(id, .approval(ApprovalRequest(requestId: "r-flaky", title: "Run command", detail: "rm -rf target/ && cargo test -p auth session_refresh -- --test-threads=8 --nocapture 2>&1 | tee /tmp/auth-flaky.log", state: .pending)))
+        add(id, .user(text: "Add a `streak_days` column to users and backfill it from the activity log.", images: 0), at: now - 9 * m)
+        add(id, .reasoning(text: "A new column needs a migration and a backfill. Let me read the schema and the last migration."))
+        add(id, tool(.read, "Read", "db/schema.sql"))
+        add(id, tool(.read, "Read", "db/migrations/0041_add_last_active.sql"))
+        add(id, tool(.search, "Search", "\"activity_log\" in src/"))
+        add(id, .reasoning(text: "The activity log has one row per user per day."))
+        add(id, tool(.command, "Run", "./migrate --status", out: "41 applied\n0 pending"))
+        add(id, .assistant(text: "The schema has no streak yet. The activity log keeps one row per user per day, so the count can be backfilled in the same migration that adds the column:\n\n```sql\nALTER TABLE users ADD COLUMN streak_days INTEGER NOT NULL DEFAULT 0;\n```\n\nI'll write migration 0042 with the backfill, then read the new column in the user model.", streaming: false))
+        add(id, .reasoning(text: "Write the migration, then the model."))
+        add(id, tool(.edit, "Write", "db/migrations/0042_add_streak_days.sql", add: 24, del: 0))
+        add(id, tool(.edit, "Edit", "src/models/user.rs", add: 14, del: 2))
+        add(id, .assistant(text: "Both edits are in. Migration 0042 is written but not applied, so I'd like to run `./migrate` on the development database. It applies 0042 and nothing else.", streaming: false))
+        add(id, .approval(ApprovalRequest(requestId: "r-flaky", title: "Run command", detail: "./migrate", state: .pending)))
         if let i = threads.firstIndex(where: { $0.id == id }) {
-            threads[i].ask = RowAsk(requestId: "r-flaky", detail: "rm -rf target/ && cargo test -p auth session_refresh -- --test-threads=8 --nocapture 2>&1 | tee /tmp/auth-flaky.log")
+            threads[i].ask = RowAsk(requestId: "r-flaky", detail: "./migrate")
         }
 
         // Question

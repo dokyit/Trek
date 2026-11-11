@@ -145,7 +145,7 @@ enum DemoMac {
     /// What "Regenerate title" comes back with, for a few seeded threads.
     static func betterTitle(for tid: String) -> String? {
         switch tid {
-        case "t-flaky": "Fix the session refresh race"
+        case "t-flaky": "Add streak days to users"
         case "t-ratelimit": "Rate-limit logins per IP and account"
         case "t-worktree": "What the worktree cleanup deletes"
         case "t-glass": "Liquid Glass tab bar over the map"
