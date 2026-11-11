@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trek privacy: what the app and this site send</title>
+<meta name="description" content="Trek asks before it shares anonymous usage data, and never sends prompts, code, file names, paths, transcripts, keys or emails. This site has no cookies and no trackers.">
+<link rel="canonical" href="https://trekdesktop.com/privacy/">
+<meta name="theme-color" content="#F3EEE6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#17131F" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Trek">
+<meta property="og:url" content="https://trekdesktop.com/privacy/">
+<meta property="og:title" content="Trek privacy: what the app and this site send">
+<meta property="og:description" content="Trek asks before it shares anonymous usage data, and never sends prompts, code, file names, paths, transcripts, keys or emails.">
+<meta property="og:image" content="https://trekdesktop.com/assets/img/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+<link rel="preload" href="/assets/fonts/Inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/assets/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the page</a>
+
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="mark" viewBox="0 0 16 16">
+    <rect class="u1" x=".5" y="12" width="15" height="4" rx="2"/><rect class="s1" x=".5" y="12" width="15" height="3" rx="1.5"/>
+    <rect class="u2" x="3" y="8" width="11" height="3" rx="1.5"/><rect class="s2" x="3" y="8" width="11" height="2" rx="1"/>
+    <rect class="u3" x="3.5" y="4" width="8" height="3" rx="1.5"/><rect class="s3" x="3.5" y="4" width="8" height="2" rx="1"/>
+    <rect class="u4" x="5.5" y="0" width="5" height="3" rx="1.5"/><rect class="s4" x="5.5" y="0" width="5" height="2" rx="1"/>
+  </symbol>
+  <symbol id="i-out" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
+</svg>
+
+<header class="nav">
+  <a class="brand" href="/" aria-label="Trek, home"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Trek</a>
+  <nav class="nav-links" aria-label="Trek">
+    <a href="/#how">How it works</a>
+    <a href="/#inbox">Features</a>
+    <a href="/#iphone">iPhone</a>
+    <a href="/#install">Install</a>
+    <a href="/#faq">FAQ</a>
+  </nav>
+  <a class="nav-out" href="https://github.com/dokyit/Trek">GitHub<svg class="icon" aria-hidden="true"><use href="#i-out"/></svg></a>
+  <a class="button button-small" href="/#install">Download</a>
+</header>
+
+<main id="main" class="page">
+  <div class="wrap">
+    <div class="waypoint-row"><p class="waypoint"><svg class="cairn" aria-hidden="true"><use href="#mark"/></svg>Privacy</p></div>
+    <h1>What Trek sends, <span class="dim">and what it never does.</span></h1>
+    <p class="lede">Trek asks once whether it may share anonymous usage data. Say no and it sends nothing, except feedback you choose to send. Either way it never sends your prompts, code, file names, paths, transcripts, keys or account emails.</p>
+
+    <div class="doc">
+      <h2>The question Trek asks</h2>
+      <p>On the first launch after setup, Trek asks whether it may share anonymous usage data. If you used an earlier version, it asks you once too. You can change your answer at any time in <strong>Settings, Privacy</strong>, and that page shows exactly what was sent last.</p>
+      <ul>
+        <li><strong>With a yes, Trek shares</strong> anonymous usage counts (how often Trek opens, which agents and tools are used), crash and error reports, and the app version, operating system and architecture.</li>
+        <li><strong>Trek never shares</strong> prompts, code, file names, paths, transcripts, keys or account emails.</li>
+        <li><strong>With a no,</strong> nothing is sent, ever, except feedback you send yourself.</li>
+      </ul>
+      <p>Nothing is sent before you answer. Nothing is sent if the <code>DO_NOT_TRACK</code> environment variable is set; Trek then doesn't ask, and the Privacy page says why.</p>
+
+      <h2>Where it goes</h2>
+      <p>Usage data, crash reports and feedback go to <a href="https://posthog.com">PostHog</a>, on its US cloud (<code>us.i.posthog.com</code>). The key built into Trek can only add events. It cannot read them.</p>
+
+      <h2>What is sent, exactly</h2>
+      <p>Every usage event carries the app version, the update channel (stable, beta or nightly), the operating system and its version, and the architecture. These are all the events there are:</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th scope="col">Event</th><th scope="col">When, and what it adds</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Install</th><td>The first launch after a yes, once. It says whether Trek was already set up on this computer.</td></tr>
+            <tr><th scope="row">App opened</th><td>A launch, at most once a day.</td></tr>
+            <tr><th scope="row">App updated</th><td>The first launch of a new version, with the old and new version numbers.</td></tr>
+            <tr><th scope="row">Feature used</th><td>The day after: one count for each agent you messaged and each tool panel you opened that day. The names are Trek's own words, such as <code>claude-code</code> or <code>terminal</code>, never anything you typed. An agent you added yourself is counted as "other".</td></tr>
+            <tr><th scope="row">Crash</th><td>The launch after a crash: the error message, where in Trek's own source it happened, and a backtrace.</td></tr>
+            <tr><th scope="row">Feedback</th><td>Only when you send feedback. See below.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2>Who you are to Trek</h2>
+      <p>A random install id, made the first time you say yes. Nothing else about you or the install is known. Each event tells PostHog not to make a profile of a person and not to look up a country or city from the address it came from. <strong>Reset</strong> in Settings, Privacy makes a new id and drops whatever was waiting to be sent under the old one.</p>
+
+      <h2>What is removed before a crash report or a log is sent</h2>
+      <ul>
+        <li>Secrets you gave an agent during the run.</li>
+        <li>Anything shaped like a key or a token, including private keys and passwords inside web addresses.</li>
+        <li>Email addresses.</li>
+        <li>Your project folders and any other path on your disk, apart from system locations such as <code>/usr</code> or <code>/Applications</code>. Your home folder becomes <code>~</code>.</li>
+      </ul>
+
+      <h2>Feedback</h2>
+      <p>Help, Send Feedback opens a form: what happened, whether it is a bug or an idea, an optional email for a reply, and <strong>Include diagnostics</strong>, which is on by default. The form says in a line what it will send, and shows all of it on request before anything goes. Sending it is the consent, so it works even if you said no to usage data.</p>
+      <p>With diagnostics, feedback carries the app version, operating system and architecture, up to 20 recent warning and error lines, and the last 200 lines of Trek's log, cleaned as described above. Without diagnostics it carries none of that. If you said no to usage data, feedback is sent under a new random id each time, so it can't be tied to anything.</p>
+      <p>The form can also open a new issue on GitHub with your message and diagnostics filled in. It never includes your email there, because an issue is public.</p>
+
+      <h2>What stays on your computer</h2>
+      <p>In a <code>telemetry</code> folder in Trek's data folder: your answer, the install id, today's counts, events waiting to be sent (at most 500; each is dropped after five failed tries or a week), and a copy of the last request exactly as it was sent. A crash also leaves a report in the data folder. Until you answer the question it waits there; with a yes the next launch sends it, and with a no it is deleted.</p>
+
+      <h2>The iPhone app</h2>
+      <p>Trek for iPhone has no usage data and no crash reports. It has the same feedback form, which sends your message and, with diagnostics, the app's version, the iOS version and the architecture.</p>
+
+      <h2>What else Trek connects to</h2>
+      <ul>
+        <li><strong>Your agents and models.</strong> Your prompts and code go to the agents and model providers you choose, through their own tools or your API keys, as they do in a terminal. Trek never reads or stores the logins of the agent CLIs it drives.</li>
+        <li><strong>Updates.</strong> Trek checks its releases on GitHub for a new version of itself, and public package feeds for new versions of your agents' command-line tools.</li>
+        <li><strong>Your phone.</strong> The iPhone app connects straight to your computer over your Wi-Fi or Tailscale. No Trek server sits in between. Push notifications go through ntfy, only if you turn them on.</li>
+      </ul>
+
+      <h2>This website</h2>
+      <p>This site sets no cookies and carries no analytics, trackers or third-party fonts. Its pages, type and pictures all come from this domain, which is hosted on Cloudflare; like any host, Cloudflare receives the request your browser makes in order to answer it.</p>
+      <p>The home page makes one request elsewhere: your browser asks GitHub's public API for Trek's latest release, so the download button can point at the right file. That request goes to GitHub and is covered by GitHub's own privacy statement. With JavaScript off it isn't made, and the button leads to the release page.</p>
+
+      <h2>Questions</h2>
+      <p>Write to <a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a>. The full technical account, with every property of every event, is in <a href="https://github.com/dokyit/Trek/blob/main/docs/PRIVACY.md">docs/PRIVACY.md</a> in the repository, and the code that sends it is in <code>crates/trek-telemetry</code>.</p>
+      <p class="updated">Last updated 11 November 2026.</p>
+    </div>
+  </div>
+</main>
+
+<div class="dusk">
+<footer class="footer">
+  <div class="wrap">
+    <div class="footer-row">
+      <nav aria-label="Trek elsewhere">
+        <ul>
+          <li><a href="/">Home</a></li>
+          <li><a href="https://github.com/dokyit/Trek">GitHub</a></li>
+          <li><a href="https://github.com/dokyit/Trek/releases">Releases and changelog</a></li>
+          <li><a href="https://github.com/dokyit/Trek/blob/main/LICENSE">Apache-2.0 licence</a></li>
+          <li><a href="mailto:support@trekdesktop.com">support@trekdesktop.com</a></li>
+        </ul>
+      </nav>
+      <p>© 2026 Toby Dokyi</p>
+    </div>
+    <p class="fine">Trek isn't affiliated with or endorsed by Anthropic, OpenAI, Google, Microsoft or any other maker of the agents it runs. This site sets no cookies and carries no analytics or trackers.</p>
+  </div>
+</footer>
+</div>
+</body>
+</html>

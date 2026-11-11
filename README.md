@@ -22,7 +22,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
   <a href="https://github.com/dokyit/Trek/releases/latest/download/Trek-Setup-x86_64.exe"><img src="docs/assets/buttons/download-windows.png" width="250" height="56" alt="Download for Windows"></a>
 </p>
 
-<sub><a href="https://github.com/dokyit/Trek/releases">All releases</a> · <a href="#install">Install notes</a> · <a href="#build-from-source">Build from source</a></sub>
+<sub><a href="https://trekdesktop.com">trekdesktop.com</a> · <a href="https://github.com/dokyit/Trek/releases">All releases</a> · <a href="#install">Install notes</a> · <a href="#build-from-source">Build from source</a></sub>
 
 </div>
 

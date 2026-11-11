@@ -1,0 +1,11 @@
+# Cloudflare Pages redirects: short addresses that are easy to say and to print.
+/download      /#install                                   302
+/changelog     https://github.com/dokyit/Trek/releases     302
+/releases      https://github.com/dokyit/Trek/releases     302
+/github        https://github.com/dokyit/Trek              302
+/source        https://github.com/dokyit/Trek              302
+/privacy.html  /privacy/                                   301
+
+# The folder's own notes are for the repository, not for visitors.
+/README.md     https://github.com/dokyit/Trek/blob/main/site/README.md   302
+/DESIGN.md     https://github.com/dokyit/Trek/blob/main/site/DESIGN.md   302
