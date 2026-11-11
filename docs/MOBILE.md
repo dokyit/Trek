@@ -263,8 +263,9 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `consult` | `send.consult`: a message sent with consultants |
 | `resume_interrupted` | a row's `cut_short`, and `thread_action` `resume_interrupted`, `dismiss_interrupted` |
 | `uploads` | `upload_part` (answered with `upload_progress`), and `send.files` / `new_thread.files`: videos and files sent with a message |
+| `side_chat` | `side_chat`: a thread's side chat found, or one started beside it (the phone's `/side`) |
 
-`use_reset` to `icon`, and `card_actions` to `consult` and `uploads`, are described under "Keeping up with the
+`use_reset` to `icon`, and `card_actions` to `consult`, `uploads` and `side_chat`, are described under "Keeping up with the
 Mac" below, `basecamp_v2` under
 Basecamp, `note_images` and `note_files` under Notes.
 
@@ -371,7 +372,11 @@ Thread details, each optional and left out when there's nothing to say (older Ma
   Mac they show only under their parent): they come in `unlisted`, with `parent_id`, every one
   under a listed thread, done ones too. A thread whose sub-agent (at any depth) waits on the user
   says so as the Mac's card does, `"needs":{"kind":"approval","text":"Sub-agent needs you"}`,
-  `"needs_thread":"<the sub-agent's thread>"`, and is in the `inbox` for it.
+  `"needs_thread":"<the sub-agent's thread>"`, and is in the `inbox` for it. The phone answers it
+  from the parent, as the Mac does (`ThreadView::live_footer`): while the parent's thread shows, it
+  subscribes to the `needs_thread` thread too, pins that thread's open request over the composer
+  under "Sub-agent “…” is asking" with Open it, and sends the `answer` with the sub-agent's
+  `thread_id`. No message of its own: a Mac that lists `sub_agents` already serves all of it.
 
 Live changes:
 
@@ -1006,6 +1011,28 @@ The message the agent gets: `What breaks at 0:03? @"/Users/me/Library/Applicatio
 The phone's bubble shows mentions of absolute paths at the end of a message as chips by name (a
 video the row's `videos` lists plays instead).
 
+**`side_chat`**: the Mac's Side Chat from the phone, a quick question beside a thread in a session
+of its own, which the thread's agent doesn't hear (the phone's `/side`, a sheet over the thread). A
+side chat is a thread no list holds. Without `text`, the request finds the newest side chat beside
+`thread_id`; the reply carries its row as `side`, or no `side` when the thread has none. With
+`text`, a new one starts beside the thread with that as its first message (`images` as `send`'s):
+on the thread's agent, model and effort, in its project and folder, asking before every edit and
+command as a side chat started on the Mac does, and named for the message. The Mac's own window
+and its Side Chat panel's tabs stay as they are; the chat is in the panel's history. From there
+the side chat is a thread like any other, by the `side.id`: `subscribe`, `send`, `answer`,
+`interrupt`, `set_prefs`. Its row comes as `unlisted` while a phone has it open, and stops when the
+last one lets go. `not_found` for a thread that's gone, `bad_request` for a side chat (it has none
+of its own) or a first message with nothing in it.
+
+```json
+{"type":"side_chat","id":"30","thread_id":"t"}
+  → {"type":"side_chat","re":"30","thread_id":"t"}                                    (none yet)
+{"type":"side_chat","id":"31","thread_id":"t","text":"What does retry() do?"}
+  → {"type":"side_chat","re":"31","thread_id":"t","side":{"id":"s","title":"What does retry() do?","run_state":"working",…}}
+{"type":"subscribe","id":"32","thread_id":"s","after_seq":null,"limit":60}            → transcript, then items and `unlisted` rows
+{"type":"send","id":"33","thread_id":"s","text":"And backoff()?","mode":null}         → ack
+```
+
 **Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
 question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
 doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the
@@ -1037,7 +1064,7 @@ pub trait RemoteHost: Send + Sync + 'static {
     fn set_prefs, thread_action, usage, basecamp, notes, note, create_note, save_note, delete_note,
        git_status, git_diff, git_commit, git_push, git_branches, git_switch, worktree_merge,
        worktree_remove, commands, settings, set_settings, turn_action, …, media, context_card,
-       turn_preview
+       turn_preview, upload_part, side_chat
     // Defaults built on `transcript`:
     fn transcript_for(&self, thread_id, after_seq, limit)   // what `subscribe` calls
     fn transcript_before(&self, thread_id, before, limit)   // a page, cut from the whole transcript
@@ -1130,6 +1157,7 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | Changes card (`changes_card.rs`) | same | `Thread/ChangesCard.swift`, DiffSheet | |
 | Rewind/undo/retry confirmation with its files (`confirm_card`) | same | `Thread/ConfirmSheet.swift` | `turn_preview`: "Also restore files" with each file and what happens to it, and the recap note. An older Mac: the two-button dialog. |
 | Approval card (`live_footer`) | same | `RequestCards.swift` | |
+| A sub-agent's approval, question or plan on its parent (`live_footer`, `sub_agent_asking`) | same | `Thread/SubAgents.swift` SubAgentAskLine, `Model/SubAgentAsk.swift` | The sub-agent's own card over the parent's composer, under "Sub-agent “…” is asking" and Open it; the answer goes to the sub-agent's thread. The same card as the thread's own: the destructive-command warning, Face ID before Allow for this session. A secret (typed on the Mac) keeps the card that opens its thread. |
 | Question card (`question_card`) | same | RequestCards QuestionCard, `AnswerField.swift` | A secret answer is masked as it's typed (an eye to check it) and in the transcript after. |
 | Plan card (`plan_card`) | same | RequestCards PlanCard | |
 | Working bar and live group (`working_bar.rs`, `activity.rs`) | reduced | WorkingLine, WorkingFooter | One "doing now" line. |
@@ -1138,7 +1166,9 @@ its own layout; *reduced*: it shows less; *missing*: it shows nothing, or raw te
 | Context ring and popover (`context_popover.rs`) | same | `Thread/ThreadStatus.swift`, `Thread/ContextBreakdown.swift` | `context_card`: the segmented bar and its rows, Compact now (`thread_action compact`). Usage windows are in the Usage sheet. |
 | Limit bar: Resume at reset, Try again, Snooze, Switch agent (`composer.rs`) | same | `Thread/ComposerNotes.swift` LimitBar | The row's `pause`; `limit_actions`. Switch agent opens the model picker. |
 | Queued follow-ups (composer) | same | `Thread/QueuedStrip.swift` | |
-| Slash command picker (`composer/pickers.rs`) | same | `Thread/CommandPicker.swift` | |
+| Slash command picker (`composer/pickers.rs`) | same | `Thread/CommandPicker.swift` | `/side` is the phone's own row among Trek's (`SideCommand`), where the Mac serves `side_chat`. |
+| Side Chat (`ide/ai/`, `Scope::Side`) | reduced | `Thread/SideChatSheet.swift`, `Model/SideChat.swift` | A sheet over the thread, from `/side` (what follows it is asked at once) or the thread's menu: the thread's newest side chat, or a draft whose first message starts one; New side chat in its bar. One at a time, no tabs or history, and the model is the thread's until it's changed in the sheet. |
+| Pictures in a message and in an answer (`md.rs` LocalImage, the preview) | same | `Thread/MessageImages.swift`, `Thread/MediaViews.swift`, `Thread/PictureMenu.swift` | A long press on one (a thumbnail, an answer's picture, the full-screen viewer) offers Save to Photos, Copy and Share…; saving asks for add-only Photos access (`Model/PictureKeeper.swift`). |
 | Model, effort and access chips (`composer.rs`) | same | `ThreadSettingsBar.swift` | |
 | Consult pill (`composer.rs`) | same | `Thread/ConsultPicker.swift` | In the settings row; who, how (advise, discuss, arena), then implement or report; sent with `send.consult`. |
 | Composer status lines ("Another thread is also editing this folder", …) | reduced | `Thread/ComposerNotes.swift` FolderSharedLine | The row's `shares_folder`. No "Use a worktree next time"; cost and cache are in the strip under the title. |
@@ -1257,7 +1287,11 @@ Where the phone was paired doesn't matter: it looks for the Mac afresh wherever 
   with a value it doesn't know (`send` modes, Basecamp ranges, states…) fall back to a default; an
   agent without `models` reads with none.
 - The phone offers what the Mac's `features` list: an older Mac's phone sees no search on the Mac,
-  no sub-agents to open, and the thread menu as it was.
+  no sub-agents to open, no `/side` and no Side chat in the thread menu, and the thread menu as
+  it was.
+- A transcript has more than one reader on the phone (`AppModel.subscribe(_:as:)`): the thread's
+  own screen, and a parent showing its sub-agent's request. The Mac hears `unsubscribe` when the
+  last of them lets go, and `mark_seen` only for the thread's own screen.
 
 ## Phases and milestones
 
@@ -1337,7 +1371,9 @@ instead and queue).
 - **Sub-agents, the thread menu and search** (`remote/sub_agents.rs`, `remote/thread_actions.rs`,
   `remote/search.rs`): unlisted rows are the listed threads' sub-agents (`Workspace::children`,
   every depth) and threads a phone has open that aren't listed, built and compared with the rows;
-  a parent whose sub-agent waits takes its request as the sidebar card does. Snooze, wake, mark
+  a parent whose sub-agent waits takes its request as the sidebar card does. A side chat a phone
+  has open is an unlisted row too (`remote/side_chat.rs`: `Workspace::side_chat_of` finds a
+  thread's newest, `start_side_chat_beside` starts one without the main window's route). Snooze, wake, mark
   unread and regenerate title call the menu's own `Workspace` methods (`snooze`,
   `snooze_until_morning`, `snooze_until`, `unsnooze`, `mark_unread`, `regenerate_title`); delete
   words its confirmation as the sidebar and `worktree_ui::confirm_leave` do. Search runs

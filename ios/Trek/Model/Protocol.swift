@@ -773,6 +773,8 @@ nonisolated enum ServerMessage {
     case uploadProgress(re: String?, UploadProgress)
     /// How an iPhone update the Mac runs is going (to every phone, asked or not).
     case phoneUpdate(PhoneUpdate)
+    /// The side chat beside a thread (`side_chat`): the one found or just started, or none.
+    case sideChat(re: String?, SideChatReply)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -868,6 +870,7 @@ nonisolated enum ServerMessage {
         case "context_card": return .contextCard(re: r.re, try decoder.decode(ContextCard.self, from: data))
         case "turn_preview": return .turnPreview(re: r.re, try decoder.decode(TurnPreview.self, from: data))
         case "upload_progress": return .uploadProgress(re: r.re, try decoder.decode(UploadProgress.self, from: data))
+        case "side_chat": return .sideChat(re: r.re, try decoder.decode(SideChatReply.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -985,6 +988,9 @@ nonisolated enum ClientMessage {
     /// A piece of a file sent with a message (`uploads`): base64 `data` from `offset` of a file
     /// `total` bytes long, every piece under the same `uploadId` (a UUID).
     case uploadPart(uploadId: String, name: String, total: Int64, offset: Int64, data: String)
+    /// The side chat beside a thread (`side_chat`): without `text` the newest one it has, with
+    /// `text` a new one started with that message (and `images`, as `send`'s).
+    case sideChat(threadId: String, text: String?, images: [ImageUpload])
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     /// The build (the number of commits it was built from, `install-device.sh`).
@@ -1026,6 +1032,10 @@ nonisolated enum ClientMessage {
             if !files.isEmpty { o["files"] = files }
         case .uploadPart(let uploadId, let name, let total, let offset, let data):
             o = ["type": "upload_part", "upload_id": uploadId, "name": name, "total": total, "offset": offset, "data": data]
+        case .sideChat(let threadId, let text, let images):
+            o = ["type": "side_chat", "thread_id": threadId]
+            if let text { o["text"] = text }
+            if !images.isEmpty { o["images"] = images.map(\.json) }
         case .setPrefs(let threadId, let agent, let model, let effort, let access, let plan):
             o = ["type": "set_prefs", "thread_id": threadId]
             if let agent { o["agent"] = agent }

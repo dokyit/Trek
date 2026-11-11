@@ -80,7 +80,11 @@ same protocol messages a Mac does, so everything in the app works without one.
 Launch arguments for screenshots: `-TrekOpen <thread id>` (e.g. `t-flaky`, `t-inbox`,
 `t-ratelimit`, `t-settings`; `t-background` is done with its turn while its dev server still runs,
 with `-TrekSheet background-output` its output open from the strip), `-TrekTab basecamp|usage|notes|settings|appearance|search`, `-TrekSheet new` (or `model`, with
-`-TrekOpen`: the model picker), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
+`-TrekOpen`: the model picker; `side`: the thread's side chat, e.g. `-TrekOpen t-tailscale` which
+has one from earlier, or `-TrekOpen t-worktree -TrekSideAsk "What does the job prune?"` to ask
+one as `/side …` does; `image`: a message's first picture full screen, e.g. `-TrekOpen t-offline`),
+`-TrekDemoSubAsk risky|question|plan` (what the sub-agent of `t-profile` asks, pinned in its
+parent's thread: an approval unless said), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
 `-TrekDemoOldMac YES` (the demo Mac is one from before rows carried `busy_in_background` and left
 out a chat folder's branch: `t-chat`, `t-waiting`; `t-quiz` asks five questions at once),
 `-TrekDemoPC YES` (a second demo machine, a Windows PC), `-TrekDemoRelease newer` (the update card),
@@ -154,8 +158,9 @@ Trek/Design     Trek palette (the Mac's trek.json and palette.rs), Inter and Jet
                 OFL), status colours, project hues, file-type chips, agent logos
 Trek/Assets     App icons: Ember (with iOS 18 dark and tinted variants), Night and Glass, rendered from
                 assets/brand/trek-icon-*-ios.svg by scripts/app-icons.sh
-Trek/Views      Threads, Thread (transcript grouping, tool rows, request cards, composer),
-                New thread sheet, Pairing (QR scanner, typed pairing, confirmation sheet), Settings, Search
+Trek/Views      Threads, Thread (transcript grouping, tool rows, request cards, composer, the side
+                chat's sheet, a picture's long-press menu), New thread sheet, Pairing (QR scanner,
+                typed pairing, confirmation sheet), Settings, Search
 ```
 
 ## Not done yet

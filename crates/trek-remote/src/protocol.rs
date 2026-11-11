@@ -10,12 +10,14 @@ mod cards;
 mod machines;
 mod parity;
 mod phone_update;
+mod side_chat;
 mod thread_parity;
 mod uploads;
 pub use cards::*;
 pub use machines::*;
 pub use parity::*;
 pub use phone_update::*;
+pub use side_chat::*;
 pub use thread_parity::*;
 pub use uploads::*;
 
@@ -242,6 +244,9 @@ pub enum ClientMessage {
     /// A piece of a file sent with a message (answered with `upload_progress`; feature
     /// `uploads`, `uploads.rs`).
     UploadPart(UploadPart),
+    /// The side chat beside a thread: the one there is, or a new one started with its first
+    /// message (answered with `side_chat`; feature `side_chat`, `side_chat.rs`).
+    SideChat(SideChatRequest),
 }
 
 impl ClientMessage {
@@ -299,6 +304,7 @@ impl ClientMessage {
             Self::ContextCard { .. } => "context_card",
             Self::TurnPreview(_) => "turn_preview",
             Self::UploadPart(_) => "upload_part",
+            Self::SideChat(_) => "side_chat",
         }
     }
 }
@@ -598,6 +604,9 @@ pub mod feature {
     /// `upload_part`, and `send.files` / `new_thread.files`: videos and other files from the
     /// phone, sent in pieces, mentioned in the message.
     pub const UPLOADS: &str = "uploads";
+    /// `side_chat`: a thread's side chat found, or one started beside it; its row then follows as
+    /// `unlisted` while a phone has it open.
+    pub const SIDE_CHAT: &str = "side_chat";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -625,6 +634,7 @@ pub mod feature {
         CONSULT,
         RESUME_INTERRUPTED,
         UPLOADS,
+        SIDE_CHAT,
     ];
 }
 
@@ -988,6 +998,8 @@ pub enum ServerMessage {
     TurnPreview(TurnPreview),
     /// The reply to `upload_part`.
     UploadProgress(UploadProgress),
+    /// The reply to `side_chat`.
+    SideChat(SideChat),
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.

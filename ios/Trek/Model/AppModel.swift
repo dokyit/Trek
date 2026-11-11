@@ -100,6 +100,9 @@ final class AppModel {
     @ObservationIgnored private var holders: [String: Set<String>] = [:]
     /// The thread's own screen, as a holder of its transcript.
     nonisolated static let onScreen = "screen"
+    /// The side chat each thread was last found with (qualified ids): its sheet opens on it at
+    /// once, while the Mac is asked whether it's still the one.
+    @ObservationIgnored var sideChats: [String: String] = [:]
     /// The tab bar's counts, kept as values so views that show them don't redraw on every row update.
     private(set) var workingCount = 0
     private(set) var needsYouCount = 0
@@ -400,6 +403,7 @@ final class AppModel {
         for s in stores.values where link.owns(s.id) { saveCache(s); s.subscribed = false }
         stores = stores.filter { !link.owns($0.key) }
         holders = holders.filter { !link.owns($0.key) }
+        sideChats = sideChats.filter { !link.owns($0.key) }
         commands = commands.filter { !link.owns($0.key) }
         gitStatus = gitStatus.filter { !$0.key.owned(by: link) }
         gitBranches = gitBranches.filter { !$0.key.owned(by: link) }
@@ -461,6 +465,7 @@ final class AppModel {
         projects = []
         stores = [:]
         holders = [:]
+        sideChats = [:]
         unlisted = [:]
         gitStatus = [:]
         gitBranches = [:]
@@ -579,7 +584,7 @@ final class AppModel {
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
              .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
              .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _), .media(let re, _), .contextCard(let re, _),
-             .turnPreview(let re, _), .uploadProgress(let re, _):
+             .turnPreview(let re, _), .uploadProgress(let re, _), .sideChat(let re, _):
             link.reply(re, message)
         case .unlisted(let t):
             setUnlisted(qualify(t, on: link))
@@ -644,7 +649,7 @@ final class AppModel {
              .commands(let tid), .turnAction(let tid, _, _, _, _), .queueAction(let tid, _, _, _, _),
              .attachment(let tid, _, _, _), .backgroundOutput(let tid, _), .stopBackground(let tid, _),
              .cardAction(let tid, _, _), .media(let tid, _, _, _, _), .contextCard(let tid), .turnPreview(let tid, _, _),
-             .sendConsult(let tid, _, _, _, _, _):
+             .sendConsult(let tid, _, _, _, _, _), .sideChat(let tid, _, _):
             return t(tid)
         case .setPrefs(let tid, _, _, _, _, _):
             return t(tid)
@@ -710,6 +715,7 @@ final class AppModel {
         case .noteAsset(let nid, let path, let px): return .noteAsset(noteId: b(nid), path: path, maxPx: px)
         case .addNoteImage(let nid, let data, let name): return .addNoteImage(noteId: b(nid), data: data, name: name)
         case .icon(let a, let pid): return .icon(agent: a, projectId: pid.map(b))
+        case .sideChat(let tid, let text, let images): return .sideChat(threadId: b(tid), text: text, images: images)
         default: return m
         }
     }

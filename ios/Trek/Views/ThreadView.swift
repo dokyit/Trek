@@ -7,12 +7,14 @@ import SwiftUI
 /// composer's text lives in its own observable object, so typing redraws only the composer.
 struct ThreadView: View {
     var threadID: String
+    /// Shown in a side chat's sheet (`SideChatSheet`): what its bar's buttons do there.
+    var side: SideChatHost? = nil
     @Environment(AppModel.self) private var model
 
     var body: some View {
         // One identity per thread: when a thread replaces another in the path (a fork, a
         // notification), the screen is made anew, subscribes, and starts with its own composer.
-        ThreadScreen(store: model.store(threadID))
+        ThreadScreen(store: model.store(threadID), side: side)
             .id(threadID)
     }
 }
@@ -94,6 +96,10 @@ final class ComposerState {
 
 private struct ThreadScreen: View {
     let store: ThreadStore
+    /// It's a side chat, in its sheet over the thread it's beside.
+    var side: SideChatHost? = nil
+    /// The side chat beside this thread, asked for (`/side`, the menu): its sheet is up.
+    @State private var sideChat: SideChatAsk?
     @Environment(AppModel.self) private var model
     @State private var composer = ComposerState()
     @State private var renaming = false
@@ -129,7 +135,10 @@ private struct ThreadScreen: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 ComposerArea(store: store, composer: composer, room: room - (t == nil ? 0 : stripHeight),
-                             newPromptSent: { composer.newPrompt = $0 })
+                             newPromptSent: { composer.newPrompt = $0 },
+                             // A side chat has none of its own.
+                             offersSide: side == nil && model.serves(.sideChat, on: threadID),
+                             openSide: { sideChat = $0 })
             }
             // Between the title bar and the keyboard (or the screen's foot): what the requests
             // over the composer may take, the strip under the title kept clear.
@@ -155,6 +164,8 @@ private struct ThreadScreen: View {
             .sheet(isPresented: $showingGit) { GitSheet(threadID: threadID) }
             .sheet(isPresented: $showingUsage) { UsageSheet(host: model.link(for: threadID)) }
             .sheet(isPresented: $snoozePicking) { if let t = thread { SnoozePicker(thread: t) } }
+            // Over the thread, which stays as it is under it: closed, the reader is where they were.
+            .sheet(item: $sideChat) { SideChatSheet(parent: threadID, ask: $0) }
             .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in
                 NewThreadSheet(project: request.project, prompt: request.prompt, on: request.link) { model.openRequest = $0 }
@@ -172,6 +183,8 @@ private struct ThreadScreen: View {
                 model.subscribe(threadID)
                 let link = model.link(for: threadID)
                 if link?.usage == nil { model.loadUsage(quiet: true, on: link) }
+                // Screenshots' sheets are the thread's own, not a side chat's in its sheet.
+                guard side == nil else { return }
                 switch Launch.sheet {
                 case "git": showingGit = true
                 case "commands": composer.draft = "/"
@@ -179,6 +192,9 @@ private struct ThreadScreen: View {
                 case "delete":
                     // Once the row is in.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if let t = thread { model.askToDelete(t, into: $deleteAsk) } }
+                case "side":
+                    // Once the Mac has said what it serves.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { sideChat = SideChatAsk(question: Launch.sideAsk ?? "") }
                 default: break
                 }
             }
@@ -195,6 +211,7 @@ private struct ThreadScreen: View {
 
     private var subtitle: String {
         guard let t = thread else { return "" }
+        if side != nil { return ["Side chat", t.modelLabel].compactMap { $0 }.joined(separator: " · ") }
         if t.parentId != nil { return ["Sub-agent", t.modelLabel].compactMap { $0 }.joined(separator: " · ") }
         return [t.project?.name, t.branch].compactMap { $0 }.joined(separator: " · ")
     }
@@ -208,6 +225,23 @@ private struct ThreadScreen: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        if let side {
+            // In its sheet: closed, and another started. What moves a thread around the list
+            // (pin, settle, snooze, archive) isn't a side chat's: no list holds it.
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Done", systemImage: "xmark") { side.close() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("New side chat", systemImage: "square.and.pencil") { side.startNew() }
+                    .accessibilityHint("This one stays on your Mac, in the Side Chat panel's history")
+            }
+        } else {
+            threadToolbar
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var threadToolbar: some ToolbarContent {
         if let t = thread, offersGit(t) {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingGit = true } label: { GitButtonLabel(changed: t.git?.changed ?? 0) }
@@ -217,6 +251,7 @@ private struct ThreadScreen: View {
         ToolbarItem(placement: .topBarTrailing) {
             ThreadMenu(shown: thread.map { ThreadMenu.Shown($0, model: model) }, thread: thread,
                        usage: { showingUsage = true },
+                       side: { sideChat = SideChatAsk() },
                        pickSnooze: { snoozePicking = true },
                        rename: {
                            newTitle = thread?.title ?? ""
@@ -811,6 +846,9 @@ private struct ComposerArea: View {
     /// The height between the strip under the title and the keyboard (or the screen's foot).
     var room: CGFloat
     var newPromptSent: (String) -> Void
+    /// `/side` opens a side chat beside this thread (its Mac serves them, and it isn't one itself).
+    var offersSide = false
+    var openSide: (SideChatAsk) -> Void = { _ in }
     @Environment(AppModel.self) private var model
     /// The requests' own height, and that of what's under them (queued, settings, composer).
     @State private var requestsHeight: CGFloat = 0
@@ -852,7 +890,9 @@ private struct ComposerArea: View {
         let thread = store.summary
         let working = thread?.runState == .working
         let query = CommandPicker.query(composer.draft)
-        let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
+        // The Mac's list, with `/side` among Trek's own where it opens a side chat here.
+        let listed = offersSide ? SideCommand.adding(to: model.commands[threadID] ?? []) : model.commands[threadID] ?? []
+        let commands = query.map { CommandPicker.matches(listed, $0) } ?? []
         let needsKid = thread?.needsThread.flatMap { model.serves(.subAgents, on: threadID) ? $0 : nil }
         let pending = store.pending.filter { !answered.contains($0.id) }
         // A sub-agent's request is read from its own transcript and answered here, as on the Mac.
@@ -941,7 +981,7 @@ private struct ComposerArea: View {
                         .transition(.rise(motion))
                 }
                 if !commands.isEmpty {
-                    CommandPicker(commands: model.commands[threadID] ?? [], query: query ?? "") { cmd in
+                    CommandPicker(commands: listed, query: query ?? "") { cmd in
                         composer.draft = "/\(cmd.name) "
                     }
                     .transition(.rise(motion))
@@ -1070,6 +1110,18 @@ private struct ComposerArea: View {
         // Nothing can go while the Mac is out of reach: what's typed stays in the composer.
         guard let link = model.link(for: threadID), link.connection == .connected else {
             model.show(AppModel.notConnected, error: true)
+            return
+        }
+        // `/side`: the side chat's sheet opens over the thread, with what followed the command as
+        // the first thing asked there. Nothing goes to this thread's agent.
+        if offersSide, let question = SideCommand.question(text) {
+            guard composer.files.isEmpty else {
+                model.show("A side chat takes photos, not files. Take the files off, then send /side again.", error: true)
+                return
+            }
+            felt = Felt(feedback: .impact(weight: .light))
+            openSide(SideChatAsk(question: question, photos: composer.photos))
+            composer.cleared(after: composer.draft)
             return
         }
         felt = Felt(feedback: .impact(weight: .light))

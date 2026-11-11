@@ -132,6 +132,8 @@ struct ThreadMenu: View, nonisolated Equatable {
         var regenerateTitle: Bool
         var markUnread: Bool
         var delete: Bool
+        /// A side chat opens beside it (`side_chat`).
+        var sideChat = false
     }
 
     // Read by `==`, which SwiftUI may call off the main thread.
@@ -139,6 +141,8 @@ struct ThreadMenu: View, nonisolated Equatable {
     /// For the snooze menu; not compared (`shown` says what's on screen).
     var thread: ThreadSummary?
     var usage: () -> Void
+    /// Open the side chat beside it.
+    var side: () -> Void = {}
     var pickSnooze: () -> Void
     var rename: () -> Void
     var archive: () -> Void
@@ -161,6 +165,10 @@ struct ThreadMenu: View, nonisolated Equatable {
                     } else {
                         Label { Text(s.name) } icon: { AgentMenuIcon(agent: s.agent) }
                     }
+                }
+                // A quick question beside the thread, which its agent doesn't hear: `/side` too.
+                if s.sideChat {
+                    Button("Side chat", systemImage: "bubble.left.and.bubble.right", action: side)
                 }
                 // A sub-agent isn't in the list: what moves rows around doesn't apply to it.
                 if !s.subAgent {
@@ -221,6 +229,7 @@ extension ThreadMenu.Shown {
                   plan: plan != nil, planSummary: plan?.summary, subAgent: t.parentId != nil,
                   pinned: t.pinned, section: t.section, working: t.runState == .working,
                   snooze: model.serves(.snooze, on: t.id), regenerateTitle: model.serves(.regenerateTitle, on: t.id),
-                  markUnread: model.serves(.markUnread, on: t.id), delete: model.serves(.delete, on: t.id))
+                  markUnread: model.serves(.markUnread, on: t.id), delete: model.serves(.delete, on: t.id),
+                  sideChat: model.serves(.sideChat, on: t.id))
     }
 }

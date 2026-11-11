@@ -55,6 +55,8 @@ nonisolated enum MacFeature: String, CaseIterable {
     case consult
     /// Videos and files sent with a message, a piece at a time (`upload_part`, `send.files`).
     case uploads
+    /// `side_chat`: a thread's side chat found, or one started beside it (`/side`, the thread's menu).
+    case sideChat = "side_chat"
 }
 
 /// The Mac's snooze menu.

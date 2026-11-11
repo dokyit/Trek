@@ -49,6 +49,7 @@ pub mod phone_update;
 mod queue;
 pub mod search;
 mod settings;
+mod side_chat;
 mod sub_agents;
 mod thread_actions;
 mod thread_parity;
@@ -1157,6 +1158,10 @@ impl Workspace {
             tr::HostRequest::TurnPreview { req, reply } => self.remote_turn_preview(req, reply, cx),
             // A video or file from the phone, a piece at a time (`uploads.rs`).
             tr::HostRequest::UploadPart { req, reply } => uploads::part(req, reply, cx),
+            // The Side Chat panel's quick question, from a phone's sheet (`side_chat.rs`).
+            tr::HostRequest::SideChat { req, reply } => {
+                let _ = reply.send(self.remote_side_chat(req, cx));
+            }
         }
     }
 

@@ -5684,3 +5684,179 @@ fn a_question_answered_on_the_mac_while_the_phone_was_away_closes_on_the_phone()
         assert!(again.items.iter().all(|i| !i.id.starts_with('r')));
     });
 }
+
+fn side_chat(
+    id: &str,
+    text: Option<&str>,
+) -> impl FnOnce(tr::Reply<tr::SideChat>) -> tr::HostRequest {
+    let req = tr::SideChatRequest {
+        thread_id: id.to_string(),
+        text: text.map(str::to_string),
+        images: vec![],
+    };
+    move |reply| tr::HostRequest::SideChat { req, reply }
+}
+
+#[test]
+fn a_phone_starts_a_side_chat_beside_a_thread_and_finds_it_again() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let before = trek.read(cx, |ws, _| {
+            (
+                ws.route.clone(),
+                ws.side_chat.tabs.len(),
+                ws.side_chat.is_draft(),
+                ws.live[&id].items.len(),
+            )
+        });
+
+        // None yet: the answer names the thread and no side chat.
+        let none = ask(&trek, cx, side_chat(&id, None)).unwrap();
+        assert_eq!((none.thread_id.as_str(), none.side), (id.as_str(), None));
+
+        // Started with its first message: beside the thread, on its agent, asking first, named
+        // for the message. The Mac's window and its Side Chat panel stay as they were.
+        let question = "What does retry() do?";
+        let started = ask(&trek, cx, side_chat(&id, Some(question))).unwrap();
+        let row = started.side.expect("the new side chat's row");
+        let side = row.id.clone();
+        assert_ne!(side, id);
+        assert_eq!(row.title, trek_core::import_title(question));
+        assert_eq!(row.access, Some(tr::Access::Supervised));
+        let (side_of, agent, parent_agent, cwd, parent_cwd) = trek.read(cx, |ws, _| {
+            let (s, p) = (ws.thread(&side).unwrap(), ws.thread(&id).unwrap());
+            (
+                s.side_of.clone(),
+                s.agent.clone(),
+                p.agent.clone(),
+                s.cwd.clone(),
+                p.cwd.clone(),
+            )
+        });
+        assert_eq!(side_of.as_deref(), Some(id.as_str()));
+        assert_eq!((agent, cwd), (parent_agent, parent_cwd));
+        trek.wait_done(cx, &side, RunState::Idle).await;
+        let after = trek.read(cx, |ws, _| {
+            (
+                ws.route.clone(),
+                ws.side_chat.tabs.len(),
+                ws.side_chat.is_draft(),
+                ws.live[&id].items.len(),
+            )
+        });
+        assert_eq!(
+            after, before,
+            "the thread and the Mac's screen are left alone"
+        );
+        assert!(
+            trek.items(cx, &side).iter().any(
+                |i| matches!(i, trek_core::store::Item::User { text, .. } if text == question)
+            ),
+            "its first message is in it"
+        );
+
+        // No list holds it: not the threads, and not the unlisted rows until a phone has it open.
+        let snapshot = ask(&trek, cx, |reply| tr::HostRequest::Snapshot { reply }).unwrap();
+        assert!(
+            snapshot
+                .threads
+                .iter()
+                .chain(&snapshot.unlisted)
+                .all(|t| t.id != side)
+        );
+        // Found again from the thread.
+        let found = ask(&trek, cx, side_chat(&id, None)).unwrap();
+        assert_eq!(found.side.map(|s| s.id), Some(side.clone()));
+
+        // Opened, it's a thread like any other: read, followed as an unlisted row, sent to.
+        let t = ask_later(&trek, cx, transcript_req(&side, None, Some(50)))
+            .await
+            .unwrap();
+        assert!(
+            t.items
+                .iter()
+                .any(|i| matches!(&i.body, tr::ItemBody::User { text, .. } if text == question))
+        );
+        let followed = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+            trek.update(cx, |ws, cx| {
+                ws.threads_gen += 1;
+                ws.push_remote_changes(cx);
+                ws.remote.as_ref().unwrap().unlisted.contains_key(&side)
+            })
+        };
+        assert!(
+            followed(&trek, cx),
+            "its row goes while a phone has it open"
+        );
+        let items = trek.items(cx, &side).len();
+        ask(&trek, cx, send(&side, "And backoff()?")).unwrap();
+        let s = side.clone();
+        trek.wait(cx, "the side chat to answer", move |ws| {
+            ws.live[&s].items.len() > items
+                && ws.thread(&s).is_some_and(|t| t.run_state == RunState::Idle)
+        })
+        .await;
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.live[&id].items.len()),
+            before.3,
+            "the thread heard none of it"
+        );
+        // Closed on the phone: not followed any more, and still there.
+        trek.update(cx, |ws, cx| {
+            ws.remote_request(
+                tr::HostRequest::Unwatch {
+                    thread_id: side.clone(),
+                },
+                cx,
+            )
+        });
+        assert!(!followed(&trek, cx));
+        assert!(trek.read(cx, |ws, _| ws.thread(&side).is_some()));
+
+        // Another one: the newest is the one found.
+        let second = ask(&trek, cx, side_chat(&id, Some("And one more thing")))
+            .unwrap()
+            .side
+            .unwrap()
+            .id;
+        assert_ne!(second, side);
+        trek.wait_done(cx, &second, RunState::Idle).await;
+        let found = ask(&trek, cx, side_chat(&id, None)).unwrap();
+        assert_eq!(found.side.map(|s| s.id), Some(second));
+    });
+}
+
+#[test]
+fn a_side_chat_is_refused_where_there_is_nothing_to_put_it_beside() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let threads = trek.read(cx, |ws, _| ws.threads.len());
+        // Nothing to ask.
+        let empty = ask(&trek, cx, side_chat(&id, Some("  "))).unwrap_err();
+        assert_eq!(empty.code, tr::ErrorCode::BadRequest);
+        // No such thread.
+        let gone = ask(&trek, cx, side_chat("nope", Some("hello"))).unwrap_err();
+        assert_eq!(gone.code, tr::ErrorCode::NotFound);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.threads.len()),
+            threads,
+            "neither started anything"
+        );
+        // A side chat has none of its own.
+        let side = ask(&trek, cx, side_chat(&id, Some("What's in here?")))
+            .unwrap()
+            .side
+            .unwrap()
+            .id;
+        trek.wait_done(cx, &side, RunState::Idle).await;
+        for text in [None, Some("And beside this?")] {
+            let nested = ask(&trek, cx, side_chat(&side, text)).unwrap_err();
+            assert_eq!(nested.code, tr::ErrorCode::BadRequest);
+        }
+    });
+}

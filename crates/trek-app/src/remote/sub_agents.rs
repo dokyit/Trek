@@ -2,7 +2,8 @@
 //! out (on the Mac they show only under their parent): phones get them as `unlisted` rows, so one
 //! can be opened from its parent to read it, answer it or stop it. Threads a phone has open that
 //! the list leaves out (found by a search) come the same way. A parent whose sub-agent waits on
-//! the user says so in its own row, as its sidebar card does, and is in the inbox for it.
+//! the user says so in its own row, as its sidebar card does, and is in the inbox for it. A side
+//! chat a phone has open (`side_chat.rs`) comes as an unlisted row too: no list ever holds one.
 
 use super::Remote;
 use crate::workspace::Workspace;
@@ -46,7 +47,11 @@ impl Workspace {
             if listed.contains(id.as_str()) || seen.contains(id.as_str()) {
                 continue;
             }
-            if let Some(t) = self.thread(id).filter(|t| t.own_section(now).is_some()) {
+            // A side chat sits in no section, and is followed all the same while it's open.
+            let shown = |t: &&Thread| {
+                t.own_section(now).is_some() || (t.side_of.is_some() && t.archived_at.is_none())
+            };
+            if let Some(t) = self.thread(id).filter(shown) {
                 out.push(self.remote_summary(t, now));
             }
         }

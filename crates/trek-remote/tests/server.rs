@@ -2543,6 +2543,7 @@ async fn welcome_lists_the_features_and_a_host_without_them_says_so() {
         json!({"type": "machine_info"}),
         json!({"type": "clone_project", "url": "https://github.com/dokyit/trek.git", "folder": "~/trek", "name": "trek"}),
         json!({"type": "put_files", "project_id": "p", "files": [{"path": ".env", "bytes_b64": "S0VZPTE=", "mode": 384}]}),
+        json!({"type": "side_chat", "thread_id": "t", "text": "What does retry() do?"}),
     ]
     .into_iter()
     .enumerate()

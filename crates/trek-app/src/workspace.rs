@@ -4234,6 +4234,18 @@ impl Workspace {
             .current_thread()
             .and_then(|t| self.project_dir(t))
             .or_else(|| cwd.clone().filter(|c| !trek_core::paths::is_chat_dir(c)));
+        self.side_chat_beside(parent, cwd, project, p, cx)
+    }
+
+    /// A side chat of `parent` (a thread's id, or `"draft"`), in `project` and working in `cwd`.
+    pub(crate) fn side_chat_beside(
+        &mut self,
+        parent: String,
+        cwd: Option<PathBuf>,
+        project: Option<PathBuf>,
+        p: Prefs,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
         let account = self.account_on(&p.agent, p.account.clone());
         let mut t = self
             .store

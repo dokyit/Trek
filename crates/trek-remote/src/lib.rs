@@ -66,6 +66,9 @@
 //!   `user.videos`, `tool.watch`, and rows' `shares_folder` and `pause`; **`media`** serves only
 //!   files the thread's items name; **`context_card`** and `thread_action` `compact`;
 //!   **`turn_preview`**; the limit bar's `thread_action`s; `send.consult`.
+//! - **`side_chat`** (feature `side_chat`, `side_chat.rs`): the newest side chat beside a thread,
+//!   or a new one started with its first message, without moving the Mac's own screen; its row
+//!   goes as `HostEvent::Unlisted` while a phone has it open.
 //! - **`mark_seen`**: clear the thread's unseen flag, as opening it on the desktop does.
 //! - **Push** through [`RemoteHandle::push`]: `HostEvent::Thread` whenever a thread's row changes
 //!   (state, title, needs, activity, diff stat), `ThreadRemoved` on delete/archive, `Item` for every

@@ -1138,6 +1138,7 @@ const CLIENT_TYPES: &[&str] = &[
     "context_card",
     "turn_preview",
     "upload_part",
+    "side_chat",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -1558,6 +1559,7 @@ async fn call<H: RemoteHost>(
             .upload_part(req)
             .await
             .map(ServerMessage::UploadProgress),
+        ClientMessage::SideChat(req) => host.side_chat(req).await.map(ServerMessage::SideChat),
         other => Err(HostError::bad_request(format!(
             "Unexpected \"{}\"",
             other.kind()

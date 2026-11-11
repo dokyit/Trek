@@ -102,6 +102,8 @@ enum Launch {
     /// A note to open on the Notes tab.
     static var note: String? { UserDefaults.standard.string(forKey: "TrekNote") }
     static var sheet: String? { UserDefaults.standard.string(forKey: "TrekSheet") }
+    /// With `-TrekSheet side`: what's asked in the side chat, as if `/side <this>` had been sent.
+    static var sideAsk: String? { UserDefaults.standard.string(forKey: "TrekSideAsk") }
     /// Text typed in Search, for screenshots.
     static var search: String? { UserDefaults.standard.string(forKey: "TrekSearch") }
     /// Sections of the thread list to start folded, comma-separated ("Pinned,Needs you",

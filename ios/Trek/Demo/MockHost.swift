@@ -11,6 +11,8 @@ final class MockHost: Backend {
     private var items: [String: [TItem]] = [:]
     private var seq: [String: Int64] = [:]
     private var subscribed: Set<String> = []
+    /// Side chats, by their thread: the thread each is beside. No list holds them.
+    private var sideOf: [String: String] = [:]
     /// Each thread's item counter, for the Mac's ids: `i<n>`, `c<n>` for a turn's changes, `r<n>`
     /// for requests.
     private var counters: [String: Int] = [:]
@@ -127,7 +129,7 @@ final class MockHost: Backend {
         }
         deliver(.welcome(re: "auth", host: host, features: Self.features), after: 0.15)
         // Sub-agents' threads aren't listed: they come as unlisted rows.
-        deliver(.snapshot(Snapshot(threads: threads.filter { $0.parentId == nil }, projects: projects, agents: agents, fullAccess: true,
+        deliver(.snapshot(Snapshot(threads: threads.filter { $0.parentId == nil && sideOf[$0.id] == nil }, projects: projects, agents: agents, fullAccess: true,
                                    unlisted: threads.filter { $0.parentId != nil }, release: DemoMac.release(running: host.version))),
                 after: 0.2)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.onState?(.connected) }
@@ -241,7 +243,7 @@ final class MockHost: Backend {
             ack(id)
             append(tid, .user(text: text, images: images.count))
             update(tid) { $0.runState = .working; $0.needs = nil; $0.workingSince = Self.now; $0.activity = "Thinking"; $0.section = $0.pinned ? .pinned : .working }
-            respond(in: tid, to: text)
+            if sideOf[tid] != nil { answerAside(tid) } else { respond(in: tid, to: text) }
         case .setPrefs(let tid, let agentKey, let model, let effort, let access, let plan):
             ack(id)
             update(tid) { t in
@@ -295,7 +297,7 @@ final class MockHost: Backend {
         case .usage:
             deliver(.usage(re: id, DemoMac.usage()), after: 0.4)
         case .basecamp(let range):
-            deliver(.basecamp(re: id, DemoMac.basecamp(range, threads: threads.filter { $0.parentId == nil }, projects: projects)), after: 0.3)
+            deliver(.basecamp(re: id, DemoMac.basecamp(range, threads: threads.filter { $0.parentId == nil && sideOf[$0.id] == nil }, projects: projects)), after: 0.3)
         case .notes:
             deliver(.notes(re: id, notes.sorted { $0.modified > $1.modified }.map(DemoMac.summary)))
         case .note(let nid):
@@ -379,6 +381,8 @@ final class MockHost: Backend {
             take(.send(threadId: tid, text: DemoMac.withConsult(mentioning(text, files), consult), mode: mode, images: images), id: id)
         case .uploadPart:
             takeUpload(message, id: id)
+        case .sideChat(let tid, let text, let images):
+            sideChat(tid, text: text, images: images.count, id: id)
         }
     }
 
@@ -759,7 +763,8 @@ final class MockHost: Backend {
     func update(_ tid: String, push: Bool = true, _ f: (inout ThreadSummary) -> Void) {
         guard let i = threads.firstIndex(where: { $0.id == tid }) else { return }
         f(&threads[i])
-        if push { deliver(threads[i].parentId == nil ? .thread(threads[i]) : .unlisted(threads[i])) }
+        // Sub-agents' rows and side chats' are no list's: they go as unlisted rows.
+        if push { deliver(threads[i].parentId == nil && sideOf[tid] == nil ? .thread(threads[i]) : .unlisted(threads[i])) }
     }
 
     // MARK: Sample data
@@ -1199,6 +1204,23 @@ extension MockHost {
         add("t-tailscale-scout", .assistant(text: "`advertise_address()` takes the first private IPv4 address of an interface that's up. It never looks at Tailscale, so a phone on the tailnet gets the LAN address.", streaming: false))
         add("t-tailscale-scout", .turnEnd(tookSecs: 48))
 
+        // A side chat from earlier, beside a thread: its sheet finds it again.
+        if let p = thread("t-tailscale") {
+            var side = ThreadSummary(id: "t-tailscale-side", title: "Where does the QR code get drawn?", project: p.project, agent: p.agent,
+                                     model: p.model, modelLabel: p.modelLabel, runState: .idle, needs: nil, section: .settled,
+                                     unseen: false, pinned: false, branch: p.branch, worktree: p.worktree, activity: nil,
+                                     workingSince: nil, updatedAt: now - 18 * m, additions: 0, deletions: 0)
+            side.access = .supervised
+            threads.append(side)
+            sideOf[side.id] = p.id
+            seq[side.id] = 0
+            items[side.id] = []
+            add(side.id, .user(text: "Where does the QR code get drawn? Just point me at the file.", images: 0), at: now - 19 * m)
+            add(side.id, tool(.search, "Search", "\"qr\" in crates/trek-app/src"))
+            add(side.id, .assistant(text: "In `crates/trek-app/src/settings/phone.rs`: `pairing_qr()` builds the `trek://pair…` link and `qr_image()` draws it. The address in the link comes from `remote_endpoint()` in `remote.rs`.", streaming: false))
+            add(side.id, .turnEnd(tookSecs: 6), at: now - 18 * m)
+        }
+
         add("t-glass", .user(text: "Try the Liquid Glass tab bar on the main screen and tell me how it looks with the map behind it.", images: 0), at: now - 52 * m)
         add("t-glass", .assistant(text: "It reads well over the map in light mode. In dark mode the labels lose contrast over the satellite layer; a slightly stronger tint fixes it.", streaming: false))
         add("t-glass", .turnEnd(tookSecs: 95))
@@ -1207,6 +1229,42 @@ extension MockHost {
     /// The parent's row says what kind of thing its sub-agent waits on.
     private func setNeeds(_ tid: String, _ kind: NeedsKind) {
         if let i = threads.firstIndex(where: { $0.id == tid }) { threads[i].needs = Needs(kind: kind, text: "Sub-agent needs you") }
+    }
+
+    /// `side_chat`: the newest side chat beside `tid`, or a new one started with `text`, as the
+    /// Mac starts one: on the thread's agent and model, asking first, in no list.
+    private func sideChat(_ tid: String, text: String?, images: Int, id: String?) {
+        guard let parent = thread(tid) else { return refuse(id, .notFound, "No such thread") }
+        guard sideOf[tid] == nil else { return refuse(id, .badRequest, "A side chat has no side chat of its own") }
+        guard let text else {
+            deliver(.sideChat(re: id, SideChatReply(threadId: tid, side: threads.last { sideOf[$0.id] == tid })), after: 0.12)
+            return
+        }
+        let words = text.split(separator: " ").prefix(7).joined(separator: " ")
+        var side = ThreadSummary(id: "t-side-\(sideOf.count + 1)", title: words.isEmpty ? "Side chat" : words, project: parent.project,
+                                 agent: parent.agent, model: parent.model, modelLabel: parent.modelLabel, runState: .working, needs: nil,
+                                 section: .settled, unseen: false, pinned: false, branch: parent.branch, worktree: parent.worktree,
+                                 activity: "Thinking", workingSince: Self.now, updatedAt: Self.now, additions: 0, deletions: 0)
+        side.effort = parent.effort
+        side.access = .supervised
+        threads.append(side)
+        sideOf[side.id] = tid
+        items[side.id] = []
+        seq[side.id] = 0
+        deliver(.sideChat(re: id, SideChatReply(threadId: tid, side: side)), after: 0.25)
+        append(side.id, .user(text: text, images: images))
+        answerAside(side.id)
+    }
+
+    /// A side chat's answer: short, as a quick question's is.
+    private func answerAside(_ tid: String) {
+        later(1.2) { [weak self] in
+            self?.append(tid, .tool(ToolCall(callId: UUID().uuidString, tool: .search, title: "Search", detail: "\"prune\" in src/", status: .done, output: "", added: nil, removed: nil)))
+            self?.update(tid) { $0.activity = "Reading src/worktrees.rs" }
+        }
+        later(2.6) { [weak self] in
+            self?.finish(tid, with: "Short answer: it only removes worktrees whose branch is merged **and** whose thread is archived, so nothing in flight is touched.\n\n- The check is `is_stale()` in `src/worktrees.rs`\n- It runs once a day, at launch\n\nAsk again here whenever. The thread beside this one hasn't heard any of it.", took: 3)
+        }
     }
 
     /// A sub-agent was answered or stopped: its parent's row says so.

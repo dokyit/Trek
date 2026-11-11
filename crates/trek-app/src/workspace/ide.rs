@@ -467,6 +467,40 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The newest side chat started beside thread `id`.
+    pub fn side_chat_of(&self, id: &str) -> Option<&trek_core::store::Thread> {
+        self.threads
+            .iter()
+            .filter(|t| t.archived_at.is_none() && t.side_of.as_deref() == Some(id))
+            .max_by_key(|t| t.updated_at)
+    }
+
+    /// A side chat started beside thread `beside` from somewhere other than the Side Chat panel
+    /// (a phone's sheet), with its first message: on that thread's agent and model, asking first
+    /// as `create_side_chat` has it, in its project and folder. The main window stays where it
+    /// is and the panel's tabs as they are; the chat is in the panel's history.
+    pub fn start_side_chat_beside(
+        &mut self,
+        beside: &str,
+        text: String,
+        images: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let t = self.thread(beside)?.clone();
+        let mut prefs = self.prefs_in(&Scope::Thread(t.id.clone()));
+        prefs.hand_holding = trek_core::HandHolding::Supervised;
+        let project = self
+            .project_dir(&t)
+            .or_else(|| t.cwd.clone().filter(|c| !trek_core::paths::is_chat_dir(c)));
+        let id = self.side_chat_beside(t.id.clone(), t.cwd.clone(), project, prefs, cx)?;
+        // Named for its first message till its title comes, as `send_side_draft` names one.
+        let title = trek_core::import_title(&text);
+        self.mutate_thread(&id, cx, |t| t.title = title);
+        self.send_to(&id, text, images, cx);
+        cx.notify();
+        Some(id)
+    }
+
     /// The AI side bar's new chat sends its first message: an editor chat starts in the IDE
     /// folder and takes the tab's place. The harness stays where it was (no route change, no tab there).
     pub(super) fn send_ide_draft(

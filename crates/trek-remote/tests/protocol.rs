@@ -1471,7 +1471,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -2051,4 +2051,44 @@ fn pieces_that_cannot_be_kept_are_refused() {
             .name,
         "évil.sh"
     );
+}
+
+#[test]
+fn a_side_chat_is_found_or_started_and_older_messages_still_read() {
+    // Looking for the one a thread has: nothing but the thread.
+    let find = client_round_trip(r#"{"type":"side_chat","id":"4","thread_id":"t"}"#);
+    let ClientMessage::SideChat(req) = find.msg else {
+        panic!()
+    };
+    assert_eq!((req.thread_id.as_str(), req.text), ("t", None));
+    // Starting one: its first message, with photos when there are some.
+    let start = client_round_trip(
+        r#"{"type":"side_chat","id":"5","thread_id":"t","text":"What does retry() do?","images":[{"mime":"image/png","data":"iVBORw0K"}]}"#,
+    );
+    let ClientMessage::SideChat(req) = start.msg else {
+        panic!()
+    };
+    assert_eq!(req.text.as_deref(), Some("What does retry() do?"));
+    assert_eq!(req.images.len(), 1);
+    assert_eq!(
+        ClientMessage::SideChat(SideChatRequest::default()).kind(),
+        "side_chat"
+    );
+    // The answer: the side chat's row, or none while the thread has no side chat.
+    let found = server_round_trip(
+        r#"{"type":"side_chat","re":"5","thread_id":"t","side":{"id":"s","title":"What does retry() do?","project":{"id":"p","name":"trek","hue":24,"monogram":"TR"},"agent":{"key":"codex","name":"Codex"},"model":null,"model_label":null,"run_state":"working","needs":null,"section":"settled","unseen":false,"pinned":false,"branch":null,"worktree":false,"activity":null,"working_since":null,"updated_at":1791000000000,"additions":0,"deletions":0}}"#,
+    );
+    let ServerMessage::SideChat(SideChat { thread_id, side }) = found.msg else {
+        panic!()
+    };
+    assert_eq!(
+        (thread_id.as_str(), side.map(|s| s.id)),
+        ("t", Some("s".to_string()))
+    );
+    let none = server_round_trip(r#"{"type":"side_chat","re":"4","thread_id":"t"}"#);
+    let ServerMessage::SideChat(SideChat { side, .. }) = none.msg else {
+        panic!()
+    };
+    assert_eq!(side, None);
+    assert!(feature::ALL.contains(&feature::SIDE_CHAT));
 }

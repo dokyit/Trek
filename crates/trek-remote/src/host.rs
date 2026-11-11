@@ -23,7 +23,7 @@ use crate::protocol::{
     UpdatePhoneRequest,
 };
 use crate::protocol::{ContextCard, Media, MediaRequest, TurnPreview, TurnPreviewRequest};
-use crate::protocol::{UploadPart, UploadProgress};
+use crate::protocol::{SideChat, SideChatRequest, UploadPart, UploadProgress};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -435,6 +435,15 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("receive files from the phone")
     }
 
+    /// The side chat beside a thread (feature `side_chat`): without `text` the newest one it has
+    /// (no `side` when it has none), with `text` a new one started with that message, without
+    /// moving anything on the Mac's own screen. `not_found` for a thread that's gone,
+    /// `bad_request` for a side chat (it has none of its own).
+    fn side_chat(&self, req: SideChatRequest) -> impl Future<Output = HostResult<SideChat>> + Send {
+        let _ = req;
+        unsupported("open a side chat")
+    }
+
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -690,6 +699,11 @@ pub enum HostRequest {
     UploadPart {
         req: UploadPart,
         reply: Reply<UploadProgress>,
+    },
+    /// See [`RemoteHost::side_chat`].
+    SideChat {
+        req: SideChatRequest,
+        reply: Reply<SideChat>,
     },
 }
 
@@ -1021,6 +1035,11 @@ impl RemoteHost for ChannelHost {
 
     async fn upload_part(&self, req: UploadPart) -> HostResult<UploadProgress> {
         self.call(|reply| HostRequest::UploadPart { req, reply })
+            .await
+    }
+
+    async fn side_chat(&self, req: SideChatRequest) -> HostResult<SideChat> {
+        self.call(|reply| HostRequest::SideChat { req, reply })
             .await
     }
 }
