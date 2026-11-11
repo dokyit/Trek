@@ -71,7 +71,7 @@ enum Inline {
     /// A chip's padding from its neighbours: a thin space on each side, outside the chip.
     private static let pad = "\u{2009}"
 
-    private struct Key: Hashable {
+    private nonisolated struct Key: Hashable {
         var markdown: String
         var size: CGFloat
         var weight: Font.Weight
@@ -80,32 +80,49 @@ enum Inline {
         var autoPaths: Bool
     }
 
-    @MainActor private static var texts: [Key: Text] = [:]
-    private nonisolated static let attributed = Mutex<[String: AttributedString]>([:])
+    /// Lines of text kept, built and parsed: 6 MiB each by what they're reckoned to cost, eight
+    /// times their Markdown and a few hundred bytes (a `Text` is a tree of its pieces, an
+    /// `AttributedString` its runs and their attributes; neither says what it weighs, so this is
+    /// an estimate). A line is a paragraph, some 200 bytes: about 3,000 of them, the threads read
+    /// lately. They were 4,000 and 6,000 lines of any length, all dropped at once past that.
+    /// A line streaming in replaces its shorter self.
+    nonisolated static let cacheBudget = 6 << 20
+    /// One line's most to be kept: 32 KB of Markdown. A longer one is built each time.
+    nonisolated static let cacheEntryCap = 256 << 10
+
+    /// What a line of `markdown` costs to keep.
+    nonisolated static func cost(_ markdown: String) -> Int { markdown.utf8.count * 8 + 256 }
+
+    @MainActor private static var texts = ByteLRU<Key, Text>(budget: cacheBudget, entryCap: cacheEntryCap) { new, old in
+        new.size == old.size && new.weight == old.weight && new.dark == old.dark && new.projectHue == old.projectHue
+            && new.autoPaths == old.autoPaths && new.markdown.extends(old.markdown)
+    }
+    private nonisolated static let attributed = Mutex(ByteLRU<String, AttributedString>(budget: cacheBudget, entryCap: cacheEntryCap) { new, old in
+        new.extends(old)
+    })
 
     /// `text(…)`, built once per Markdown, size and look: a transcript redrawn (scrolled back
     /// to, or around a row that changed) doesn't parse and assemble its text again.
     @MainActor static func cachedText(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular, dark: Bool,
                                       projectHue: Int? = nil, autoPaths: Bool = false) -> Text {
         let key = Key(markdown: markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, autoPaths: autoPaths)
-        if let hit = texts[key] { return hit }
+        if let hit = texts.value(for: key) { return hit }
         let t = text(markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, autoPaths: autoPaths)
-        if texts.count > 4000 { texts.removeAll(keepingCapacity: true) }
-        texts[key] = t
+        texts.insert(t, for: key, cost: cost(markdown))
         return t
     }
 
     /// Inline Markdown parsed, once (safe off the main thread, to parse ahead).
     nonisolated static func parsed(_ markdown: String) -> AttributedString {
-        if let hit = attributed.withLock({ $0[markdown] }) { return hit }
+        if let hit = attributed.withLock({ $0.value(for: markdown) }) { return hit }
         let a = (try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(markdown)
-        attributed.withLock { c in
-            if c.count > 6000 { c.removeAll(keepingCapacity: true) }
-            c[markdown] = a
-        }
+        attributed.withLock { _ = $0.insert(a, for: markdown, cost: cost(markdown)) }
         return a
     }
+
+    /// Whether `markdown`'s parse is kept (for tests).
+    nonisolated static func isParsedCached(_ markdown: String) -> Bool { attributed.withLock { $0.contains(markdown) } }
 
     static func text(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular, dark: Bool,
                      projectHue: Int? = nil, autoPaths: Bool = false) -> Text {

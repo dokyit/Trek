@@ -316,8 +316,9 @@ extension AppModel {
         request(.addNoteImage(noteId: noteID, data: upload.data, name: name)) { [weak self] reply in
             switch reply {
             case .noteImage(_, let image):
-                // What the phone just sent: drawn at once, without asking for it back.
-                Attachments.cache.setObject(photo.image, forKey: "note:\(noteID)/\(image.path)@full" as NSString)
+                // What the phone just sent: drawn at once, without asking for it back. At the
+                // viewer's size, as the Mac would send it: a photo off the camera is 48 MB whole.
+                Attachments.cache.setObject(Attachments.fitted(photo.image, maxPx: 2048), forKey: "note:\(noteID)/\(image.path)@full" as NSString)
                 done(image)
             case .error(_, _, let text):
                 self?.show(text, error: true)
@@ -369,15 +370,62 @@ extension AppModel {
 
 /// Images of messages, scaled and kept in memory.
 enum Attachments {
-    static let cache: NSCache<NSString, UIImage> = {
-        let c = NSCache<NSString, UIImage>()
-        c.totalCostLimit = 48 << 20
-        return c
-    }()
+    /// Decoded pictures kept: 64 MiB of pixels. A message's thumbnail (480 px) is under 1 MB, an
+    /// answer's or a note's picture (1,024 px) about 3, the viewer's (2,048 px) up to 17: a thread
+    /// of screenshots and the few looked at up close. It was 48 MiB of the files' bytes, which
+    /// says little: a 400 KB JPEG is 12 MB of pixels, so the cache held many times its limit.
+    nonisolated static let budget = 64 << 20
+    /// One picture's most to be kept: 24 MiB, above the largest the Mac sends for the viewer.
+    /// A larger one (a picture from the web, a photo off the camera) is shown and not kept.
+    nonisolated static let entryCap = 24 << 20
+
+    static let cache = DecodedImageCache(budget: budget, entryCap: entryCap)
 
     /// Decoded off the main actor, ready to draw.
     @concurrent nonisolated static func decode(_ data: Data) async -> UIImage? {
         await UIImage(data: data)?.byPreparingForDisplay()
+    }
+
+    /// `image` no longer than `maxPx` on its long side, in pixels: itself when it's within that.
+    static func fitted(_ image: UIImage, maxPx: CGFloat) -> UIImage {
+        let pixels = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        let longest = max(pixels.width, pixels.height)
+        guard longest > maxPx, longest > 0 else { return image }
+        let k = maxPx / longest
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let size = CGSize(width: (pixels.width * k).rounded(), height: (pixels.height * k).rounded())
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+    }
+}
+
+/// An image cache that counts what its pictures weigh decoded, whatever cost a caller gives
+/// (callers know the file's size, a tenth to a thirtieth of that), and keeps none over its
+/// per-picture cap. iOS still empties it when memory runs short, as any `NSCache`.
+nonisolated final class DecodedImageCache: NSCache<NSString, UIImage>, @unchecked Sendable {
+    let entryCap: Int
+
+    init(budget: Int, entryCap: Int) {
+        self.entryCap = entryCap
+        super.init()
+        totalCostLimit = budget
+    }
+
+    /// What `image` takes in memory once drawn: its pixels, four bytes each.
+    static func decodedCost(_ image: UIImage) -> Int {
+        if let cg = image.cgImage { return cg.bytesPerRow * cg.height }
+        return Int(image.size.width * image.scale * image.size.height * image.scale) * 4
+    }
+
+    override func setObject(_ image: UIImage, forKey key: NSString) {
+        setObject(image, forKey: key, cost: 0)
+    }
+
+    override func setObject(_ image: UIImage, forKey key: NSString, cost _: Int) {
+        let cost = Self.decodedCost(image)
+        // Too big to keep: its caller has it to show, and asks again next time.
+        guard cost <= entryCap else { return removeObject(forKey: key) }
+        super.setObject(image, forKey: key, cost: cost)
     }
 }
 

@@ -137,18 +137,31 @@ nonisolated enum Markdown {
         }
     }
 
-    private static let cache = Mutex<[String: [Block]]>([:])
+    /// Parsed answers kept: 8 MiB by what they cost, twice their text (the key, and the blocks
+    /// that hold it again). That's some 400 answers of 10 KB or 2,000 of 2 KB: the threads read
+    /// lately (the phone holds 80 items of a thread). It was 3,000 answers of any size, all
+    /// dropped at once at 3,001. A text streaming in replaces its shorter self here.
+    static let cacheBudget = 8 << 20
+    /// One answer's most to be kept: 512 KB of text. A longer one is parsed each time it's drawn.
+    static let cacheEntryCap = 1 << 20
+
+    private static let cache = Mutex(ByteLRU<String, [Block]>(budget: cacheBudget, entryCap: cacheEntryCap) { new, old in
+        new.extends(old)
+    })
+
+    /// What `text`'s blocks cost to keep.
+    static func cost(_ text: String) -> Int { text.utf8.count * 2 + 64 }
 
     /// `text`'s blocks, parsed once.
     static func blocks(_ text: String) -> [Block] {
-        if let hit = cache.withLock({ $0[text] }) { return hit }
+        if let hit = cache.withLock({ $0.value(for: text) }) { return hit }
         let parsed = parse(text)
-        cache.withLock { c in
-            if c.count > 3000 { c.removeAll(keepingCapacity: true) }
-            c[text] = parsed
-        }
+        cache.withLock { _ = $0.insert(parsed, for: text, cost: cost(text)) }
         return parsed
     }
+
+    /// Whether `text`'s blocks are kept (for tests).
+    static func isCached(_ text: String) -> Bool { cache.withLock { $0.contains(text) } }
 
     /// Parses `texts` (and their inline Markdown) in the background, so they draw at once.
     static func prewarm(_ texts: [String]) {
