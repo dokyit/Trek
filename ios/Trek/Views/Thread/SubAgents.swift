@@ -1,7 +1,63 @@
 import SwiftUI
 
-/// Above a parent's composer while one of its sub-agents waits on the user: what it's waiting for
-/// and a way into its thread, where it's answered (as the Mac's card says "Sub-agent needs you").
+/// Over a sub-agent's request pinned in its parent's thread: whose request it is, and the way into
+/// its thread (the Mac's "Sub-agent “…” is asking" with "Open it"). The request under it is
+/// answered here, and the answer goes to the sub-agent.
+struct SubAgentAskLine: View {
+    /// The sub-agent's thread.
+    var threadID: String
+    @Environment(AppModel.self) private var model
+    @Environment(\.openThread) private var openThread
+
+    var body: some View {
+        let kid = model.thread(threadID)
+        let name = kid?.title ?? ""
+        // Side by side; at the accessibility sizes the button goes under the words.
+        BesideOrOver(spacing: 8) {
+            HStack(spacing: 8) {
+                AgentGlyph(key: kid?.agent.logo ?? kid?.agent.key ?? "", size: 16)
+                    .accessibilityHidden(true)
+                // A long title gives way, not the words after it: "Sub-agent “Benchmark the scr…” is asking".
+                HStack(spacing: 0) {
+                    Text(name.isEmpty ? "A sub-agent" : "Sub-agent “\(name)")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(name.isEmpty ? " is asking" : "” is asking")
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .font(.ui(.footnote).weight(.medium))
+                .foregroundStyle(Trek.muted)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(name.isEmpty ? "A sub-agent is asking" : "Sub-agent \(name) is asking")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                if let openThread { openThread(threadID) } else { model.openRequest = threadID }
+            } label: {
+                Text("Open it")
+                    .font(.ui(.footnote).weight(.semibold))
+                    .foregroundStyle(Trek.foreground)
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 30)
+                    .background(Trek.foreground.opacity(0.08), in: Capsule())
+                    // A finger's worth of room around a small capsule.
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.press)
+            .padding(.vertical, -7)
+            .accessibilityLabel("Open the sub-agent's thread")
+            .accessibilityHint("Its request can be answered here too")
+        }
+        .padding(.leading, 6)
+        .padding(.trailing, 2)
+    }
+}
+
+/// Above a parent's composer while one of its sub-agents waits on something that isn't answered
+/// from here (a secret typed on the Mac, or a Mac that sends no request for it): what it's waiting
+/// for and a way into its thread (as the Mac's card says "Sub-agent needs you").
 struct SubAgentNeedsCard: View {
     var threadID: String
     var needs: Needs?

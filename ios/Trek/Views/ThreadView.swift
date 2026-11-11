@@ -821,6 +821,10 @@ private struct ComposerArea: View {
     @State private var answered: Set<String> = []
     /// What the last tap here is felt as: a message going, a turn stopped, a request answered.
     @State private var felt: Felt?
+    /// A sub-agent has waited long enough for its request that the card that opens it will do.
+    @State private var kidWaited = false
+    /// Sub-agents answered from here a moment ago: their parent's row hasn't caught up yet.
+    @State private var settling: Set<String> = []
     @MotionAllowed private var motion
 
     private struct Felt: Equatable {
@@ -851,8 +855,13 @@ private struct ComposerArea: View {
         let commands = query.map { CommandPicker.matches(model.commands[threadID] ?? [], $0) } ?? []
         let needsKid = thread?.needsThread.flatMap { model.serves(.subAgents, on: threadID) ? $0 : nil }
         let pending = store.pending.filter { !answered.contains($0.id) }
+        // A sub-agent's request is read from its own transcript and answered here, as on the Mac.
+        let kidStore = needsKid.map { model.store($0) }
+        let ask = SubAgentAsk.of(kid: needsKid, own: store.pending, kidPending: kidStore?.pending ?? [], answered: answered,
+                                 kidLoaded: kidStore?.loaded ?? false, waited: kidWaited,
+                                 settling: needsKid.map(settling.contains) ?? false)
         VStack(spacing: 10) {
-            if needsKid != nil || !pending.isEmpty {
+            if ask.pins || !pending.isEmpty {
                 // Requests can be taller than the screen (many questions, each with its options):
                 // they scroll on their own, under the strip and over the composer, and the field
                 // being typed in comes into view over the keyboard.
@@ -860,8 +869,23 @@ private struct ComposerArea: View {
                     ScrollView {
                         VStack(spacing: 10) {
                             if let kid = needsKid {
-                                SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
-                                    .transition(requestTransition)
+                                switch ask {
+                                case .cards(let asked):
+                                    SubAgentAskLine(threadID: kid)
+                                        .transition(requestTransition)
+                                    ForEach(asked) { item in
+                                        PendingRequestCard(item: item, agentName: kidStore?.summary?.agent.name ?? "The sub-agent",
+                                                           threadID: kid) { response in
+                                            if let rid = Self.requestId(item) { answer(item.id, requestId: rid, response, in: kid) }
+                                        }
+                                        .transition(requestTransition)
+                                    }
+                                case .open:
+                                    SubAgentNeedsCard(threadID: kid, needs: thread?.needs)
+                                        .transition(requestTransition)
+                                case .none, .waiting:
+                                    EmptyView()
+                                }
                             }
                             ForEach(pending) { item in
                                 PendingRequestCard(item: item, agentName: thread?.agent.name ?? "The agent", threadID: threadID) { response in
@@ -963,14 +987,29 @@ private struct ComposerArea: View {
         }
         .animation(.smooth(duration: 0.3), value: pending.map(\.id))
         .animation(.smooth(duration: 0.3), value: thread?.needsThread)
+        .animation(.smooth(duration: 0.3), value: ask)
         .animation(.smooth(duration: 0.3), value: thread?.queued)
         .animation(.smooth(duration: 0.3), value: thread?.runsInBackground)
         .animation(.smooth(duration: 0.3), value: thread?.cutShort)
         .animation(.snappy(duration: 0.2), value: commands.isEmpty)
         .sensoryFeedback(trigger: felt) { _, new in new?.feedback }
         // What the Mac has closed needn't be kept back any more.
-        .onChange(of: store.pending.map(\.id)) { _, ids in
+        .onChange(of: store.pending.map(\.id) + (kidStore?.pending ?? []).map { SubAgentAsk.key($0.id, in: needsKid) }) { _, ids in
             if !answered.isEmpty { answered.formIntersection(ids) }
+        }
+        // The sub-agent that waits: its transcript is listened to while this thread shows, for
+        // the request it carries. Its own screen may have it open too (`AppModel.subscribe`).
+        .onAppear { if let kid = needsKid { model.subscribe(kid, as: SubAgentAsk.holder(threadID)) } }
+        .onDisappear { if let kid = needsKid { model.unsubscribe(kid, as: SubAgentAsk.holder(threadID)) } }
+        .onChange(of: needsKid) { old, new in
+            if let old { model.unsubscribe(old, as: SubAgentAsk.holder(threadID)) }
+            if let new { model.subscribe(new, as: SubAgentAsk.holder(threadID)) }
+        }
+        .task(id: needsKid) {
+            kidWaited = false
+            guard needsKid != nil else { return }
+            try? await Task.sleep(for: .seconds(1.2))
+            if !Task.isCancelled { kidWaited = true }
         }
         .onChange(of: composer.draft) {
             // The keyboard put back the message just sent: it stays gone.
@@ -994,16 +1033,24 @@ private struct ComposerArea: View {
     }
 
     /// Felt, and the card gone, as the finger lifts; the Mac's word decides whether it stays gone.
-    private func answer(_ id: String, requestId rid: String, _ response: AnswerResponse) {
+    /// `kid`: the request is a sub-agent's, pinned here: the answer goes to its thread.
+    private func answer(_ id: String, requestId rid: String, _ response: AnswerResponse, in kid: String? = nil) {
         felt = Felt(feedback: Self.goesAhead(response) ? .impact(weight: .medium) : .impact(weight: .light))
-        answered.insert(id)
-        let store = store
-        model.answer(threadID, requestId: rid, response) { ok in
+        let key = SubAgentAsk.key(id, in: kid)
+        answered.insert(key)
+        if let kid { settling.insert(kid) }
+        let asked = kid.map { model.store($0) } ?? store
+        model.answer(kid ?? threadID, requestId: rid, response) { ok in
             // Refused (the toast says why): back, to be answered again.
-            guard ok else { answered.remove(id); return }
+            guard ok else {
+                answered.remove(key)
+                if let kid { settling.remove(kid) }
+                return
+            }
             // Taken, yet still asking a moment later: back rather than lost.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                if store.pending.contains(where: { $0.id == id }) { answered.remove(id) }
+                if asked.pending.contains(where: { $0.id == id }) { answered.remove(key) }
+                if let kid { settling.remove(kid) }
             }
         }
     }

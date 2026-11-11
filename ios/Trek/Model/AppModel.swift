@@ -94,6 +94,12 @@ final class AppModel {
     /// Each opened thread's own store (its row, transcript and paging), keyed by qualified id, so
     /// an update to one thread redraws only what shows it. Not observed: views observe the stores.
     @ObservationIgnored private var stores: [String: ThreadStore] = [:]
+    /// Who has each thread's transcript open: its own screen (`onScreen`), and whatever else reads
+    /// it (a parent showing its sub-agent's request). The Mac is told to stop sending when the
+    /// last of them lets go, not when the first does.
+    @ObservationIgnored private var holders: [String: Set<String>] = [:]
+    /// The thread's own screen, as a holder of its transcript.
+    nonisolated static let onScreen = "screen"
     /// The tab bar's counts, kept as values so views that show them don't redraw on every row update.
     private(set) var workingCount = 0
     private(set) var needsYouCount = 0
@@ -393,6 +399,7 @@ final class AppModel {
         unlisted = unlisted.filter { !link.owns($0.key) }
         for s in stores.values where link.owns(s.id) { saveCache(s); s.subscribed = false }
         stores = stores.filter { !link.owns($0.key) }
+        holders = holders.filter { !link.owns($0.key) }
         commands = commands.filter { !link.owns($0.key) }
         gitStatus = gitStatus.filter { !$0.key.owned(by: link) }
         gitBranches = gitBranches.filter { !$0.key.owned(by: link) }
@@ -453,6 +460,7 @@ final class AppModel {
         threads = []
         projects = []
         stores = [:]
+        holders = [:]
         unlisted = [:]
         gitStatus = [:]
         gitBranches = [:]
@@ -750,10 +758,16 @@ final class AppModel {
     func existingStore(_ tid: String) -> ThreadStore? { stores[tid] }
 
     /// Opens a thread's transcript: what the cache has shows at once, and the host sends what's
-    /// newer (or the last page, when it's the first time).
-    func subscribe(_ tid: String) {
+    /// newer (or the last page, when it's the first time). `holder`: who wants it (the thread's
+    /// own screen unless said); it stays open until each has let go (`unsubscribe`).
+    func subscribe(_ tid: String, as holder: String = AppModel.onScreen) {
+        holders[tid, default: []].insert(holder)
         let s = store(tid)
-        guard !s.subscribed else { return }
+        guard !s.subscribed else {
+            // Open already for another reader, and now on its own screen: seen.
+            if holder == Self.onScreen { markSeen(tid) }
+            return
+        }
         if Perf.enabled { openStarts[tid] = Perf.navigated ?? Perf.now; Perf.navigated = nil }
         if !s.loaded,
            let cached = Perf.measure("cache load", tid, { TranscriptCache.load(host: s.hostId, thread: s.bareId) }) {
@@ -762,15 +776,23 @@ final class AppModel {
         }
         s.subscribed = true
         resubscribe(s)
-        markSeen(tid)
+        // Read for its request from its parent's thread, a sub-agent's own thread hasn't been seen.
+        if holder == Self.onScreen { markSeen(tid) }
     }
+
+    /// Who has `tid`'s transcript open.
+    func holders(of tid: String) -> Set<String> { holders[tid] ?? [] }
 
     private func resubscribe(_ s: ThreadStore, on link: HostLink? = nil) {
         protocolLog.info("transcript \(s.id, privacy: .public): subscribe after \(s.loaded ? String(s.seq) : "-", privacy: .public)")
         request(.subscribe(threadId: s.id, afterSeq: s.loaded ? s.seq : nil, limit: Self.firstPage), on: link)
     }
 
-    func unsubscribe(_ tid: String) {
+    /// `holder` is done with `tid`'s transcript; the last one to let go closes it.
+    func unsubscribe(_ tid: String, as holder: String = AppModel.onScreen) {
+        holders[tid]?.remove(holder)
+        guard holders[tid]?.isEmpty ?? true else { return }
+        holders[tid] = nil
         guard let s = stores[tid], s.subscribed else { return }
         s.subscribed = false
         s.flushQueued()

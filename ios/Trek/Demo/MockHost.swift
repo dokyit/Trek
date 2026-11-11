@@ -1174,7 +1174,25 @@ extension MockHost {
         add("t-profile-bench", .user(text: "Benchmark scrolling a 3,000-item transcript before and after caching row heights. Report frames dropped per second.", images: 0), at: now - 4 * m)
         add("t-profile-bench", tool(.read, "Read", "crates/trek-app/benches/transcript_scroll.rs"))
         add("t-profile-bench", .assistant(text: "The bench exists already. I'll run it on the current build first, for the baseline.", streaming: false))
-        add("t-profile-bench", .approval(ApprovalRequest(requestId: "r-bench", title: "Run command", detail: "cargo bench -p trek-app --bench transcript_scroll", state: .pending)))
+        // What it asks, for its parent's thread to show: an approval, or with `-TrekDemoSubAsk`
+        // one that looks destructive (`risky`), a question or a plan.
+        switch UserDefaults.standard.string(forKey: "TrekDemoSubAsk") {
+        case "risky":
+            add("t-profile-bench", .approval(ApprovalRequest(requestId: "r-bench", title: "Run command",
+                                                              detail: "rm -rf target/criterion && cargo bench -p trek-app --bench transcript_scroll", state: .pending)))
+        case "question":
+            add("t-profile-bench", .question(QuestionRequest(requestId: "r-bench", questions: [
+                Question(header: "Baseline", question: "Which build is the baseline?", options: [
+                    QuestionOption(label: "main", description: "What's released now"),
+                    QuestionOption(label: "This branch, before the cache", description: "Isolates the change itself")],
+                         multi: false, secret: false)], state: .pending, answers: nil)))
+            setNeeds("t-profile", .question)
+        case "plan":
+            add("t-profile-bench", .plan(PlanRequest(requestId: "r-bench", markdown: "## Benchmark the scroll path\n\n1. Build `main` and this branch in release\n2. Run `transcript_scroll` five times on each\n3. Report dropped frames per second, with the spread", state: .pending)))
+            setNeeds("t-profile", .plan)
+        default:
+            add("t-profile-bench", .approval(ApprovalRequest(requestId: "r-bench", title: "Run command", detail: "cargo bench -p trek-app --bench transcript_scroll", state: .pending)))
+        }
 
         add("t-tailscale-scout", .user(text: "How does pairing.rs choose the address it puts in the QR code?", images: 0), at: now - 30 * m)
         add("t-tailscale-scout", tool(.read, "Read", "crates/trek-remote/src/pairing.rs"))
@@ -1184,6 +1202,11 @@ extension MockHost {
         add("t-glass", .user(text: "Try the Liquid Glass tab bar on the main screen and tell me how it looks with the map behind it.", images: 0), at: now - 52 * m)
         add("t-glass", .assistant(text: "It reads well over the map in light mode. In dark mode the labels lose contrast over the satellite layer; a slightly stronger tint fixes it.", streaming: false))
         add("t-glass", .turnEnd(tookSecs: 95))
+    }
+
+    /// The parent's row says what kind of thing its sub-agent waits on.
+    private func setNeeds(_ tid: String, _ kind: NeedsKind) {
+        if let i = threads.firstIndex(where: { $0.id == tid }) { threads[i].needs = Needs(kind: kind, text: "Sub-agent needs you") }
     }
 
     /// A sub-agent was answered or stopped: its parent's row says so.
