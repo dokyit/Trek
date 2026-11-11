@@ -64,10 +64,10 @@ id = "trek-links"
 area = "App"
 what = "trek:// links open in Trek"
 macos = "yes"
-windows = "partial"
-how = { macos = "A URL type in the bundle.", windows = "Trek registers the HKCU key itself at launch." }
-note = "The uninstaller leaves the trek:// and AppUserModelId keys behind: remove both in script/Uninstall-Trek.ps1."
-code = ["crates/trek-app/src/winsys.rs"]
+windows = "yes"
+how = { macos = "A URL type in the bundle.", windows = "Trek registers the HKCU key itself at launch; both uninstallers remove it (only while it opens that install) and the AppUserModelId key." }
+code = ["crates/trek-app/src/winsys.rs", "script/Uninstall-Trek.ps1"]
+tests = ["script/tests/uninstall-keys.Tests.ps1"]
 
 [[feature]]
 id = "glass"
@@ -180,9 +180,10 @@ id = "video-posters"
 area = "Composer"
 what = "A poster frame on an attached video's tile"
 macos = "yes"
-windows = "no"
-note = "qlmanage on the Mac; nothing on Windows. Explorer's thumbnail API (IShellItemImageFactory), or ffmpeg when it's installed."
+windows = "yes"
+how = { macos = "qlmanage's thumbnail.", windows = "Explorer's thumbnail (IShellItemImageFactory), 256 px, from whatever thumbnailer Windows has for the video." }
 code = ["crates/trek-app/src/attachments.rs"]
+tests = ["crates/trek-app/src/attachments.rs"]
 
 [[feature]]
 id = "snapshots"
@@ -208,9 +209,10 @@ id = "share-sheet"
 area = "Threads"
 what = "Share a thread through the system (AirDrop, Messages, Mail)"
 macos = "yes"
-windows = "no"
-note = "Gist, HTML and copying work on both; the system share isn't wired on Windows. Windows' share UI (DataTransferManager / ShowShareUIForWindow)."
-code = ["crates/trek-app/src/share.rs"]
+windows = "yes"
+how = { macos = "The system share sheet (AirDrop, Messages, Mail).", windows = "Windows' share window (Nearby Sharing, Outlook, Teams and the apps that take a share), opened over Trek's window with the thread as text under its title." }
+code = ["crates/trek-app/src/share.rs", "crates/trek-app/src/share/windows.rs"]
+tests = ["crates/trek-app/tests/share.rs"]
 
 [[feature]]
 id = "video-transcripts"
@@ -229,10 +231,10 @@ id = "banners"
 area = "Notifications"
 what = "A banner when a thread needs you or finishes; clicking it opens the thread"
 macos = "yes"
-windows = "partial"
-how = { macos = "The notification center.", windows = "Toasts under an AppUserModelID Trek registers itself." }
-note = "A toast clicked after Trek has quit can't start it: no COM activator or protocol launch on the toast. Trek staying up while agents work (keep-working-window-closed) covers most of it."
-code = ["crates/trek-app/src/root.rs"]
+windows = "yes"
+how = { macos = "The notification center.", windows = "Toasts under the AppUserModelID Trek registers, protocol-activated with the thread's trek:// link: a click starts Trek if it has quit, or hands the link to the running one." }
+code = ["crates/trek-app/src/root.rs", "vendor/gpui-pre-windows/src/system_notifications.rs"]
+tests = ["crates/trek-app/tests/alerts.rs"]
 
 [[feature]]
 id = "notification-permission"
@@ -271,18 +273,20 @@ id = "browser-popups"
 area = "Browser"
 what = "Popups that keep their opener (sign-ins that answer the opening page)"
 macos = "yes"
-windows = "partial"
-note = "WebView2 popups open as plain tabs with no window.opener, so sign-ins that post back to the opening page can't finish. NewWindowRequested with a deferral and SetNewWindow, and WindowCloseRequested."
-code = ["crates/trek-app/src/panels/browser.rs"]
+windows = "yes"
+how = { macos = "A real view made from WebKit's configuration.", windows = "WebView2's NewWindowRequested hands the page a view of Trek's (SetNewWindow) made from its opener's environment; WindowCloseRequested closes it. Ctrl-click and middle-click tabs keep an opener there (wry doesn't pass the click's details)." }
+code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
+tests = ["crates/trek-app/src/panels/browser/fixtures/check.py"]
 
 [[feature]]
 id = "browser-asks"
 area = "Browser"
 what = "A page's dialogs and permission asks in Trek's bar; answered for an agent at work"
 macos = "yes"
-windows = "no"
-note = "WebView2's own dialogs show instead, and a JavaScript dialog can stall an agent until the user closes it. ScriptDialogOpening, PermissionRequested and LaunchingExternalUriScheme, fed into the existing asks."
-code = ["crates/trek-app/src/panels/browser/asks.rs"]
+windows = "yes"
+how = { macos = "WebKit's UI delegate into Trek's bar.", windows = "WebView2's ScriptDialogOpening, PermissionRequested and LaunchingExternalUriScheme into the same bar (camera and microphone as one ask; an app link names the app Windows has for it); while an agent drives, Trek answers dialogs for it (Ask::for_agent, shared)." }
+code = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
+tests = ["crates/trek-app/src/panels/browser/asks.rs"]
 
 [[feature]]
 id = "browser-downloads"
@@ -355,9 +359,10 @@ id = "computer-use-elements"
 area = "Agent tools"
 what = "Computer use by element (an outline with refs; click, type and wait by ref)"
 macos = "yes"
-windows = "no"
-note = "The Accessibility tree on the Mac; on Windows only screenshots and coordinates. UI Automation's tree and patterns (Invoke, Value, Toggle) would match it."
-code = ["crates/trek-mcp/src/desktop.rs"]
+windows = "yes"
+how = { macos = "The Accessibility tree.", windows = "UI Automation: the same outline and refs, press (Invoke, Toggle, SelectionItem, ExpandCollapse), click and type by ref, wait for an element; classic menu bars read whole. Apps running as administrator can't be read, and menus an app draws itself have no words." }
+code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-mcp/src/desktop/uia.rs"]
+tests = ["crates/trek-mcp/src/desktop/uia.rs"]
 
 [[feature]]
 id = "computer-use-background"
@@ -375,10 +380,10 @@ id = "direct-agents-shell"
 area = "Agents"
 what = "API-key and local-model agents run shell commands"
 macos = "yes"
-windows = "partial"
-how = { macos = "bash.", windows = "cmd.exe, and the model is told bash syntax won't work." }
-note = "Models write bash far more reliably than cmd. Git Bash (Git for Windows is already needed) or PowerShell 7 would serve them better."
-code = ["crates/trek-agents/src/direct.rs"]
+windows = "yes"
+how = { macos = "bash.", windows = "Git for Windows' bash (never WSL's), the script handed over whole; background tasks end with the session through a job object. cmd.exe where Git for Windows isn't installed." }
+code = ["crates/trek-agents/src/direct.rs", "crates/trek-agents/src/direct/executor.rs"]
+tests = ["crates/trek-agents/src/direct.rs"]
 
 [[feature]]
 id = "agent-updates"
@@ -415,9 +420,10 @@ id = "skills-symlinks"
 area = "Agents"
 what = "Skills keep the symlinks inside them when copied or moved"
 macos = "yes"
-windows = "partial"
-note = "Dropped on Windows, without a word. Junctions for folders and copies for files, said when it happens."
+windows = "yes"
+how = { macos = "Symlinks kept.", windows = "Symlinks where Windows allows them (Developer Mode, or an administrator); otherwise a junction for a linked folder (if Windows will go through it) and a copy for a linked file. One that can't be kept stops the copy and says why." }
 code = ["crates/trek-core/src/skills.rs"]
+tests = ["crates/trek-core/src/skills.rs"]
 
 # ---------- iPhone and other machines ----------
 
@@ -472,9 +478,10 @@ id = "pairing-key"
 area = "iPhone"
 what = "The pairing TLS key is readable by its owner alone"
 macos = "yes"
-windows = "partial"
-note = "0600 on the Mac; on Windows it inherits the profile folder's access list. An owner-only access list."
+windows = "yes"
+how = { macos = "0600.", windows = "An access list with the owner alone, nothing inherited, set before the key is written (and an older key's fixed when it's loaded)." }
 code = ["crates/trek-remote/src/tls.rs"]
+tests = ["crates/trek-remote/src/tls.rs"]
 
 [[feature]]
 id = "machine-target"

@@ -359,7 +359,13 @@ pub fn take(
             ""
         }
     );
-    if !open.background {
+    // A thread's link (a banner clicked) brings that thread forward itself, in its own window
+    // if it has one: the main window coming first would flash in front of it.
+    let shows_a_thread = open.args.iter().any(|a| {
+        a.get(..14)
+            .is_some_and(|p| p.eq_ignore_ascii_case("trek://thread/"))
+    });
+    if !open.background && !shows_a_thread {
         crate::root::show_main(ws.clone(), cx);
     }
     for arg in open.args {

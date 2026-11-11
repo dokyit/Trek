@@ -997,9 +997,10 @@ fn kind_and_size(path: &Path, folder: bool) -> String {
     }
 }
 
-/// A video's poster frame, as Quick Look draws its thumbnail, made once into Trek's cache and read
-/// as any image. The Mac's (`qlmanage`); elsewhere, and in tests, there is none, and the tile
-/// keeps the file's icon.
+/// A video's poster frame, as the system's own thumbnail of it, made once into Trek's cache and
+/// read as any image: Quick Look's on the Mac (`qlmanage`), Explorer's on Windows (the shell's
+/// thumbnail of the file). Where there is none (no thumbnailer for the format, and in tests), the
+/// tile keeps the file's icon.
 pub enum Poster {}
 
 impl Asset for Poster {
@@ -1069,9 +1070,166 @@ fn make_poster(video: &Path, png: &Path) -> Result<()> {
     result
 }
 
-#[cfg(not(all(target_os = "macos", not(any(test, feature = "test-support")))))]
+/// Make `video`'s poster frame at `png`, unless it's there already: the thumbnail Explorer shows
+/// for it, from whichever thumbnailer Windows has for the format (its own reads MP4, MOV, AVI,
+/// WMV and the rest Media Foundation plays), as big as the Mac's.
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
+fn make_poster(video: &Path, png: &Path) -> Result<()> {
+    if png.is_file() {
+        return Ok(());
+    }
+    if let Some(dir) = png.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Written beside it, then moved: a tile drawn meanwhile never reads half a file.
+    let making = png.with_extension("making.png");
+    let made = shell_thumbnail::to_png(video, shell_thumbnail::POSTER_EDGE, &making)
+        .and_then(|()| std::fs::rename(&making, png).map_err(anyhow::Error::from));
+    if made.is_err() {
+        let _ = std::fs::remove_file(&making);
+    }
+    made
+}
+
+#[cfg(any(test, feature = "test-support", not(any(target_os = "macos", windows))))]
 fn make_poster(video: &Path, _png: &Path) -> Result<()> {
     bail!("no poster frame for {} here", video.display())
+}
+
+/// Explorer's thumbnail of a file, through its shell item's image factory: what Explorer draws for
+/// a video (a frame from it, by Windows' own thumbnailer or one a codec pack adds), never the
+/// file's icon in its place. Written out as PNG.
+#[cfg(windows)]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+mod shell_thumbnail {
+    use anyhow::{Context as _, Result, bail};
+    use std::path::Path;
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
+        GetDIBits, GetObjectW, HBITMAP, ReleaseDC,
+    };
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::UI::Shell::{
+        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_THUMBNAILONLY,
+    };
+    use windows::core::HSTRING;
+
+    /// How big a poster frame is made, at most, either way (`qlmanage -s 256` on the Mac).
+    pub const POSTER_EDGE: i32 = 256;
+
+    /// `path`'s thumbnail, at most `edge` pixels on its longer side, as a PNG at `out`.
+    pub fn to_png(path: &Path, edge: i32, out: &Path) -> Result<()> {
+        let (width, height, mut pixels) = thumbnail(path, edge)?;
+        unpremultiply(&mut pixels);
+        let image = image::RgbaImage::from_raw(width, height, pixels)
+            .context("the thumbnail's pixels don't fill it")?;
+        image
+            .save_with_format(out, image::ImageFormat::Png)
+            .with_context(|| format!("{} couldn't be written", out.display()))
+    }
+
+    /// The thumbnail's size and pixels, top row first, as RGBA (still premultiplied).
+    fn thumbnail(path: &Path, edge: i32) -> Result<(u32, u32, Vec<u8>)> {
+        // SAFETY: plain calls. The shell wants a single-threaded apartment; a thread already in
+        // one of another kind answers with an error and stays as it is (thumbnails are made there
+        // too). It's left uninitialized only when this call initialized it.
+        let joined = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        // SAFETY: a NUL-ended path; the bitmap the factory hands over is ours, read, then freed.
+        let result = unsafe {
+            SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(
+                &HSTRING::from(path.as_os_str()),
+                None,
+            )
+            .and_then(|item| item.GetImage(SIZE { cx: edge, cy: edge }, SIIGBF_THUMBNAILONLY))
+            .context("Windows has no thumbnail of it")
+            .and_then(|bitmap| {
+                let pixels = bitmap_pixels(bitmap);
+                let _ = DeleteObject(bitmap.into());
+                pixels
+            })
+        };
+        if joined {
+            // SAFETY: balances the successful CoInitializeEx above, on the same thread.
+            unsafe { CoUninitialize() };
+        }
+        result
+    }
+
+    /// A bitmap's pixels as 32-bit RGBA, top row first.
+    ///
+    /// # Safety
+    /// `bitmap` is a live bitmap, selected into no device context.
+    unsafe fn bitmap_pixels(bitmap: HBITMAP) -> Result<(u32, u32, Vec<u8>)> {
+        let mut info = BITMAP::default();
+        // SAFETY: `info` is a BITMAP, as big as the call is told.
+        let got = unsafe {
+            GetObjectW(
+                bitmap.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some((&mut info as *mut BITMAP).cast()),
+            )
+        };
+        let (width, height) = (info.bmWidth, info.bmHeight.abs());
+        if got == 0 || width <= 0 || height <= 0 {
+            bail!("the thumbnail is no bitmap");
+        }
+        let mut header = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                // Negative: rows top first.
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        // SAFETY: the screen's device context, released below; `pixels` holds every row of 32-bit
+        // pixels the header asks for.
+        let rows = unsafe {
+            let screen = GetDC(None);
+            let rows = GetDIBits(
+                screen,
+                bitmap,
+                0,
+                height as u32,
+                Some(pixels.as_mut_ptr().cast()),
+                &mut header,
+                DIB_RGB_COLORS,
+            );
+            ReleaseDC(None, screen);
+            rows
+        };
+        if rows != height {
+            bail!("the thumbnail's pixels couldn't be read");
+        }
+        // BGRA to RGBA.
+        for px in pixels.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        Ok((width as u32, height as u32, pixels))
+    }
+
+    /// Straight alpha from the shell's premultiplied RGBA; a bitmap whose alpha is all zero had
+    /// none, and is opaque.
+    pub fn unpremultiply(pixels: &mut [u8]) {
+        if pixels.chunks_exact(4).all(|px| px[3] == 0) {
+            pixels.chunks_exact_mut(4).for_each(|px| px[3] = 255);
+            return;
+        }
+        for px in pixels.chunks_exact_mut(4) {
+            let a = u32::from(px[3]);
+            if a > 0 && a < 255 {
+                for c in &mut px[..3] {
+                    *c = (u32::from(*c) * 255 / a).min(255) as u8;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1358,6 +1516,114 @@ mod tests {
         assert_eq!((back.width(), back.height()), (64, 48));
         assert!(crate::mentions::is_image(&out));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A video's poster frame on Windows: Explorer's thumbnail of it (`shell_thumbnail`).
+    #[cfg(windows)]
+    mod shell_thumbnails {
+        use super::temp_dir;
+        use crate::attachments::shell_thumbnail::{POSTER_EDGE, to_png, unpremultiply};
+
+        /// Windows has a thumbnailer for `.ext` files: a thumbnail provider among its shell
+        /// extensions, for the extension or for videos as a whole.
+        fn windows_thumbnails(ext: &str) -> bool {
+            use windows_sys::Win32::System::Registry::{
+                HKEY_CLASSES_ROOT, RRF_RT_REG_SZ, RegGetValueW,
+            };
+            const PROVIDER: &str = "{e357fccd-a995-4576-b01f-234630154e96}";
+            [
+                format!(r".{ext}\ShellEx\{PROVIDER}"),
+                format!(r"SystemFileAssociations\.{ext}\ShellEx\{PROVIDER}"),
+                format!(r"SystemFileAssociations\video\ShellEx\{PROVIDER}"),
+            ]
+            .iter()
+            .any(|key| {
+                let key: Vec<u16> = key.encode_utf16().chain([0]).collect();
+                let mut bytes = 0u32;
+                // SAFETY: a NUL-ended name; only the default value's size is asked for.
+                unsafe {
+                    RegGetValueW(
+                        HKEY_CLASSES_ROOT,
+                        key.as_ptr(),
+                        std::ptr::null(),
+                        RRF_RT_REG_SZ,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut bytes,
+                    ) == 0
+                }
+            })
+        }
+
+        /// An attached video's tile shows Explorer's thumbnail of it: a frame, the video's shape,
+        /// as a PNG. Needs a video, made here by ffmpeg where it's installed, and a Windows that
+        /// thumbnails videos (a desktop's; Server without Media Foundation has no thumbnailer):
+        /// without either, there's nothing to look at, and the test says so and passes.
+        #[test]
+        fn a_video_s_poster_is_the_frame_explorer_shows() {
+            use std::process::Stdio;
+            let dir = temp_dir("poster");
+            std::fs::create_dir_all(&dir).unwrap();
+            let video = dir.join("clip.mp4");
+            // A second of ffmpeg's test pattern, 4:3.
+            let made = std::process::Command::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error", "-y"])
+                .args(["-f", "lavfi", "-i"])
+                .arg("testsrc=size=160x120:rate=4:duration=1")
+                .args(["-pix_fmt", "yuv420p"])
+                .arg(&video)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !made || !windows_thumbnails("mp4") {
+                eprintln!(
+                    "skipped: {}",
+                    if made {
+                        "Windows has no thumbnailer for MP4 here"
+                    } else {
+                        "no ffmpeg to make a video with"
+                    }
+                );
+                let _ = std::fs::remove_dir_all(dir);
+                return;
+            }
+            let png = dir.join("poster.png");
+            to_png(&video, POSTER_EDGE, &png).unwrap();
+            let back = image::open(&png).unwrap().to_rgba8();
+            let (w, h) = (back.width(), back.height());
+            let edge = POSTER_EDGE as u32;
+            assert!(w > 0 && h > 0 && w <= edge && h <= edge, "{w}x{h}");
+            assert!(
+                (w as f32 / h as f32 - 4.0 / 3.0).abs() < 0.1,
+                "the video's 4:3, not a square icon: {w}x{h}"
+            );
+            assert!(back.pixels().all(|p| p.0[3] == 255), "opaque");
+            // The pattern's colours, not a blank or a glyph.
+            let colours: std::collections::HashSet<[u8; 3]> = back
+                .pixels()
+                .map(|p| [p.0[0] >> 4, p.0[1] >> 4, p.0[2] >> 4])
+                .collect();
+            assert!(colours.len() > 8, "{} colours", colours.len());
+
+            // A file Windows has no thumbnail of says so, rather than giving its icon.
+            let text = dir.join("notes.txt");
+            std::fs::write(&text, "not a video").unwrap();
+            assert!(to_png(&text, POSTER_EDGE, &dir.join("x.png")).is_err());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// The shell's pixels are premultiplied; a bitmap with no alpha at all is opaque.
+        #[test]
+        fn a_thumbnail_s_alpha_is_made_straight() {
+            let mut none = vec![10, 20, 30, 0, 40, 50, 60, 0];
+            unpremultiply(&mut none);
+            assert_eq!(none, [10, 20, 30, 255, 40, 50, 60, 255]);
+            let mut half = vec![50, 100, 0, 128, 7, 8, 9, 255, 0, 0, 0, 0];
+            unpremultiply(&mut half);
+            assert_eq!(half, [99, 199, 0, 128, 7, 8, 9, 255, 0, 0, 0, 0]);
+        }
     }
 
     #[test]

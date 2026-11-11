@@ -205,7 +205,7 @@ const WINDOWS: Words = Words {
     ),
 
     computer_use_note: Some(
-        "Windows asks for no permission: once computer use is on, agents can see the screen, click and type. They can't type into apps running as administrator.",
+        "Windows asks for no permission: once computer use is on, agents can see the screen, read apps' controls, click and type. They can't reach apps running as administrator.",
     ),
 
     trash: "Recycle Bin",

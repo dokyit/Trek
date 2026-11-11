@@ -1,6 +1,7 @@
 //! Windows: input via `SendInput`, windows via `EnumWindows` and DWM, screenshots via GDI, apps via
-//! `ShellExecuteW`. trek-mcp is per-monitor DPI aware, so every coordinate here is a physical pixel
-//! with the primary display's top-left at (0, 0).
+//! `ShellExecuteW`, a window's elements via UI Automation (`uia`). trek-mcp is per-monitor DPI
+//! aware, so every coordinate here is a physical pixel with the primary display's top-left at
+//! (0, 0), UI Automation's included.
 //!
 //! The pure parts (coordinate normalisation, key strokes, the window filter, app lookup) are at
 //! the top and tested; the Win32 calls below them only translate.
@@ -44,8 +45,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 
-use super::{Button, Capture, Desktop, Display, Rect, WindowInfo};
+use super::{Button, Capture, Desktop, Display, Elements, Performed, Reading, Rect, WindowInfo};
 use crate::keys::{self, VkCombo};
+use crate::outline::{Action, Node};
 
 // ---- pure: tested below ----
 
@@ -463,6 +465,36 @@ impl Desktop for Win {
         }
         Ok(())
     }
+
+    // Elements, through UI Automation (`uia::com`, on a thread of its own).
+
+    fn has_elements(&self) -> bool {
+        true
+    }
+
+    fn elements(&self, w: &WindowInfo, reading: &Reading) -> Result<Elements, String> {
+        super::uia::com::elements(w, reading)
+    }
+
+    fn element_at(&self, w: &WindowInfo, place: &[usize]) -> Result<Option<Node>, String> {
+        super::uia::com::element_at(w, place)
+    }
+
+    fn perform(&self, w: &WindowInfo, identity: u64, action: Action) -> Result<Performed, String> {
+        super::uia::com::perform(w, identity, action)
+    }
+
+    fn focus(&self, w: &WindowInfo, identity: u64) -> Result<bool, String> {
+        super::uia::com::focus(w, identity)
+    }
+
+    fn add_text(&self, w: &WindowInfo, identity: u64, text: &str) -> Result<(), String> {
+        super::uia::com::add_text(w, identity, text)
+    }
+
+    fn reveal(&self, w: &WindowInfo, identity: u64) -> Result<bool, String> {
+        super::uia::com::reveal(w, identity)
+    }
 }
 
 fn sleep_ms(ms: u64) {
@@ -634,7 +666,7 @@ fn describe(hwnd: HWND, names: &mut std::collections::HashMap<u32, String>) -> W
 }
 
 /// The executable's name for a process, or "" when Windows won't say (a protected process).
-fn process_name(pid: u32) -> String {
+pub(super) fn process_name(pid: u32) -> String {
     // SAFETY: plain values in; a null handle (refused) is checked below.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {

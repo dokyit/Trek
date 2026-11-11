@@ -106,6 +106,8 @@ pub(crate) struct TestSystemNotifications {
     pub(crate) shown: Vec<SystemNotification>,
     pub(crate) delivered: Vec<SystemNotification>,
     pub(crate) dismissed: Vec<SharedString>,
+    /// Trek: each tag's launch link, as its latest notification was posted.
+    pub(crate) launches: std::collections::HashMap<SharedString, SharedString>,
     response_callback: Option<Box<dyn FnMut(SystemNotificationResponse)>>,
 }
 
@@ -352,6 +354,15 @@ impl TestPlatform {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn dismissed_system_notifications(&self) -> Vec<SharedString> {
         self.system_notifications.borrow().dismissed.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn system_notification_launch(&self, tag: &str) -> Option<SharedString> {
+        self.system_notifications
+            .borrow()
+            .launches
+            .get(tag)
+            .cloned()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -612,7 +623,21 @@ impl Platform for TestPlatform {
         } else {
             system_notifications.delivered.push(notification.clone());
         }
+        system_notifications.launches.remove(&notification.tag);
         system_notifications.shown.push(notification);
+    }
+
+    fn show_system_notification_with_launch(
+        &self,
+        notification: SystemNotification,
+        launch: SharedString,
+    ) {
+        let tag = notification.tag.clone();
+        self.show_system_notification(notification);
+        let mut system_notifications = self.system_notifications.borrow_mut();
+        if system_notifications.app_identity.is_some() {
+            system_notifications.launches.insert(tag, launch);
+        }
     }
 
     fn dismiss_system_notification(&self, tag: &str) {

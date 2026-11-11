@@ -5,6 +5,7 @@ mod common;
 use common::{Trek, mock, open, run, store_items, toasts};
 use gpui_kit::{AppContext as _, ClipboardItem, TestAppContext};
 use trek_app::keys::{self, Id};
+use trek_app::share::Tab;
 use trek_app::share::gist::{self, Gist};
 use trek_app::thread_menu::{Copy, copy_text};
 use trek_app::workspace::Route;
@@ -188,9 +189,49 @@ fn share_opens_the_sheet_and_its_tabs() {
         assert!(trek.visible(cx, "share-to-phone"));
         assert_eq!(
             trek.visible(cx, "share-to-system"),
-            cfg!(target_os = "macos"),
-            "More… is the Mac's share menu"
+            cfg!(any(target_os = "macos", windows)),
+            "More… is the system's share: the Mac's share menu, Windows' share window"
         );
+    });
+}
+
+/// More… gives the system's share the thread as a link carries it (Markdown, with the sheet's
+/// choices), under its title; the sheet stays up behind the system's, as it does on a Mac.
+#[test]
+fn more_hands_the_thread_to_the_system_s_share() {
+    if !cfg!(any(target_os = "macos", windows)) {
+        return;
+    }
+    run(async |cx| {
+        let trek = open(cx);
+        let id = talked_thread(&trek, cx);
+        let title = trek.read(cx, |ws, _| ws.thread(&id).unwrap().title.clone());
+        trek_app::share::SYSTEM_SHARES.with(|s| s.borrow_mut().clear());
+        trek.render(cx);
+        cx.update_window(trek.window, |_, window, cx| {
+            trek_app::share::open_on(trek.ws.clone(), &id, Tab::SendTo, window, cx)
+        })
+        .unwrap();
+        trek.render(cx);
+        trek.click(cx, "share-to-system");
+        trek.render(cx);
+        trek.click(cx, "share-primary");
+        let shared = trek_app::share::SYSTEM_SHARES.with(|s| s.borrow().clone());
+        let [(shared_title, text)] = shared.as_slice() else {
+            panic!("one share, got {shared:?}")
+        };
+        assert_eq!(shared_title, &title);
+        assert!(text.starts_with(&format!("# {title}\n")), "{text}");
+        assert!(
+            text.contains("## You") && text.contains("Fixed it."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Read main.rs"),
+            "tool calls go by default: {text}"
+        );
+        trek.render(cx);
+        assert!(trek.visible(cx, "share-sheet"));
     });
 }
 

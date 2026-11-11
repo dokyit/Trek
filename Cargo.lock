@@ -9514,6 +9514,7 @@ dependencies = [
  "trek-ipc",
  "trek-phone",
  "trek-test-fixtures",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
 ]
 
@@ -9593,6 +9594,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

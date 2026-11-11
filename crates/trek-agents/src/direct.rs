@@ -213,7 +213,11 @@ async fn environment(exec: &dyn ToolExecutor, cwd: &Path) -> String {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Linux".to_string())
     };
-    let shell = if exec.is_local() && cfg!(windows) {
+    let shell = if exec.is_local() && executor::runs_git_bash() {
+        // MSYS turns an argument that looks like a path (`/PID`) into a Windows one on its way
+        // to a Windows program, unless it's written with two slashes.
+        "bash (Git Bash on Windows: forward slashes in paths, /dev/null not NUL, and a Windows program's /flag written //flag)"
+    } else if exec.is_local() && cfg!(windows) {
         "cmd.exe (bash syntax won't work)"
     } else {
         "bash"
@@ -971,6 +975,7 @@ async fn session(
     // Process groups of commands the model left running: ended with the session.
     let mut background = BackgroundGroups {
         groups: Vec::new(),
+        held: Vec::new(),
         local,
     };
     // How full the context is: tokens in it at the last usage report, and `history`'s length
@@ -1491,7 +1496,7 @@ async fn session(
                                                 &options,
                                                 config.script,
                                                 &hub,
-                                                &mut background.groups,
+                                                &mut background,
                                                 &events,
                                                 &commands,
                                                 &mut kept,
@@ -1922,20 +1927,26 @@ async fn session(
 
 /// Process groups a session's commands left running. Dropped, it ends those on this machine: a
 /// session can end by a panic or by the app going away mid-turn as well as by being told to.
+/// On Windows with Git Bash that's by the jobs in `held` (`groups` are Git Bash's own ids there,
+/// for `kill`, which Windows knows nothing of).
+#[derive(Default)]
 struct BackgroundGroups {
     groups: Vec<i32>,
+    held: Vec<executor::Held>,
+    /// The groups are this machine's to signal (on Windows only `held` ends anything).
+    #[cfg_attr(not(unix), allow(dead_code))]
     local: bool,
 }
 
 impl Drop for BackgroundGroups {
     fn drop(&mut self) {
-        if !self.local {
-            return;
-        }
-        for group in &self.groups {
-            #[cfg(unix)]
-            crate::signal_group(*group, libc::SIGTERM);
-            trek_core::procs::unregister(*group);
+        // On Windows the jobs in `held` end them as they're dropped, after this.
+        #[cfg(unix)]
+        if self.local {
+            for group in &self.groups {
+                crate::signal_group(*group, libc::SIGTERM);
+                trek_core::procs::unregister(*group);
+            }
         }
     }
 }
@@ -2858,7 +2869,7 @@ async fn execute_tool(
     options: &DirectOptions,
     script: bool,
     hub: &mcp::McpHub,
-    background: &mut Vec<i32>,
+    background: &mut BackgroundGroups,
     events: &async_channel::Sender<AgentEvent>,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
@@ -3355,11 +3366,16 @@ async fn run_bash_command(
 
 /// Starts `command` and doesn't wait for it: its output goes to a file, and it stays running until
 /// the model stops it or the session ends.
+///
+/// In Git Bash on Windows the shell's `$$` is a process group of Git Bash's own, which its `kill`
+/// ends whole, as on a Mac: `taskkill /T` goes by Windows' parent ids, and loses what a Git Bash
+/// program that runs another (`npm`'s script, a `sleep` after an `echo`) leaves behind. Trek ends
+/// it with the session by the job it's held in (see `executor::Held`).
 async fn start_in_background(
     exec: &dyn ToolExecutor,
     command: &str,
     cwd: &Path,
-    background: &mut Vec<i32>,
+    background: &mut BackgroundGroups,
     commands: &async_channel::Receiver<Command>,
     kept: &mut VecDeque<Command>,
     shutdown: &mut bool,
@@ -3377,8 +3393,8 @@ async fn start_in_background(
     if let Err(e) = waiting.on(exec.write(&log, b"")).await? {
         return Ok((format!("Failed to start in the background: {e:#}"), false));
     }
-    let windows = exec.is_local() && cfg!(windows);
-    let wrapped = if windows {
+    let cmd_exe = exec.is_local() && cfg!(windows) && !executor::runs_git_bash();
+    let wrapped = if cmd_exe {
         format!("start \"\" /b cmd /c \"{command} > \"{shown}\" 2>&1\"")
     } else {
         format!(
@@ -3386,14 +3402,15 @@ async fn start_in_background(
             search::quote(&shown)
         )
     };
-    let ran = match waiting
-        .on(exec.exec(&wrapped, cwd, Some(Duration::from_secs(10))))
+    let (ran, held) = match waiting
+        .on(exec.exec_background(&wrapped, cwd, Some(Duration::from_secs(10))))
         .await?
     {
         Ok(ran) => ran,
         Err(e) if e.downcast_ref::<ExecutorGone>().is_some() => return Err(e),
         Err(e) => return Ok((format!("Failed to start in the background: {e:#}"), false)),
     };
+    background.held.push(held);
     if !ran.success() {
         return Ok((
             format!(
@@ -3411,9 +3428,10 @@ async fn start_in_background(
             true,
         ));
     };
-    background.push(group);
-    // Trek ending, or a later launch finding it left over, ends it too.
-    if exec.is_local() {
+    background.groups.push(group);
+    // Trek ending, or a later launch finding it left over, ends it too. Not Git Bash's group on
+    // Windows, which is no Windows process id: its job ends with Trek.
+    if exec.is_local() && cfg!(unix) {
         trek_core::procs::register(group);
     }
     Ok((
@@ -5489,7 +5507,7 @@ mod tests {
             options,
             script,
             &mcp::McpHub::new(Vec::new()),
-            &mut Vec::new(),
+            &mut BackgroundGroups::default(),
             events,
             commands,
             kept,
@@ -9120,6 +9138,207 @@ print(`line 2: ${text}; lines: ${stdout.trim()}; exit ${exit_code}`);
         // Ended with the session.
         let alive = unsafe { libc::kill(-group, 0) } == 0;
         assert!(!alive, "group {group} outlived the session");
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn something_left_running_doesnt_hold_the_answer_in_git_bash() {
+        if !executor::tests::git_bash_here() {
+            return;
+        }
+        let started = Instant::now();
+        // Held, to end the `sleep` after: on Windows the pipe's reader is a blocking thread, which
+        // the test's runtime would otherwise wait 30 seconds on as it shuts down.
+        let (ran, held) = LocalExecutor
+            .exec_background("sleep 30 & echo started", Path::new("."), None)
+            .await
+            .unwrap();
+        assert!(ran.success(), "{ran:?}");
+        assert_eq!(ran.stdout, "started\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(held);
+    }
+
+    /// The prompt tells the model it's on Windows and writing for Git Bash, with the branch asked
+    /// through it, and stays in the budget `the_harness_prompt_stays_small` keeps.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_prompt_says_windows_and_git_bash() {
+        if !executor::tests::git_bash_here() {
+            return;
+        }
+        let env = environment(&LocalExecutor, Path::new(".")).await;
+        assert!(
+            env.contains("\nOS: Windows\nShell: bash (Git Bash on Windows:"),
+            "{env}"
+        );
+        assert!(env.contains("\nGit branch: "), "{env}");
+        let prompt = system_prompt(
+            Path::new(r"C:\Users\someone\project"),
+            false,
+            &env,
+            None,
+            None,
+        );
+        assert!(prompt.len() / 4 <= 300, "{}", prompt.len() / 4);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn commands_get_the_login_path_and_git_bash() {
+        if !executor::tests::git_bash_here() {
+            return;
+        }
+        let ran = LocalExecutor
+            .exec(
+                "cygpath -w -p \"$PATH\"; echo \"${BASH_VERSION:+bash}\"; command -v ls grep sed",
+                Path::new("."),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut lines = ran.stdout.lines();
+        // Git Bash puts its own tools first; after them, every folder of the login PATH.
+        let path = lines.next().unwrap_or_default();
+        let key = |p: &str| p.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+        let found: Vec<String> = path.split(';').map(key).collect();
+        let login: Vec<String> = trek_core::detect::login_path()
+            .split(';')
+            .filter(|p| !p.trim().is_empty())
+            .map(key)
+            .collect();
+        assert!(!login.is_empty());
+        assert!(
+            found.ends_with(&login),
+            "{login:?} isn't the end of {found:?}"
+        );
+        assert_eq!(lines.next(), Some("bash"));
+        assert_eq!(
+            lines.collect::<Vec<_>>(),
+            ["/usr/bin/ls", "/usr/bin/grep", "/usr/bin/sed"]
+        );
+    }
+
+    /// The Windows id a background command's log says, once it does.
+    #[cfg(windows)]
+    async fn pid_in(log: &str) -> u32 {
+        for _ in 0..50 {
+            let text = std::fs::read_to_string(log).unwrap_or_default();
+            if let Some(pid) = text.lines().find_map(|l| l.trim().parse().ok()) {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("no pid in {log}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_model_can_start_something_in_the_background_and_set_a_timeout_in_git_bash() {
+        if !executor::tests::git_bash_here() {
+            return;
+        }
+        // The `sleep` is one of Git Bash's programs, which no Windows parent id leads to (see
+        // `executor::Held`); it says its Windows id once it's running.
+        let s = TestSession::start(
+            "ollama",
+            HandHolding::FullAccess,
+            vec![
+                openai_tool_call(
+                    "call_1",
+                    "bash",
+                    json!({ "command": "echo from-background; sleep 30 & sleep 1; cat /proc/$!/winpid; wait", "background": true }),
+                ),
+                openai_tool_call(
+                    "call_2",
+                    "bash",
+                    json!({ "command": "sleep 30", "timeout_s": 1 }),
+                ),
+                openai_text("ok"),
+            ],
+        )
+        .await;
+        s.prompt("go").await;
+        let (output, ok) = s.tool_finished().await;
+        assert!(ok && output.contains("process group"), "{output}");
+        assert!(output.contains("To stop it: kill -- -"), "{output}");
+        let log = output
+            .split("output goes to ")
+            .nth(1)
+            .and_then(|r| r.split(": read it").next())
+            .expect("a log path")
+            .to_string();
+        let (output, ok) = s.tool_finished().await;
+        assert!(
+            !ok && output.contains("timed out after 1 seconds"),
+            "{output}"
+        );
+        assert_eq!(s.turn_complete().await, None);
+        let sleep = executor::tests::Watched::open(pid_in(&log).await);
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("from-background")
+        );
+        s.finish().await;
+        // Ended with the session.
+        assert!(
+            sleep.ends_within(Duration::from_secs(5)),
+            "the background command outlived the session"
+        );
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_way_the_model_is_told_to_stop_a_background_command_ends_all_of_it_in_git_bash() {
+        if !executor::tests::git_bash_here() {
+            return;
+        }
+        let (_tx, commands) = async_channel::unbounded();
+        let (mut kept, mut shutdown) = (VecDeque::new(), false);
+        let mut background = BackgroundGroups {
+            groups: Vec::new(),
+            held: Vec::new(),
+            local: true,
+        };
+        // A Git Bash program run by a shell run by another, as `npm`'s script runs: Windows'
+        // parent ids lead to neither, so `taskkill /T` would miss it.
+        let (out, ok) = start_in_background(
+            &LocalExecutor,
+            "bash -c 'sleep 30 & sleep 1; cat /proc/$!/winpid; wait'",
+            &std::env::temp_dir(),
+            &mut background,
+            &commands,
+            &mut kept,
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert!(ok, "{out}");
+        let log = out
+            .split("output goes to ")
+            .nth(1)
+            .and_then(|r| r.split(": read it").next())
+            .expect("a log path")
+            .to_string();
+        let sleep = executor::tests::Watched::open(pid_in(&log).await);
+        let stop = out.split("To stop it: ").nth(1).expect("how to stop it");
+        let ran = LocalExecutor
+            .exec(stop, &std::env::temp_dir(), Some(Duration::from_secs(10)))
+            .await
+            .unwrap();
+        assert!(ran.success(), "{stop}: {ran:?}");
+        assert!(
+            sleep.ends_within(Duration::from_secs(5)),
+            "{stop} left it running"
+        );
+        drop(background);
         let _ = std::fs::remove_file(&log);
     }
 

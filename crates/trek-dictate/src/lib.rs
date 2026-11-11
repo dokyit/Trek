@@ -47,6 +47,13 @@ pub fn fallback() -> Option<&'static str> {
     backend!(fallback())
 }
 
+/// Open the system's own dictation into the text field with the focus, where Trek's can't
+/// take it ([`fallback`]): Windows' voice typing (Win+H). False where there's none to open, or
+/// it couldn't be.
+pub fn open_system_dictation() -> bool {
+    backend!(open_system_dictation())
+}
+
 /// `reply` hears `Ok` once dictation may start (the system's permissions are in, and on Windows
 /// the mic is open and listening), or why it may not. It can answer a while after it's called.
 pub fn ensure_permission(reply: Sender<Result<(), String>>) {
@@ -209,6 +216,10 @@ mod imp {
     /// A build that can't ask hides the mic rather than pointing to macOS's own dictation.
     pub fn fallback() -> Option<&'static str> {
         None
+    }
+
+    pub fn open_system_dictation() -> bool {
+        false
     }
 
     /// Nothing is opened before `start`, so a take given up while asking holds nothing.
@@ -684,6 +695,10 @@ mod imp {
         None
     }
 
+    pub fn open_system_dictation() -> bool {
+        false
+    }
+
     pub fn ensure_permission(reply: Sender<Result<(), String>>) {
         let _ = reply.try_send(Err(unavailable()));
     }
@@ -729,17 +744,20 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    /// Windows' backend, as Trek calls it, without opening anything: whatever this PC has, the
-    /// mic shows only where the recognizer is registered, and the dimmed one only where it isn't.
+    /// Windows' backend, as Trek calls it, without opening anything: whatever this PC has, Trek's
+    /// own mic shows only where the recognizer is registered and Trek has package identity (the
+    /// one case Windows answers it in), and Windows' voice typing is offered everywhere else. A
+    /// test runs without identity.
     #[cfg(windows)]
     #[test]
-    fn windows_shows_the_mic_where_its_recognizer_is() {
+    fn windows_shows_treks_mic_only_where_windows_answers_it() {
         use crate::windows as backend;
-        let registered = crate::windows::hints::recognizer_registered();
-        assert_eq!(backend::available(), registered);
+        assert!(!backend::packaged(), "a test runs without package identity");
+        let ours = crate::windows::hints::recognizer_registered() && backend::packaged();
+        assert_eq!(backend::available(), ours);
         assert_eq!(
             backend::fallback(),
-            (!registered).then_some("Press Win+H to dictate")
+            (!ours).then_some("Press Win+H to dictate")
         );
     }
 

@@ -33,6 +33,8 @@ struct State {
     asked: usize,
     takes: usize,
     abandoned: usize,
+    /// Times the system's own dictation was asked to open.
+    system_opened: usize,
     /// The take alive now, and whether ✓ stopped its mic.
     alive: bool,
     finished: bool,
@@ -57,6 +59,7 @@ pub fn install() -> Fake {
         asked: 0,
         takes: 0,
         abandoned: 0,
+        system_opened: 0,
         alive: false,
         finished: false,
         heard: None,
@@ -157,6 +160,11 @@ impl Fake {
     pub fn abandoned(&self) -> usize {
         self.0.borrow().abandoned
     }
+
+    /// Times the mic asked for the system's own dictation (Windows' voice typing) to open.
+    pub fn system_opened(&self) -> usize {
+        self.0.borrow().system_opened
+    }
 }
 
 fn installed() -> Option<Rc<RefCell<State>>> {
@@ -222,6 +230,13 @@ pub(crate) fn start(heard: Sender<Heard>) -> Result<Take, String> {
     s.heard = Some(heard);
     drop(s);
     Ok(Take(state))
+}
+
+pub(crate) fn open_system_dictation() -> bool {
+    if let Some(state) = installed() {
+        state.borrow_mut().system_opened += 1;
+    }
+    false
 }
 
 pub(crate) fn abandon() {
