@@ -52,6 +52,10 @@
 	<string>Trek listens while you hold a message to say, so you can speak a follow-up instead of typing it.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Trek turns what you say into the words of your message, on this iPhone when it can.</string>
+	<!-- "Save to Photos" on a long-pressed picture (PictureKeeper). Add-only: Trek puts the picture
+	     there and never reads the library, so there is no NSPhotoLibraryUsageDescription. -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Trek adds a picture to Photos when you choose Save to Photos. It never looks at your library.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

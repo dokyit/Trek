@@ -89,7 +89,8 @@ extension AppModel {
     }
 }
 
-/// The pictures an answer shows on a line of their own; a tap opens them full screen.
+/// The pictures an answer shows on a line of their own; a tap opens them full screen, and a long
+/// press offers to save, copy or share one.
 struct AnswerImages: View {
     var pictures: [MediaLink]
     var size: CGFloat = 16
@@ -150,6 +151,9 @@ struct AnswerImage: View {
         }
         .buttonStyle(.plain)
         .disabled(loaded == nil)
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12, style: .continuous))
+        // Once it's here: there's nothing to keep of a placeholder.
+        .pictureMenu(loaded == nil ? nil : source)
         .accessibilityLabel(picture.label)
         .accessibilityHint(loaded == nil ? "" : "Opens it full screen")
         .task(id: source) {

@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 /// A message's images as thumbnails in its bubble, as the Mac shows them; a tap opens them full
-/// screen, like the Mac's preview.
+/// screen, like the Mac's preview, and a long press offers to save, copy or share one.
 struct MessageImages: View {
     var threadID: String
     var itemID: String
@@ -35,6 +35,9 @@ struct MessageImages: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                // What lifts under a long press is the tile, corners and all.
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .pictureMenu(.message(threadID: threadID, itemID: itemID, index: i))
                 .accessibilityLabel("Image \(i + 1) of \(count)")
                 .accessibilityHint("Opens it full screen")
             }
@@ -135,13 +138,17 @@ final class ViewerDrag {
 }
 
 /// Images full screen: a message's, or a note's pictures. Swipe between them, pinch or
-/// double-tap to zoom, pull one down to close: what's behind shows through as it goes.
+/// double-tap to zoom, pull one down to close: what's behind shows through as it goes. A long
+/// press on one offers to save, copy or share it.
 struct ImageViewer: View {
     var images: [ViewerImage]
     var start: Int
     @Environment(\.dismiss) private var dismiss
     @State private var page = 0
     @State private var drag = ViewerDrag()
+    /// What a long press on an image ends in. The viewer's own, not each page's: a sheet asked
+    /// for from inside a page of the pager didn't come up the first time.
+    @State private var runner = PictureRunner()
 
     init(images: [ViewerImage], start: Int) {
         self.images = images
@@ -160,7 +167,7 @@ struct ImageViewer: View {
             Backdrop(drag: drag)
             TabView(selection: $page) {
                 ForEach(Array(images.enumerated()), id: \.offset) { i, image in
-                    FullImage(image: image, drag: drag).tag(i)
+                    FullImage(image: image, drag: drag, runner: runner).tag(i)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: count > 1 ? .automatic : .never))
@@ -182,7 +189,12 @@ struct ImageViewer: View {
                         .glassEffect(.regular, in: .capsule)
                 }
             }
+            // "Saved to Photos", "Copied": the app's own toast is under this cover. Below the
+            // buttons, and felt once (the one under the cover feels what goes wrong).
+            ToastOverlay(feels: false)
+                .padding(.top, 52)
         }
+        .modifier(PictureOutcomes(runner: runner))
         .preferredColorScheme(.dark)
         .statusBarHidden()
         // Clear, so the thread shows through as the black behind the image fades with a pull.
@@ -216,6 +228,7 @@ struct ImageViewer: View {
 private struct FullImage: View {
     var image: ViewerImage
     let drag: ViewerDrag
+    let runner: PictureRunner
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @MotionAllowed private var motion
@@ -225,7 +238,9 @@ private struct FullImage: View {
     var body: some View {
         Group {
             if let loaded {
-                ZoomableImage(image: loaded, drag: drag, motion: motion) {
+                ZoomableImage(image: loaded, drag: drag, motion: motion, onAct: { [runner, model] act in
+                    Task { await runner.run(act, image: loaded, model: model) }
+                }) {
                     // It has gone off the screen already: the cover goes without sliding again.
                     var t = Transaction()
                     t.disablesAnimations = true
@@ -259,13 +274,17 @@ private struct FullImage: View {
 
 /// An image that pinches and double-taps to zoom, pans when zoomed, and closes on a pull down
 /// when it isn't: it follows the finger, shrinking a little as it goes, and, let go, either
-/// carries on off the screen at the finger's speed or springs back.
-private struct ZoomableImage: UIViewRepresentable {
+/// carries on off the screen at the finger's speed or springs back. Held still, it lifts and
+/// offers Save to Photos, Copy and Share… (the system's own menu, taken off the image for as long
+/// as a pull, a pan, a pinch or a swipe to the next image has hold of it).
+struct ZoomableImage: UIViewRepresentable {
     var image: UIImage
     let drag: ViewerDrag
     /// Movement welcome (not Reduce Motion): let go, it flies off or springs back with a little
     /// give; without, it fades out or settles back with none.
     var motion: Bool
+    /// Save, copy or share was picked from the long press's menu.
+    var onAct: (PictureAct) -> Void
     /// It has left the screen.
     var onClose: () -> Void
 
@@ -290,6 +309,17 @@ private struct ZoomableImage: UIViewRepresentable {
         view.contentMode = .scaleAspectFit
         view.isAccessibilityElement = true
         view.accessibilityLabel = "Image"
+        // The long press's menu, on the scroll view beside its other gestures: the image stays
+        // out of touch handling, as it was, so the pinch, the pan and the pull are found as before.
+        // The same three are VoiceOver's actions on the image.
+        context.coordinator.offerMenu()
+        let coordinator = context.coordinator
+        view.accessibilityCustomActions = PictureAct.allCases.map { act in
+            UIAccessibilityCustomAction(name: act.title) { [weak coordinator] _ in
+                coordinator?.onAct(act)
+                return true
+            }
+        }
         scroll.addSubview(view)
         context.coordinator.view = view
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleTap(_:)))
@@ -307,17 +337,27 @@ private struct ZoomableImage: UIViewRepresentable {
         let c = context.coordinator
         c.view?.image = image
         c.onClose = onClose
+        c.onAct = onAct
         c.drag = drag
         c.motion = motion
-        DispatchQueue.main.async { if let scroll = c.scroll { c.layout(scroll) } }
+        DispatchQueue.main.async {
+            guard let scroll = c.scroll else { return }
+            c.layout(scroll)
+            c.watchPager(from: scroll)
+        }
+    }
+
+    static func dismantleUIView(_ box: UIView, coordinator: Coordinator) {
+        coordinator.unwatchPager()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate {
         weak var view: UIImageView?
         weak var scroll: UIScrollView?
         var onClose: () -> Void = {}
+        var onAct: (PictureAct) -> Void = { _ in }
         var drag: ViewerDrag?
         var motion = true
         /// Gone: the pull let go of it past the point of no return.
@@ -329,7 +369,8 @@ private struct ZoomableImage: UIViewRepresentable {
             guard let pan = gesture as? UIPanGestureRecognizer,
                   let scroll = pan.view as? UIScrollView else { return true }
             let moved = pan.velocity(in: scroll)
-            return scroll.zoomScale == 1 && moved.y > 0 && moved.y > abs(moved.x)
+            // Not with the long press's menu up: the finger that brought it up picks from it.
+            return !menuUp && scroll.zoomScale == 1 && moved.y > 0 && moved.y > abs(moved.x)
         }
 
         func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
@@ -357,6 +398,7 @@ private struct ZoomableImage: UIViewRepresentable {
             if pan.state == .began {
                 base = scroll.layer.presentation()?.affineTransform().ty ?? 0
                 scroll.layer.removeAllAnimations()
+                hold(.pull, true)
             }
             let pulled = base + pan.translation(in: space).y
             // Down follows the finger one to one; up, past where it started, gives less and less.
@@ -374,6 +416,7 @@ private struct ZoomableImage: UIViewRepresentable {
                 } else {
                     settle(scroll, from: y, velocity: v)
                 }
+                hold(.pull, false)
             default:
                 break
             }
@@ -412,6 +455,159 @@ private struct ZoomableImage: UIViewRepresentable {
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? { view }
+
+        // MARK: The long press's menu
+
+        /// What has hold of the image, and so keeps the menu off it.
+        nonisolated enum Hold: Hashable, Sendable { case pull, page, pan, zoom }
+        private var holds: Set<Hold> = []
+        private var menu: UIContextMenuInteraction?
+        /// The menu is on screen.
+        private var menuUp = false
+        /// What was picked from the menu, until the menu has left the screen: what it ends in (a
+        /// sheet, an alert, a toast) comes once the menu is out of the way.
+        private var chosen: PictureAct?
+        /// The scroll view that pages between images (the `TabView`'s), watched for its swipe.
+        private weak var pager: UIScrollView?
+
+        /// The menu is the scroll view's while nothing else has hold of the image. A gesture that
+        /// takes hold takes the menu off for as long as it lasts: the image goes with the finger,
+        /// and the menu's own long press, which counts how long a finger has been down more than
+        /// how far it went, came up part-way through a pull, a pan or a swipe to the next image.
+        func hold(_ reason: Hold, _ on: Bool) {
+            if on { holds.insert(reason) } else { holds.remove(reason) }
+            guard let scroll else { return }
+            if Self.menuOffered(holds: holds, leaving: leaving) {
+                guard menu == nil else { return }
+                let interaction = UIContextMenuInteraction(delegate: self)
+                scroll.addInteraction(interaction)
+                menu = interaction
+            } else if let interaction = menu {
+                scroll.removeInteraction(interaction)
+                menu = nil
+            }
+        }
+
+        nonisolated static func menuOffered(holds: Set<Hold>, leaving: Bool) -> Bool {
+            holds.isEmpty && !leaving
+        }
+
+        /// Puts the menu on the image (once its scroll view is here).
+        func offerMenu() { hold(.pull, false) }
+
+        /// Follows the swipe between images, to keep the menu out of it.
+        func watchPager(from scroll: UIScrollView) {
+            guard pager == nil else { return }
+            var above = scroll.superview
+            while let view = above {
+                if let found = view as? UIScrollView {
+                    pager = found
+                    found.panGestureRecognizer.addTarget(self, action: #selector(paged(_:)))
+                    return
+                }
+                above = view.superview
+            }
+        }
+
+        func unwatchPager() {
+            pager?.panGestureRecognizer.removeTarget(self, action: #selector(paged(_:)))
+            pager = nil
+        }
+
+        @objc func paged(_ pan: UIPanGestureRecognizer) {
+            switch pan.state {
+            case .began: hold(.page, true)
+            case .ended, .cancelled, .failed: hold(.page, false)
+            default: break
+            }
+        }
+
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { hold(.pan, true) }
+
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate { hold(.pan, false) }
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { hold(.pan, false) }
+
+        func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { hold(.zoom, true) }
+
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) { hold(.zoom, false) }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, willDisplayMenuFor configuration: UIContextMenuConfiguration,
+                                    animator: (any UIContextMenuInteractionAnimating)?) {
+            menuUp = true
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, willEndFor configuration: UIContextMenuConfiguration,
+                                    animator: (any UIContextMenuInteractionAnimating)?) {
+            menuUp = false
+            if let animator {
+                animator.addCompletion { [weak self] in self?.carryOut() }
+            } else {
+                carryOut()
+            }
+        }
+
+        /// A row of the menu was tapped: done once the menu has gone (now, if it has already).
+        private func picked(_ act: PictureAct) {
+            chosen = act
+            if !menuUp { carryOut() }
+        }
+
+        private func carryOut() {
+            guard let act = chosen else { return }
+            chosen = nil
+            onAct(act)
+        }
+
+        /// Whether a long press may bring the menu up: on the picture itself (not the black beside
+        /// it), and not while the image is on its way out, nor part-way through a pull (`pulled`:
+        /// how far, 0 to 1).
+        nonisolated static func offersMenu(leaving: Bool, pulled: CGFloat, onPicture: Bool = true) -> Bool {
+            !leaving && pulled == 0 && onPicture
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+            guard let view, let size = view.image?.size else { return nil }
+            let onPicture = Self.fitted(size, in: view.bounds).contains(interaction.location(in: view))
+            guard Self.offersMenu(leaving: leaving, pulled: drag?.progress ?? 0, onPicture: onPicture) else { return nil }
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+                UIMenu(children: PictureAct.allCases.map { act in
+                    UIAction(title: act.title, image: UIImage(systemName: act.symbol)) { _ in self?.picked(act) }
+                })
+            }
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configuration: UIContextMenuConfiguration,
+                                    highlightPreviewForItemWithIdentifier identifier: any NSCopying) -> UITargetedPreview? {
+            lifted()
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configuration: UIContextMenuConfiguration,
+                                    dismissalPreviewForItemWithIdentifier identifier: any NSCopying) -> UITargetedPreview? {
+            lifted()
+        }
+
+        /// What lifts is the picture, not the screen it's fitted in: the bars above and below it
+        /// (or beside it) are no part of it.
+        private func lifted() -> UITargetedPreview? {
+            guard let view, view.window != nil else { return nil }
+            let parameters = UIPreviewParameters()
+            parameters.backgroundColor = .clear
+            if let size = view.image?.size {
+                parameters.visiblePath = UIBezierPath(roundedRect: Self.fitted(size, in: view.bounds), cornerRadius: 14)
+            }
+            return UITargetedPreview(view: view, parameters: parameters)
+        }
+
+        /// Where a picture `size` large is drawn when it's fitted, whole, in `bounds`.
+        nonisolated static func fitted(_ size: CGSize, in bounds: CGRect) -> CGRect {
+            guard size.width > 0, size.height > 0, bounds.width > 0, bounds.height > 0 else { return bounds }
+            let scale = min(bounds.width / size.width, bounds.height / size.height)
+            let fit = CGSize(width: size.width * scale, height: size.height * scale)
+            return CGRect(x: bounds.midX - fit.width / 2, y: bounds.midY - fit.height / 2, width: fit.width, height: fit.height)
+        }
 
         @objc func doubleTap(_ tap: UITapGestureRecognizer) {
             guard let scroll = tap.view as? UIScrollView else { return }

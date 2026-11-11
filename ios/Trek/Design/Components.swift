@@ -255,6 +255,9 @@ struct RidgeBackdrop: View {
 /// pulled down it gives a little and springs back. While a finger is on it, it stays. Something
 /// that went wrong is felt as well as shown.
 struct ToastOverlay: View {
+    /// False for a second copy over something that covers the app's own (the image viewer): what
+    /// went wrong is felt once.
+    var feels = true
     @Environment(AppModel.self) private var model
     /// How far the finger has it from its place (up is negative).
     @State private var drag: CGFloat = 0
@@ -272,7 +275,7 @@ struct ToastOverlay: View {
                     .padding(.top, 6)
             }
         }
-        .sensoryFeedback(trigger: model.toast) { _, new in new?.isError == true ? .error : nil }
+        .sensoryFeedback(trigger: model.toast) { [feels] _, new in feels && new?.isError == true ? .error : nil }
         .onChange(of: model.toast?.id) { _, id in
             // A new toast starts in its place, wherever the finger left the last one.
             guard id != nil, drag != 0 else { return }
