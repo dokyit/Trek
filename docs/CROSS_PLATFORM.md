@@ -64,6 +64,11 @@ had 1,308 platform gates in 187 files, 595 of them in trek-app.
   - **Every file's gate count is the one recorded.** A change that adds or removes a gate fails
     until the counts are recorded again. The failure message says to update the feature in the
     ledger first.
+  - **Every gated file belongs to a feature.** A file with gates must be named in the `code` or
+    `tests` of the ledger feature whose platforms it makes differ. The 139 files that predate
+    the rule are listed as `unclaimed` in `gates.toml`. That list only shrinks: a file new to it,
+    or one on it that gains a gate, fails even when the counts are being recorded, so a new
+    platform split can't land without a feature that owns it.
 
   ```
   TREK_PARITY_UPDATE=1 cargo test -p trek-parity   # record the counts and regenerate PARITY.md
@@ -143,10 +148,9 @@ In order of how much each removes the problem, smallest first where that's close
    screens that differ most: Settings › Tools, the composer's + menu and mic, onboarding, the
    tools panel and the title bar. GPUI's test platform needs one knob for it
    (`can_select_mixed_files_and_dirs` is fixed at `true` today).
-3. **Link each gated file to its features** (small). Add a `code` entry in the ledger for every
-   file in `gates.toml`, so a new gate in a file points the reviewer at the feature it changes.
-   Today `code` is filled for the features listed; the long tail of gated files can be added as
-   they're touched. The check can then require it for files that gain a gate.
+3. **Claim the rest of the gated files** (ongoing). The check now requires a feature for any
+   file that gains a gate (see above). What's left is the `unclaimed` list in `gates.toml`:
+   each file comes off it when the feature it belongs to names it.
 4. **Draft until complete** (small, needs one real release to try). `release.sh` creates the
    GitHub release as soon as the Mac half is done, so a Windows failure leaves a public release
    without Windows downloads. Create it as a draft, and let `complete` publish it once every

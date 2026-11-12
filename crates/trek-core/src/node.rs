@@ -219,16 +219,15 @@ pub fn setup_env_for(login: &str, npm: Option<&Path>, own_root: &Path) -> Vec<(S
             "npm_config_prefix".to_string(),
             own_root.display().to_string(),
         ));
-        // npm's warnings and notices are for whoever keeps a Node: "Run `npm install -g
-        // --allow-scripts=…`" or "To update run: `npm install -g npm@…`" after an install that
-        // worked would read as one more thing to do. Errors still show.
-        if cfg!(windows) {
-            env.push(("npm_config_loglevel".to_string(), "error".to_string()));
-            env.push((
-                "npm_config_update_notifier".to_string(),
-                "false".to_string(),
-            ));
-        }
+        // npm's warnings and notices are for whoever keeps a Node, and Trek keeps this one: "Run
+        // `npm install -g --allow-scripts=…`" or "To update run: `npm install -g npm@…`" after an
+        // install that worked would read as one more thing to do, on either platform. Errors still
+        // show.
+        env.push(("npm_config_loglevel".to_string(), "error".to_string()));
+        env.push((
+            "npm_config_update_notifier".to_string(),
+            "false".to_string(),
+        ));
     }
     env
 }
@@ -806,14 +805,11 @@ mod tests {
             get(&env, "npm_config_prefix"),
             Some(own_root.display().to_string())
         );
-        // On Windows, without npm's warnings and notices: on a Mac, as ever.
-        assert_eq!(
-            get(&env, "npm_config_loglevel"),
-            cfg!(windows).then(|| "error".to_string())
-        );
+        // Without npm's warnings and notices, on both platforms: Trek keeps this Node.
+        assert_eq!(get(&env, "npm_config_loglevel"), Some("error".to_string()));
         assert_eq!(
             get(&env, "npm_config_update_notifier"),
-            cfg!(windows).then(|| "false".to_string())
+            Some("false".to_string())
         );
 
         // Whichever npm, on Windows its install scripts run for the agents that need them.

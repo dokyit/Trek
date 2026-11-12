@@ -8,6 +8,10 @@
 //!   `cfg!(target_os = "macos")`, ...) each source file has. A file gaining or losing one fails the
 //!   check until the count is recorded again, in the same change as the ledger entry that says
 //!   what the other platform does there. The count's diff is how a review sees it happen.
+//! - Ownership: a file with gates belongs to a feature, which names it in its `code` or `tests`.
+//!   The files from before the rule are listed as `unclaimed` in `gates.toml`; that list only
+//!   shrinks, and a file new to it, or one on it that gains a gate, fails even when the counts are
+//!   being recorded: a feature naming the file is the only way through.
 //!
 //! See `docs/CROSS_PLATFORM.md` for the reasoning and the rest of the plan.
 
@@ -162,11 +166,86 @@ pub fn census(root: &Path) -> BTreeMap<String, usize> {
         .collect()
 }
 
-/// The gate counts recorded in `docs/parity/gates.toml`.
+/// The gate counts recorded in `docs/parity/gates.toml`, and the gated files no feature claims
+/// yet (`unclaimed`), which only shrinks. A file without the list predates the rule: recording the
+/// counts adopts the files unclaimed then, once.
 #[derive(Debug, Default, Deserialize)]
 pub struct Recorded {
     #[serde(default)]
+    pub unclaimed: Option<BTreeSet<String>>,
+    #[serde(default)]
     pub gates: BTreeMap<String, usize>,
+}
+
+/// The files with platform gates (`found`, a `census`) that no feature in `ledger` names in its
+/// `code` or `tests`: differences between the platforms nobody has tied to what a user sees.
+pub fn unclaimed(found: &BTreeMap<String, usize>, ledger: &Ledger) -> BTreeSet<String> {
+    let claimed: BTreeSet<&str> = ledger
+        .feature
+        .iter()
+        .flat_map(|f| f.code.iter().chain(&f.tests))
+        .map(String::as_str)
+        .collect();
+    found
+        .keys()
+        .filter(|file| !claimed.contains(file.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// The gated files no feature claims that can't be recorded as they are, one line each: a file
+/// unclaimed now that wasn't before (`recorded`, the list in `docs/parity/gates.toml`), and one
+/// on that list that gained gates (`was` the recorded counts, `found` the census). Each is a new
+/// difference between the platforms that no feature owns; recording the counts again doesn't
+/// clear it: a feature in the ledger naming the file does.
+pub fn unclaimed_growth(
+    recorded: &BTreeSet<String>,
+    unclaimed: &BTreeSet<String>,
+    was: &BTreeMap<String, usize>,
+    found: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    const CLAIM: &str = "Add it to the `code` or `tests` of the feature in docs/parity/ledger.toml whose platforms it makes differ (or add that feature), so the difference is one someone wrote down.";
+    unclaimed
+        .iter()
+        .filter_map(|file| {
+            let now = found.get(file).copied().unwrap_or(0);
+            if !recorded.contains(file) {
+                Some(format!(
+                    "{file}: {now} platform gate(s), and no feature claims it. {CLAIM}"
+                ))
+            } else {
+                let before = was.get(file).copied().unwrap_or(0);
+                (now > before).then(|| {
+                    format!(
+                        "{file}: {now} platform gates, {} more than recorded, and no feature claims it yet. {CLAIM}",
+                        now - before
+                    )
+                })
+            }
+        })
+        .collect()
+}
+
+/// The files on the recorded `unclaimed` list that aren't unclaimed any more (a feature names
+/// them, or their gates went): recording the counts again takes them off.
+pub fn claimed_since(recorded: &BTreeSet<String>, unclaimed: &BTreeSet<String>) -> Vec<String> {
+    recorded
+        .difference(unclaimed)
+        .map(|file| {
+            format!(
+                "{file}: a feature claims it now, or it has no gates left: it comes off docs/parity/gates.toml's `unclaimed`."
+            )
+        })
+        .collect()
+}
+
+/// The files of `unclaimed` (now) that may be recorded as unclaimed: those that already were.
+/// The list only shrinks; a newly unclaimed file is refused by `claim_changes`.
+pub fn still_unclaimed(
+    recorded: &BTreeSet<String>,
+    unclaimed: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    recorded.intersection(unclaimed).cloned().collect()
 }
 
 /// What `found` (a `census`) says that `recorded` doesn't, one line for each file, in words that
@@ -205,14 +284,21 @@ pub fn gate_changes(
         .collect()
 }
 
-/// `found` as `docs/parity/gates.toml` records it.
-pub fn render_gates(found: &BTreeMap<String, usize>) -> String {
+/// `found` and `unclaimed` as `docs/parity/gates.toml` records them.
+pub fn render_gates(found: &BTreeMap<String, usize>, unclaimed: &BTreeSet<String>) -> String {
     let mut out = String::from(
         "# How many platform gates (`cfg(windows)`, `cfg!(target_os = \"macos\")`, ...) each file has.\n\
          # Written by `TREK_PARITY_UPDATE=1 cargo test -p trek-parity`, not by hand: a change to a count\n\
          # goes with the change to docs/parity/ledger.toml that says what each platform does there.\n\
-         \n[gates]\n",
+         #\n\
+         # `unclaimed`: the gated files no feature in the ledger names in its `code` or `tests` yet. It\n\
+         # only shrinks: a file that gains gates must belong to a feature, and one claimed comes off.\n\
+         \nunclaimed = [\n",
     );
+    for file in unclaimed {
+        out.push_str(&format!("    \"{file}\",\n"));
+    }
+    out.push_str("]\n\n[gates]\n");
     for (file, n) in found {
         out.push_str(&format!("\"{file}\" = {n}\n"));
     }
@@ -424,8 +510,68 @@ mod tests {
         assert!(changes[2].starts_with("new.rs: 1 platform gate, 1 more than recorded (0)."));
         assert!(gate_changes(&found, &found).is_empty());
         // What's written reads back as it was.
-        let back: Recorded = toml::from_str(&render_gates(&found)).unwrap();
+        let unclaimed: BTreeSet<String> = ["crates/a/src/lib.rs".to_string()].into();
+        let back: Recorded = toml::from_str(&render_gates(&found, &unclaimed)).unwrap();
         assert_eq!(back.gates, found);
+        assert_eq!(back.unclaimed, Some(unclaimed));
+        let none: Recorded = toml::from_str(&render_gates(&found, &BTreeSet::new())).unwrap();
+        assert_eq!(
+            none.unclaimed,
+            Some(BTreeSet::new()),
+            "an empty list, not none"
+        );
+    }
+
+    fn ledger_with(code: &[&str], tests: &[&str]) -> Ledger {
+        toml::from_str(&format!(
+            "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\ncode = {code:?}\ntests = {tests:?}\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_gated_file_belongs_to_a_feature_and_the_old_unclaimed_ones_only_dwindle() {
+        let found: BTreeMap<String, usize> = [
+            ("crates/a/src/lib.rs".to_string(), 2),
+            ("crates/b/src/lib.rs".to_string(), 1),
+            ("crates/c/tests/t.rs".to_string(), 1),
+        ]
+        .into();
+        // A feature's `code` or `tests` claims a file.
+        let ledger = ledger_with(&["crates/a/src/lib.rs"], &["crates/c/tests/t.rs"]);
+        let open = unclaimed(&found, &ledger);
+        assert_eq!(open, ["crates/b/src/lib.rs".to_string()].into());
+
+        // Unclaimed and not recorded so: a new difference no feature owns.
+        let none = BTreeSet::new();
+        let growth = unclaimed_growth(&none, &open, &found, &found);
+        assert_eq!(growth.len(), 1);
+        assert!(
+            growth[0]
+                .starts_with("crates/b/src/lib.rs: 1 platform gate(s), and no feature claims it.")
+        );
+
+        // Recorded as unclaimed (from before the rule): fine as it is...
+        let recorded: BTreeSet<String> = ["crates/b/src/lib.rs".to_string()].into();
+        assert!(unclaimed_growth(&recorded, &open, &found, &found).is_empty());
+        assert_eq!(still_unclaimed(&recorded, &open), recorded);
+        // ...but not with more gates than recorded.
+        let was: BTreeMap<String, usize> = [("crates/b/src/lib.rs".to_string(), 0)].into();
+        let grew = unclaimed_growth(&recorded, &open, &was, &found);
+        assert!(
+            grew[0].contains("1 more than recorded, and no feature claims it yet"),
+            "{grew:?}"
+        );
+
+        // Claimed since: it comes off the list, and the list never takes a file back on.
+        let claimed = ledger_with(
+            &["crates/a/src/lib.rs", "crates/b/src/lib.rs"],
+            &["crates/c/tests/t.rs"],
+        );
+        let now = unclaimed(&found, &claimed);
+        assert!(now.is_empty());
+        assert_eq!(claimed_since(&recorded, &now).len(), 1);
+        assert!(still_unclaimed(&recorded, &now).is_empty());
     }
 
     #[test]

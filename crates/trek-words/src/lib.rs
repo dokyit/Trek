@@ -87,9 +87,9 @@ pub struct Words {
     /// The release a platform downloads, as "the ... build" names it: "Mac", "Windows".
     pub build_name: &'static str,
 
-    /// Settings › Tools › Video watcher: what it does, and what its transcripts take. A Mac
-    /// transcribes with its own speech recognition when whisper isn't installed; Windows has none
-    /// that reads a file.
+    /// Settings › Tools › Video watcher: what it does, and what its transcripts take. Without
+    /// whisper, a Mac transcribes with its own speech recognition, and Windows with Trek's own
+    /// speech model, once dictation has downloaded it.
     pub video_watcher_note: &'static str,
 
     /// The local model servers Trek finds, as a list in a sentence. MLX runs on Apple silicon
@@ -217,7 +217,7 @@ const WINDOWS: Words = Words {
 
     build_name: "Windows",
 
-    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp, and transcripts need whisper (pip install openai-whisper). Applies to new sessions.",
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp; transcripts use whisper when it's installed, else Trek's own speech model, which the composer's mic downloads the first time it's clicked. Applies to new sessions.",
 
     local_servers: "Ollama, LM Studio, and llama.cpp",
 

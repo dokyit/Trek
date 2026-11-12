@@ -193,10 +193,7 @@ fn name_problem(dir: &Path, name: &str, nested: bool, renaming: Option<&Path>) -
     if name.is_empty() {
         return Some("A name is needed.".into());
     }
-    if name.split('/').any(|p| p == "." || p == "..")
-        || name.starts_with('/')
-        || (!nested && name.contains('/'))
-    {
+    if invalid_name(name, nested, cfg!(windows)) {
         return Some(format!("“{name}” isn't a valid name here."));
     }
     let to = dir.join(name);
@@ -206,6 +203,41 @@ fn name_problem(dir: &Path, name: &str, nested: bool, renaming: Option<&Path>) -
     to.symlink_metadata()
         .is_ok()
         .then(|| format!("A file or folder “{name}” already exists here. Choose another name."))
+}
+
+/// `name` (for a new item, or a rename) can't be one inside the folder: it climbs out (`..`) or
+/// starts elsewhere (`/`), or is nested where it can't be (`nested`: `a/b.md` makes the folder).
+/// On Windows (`windows`, a value so either platform's tests check both) its own rules too: `\`
+/// separates as `/` does, a drive (`C:`) or a share (`\\server`) is elsewhere, a `:` names a
+/// hidden stream of the file before it, `<>"|?*` and control characters are refused, and so are
+/// names Windows keeps for devices (`CON`, `NUL`, `COM1`…) and ones ending in a dot or a space.
+fn invalid_name(name: &str, nested: bool, windows: bool) -> bool {
+    let separators: &[char] = if windows { &['/', '\\'] } else { &['/'] };
+    let parts: Vec<&str> = name.split(separators).collect();
+    if parts.iter().any(|p| *p == "." || *p == "..")
+        || name.starts_with(separators)
+        || (!nested && parts.len() > 1)
+    {
+        return true;
+    }
+    windows
+        && parts.iter().any(|p| {
+            p.is_empty()
+                || p.ends_with(['.', ' '])
+                || p.chars().any(|c| c < ' ' || "<>:\"|?*".contains(c))
+                || kept_for_devices(p)
+        })
+}
+
+/// A name Windows keeps for a device, with or without an extension: `nul`, `CON.txt`, `com1`
+/// (`COM0` to `COM9` and `LPT0` to `LPT9`, as its naming rules list them).
+fn kept_for_devices(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit())
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
 }
 
 pub struct ExplorerPanel {
@@ -932,7 +964,66 @@ impl ExplorerPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitMark, git_marks, name_problem};
+    use super::{GitMark, git_marks, invalid_name, name_problem};
+
+    /// A new item or a rename stays in its folder under either platform's rules, and the Windows
+    /// ones are checked on the Mac's CI too: `..\x` and `C:\x` would land outside the folder,
+    /// `todo:v2.md` would write a hidden stream of `todo`, and `nul` is a device.
+    #[test]
+    fn names_stay_in_the_folder_by_each_platforms_rules() {
+        for windows in [false, true] {
+            assert!(invalid_name("../x", true, windows));
+            assert!(invalid_name("/x", true, windows));
+            assert!(
+                invalid_name("a/b", false, windows),
+                "nested only where allowed"
+            );
+            assert!(!invalid_name("a/b.md", true, windows));
+            assert!(!invalid_name("notes.md", false, windows));
+        }
+        for bad in [
+            r"..\x",
+            r"C:\x",
+            "c:x.md",
+            r"\\server\share",
+            r"src\..\..\x",
+            "todo:v2.md",
+            "nul",
+            "CON.txt",
+            "com1",
+            "lpt9.log",
+            "name.",
+            "name ",
+            "a<b",
+            "a|b",
+            "a?b",
+            "a*b",
+            "a\"b",
+            "tab\there",
+            r"a\\b",
+            "com0",
+            "LPT0.txt",
+        ] {
+            assert!(invalid_name(bad, true, true), "{bad:?} on Windows");
+        }
+        for fine in [
+            "con-notes.md",
+            "console.md",
+            "com10.txt",
+            r"src\main.rs",
+            "a.b.c",
+        ] {
+            assert!(!invalid_name(fine, true, true), "{fine:?} on Windows");
+        }
+        assert!(
+            invalid_name(r"src\main.rs", false, true),
+            "a folder, where nesting isn't allowed"
+        );
+        // What only Windows refuses is a valid name on a Mac.
+        for fine in ["todo:v2.md", "name.", "nul", r"back\slash"] {
+            assert!(!invalid_name(fine, true, false), "{fine:?} on a Mac");
+        }
+    }
 
     #[test]
     fn a_rename_that_only_changes_case_is_not_a_clash_with_itself() {
