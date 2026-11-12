@@ -968,7 +968,7 @@ what = "OpenCode asks before edits and commands as the thread's access level say
 macos = "yes"
 windows = "yes"
 how = { macos = "An administrator's OpenCode config is read from /Library/Application Support/opencode.", windows = "An administrator's is read from %ProgramData%\\opencode. The user's own is ~/.config/opencode on both: OpenCode finds it from the home folder, not %APPDATA%." }
-note = "The tests of 1.x and 2 sharing one history run on macOS only (a /bin/sh stand-in and /usr/bin/sqlite3); rusqlite and a fixture verb would run them on Windows."
+note = "Its scratch run of 1.x reads nothing of the user's on either platform (HOME, USERPROFILE and the XDG folders all point into it). The tests of 1.x and 2 sharing one history run on macOS only (a /bin/sh stand-in and /usr/bin/sqlite3); rusqlite and a fixture verb would run them on Windows."
 code = ["crates/trek-agents/src/opencode.rs"]
 tests = ["crates/trek-agents/src/opencode.rs"]
 
@@ -978,7 +978,7 @@ area = "Notes"
 what = "Notes save as you type, and one that can't be saved stays unsaved and is tried again"
 macos = "yes"
 windows = "yes"
-note = "The can't-be-saved test runs on macOS only (it makes the notes folder read-only); holding the note open unshared would fail the rename on Windows."
+how = { macos = "The can't-be-saved test makes the notes folder read-only.", windows = "The can't-be-saved test holds the note open unshared, as a sync client or a backup would, so it can't be replaced." }
 tests = ["crates/trek-app/tests/notes.rs"]
 
 [[feature]]
