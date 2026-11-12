@@ -432,7 +432,7 @@ pub fn open_in_items(mut menu: PopupMenu, dir: PathBuf) -> PopupMenu {
     .into_iter()
     .filter(|(_, app)| {
         matches!(*app, "Finder" | "Terminal") // words: ok
-            || std::path::Path::new(&format!("/Applications/{app}.app")).exists()
+            || trek_core::open_in::mac_app_installed(app)
     });
     for (label, app) in apps {
         let dir = dir.clone();

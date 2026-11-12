@@ -196,15 +196,19 @@ fn a_saved_key_can_be_copied_and_says_where_it_lives() {
         trek.render(cx);
         assert!(trek.visible(cx, "copy-google"), "Copy is offered");
         assert!(trek.visible(cx, "del-google"), "Remove is offered");
-        // The status says which Keychain item holds it, so Keychain Access can find it.
-        if cfg!(target_os = "macos") {
-            assert!(
-                trek_app::settings_view::shown::take()
-                    .iter()
-                    .any(|t| t.contains(trek_core::keychain::SERVICE)),
-                "the status names the Keychain item"
-            );
-        }
+        // The status says which item holds it, so Keychain Access or Credential Manager can find
+        // it: the Keychain's service, or the credential's name (`google.dev.trek.Trek`).
+        let item = if cfg!(windows) {
+            format!("google.{}", trek_core::keychain::SERVICE)
+        } else {
+            trek_core::keychain::SERVICE.to_string()
+        };
+        assert!(
+            trek_app::settings_view::shown::take()
+                .iter()
+                .any(|t| t.contains(&item)),
+            "the status names the item that holds the key"
+        );
         trek.click(cx, "copy-google");
         trek.render(cx);
         assert_eq!(

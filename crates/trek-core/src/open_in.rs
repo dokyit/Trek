@@ -82,6 +82,24 @@ const SPECS: [Spec; 4] = [
 /// `<root>\bin`, Cursor's in `<root>\resources\app\bin`.
 const ROOT_SEARCH: usize = 4;
 
+/// Whether the Mac app `name` (`Zed`, `Visual Studio Code`) is installed where `open -a` finds
+/// one: /Applications, or the user's own ~/Applications (JetBrains Toolbox puts its IDEs there,
+/// and an app dragged in without an administrator's password goes there too).
+pub fn mac_app_installed(name: &str) -> bool {
+    mac_app_installed_in(name, &crate::paths::home(), |p| p.exists())
+}
+
+/// `mac_app_installed` with the home folder and the lookup given, for tests on either platform.
+pub fn mac_app_installed_in(name: &str, home: &Path, exists: impl Fn(&Path) -> bool) -> bool {
+    let bundle = format!("{name}.app");
+    [
+        Path::new("/Applications").join(&bundle),
+        home.join("Applications").join(&bundle),
+    ]
+    .iter()
+    .any(|p| exists(p))
+}
+
 /// The menu's rows for this machine (after the file manager's): each program found, as
 /// `windows_targets_with` answers them from the machine's registry and PATH.
 pub fn windows_targets() -> Vec<Target> {
@@ -217,6 +235,30 @@ fn registered_value(raw: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn a_mac_app_is_found_in_either_applications_folder() {
+        let home = Path::new("/Users/me");
+        let there = |found: &'static [&'static str]| {
+            move |p: &Path| found.iter().any(|f| Path::new(f) == p)
+        };
+        assert!(mac_app_installed_in(
+            "Zed",
+            home,
+            there(&["/Applications/Zed.app"])
+        ));
+        // JetBrains Toolbox, or an app dragged in without an administrator.
+        assert!(mac_app_installed_in(
+            "IntelliJ IDEA",
+            home,
+            there(&["/Users/me/Applications/IntelliJ IDEA.app"])
+        ));
+        assert!(!mac_app_installed_in(
+            "Cursor",
+            home,
+            there(&["/Applications/Zed.app"])
+        ));
+    }
 
     /// A machine: its registered programs (by exe name), its PATH commands, and the files that exist.
     #[derive(Default)]

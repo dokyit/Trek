@@ -676,9 +676,7 @@ fn openers(dir: &Path) -> Vec<Opener> {
         ("Xcode", "Xcode"),
     ]
     .into_iter()
-    .filter(|(_, app)| {
-        *app == "Terminal" || Path::new(&format!("/Applications/{app}.app")).exists()
-    });
+    .filter(|(_, app)| *app == "Terminal" || trek_core::open_in::mac_app_installed(app));
     for (label, app) in apps {
         let dir = dir.to_path_buf();
         out.push((

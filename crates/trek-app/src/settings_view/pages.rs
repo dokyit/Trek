@@ -978,6 +978,14 @@ impl SettingsView {
                     trek_core::keychain::SERVICE
                 )
                 .into(),
+                // Credential Manager lists it under Windows Credentials by its target name, which
+                // the keyring crate makes `<account>.<service>`.
+                (SavedKey::Saved, _) if cfg!(windows) => format!(
+                    "Saved in {} (Windows Credentials › {id}.{})",
+                    crate::words::words().your_credential_store,
+                    trek_core::keychain::SERVICE
+                )
+                .into(),
                 (SavedKey::Saved, _) => {
                     format!("Saved in {}", crate::words::words().your_credential_store).into()
                 }
