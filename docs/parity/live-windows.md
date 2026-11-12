@@ -1,6 +1,6 @@
 # Live check on Windows
 
-Written by `cargo run -p trek-parity --bin parity-live` against the capture build of `09f09784`: each feature's `live` steps in `docs/parity/ledger.toml`, run in an isolated Trek, then a screenshot (`live-<id>.png` in its command folder). Run it again after a change; the steps are the same on every platform unless the ledger says otherwise.
+Written by `cargo run -p trek-parity --bin parity-live` against the capture build of `9847dc05`: each feature's `live` steps in `docs/parity/ledger.toml`, run in an isolated Trek, then a screenshot (`live-<id>.png` in its command folder). Run it again after a change; the steps are the same on every platform unless the ledger says otherwise.
 
 **65 shown working, 0 failed, 26 with no live steps here, 8 not on Windows.**
 
