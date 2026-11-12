@@ -1134,5 +1134,5 @@ area = "App"
 what = "Trek stays light while agents work: the working bar, streamed text and typing redraw only what changed, and a long thread opens quickly"
 macos = "yes"
 windows = "yes"
-live = ["route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView 11- WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system"]
+live = ["route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system"]
 tests = ["crates/trek-app/tests/render.rs"]
