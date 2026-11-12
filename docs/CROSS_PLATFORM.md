@@ -63,10 +63,11 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    runs as, the libraries loaded in it, a real rust-analyzer's problems in the editor, `gh`
    having no login inside the run, a file that lives only in the cloud (a real Cloud Files
    placeholder whose data a sync provider of the check's own hands over when Windows asks), the
-   Photos picker's sheet as AppKit has it, and the phone server's Bonjour record resolved through
-   the system's DNS-SD as a phone resolves it.
+   Photos picker's sheet as AppKit has it, the phone server's Bonjour record resolved through the
+   system's DNS-SD as a phone resolves it, and the close button leaving Trek in the tray with no
+   window, its icon still there.
 
-   On Windows (`3d1f161f`, a fresh profile, rust-analyzer on PATH): 84 of the
+   On Windows (`c48a1d3d`, a fresh profile, rust-analyzer on PATH): 84 of the
    99 features shown working, 0 failing, 8 that aren't on Windows, and 7 that an isolated run
    can't show, each saying what checks it instead: other apps' accessibility trees, the real Codex
    and OpenCode CLIs (an isolated run starts no real agent, and never acts as the user), the
