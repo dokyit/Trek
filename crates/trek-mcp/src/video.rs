@@ -48,9 +48,10 @@ pub const ENV_VIDEO_DIR: &str = "TREK_VIDEO_DIR";
 /// Where Trek keeps dictation's speech model (Windows): a transcript without whisper uses it.
 pub const ENV_DICTATION_DIR: &str = "TREK_DICTATION_DIR";
 
+// No restart: the user's and the machine's Path are read again as they are now (util.rs).
 #[cfg(windows)]
 pub const FFMPEG_MISSING: &str = "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to \
-install them with `winget install ffmpeg` (then restart the session so the new PATH is seen), and try again.";
+install them with `winget install ffmpeg`, and try again.";
 #[cfg(not(windows))]
 pub const FFMPEG_MISSING: &str = "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to \
 install them with `brew install ffmpeg`, and try again.";

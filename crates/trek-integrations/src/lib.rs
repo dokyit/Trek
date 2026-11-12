@@ -63,7 +63,10 @@ pub const AXE_INSTALL: &str = "brew install cameroncooke/axe/axe";
 
 /// ffmpeg and ffprobe, which `watch_video` reads videos with (not bundled), both installed.
 pub fn ffmpeg_installed() -> bool {
-    trek_core::detect::which("ffmpeg").is_some() && trek_core::detect::which("ffprobe").is_some()
+    // As the registry has the PATH now, on Windows: an ffmpeg installed from Settings is seen
+    // without restarting Trek.
+    trek_core::detect::which_now("ffmpeg").is_some()
+        && trek_core::detect::which_now("ffprobe").is_some()
 }
 
 pub const FFMPEG_INSTALL: &str = if cfg!(windows) {

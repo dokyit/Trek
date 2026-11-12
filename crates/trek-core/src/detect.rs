@@ -324,6 +324,29 @@ pub fn which(binary: &str) -> Option<PathBuf> {
     which_in(login_path(), binary)
 }
 
+/// `which`, and then, on Windows, the machine's and the user's Path as the registry has them now:
+/// `login_path` is composed once a launch, so a program installed since (winget puts ffmpeg's
+/// folder on the user's Path) is found without restarting Trek. A Mac's login PATH is asked once
+/// a launch, as a terminal opened then would have it.
+pub fn which_now(binary: &str) -> Option<PathBuf> {
+    which(binary).or_else(|| path_now().and_then(|path| which_in(&path, binary)))
+}
+
+/// The machine's Path then the user's, as the registry has them now.
+#[cfg(windows)]
+fn path_now() -> Option<String> {
+    let parts: Vec<String> = [registry_path(true), registry_path(false)]
+        .into_iter()
+        .flatten()
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(";"))
+}
+
+#[cfg(not(windows))]
+fn path_now() -> Option<String> {
+    None
+}
+
 /// `which`, on another PATH (`path`, in the platform's own format).
 pub fn which_in(path: &str, binary: &str) -> Option<PathBuf> {
     find_in(path, binary, &std::env::var("PATHEXT").unwrap_or_default())
@@ -1123,6 +1146,24 @@ mod tests_paths {
         std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         file
+    }
+
+    /// What the login PATH has is found as by `which`; on Windows the registry's Path is read as
+    /// it is now (the machine's has System32, expanded), and a program missing everywhere isn't.
+    #[test]
+    fn which_now_reads_the_path_as_it_is_now() {
+        assert!(which_now("trek-no-such-tool-anywhere").is_none());
+        #[cfg(windows)]
+        {
+            let now = path_now().expect("the registry's Path");
+            assert!(
+                now.to_lowercase().contains(r"\system32") && !now.contains("%SystemRoot%"),
+                "{now}"
+            );
+            assert!(which_now("cmd").is_some());
+        }
+        #[cfg(not(windows))]
+        assert_eq!(path_now(), None);
     }
 
     #[test]

@@ -219,7 +219,10 @@ pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
         .find(|p| is_executable(p))
 }
 
-/// Find an executable by name (`.exe` added) on PATH plus `extra_dirs` and winget's links folder.
+/// Find an executable by name (`.exe` added) on PATH plus `extra_dirs` and winget's links folder,
+/// then on the user's and the machine's Path as the registry has them now: PATH is what this
+/// process was started with (Trek's, from its launch), so a program installed since (winget
+/// puts ffmpeg's folder on the user's Path) is found without restarting Trek.
 #[cfg(windows)]
 pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
@@ -235,9 +238,65 @@ pub fn find_executable(name: &str, extra_dirs: &[&str]) -> Option<PathBuf> {
         );
     }
     let file = format!("{name}.exe");
-    dirs.into_iter()
-        .map(|d| d.join(&file))
-        .find(|p| p.is_file())
+    let found = |dirs: Vec<PathBuf>| {
+        dirs.into_iter()
+            .map(|d| d.join(&file))
+            .find(|p| p.is_file())
+    };
+    found(dirs).or_else(|| found(registry_path_dirs()))
+}
+
+/// The folders on the user's Path and then the machine's, as the registry has them now, with the
+/// `%NAME%`s of a `REG_EXPAND_SZ` filled in.
+#[cfg(windows)]
+fn registry_path_dirs() -> Vec<PathBuf> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+        RegGetValueW,
+    };
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let read = |hive: HKEY, key: &str| -> Option<String> {
+        let (key, value) = (wide(key), wide("Path"));
+        // A Path can be 32,767 characters at most.
+        let mut buf = vec![0u16; 32_768];
+        let mut len = (buf.len() * 2) as u32;
+        // SAFETY: NUL-ended names, and `buf` of `len` bytes; an expandable value comes back
+        // expanded (no RRF_NOEXPAND).
+        let e = unsafe {
+            RegGetValueW(
+                hive,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        (e == ERROR_SUCCESS).then(|| {
+            let units = (len as usize / 2).min(buf.len());
+            let end = buf[..units].iter().position(|&c| c == 0).unwrap_or(units);
+            String::from_utf16_lossy(&buf[..end])
+        })
+    };
+    [
+        (HKEY_CURRENT_USER, "Environment"),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(hive, key)| read(hive, key))
+    .flat_map(|path| {
+        path.split(';')
+            .map(|d| d.trim().trim_matches('"').to_string())
+            .filter(|d| !d.is_empty())
+            .collect::<Vec<_>>()
+    })
+    .map(PathBuf::from)
+    .collect()
 }
 
 #[cfg(unix)]
@@ -258,6 +317,24 @@ pub fn fmt_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registry's Path, read now and expanded: the machine's always has System32 in it
+    /// (`%SystemRoot%\system32`, expanded), and a program in one of its folders is found there.
+    #[cfg(windows)]
+    #[test]
+    fn the_registrys_path_is_read_as_it_is_now() {
+        let dirs = registry_path_dirs();
+        let system = dirs
+            .iter()
+            .find(|d| d.to_string_lossy().to_lowercase().ends_with(r"\system32"))
+            .unwrap_or_else(|| panic!("System32 on the machine's Path: {dirs:?}"));
+        assert!(
+            !system.to_string_lossy().contains('%'),
+            "expanded: {system:?}"
+        );
+        assert!(system.join("cmd.exe").is_file());
+        assert!(find_executable("cmd", &[]).is_some());
+    }
 
     #[test]
     fn png_header() {
