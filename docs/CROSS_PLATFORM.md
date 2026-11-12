@@ -130,6 +130,28 @@ same code, done there too, or recorded in the ledger.
 - **Words per platform in `trek-words`.** Every visible sentence that differs by platform is held
   whole there, and a test checks that the Windows table names nothing of the Mac's (Finder, Dock,
   Keychain, …). `trek_words::pretend` lets a test read either platform's wording on any OS.
+- **A pure reading takes the platform as an argument.** Reading a command line or a path is a
+  function that's told which platform's rules to use (`windows: bool`), and the public one passes
+  `cfg!(windows)`: path chips (`md.rs`'s `looks_like_path_on`), the verification CLI's runs
+  (`verification.rs`'s `invocations`), the verdict on a turn (`verdict_on`). Each CI then tests
+  both readings, so a Windows rule can't break unnoticed on a Mac change, or the other way round.
+- **One crate for one difference used in many places.** "Only the user can read this file" is
+  0600 on the Mac and an owner-only access list on Windows; it was written out (or not) in every
+  place a secret was saved, and Windows was missed in five. `trek-private` holds it once
+  (`create_new`, `write`, `create_dir`, `restrict`, `is_private`), every secret file goes through
+  it, and tests check `is_private` on both platforms instead of 0600 on one. Ten files' 35 gates
+  became 21, six of them in that crate. When the same `#[cfg]` pair appears a third time, it's
+  that kind of difference.
+- **Tests that need a program use the fixture binary, never a shell script.** A `#!/bin/sh`
+  stand-in runs on the Mac alone, and a `.cmd` one hands its arguments to cmd.exe. The
+  test-fixtures program has verbs for what tests need (`record` notes its arguments and stdin and
+  answers; `cat`, `echo`, `exit`, …), and copied under a program's name it stands in for that
+  program (`gh`, `gh.exe`). `trek_test_fixtures::bin` rebuilds it when its sources are newer, so a
+  CI cache never hands a test an old one.
+- **The other platform's keys and links, on each runner.** `keys::with_mac(false, || open(cx))`
+  binds Windows' keys on a Mac (Ctrl+K, Alt+Shift+E, Ctrl+F4 are tested on both CIs). A link test
+  on Windows makes a junction (`mklink /J`), which needs no privilege, where the Mac makes a
+  symlink; one that needs a file symlink skips that case where the process may not make one.
 
 ## What comes next
 
@@ -184,6 +206,11 @@ In order of how much each removes the problem, smallest first where that's close
      and `PARITY.md` with the change.
 - Fixing a bug seen on one platform: check whether the other platform's path has it too, and say
   so in the pull request.
+- Writing a test: make it run on both CIs. A reading takes the platform as an argument; a program
+  it needs is the fixture binary (a verb, or copied under the program's name), not a script; a
+  platform's keys are bound with `keys::with_mac`; a link on Windows is a junction. A test gated
+  to one platform says why the other can't run it, and the feature's ledger note says so too.
+- Saving a secret: through `trek-private`, never `fs::write` with a `#[cfg(unix)]` mode beside it.
 - Adding C or C++ to the Windows build: give it the static runtime (/MT), as
   `vendor/whisper-rs-sys/build.rs` does for whisper.cpp (`tests/hardening.rs` fails otherwise),
   and keep its build script's link-search paths to the folders its libraries are in.
