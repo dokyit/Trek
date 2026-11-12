@@ -32,10 +32,13 @@ const FROM_THE_START: &[&str] = &[
 ];
 
 /// What steps can name, filled in here: `{project}`, a small git project made beside the
-/// command folder (a README, and a source file with a tab in it); `{/}`, this platform's path
-/// separator (an Explorer row's id is its path).
+/// command folder (a README, and a source file with a tab in it); `{data}`, the app's data
+/// folder; `{/}`, this platform's path separator (an Explorer row's id is its path).
 fn fill(step: &str, project: &Path) -> String {
+    // The app's data folder is beside the project, in the driver's runtime folder.
+    let data = project.parent().unwrap_or(project).join("data");
     step.replace("{project}", &project.to_string_lossy())
+        .replace("{data}", &data.to_string_lossy())
         .replace("{/}", std::path::MAIN_SEPARATOR_STR)
 }
 

@@ -13,7 +13,7 @@
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
-//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
+//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path>` and `private <path>` (in the data folder: there, and readable by the user alone), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
@@ -2052,6 +2052,41 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     // Files in the composer, as a drop puts them there: images as thumbnails, the rest (videos,
     // PDFs, folders) as tiles. Paths are separated by `|` (they may have spaces).
+    // `open-link <trek:// link>`: the link as the system hands it to Trek (a browser button, an
+    // editor extension, a banner clicked), through `deep_link::open`.
+    if verb == "open-link" {
+        anyhow::ensure!(
+            arg.starts_with("trek://"),
+            "open-link takes a trek:// link, not {arg:?}"
+        );
+        crate::deep_link::open(arg, cx);
+        cx.refresh_windows();
+        return Ok(());
+    }
+    // `file <path>` and `private <path>`, `path` in the data folder: it's there; and the user
+    // alone can read it (`trek_private::is_private`), as written by the app.
+    if verb == "file" || verb == "private" {
+        let path = trek_core::paths::data_dir().join(arg.trim());
+        anyhow::ensure!(path.exists(), "{verb}: {} isn't there", path.display());
+        if verb == "private" {
+            anyhow::ensure!(
+                trek_private::is_private(&path)?,
+                "private: others can read {}",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    // `heic-demo`: a photo as an iPhone writes one (HEIC), made by the system's own codec in the
+    // data folder (`attachments::heic_photo`), then attached as `attach` does, going in as a
+    // picture agents can read.
+    if verb == "heic-demo" {
+        let photo = trek_core::paths::data_dir()
+            .join("heic-demo")
+            .join("IMG_0001.HEIC");
+        crate::attachments::heic_photo(&photo)?;
+        return run(ws, "attach", &photo.to_string_lossy(), cx);
+    }
     if verb == "attach" && !arg.is_empty() {
         let main = ws
             .read(cx)

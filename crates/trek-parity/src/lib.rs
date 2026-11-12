@@ -383,10 +383,11 @@ impl Feature {
     }
 }
 
-/// A live step that checks what's on screen, rather than doing something.
+/// A live step that checks something (what's on screen, a file the app wrote), rather than doing
+/// something.
 pub fn checks(step: &str) -> bool {
     let verb = step.split_whitespace().next().unwrap_or_default();
-    matches!(verb, "count" | "hittest")
+    matches!(verb, "count" | "hittest" | "file" | "private")
 }
 
 /// What's wrong with `feature`'s live steps: a platform it's on with neither steps nor a word on
@@ -944,6 +945,7 @@ mod tests {
         assert_eq!(f.live_on(Platform::Macos).len(), 2);
         assert_eq!(f.live_on(Platform::Windows), ["count phone-apps 1"]);
         assert!(checks("count x 1") && checks("hittest title-text HTCAPTION"));
+        assert!(checks("private mobile/identity.key") && checks("file downloads/a.txt"));
         assert!(!checks("route draft"));
     }
 

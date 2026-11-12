@@ -52,8 +52,13 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    `cargo run -p trek-parity --bin parity-live` runs the steps against the capture build on
    whichever computer it's on, and writes `docs/parity/live-<platform>.md`: the same steps on a
    Mac and a PC, so a feature built on one is seen working, or not, on the other, before a user
-   finds it. On Windows: 54 of the 99 features shown working, 37 that an isolated run can't show
-   (each says what checks it instead), 8 that aren't on Windows.
+   finds it. On Windows: 65 of the 99 features shown working, 0 failing, 26 that an isolated run
+   can't show (the system's own windows, real accounts, releases, a real phone; each says what
+   checks it instead), 8 that aren't on Windows. The Mac-only features' steps are written from the
+   Mac's code and wait for a run on a Mac (`docs/parity/live-macos.md`). Building the checks found
+   three bugs on Windows: video posters missing for a path written with `/`, the capture build's
+   import demo needing a `sqlite3` program Windows lacks, and an isolated run's Browser saving
+   downloads into the user's Downloads folder.
 
 So a fix made on one platform lands in a shared layer (and both CIs test it), or in a backend
 whose counterpart the ledger names. A behaviour fix hidden behind `fluent::WINDOWS` fails review

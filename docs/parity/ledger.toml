@@ -71,7 +71,7 @@ area = "App"
 what = "trek:// links open in Trek"
 macos = "yes"
 windows = "yes"
-live_skip = "trek:// is the installed Trek's (the system hands links to it), not an isolated one's: the link tests and tests/reentry.rs."
+live = ["route project:{project}", "open-link trek://edit?path={project}{/}README.md&line=1", "wait 1500", "count editor-save 1", "click mode-agents"]
 how = { macos = "A URL type in the bundle.", windows = "Trek registers the HKCU key itself at launch; both uninstallers remove it (only while it opens that install) and the AppUserModelId key." }
 code = ["crates/trek-app/src/winsys.rs", "script/Uninstall-Trek.ps1"]
 tests = ["script/tests/uninstall-keys.Tests.ps1", "crates/trek-app/src/deep_link.rs", "crates/trek-app/tests/hardening.rs"]
@@ -186,7 +186,7 @@ area = "Composer"
 what = "Pick from the Photos library"
 macos = "yes"
 windows = "n/a"
-live_skip = "The Mac's Photos library: steps to be written on a Mac."
+live_skip = "The Photos library opens from the + menu, whose items carry no ids to check by; the Photos picker's tests cover it on a Mac."
 how = { macos = "The system's Photos picker, as a sheet.", windows = "Windows has no library picker: photos are files, picked in the open dialog." }
 code = ["crates/trek-app/src/photos.rs"]
 
@@ -196,7 +196,8 @@ area = "Composer"
 what = "HEIC and HEIF photos attach as images agents can read"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a HEIC photo attached from disk: the attachment tests decode one."
+note = "The capture build's `heic-demo` makes its test photo with the same codecs (Windows' HEIF encoder; a Mac's sips), for the live check."
+live = ["route project:{project}", "heic-demo", "wait 2500", "count attachment#* 1+"]
 how = { macos = "Converted to PNG with sips.", windows = "Converted to PNG by Windows' own codecs (WIC), with the HEIF and HEVC extensions most Windows 11 PCs have; without them Trek names the Microsoft Store extension to get. Checked with a real 8256x5504 HEIC." }
 code = ["crates/trek-app/src/attachments.rs"]
 tests = ["crates/trek-app/src/attachments.rs"]
@@ -207,7 +208,7 @@ area = "Composer"
 what = "A poster frame on an attached video's tile"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a video attached from disk: the attachment tests make a poster from one."
+live = ["route project:{project}", "pace 0", "send mock:video", "wait idle 60000", "attach {data}{/}mock-video{/}clip.mp4", "wait 3000", "count attachment-poster* 1+"]
 how = { macos = "qlmanage's thumbnail.", windows = "Explorer's thumbnail (IShellItemImageFactory), 256 px, from whatever thumbnailer Windows has for the video." }
 code = ["crates/trek-app/src/attachments.rs"]
 tests = ["crates/trek-app/src/attachments.rs"]
@@ -251,7 +252,7 @@ area = "Agent tools"
 what = "watch_video gives agents a transcript of a video's audio"
 macos = "yes"
 windows = "yes"
-live_skip = "watch_video runs in trek-mcp, for an agent: its tests, and on a PC a spoken clip transcribed word for word by dictation's model (local.rs a_recording_is_transcribed_with_dictations_model)."
+live = ["route project:{project}", "pace 0", "send mock:video", "wait idle 60000", "wait 800", "count trek-artifact-* 1+"]
 how = { macos = "whisper when it's installed, else the Speech framework.", windows = "whisper when it's installed, else Whisper in Trek itself: trek-mcp transcribes on the PC with dictation's engine (trek-dictate) and the speech model the mic downloaded, whose folder Trek names in TREK_DICTATION_DIR. It never downloads the model for a video: without it, the agent is told the composer's mic gets it (141 MB) or to install whisper." }
 note = "Checked on a Windows 11 PC (i7-13700H): a generated clip with a sentence spoken a second in, watched from 0:01, comes back word for word as [0:01.0–0:06.0] on the video's clock, in 2.7 s for the whole call (trek-mcp's video tests, where the model is present; they pass as skipped where it isn't, as on CI). A first-time Windows user gets transcripts once dictation has been used once, where a Mac asks for Speech Recognition the first time. Settings' \"Install ffmpeg\" runs `winget install ffmpeg`, which without Developer Mode puts the package's own folder on the user's Path rather than in its Links: Settings (detect::which_now) and watch_video (trek-mcp's find_executable) read the registry's Path as it is now, so it's found without restarting Trek."
 code = ["crates/trek-mcp/src/video.rs", "crates/trek-dictate/src/lib.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-app/src/workspace.rs", "crates/trek-mcp/src/util.rs", "crates/trek-core/src/detect.rs", "crates/trek-integrations/src/lib.rs"]
@@ -289,8 +290,8 @@ area = "Tools"
 what = "The iPhone tool: your real iPhone for you and agents"
 macos = "yes"
 windows = "partial"
+live_macos = ["phone touch", "wait 800", "count phone-mirror 1"]
 live_windows = ["phone ready", "wait 600", "count phone-apps 1", "count phone-install 1", "phone files", "wait 600", "count phone-files 1"]
-live_skip = "On a Mac the iPhone tool's demo states differ (usb, touch, mirroring, driver): steps to be written on a Mac."
 how = { macos = "Live screen over USB, keyboard and mouse over Bluetooth, iPhone Mirroring or Trek Driver for taps, apps and files.", windows = "Through Apple Devices (Apple Mobile Device Service, from the Microsoft Store): the phone's details, its apps (list, install an .ipa) and files (media, and apps' Documents: add, save, remove), AssistiveTouch, and agents' eight phone tools for them, one agent at a time, with installs and file changes asked first. The panel says what's missing: Apple Devices, its service, a phone, Trust, unlocking." }
 note = "The live screen and taps need Trek on a Mac: CoreMediaIO capture, Bluetooth HID, iPhone Mirroring and starting Trek Driver (Xcode) are Mac-only. idevice's XCTest and screenshots build on Windows, but iOS 17 and later need the developer disk image mounted, and the driver is built and signed on a Mac."
 code = ["crates/trek-phone/src/lib.rs", "crates/trek-phone/src/pc.rs", "crates/trek-app/src/panels/mod.rs", "crates/trek-app/src/panels/phone/windows.rs", "crates/trek-mcp/src/phone.rs", "crates/trek-phone/src/driver.rs", "crates/trek-phone/src/device.rs", "crates/trek-app/src/panels/phone.rs", "crates/trek-app/src/workspace/phone_use.rs", "crates/trek-app/src/settings_view.rs"]
@@ -302,7 +303,7 @@ area = "Tools"
 what = "The iOS Simulator tool"
 macos = "yes"
 windows = "n/a"
-live_skip = "The iOS Simulator needs Xcode on a Mac: steps to be written on a Mac."
+live_macos = ["route project:{project}", "tools simulator", "wait 1500", "count sim-devices 1"]
 how = { macos = "simctl and AXe.", windows = "The Simulator comes with Xcode, which is Mac-only: Settings says so. An Android emulator tool would be the Windows counterpart." }
 code = ["crates/trek-app/src/workspace.rs", "crates/trek-app/src/panels/simulator.rs"]
 tests = ["crates/trek-app/tests/words.rs"]
@@ -313,7 +314,7 @@ area = "Browser"
 what = "Popups that keep their opener (sign-ins that answer the opening page)"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a page that opens a sign-in popup: the popup fixture in tests/browser.rs."
+live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval window.open('https://example.com/', 'pop', 'width=420,height=320'); 1", "wait 2500", "count browser-sheet-tab 1", "click browser-sheet-close"]
 how = { macos = "A real view made from WebKit's configuration.", windows = "WebView2's NewWindowRequested hands the page a view of Trek's (SetNewWindow) made from its opener's environment; WindowCloseRequested closes it. Ctrl-click and middle-click tabs keep an opener there (wry doesn't pass the click's details)." }
 code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
 tests = ["crates/trek-app/src/panels/browser/fixtures/check.py"]
@@ -324,7 +325,7 @@ area = "Browser"
 what = "A page's dialogs and permission asks in Trek's bar; answered for an agent at work"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a page that asks (a dialog, the camera): tests/browser.rs's fixtures, and mock:browser approvals."
+live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval setTimeout(() => alert('Live check'), 10); 1", "wait 1200", "count browser-ask-yes 1", "click browser-ask-yes"]
 how = { macos = "WebKit's UI delegate into Trek's bar.", windows = "WebView2's ScriptDialogOpening, PermissionRequested and LaunchingExternalUriScheme into the same bar (camera and microphone as one ask; an app link names the app Windows has for it); while an agent drives, Trek answers dialogs for it (Ask::for_agent, shared)." }
 code = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser/webview2.rs"]
 tests = ["crates/trek-app/src/panels/browser/asks.rs"]
@@ -335,7 +336,7 @@ area = "Browser"
 what = "Downloads said in Trek's toasts"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a download: tests/browser.rs's fixtures."
+live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 2500", "browser eval (() => { const a = document.createElement('a'); a.href = 'data:text/plain,live%20check'; a.download = 'live-check.txt'; document.body.appendChild(a); a.click(); return 1; })()", "wait 2500", "file downloads{/}live-check.txt"]
 how = { macos = "WebKit's downloads, through wry.", windows = "WebView2's, through wry; taking them hides WebView2's own flyout, so Trek's toasts say it." }
 code = ["crates/trek-app/src/panels/browser.rs"]
 
@@ -424,7 +425,7 @@ area = "Agent tools"
 what = "Computer use in the background, with a floating live picture"
 macos = "yes"
 windows = "no"
-live_skip = "The floating live picture is the Mac's own (background-use): steps to be written on a Mac."
+live_skip = "The live picture is a window of its own (background_use.rs), and checks count what's in the main window; `background-use show|fold|stop` drive it on a Mac, and its tests cover it."
 note = "Input goes to a window behind yours on the Mac. Windows would need per-window capture (Windows.Graphics.Capture) and input through UI Automation; idle and lock detection are there already."
 code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-app/src/background_use.rs"]
 
@@ -556,7 +557,7 @@ area = "iPhone"
 what = "The pairing TLS key is readable by its owner alone"
 macos = "yes"
 windows = "yes"
-live_skip = "Who may read the key isn't on screen: trek-remote's TLS tests (owner-only) on both CIs."
+live = ["pair-phone Live check iPhone", "wait 1500", "pair-phone leave", "private mobile{/}identity.key"]
 how = { macos = "0600.", windows = "An access list with the owner alone, nothing inherited, set before the key is written (and an older key's fixed when it's loaded)." }
 code = ["crates/trek-remote/src/tls.rs"]
 tests = ["crates/trek-remote/src/tls.rs"]
@@ -612,7 +613,7 @@ area = "App"
 what = "Hide Trek or minimize its window from the keyboard"
 macos = "yes"
 windows = "n/a"
-live_skip = "A Mac's own keys for its windows (Cmd-H, Cmd-M): steps to be written on a Mac."
+live_macos = ["route settings:keyboard-shortcuts", "wait 300", "reveal shortcut-Hide Trek", "count shortcut-Hide Trek 1", "count shortcut-Minimize 1"]
 how = { macos = "⌘H and ⌘M.", windows = "Hiding an app isn't a Windows idea; Win+Down minimizes any window." }
 code = ["crates/trek-app/src/keys.rs"]
 tests = ["crates/trek-app/tests/keys.rs"]
@@ -623,7 +624,7 @@ area = "App"
 what = "Onboarding asks for the permissions Trek uses"
 macos = "yes"
 windows = "n/a"
-live_skip = "The Mac's permission steps (Screen Recording, Accessibility, Speech): steps to be written on a Mac."
+live_macos = ["onboarding permissions", "wait 600", "count ob-perm-* 2+", "click ob-skip-all"]
 how = { macos = "A step with each permission, and Trek's icon to drag into the lists that take one.", windows = "Windows asks for none of the Mac's: the step is left out, and Settings › Notifications says when banners are off." }
 code = ["crates/trek-app/src/onboarding.rs", "crates/trek-integrations/src/lib.rs"]
 tests = ["crates/trek-app/tests/screens.rs"]
@@ -645,7 +646,7 @@ area = "Install"
 what = "Trek updated while it's closed, from the phone"
 macos = "yes"
 windows = "no"
-live_skip = "The phone's updater reaches a Mac, through its own helper: steps to be written on a Mac."
+live_skip = "Needs a paired iPhone running its updater against a Mac (phone_update.rs); its tests cover the helper."
 note = "The phone's updater reaches a Mac only. On Windows an update installs at Trek's next launch."
 code = ["crates/trek-core/src/update/closed.rs"]
 
@@ -675,7 +676,7 @@ area = "Threads"
 what = "The thought streaming in after a group of tool calls, in the timeline and the working bar"
 macos = "partial"
 windows = "yes"
-live_skip = "Needs a turn caught mid-thought: tests/activity.rs."
+live = ["route project:{project}", "pace 1", "send mock:long 6s", "wait 2500", "count working-bar 1", "click stop", "pace 0"]
 note = "Shown by Windows' timeline design only (fluent::WINDOWS). Whether the Mac's timeline shows it too is a design decision, not a bug: kept apart until it's made."
 code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs"]
 
@@ -705,8 +706,8 @@ area = "Agent tools"
 what = "Agents' Simulator, iPhone and Trek-update tools"
 macos = "yes"
 windows = "partial"
+live_macos = ["route project:{project}", "tools simulator", "wait 1500", "count sim-devices 1"]
 live_windows = ["phone agent", "wait 600", "count phone-agent-strip 1", "count phone-agent-stop 1"]
-live_skip = "On a Mac, the Simulator's and Trek-update tools need Xcode and a real Mac's updater, and its iPhone tool's demo states differ (usb, touch, mirroring): steps to be written on a Mac. Covered by trek-ipc's tool tests."
 note = "On Windows agents get the iPhone's apps and files tools (iphone-tool). The Simulator's need Xcode, and Trek's update helper for agents is the Mac's own."
 code = ["crates/trek-mcp/src/main.rs", "crates/trek-mcp/src/rpc.rs"]
 
@@ -807,7 +808,7 @@ area = "App"
 what = "Trek's secrets, machine list, paired phones, agents' MCP config and uploaded files are readable by the user alone"
 macos = "yes"
 windows = "yes"
-live_skip = "Who may read a file isn't on screen: trek-private's tests on both CIs, and session_secrets.rs, tls.rs and pairing.rs."
+live = ["pair-phone Live check iPhone", "wait 1500", "pair-phone leave", "private mobile{/}devices.json", "private mobile{/}identity.key"]
 how = { macos = "Mode 0600 (a folder 0700), through trek-private.", windows = "An access list of one entry, the user's, inheriting nothing, that each file is made with (trek-private), so it's never readable by others in between, however its folder's list reads (a data folder moved to a second drive, a %TEMP% others share); a folder's entry passes to what's made in it." }
 code = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/remote/machines.rs", "crates/trek-remote/src/tls.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-agents/src/claude.rs"]
 tests = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-remote/src/tls.rs", "crates/trek-agents/src/claude.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/tests/permission_rules.rs", "crates/trek-app/tests/machines.rs"]
@@ -1041,7 +1042,7 @@ area = "Threads"
 what = "What an agent left running (a dev server, a watcher) above the composer: its last line, the end of its output, Stop, and its whole output in a text editor"
 macos = "yes"
 windows = "yes"
-live_skip = "A program an agent leaves running shows above the composer while it runs: tests/background.rs."
+live = ["route project:{project}", "pace 0", "send mock:server", "wait 2500", "count background-strip 1", "count bg-task* 1+", "click bg-stop#0"]
 how = { macos = "Full output opens in the default text editor (open -t).", windows = "Full output opens in the editor that opens .txt files (the output files have no extension Windows knows, so they are opened as a .txt would be), Notepad if the shell can't; a path the agent names with spaces in it (C:\\Users\\Toby J\\…) is read whole." }
 code = ["crates/trek-app/src/background_strip.rs"]
 tests = ["crates/trek-app/src/background_strip.rs", "crates/trek-app/tests/background.rs"]
