@@ -3,9 +3,9 @@
    photograph of a trail; every picture of the app is a real capture shown at its real size; the
    story between them is built from the app's own parts. */
 
-@font-face { font-family: "Bricolage Grotesque"; src: url("/assets/fonts/BricolageGrotesque.woff2") format("woff2"); font-weight: 200 800; font-display: swap; }
-@font-face { font-family: "Hanken Grotesk"; src: url("/assets/fonts/HankenGrotesk.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
-@font-face { font-family: "JetBrains Mono"; src: url("/assets/fonts/JetBrainsMono-Regular.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Bricolage Grotesque"; src: url("/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52") format("woff2"); font-weight: 200 800; font-display: swap; }
+@font-face { font-family: "Hanken Grotesk"; src: url("/assets/fonts/HankenGrotesk.woff2?v=e9201edd") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("/assets/fonts/JetBrainsMono-Regular.woff2?v=8a06596f") format("woff2"); font-weight: 400; font-display: swap; }
 
 :root {
   color-scheme: light dark;
@@ -84,8 +84,8 @@ p { text-wrap: pretty; }
 .hiker { --cell: 3px; position: absolute; left: 0; width: calc(12 * var(--cell)); height: calc(16 * var(--cell)); image-rendering: pixelated; }
 .hiker[role="button"] { cursor: pointer; }
 /* Without the script he stands still, facing along the trail. */
-.hiker:not(.is-live) { background: url("/assets/img/hiker-stand-paper.png") 0 0 / 100% 100% no-repeat; }
-@media (prefers-color-scheme: dark) { .hiker:not(.is-live) { background-image: url("/assets/img/hiker-stand-night.png"); } }
+.hiker:not(.is-live) { background: url("/assets/img/hiker-stand-paper.png?v=df266ae1") 0 0 / 100% 100% no-repeat; }
+@media (prefers-color-scheme: dark) { .hiker:not(.is-live) { background-image: url("/assets/img/hiker-stand-night.png?v=50d26f2e"); } }
 .trail { position: relative; height: 54px; background: radial-gradient(circle, color-mix(in srgb, var(--ink) 40%, transparent) 0 1.5px, transparent 2px) 0 100% / 12px 3px repeat-x; }
 .trail .hiker { bottom: 5px; }
 

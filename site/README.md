@@ -56,6 +56,12 @@ Cloudflare Pages serves the `site` folder of this repository's `main` branch.
 Every push to `main` that changes `site/` is live a minute or so later. `www` to the bare domain,
 and HTTP to HTTPS, are Cloudflare settings (a redirect rule and "Always Use HTTPS"), not files here.
 
+Before a push, run `python3 script/site/stamp.py site`. It writes `?v=<hash of the file>` on every
+link to the site's own stylesheet, script, pictures and fonts. Without it Cloudflare and browsers
+keep serving the copy they hold under the same name, and a new page arrives with the last
+version's stylesheet: that happened on 12 November 2026. The pre-push hook refuses a push whose
+stamps are out of date.
+
 Two things to leave off in Cloudflare, because the pages promise it and the CSP would block them
 anyway: **Web Analytics' JavaScript snippet** (and its automatic injection), and anything else
 that adds a script, such as Rocket Loader or email obfuscation. Server-side request analytics are
@@ -145,8 +151,8 @@ this folder, the design skill's `impeccable embed-prompt --read assets/img/<file
 new or retaken picture the same way.
 
 Window captures are WebP at twice their shown size, with `width` and `height` set, and lazy below
-the first screen. Each picture ships in Paper and in Night. Keep a picture's name when replacing it;
-`_headers` caches pictures for a day.
+the first screen. Each picture ships in Paper and in Night. Keep a picture's name when replacing it and
+run `script/site/stamp.py`, which gives its links a new address.
 
 ## Rules for the look
 

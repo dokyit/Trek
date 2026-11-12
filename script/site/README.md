@@ -17,6 +17,7 @@ into the repository. `TREK_SITE_PYTHON` names a Python with Pillow and numpy (de
 | `shoot_site.sh` | Serves `site/` for the length of the run and takes stills: desktop and phone, light and dark. |
 | `rec.sh`, `record.mjs` | A real-time recording of a page from headless Chrome. |
 | `check_links.py` | Checks every link in the site; `--online` asks outside addresses too. |
+| `stamp.py` | Writes `?v=<hash of the file>` on every link to the site's own files (`SITE_DIR`), so a changed file is fetched at once and never served from an old copy. Run it after any change under `site/`; `--check` is what the pre-push hook runs. |
 
 Nothing here opens a window: Chrome runs headless, the test app stays on its own display, and
 Simulator.app is never started.
