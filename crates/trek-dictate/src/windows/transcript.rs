@@ -243,6 +243,44 @@ pub fn clean(text: &str) -> String {
     text
 }
 
+/// A take's text as it goes in, in `language` (Whisper's short name): English starts with a
+/// capital and ends with a stop, as the Mac's recognizer writes every take; Whisper now and then
+/// leaves the last stop off ("…of x squared"). One that ends in a quote or a bracket, or another
+/// language, goes in as Whisper wrote it.
+pub fn finished(text: &str, language: Option<&str>) -> String {
+    let text = text.trim();
+    if language != Some("en") {
+        return text.to_string();
+    }
+    let mut chars = text.chars();
+    let mut out: String = chars
+        .next()
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .collect();
+    out.push_str(chars.as_str());
+    if out.chars().last().is_some_and(char::is_alphanumeric) {
+        out.push('.');
+    }
+    out
+}
+
+/// More words a second than anyone says (a fast talker manages four or five).
+pub const WORDS_A_SECOND: f32 = 7.;
+
+/// A pass over `samples` of sound heard more words than anyone could say in that time: Whisper
+/// went round and round. A quick pass over the first words, cut off mid-sentence, does ("Use the
+/// chain rule to use the chain rule to …", forty times over a second and a half), as its greedy
+/// search has no second try. Phrases said again and again by a person ("Hello? Hello? Hello?")
+/// stay within it.
+pub fn babbled(samples: usize, segments: &[Segment]) -> bool {
+    let words: usize = segments
+        .iter()
+        .map(|s| clean(&s.text).split_whitespace().count())
+        .sum();
+    words as f32 > WORDS_A_SECOND * samples as f32 / RATE as f32 + 4.
+}
+
 /// What Whisper reads before decoding a pass again, for the style it writes in. Left to itself
 /// Whisper sometimes writes English plainly, all lowercase and without stops ("use the chain
 /// rule to find the derivative of sine of x squared"), where the Mac's recognizer punctuates
@@ -266,10 +304,19 @@ pub fn plain_english(language: Option<&str>, text: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct Language {
     kept: Option<i32>,
+    /// The latest guess, kept or not.
+    last: Option<i32>,
 }
 
 /// Speech to go on before a guess is kept: 2 s.
 pub const ENOUGH: usize = 2 * RATE as usize;
+
+/// The languages of the speech model (Whisper base), by id: 0 to 98. whisper.cpp guesses among
+/// one more, Cantonese (99, "yue"), which only large-v3 has. For base, that one's chance is
+/// another token's (the one that asks for a translation), and on a quick pass over the first
+/// seconds it can come out on top: plain English was kept as Cantonese, and the take's last
+/// pass decoded as Cantonese lost its stops.
+pub const LANGUAGES: i32 = 99;
 
 impl Language {
     /// The language to decode in, once kept (Whisper's id for it).
@@ -277,9 +324,19 @@ impl Language {
         self.kept
     }
 
-    /// A pass over `speech` samples of speech guessed `id` (negative: no guess).
+    /// The take's language as well as it's known: kept, else the latest guess.
+    pub fn best(&self) -> Option<i32> {
+        self.kept.or(self.last)
+    }
+
+    /// A pass over `speech` samples of speech guessed `id` (negative: no guess). A guess
+    /// outside the model's languages is no guess.
     pub fn guessed(&mut self, id: i32, speech: usize) {
-        if self.kept.is_none() && id >= 0 && speech >= ENOUGH {
+        if !(0..LANGUAGES).contains(&id) {
+            return;
+        }
+        self.last = Some(id);
+        if self.kept.is_none() && speech >= ENOUGH {
             self.kept = Some(id);
         }
     }
@@ -500,14 +557,68 @@ mod tests {
     #[test]
     fn the_language_is_kept_once_theres_enough_to_go_on() {
         let mut l = Language::default();
+        assert_eq!(l.best(), None);
         l.guessed(3, ENOUGH - 1);
         assert_eq!(l.kept(), None, "too little speech to trust");
+        assert_eq!(l.best(), Some(3), "but it's the best guess so far");
         l.guessed(-1, ENOUGH);
         assert_eq!(l.kept(), None, "no guess");
+        // Cantonese, which the base model doesn't have: its "guess" is another token's chance.
+        l.guessed(LANGUAGES, 10 * ENOUGH);
+        assert_eq!((l.kept(), l.best()), (None, Some(3)), "no guess either");
         l.guessed(0, ENOUGH);
         assert_eq!(l.kept(), Some(0));
         l.guessed(5, 10 * ENOUGH);
         assert_eq!(l.kept(), Some(0), "kept for the rest of the take");
+    }
+
+    #[test]
+    fn an_english_take_goes_in_with_a_capital_and_a_stop() {
+        let en = Some("en");
+        assert_eq!(
+            finished(
+                "Use the chain rule to find the derivative of sine of x squared",
+                en
+            ),
+            "Use the chain rule to find the derivative of sine of x squared."
+        );
+        assert_eq!(finished(" fix it ", en), "Fix it.");
+        // Written already, or ending in what a stop shouldn't follow: as it is.
+        assert_eq!(finished("Can you hear me?", en), "Can you hear me?");
+        assert_eq!(finished("Done.", en), "Done.");
+        assert_eq!(finished("Call it \"done\"", en), "Call it \"done\"");
+        assert_eq!(finished("Run it (twice)", en), "Run it (twice)");
+        assert_eq!(finished("Use version 2", en), "Use version 2.");
+        assert_eq!(finished("", en), "");
+        // Another language, or one not known: as Whisper wrote it.
+        assert_eq!(finished("usa la regla", Some("es")), "usa la regla");
+        assert_eq!(finished("今日は晴れです", Some("ja")), "今日は晴れです");
+        assert_eq!(finished("use the chain rule", None), "use the chain rule");
+    }
+
+    #[test]
+    fn a_pass_that_went_round_and_round_is_told_from_speech() {
+        let looped = "Use the chain rule to ".repeat(40);
+        assert!(babbled(SECOND * 3 / 2, &[seg(0., 1.5, &looped)]));
+        // What people say, quickly or again and again, isn't.
+        let said = [seg(0., 3.6, "Trek can now take dictation on Windows.")];
+        assert!(!babbled(SECOND * 36 / 10, &said));
+        let again = [
+            seg(0., 1., "Hello."),
+            seg(3., 4., "Hello."),
+            seg(6., 7., "Hello."),
+        ];
+        assert!(!babbled(7 * SECOND, &again));
+        assert!(!babbled(
+            SECOND / 2,
+            &[seg(0., 0.5, "Yes, go ahead and do it")]
+        ));
+        assert!(!babbled(SECOND, &[]));
+        // Whisper's marks for what isn't speech aren't words.
+        assert!(!babbled(
+            SECOND,
+            &[seg(0., 1., "[BLANK_AUDIO] (music) ♪ ♪ ♪ ♪ ♪ ♪ ♪ ♪ ♪ ♪ ♪ ♪")]
+        ));
     }
 
     #[test]

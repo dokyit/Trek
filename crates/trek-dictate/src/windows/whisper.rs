@@ -121,11 +121,16 @@ mod engine {
         pub fn decode(&mut self, pass: Pass) -> Result<Decoded, String> {
             let kept = pass.language.and_then(whisper_rs::get_lang_str);
             let decoded = self.run(&pass, kept, None)?;
-            // English that came back written plainly: again, prompted to write as written.
-            let language = kept.or_else(|| whisper_rs::get_lang_str(decoded.language));
-            let text: String = decoded.segments.iter().map(|s| s.text.as_str()).collect();
-            if plain_english(language, &text) {
-                return self.run(&pass, language, Some(WRITTEN));
+            // The take's last pass, its English written plainly: again, after a prompt to write
+            // as written. Only the last (beam search, and warmer again when unsure): the quick
+            // greedy passes over the first words as they come, prompted, repeat themselves
+            // ("Use the chain rule to use the chain rule to …").
+            if pass.last {
+                let language = kept.or_else(|| whisper_rs::get_lang_str(decoded.language));
+                let text: String = decoded.segments.iter().map(|s| s.text.as_str()).collect();
+                if plain_english(language, &text) {
+                    return self.run(&pass, language, Some(WRITTEN));
+                }
             }
             Ok(decoded)
         }

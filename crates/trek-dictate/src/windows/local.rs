@@ -766,7 +766,10 @@ fn decode(model: &Model, rec: &Shared, control: &Control, heard: &Sender<Heard>,
                     let _ = heard.try_send(Heard::Partial(text.text()));
                     heard.try_send(Heard::Failed(problem.sentence()))
                 }
-                (Ok(_), None) => heard.try_send(Heard::Final(text.text())),
+                (Ok(_), None) => heard.try_send(Heard::Final(super::transcript::finished(
+                    &text.text(),
+                    language.best().and_then(whisper::language),
+                ))),
             };
             return;
         }
@@ -843,6 +846,16 @@ fn pass(
         last,
         stop,
     })?;
+    // A pass that went round and round ("Use the chain rule to use the chain rule to …") counts
+    // for nothing: the text stays as it was shown, and a quick pass is tried again a moment
+    // later with more to go on. Taken, it could settle into the take for good.
+    if super::transcript::babbled(window.len(), &decoded.segments) {
+        tracing::warn!(
+            "dictation: a pass over {:.1} s heard more words than anyone says; dropped",
+            window.len() as f32 / audio::RATE as f32
+        );
+        return Ok(if last { window.end } else { window.start });
+    }
     let spoken = heard.map_or(0, |h| {
         h.end
             .min(window.end)
@@ -1089,25 +1102,63 @@ mod tests {
         let _ = std::fs::remove_file(&wav);
 
         let model = whisper::load(&ready(&models).unwrap()).expect("the model loads");
-        let rec = Shared::recorded(sound);
+        let written = "Use the chain rule to find the derivative of sine of x squared.";
+        let said = |heard: async_channel::Receiver<Heard>| {
+            let (mut partials, mut text) = (vec![], None);
+            while let Ok(h) = heard.try_recv() {
+                match h {
+                    Heard::Final(t) => text = Some(t),
+                    Heard::Partial(t) => partials.push(t),
+                    Heard::Failed(why) => panic!("the take failed: {why}"),
+                }
+            }
+            (partials, text.expect("the take's text"))
+        };
+
+        // ✓ at once, as `dictate-file` runs a take: its last pass over all of it.
+        let rec = Shared::recorded(sound.clone());
         let control = Control::default();
         control.finish.store(true, Ordering::Relaxed);
-        let (heard, said) = async_channel::unbounded();
+        let (heard, words) = async_channel::unbounded();
         decode(&model, &rec, &control, &heard, &Gauge::default());
-        let mut text = None;
-        while let Ok(h) = said.try_recv() {
-            match h {
-                Heard::Final(t) => text = Some(t),
-                Heard::Partial(_) => {}
-                Heard::Failed(why) => panic!("the take failed: {why}"),
-            }
-        }
-        let text = text.expect("the take's text");
+        let (_, text) = said(words);
         eprintln!("heard {text:?}");
-        assert_eq!(
-            text, "Use the chain rule to find the derivative of sine of x squared.",
-            "written as the Mac writes it"
-        );
+        assert_eq!(text, written, "written as the Mac writes it");
+
+        // As spoken into the microphone (100 ms packets, in real time), then ✓: the words that
+        // show as they come are written too, and so is the take.
+        let rec = std::sync::Arc::new(Shared::default());
+        let control = std::sync::Arc::new(Control::default());
+        let (heard, words) = async_channel::unbounded();
+        let take = std::thread::spawn({
+            let (rec, control) = (rec.clone(), control.clone());
+            move || decode(&model, &rec, &control, &heard, &Gauge::default())
+        });
+        let packet = super::audio::RATE as usize / 10;
+        let started = std::time::Instant::now();
+        let quiet = vec![0.; super::audio::RATE as usize];
+        for (i, chunk) in sound.chunks(packet).chain(quiet.chunks(packet)).enumerate() {
+            rec.audio.lock().unwrap().extend_from_slice(chunk);
+            let due = std::time::Duration::from_millis(100 * (i as u64 + 1));
+            std::thread::sleep(due.saturating_sub(started.elapsed()));
+        }
+        rec.stop();
+        rec.stopped.store(true, Ordering::Relaxed);
+        control.finish.store(true, Ordering::Relaxed);
+        take.join().unwrap();
+        let (partials, text) = said(words);
+        eprintln!("as it came {partials:?}, then {text:?}");
+        assert!(!partials.is_empty(), "words showed as they came");
+        // As they came, never more words than were said: prompted, a quick pass over the first
+        // second went round and round ("Use the chain rule to use the chain rule to …").
+        let said_words = written.split_whitespace().count();
+        for p in &partials {
+            assert!(
+                p.split_whitespace().count() <= said_words,
+                "more words than were said: {p:?}"
+            );
+        }
+        assert_eq!(text, written);
     }
 
     /// A spoken sentence through the whole of the engine but the microphone: Windows' speech
