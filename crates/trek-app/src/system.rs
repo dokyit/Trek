@@ -86,16 +86,20 @@ fn follow_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     .detach();
 }
 
+/// The capture build's `motion on`: animations go whatever the system asks, as the render tests
+/// turn them on (a CI runner's system has them off).
+#[cfg(feature = "shots")]
+pub static MOTION_FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The app's reduce-motion flag: the system's preference or Trek's.
-fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
+pub(crate) fn apply_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     if cfg!(any(test, feature = "test-support")) {
         return;
     }
-    reduce_motion_as(
-        SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed),
-        workspace,
-        cx,
-    );
+    let system = SYSTEM_REDUCES_MOTION.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "shots")]
+    let system = system && !MOTION_FORCED.load(std::sync::atomic::Ordering::Relaxed);
+    reduce_motion_as(system, workspace, cx);
 }
 
 /// Set the app's reduce-motion flag from what the system asks (`system`) and Trek's own setting:
