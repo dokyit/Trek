@@ -447,6 +447,24 @@ fn comparable(path: &str) -> String {
     path.trim_end_matches('\\').to_lowercase()
 }
 
+/// Which of `found` (ids and parent ids, each parent before its children, all under `root`) are
+/// still where they were by the later list `again`: with the same parent, under a parent that is.
+/// Windows' cleanup needs it (an id handed out again sits under another parent); the logic is
+/// tested on both platforms.
+#[cfg(any(windows, test))]
+fn unchanged(found: &[(u32, u32)], root: u32, again: &[(u32, u32)]) -> Vec<bool> {
+    let mut keep: Vec<bool> = Vec::with_capacity(found.len());
+    for (i, &(pid, ppid)) in found.iter().enumerate() {
+        let parent_kept = ppid == root
+            || found[..i]
+                .iter()
+                .zip(&keep)
+                .any(|(&(p, _), &k)| k && p == ppid);
+        keep.push(parent_kept && again.contains(&(pid, ppid)));
+    }
+    keep
+}
+
 /// When process `pid` started (unix seconds), if it runs.
 #[cfg(target_os = "macos")]
 fn start_time(pid: i32) -> Option<i64> {
@@ -697,7 +715,7 @@ mod win {
             }
         }
         let ids: Vec<(u32, u32)> = found.iter().map(|(p, ppid)| (p.pid, *ppid)).collect();
-        let keep = unchanged(&ids, root.pid, &snapshot()?);
+        let keep = super::unchanged(&ids, root.pid, &snapshot()?);
         Some(
             found
                 .into_iter()
@@ -766,22 +784,6 @@ mod win {
             })
             .map(|(child, _)| child)
             .collect()
-    }
-
-    /// Which of `found` (ids and parent ids, each parent before its children, all under `root`)
-    /// are still where they were by the later list `again`: with the same parent, under a parent
-    /// that is.
-    pub(super) fn unchanged(found: &[(u32, u32)], root: u32, again: &[(u32, u32)]) -> Vec<bool> {
-        let mut keep: Vec<bool> = Vec::with_capacity(found.len());
-        for (i, &(pid, ppid)) in found.iter().enumerate() {
-            let parent_kept = ppid == root
-                || found[..i]
-                    .iter()
-                    .zip(&keep)
-                    .any(|(&(p, _), &k)| k && p == ppid);
-            keep.push(parent_kept && again.contains(&(pid, ppid)));
-        }
-        keep
     }
 
     /// End `g`'s first process and everything under it, when that process, running or exited but
@@ -1151,7 +1153,6 @@ mod tests {
         unregister(id);
     }
 
-    #[cfg(windows)]
     #[test]
     fn processes_whose_ids_changed_hands_are_passed_over() {
         // 10 and 20 under the root (1), 11 under 10, 12 under 11. By the second list, 11 has a
@@ -1159,11 +1160,8 @@ mod tests {
         // over, and so is 20, gone.
         let found = [(10, 1), (11, 10), (12, 11), (20, 1)];
         let again = [(10, 1), (11, 99), (12, 11), (30, 1)];
-        assert_eq!(
-            win::unchanged(&found, 1, &again),
-            [true, false, false, false]
-        );
-        assert_eq!(win::unchanged(&found, 1, &found), [true; 4]);
+        assert_eq!(unchanged(&found, 1, &again), [true, false, false, false]);
+        assert_eq!(unchanged(&found, 1, &found), [true; 4]);
     }
 
     #[cfg(windows)]
