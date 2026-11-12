@@ -29,7 +29,7 @@ $Settings = @(
 ) -join "`n"
 $Tools = @('git', 'explorer', 'terminal', 'browser', 'sidechat', 'simulator', 'iphone')
 $BasicRoutes = @('draft', 'no-project', 'basecamp', 'notes', 'study', 'appearance', 'first', 'onboarding')
-$ControlVerbs = @('browser', 'range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair', 'limits-demo', 'accounts-demo', 'pr-demo', 'dictate-demo', 'onboarding', 'compact-demo', 'phone', 'update-demo', 'resume-demo', 'secret-demo', 'approve', 'deny', 'answer', 'import-demo', 'checks-demo', 'privacy-demo')
+$ControlVerbs = @('browser', 'range', 'settled', 'glass', 'tint', 'theme', 'pace', 'wait', 'new', 'diff', 'tools', 'editor', 'ide', 'artifacts', 'scroll', 'click', 'rclick', 'hover', 'elements', 'key', 'note', 'background-use', 'terminal', 'type', 'pair', 'limits-demo', 'accounts-demo', 'pr-demo', 'dictate', 'dictate-file', 'dictate-demo', 'onboarding', 'compact-demo', 'phone', 'update-demo', 'resume-demo', 'secret-demo', 'approve', 'deny', 'answer', 'import-demo', 'checks-demo', 'privacy-demo')
 $ValueFlags = @('--size', '--timeout', '--output', '--lines', '--grep')
 
 $script:Human = $args -contains '--human'

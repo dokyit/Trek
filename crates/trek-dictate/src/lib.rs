@@ -9,13 +9,19 @@
 //! Info.plist — a bare `cargo run` binary — hides the button instead of asking (TCC ends
 //! processes that ask without declaring).
 //!
-//! On Windows it's Windows' own online speech recognition, in a continuous session on a thread
-//! of its own (`windows`). Elsewhere there's no dictation, and no mic.
+//! On Windows it's Whisper on the PC itself (whisper.cpp over the microphone as WASAPI records
+//! it), its speech model downloaded the first time dictation is used; a Trek with package
+//! identity uses Windows' own online speech recognition instead, which Windows answers only
+//! there (`windows`). Where neither can run, the mic offers Windows' voice typing (Win+H).
+//! Elsewhere there's no dictation, and no mic.
 //!
 //! Under `test-support` a fake stands in for all of it (`fake`), so no test reaches a real
 //! microphone; with none installed there's no dictation.
 
 use async_channel::Sender;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 #[cfg(feature = "test-support")]
 pub mod fake;
@@ -40,6 +46,103 @@ macro_rules! backend {
 pub fn available() -> bool {
     backend!(available())
 }
+
+/// The mic button's tip: "Dictate", except where what's said goes online (a packaged Trek on
+/// Windows, whose dictation is Windows' online recognizer), which says so.
+pub fn tip() -> &'static str {
+    backend!(tip())
+}
+
+/// The tip where dictation runs on the computer itself.
+const DICTATE: &str = "Dictate";
+
+/// Where Trek keeps what it can download again (the app passes `trek_core::paths::local_data_dir`
+/// at launch: `%LOCALAPPDATA%`'s data folder on Windows, not the roaming one). Dictation that
+/// needs a speech model of its own (Windows' on-device engine) keeps it in `dictation/` there.
+pub fn keep_data_in(dir: fn() -> PathBuf) {
+    let _ = DATA.set(dir);
+}
+
+static DATA: OnceLock<fn() -> PathBuf> = OnceLock::new();
+
+/// Trek's local data folder, once the app has said where it is.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn data_dir() -> Option<PathBuf> {
+    DATA.get().map(|dir| dir())
+}
+
+/// Dictation's one-time setup while it's under way (Windows' on-device engine downloading its
+/// speech model, which the first ask waits for): how far it has got. `None` when there's nothing
+/// to wait for.
+pub fn getting_ready() -> Option<Progress> {
+    backend!(getting_ready())
+}
+
+/// How far a download has got, in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub done: u64,
+    pub total: u64,
+}
+
+impl Progress {
+    /// 0 to 1.
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 {
+            0.
+        } else {
+            (self.done.min(self.total) as f64 / self.total as f64) as f32
+        }
+    }
+
+    /// "31 of 141 MB", in Windows Explorer's megabytes (1,048,576 bytes), the part done rounded
+    /// down so it reads the total only once it's all there.
+    pub fn said(&self) -> String {
+        format!(
+            "{} of {} MB",
+            megabytes(self.done.min(self.total), true),
+            megabytes(self.total, false)
+        )
+    }
+}
+
+/// Whole megabytes (1,048,576 bytes): rounded down for a part `done`, to the nearest otherwise.
+pub fn megabytes(bytes: u64, done: bool) -> u64 {
+    const MB: u64 = 1 << 20;
+    if done {
+        bytes / MB
+    } else {
+        (bytes + MB / 2) / MB
+    }
+}
+
+/// The speech model dictation runs on this PC, where it needs one of its own (Windows'
+/// on-device engine; `None` on a Mac, or where Windows' own recognizer listens).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Model {
+    /// What it's called: "Whisper base (multilingual)".
+    pub name: &'static str,
+    pub bytes: u64,
+    /// Downloaded and in place.
+    pub on_disk: bool,
+    /// The folder it's kept in.
+    pub folder: Option<PathBuf>,
+}
+
+/// The speech model, as it stands now.
+pub fn model() -> Option<Model> {
+    backend!(model())
+}
+
+/// Delete the downloaded speech model (and any half-finished download of it); the next take
+/// downloads it again. A take under way keeps the copy it loaded.
+pub fn remove_model() -> Result<(), String> {
+    backend!(remove_model())
+}
+
+/// How long ✓ waits for a take's text before what was shown goes in, unless the take says
+/// otherwise (`Dictation::grace`).
+pub const GRACE: Duration = Duration::from_millis(1500);
 
 /// Where Trek can't take dictation but the system's own dictation can (Windows' Win+H): what a
 /// dimmed mic says instead. `None` where Trek can, or where there's nothing to point to.
@@ -139,6 +242,13 @@ impl Dictation {
     pub fn finish(&mut self) {
         self.0.finish()
     }
+
+    /// How long, after [`finish`](Self::finish), the take's text may take before what was shown
+    /// goes in instead: [`GRACE`], or longer for a recognizer that decodes the take once more on
+    /// this PC (Windows' on-device engine, as long as its passes have been taking).
+    pub fn grace(&self) -> Duration {
+        self.0.grace()
+    }
 }
 
 /// What a take says to the composer.
@@ -218,8 +328,25 @@ mod imp {
         None
     }
 
+    pub fn tip() -> &'static str {
+        crate::DICTATE
+    }
+
     pub fn open_system_dictation() -> bool {
         false
+    }
+
+    /// The Speech framework has its models already: nothing to download, nothing to keep.
+    pub fn getting_ready() -> Option<Progress> {
+        None
+    }
+
+    pub fn model() -> Option<Model> {
+        None
+    }
+
+    pub fn remove_model() -> Result<(), String> {
+        Ok(())
     }
 
     /// Nothing is opened before `start`, so a take given up while asking holds nothing.
@@ -387,6 +514,11 @@ mod imp {
                 },
                 _ => 0.,
             }
+        }
+
+        /// Speech settles a take's text quickly once its audio ends.
+        pub fn grace(&self) -> std::time::Duration {
+            GRACE
         }
 
         /// Stop the mic; the take's text follows as [`Heard::Final`] (or `Failed`).
@@ -680,6 +812,9 @@ mod imp {
             0.
         }
         pub fn finish(&mut self) {}
+        pub fn grace(&self) -> std::time::Duration {
+            GRACE
+        }
     }
 
     #[cfg(feature = "shots")]
@@ -693,6 +828,22 @@ mod imp {
 
     pub fn fallback() -> Option<&'static str> {
         None
+    }
+
+    pub fn tip() -> &'static str {
+        crate::DICTATE
+    }
+
+    pub fn getting_ready() -> Option<Progress> {
+        None
+    }
+
+    pub fn model() -> Option<Model> {
+        None
+    }
+
+    pub fn remove_model() -> Result<(), String> {
+        Ok(())
     }
 
     pub fn open_system_dictation() -> bool {
@@ -744,21 +895,38 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    /// Windows' backend, as Trek calls it, without opening anything: whatever this PC has, Trek's
-    /// own mic shows only where the recognizer is registered and Trek has package identity (the
-    /// one case Windows answers it in), and Windows' voice typing is offered everywhere else. A
-    /// test runs without identity.
+    /// Windows' backend, as Trek calls it, without opening anything: a test runs without package
+    /// identity, which Windows' own recognizer never answers, so Trek dictates on this PC
+    /// wherever its processor runs Whisper; Windows' voice typing is offered only where it
+    /// can't, and never opens while Trek's own mic is there. Nothing online to allow, either.
     #[cfg(windows)]
     #[test]
-    fn windows_shows_treks_mic_only_where_windows_answers_it() {
+    fn windows_dictates_on_this_pc_without_package_identity() {
+        use crate::Access;
         use crate::windows as backend;
         assert!(!backend::packaged(), "a test runs without package identity");
-        let ours = crate::windows::hints::recognizer_registered() && backend::packaged();
+        let ours = backend::local::can_run();
+        let engine = if ours {
+            backend::Engine::Local
+        } else {
+            backend::Engine::None
+        };
+        assert_eq!(backend::engine(), engine);
         assert_eq!(backend::available(), ours);
         assert_eq!(
             backend::fallback(),
             (!ours).then_some("Press Win+H to dictate")
         );
+        assert_eq!(backend::tip(), "Dictate");
+        if ours {
+            assert!(
+                !backend::open_system_dictation(),
+                "Win+H never opens by itself"
+            );
+            assert_eq!(backend::speech_access(), Access::Granted);
+            let model = backend::model().expect("the engine's model");
+            assert_eq!(model.bytes, backend::model::BASE.bytes);
+        }
     }
 
     #[test]

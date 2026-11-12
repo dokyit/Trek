@@ -1,0 +1,8 @@
+# Environment for every build of this workspace: local, CI and release alike.
+[env]
+# whisper.cpp (trek-dictate's on-device dictation on Windows) is built by its own CMake, which by
+# default tunes it for the machine building it: a release built on a runner with AVX-512 would
+# then stop with an illegal instruction on most laptops. Off, it's built for the x86-64 baseline
+# ggml enables without native tuning (SSE4.2, AVX, AVX2 with FMA and F16C, BMI2), which
+# `trek_dictate::windows::local::can_run` checks for before loading it.
+GGML_NATIVE = "OFF"

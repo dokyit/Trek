@@ -29,6 +29,10 @@ Third-party materials bundled in this repository:
   theirs is included. The element outline with refs for agents (crates/trek-mcp/src/phone.rs,
   ios/TrekDriver/Driver/Elements.swift) follows the shape of terminal-phone (Govijr,
   github.com/govijr/terminal-phone), MIT.
+* Dictation on Windows (crates/trek-dictate/src/windows) runs whisper.cpp (The ggml authors,
+  github.com/ggml-org/whisper.cpp), MIT, compiled into Trek through the whisper-rs crates
+  (Unlicense). The speech model it downloads the first time the mic is used is OpenAI's
+  Whisper base model (github.com/openai/whisper), MIT, as whisper.cpp publishes it.
 * Agent and provider logos under crates/trek-app/assets/logos and
   ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,

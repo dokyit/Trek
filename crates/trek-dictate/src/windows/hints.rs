@@ -79,6 +79,16 @@ impl Hints {
         Ok(())
     }
 
+    /// What stops dictation on this PC before the mic opens: the microphone's switches only. It
+    /// needs neither Windows' recognizer nor online speech recognition.
+    pub fn microphone(&self) -> Result<(), Problem> {
+        if denied(&self.microphone) || denied(&self.desktop_microphone) {
+            Err(Problem::MicrophoneOff)
+        } else {
+            Ok(())
+        }
+    }
+
     /// The microphone switches, as onboarding would show them: Windows asks desktop apps
     /// nothing, so it's allowed unless one is off.
     pub fn mic_access(&self) -> Access {
@@ -210,6 +220,28 @@ mod tests {
                 "{microphone} {desktop}"
             );
             assert_eq!(h.mic_access(), Access::Denied);
+        }
+    }
+
+    /// Dictation on this PC needs the microphone's switches on, and nothing of Windows' own
+    /// recognizer: not the recognizer, not online speech recognition, not its policy.
+    #[test]
+    fn on_this_pc_only_the_microphone_switches_count() {
+        let h = Hints {
+            recognizer: false,
+            online_speech: Some(0),
+            speech_policy: Some(0),
+            ..set_up()
+        };
+        assert_eq!(h.microphone(), Ok(()));
+        assert_eq!(Hints::default().microphone(), Ok(()), "unset isn't off");
+        for (microphone, desktop) in [("Deny", "Allow"), ("Allow", "Deny")] {
+            let h = Hints {
+                microphone: Some(microphone.into()),
+                desktop_microphone: Some(desktop.into()),
+                ..set_up()
+            };
+            assert_eq!(h.microphone(), Err(Problem::MicrophoneOff));
         }
     }
 

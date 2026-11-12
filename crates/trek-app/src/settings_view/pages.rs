@@ -182,6 +182,59 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Where dictation runs a speech model of its own (Windows, on the PC): which one, whether
+    /// it's downloaded, and a way to remove it (the mic downloads it again when it's next used).
+    fn dictation_row(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let model = crate::dictate::model()?;
+        let size = format!("{} MB", crate::dictate::megabytes(model.bytes, false));
+        let downloading = crate::dictate::getting_ready();
+        let description = match downloading {
+            Some(progress) => format!(
+                "Speech turns into text on this PC with {}. Its speech model is downloading: {}.",
+                model.name,
+                progress.said()
+            ),
+            None if model.on_disk => format!(
+                "Speech turns into text on this PC with {}, so what you say stays on it. Its speech model takes {size}; removed, it downloads again the next time you click the mic.",
+                model.name
+            ),
+            None => format!(
+                "Speech turns into text on this PC with {}, so what you say stays on it. Its speech model ({size}) downloads the first time you click the mic.",
+                model.name
+            ),
+        };
+        let control = if model.on_disk && downloading.is_none() {
+            Button::new("dictation-model-remove")
+                .small()
+                .outline()
+                .label("Remove")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Err(message) = crate::dictate::remove_model() {
+                        this.workspace.update(cx, |_, cx| {
+                            cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                                message,
+                                undo: None,
+                            })
+                        });
+                    }
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .id("dictation-model-state")
+                .text_size(to_rems(text::META))
+                .text_color(cx.theme().muted_foreground)
+                .child(if downloading.is_some() {
+                    "Downloading"
+                } else {
+                    "Not downloaded"
+                })
+                .into_any_element()
+        };
+        Some(Self::row("Dictation", description, control, cx))
+    }
+
     pub(super) fn general_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
         let agents = ws.ready_agents();
@@ -425,7 +478,10 @@ impl SettingsView {
                         self.usage_shown_picker(cx),
                         cx,
                     ),
-                ],
+                ]
+                .into_iter()
+                .chain(self.dictation_row(cx))
+                .collect(),
                 cx,
             ),
             Self::heading("Inbox", cx),

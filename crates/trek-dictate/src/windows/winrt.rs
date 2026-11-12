@@ -523,7 +523,7 @@ fn within<T: Send + 'static>(
 
 /// The default capture endpoint: the microphone Windows' recognizer listens with. Getting it
 /// doesn't open it.
-fn microphone() -> ::windows::core::Result<IMMDevice> {
+pub(super) fn microphone() -> ::windows::core::Result<IMMDevice> {
     // SAFETY: COM is initialized on the calling thread (this module's thread, or the probe's
     // main); the enumerator is released when it drops.
     unsafe {
@@ -533,7 +533,7 @@ fn microphone() -> ::windows::core::Result<IMMDevice> {
 }
 
 /// The default microphone is muted in Windows. One whose state can't be read counts as not.
-fn microphone_muted() -> bool {
+pub(super) fn microphone_muted() -> bool {
     microphone()
         // SAFETY: on the thread that made `device`; `Activate` makes the interface its type
         // names, with no activation parameters, and `GetMute` only reads.

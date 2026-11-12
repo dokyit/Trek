@@ -271,6 +271,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 pub fn run() {
     perf::start();
     logging::init();
+    // Dictation keeps a speech model of its own on Windows: `dictation/` in the local data folder,
+    // which a roaming profile doesn't carry between PCs (it downloads again wherever it's needed).
+    dictate::keep_data_in(trek_core::paths::local_data_dir);
 
     // On Windows, one Trek per data folder: a second launch hands its links and paths to the
     // running one and exits (macOS does this itself, through `on_open_urls` and `on_reopen`).

@@ -160,10 +160,11 @@
 "crates/trek-core/src/worktree.rs" = 2
 "crates/trek-core/tests/quiet_spawns.rs" = 1
 "crates/trek-core/tests/spawn_lint.rs" = 1
-"crates/trek-dictate/examples/winrt_probe.rs" = 5
-"crates/trek-dictate/src/lib.rs" = 5
+"crates/trek-dictate/examples/winrt_probe.rs" = 6
+"crates/trek-dictate/src/lib.rs" = 6
 "crates/trek-dictate/src/windows/hints.rs" = 3
-"crates/trek-dictate/src/windows/mod.rs" = 4
+"crates/trek-dictate/src/windows/mod.rs" = 7
+"crates/trek-dictate/src/windows/model.rs" = 4
 "crates/trek-format/src/lib.rs" = 4
 "crates/trek-integrations/src/lib.rs" = 11
 "crates/trek-ipc-ui/src/lib.rs" = 7

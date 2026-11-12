@@ -73,11 +73,9 @@ pub struct Words {
     /// photos), whatever the system opens that kind of file with on Windows.
     pub open_in_viewer: &'static str,
 
-    /// The mic button's tip. On Windows it says whose recognizer listens: Windows' online one.
-    pub dictate_tip: &'static str,
-    /// The system's own dictation, for where Trek's can't work (Windows without its speech
-    /// recognizer): a dimmed mic's tip, and the end of the sentence that says why. `None` where
-    /// Trek's always can (a Mac build that can't ask hides the mic instead).
+    /// The system's own dictation, for where Trek's can't work (a Windows PC whose processor
+    /// can't run Trek's): a dimmed mic's tip, and the end of the sentence that says why. `None`
+    /// where Trek's always can (a Mac build that can't ask hides the mic instead).
     pub dictate_fallback: Option<&'static str>,
 
     /// The Browser tool when the system's web view can't be made (WebView2 on Windows).
@@ -147,7 +145,6 @@ const MACOS: Words = Words {
 
     open_in_viewer: "Open in Preview",
 
-    dictate_tip: "Dictate",
     dictate_fallback: None,
 
     browser_unavailable: "The embedded browser isn't available on this system.",
@@ -212,7 +209,6 @@ const WINDOWS: Words = Words {
 
     open_in_viewer: "Open in default app",
 
-    dictate_tip: "Dictate with Windows' online speech recognition",
     dictate_fallback: Some("Press Win+H to dictate"),
 
     browser_unavailable: "The embedded browser needs Microsoft Edge WebView2, which couldn't be started on this PC.",
@@ -303,7 +299,6 @@ mod tests {
             computer_use_note,
             trash,
             open_in_viewer,
-            dictate_tip,
             dictate_fallback,
             browser_unavailable,
             quit_app,
@@ -348,7 +343,6 @@ mod tests {
             ("computer_use_note", computer_use_note.unwrap_or(nothing)),
             ("trash", trash),
             ("open_in_viewer", open_in_viewer),
-            ("dictate_tip", dictate_tip),
             ("dictate_fallback", dictate_fallback.unwrap_or(nothing)),
             ("browser_unavailable", browser_unavailable),
             ("quit_app", quit_app),
@@ -440,7 +434,6 @@ mod tests {
             "the Mac's Phone page says nothing of a firewall"
         );
         assert_eq!(w.open_in_viewer, "Open in Preview");
-        assert_eq!(w.dictate_tip, "Dictate");
         assert_eq!(
             w.dictate_fallback, None,
             "a Mac build that can't dictate hides the mic"
@@ -499,10 +492,6 @@ mod tests {
         assert_eq!(
             w.open_in_viewer, "Open in default app",
             "Windows has no Preview, or Quick Look"
-        );
-        assert_eq!(
-            w.dictate_tip,
-            "Dictate with Windows' online speech recognition"
         );
         assert_eq!(w.dictate_fallback, Some("Press Win+H to dictate"));
         assert_eq!(w.quit_app, "Exit Trek", "Windows apps exit; a Mac's quit");

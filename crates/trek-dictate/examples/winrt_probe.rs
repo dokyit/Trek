@@ -6,7 +6,10 @@
 //! Without `--listen` it only asks: the speech language Windows is set to, the languages it can
 //! dictate in, whether the recognizer can be made and the dictation constraint compiled, and the
 //! Settings switches Trek reads. It never opens the microphone. With `--listen` it then dictates
-//! through Trek's own backend, printing what it hears, until Enter (or 30 seconds).
+//! through Trek's own backend, printing what it hears, until Enter (or 30 seconds). Unpackaged,
+//! as this probe is, that's Whisper on this PC: its speech model (141 MB) downloads the first
+//! time into `dictation/` in `TREK_DATA_DIR`, or in a folder of the probe's own in the temp
+//! folder.
 
 #[cfg(not(windows))]
 fn main() {
@@ -126,12 +129,26 @@ fn dictate() {
     use trek_dictate::Heard;
     println!();
     println!("Listening through Trek's backend: speak, then press Enter to finish.");
+    trek_dictate::keep_data_in(data);
     let (reply, allowed) = async_channel::bounded(1);
     trek_dictate::ensure_permission(reply);
-    match allowed.recv_blocking() {
+    // The first time on this PC, the speech model downloads before the mic opens.
+    let answer = loop {
+        match allowed.try_recv() {
+            Ok(answer) => break Ok(answer),
+            Err(async_channel::TryRecvError::Closed) => break Err(()),
+            Err(async_channel::TryRecvError::Empty) => {
+                if let Some(progress) = trek_dictate::getting_ready() {
+                    println!("  getting ready: {}", progress.said());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    };
+    match answer {
         Ok(Ok(())) => {}
         Ok(Err(why)) => return println!("  not allowed: {why}"),
-        Err(_) => return println!("  no answer"),
+        Err(()) => return println!("  no answer"),
     }
     let (heard, results) = async_channel::unbounded();
     let mut take = match trek_dictate::start(heard) {
@@ -169,6 +186,14 @@ fn dictate() {
             }
         }
     }
+}
+
+/// Where the probe keeps a speech model: `TREK_DATA_DIR`, else a folder of its own.
+#[cfg(windows)]
+fn data() -> std::path::PathBuf {
+    std::env::var_os("TREK_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("trek-dictate-probe"))
 }
 
 #[cfg(windows)]

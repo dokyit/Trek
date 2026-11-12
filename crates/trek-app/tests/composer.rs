@@ -976,6 +976,55 @@ fn the_voice_toolbar_moves_through_its_states() {
         }
     );
 
+    // Getting ready (a speech model downloading): the row shows how far it's got; ✓ isn't there
+    // to press, the download goes on in the background, ✕ gives it up, a failure says why, and
+    // the take opens from it as from asking.
+    let mut v = Voice::default();
+    v.step(Event::Mic);
+    let third = trek_app::dictate::Progress {
+        done: 47 << 20,
+        total: 141 << 20,
+    };
+    assert_eq!(v.step(Event::Preparing(third)), Effect::default());
+    assert_eq!(v.phase, Phase::Preparing);
+    assert!(v.row() && !v.active(), "the row, over the text as typed");
+    assert_eq!(
+        v.preparing().as_deref(),
+        Some("Getting dictation ready: 47 of 141 MB")
+    );
+    assert_eq!(v.step(Event::Mic), Effect::default());
+    assert_eq!(v.step(Event::Confirm), Effect::default());
+    assert_eq!(v.step(Event::Background), Effect::default());
+    assert_eq!(
+        v.step(Event::Cancel),
+        Effect {
+            end: true,
+            abandon: true,
+            ..Default::default()
+        }
+    );
+    assert!(v.phase == Phase::Idle && !v.row() && v.preparing().is_none());
+    v.step(Event::Mic);
+    v.step(Event::Preparing(third));
+    assert_eq!(
+        v.step(Event::Failed("offline".into())),
+        Effect {
+            end: true,
+            toast: Some("offline".into()),
+            ..Default::default()
+        }
+    );
+    v.step(Event::Mic);
+    v.step(Event::Preparing(third));
+    v.step(started(true));
+    assert!(v.active() && v.progress.is_none());
+    assert_eq!(
+        v.step(Event::Preparing(third)),
+        Effect::default(),
+        "late progress changes nothing"
+    );
+    assert_eq!(v.phase, Phase::Listening);
+
     // The preview splices at the caret with a space either side as needed, on a char boundary.
     let mut v = Voice::default();
     v.step(Event::Started {
@@ -1104,16 +1153,16 @@ fn a_refused_ask_says_why_and_opens_nothing() {
     });
 }
 
-/// Where Trek can't take dictation itself (on Windows, a Trek without package identity, whose
-/// recognizer Windows never answers), the mic asks for the system's own dictation (Windows' voice
-/// typing, Win+H) into the composer; only where that can't open does it say why Trek's isn't
-/// there. Nothing of Trek's own opens either way.
+/// Where Trek can't take dictation itself (on Windows, a PC whose processor can't run Trek's
+/// on-device engine, and no package identity for Windows' own), the dimmed mic asks for the
+/// system's own dictation (Windows' voice typing, Win+H) into the composer, the last resort, and
+/// says why Trek's isn't there. Nothing of Trek's own opens.
 #[test]
 fn where_trek_cant_dictate_the_mic_opens_the_systems_dictation() {
     use trek_app::dictate::fake;
     run(async |cx| {
         let _windows = trek_app::words::pretend(true);
-        let why = "Windows speech recognition isn't available on this PC. Press Win+H to dictate.";
+        let why = "This PC's processor can't run Trek's dictation, which needs AVX2. Press Win+H to dictate with Windows' voice typing instead.";
         let dictation = fake::install();
         dictation.unavailable(why);
         let trek = open(cx);
@@ -1192,6 +1241,102 @@ fn a_take_given_up_lets_go_of_the_mic() {
         trek.click(cx, "dictate");
         assert!(dictation.listening());
         assert_eq!(voice_phase(&trek, cx), Phase::Listening);
+    });
+}
+
+/// The first take on a Windows PC waits for the speech model to download: the voice row comes up
+/// in the toolbar's place with how far it's got (the text stays as typed, and editable), ✕ gives
+/// it up (the download stops, nothing opens, no answer is waited for), and once the model is
+/// there the take opens as any other.
+#[test]
+fn a_take_waiting_for_its_speech_model_shows_the_download() {
+    use trek_app::composer::voice::{PREPARING, Phase};
+    use trek_app::dictate::{Heard, Progress, fake};
+    let model = |mb: u64| Progress {
+        done: mb << 20,
+        total: 147_951_465,
+    };
+    let said = |trek: &Trek, cx: &gpui_kit::TestAppContext| {
+        cx.read(|cx| trek.root.read(cx).composer.read(cx).voice_preparing_text())
+    };
+    run(async |cx| {
+        let dictation = fake::install();
+        let trek = open(cx);
+        trek.type_text(cx, "Note:");
+        dictation.hold();
+        dictation.downloading(Some(model(31)));
+        trek.click(cx, "dictate");
+        trek.render(cx);
+        assert_eq!(voice_phase(&trek, cx), Phase::Preparing);
+        assert_eq!(
+            said(&trek, cx).as_deref(),
+            Some("Getting dictation ready: 31 of 141 MB")
+        );
+        assert!(
+            trek.visible(cx, "voice-row")
+                && trek.visible(cx, "voice-preparing")
+                && trek.visible(cx, "voice-cancel")
+        );
+        assert!(
+            !trek.visible(cx, "send") && !trek.visible(cx, "dictate"),
+            "the row is in the toolbar's place"
+        );
+        assert!(!dictation.mic_open(), "nothing listens yet");
+
+        // It moves on as the download does, and the message is still what was typed.
+        dictation.downloading(Some(model(100)));
+        cx.executor().advance_clock(PREPARING);
+        trek.render(cx);
+        assert_eq!(
+            said(&trek, cx).as_deref(),
+            Some("Getting dictation ready: 100 of 141 MB")
+        );
+        assert_eq!(trek.composer_text(cx), "Note:");
+
+        // ✕ gives it up: the download stops, and the toolbar is back as it was.
+        trek.click(cx, "voice-cancel");
+        trek.render(cx);
+        assert_eq!(voice_phase(&trek, cx), Phase::Idle);
+        assert_eq!(dictation.abandoned(), 1);
+        assert_eq!(dictation.waiting(), 0, "its answer isn't waited for");
+        assert_eq!(
+            trek_app::dictate::getting_ready(),
+            None,
+            "the download stopped"
+        );
+        assert!(!dictation.mic_open());
+        assert!(trek.visible(cx, "dictate") && !trek.visible(cx, "voice-row"));
+        assert_eq!(trek.composer_text(cx), "Note:");
+
+        // Again, to the end: the model is in, the mic opens, and the take is like any other.
+        dictation.downloading(Some(model(141)));
+        trek.click(cx, "dictate");
+        trek.render(cx);
+        assert_eq!(
+            said(&trek, cx).as_deref(),
+            Some("Getting dictation ready: 141 of 141 MB")
+        );
+        dictation.downloading(Some(Progress {
+            done: 147_951_465,
+            total: 147_951_465,
+        }));
+        cx.executor().advance_clock(PREPARING);
+        trek.render(cx);
+        assert_eq!(
+            said(&trek, cx).as_deref(),
+            Some("Getting dictation ready…"),
+            "all of it there: loading"
+        );
+        dictation.downloading(None);
+        dictation.answer();
+        trek.render(cx);
+        assert_eq!(voice_phase(&trek, cx), Phase::Listening);
+        assert!(dictation.listening());
+        assert!(!trek.visible(cx, "voice-preparing"));
+        dictation.hear(Heard::Partial("make it so".into()));
+        trek.render(cx);
+        assert_eq!(voice_preview(&trek, cx).0, "Note: make it so");
+        assert_eq!(dictation.abandoned(), 1, "nothing more was given up");
     });
 }
 
