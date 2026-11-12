@@ -1,4 +1,6 @@
-# Environment for every build of this workspace: local, CI and release alike.
+# Environment for every build of this workspace: local, CI and release alike. whisper-rs-sys hands
+# every GGML_* and CMAKE_* variable to whisper.cpp's CMake, and nothing else reads these. Its build
+# script doesn't run again when they change: after editing them, `cargo clean -p whisper-rs-sys`.
 [env]
 # whisper.cpp (trek-dictate's on-device dictation on Windows) is built by its own CMake, which by
 # default tunes it for the machine building it: a release built on a runner with AVX-512 would
@@ -6,3 +8,11 @@
 # ggml enables without native tuning (SSE4.2, AVX, AVX2 with FMA and F16C, BMI2), which
 # `trek_dictate::windows::local::can_run` checks for before loading it.
 GGML_NATIVE = "OFF"
+# And with the static runtime (/MT), as Trek carries the Visual C++ runtime rather than asking
+# for its DLLs (script/static_vcruntime.rs): built with /MD, whisper.cpp's C++ made trek.exe
+# import msvcp140.dll, and Trek wouldn't start on a PC without the redistributable. These come
+# after the /MD the cmake crate puts in CMAKE_<LANG>_FLAGS, so they're what cl.exe goes by;
+# the rest is CMake's own Release flags. (Only Windows builds whisper.cpp: see trek-dictate's
+# Cargo.toml.)
+CMAKE_C_FLAGS_RELEASE = "/MT /O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "/MT /O2 /Ob2 /DNDEBUG"

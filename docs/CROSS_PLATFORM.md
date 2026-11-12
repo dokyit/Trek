@@ -106,9 +106,17 @@ same code, done there too, or recorded in the ledger.
   tested on the Mac's CI too. The same goes for `photos::menu` (the + menu's items) and the
   attach dialog asking GPUI whether mixed picking works (`can_select_mixed_files_and_dirs`).
 - **Backends behind a boundary, with a fake.** Dictation keeps the composer's API (`available`,
-  `ensure_permission`, `start`, `Dictation`). The Windows backend's event and phrase logic is in a
-  module compiled on every platform, so the Mac's CI tests it too. A test fake drives the voice UI
-  with no microphone.
+  `ensure_permission`, `start`, `Dictation`), whichever engine is behind it: Apple's Speech
+  framework, Whisper on a Windows PC, or Windows' own recognizer for a packaged Trek. What the
+  Windows engines decide (speech detection, how passes add up to the text, what a download's
+  response means, the sentences) is in modules compiled on every platform, so the Mac's CI tests
+  it too. A test fake drives the voice UI, the model's download included, with no microphone.
+- **Native code takes the runtime Trek ships with.** C or C++ built from source into the Windows
+  app (whisper.cpp) gets the static Visual C++ runtime (/MT, `.cargo/config.toml`), as Trek's own
+  programs link it (`script/static_vcruntime.rs`). Built the default way, it made `trek.exe` ask
+  for `msvcp140.dll`, and Trek wouldn't have started on a PC without the redistributable.
+  `tests/hardening.rs` (CI) and `release.ps1` now refuse a `trek.exe` that names any of the
+  redistributable's DLLs.
 - **Words per platform in `trek-words`.** Every visible sentence that differs by platform is held
   whole there, and a test checks that the Windows table names nothing of the Mac's (Finder, Dock,
   Keychain, …). `trek_words::pretend` lets a test read either platform's wording on any OS.
@@ -148,10 +156,11 @@ In order of how much each removes the problem, smallest first where that's close
 7. **Real-OS backend tests where the OS is the point** (ongoing). Windows dictation, Apple Mobile
    Device Service, WebView2's events, DWM: each backend keeps its pure logic in a module tested
    everywhere, and a thin OS layer with a few tests on its own runner.
-8. **Close the recorded gaps** (ongoing). The ledger is the backlog. The biggest for Windows
-   users are computer use by element (UI Automation), the browser's asks and popups (WebView2
-   events), HEIC photos (WIC), the system share sheet, banners that can start Trek, and an ARM64
-   build.
+8. **Close the recorded gaps** (ongoing). The ledger is the backlog. Computer use by element,
+   the browser's asks and popups, HEIC photos, the share window, banners that start Trek and
+   dictation on the PC have closed. The biggest left for Windows users are computer use in the
+   background, window snapshots through Windows.Graphics.Capture, signed builds, an ARM64 build,
+   updating while Trek is closed, and the iPhone app's own build, which needs a Mac.
 
 ## For someone changing Trek
 
@@ -165,6 +174,8 @@ In order of how much each removes the problem, smallest first where that's close
      and `PARITY.md` with the change.
 - Fixing a bug seen on one platform: check whether the other platform's path has it too, and say
   so in the pull request.
+- Adding C or C++ to the Windows build: give it the static runtime (/MT), as `.cargo/config.toml`
+  does for whisper.cpp. `tests/hardening.rs` fails otherwise.
 - `fluent::WINDOWS` is for how Windows looks: corners, strokes, colours. A behaviour change goes on
   both platforms, or into the ledger with why not, never behind the styling switch.
 - Words that name a platform's things go in `trek-words`, held whole when more than a word

@@ -10,15 +10,17 @@ use std::time::Duration;
 use trek_app::workspace::Route;
 
 /// `trek.exe` starts on a Windows without the Visual C++ redistributable, as it carries the runtime
-/// (`script/static_vcruntime.rs`). A program asking for the DLL names it in its imports.
+/// (`script/static_vcruntime.rs`): the C runtime, and the C++ one that whisper.cpp (dictation)
+/// would otherwise ask for (`.cargo/config.toml`), with no OpenMP. A program asking for one of the
+/// redistributable's DLLs names it in its imports.
 #[cfg(windows)]
 #[test]
 fn trek_carries_the_visual_c_runtime() {
     let exe = std::fs::read(env!("CARGO_BIN_EXE_trek")).unwrap();
-    let asks = exe
-        .windows(12)
-        .any(|w| w.eq_ignore_ascii_case(b"vcruntime140"));
-    assert!(!asks, "trek.exe needs vcruntime140.dll");
+    for dll in [&b"vcruntime140"[..], b"msvcp140", b"vcomp140"] {
+        let asks = exe.windows(dll.len()).any(|w| w.eq_ignore_ascii_case(dll));
+        assert!(!asks, "trek.exe needs {}.dll", String::from_utf8_lossy(dll));
+    }
 }
 
 fn editing(path: &PathBuf) -> impl Fn(&Route) -> bool + '_ {
