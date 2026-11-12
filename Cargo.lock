@@ -9599,7 +9599,7 @@ dependencies = [
 
 [[package]]
 name = "trek-private"
-version = "0.4.49"
+version = "0.4.50"
 dependencies = [
  "windows-sys 0.61.2",
 ]
