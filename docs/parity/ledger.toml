@@ -341,7 +341,7 @@ area = "Browser"
 what = "Browser extensions with their button, popup and options"
 macos = "yes"
 windows = "partial"
-note = "WebView2 runs unpacked extensions' content scripts only: no toolbar button, popup or options page. Those pages hosted in a Trek-made view would close it. The starters are all labelled \"Works here\" on Windows without a measured fit: Bitwarden, 1Password, Dark Reader and Grammarly need their popup (or native messaging), which WebView2 doesn't show (catalog.rs's fit())."
+note = "WebView2 runs unpacked extensions' content scripts only: no toolbar button, popup or options page. Those pages hosted in a Trek-made view would close it. The starters say so on Windows (catalog.rs's webview2 fit): Bitwarden and 1Password can't work (the vault is the popup), Grammarly, Dark Reader and uBlock Origin Lite partly."
 code = ["crates/trek-app/src/panels/browser_extensions.rs", "crates/trek-app/src/panels/browser_extensions/catalog.rs"]
 
 [[feature]]
