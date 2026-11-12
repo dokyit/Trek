@@ -70,6 +70,14 @@ jobs:
       - name: ffmpeg
         run: command -v ffmpeg || brew install ffmpeg
 
+      # The capture build in the log (its time, and any error) before the driver starts the app; the
+      # driver's own build then finds it done. It builds into target/shots: the shots feature
+      # changes the whole GPUI stack's fingerprints.
+      - name: Build the capture build
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/shots
+        run: cargo build --locked -p trek-app --features shots
+
       # Its output to a file: the app it starts would hold the step's own open otherwise. The mic
       # and Study's Talk show as in the installed app: an unbundled build hides them unless told
       # (`TREK_DICTATE=1`; a tap then says it's the installed app's to ask for the microphone).
@@ -99,6 +107,7 @@ jobs:
           name: live-macos
           path: |
             live-macos.md
+            start.json
             ${{ env.RUNTIME }}/shot/live-*.png
             ${{ env.RUNTIME }}/trek.log
           if-no-files-found: warn
@@ -162,6 +171,11 @@ jobs:
       - name: ffmpeg
         run: if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
 
+      # The capture build in the log (its time, and any error) before the driver starts the app; the
+      # driver's own build then finds it done.
+      - name: Build the capture build
+        run: cargo build --locked -p trek-app --features shots
+
       # Its output to a file: the app it starts would hold the step's own open otherwise.
       - name: Start the capture build
         run: |
@@ -192,6 +206,7 @@ jobs:
           name: live-windows
           path: |
             live-windows.md
+            start.json
             ${{ env.RUNTIME }}/shot/live-*.png
             ${{ env.RUNTIME }}/trek.log
           if-no-files-found: warn

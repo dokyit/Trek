@@ -393,6 +393,7 @@ pub fn checks(step: &str) -> bool {
         // `mark` only notes what is there.
         "console-windows" => words.next() == Some("new"),
         "browser" => words.next() == Some("expect"),
+        "banners" => words.next() == Some("new"),
         _ => false,
     }
 }
@@ -958,6 +959,7 @@ mod tests {
         assert!(checks("console-windows new 0") && !checks("console-windows mark"));
         assert!(checks("browser expect crashed loaded") && !checks("browser crash"));
         assert!(checks("native") && checks("self-contained"));
+        assert!(checks("banners new 1+") && !checks("banners mark"));
         assert!(!checks("route draft"));
     }
 

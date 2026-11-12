@@ -1744,7 +1744,7 @@ fn register_toast_identity() {
 const ATTENTION_TAG: &str = "trek-attention-";
 
 /// The system notification tag for an alert about `thread`; a newer alert replaces an older one.
-fn attention_tag(thread: &str) -> SharedString {
+pub(crate) fn attention_tag(thread: &str) -> SharedString {
     format!("{ATTENTION_TAG}{thread}").into()
 }
 

@@ -156,8 +156,10 @@ if-addrs = "0.13"
 trek-phone = { path = "../trek-phone" }
 # Shortcut files (IShellLinkW) pointed at a Trek that moved (src/shortcuts.rs). The taskbar button's overlay badge (ITaskbarList3), and snapshots: Snipping Tool's overlay (ShellExecuteW)
 # and the clipboard it leaves the image on. Photos agents can't read (HEIC) turned into PNG by
-# Windows' own codecs (WIC, src/attachments.rs). The version GPUI's Windows platform uses.
-windows = { version = "0.62", features = ["ApplicationModel_DataTransfer", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Windows' own codecs (WIC, src/attachments.rs). The version GPUI's Windows platform uses. The
+# notification center's list of banners, for the capture build's live check (UI_Notifications is
+# GPUI's already; Foundation_Collections is the list it comes as).
+windows = { version = "0.62", features = ["ApplicationModel_DataTransfer", "Foundation_Collections", "UI_Notifications", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # The browser panel's WebView2 calls wry doesn't wrap (history, error pages, CapturePreview): the
 # webview2-com and windows versions wry 0.53 is built on, so its ICoreWebView2 is the same type.
 webview2-com = "0.38"

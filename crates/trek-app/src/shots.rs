@@ -13,7 +13,7 @@
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
-//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded` (the page's process ended; the tab as the panel has it), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
+//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded` (the page's process ended; the tab as the panel has it), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
@@ -297,6 +297,23 @@ fn self_contained() -> anyhow::Result<()> {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     anyhow::bail!("self-contained: Windows and macOS only")
+}
+
+/// The banners `banners mark` noted, by tag.
+#[cfg(windows)]
+static BANNERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The tags of the banners in Windows' notification center under Trek's app id.
+#[cfg(windows)]
+fn banner_tags() -> anyhow::Result<Vec<String>> {
+    use windows::UI::Notifications::ToastNotificationManager;
+    let id = windows::core::HSTRING::from(crate::winsys::APP_ID);
+    let list = ToastNotificationManager::History()?.GetHistoryWithId(&id)?;
+    let mut tags = Vec::new();
+    for banner in list {
+        tags.push(banner.Tag()?.to_string());
+    }
+    Ok(tags)
 }
 
 /// What `programs` found last, for `programs-ended`: process ids and their programs.
@@ -2534,6 +2551,53 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     // is the system's or Trek's own.
     if verb == "self-contained" {
         return self_contained();
+    }
+    // `banners mark` | `banners new <n>[+]`: the banners in Windows' notification center under
+    // Trek's app id, as the system lists them (`ToastNotificationHistory`). `mark` notes those
+    // there now (an installed Trek's share the id); `new` counts the others, and takes them away
+    // again, so a check leaves none behind. A Mac's banners need the installed app.
+    if verb == "banners" {
+        anyhow::ensure!(
+            cfg!(windows),
+            "banners: Windows' alone (a Mac's banners need the installed app)"
+        );
+        #[cfg(windows)]
+        {
+            let now = banner_tags()?;
+            let mut marked = BANNERS.lock().unwrap_or_else(|e| e.into_inner());
+            match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
+                ("mark", _) => *marked = now,
+                ("new", n) => {
+                    let (n, more) = match n.trim().strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n.trim(), false),
+                    };
+                    let n: usize = n.parse()?;
+                    let new: Vec<String> =
+                        now.into_iter().filter(|t| !marked.contains(t)).collect();
+                    // Taken away by the Trek that posted them, as GPUI takes its own banners
+                    // away: Windows won't take one with no group away by its tag.
+                    let ids: Vec<String> =
+                        ws.read(cx).threads.iter().map(|t| t.id.clone()).collect();
+                    for id in &ids {
+                        cx.dismiss_system_notification(&crate::root::attention_tag(id));
+                    }
+                    let left = banner_tags()?.iter().filter(|t| new.contains(t)).count();
+                    anyhow::ensure!(
+                        left == 0,
+                        "banners: {left} of the check's still in the notification center"
+                    );
+                    anyhow::ensure!(
+                        new.len() == n || more && new.len() > n,
+                        "banners: {} new in the notification center, not {n}{}",
+                        new.len(),
+                        if more { " or more" } else { "" }
+                    );
+                }
+                _ => anyhow::bail!("banners mark | new <n>[+]"),
+            }
+        }
+        return Ok(());
     }
     // `programs <name> <n>[+]`: running processes of program `name` (`ping`, `sleep`; `.exe` and
     // case aside) anywhere under Trek's own, as the system lists them; remembered for

@@ -267,7 +267,8 @@ area = "Notifications"
 what = "A banner when a thread needs you or finishes; clicking it opens the thread"
 macos = "yes"
 windows = "yes"
-live_skip = "A banner is the system's, outside Trek's window: the notification tests."
+live_windows = ["route settings:notifications", "wait 300", "reveal notify-mode#1", "click notify-mode#1", "reveal notify-unfocused", "click notify-unfocused", "banners mark", "route project:{project}", "pace 1", "send mock:long 3s", "wait 600", "route basecamp", "wait idle 30000", "wait 2000", "pace 0", "banners new 1+", "route settings:notifications", "wait 300", "reveal notify-unfocused", "click notify-unfocused", "reveal notify-mode#3", "click notify-mode#3"]
+live_skip = "On a Mac a banner needs the installed app: an unbundled build has no notification center to post to (the notification tests cover it)."
 how = { macos = "The notification center.", windows = "Toasts under the AppUserModelID Trek registers, protocol-activated with the thread's trek:// link: a click starts Trek if it has quit, or hands the link to the running one." }
 code = ["crates/trek-app/src/root.rs", "vendor/gpui-pre-windows/src/system_notifications.rs"]
 tests = ["crates/trek-app/tests/alerts.rs"]
