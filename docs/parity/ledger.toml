@@ -728,10 +728,9 @@ tests = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets
 id = "contrast-fixes"
 area = "App"
 what = "Chips, segmented controls, the completion ghost and the CI graph's labels are legible, Night included"
-macos = "partial"
+macos = "yes"
 windows = "yes"
-how = { macos = "The kit's own colours.", windows = "Legibility fixes made for Windows, behind fluent::WINDOWS." }
-note = "Fixes only Windows got: a chip's hover that in Night all but vanishes (composer/look.rs), Night's selected segment darker than its track (look.rs), the completion ghost a caret-width off (pickers.rs), and the CI graph's labels held to 4.5:1 (pr_card.rs). Each is a behaviour fix behind the styling switch: lift the condition once design agrees."
+how = { macos = "The same fixes, now on both: a chip's hover and pressed fills (the kit's ghost hover all but vanished in Night), Night's selected segment lighter than its track, the completion ghost against the typed text (not a caret-width past it), and the CI graph's grey text held to 4.5:1.", windows = "The same; made for Windows first, behind fluent::WINDOWS, which they no longer are." }
 code = ["crates/trek-app/src/composer/look.rs", "crates/trek-app/src/composer/pickers.rs", "crates/trek-app/src/pr_card.rs"]
 
 [[feature]]
