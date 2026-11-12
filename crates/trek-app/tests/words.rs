@@ -58,7 +58,7 @@ fn windows_pages_say_windows() {
         assert!(
             has(
                 &appearance,
-                "Shown on the taskbar and in Alt+Tab while Trek runs. Trek's file and its shortcuts keep Ember."
+                "Shown on the taskbar and in Alt+Tab while Trek runs. Trek's file and its shortcuts keep Night."
             ),
             "{appearance:?}"
         );
@@ -448,7 +448,7 @@ fn a_mac_reads_as_it_always_has() {
         assert!(
             has(
                 &appearance,
-                "Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed."
+                "Shown in the Dock while Trek runs. Finder and the Dock keep Night when Trek is closed."
             ),
             "{appearance:?}"
         );

@@ -2,14 +2,14 @@
 """Render Trek's Windows icons from the brand SVGs (the Windows twin of the icon steps in bundle.sh).
 
 Writes:
-  assets/brand/trek.ico                                 the app icon (ember, as the Mac bundle's
+  assets/brand/trek.ico                                 the app icon (night, as the Mac bundle's
                                                         .icns), 16 20 24 32 48 64 128 256 px,
                                                         embedded in trek.exe by crates/trek-app/build.rs;
                                                         16 and 32 px from the art drawn for those sizes
-                                                        (trek-icon-ember-16.svg, -32.svg), as the .icns
-  assets/brand/trek-night.ico, trek-glass.ico           the other two Appearance › App icon choices,
+                                                        (trek-icon-night-16.svg, -32.svg), as the .icns
+  assets/brand/trek-paper.ico, trek-glass.ico           the other two Appearance › App icon choices,
                                                         same sizes, embedded as resources 2 and 3
-                                                        (src/app_icon.rs has the ids)
+                                                        (winsys::icon_resource has the ids)
   crates/trek-assets/assets/brand/tray/{state}-{theme}-{px}.png
                                                         the system tray glyphs, state is idle |
                                                         working | attention, px is 16 20 24 32 (the
@@ -31,14 +31,14 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 BRAND = os.path.join(ROOT, "assets", "brand")
 TRAY_OUT = os.path.join(ROOT, "crates", "trek-assets", "assets", "brand", "tray")
 ICO_SIZES = [16, 20, 24, 32, 48, 64, 128, 256]
-# Sizes with art of their own (assets/brand/trek_icon.py's small sizes: the title bar's small mark
-# on the tile, on whole pixels), where the full art blurs into a smudge. The rest scale the full art.
+# Sizes with art of their own (assets/brand/trek_icon.py's small sizes: the mountain drawn on
+# whole pixels, without its trail at 16 px), where the full art blurs. The rest scale the full art.
 SMALL_ART = [16, 32]
 TRAY_SIZES = [16, 20, 24, 32]
 STATES = ["idle", "working", "attention"]
-# Ember is the Mac bundle's icon (script/bundle.sh: Trek orange with porcelain stones) and the
-# exe's own; night and glass are the other two Appearance can put on the windows while Trek runs.
-APP_ICONS = [("trek.ico", "trek-icon-ember.svg"), ("trek-night.ico", "trek-icon-night.svg"), ("trek-glass.ico", "trek-icon-glass.svg")]
+# Night is the Mac bundle's icon (script/bundle.sh: the mountain on charcoal) and the exe's own;
+# paper and glass are the other two Appearance can put on the windows while Trek runs.
+APP_ICONS = [("trek.ico", "trek-icon-night.svg"), ("trek-paper.ico", "trek-icon-paper.svg"), ("trek-glass.ico", "trek-icon-glass.svg")]
 
 
 def resvg(svg, out, px):
@@ -95,7 +95,7 @@ def main():
                     resvg(svg, os.path.join(TRAY_OUT, f"{state}-{theme}-{px}.png"), px)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    print("wrote assets/brand/trek.ico, trek-night.ico, trek-glass.ico and", os.path.relpath(TRAY_OUT, ROOT))
+    print("wrote assets/brand/trek.ico, trek-paper.ico, trek-glass.ico and", os.path.relpath(TRAY_OUT, ROOT))
 
 
 if __name__ == "__main__":

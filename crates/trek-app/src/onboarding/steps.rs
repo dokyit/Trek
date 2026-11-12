@@ -16,7 +16,8 @@ use std::cell::Cell;
 use trek_core::HandHolding;
 use trek_core::settings::{AppIcon, ThemeChoice};
 
-/// The intro's length: the hiker walks up to the cairn while it stacks, then the words come.
+/// The intro's length: the hiker walks up to the mountain while it draws itself, then the words
+/// come.
 const INTRO: Duration = Duration::from_millis(2200);
 
 thread_local! {
@@ -39,7 +40,7 @@ pub(super) fn drag_tile(id: impl Into<ElementId>, size: f32, cx: &App) -> AnyEle
         .cursor(CursorStyle::OpenHand)
         .hover(|s| s.bg(theme.foreground.opacity(0.05)))
         .child(
-            img(crate::system::app_icon_image(AppIcon::Ember))
+            img(crate::system::app_icon_image(AppIcon::default()))
                 .size_full()
                 .object_fit(ObjectFit::Contain),
         )
@@ -340,7 +341,7 @@ fn span(t: f32, from: f32, to: f32) -> f32 {
 }
 
 impl Onboarding {
-    /// The intro: the hiker walks the trail up to the cairn as it stacks itself, then the
+    /// The intro: the hiker walks the trail up to the mountain as it draws itself, then the
     /// welcome fades up. With reduce motion, all of it is simply there.
     pub(super) fn welcome(
         &mut self,
@@ -359,7 +360,7 @@ impl Onboarding {
         }
         let walk = span(t, 0., 0.7);
         // The last stretch of the trail, at a walk: it sets off, takes a few strides and slows
-        // to a stop by the cairn. (The whole trail in this time would be a sprint.)
+        // to a stop by the mountain. (The whole trail in this time would be a sprint.)
         let eased = walk * walk * (3. - 2. * walk);
         let hiker = crate::mascot::crossing(0.65 + 0.35 * eased, walk > 0. && walk < 1., cx);
         let words = span(t, 0.45, 0.8);
@@ -399,8 +400,8 @@ impl Onboarding {
                     .items_end()
                     .gap(px(6.))
                     .child(div().w(px(220.)).child(hiker))
-                    .child(crate::brand::cairn_draw(
-                        SharedString::from(format!("ob-cairn-{}", self.run)),
+                    .child(crate::brand::mountain_draw(
+                        SharedString::from(format!("ob-mark-{}", self.run)),
                         px(72.),
                         reduce,
                     )),
@@ -1625,8 +1626,8 @@ impl Onboarding {
             })
             .collect();
         v_flex()
-            .child(div().pb(px(20.)).child(crate::brand::cairn_draw(
-                SharedString::from(format!("ob-ready-cairn-{}", self.run)),
+            .child(div().pb(px(20.)).child(crate::brand::mountain_draw(
+                SharedString::from(format!("ob-ready-mark-{}", self.run)),
                 px(56.),
                 reduce,
             )))

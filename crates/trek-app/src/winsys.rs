@@ -148,14 +148,14 @@ pub fn set_overlay_badge(hwnd: isize, count: usize) -> bool {
 }
 
 /// The id of the icon resource in `trek.exe` for `icon`. `build.rs` embeds the three `.ico`s
-/// under these numbers (ember stays 1: GPUI's window class and Explorer read the exe's icon
-/// from there), and a test keeps the two lists the same.
+/// under these numbers (Night, the default, is 1: GPUI's window class and Explorer read the
+/// exe's icon from there), and a test keeps the two lists the same.
 #[cfg(any(windows, test, feature = "test-support"))]
 pub fn icon_resource(icon: trek_core::settings::AppIcon) -> u16 {
     use trek_core::settings::AppIcon;
     match icon {
-        AppIcon::Ember => 1,
-        AppIcon::Night => 2,
+        AppIcon::Night => 1,
+        AppIcon::Paper => 2,
         AppIcon::Glass => 3,
     }
 }
@@ -878,15 +878,15 @@ mod tests {
 
     /// What `build.rs` embeds, as it spells it: (resource id, file in assets/brand).
     const EMBEDDED: [(AppIcon, &str); 3] = [
-        (AppIcon::Ember, "trek.ico"),
-        (AppIcon::Night, "trek-night.ico"),
+        (AppIcon::Night, "trek.ico"),
+        (AppIcon::Paper, "trek-paper.ico"),
         (AppIcon::Glass, "trek-glass.ico"),
     ];
 
     #[test]
-    fn each_app_icon_has_its_own_resource_and_ember_stays_the_exes_icon() {
+    fn each_app_icon_has_its_own_resource_and_night_is_the_exes_icon() {
         // Resource 1 is what GPUI's window class loads at start and Explorer shows for the exe.
-        assert_eq!(icon_resource(AppIcon::Ember), 1);
+        assert_eq!(icon_resource(AppIcon::Night), 1);
         let ids: Vec<u16> = EMBEDDED
             .iter()
             .map(|(icon, _)| icon_resource(*icon))

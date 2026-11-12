@@ -59,9 +59,9 @@ if [[ $(cat "$ICON_CACHE/stamp" 2>/dev/null) != "$ICON_KEY" \
   ICONSET=$(mktemp -d)/AppIcon.iconset; mkdir -p "$ICONSET"
   pids=()
   # The art for a frame of $1 px: 16 and 32 px (16 pt at 1x and 2x, 32 pt at 1x) are drawn for
-  # their size, the title bar's small mark on the tile (trek_icon.py), as the full art blurs into a
-  # smudge there. From 64 px up it's the full art.
-  art() { case $1 in 16|32) print -r -- assets/brand/trek-icon-ember-$1.svg ;; *) print -r -- assets/brand/trek-icon-ember.svg ;; esac }
+  # their size, the mountain on whole pixels (trek_icon.py), as the full art blurs there. From
+  # 64 px up it's the full art. Night is the bundle's icon; the others go up at run time.
+  art() { case $1 in 16|32) print -r -- assets/brand/trek-icon-night-$1.svg ;; *) print -r -- assets/brand/trek-icon-night.svg ;; esac }
   for s in 16 32 128 256 512; do
     resvg -w $s -h $s "$(art $s)" "$ICONSET/icon_${s}x${s}.png" & pids+=($!)
     resvg -w $((s*2)) -h $((s*2)) "$(art $((s*2)))" "$ICONSET/icon_${s}x${s}@2x.png" & pids+=($!)

@@ -493,7 +493,7 @@ area = "App"
 what = "Choose Trek's app icon"
 macos = "yes"
 windows = "yes"
-how = { macos = "The Dock tile while Trek runs; Finder and the Dock keep Ember when it's closed.", windows = "The windows' icons (taskbar, Alt+Tab) while Trek runs; Trek's file and its shortcuts keep Ember." }
+how = { macos = "The Dock tile while Trek runs; Finder and the Dock keep Night when it's closed.", windows = "The windows' icons (taskbar, Alt+Tab) while Trek runs; Trek's file and its shortcuts keep Night." }
 code = ["crates/trek-app/src/system.rs"]
 
 [[feature]]

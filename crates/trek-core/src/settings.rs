@@ -952,7 +952,7 @@ pub struct Appearance {
     /// (`keep_windows_opaque`), so what's chosen from here on stays.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub windows_opaque_applied: bool,
-    /// The Dock icon: the cairn on Trek orange, or one of its alternatives.
+    /// The Dock icon: the mountain on Night's charcoal, or one of its alternatives.
     pub app_icon: AppIcon,
 }
 
@@ -960,12 +960,15 @@ pub struct Appearance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppIcon {
-    /// Porcelain stones on a Trek-orange tile: the icon in the app bundle.
+    /// The mountain in Trek's orange on the Night theme's charcoal: the icon in the app bundle.
+    /// `ember` is the default of versions before the mountain (stones on an orange tile, which
+    /// is no more): a file that says so gets today's default.
     #[default]
-    Ember,
-    /// Trek-orange stones on the Night theme's charcoal.
+    #[serde(alias = "ember")]
     Night,
-    /// Frosted glass stones over a sunset.
+    /// The mountain on the Paper theme's cream.
+    Paper,
+    /// A frosted glass mountain over a sunset.
     Glass,
 }
 
@@ -1030,7 +1033,7 @@ impl Default for Appearance {
             glass: false,
             glass_tint: 0.6,
             windows_opaque_applied: cfg!(windows),
-            app_icon: AppIcon::Ember,
+            app_icon: AppIcon::Night,
         }
     }
 }
@@ -1697,6 +1700,29 @@ mod tests {
                 .shown,
             Some(vec![])
         );
+    }
+
+    #[test]
+    fn an_app_icon_from_before_the_mountain_is_todays_default() {
+        // `ember` was the default (stones on an orange tile), an icon that is no more.
+        let old: Settings = toml::from_str("[appearance]\napp_icon = \"ember\"\n").unwrap();
+        assert_eq!(old.appearance.app_icon, AppIcon::Night);
+        assert_eq!(AppIcon::default(), AppIcon::Night);
+        assert_eq!(Settings::default().appearance.app_icon, AppIcon::Night);
+        // It's written back under today's name.
+        let text = toml::to_string_pretty(&old).unwrap();
+        assert!(text.contains("app_icon = \"night\""), "{text}");
+        for (name, icon) in [
+            ("night", AppIcon::Night),
+            ("paper", AppIcon::Paper),
+            ("glass", AppIcon::Glass),
+        ] {
+            let s: Settings =
+                toml::from_str(&format!("[appearance]\napp_icon = \"{name}\"\n")).unwrap();
+            assert_eq!(s.appearance.app_icon, icon);
+            let text = toml::to_string_pretty(&s).unwrap();
+            assert!(text.contains(&format!("app_icon = \"{name}\"")), "{text}");
+        }
     }
 
     #[test]
