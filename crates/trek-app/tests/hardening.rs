@@ -11,8 +11,8 @@ use trek_app::workspace::Route;
 
 /// `trek.exe` starts on a Windows without the Visual C++ redistributable, as it carries the runtime
 /// (`script/static_vcruntime.rs`): the C runtime, and the C++ one that whisper.cpp (dictation)
-/// would otherwise ask for (`.cargo/config.toml`), with no OpenMP. A program asking for one of the
-/// redistributable's DLLs names it in its imports.
+/// would otherwise ask for (`vendor/whisper-rs-sys/build.rs`), with no OpenMP. A program asking
+/// for one of the redistributable's DLLs names it in its imports.
 #[cfg(windows)]
 #[test]
 fn trek_carries_the_visual_c_runtime() {

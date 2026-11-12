@@ -1,7 +1,8 @@
 //! Whisper (whisper.cpp, through whisper-rs) as the on-device engine runs it: the model loaded
 //! (`Model`), and a pass over part of a take decoded into phrases and where they fall in it
 //! (`Decoder::decode`). x86-64 only: whisper.cpp is built there for the AVX2 baseline (see
-//! `.cargo/config.toml`), and `can_run` checks the processor has it before anything loads.
+//! `vendor/whisper-rs-sys/build.rs`), and `can_run` checks the processor has it before anything
+//! loads.
 
 use super::transcript::Segment;
 use std::path::Path;

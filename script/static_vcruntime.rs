@@ -6,8 +6,8 @@
 /// has. Done here, not with `+crt-static` in `.cargo/config.toml`: CI and the release set
 /// `RUSTFLAGS`, which makes Cargo ignore a config file's flags, and the release would ship without
 /// it. `release.ps1` and `tests/hardening.rs` check that it took. C++ built in by its own build
-/// (whisper.cpp, for dictation) must take the static runtime too: `.cargo/config.toml` gives its
-/// CMake /MT, so it asks for no msvcp140.dll.
+/// (whisper.cpp, for dictation) must take the static runtime too: Trek's copy of whisper-rs-sys
+/// (`vendor/whisper-rs-sys/build.rs`) compiles it with /MT, so it asks for no msvcp140.dll.
 ///
 /// Every program the package links gets it, its tests and examples as well as its binaries: the
 /// tests run with the runtime Trek ships with, and whisper.cpp's static runtime doesn't meet

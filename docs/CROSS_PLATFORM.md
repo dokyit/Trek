@@ -112,11 +112,16 @@ same code, done there too, or recorded in the ledger.
   response means, the sentences) is in modules compiled on every platform, so the Mac's CI tests
   it too. A test fake drives the voice UI, the model's download included, with no microphone.
 - **Native code takes the runtime Trek ships with.** C or C++ built from source into the Windows
-  app (whisper.cpp) gets the static Visual C++ runtime (/MT, `.cargo/config.toml`), as Trek's own
-  programs link it (`script/static_vcruntime.rs`). Built the default way, it made `trek.exe` ask
-  for `msvcp140.dll`, and Trek wouldn't have started on a PC without the redistributable.
-  `tests/hardening.rs` (CI) and `release.ps1` now refuse a `trek.exe` that names any of the
-  redistributable's DLLs.
+  app (whisper.cpp) gets the static Visual C++ runtime (/MT, `vendor/whisper-rs-sys/build.rs`),
+  as Trek's own programs link it (`script/static_vcruntime.rs`). Built the default way, it made
+  `trek.exe` ask for `msvcp140.dll`, and Trek wouldn't have started on a PC without the
+  redistributable. `tests/hardening.rs` (CI) and `release.ps1` now refuse a `trek.exe` that names
+  any of the redistributable's DLLs.
+- **A native build adds one folder to the link path, not its build tree.** On Windows, Cargo puts
+  every search path a build script names on PATH for each program `cargo test` and `cargo run`
+  start. whisper-rs-sys named all 111 folders of CMake's build tree, some 11,000 characters, and
+  `cmd.exe` stopped finding commands in tests that start it: the Windows CI jobs failed while
+  every test on its own passed. Trek's copy names only where the libraries are installed.
 - **Words per platform in `trek-words`.** Every visible sentence that differs by platform is held
   whole there, and a test checks that the Windows table names nothing of the Mac's (Finder, Dock,
   Keychain, …). `trek_words::pretend` lets a test read either platform's wording on any OS.
@@ -174,8 +179,9 @@ In order of how much each removes the problem, smallest first where that's close
      and `PARITY.md` with the change.
 - Fixing a bug seen on one platform: check whether the other platform's path has it too, and say
   so in the pull request.
-- Adding C or C++ to the Windows build: give it the static runtime (/MT), as `.cargo/config.toml`
-  does for whisper.cpp. `tests/hardening.rs` fails otherwise.
+- Adding C or C++ to the Windows build: give it the static runtime (/MT), as
+  `vendor/whisper-rs-sys/build.rs` does for whisper.cpp (`tests/hardening.rs` fails otherwise),
+  and keep its build script's link-search paths to the folders its libraries are in.
 - `fluent::WINDOWS` is for how Windows looks: corners, strokes, colours. A behaviour change goes on
   both platforms, or into the ledger with why not, never behind the styling switch.
 - Words that name a platform's things go in `trek-words`, held whole when more than a word
