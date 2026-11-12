@@ -1084,6 +1084,32 @@ mod tests {
         }
     }
 
+    /// The Mac's grace, as the Windows test below has its own: a group that ignores TERM (a script
+    /// that traps it; an agent still saving its session) is given the grace, then killed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn end_all_gives_a_group_that_ignores_term_its_grace_then_kills_it() {
+        use std::os::unix::process::CommandExt as _;
+        let _registry = registry();
+        // `sleep` inherits the ignored TERM from the shell, so only the KILL ends either.
+        let mut stubborn = std::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        register(stubborn.id() as i32);
+        let grace = Duration::from_millis(800);
+        let started = std::time::Instant::now();
+        end_all(grace);
+        let took = started.elapsed();
+        assert!(!stubborn.wait().unwrap().success(), "killed");
+        assert!(
+            took >= grace - Duration::from_millis(50) && took < grace + Duration::from_secs(3),
+            "the grace, then the kill: {took:?}"
+        );
+        assert!(live().is_empty());
+    }
+
     #[cfg(windows)]
     #[test]
     fn end_all_gives_groups_their_grace_before_ending_them() {
