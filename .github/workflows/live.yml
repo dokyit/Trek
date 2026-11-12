@@ -176,6 +176,51 @@ jobs:
       - name: Build the capture build
         run: cargo build --locked -p trek-app --features shots
 
+      # The runner's screen is 1024×768, where the app's 1280-wide window can't fit: Trek narrows
+      # and folds away the hub column (it needs 916 points beside the sidebar), and the checks
+      # that look in it fail. A screen the size people use, the first mode the display takes.
+      - name: Screen
+        continue-on-error: true
+        run: |
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class TrekScreen {
+              [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+              public struct DEVMODE {
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+                  public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+                  public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+                  public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+                  public short dmLogPixels;
+                  public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+                  public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2;
+                  public int dmPanningWidth, dmPanningHeight;
+              }
+              [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+              static extern int EnumDisplaySettings(string device, int mode, ref DEVMODE dm);
+              [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+              static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+              public static int Set(int width, int height) {
+                  var dm = new DEVMODE();
+                  dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+                  if (EnumDisplaySettings(null, -1, ref dm) == 0) return -100;
+                  dm.dmPelsWidth = width;
+                  dm.dmPelsHeight = height;
+                  dm.dmFields = 0x80000 | 0x100000;
+                  return ChangeDisplaySettings(ref dm, 0);
+              }
+          }
+          '@
+          foreach ($mode in @(@(1920, 1080), @(1680, 1050), @(1600, 900), @(1440, 900), @(1280, 1024))) {
+              $result = [TrekScreen]::Set($mode[0], $mode[1])
+              "$($mode[0])x$($mode[1]): $result"
+              if ($result -eq 0) { break }
+          }
+          Add-Type -AssemblyName System.Windows.Forms
+          "The screen: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds)"
+
       # The driver starts the app through the shell, handing it none of the step's handles, so the
       # step ends once the app answers (an app holding the step's output pipe kept it waiting
       # until the job ran out of time). Its JSON goes to a file, kept with the artifacts.
@@ -200,6 +245,10 @@ jobs:
         run: |
           if (Test-Path live-windows.md) { Get-Content live-windows.md | Add-Content $env:GITHUB_STEP_SUMMARY }
           pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 stop *> $null
+          # Into the workspace: the runtime is on C: and the checkout on D:, and an artifact's files
+          # need a folder in common.
+          New-Item -ItemType Directory -Force live-files | Out-Null
+          if ($env:RUNTIME) { Copy-Item "$env:RUNTIME/shot/live-*.png", "$env:RUNTIME/trek.log" live-files -ErrorAction SilentlyContinue }
           exit 0
 
       - uses: actions/upload-artifact@v4
@@ -209,8 +258,7 @@ jobs:
           path: |
             live-windows.md
             start.json
-            ${{ env.RUNTIME }}/shot/live-*.png
-            ${{ env.RUNTIME }}/trek.log
+            live-files/
           if-no-files-found: warn
 
       - name: Cache contents
