@@ -196,7 +196,7 @@ function Send-Soft($State, [string[]]$Lines, [double]$Timeout) {
     Wait-Done $State $Timeout
 }
 
-function Build-Shots {
+function Build-Shots([scriptblock]$BeforeInstall) {
     $started = Get-Date
     $env:CARGO_TARGET_DIR = $TargetDir
     Push-Location $Root
@@ -214,6 +214,9 @@ function Build-Shots {
     if (-not $exe.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) { Die 'Cargo reported a Trek executable outside the controlled target directory.' $null $exe }
     # Copy into the runtime dir: on a shared CARGO_TARGET_DIR another worktree's build can
     # overwrite debug\trek.exe between the build and the launch (same reason as TREK_BIN).
+    # Windows won't replace an .exe that's running, as macOS would: a caller whose app may be
+    # running from it stops it here, once there's a build to put in its place.
+    if ($BeforeInstall) { & $BeforeInstall }
     New-Item -ItemType Directory -Force (Split-Path $BinPath -Parent) | Out-Null
     Copy-Item $exe $BinPath -Force
     $sha = (Get-FileHash $BinPath -Algorithm SHA256).Hash.ToLower()
@@ -326,11 +329,11 @@ function Invoke-Check([bool]$Quick) {
             }
         }
         $wasRunning = (Get-Status).running
-        $b = Build-Shots
-        $steps.Add(@{ name = 'shots build'; passed = $true; seconds = $b.seconds; binary = $b.binary })
         # Smoke exactly the executable just built, preserving the caller's running/stopped
-        # state but never validating an older process that happened to be open.
-        if ($wasRunning) { Stop-Trek | Out-Null }
+        # state but never validating an older process that happened to be open. A running app
+        # stops before the new build is copied over its executable.
+        $b = Build-Shots { if ($wasRunning) { Stop-Trek | Out-Null } }
+        $steps.Add(@{ name = 'shots build'; passed = $true; seconds = $b.seconds; binary = $b.binary })
         Start-Trek $false '1280x820' | Out-Null
         try {
             $state = Read-State
