@@ -1755,4 +1755,33 @@ mod tests {
         );
         assert!(claude.billing.is_some() && codex.billing.is_some());
     }
+
+    /// Against the installed Claude Code and Codex: the models each lists and the name the picker
+    /// gives each, none of them a bare family ("Opus") or a raw id. Sends no prompt.
+    /// `cargo test -p trek-agents models_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn models_live() {
+        let dir = std::env::temp_dir();
+        for (agent, st) in [
+            (
+                "claude",
+                trek_core::runtime().block_on(claude_commands(&dir)),
+            ),
+            ("codex", trek_core::runtime().block_on(codex_commands(&dir))),
+        ] {
+            let st = st.unwrap();
+            assert!(!st.models.is_empty(), "{agent}: no models ({:?})", st.error);
+            for m in &st.models {
+                println!("{agent}: {:<32} → {}", m.id, m.name);
+                let bare = ["opus", "fable", "sonnet", "haiku"]
+                    .iter()
+                    .any(|f| m.name.eq_ignore_ascii_case(f));
+                assert!(
+                    !bare && m.name != m.id || m.id == "default",
+                    "{agent}: {m:?}"
+                );
+            }
+        }
+    }
 }
