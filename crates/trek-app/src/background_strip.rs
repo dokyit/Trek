@@ -730,7 +730,7 @@ impl RenderOnce for Trigger {
 
 impl Render for BackgroundStrip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("BackgroundStrip");
         let Some(shown) = self.shown.clone() else {
             return div().into_any_element();

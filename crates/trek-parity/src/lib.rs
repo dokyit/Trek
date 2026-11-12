@@ -394,6 +394,8 @@ pub fn checks(step: &str) -> bool {
         "console-windows" => words.next() == Some("new"),
         "browser" => words.next() == Some("expect"),
         "banners" => words.next() == Some("new"),
+        "renders" => words.next().is_some_and(|w| w != "mark"),
+        "within" | "signed-out" => true,
         _ => false,
     }
 }
@@ -960,6 +962,9 @@ mod tests {
         assert!(checks("browser expect crashed loaded") && !checks("browser crash"));
         assert!(checks("native") && checks("self-contained"));
         assert!(checks("banners new 1+") && !checks("banners mark"));
+        assert!(checks("renders WorkingBar 10+") && !checks("renders mark"));
+        assert!(checks("within context-bar-* context-bar"));
+        assert!(checks("signed-out"));
         assert!(!checks("route draft"));
     }
 

@@ -757,7 +757,7 @@ impl StudyView {
 
 impl Render for StudyView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("Study");
         let picked = self.workspace.read(cx).study.picked.clone();
         let mut sessions = self.shown_sessions(cx);

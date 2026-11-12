@@ -232,7 +232,8 @@ area = "Composer"
 what = "Preview files Trek doesn't draw itself (PDF, SVG, HEIC)"
 macos = "yes"
 windows = "partial"
-live_skip = "A preview opens in another app (Quick Look on a Mac, the file's app on Windows), outside Trek's window."
+live_macos = ["route project:{project}", "attach {project}{/}preview.trekcheck", "wait 600", "click attachment-file#0", "wait 3000", "programs qlmanage 1", "programs-stop", "hover attachment-file#0", "wait 300", "click att-file-x#0"]
+live_windows = ["file-app trekcheck on", "route project:{project}", "attach {project}{/}preview.trekcheck", "wait 600", "click attachment-file#0", "wait 3000", "file opened.trekcheck", "file-app trekcheck off", "hover attachment-file#0", "wait 300", "click att-file-x#0"]
 note = "Quick Look on the Mac; Windows opens the file's default app. The editor's WebView2 preview could show PDFs and SVGs in place."
 code = ["crates/trek-app/src/image_preview.rs"]
 
@@ -242,7 +243,7 @@ area = "Threads"
 what = "Share a thread through the system (AirDrop, Messages, Mail)"
 macos = "yes"
 windows = "yes"
-live_skip = "The system's share window (Windows' Share, a Mac's AirDrop and Messages), outside Trek's: the share tests."
+live_skip = "The system's share window, outside Trek's, which Windows shows only over the window in front: a capture run stays behind the user's windows, and asked from there, Windows showed nothing and asked Trek for nothing (seen live). The share tests check what a share offers."
 how = { macos = "The system share sheet (AirDrop, Messages, Mail).", windows = "Windows' share window (Nearby Sharing, Outlook, Teams and the apps that take a share), opened over Trek's window with the thread as text under its title." }
 code = ["crates/trek-app/src/share.rs", "crates/trek-app/src/share/windows.rs"]
 tests = ["crates/trek-app/tests/share.rs"]
@@ -279,7 +280,8 @@ area = "Notifications"
 what = "Trek knows whether its banners are allowed, and says how to allow them"
 macos = "yes"
 windows = "yes"
-live_skip = "Asks the system whether banners are allowed: the notification tests."
+live_windows = ["route settings:notifications", "wait 300", "reveal notify-mode#1", "click notify-mode#1", "banner-permission off", "route settings:general", "wait 200", "route settings:notifications", "wait 400", "count open-notification-settings 1", "banner-permission restore", "route settings:general", "wait 200", "route settings:notifications", "wait 400", "count open-notification-settings 0", "reveal notify-mode#3", "click notify-mode#3"]
+live_skip = "On a Mac the answer is the notification center's, which only the installed app can ask (an unbundled build has no bundle to ask for): the notification tests."
 how = { macos = "The notification center's authorization; onboarding asks, and Settings › Notifications says when banners are off.", windows = "Windows' own switches (every app's, and Trek's app id's) read from the registry; Settings › Notifications says when banners are off and opens Windows' page. Do Not Disturb holds banners back without refusing them." }
 code = ["crates/trek-app/src/permissions.rs", "crates/trek-app/src/settings_view/pages.rs"]
 tests = ["crates/trek-app/tests/words.rs"]
@@ -668,7 +670,7 @@ area = "Threads"
 what = "An opened timeline row stays in view while following the end; the context bar's slivers stay within it; Compact now stays until the summary is done"
 macos = "yes"
 windows = "yes"
-live_skip = "How the transcript scrolls and the context bar fits: the transcript and context bar tests."
+live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "click hub-context", "wait 800", "within context-bar-* context-bar", "key escape"]
 how = { macos = "The same on both.", windows = "The same on both: made for Windows first, behind its styling switch (fluent::WINDOWS), so the Mac had none of them until this audit." }
 code = ["crates/trek-app/src/thread_view.rs", "crates/trek-app/src/context_popover.rs"]
 
@@ -1011,7 +1013,7 @@ area = "Development"
 what = "The capture build (`shots`): an isolated Trek that trek-dev drives with commands and captures, to verify a change"
 macos = "yes"
 windows = "partial"
-live = ["count title-text 1"]
+live = ["count title-text 1", "signed-out"]
 how = { macos = "trek-dev. No Dock tile, and every window opens on a display of the run's own (Trek Test Display), so nothing is on the owner's screens and macOS keeps drawing it; `windows` and `screenshot --real` capture its real pixels. Pages and previews are snapped by WebKit or cropped from a capture of the window (Screen Recording); `browser press` sends a page real keys through AppKit; extensions' popups and options pages can be driven.", windows = "trek-dev.ps1. The window opens behind the owner's (TREK_BACKGROUND), where Windows keeps drawing it, so it needs no display of its own (`--real` is refused); pages and previews are snapped by WebView2. `hittest`, `realclick`, `realmove` and `realleave` check what the window answers WM_NCHITTEST and send its own handle a real click or a leave." }
 note = "On Windows: no `browser press` (a key into a page that WebView2 handles itself; WebView2's DevTools Input.dispatchKeyEvent would do it), no capture of a whole window's real pixels with its web views (PrintWindow with PW_RENDERFULLCONTENT, or Windows.Graphics.Capture, would), and `checks-demo` writes its stand-in `gh` as an extensionless `#!/bin/sh` script Windows can't start, so the pull request card's states can't be shown (a `gh.cmd` would). Extensions' popups and options pages are the Mac's alone because WebView2 has none (browser-extensions). Its terminal starts a real shell for a live check on Windows alone (`TREK_VERIFY_SHELL`: PowerShell with -NoProfile, cmd with /d, never a job's command); an isolated run on a Mac keeps its stand-in, as a Mac's login shells have no one flag that skips their start-up files. Its stand-in iPhone (`pair-phone`) pairs over the real protocol with a phone server on the loopback alone, on both. Its `second-launch` (Trek started again, handing a link over through `single_instance`) is Windows' alone: a Mac hands a second launch to the running app itself, which its `open-link` stands for."
 code = ["crates/trek-app/src/shots.rs", "crates/trek-app/src/test_display.rs"]
@@ -1132,5 +1134,5 @@ area = "App"
 what = "Trek stays light while agents work: the working bar, streamed text and typing redraw only what changed, and a long thread opens quickly"
 macos = "yes"
 windows = "yes"
-live_skip = "Measured, not seen: the render-count tests (tests/scaling.rs, hover_cached.rs, activity.rs) on both CIs."
+live = ["route project:{project}", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView 11- Composer 4- WindowTitle 0- Sidebar 3-", "click stop", "pace 0"]
 tests = ["crates/trek-app/tests/render.rs"]

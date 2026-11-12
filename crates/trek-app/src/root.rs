@@ -984,7 +984,7 @@ impl WindowTitle {
 
 impl Render for WindowTitle {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("WindowTitle");
         if self.workspace.read(cx).ide() {
             return self.render_editor(cx);
@@ -1963,7 +1963,7 @@ impl TrekWindow {
 
 impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("TrekWindow");
         crate::perf::frame_begins();
         crate::chrome::let_go_of_hover(window, cx);

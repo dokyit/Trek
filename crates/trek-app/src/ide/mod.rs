@@ -444,7 +444,7 @@ impl IdeWorkbench {
 
 impl Render for IdeWorkbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("IdeWorkbench");
         let glass = self.workspace.read(cx).glass();
         let line = Self::line(glass, cx);

@@ -65,6 +65,11 @@ What parity-live's steps work in.
     // in it what it reports by itself, no build needed: a module whose file isn't there. What
     // rust-analyzer's Cargo writes beside it is ignored, so the project's changes stay the steps'.
     std::fs::write(dir.join(".gitignore"), "target/\nCargo.lock\n")?;
+    // A file of a kind no app has, for the preview to hand to the one a check names (`file-app`).
+    std::fs::write(
+        dir.join("preview.trekcheck"),
+        "What the preview hands to the file's app.\n",
+    )?;
     std::fs::write(
         dir.join("lsp").join("Cargo.toml"),
         "[package]

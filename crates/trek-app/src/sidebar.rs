@@ -2815,7 +2815,7 @@ fn inbox_rows(inbox: &[(Thread, Why)], open: bool) -> (Vec<String>, usize) {
 
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("Sidebar");
         let ws = self.workspace.read(cx);
         self.graph = Graph {

@@ -1,7 +1,8 @@
 //! What the UI tests see of a render: `rendered` is called from each view's `render` in test
 //! builds, `take_renders` hands the counts out. In `cargo test` this module is on (the
-//! `test-support` feature, which the tests' dev-dependency on trek-app itself enables); a plain
-//! build leaves it out, calls and all.
+//! `test-support` feature, which the tests' dev-dependency on trek-app itself enables), and in the
+//! capture build (`shots`), whose live checks count renders in the running app; a plain build
+//! leaves it out, calls and all.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

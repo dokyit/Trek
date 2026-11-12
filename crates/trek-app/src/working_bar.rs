@@ -1311,7 +1311,7 @@ pub struct SettledRows {
 
 impl Render for SettledRows {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("SettledRows");
         let open = self.open.as_ref();
         let len = self.rows.len();
@@ -1340,7 +1340,7 @@ pub struct BarTop {
 
 impl Render for BarTop {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("BarTop");
         let Some((shown, open)) = self
             .bar
@@ -1425,7 +1425,7 @@ fn column(width: Pixels, el: impl IntoElement) -> Div {
 
 impl Render for WorkingBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("WorkingBar");
         let Some(shown) = self.shown.clone() else {
             return div().into_any_element();

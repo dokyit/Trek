@@ -1648,7 +1648,7 @@ impl AiTranscript {
 
 impl Render for AiTranscript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("AiTranscript");
         let Some(thread) = self.current.clone() else {
             return div().into_any_element();

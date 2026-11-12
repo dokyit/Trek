@@ -93,7 +93,8 @@ pub mod workspace;
 pub mod worktree_apps_ui;
 pub mod worktree_ui;
 
-#[cfg(any(test, feature = "test-support"))]
+// The capture build counts renders too, for its live checks (`renders`).
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
 pub mod test_support;
 
 use gpui_kit::component::highlighter::HighlightTheme;
@@ -269,6 +270,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 }
 
 pub fn run() {
+    // A capture run is signed out of the user's accounts before anything else starts.
+    #[cfg(feature = "shots")]
+    shots::isolate_accounts();
     perf::start();
     logging::init();
     // Dictation keeps a speech model of its own on Windows: `dictation/` in the local data folder,

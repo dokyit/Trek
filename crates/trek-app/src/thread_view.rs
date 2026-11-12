@@ -5087,7 +5087,7 @@ struct RowContext {
 
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered(if self.scope == Scope::Beside {
             "ThreadView:beside"
         } else {
