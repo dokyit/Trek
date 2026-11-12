@@ -58,37 +58,55 @@ enum TextSizeChoice: String, CaseIterable, Identifiable {
     }
 }
 
-/// The app icons, as the Mac offers them (its Settings › Appearance › App icon): the alternatives
-/// are `AppIcon-Night` and `AppIcon-Glass` in the asset catalog (ios/scripts/app-icons.sh).
+/// The app icons, as the Mac offers them (its Settings › Appearance › App icon): Night is the
+/// app's own, and the alternatives are `AppIcon-Paper` and `AppIcon-Glass` in the asset catalog
+/// (ios/scripts/app-icons.sh).
 enum AppIconChoice: String, CaseIterable, Identifiable {
-    case ember, night, glass
+    case night, paper, glass
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .ember: "Ember"
         case .night: "Night"
+        case .paper: "Paper"
         case .glass: "Glass"
         }
     }
     /// The name `setAlternateIconName` takes; nil for the primary icon.
     var iconName: String? {
         switch self {
-        case .ember: nil
-        case .night: "AppIcon-Night"
+        case .night: nil
+        case .paper: "AppIcon-Paper"
         case .glass: "AppIcon-Glass"
         }
     }
     /// A small copy of it to pick from.
     var preview: String {
         switch self {
-        case .ember: "IconEmber"
         case .night: "IconNight"
+        case .paper: "IconPaper"
         case .glass: "IconGlass"
         }
     }
 
+    /// The choice iOS is showing. A name this version has no icon for (`AppIcon-Night`, an
+    /// alternative before Night became the app's own) is the app's own.
     static func of(_ iconName: String?) -> AppIconChoice {
-        allCases.first { $0.iconName == iconName } ?? .ember
+        allCases.first { $0.iconName == iconName } ?? .night
+    }
+
+    /// Whether iOS still holds an alternative this version doesn't ship: it would show a blank
+    /// icon for it.
+    static func isRetired(_ iconName: String?) -> Bool {
+        guard let iconName else { return false }
+        return !allCases.contains { $0.iconName == iconName }
+    }
+
+    /// Go back to the app's own icon from an alternative that's gone. iOS says so with its own
+    /// alert, once.
+    @MainActor static func dropRetired() {
+        let app = UIApplication.shared
+        guard app.supportsAlternateIcons, isRetired(app.alternateIconName) else { return }
+        app.setAlternateIconName(nil)
     }
 }
 

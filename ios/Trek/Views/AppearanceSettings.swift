@@ -56,7 +56,7 @@ struct AppearanceSection: View {
         } header: {
             Text("App icon")
         } footer: {
-            Text("Shown on the Home Screen. Ember is Trek's own; Night and Glass are the Mac's alternatives.")
+            Text("Shown on the Home Screen. Night is Trek's own; Paper and Glass are the Mac's alternatives.")
                 .font(.ui(.footnote))
         }
 
