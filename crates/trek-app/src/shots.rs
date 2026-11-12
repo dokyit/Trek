@@ -13,7 +13,7 @@
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
-//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `cloud-file <abs-path> <text>|fetched <n>[+]|away|off` (Windows: a file that lives only in the cloud, from a sync provider of the check's own), `editor has <text>|note <text>` (the file in front shows it; the preview in front says it), `photos open|shown <0|1>|close` (Mac: the system's Photos picker as the + menu opens it, a sheet on the window), `bonjour on|found|off` (the phone server announced through the system's responder, under a name of the check's own, and found as a phone finds it), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded|why:<word>` (the page's process ended; the tab as the panel has it, and the reason Trek's page gives), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
+//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `close-main` (Windows: the close button's own path, with Keep Trek in the tray on), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `cloud-file <abs-path> <text>|fetched <n>[+]|away|off` (Windows: a file that lives only in the cloud, from a sync provider of the check's own), `editor has <text>|note <text>` (the file in front shows it; the preview in front says it), `photos open|shown <0|1>|close` (Mac: the system's Photos picker as the + menu opens it, a sheet on the window), `bonjour on|found|off` (the phone server announced through the system's responder, under a name of the check's own, and found as a phone finds it), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded|why:<word>` (the page's process ended; the tab as the panel has it, and the reason Trek's page gives), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
@@ -2741,6 +2741,25 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         crate::root::show_main(ws.clone(), cx);
         return Ok(());
     }
+    // `close-main`: the main window's close button by its own path (`root::close_main`), where
+    // the app ends with that window (Windows): with Keep Trek in the tray and the tray icon on, the
+    // windows close and Trek stays. Refused otherwise, as it would quit the run.
+    if verb == "close-main" {
+        let stays = {
+            let settings = &ws.read(cx).settings;
+            settings.general.stay_in_tray && settings.notifications.menu_bar_icon
+        };
+        anyhow::ensure!(
+            stays,
+            "close-main: only with Keep Trek in the tray and the tray icon on (else it would quit the run)"
+        );
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        main.update(cx, |_, window, cx| crate::root::close_main(window, cx))?;
+        return Ok(());
+    }
     // `badge <n>[+]`: the count on the app's icon as last put up, the system having taken it
     // (`system::SHOWN_BADGE`): n, or n or more.
     if verb == "badge" {
@@ -4009,7 +4028,9 @@ fn import_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
 fn checks_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
     let dir = trek_core::paths::data_dir().join("checks-demo");
     std::fs::create_dir_all(&dir)?;
-    let gh = dir.join("gh");
+    // A batch file on Windows, which starts no `#!` script: Rust runs a `.cmd` through cmd.exe,
+    // its arguments quoted for it.
+    let gh = dir.join(if cfg!(windows) { "gh.cmd" } else { "gh" });
     let arg = arg.trim();
     // A new commit each time `again` is asked for: each is a failure of its own.
     let fresh = format!("{:07x}", crate::pr_card::now_ms() % 0x0fff_ffff);
@@ -4073,12 +4094,21 @@ fn checks_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Resul
         "clippy\tRun clippy\t2026-11-05T10:00:00.1234567Z ##[group]Run cargo clippy -- -D warnings\n         clippy\tRun clippy\t2026-11-05T10:00:41.1234567Z error: this `if` has identical blocks\n         clippy\tRun clippy\t2026-11-05T10:00:41.2234567Z   --> crates/auth/src/session.rs:88:5\n         clippy\tRun clippy\t2026-11-05T10:00:41.3234567Z error: could not compile `auth` (lib)\n         clippy\tRun clippy\t2026-11-05T10:00:41.4234567Z ##[error]Process completed with exit code 101.\n",
     )?;
     std::fs::write(
-        &gh,
-        format!(
-            "#!/bin/sh\ndir='{}'\nif [ -e \"$dir/offline\" ]; then echo 'error connecting to api.github.com' >&2; exit 1; fi\ncase \"$1 $2\" in\n  'pr view') cat \"$dir/view.json\" ;;\n  'run view') cat \"$dir/log.txt\" ;;\n  'api rate_limit') echo '{{\"resources\":{{\"graphql\":{{\"limit\":5000,\"remaining\":4900,\"reset\":9999999999}},\"core\":{{\"limit\":5000,\"remaining\":4900,\"reset\":9999999999}}}}}}' ;;\nesac\n",
-            dir.display()
-        ),
+        dir.join("rate_limit.json"),
+        r#"{"resources":{"graphql":{"limit":5000,"remaining":4900,"reset":9999999999},"core":{"limit":5000,"remaining":4900,"reset":9999999999}}}"#,
     )?;
+    let script = if cfg!(windows) {
+        format!(
+            "@echo off\r\nset \"dir={}\"\r\nif exist \"%dir%\\offline\" (\r\n  echo error connecting to api.github.com 1>&2\r\n  exit /b 1\r\n)\r\nif \"%~1 %~2\"==\"pr view\" type \"%dir%\\view.json\"\r\nif \"%~1 %~2\"==\"run view\" type \"%dir%\\log.txt\"\r\nif \"%~1 %~2\"==\"api rate_limit\" type \"%dir%\\rate_limit.json\"\r\n",
+            dir.display()
+        )
+    } else {
+        format!(
+            "#!/bin/sh\ndir='{}'\nif [ -e \"$dir/offline\" ]; then echo 'error connecting to api.github.com' >&2; exit 1; fi\ncase \"$1 $2\" in\n  'pr view') cat \"$dir/view.json\" ;;\n  'run view') cat \"$dir/log.txt\" ;;\n  'api rate_limit') cat \"$dir/rate_limit.json\" ;;\nesac\n",
+            dir.display()
+        )
+    };
+    std::fs::write(&gh, script)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

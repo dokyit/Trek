@@ -1426,6 +1426,17 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
 /// as closing the Mac's window lets agents carry on; or quit now, stopping it.
 pub fn close_main(window: &mut Window, cx: &mut App) {
     let ws = crate::workspace::workspace_global(cx);
+    // Kept in the tray, its icon there to bring the window back: the windows close and Trek stays
+    // up whatever is at work, as a Mac's does in the Dock.
+    let stays = {
+        let settings = &ws.read(cx).settings;
+        settings.general.stay_in_tray && settings.notifications.menu_bar_icon
+    };
+    if stays {
+        // Once the window's own update is over: inside it, the window can't be closed.
+        cx.defer(|cx| keep_working(STAY, cx));
+        return;
+    }
     let (titles, updating) = {
         let ws = ws.read(cx);
         let titles: Vec<String> = ws
@@ -1515,17 +1526,26 @@ impl Global for InBackground {}
 /// saying they're done can still bring a thread back (a click on one reaches a Trek that runs).
 pub const BACKGROUND_GRACE: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// How long a Trek kept in the tray (`general.stay_in_tray`) waits once nothing is at work before
+/// it quits: for ever. The tray's Quit, or the Quit command, ends it.
+pub const STAY: std::time::Duration = std::time::Duration::MAX;
+
 /// How often a Trek working in the background looks to see whether it's done.
 const BACKGROUND_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Close Trek's windows and let its agents finish: it quits once nothing has been at work for
-/// `grace`, unless a window of its opens meanwhile (a launch of Trek, a banner clicked).
+/// `grace` (never, for `STAY`), unless a window of its opens meanwhile (a launch of Trek, a banner
+/// clicked, the tray icon).
 pub fn keep_working(grace: std::time::Duration, cx: &mut App) {
     static TIMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let this = TIMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     cx.set_global(InBackground(this));
     for window in cx.windows() {
         let _ = window.update(cx, |_, window, _| window.remove_window());
+    }
+    // In the tray for good: nothing to watch for.
+    if grace == STAY {
+        return;
     }
     cx.spawn(async move |cx| {
         let mut idle_since: Option<std::time::Instant> = None;

@@ -238,8 +238,11 @@ fn shared(agent: &AgentId) -> &'static [&'static str] {
 }
 
 /// Link each of `names` that `source` has into `dir`, unless `dir` has one already: the agent may
-/// have replaced a link with a file of its own, and that stays.
+/// have replaced a link with a file of its own, and that stays. On Windows a file linked hard is
+/// linked again when its original was replaced whole (`hard::follow`).
 fn link_shared(source: &Path, dir: &Path, names: &[&str]) {
+    #[cfg(windows)]
+    hard::follow(source, dir, names);
     for name in names {
         let (from, to) = (source.join(name), dir.join(name));
         if !from.exists() || std::fs::symlink_metadata(&to).is_ok() {
@@ -257,8 +260,8 @@ fn link(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Symbolic links need Developer Mode or an elevated process on Windows. Without them a folder
-/// gets a junction, which needs neither, and a file a copy, which follows the original no more
-/// (it's only made once).
+/// gets a junction, and a file a hard link (`hard`), which need neither; a copy (another drive)
+/// follows the original no more.
 #[cfg(windows)]
 fn link(from: &Path, to: &Path) -> std::io::Result<()> {
     if from.is_dir() {
@@ -281,7 +284,108 @@ fn link(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::os::windows::fs::symlink_file(from, to).is_ok() {
         return Ok(());
     }
+    if hard::link(from, to).is_ok() {
+        return Ok(());
+    }
     std::fs::copy(from, to).map(|_| ())
+}
+
+/// A shared file as a hard link (Windows, without Developer Mode): one file under two names, so an
+/// edit made in place on either side is the other's too. A save that replaces the original whole
+/// (written beside it, then renamed over it) leaves the account's name on the old file: each
+/// link made is recorded with the file's id (`LINKED` in the account's folder), and the next open
+/// links the new original, unless the account's name has a new file of the agent's own by then,
+/// which stays.
+#[cfg(windows)]
+mod hard {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    /// The record, beside what it records: each name linked, with its file's id then.
+    const LINKED: &str = ".trek-linked.json";
+
+    /// Link `to` to `from`, and record it.
+    pub fn link(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::hard_link(from, to)?;
+        if let (Some(dir), Some(name), Some(id)) = (to.parent(), to.file_name(), id(to)) {
+            let mut linked = read(dir);
+            linked.insert(name.to_string_lossy().into_owned(), id);
+            write(dir, &linked);
+        }
+        Ok(())
+    }
+
+    /// Link again each of `names` in `dir` still on the file it was linked to, when `source`'s
+    /// is another file now.
+    pub fn follow(source: &Path, dir: &Path, names: &[&str]) {
+        let mut linked = read(dir);
+        let mut changed = false;
+        for name in names {
+            let Some(was) = linked.get(*name).cloned() else {
+                continue;
+            };
+            let (from, to) = (source.join(name), dir.join(name));
+            let (Some(now), Some(ours)) = (id(&from), id(&to)) else {
+                continue;
+            };
+            if ours != was {
+                // The agent's own file in its place: it stays, and is no longer followed.
+                linked.remove(*name);
+                changed = true;
+                continue;
+            }
+            if now == was {
+                continue;
+            }
+            // In use by the account's agent: left for the next open.
+            if std::fs::remove_file(&to).is_ok() && std::fs::hard_link(&from, &to).is_ok() {
+                linked.insert((*name).to_string(), now);
+                changed = true;
+            }
+        }
+        if changed {
+            write(dir, &linked);
+        }
+    }
+
+    fn read(dir: &Path) -> BTreeMap<String, String> {
+        std::fs::read_to_string(dir.join(LINKED))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn write(dir: &Path, linked: &BTreeMap<String, String>) {
+        if let Ok(text) = serde_json::to_string(linked) {
+            let _ = std::fs::write(dir.join(LINKED), text);
+        }
+    }
+
+    /// The file's identity on its volume (the volume's serial number and the file's index, in
+    /// hex): the same for every name a hard link gives it, another for a file put in its place.
+    pub fn id(path: &Path) -> Option<String> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            GetFileInformationByHandle,
+        };
+        // Its attributes alone, sharing everything: an agent holding it open is no matter.
+        let file = std::fs::OpenOptions::new()
+            .access_mode(0x80) // FILE_READ_ATTRIBUTES
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .open(path)
+            .ok()?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: an open handle, and a structure the call fills.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+        (ok != 0).then(|| {
+            format!(
+                "{:08x}-{:08x}{:08x}",
+                info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
+            )
+        })
+    }
 }
 
 /// `line` with `var` set to `value`, for a POSIX shell or PowerShell (what Trek's own commands run
@@ -412,6 +516,45 @@ mod tests {
             assert!(!CLAUDE_SHARED.contains(&private), "{private}");
             assert!(!CODEX_SHARED.contains(&private), "{private}");
         }
+    }
+
+    /// Without Developer Mode a shared file is a hard link: an edit made in place on either side
+    /// is the other's, and a save that replaces the original whole is followed at the next open.
+    /// A file the agent puts in its place stays its own.
+    #[cfg(windows)]
+    #[test]
+    fn a_hard_linked_file_follows_its_original_when_it_is_replaced_whole() {
+        let tmp = crate::import::Scratch::new();
+        let (source, dir) = (tmp.0.join("source"), tmp.0.join("account"));
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (source.join("settings.json"), dir.join("settings.json"));
+        let read = || std::fs::read_to_string(&to).unwrap();
+        // A save that writes beside the file and renames over it.
+        let replace = |path: &Path, text: &str| {
+            let beside = path.with_extension("json.tmp");
+            std::fs::write(&beside, text).unwrap();
+            std::fs::rename(&beside, path).unwrap();
+        };
+        std::fs::write(&from, "one").unwrap();
+        // As `link` does where symbolic links aren't allowed.
+        hard::link(&from, &to).unwrap();
+        assert_eq!(hard::id(&from), hard::id(&to));
+        std::fs::write(&from, "two").unwrap();
+        assert_eq!(read(), "two", "an edit in place is the account's too");
+        replace(&from, "three");
+        assert_eq!(read(), "two", "the old file, until the next open");
+        link_shared(&source, &dir, CLAUDE_SHARED);
+        assert_eq!(read(), "three");
+        assert_eq!(hard::id(&from), hard::id(&to));
+        // The agent's own file in its place stays, and isn't followed any more.
+        replace(&to, "its own");
+        replace(&from, "four");
+        link_shared(&source, &dir, CLAUDE_SHARED);
+        assert_eq!(read(), "its own");
+        replace(&from, "five");
+        link_shared(&source, &dir, CLAUDE_SHARED);
+        assert_eq!(read(), "its own");
     }
 
     /// Deleting an account's folder takes the links, not what they lead to.

@@ -47,6 +47,9 @@ pub struct Words {
 
     /// General › System: the row that holds off idle sleep.
     pub keep_awake_label: &'static str,
+    /// General › System, where closing the window would end Trek (no Dock keeps it up): the row
+    /// that keeps it running in the tray instead, as (label, note). `None` where it stays anyway.
+    pub stay_in_tray: Option<(&'static str, &'static str)>,
 
     /// Settings › Phone, before the phone server is on: what the system will ask the first time it
     /// listens. `None` where it asks nothing Trek needs to explain.
@@ -129,6 +132,7 @@ const MACOS: Words = Words {
     computer_fingerprint: "This Mac's fingerprint",
 
     keep_awake_label: "Keep the Mac awake while agents work",
+    stay_in_tray: None,
 
     firewall_note: None,
 
@@ -190,6 +194,10 @@ const WINDOWS: Words = Words {
     computer_fingerprint: "This PC's fingerprint",
 
     keep_awake_label: "Keep the PC awake while agents work",
+    stay_in_tray: Some((
+        "Keep Trek in the tray when its window closes",
+        "Agents keep working and banners still come. The tray icon, or opening Trek, brings the window back. Off, closing quits once nothing is at work.",
+    )),
 
     firewall_note: Some(
         "The first time this is on, Windows Firewall asks whether Trek may communicate on private networks. Allow it, or your iPhone can't reach this PC.",
@@ -292,6 +300,7 @@ mod tests {
             computer,
             computer_fingerprint,
             keep_awake_label,
+            stay_in_tray,
             firewall_note,
             window_shadow_note,
             screen_recording,
@@ -329,6 +338,14 @@ mod tests {
             ("computer", computer),
             ("computer_fingerprint", computer_fingerprint),
             ("keep_awake_label", keep_awake_label),
+            (
+                "stay_in_tray_label",
+                stay_in_tray.map_or(nothing, |(label, _)| label),
+            ),
+            (
+                "stay_in_tray_note",
+                stay_in_tray.map_or(nothing, |(_, note)| note),
+            ),
             ("firewall_note", firewall_note.unwrap_or(nothing)),
             ("window_shadow_note", window_shadow_note.unwrap_or(nothing)),
             (

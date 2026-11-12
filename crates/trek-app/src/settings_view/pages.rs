@@ -550,8 +550,8 @@ impl SettingsView {
             ),
             Self::heading("System", cx),
             ui::group(
-                vec![
-                    Self::row(
+                [
+                    Some(Self::row(
                         crate::words::words().keep_awake_label,
                         "Stops idle sleep until every running turn has finished. The display can still sleep.",
                         self.switch(
@@ -560,8 +560,28 @@ impl SettingsView {
                             |s, v| s.general.prevent_sleep_while_running = v,
                         ),
                         cx,
-                    ),
-                    Self::row(
+                    )),
+                    // Where closing the window would end Trek: stay in the tray instead, which
+                    // needs the tray icon to come back through.
+                    crate::words::words().stay_in_tray.map(|(label, note)| {
+                        let note = if s.notifications.menu_bar_icon {
+                            note.to_string()
+                        } else {
+                            format!(
+                                "{note} It needs the {} on, in Notifications.",
+                                crate::words::words().tray_label.to_lowercase()
+                            )
+                        };
+                        Self::row(
+                            label,
+                            note,
+                            self.switch("stay-in-tray", s.general.stay_in_tray, |s, v| {
+                                s.general.stay_in_tray = v
+                            }),
+                            cx,
+                        )
+                    }),
+                    Some(Self::row(
                         "Onboarding",
                         "Appearance, permissions, your agents and keys, local models and your phone, one step at a time. Nothing is reset.",
                         Button::new("show-onboarding")
@@ -573,8 +593,11 @@ impl SettingsView {
                                     .update(cx, |ws, cx| ws.open_onboarding(None, cx))
                             })),
                         cx,
-                    ),
-                ],
+                    )),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
                 cx,
             ),
         ]

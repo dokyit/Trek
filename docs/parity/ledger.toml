@@ -17,10 +17,11 @@ id = "keep-working-window-closed"
 area = "App"
 what = "Agents keep working with Trek's window closed"
 macos = "yes"
-windows = "partial"
+windows = "yes"
 live = ["route project:{project}", "pace 1", "send mock:long 10s", "wait 1500", "keep-working", "wait 2500", "show-main", "wait 1500", "count working-bar 1", "click stop", "pace 0"]
+live_windows = ["route project:{project}", "pace 1", "send mock:long 10s", "wait 1500", "keep-working", "wait 2500", "show-main", "wait 1500", "count working-bar 1", "click stop", "pace 0", "route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon", "route settings:general", "wait 300", "reveal stay-in-tray", "click stay-in-tray", "close-main", "wait 1500", "count-all title-text 0", "tray on", "show-main", "wait 1500", "count title-text 1", "route settings:general", "wait 300", "reveal stay-in-tray", "click stay-in-tray", "route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon"]
 how = { macos = "The app stays up in the Dock; the Dock icon reopens the window.", windows = "Closing the window with agents at work asks: Keep Working closes Trek's windows and quits once the work is done (after a grace for its banners), and opening Trek or the tray icon brings the window back. With nothing at work, closing quits." }
-note = "Windows has no Dock: Trek doesn't stay up idle with no window. A setting to stay in the tray indefinitely would match the Mac fully."
+note = "Windows has no Dock, so Trek ends with its window by default. Settings › General › Keep Trek in the tray when its window closes matches the Mac: the windows close and Trek stays up in the tray, nothing asked even with agents at work, until the tray's Quit; it needs the tray icon to come back through."
 code = ["crates/trek-app/src/root.rs", "crates/trek-app/src/lib.rs"]
 tests = ["crates/trek-app/tests/titlebar.rs", "crates/trek-app/tests/windows.rs"]
 
@@ -483,11 +484,11 @@ id = "accounts"
 area = "Agents"
 what = "Several accounts for one agent, sharing your setup"
 macos = "yes"
-windows = "partial"
+windows = "yes"
 live = ["accounts-demo", "route settings:agents", "wait 400", "reveal account-more-*", "count account-more-* 2+"]
-how = { macos = "Symlinks to your setup.", windows = "Folders become junctions." }
-note = "Files (CLAUDE.md, settings.json) are copied once and stop following the original, unless Developer Mode allows symlinks. Hard links would keep them in step."
+how = { macos = "Symlinks to your setup.", windows = "Symbolic links where Developer Mode allows them. Without it, folders become junctions and files (CLAUDE.md, settings.json, config.toml) hard links: an edit made in place is the other side's too, and a save that replaces the original whole (written beside it, then renamed over it) is followed the next time the account opens. A file the account's agent puts in its place stays its own, as on a Mac. Only a file on another drive than Trek's data is a copy." }
 code = ["crates/trek-core/src/accounts.rs"]
+tests = ["crates/trek-core/src/accounts.rs"]
 
 [[feature]]
 id = "skills-symlinks"
@@ -1016,7 +1017,7 @@ macos = "yes"
 windows = "partial"
 live = ["count title-text 1", "signed-out"]
 how = { macos = "trek-dev. No Dock tile, and every window opens on a display of the run's own (Trek Test Display), so nothing is on the owner's screens and macOS keeps drawing it; `windows` and `screenshot --real` capture its real pixels. Pages and previews are snapped by WebKit or cropped from a capture of the window (Screen Recording); `browser press` sends a page real keys through AppKit; extensions' popups and options pages can be driven.", windows = "trek-dev.ps1. The window opens behind the owner's (TREK_BACKGROUND), where Windows keeps drawing it, so it needs no display of its own (`--real` is refused); pages and previews are snapped by WebView2. `hittest`, `realclick`, `realmove` and `realleave` check what the window answers WM_NCHITTEST and send its own handle a real click or a leave." }
-note = "On Windows: no `browser press` (a key into a page that WebView2 handles itself; WebView2's DevTools Input.dispatchKeyEvent would do it), no capture of a whole window's real pixels with its web views (PrintWindow with PW_RENDERFULLCONTENT, or Windows.Graphics.Capture, would), and `checks-demo` writes its stand-in `gh` as an extensionless `#!/bin/sh` script Windows can't start, so the pull request card's states can't be shown (a `gh.cmd` would). Extensions' popups and options pages are the Mac's alone because WebView2 has none (browser-extensions). Its terminal starts a real shell for a live check on Windows alone (`TREK_VERIFY_SHELL`: PowerShell with -NoProfile, cmd with /d, never a job's command); an isolated run on a Mac keeps its stand-in, as a Mac's login shells have no one flag that skips their start-up files. Its stand-in iPhone (`pair-phone`) pairs over the real protocol with a phone server on the loopback alone, on both. Its `second-launch` (Trek started again, handing a link over through `single_instance`) is Windows' alone: a Mac hands a second launch to the running app itself, which its `open-link` stands for."
+note = "On Windows: no `browser press` (a key into a page that WebView2 handles itself; WebView2's DevTools Input.dispatchKeyEvent would do it), and no capture of a whole window's real pixels with its web views (PrintWindow with PW_RENDERFULLCONTENT, or Windows.Graphics.Capture, would). `checks-demo`'s stand-in `gh` is a batch file there (`gh.cmd`; a Mac's is a `#!/bin/sh` script), so the failing checks' bar is shown on both. Extensions' popups and options pages are the Mac's alone because WebView2 has none (browser-extensions). Its terminal starts a real shell for a live check on Windows alone (`TREK_VERIFY_SHELL`: PowerShell with -NoProfile, cmd with /d, never a job's command); an isolated run on a Mac keeps its stand-in, as a Mac's login shells have no one flag that skips their start-up files. Its stand-in iPhone (`pair-phone`) pairs over the real protocol with a phone server on the loopback alone, on both. Its `second-launch` (Trek started again, handing a link over through `single_instance`) is Windows' alone: a Mac hands a second launch to the running app itself, which its `open-link` stands for."
 code = ["crates/trek-app/src/shots.rs", "crates/trek-app/src/test_display.rs"]
 tests = ["crates/trek-app/src/test_display.rs"]
 
@@ -1092,7 +1093,7 @@ area = "Threads"
 what = "A pull request's failing checks show on its thread and go back to the agent, by Send to agent or by themselves"
 macos = "yes"
 windows = "yes"
-live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "checks-demo failed", "wait 1500", "count hub-pr 1"]
+live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "checks-demo failed", "wait 1500", "count hub-pr 1", "wait shown checks-bar 15000", "count checks-bar 1"]
 how = { macos = "gh from the login PATH.", windows = "gh found through PATHEXT, started as itself (no cmd.exe, so `--jq`'s `|` reaches it as written)." }
 tests = ["crates/trek-app/tests/pr_checks.rs", "crates/test-fixtures/src/fixture.rs"]
 
