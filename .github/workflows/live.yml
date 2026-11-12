@@ -1,0 +1,198 @@
+name: Live
+
+# Every feature in docs/parity/ledger.toml with live steps, run in the capture build (an isolated
+# Trek driven by commands, `crates/trek-app/src/shots.rs`) on a Mac and on a PC: the same steps on
+# both, so a feature that works on one and not the other fails here, rather than being found by a
+# user. `cargo run -p trek-parity --bin parity-live` runs them (it's what a developer runs against
+# their own capture build); each job writes its report to the run's summary and keeps it, every
+# feature's screenshot and the app's log as artifacts.
+on:
+  pull_request:
+    paths-ignore: ['media/**', 'ios/**', 'assets/brand/**']
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  live-macos:
+    name: Live (macOS)
+    runs-on: macos-15
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key live
+
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
+
+      - name: Metal toolchain
+        run: |
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      # The mock agent's video makes its clip with ffmpeg.
+      - name: ffmpeg
+        run: command -v ffmpeg || brew install ffmpeg
+
+      # Its output to a file: the app it starts would hold the step's own open otherwise.
+      - name: Start the capture build
+        run: |
+          ./.agents/skills/verify-trek/scripts/trek-dev start > start.json 2>&1 < /dev/null || { cat start.json; exit 1; }
+          cat start.json
+
+      - name: Live checks
+        run: |
+          runtime=$(./.agents/skills/verify-trek/scripts/trek-dev status | python3 -c 'import json, sys; print(json.load(sys.stdin)["runtime_dir"])')
+          echo "RUNTIME=$runtime" >> "$GITHUB_ENV"
+          cargo build -p trek-parity --bin parity-live --locked
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$runtime/shot" --report live-macos.md
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f live-macos.md ]; then cat live-macos.md >> "$GITHUB_STEP_SUMMARY"; fi
+          ./.agents/skills/verify-trek/scripts/trek-dev stop > /dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-macos
+          path: |
+            live-macos.md
+            ${{ env.RUNTIME }}/shot/live-*.png
+            ${{ env.RUNTIME }}/trek.log
+          if-no-files-found: warn
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  live-windows:
+    name: Live (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+
+      - name: Cache key
+        id: key
+        run: python script/ci-cache.py key live
+
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python script/ci-cache.py restore
+
+      # The mock agent's video makes its clip with ffmpeg.
+      - name: ffmpeg
+        run: if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
+
+      # Its output to a file: the app it starts would hold the step's own open otherwise.
+      - name: Start the capture build
+        run: |
+          pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 start *> start.json
+          Get-Content start.json
+          if (-not (Select-String -Path start.json -Pattern '"running": true' -Quiet)) { exit 1 }
+
+      # The runner's Windows has no HEIF or HEVC codec (Microsoft's HEIF and HEVC Video
+      # Extensions): no HEIC photo can be made there to attach.
+      - name: Live checks
+        run: |
+          $status = pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 status | ConvertFrom-Json
+          "RUNTIME=$($status.runtime_dir)" >> $env:GITHUB_ENV
+          cargo build -p trek-parity --bin parity-live --locked
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$($status.runtime_dir)\shot" --report live-windows.md --skip "heic-photos=the runner's Windows has no HEIF or HEVC codec"
+          exit $LASTEXITCODE
+
+      - name: Report
+        if: always()
+        run: |
+          if (Test-Path live-windows.md) { Get-Content live-windows.md | Add-Content $env:GITHUB_STEP_SUMMARY }
+          pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 stop *> $null
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-windows
+          path: |
+            live-windows.md
+            ${{ env.RUNTIME }}/shot/live-*.png
+            ${{ env.RUNTIME }}/trek.log
+          if-no-files-found: warn
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
