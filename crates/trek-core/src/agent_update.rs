@@ -6192,6 +6192,58 @@ mod tests {
         }
     }
 
+    /// One real update on this machine, the way the Update button runs it (`run_update`: what runs
+    /// from the install gets a moment to end, the command runs, the CLI is asked its version
+    /// again): `TREK_LIVE_UPDATE=<agent, or its row's id> cargo test -p trek-core live_update --
+    /// --ignored --nocapture`. It changes what's installed.
+    #[test]
+    #[ignore = "updates an agent installed here"]
+    fn live_update() {
+        let Ok(want) = std::env::var("TREK_LIVE_UPDATE") else {
+            eprintln!(
+                "skipped: set TREK_LIVE_UPDATE to an agent installed here (codex, copilot, …)"
+            );
+            return;
+        };
+        let rows = crate::runtime().block_on(check_all());
+        let Some(v) = rows.iter().find(|v| v.agent == want || v.id == want) else {
+            let here: Vec<&str> = rows.iter().map(|v| v.agent.as_str()).collect();
+            panic!("{want} isn't installed here: {here:?}");
+        };
+        let cmd = v.command.as_ref().map(|c| c.shown()).unwrap_or_default();
+        println!(
+            "{} ({}): {} -> {} via `{cmd}`",
+            v.name,
+            v.install.label(),
+            v.installed.as_deref().unwrap_or("?"),
+            v.latest.as_deref().unwrap_or("?")
+        );
+        let started = std::time::Instant::now();
+        let outcome = crate::runtime().block_on(run_update(v));
+        match &outcome {
+            Outcome::Updated { version, output } => {
+                println!("updated to {version} in {:?}", started.elapsed());
+                println!("{}", strip_ansi(output).trim());
+            }
+            Outcome::Failed { summary, output } => {
+                println!("failed after {:?}: {summary}", started.elapsed());
+                println!("{}", strip_ansi(output).trim());
+            }
+        }
+        assert!(matches!(outcome, Outcome::Updated { .. }), "{outcome:?}");
+        let again = crate::runtime().block_on(check_all());
+        let now = again.iter().find(|r| r.id == v.id);
+        println!(
+            "checked again: {} -> {}",
+            now.and_then(|r| r.installed.as_deref()).unwrap_or("?"),
+            now.and_then(|r| r.latest.as_deref()).unwrap_or("?")
+        );
+        assert!(
+            now.is_some_and(|r| !r.update_available()),
+            "the check still offers an update"
+        );
+    }
+
     /// Devin's real bundle, installed into a scratch install of its own (never the one on PATH):
     /// `cargo test -p trek-core live_devin_bundle -- --ignored --nocapture`.
     #[test]
