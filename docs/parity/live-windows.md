@@ -1,0 +1,107 @@
+# Live check on Windows
+
+Written by `cargo run -p trek-parity --bin parity-live` against the capture build of `0e664e37`: each feature's `live` steps in `docs/parity/ledger.toml`, run in an isolated Trek, then a screenshot (`live-<id>.png` in its command folder). Run it again after a change; the steps are the same on every platform unless the ledger says otherwise.
+
+**54 shown working, 0 failed, 37 with no live steps here, 8 not on Windows.**
+
+| Area | Feature | Live | Steps or reason |
+|---|---|---|---|
+| Agent tools | Agents' Simulator, iPhone and Trek-update tools | shown working | `phone agent` · `wait 600` · `count phone-agent-strip 1` · `count phone-agent-stop 1` |
+| Agent tools | Computer use in front: screenshots, clicks, keys and typing | shown working | `route settings:tools` · `wait 300` · `count computer-use 1` |
+| Agent tools | Computer use in the background, with a floating live picture | not on Windows |  |
+| Agent tools | Computer use by element (an outline with refs; click, type and wait by ref) | no live steps | The outline comes from the accessibility tree of the user's own apps, which an isolated run doesn't drive: trek-mcp's tests (computer.rs, desktop/) and its live tests on a PC. |
+| Agent tools | Agents use Trek's own tools (sub-agents, new threads, handoffs, asking you for a secret, their transcript, the Browser and iPhone tools) over a channel only your own programs can open | shown working | `route project:{project}` · `pace 0` · `send Show a short answer` · `wait idle 30000` · `secret-demo` · `wait 400` · `count secret-value 1` · `click secret-decline` |
+| Agent tools | watch_video gives agents a transcript of a video's audio | no live steps | watch_video runs in trek-mcp, for an agent: its tests, and on a PC a spoken clip transcribed word for word by dictation's model (local.rs a_recording_is_transcribed_with_dictations_model). |
+| Agents | Several accounts for one agent, sharing your setup | shown working | `accounts-demo` · `route settings:agents` · `wait 400` · `reveal account-more-*` · `count account-more-* 2+` |
+| Agents | Add an agent from the ACP Registry, or one of your own by its command | shown working | `agent-install codex 40` · `route settings:agents` · `wait 400` · `reveal add-agent` · `count add-agent 1` |
+| Agents | Agent CLIs kept up to date, the way each was installed | shown working | `route settings:agents` · `wait 300` · `reveal check-agent-updates` · `count check-agent-updates 1` · `count agent-updates-auto 1` |
+| Agents | Codex runs a thread's commands in its own sandbox under Supervised and Auto | no live steps | Codex's sandbox is the real Codex CLI's, which an isolated run never starts: trek-agents' codex tests, rules_live.rs against the real CLI, and the thread view's sandbox notice test. |
+| Agents | API keys kept in the system's credential store, and Node.js for npm-only agents | shown working | `route settings:api-keys` · `wait 300` · `count save-anthropic 1` · `count save-openai 1` |
+| Agents | API-key and local-model agents run shell commands | shown working | `route project:{project}` · `pace 0` · `send Read the project, then run a command that needs permission` · `wait permission 30000` · `approve` · `wait idle 30000` · `wait 1000` · `count tool-group* 1+` |
+| Agents | Agents get the MCP servers set up in Trek | shown working | `route settings:tools` · `wait 300` · `reveal mcp-add` · `count mcp-add 1` · `count mcp-command 1` |
+| Agents | The model picker names models as their CLIs do | shown working | `click model-pill` · `wait 300` · `click mm-model` · `wait 300` · `count model-menu-body 1` · `count m-direct:mock-mock-swift 1` · `count m-direct:mock-mock-deep 1` |
+| Agents | OpenCode asks before edits and commands as the thread's access level says, and its 1.x and 2 share one history | no live steps | OpenCode runs as itself, which an isolated run never starts: rules_live.rs drives the real opencode CLI against a stand-in, and opencode.rs's tests cover its 1.x and 2. |
+| Agents | Rules in Settings › Permissions allow, ask about or refuse an agent's commands, file edits and fetches, however they're spelled | shown working | `route settings:permissions` · `wait 300` · `reveal rule-test` · `count rule-add 1` · `count rule-test 1` |
+| Agents | Stopping a thread, quitting Trek or a crash ends every program Trek and its agents started | no live steps | What's ended is what agents start, and the mock agent starts nothing: procs.rs's and trek-job's tests, on both CIs. |
+| Agents | Skills keep the symlinks inside them when copied or moved | shown working | `route settings:skills` · `wait 300` · `count skill-add 1` · `count skill-new 1` |
+| Agents | A verification skill: the agent checks its work with the project's own CLI, and the turn is marked Verified | shown working | `route project:{project}` · `route settings:project` · `wait 400` · `count verify-setup 1` |
+| App | Threads waiting on you, counted on the app's icon | no live steps | The badge is drawn by the system outside Trek's window (the taskbar's, the Dock's): the badge tests count what it says. |
+| App | Choose Trek's app icon | shown working | `route settings:appearance` · `wait 300` · `count app-icon-* 3+` |
+| App | Chips, segmented controls, the completion ghost and the CI graph's labels are legible, Night included | shown working | `route project:{project}` · `count model-pill 1` · `count consult-pill 1` · `count plan-pill 1` |
+| App | Translucent window (Liquid glass) | shown working | `route settings:appearance` · `wait 300` · `count glass 1` |
+| App | Hide Trek or minimize its window from the keyboard | n/a on Windows |  |
+| App | Agents keep working with Trek's window closed | no live steps | Closing the window isn't a command the capture build has: tests/upkeep.rs and the tray's tests keep agents going without it. |
+| App | Trek keeps a week of logs; after a crash the next launch says so, and a bug or crash report can send the recent log with paths and secrets taken out | shown working | `route settings:about` · `wait 300` · `count copy-diag 1` · `count about-feedback 1` |
+| App | Looks at home on its platform | shown working | `count title-text 1` · `count toggle-sidebar 1` · `count mode-switch 1` |
+| App | Trek's commands in menus | shown working | `route project:{project}` · `pace 0` · `send Show a short answer` · `wait idle 30000` · `click thread-menu` · `wait 300` · `count thread-rename 1` · `count thread-open-window 1` |
+| App | Trek, and the programs it and its agents start, open no console windows | no live steps | A console window is the system's, outside Trek's: procs.rs's tests that every program starts without one, on Windows' CI. |
+| App | Onboarding asks for the permissions Trek uses | n/a on Windows |  |
+| App | Open a project in another app | shown working | `route project:{project}` · `pace 0` · `send Show a short answer` · `wait idle 30000` · `count hub-open 1` · `count hub-open-more 1` |
+| App | Trek's words name the platform's own things: File Explorer or Finder, the taskbar or the Dock, Credential Manager or the Keychain, the Recycle Bin or the Trash, this PC or this Mac | shown working | `route settings:phone` · `wait 300` · `count mobile-on 1` |
+| App | Trek's secrets, machine list, paired phones, agents' MCP config and uploaded files are readable by the user alone | no live steps | Who may read a file isn't on screen: trek-private's tests on both CIs, and session_secrets.rs, tls.rs and pairing.rs. |
+| App | Trek stays light while agents work: the working bar, streamed text and typing redraw only what changed, and a long thread opens quickly | no live steps | Measured, not seen: the render-count tests (tests/scaling.rs, hover_cached.rs, activity.rs) on both CIs. |
+| App | A second launch hands its links and files to the running Trek | no live steps | A second launch is another process: tests/reentry.rs and trek-core's single-instance tests. |
+| App | Idle, working and needs-you icon with a small menu | no live steps | The icon is in the system's tray (the menu bar on a Mac), outside Trek's window: the tray's tests. |
+| App | Keep the computer awake while agents work, follow reduced motion and transparency, and move files to the trash | shown working | `route settings:general` · `wait 300` · `reveal prevent-sleep` · `count prevent-sleep 1` · `route settings:appearance` · `wait 300` · `reveal reduce-motion` · `count reduce-motion 1` |
+| App | The title bar: the window's own buttons, Trek's buttons beside them, and moving the window by it | shown working | `count toggle-sidebar 1` · `count toggle-tools 1` · `hittest toggle-sidebar HTCLIENT` · `hittest title-text HTCAPTION` |
+| App | trek:// links open in Trek | no live steps | trek:// is the installed Trek's (the system hands links to it), not an isolated one's: the link tests and tests/reentry.rs. |
+| App | Anonymous usage counts and crash reports, asked about once and changed in Settings › Privacy | shown working | `privacy-demo` · `wait 300` · `count consent-card 1` · `click consent-no` · `route settings:privacy` · `wait 300` · `count privacy-consent 1` |
+| Browser | Import your uBlock Origin as the ad blocker | shown working | `route project:{project}` · `tools browser` · `wait 600` · `click browser-more-button` · `wait 300` · `count browser-adblock-import 1` · `key escape` |
+| Browser | Block trackers | shown working | `route project:{project}` · `tools browser` · `wait 600` · `click browser-more-button` · `wait 300` · `count browser-block-trackers 1` · `key escape` |
+| Browser | A page's dialogs and permission asks in Trek's bar; answered for an agent at work | no live steps | Needs a page that asks (a dialog, the camera): tests/browser.rs's fixtures, and mock:browser approvals. |
+| Browser | A crashed page reloads, and a failed load says why | no live steps | Needs a page's process to crash: tests/browser.rs. |
+| Browser | Downloads said in Trek's toasts | no live steps | Needs a download: tests/browser.rs's fixtures. |
+| Browser | Browser extensions with their button, popup and options | shown working | `route project:{project}` · `tools browser` · `wait 600` · `click browser-more-button` · `wait 300` · `count browser-extensions-open 1` · `key escape` |
+| Browser | Popups that keep their opener (sign-ins that answer the opening page) | no live steps | Needs a page that opens a sign-in popup: the popup fixture in tests/browser.rs. |
+| Browser | Agents use Trek's Browser while you watch: open pages, read them as an outline with refs, click, type and press keys by ref, and take screenshots | shown working | `route project:{project}` · `tools browser` · `wait 600` · `browser go https://example.com` · `wait 3000` · `browser state` · `count browser-url 1` · `count browser-back 1` |
+| Composer | Attach files and folders from the + menu | shown working | `click attach` · `wait 300` · `count popup-menu 1` · `key escape` |
+| Composer | Dictate a message with the mic button, with live words and a level meter | shown working | `dictate-demo the chain rule` · `wait 300` · `count voice-row 1` · `count voice-confirm 1` · `click voice-cancel` |
+| Composer | Find a project's files by name: @ in the composer, the palette's files and the editor's search | shown working | `route project:{project}` · `wait 300` · `key secondary-a` · `key backspace` · `type @READ` · `wait 700` · `count picker-list 1` · `key escape` |
+| Composer | HEIC and HEIF photos attach as images agents can read | no live steps | Needs a HEIC photo attached from disk: the attachment tests decode one. |
+| Composer | Pick from the Photos library | n/a on Windows |  |
+| Composer | Preview files Trek doesn't draw itself (PDF, SVG, HEIC) | no live steps | A preview opens in another app (Quick Look on a Mac, the file's app on Windows), outside Trek's window. |
+| Composer | Keyboard shortcuts | shown working | `route settings:keyboard-shortcuts` · `wait 300` · `count shortcut-New thread 1` · `count shortcut-Send 1` |
+| Composer | Snapshot a window, an area or the screen into the message | shown working | `route settings:app-snapshots` · `wait 300` · `reveal snap-keep*` · `count snap-keep* 2+` |
+| Composer | Study mode's Talk chip | shown working | `route study` · `wait 300` · `count study-talk 1` |
+| Composer | A poster frame on an attached video's tile | no live steps | Needs a video attached from disk: the attachment tests make a poster from one. |
+| Composer | Windows' own dictation (Win+H) types into Trek's text fields | no live steps | Windows' voice typing panel is the system's: a person checked it typing into the composer (see the note). |
+| Development | The capture build (`shots`): an isolated Trek that trek-dev drives with commands and captures, to verify a change | shown working | `count title-text 1` |
+| Editor | The preview opens files that live only in the cloud | no live steps | Needs a file that lives only in OneDrive: the editor's cloud placeholder tests. |
+| Editor | The editor opens a file without hanging on a pipe, a device or a huge one, says why one can't be read (with Retry), and saves a file whole, keeping its permissions and links | shown working | `route project:{project}` · `click mode-editor` · `wait 900` · `count ide-workbench 1` · `count ide-view-explorer 1` · `click mode-agents` |
+| Editor | Hover, completion, go to definition and problems in the editor, from the language's server when it's installed | no live steps | Needs a language's server installed (rust-analyzer, typescript-language-server): tests/ide.rs. |
+| Editor | A tab in the editor is the editor's tab size wide, and a selection over it matches | shown working | `route project:{project}` · `click mode-editor` · `wait 900` · `editor open {project}{/}src{/}main.rs` · `wait 900` · `count ide-workbench 1` · `click mode-agents` |
+| Editor | Format document runs the file's formatter (rustfmt, prettier, black, gofmt, shfmt) from your PATH | no live steps | Runs the file's formatter from PATH (rustfmt, prettier...): tests/ide.rs. |
+| Editor | Keep or Undo what a thread's agent changed, file by file and hunk by hunk | shown working | `route project:{project}` · `pace 0` · `send mock:write` · `wait idle 30000` · `wait 1500` · `count changes-review* 1` · `count changes-undo* 1` |
+| Install | Trek moves out of a folder it can't update in, and fixes its shortcuts | no live steps | About where the installed Trek lives: tests/hardening.rs and the installer's tests. |
+| Install | A native build for each kind of processor | no live steps | A release's builds: the release workflow. |
+| Install | Trek starts on a computer with nothing else installed | no live steps | About the release's trek.exe: tests/hardening.rs refuses one that needs a redistributable. |
+| Install | Trek updates itself | shown working | `update-demo ready` · `wait 300` · `count updater 1` · `update-demo clear` |
+| Install | Releases the system trusts on first launch | not on Windows |  |
+| Install | Trek updated while it's closed, from the phone | not on Windows |  |
+| Machines | This computer goes by one name, to the iPhone and to other machines | shown working | `count hub-where 1` |
+| Machines | Run threads on this computer from another one | shown working | `route settings:phone` · `wait 300` · `reveal machine-add` · `count machine-add 1` |
+| Notes | Notes save as you type, and one that can't be saved stays unsaved and is tried again | shown working | `route notes` · `wait 300` · `note text Live check: a note saved as it is typed` · `wait 600` · `count note-toolbar 1` · `count note-new 1` |
+| Notifications | An alert sound, a push to the phone (ntfy), and knowing when you're away | shown working | `route settings:phone` · `wait 300` · `reveal push-on` · `count push-on 1` · `route settings:notifications` · `wait 300` · `reveal notify-mode*` · `count notify-mode* 2+` |
+| Notifications | A banner when a thread needs you or finishes; clicking it opens the thread | no live steps | A banner is the system's, outside Trek's window: the notification tests. |
+| Notifications | Trek knows whether its banners are allowed, and says how to allow them | no live steps | Asks the system whether banners are allowed: the notification tests. |
+| Threads | What an agent left running (a dev server, a watcher) above the composer: its last line, the end of its output, Stop, and its whole output in a text editor | no live steps | A program an agent leaves running shows above the composer while it runs: tests/background.rs. |
+| Threads | Basecamp: a recap of the prompts, turns, models, projects and tokens of today, this week or all along | shown working | `route basecamp` · `wait 300` · `count basecamp-totals 1` · `count basecamp-chart 1` |
+| Threads | Trek's Git features (changes, reviews, rewinds, worktrees, pull requests, commits that run the project's hooks) use the Git you have, and say how to get one | shown working | `route project:{project}` · `pace 0` · `send Show a short answer` · `wait idle 30000` · `tools git` · `wait 700` · `count git-commit 1` · `count git-push 1` |
+| Threads | Threads you had with Claude Code, Codex and OpenCode outside Trek, and worktrees from Conductor, T3 Code and Orca, show up in Trek | shown working | `import-demo` · `route settings:import-threads` · `wait 900` · `count imp-claude 1` · `count worktree-app-conductor 1` · `count worktree-app-t3-code 1` |
+| Threads | File paths in an answer show as chips: the file's name and type, a preview or the file manager on a click | shown working | `route project:{project}` · `pace 0` · `send mock:write` · `wait idle 30000` · `wait 1000` · `count path-* 1+` |
+| Threads | A pull request's failing checks show on its thread and go back to the agent, by Send to agent or by themselves | shown working | `route project:{project}` · `pace 0` · `send Show a short answer` · `wait idle 30000` · `checks-demo failed` · `wait 1500` · `count hub-pr 1` |
+| Threads | Share a thread as a link: a secret GitHub gist that Trek remembers, updates and deletes | shown working | `route project:{project}` · `pace 0` · `send Show a short answer` · `wait idle 30000` · `click thread-menu` · `wait 300` · `count thread-share 1` |
+| Threads | Share a thread through the system (AirDrop, Messages, Mail) | no live steps | The system's share window (Windows' Share, a Mac's AirDrop and Messages), outside Trek's: the share tests. |
+| Threads | The thought streaming in after a group of tool calls, in the timeline and the working bar | no live steps | Needs a turn caught mid-thought: tests/activity.rs. |
+| Threads | An opened timeline row stays in view while following the end; the context bar's slivers stay within it; Compact now stays until the summary is done | no live steps | How the transcript scrolls and the context bar fits: the transcript and context bar tests. |
+| Tools | New files and renames in the Explorer stay in their folder, with names the platform allows | shown working | `route project:{project}` · `tools explorer` · `wait 700` · `count {project}{/}README.md 1` · `count {project}{/}src 1` |
+| Tools | The iPhone tool: your real iPhone for you and agents | shown working | `phone ready` · `wait 600` · `count phone-apps 1` · `count phone-install 1` · `phone files` · `wait 600` · `count phone-files 1` |
+| Tools | The iOS Simulator tool | n/a on Windows |  |
+| Tools | Terminal, editor previews and interactive artifacts | shown working | `route project:{project}` · `tools terminal` · `wait 1500` · `count terminal 1` |
+| iPhone | The sidebar's Devices: the paired iPhone (connected, or when it was last seen) and other machines' threads | shown working | `pair-phone Live check iPhone` · `wait 1500` · `count phone-stand-in-iphone 1` · `pair-phone leave` · `wait 800` · `count phone-seen-stand-in-iphone 1` |
+| iPhone | The pairing TLS key is readable by its owner alone | no live steps | Who may read the key isn't on screen: trek-remote's TLS tests (owner-only) on both CIs. |
+| iPhone | Get the iPhone app, and update it from the computer | not on Windows |  |
+| iPhone | The iPhone app follows and steers your threads (Devices) | shown working | `pair-phone Live check iPhone` · `wait 1500` · `route settings:phone` · `wait 400` · `count mobile-on 1` · `reveal mobile-revoke-stand-in-iphone` · `count mobile-revoke-stand-in-iphone 1` · `pair-phone leave` |
+| iPhone | The phone finds the computer again when its address changes (Bonjour) | no live steps | Bonjour on a real network, with a phone on it: remote/bonjour.rs's tests. |
+| iPhone | The phone server is reachable on the local network | no live steps | Needs a phone on the network: tests/remote.rs; the isolated run's phone server is on the loopback alone. |
+| iPhone | Uploads from the phone check for free space first | no live steps | Needs a phone sending a file: trek-remote's upload tests. |
