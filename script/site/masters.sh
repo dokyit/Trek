@@ -24,7 +24,9 @@ V=$S/shots/v3
 D=$V/demo
 UNDER=$V/under.png
 DRESS="Claude Code|Sonnet 5.5|Opus 5.5"
-export CARGO_TARGET_DIR=$HOME/Library/Caches/Trek/target.nosync/wt-site CARGO_INCREMENTAL=0
+# The test app is built into the caller's CARGO_TARGET_DIR when one is set (a worktree with a
+# target directory of its own), else into the site worktree's.
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$HOME/Library/Caches/Trek/target.nosync/wt-site} CARGO_INCREMENTAL=0
 cd $W
 mkdir -p $V
 q() { "$@" >/dev/null 2>&1 || echo "FAILED: $*"; }
