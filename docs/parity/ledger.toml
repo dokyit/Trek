@@ -693,11 +693,10 @@ id = "verification-skills"
 area = "Agents"
 what = "A verification skill: the agent checks its work with the project's own CLI, and the turn is marked Verified"
 macos = "yes"
-windows = "partial"
-how = { macos = "The skill's CLI found by its `cli:` line or its file; runs read as shell commands.", windows = "The same code." }
-note = "On Windows a CLI is found only by its extension (the guide's own `scripts/app` has none), runs are read as Mac shell (`\\` an escape), so `.\\…\\app.cmd check` never matches, and pwsh/powershell/cmd aren't runners: the turn isn't marked Verified. The end-to-end tests (pstack.rs) are skipped on Windows, as the mock agent runs commands through /bin/sh. Fix: read `\\` as a separator on Windows, add the Windows shells, a `.cmd` mock CLI, and run the tests there."
+windows = "yes"
+how = { macos = "The skill's CLI found by its `cli:` line or its execute bit; runs read as shell commands.", windows = "The skill's CLI found by its `cli:` line, a program's extension or a `#!` line; runs read as PowerShell, cmd.exe and Git Bash write them (a backslash before a name a folder separator, `app` for `app.cmd`, any case, `pwsh -c`, `cmd /c`). The mock agent's CLI is a batch file it runs through cmd.exe." }
 code = ["crates/trek-core/src/verification.rs", "crates/trek-agents/src/mock.rs"]
-tests = ["crates/trek-app/tests/pstack.rs"]
+tests = ["crates/trek-core/src/verification.rs", "crates/trek-agents/src/mock.rs", "crates/trek-app/tests/pstack.rs"]
 
 [[feature]]
 id = "private-files"

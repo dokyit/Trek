@@ -121,27 +121,38 @@ fn is_executable(_: &Path, metadata: &std::fs::Metadata) -> bool {
 }
 
 /// Whether `path` (a regular file with this `metadata`) is a program: Windows has no execute bit,
-/// so it's the extension, one of `%PATHEXT%` (case-insensitively).
+/// so it's a file with a program's extension (one of `%PATHEXT%`, case-insensitively, or
+/// PowerShell's `.ps1`), or a script that names what runs it on its first line (`#!/bin/sh`), as
+/// the guide's `scripts/app` does: Git Bash, which Claude Code runs commands in there, runs it.
 #[cfg(windows)]
 fn is_executable(path: &Path, metadata: &std::fs::Metadata) -> bool {
+    use std::io::Read as _;
     const FALLBACK: &str = ".exe;.cmd;.bat;.com;.ps1";
     if !metadata.is_file() {
         return false;
     }
+    let shebang = || {
+        let mut start = [0u8; 2];
+        std::fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut start))
+            .is_ok_and(|_| &start == b"#!")
+    };
     let Some(ext) = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
     else {
-        return false;
+        return shebang();
     };
     let pathext = std::env::var("PATHEXT")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| FALLBACK.to_string());
-    pathext
-        .split(';')
-        .filter_map(|e| e.trim().strip_prefix('.'))
-        .any(|e| e.eq_ignore_ascii_case(&ext))
+    ext == "ps1"
+        || pathext
+            .split(';')
+            .filter_map(|e| e.trim().strip_prefix('.'))
+            .any(|e| e.eq_ignore_ascii_case(&ext))
+        || shebang()
 }
 
 /// When a skill's folder last changed, as far as Trek can tell.
@@ -261,13 +272,18 @@ pub fn instructions(v: &Verification, project: &Path, cwd: &Path) -> String {
     )
 }
 
-/// The CLI `cli` (run from `project`) with a program that `cwd` lacks named by its full path.
+/// The CLI `cli` (run from `project`) with a program that `cwd` lacks named by its full path, in
+/// the platform's own separators (`C:\repo\.agents\skills\…` on Windows, as its shells take it).
 fn absolute(cli: &str, project: &Path, cwd: &Path) -> String {
     let mut words: Vec<String> = cli.split_whitespace().map(String::from).collect();
     if let Some(w) = words.iter_mut().find(|w| w.starts_with("./")) {
         let rel = &w[2..];
         if !cwd.join(rel).exists() {
-            *w = project.join(rel).display().to_string();
+            let full = rel
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .fold(project.to_path_buf(), |path, part| path.join(part));
+            *w = full.display().to_string();
         }
     }
     words.join(" ")
@@ -300,6 +316,17 @@ pub fn maintain_prompt(guide: &Path, skill: &Path, has_cli: bool) -> String {
 /// whole line but its trailing flags (`make verify` → itself, `appctl --json` → `appctl`): a
 /// program run through another (make, cargo, swift) is only that program with its arguments.
 pub fn needle(cli: &str) -> Option<String> {
+    needle_on(cli, cfg!(windows))
+}
+
+/// `needle` for Windows (`windows`), where a path may be written with backslashes
+/// (`.\scripts\app.cmd`), or for macOS, where a backslash is part of a name.
+fn needle_on(cli: &str, windows: bool) -> Option<String> {
+    let cli = if windows {
+        cli.replace('\\', "/")
+    } else {
+        cli.to_string()
+    };
     let words: Vec<&str> = cli.split_whitespace().collect();
     // A path is the program when no flag comes before it (`make -C tools/x check` isn't).
     let path = words
@@ -315,8 +342,10 @@ pub fn needle(cli: &str) -> Option<String> {
 
 /// The simple commands in a shell command line, each as its words (quotes taken off): split at
 /// `;`, `&&`, `||`, `|`, `&`, parentheses, backticks and new lines, outside quotes. Comments are
-/// left out.
-fn simple_commands(line: &str) -> Vec<Vec<String>> {
+/// left out. On Windows (`windows`) a backslash before a name (`.\scripts\app.cmd`, `C:\repo`) is
+/// a folder separator, read as `/`, as PowerShell and cmd.exe take it (anywhere else it escapes,
+/// as in Git Bash), and PowerShell's braces (`& { … }`) split commands too.
+fn simple_commands(line: &str, windows: bool) -> Vec<Vec<String>> {
     let (mut out, mut words, mut word) = (vec![], vec![], String::new());
     let (mut quote, mut quoted, mut chars) = (None::<char>, false, line.chars().peekable());
     let end_word = |words: &mut Vec<String>, word: &mut String, quoted: &mut bool| {
@@ -325,9 +354,13 @@ fn simple_commands(line: &str) -> Vec<Vec<String>> {
         }
         *quoted = false;
     };
+    let separates = |next: Option<&char>| {
+        windows && next.is_some_and(|&n| n.is_alphanumeric() || matches!(n, '.' | '_' | '-' | '~'))
+    };
     while let Some(c) = chars.next() {
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
+            (_, '\\') if separates(chars.peek()) => word.push('/'),
             (Some('"'), '\\') => word.extend(chars.next()),
             (Some(_), c) => word.push(c),
             (None, '\'' | '"') => {
@@ -340,6 +373,12 @@ fn simple_commands(line: &str) -> Vec<Vec<String>> {
                 end_word(&mut words, &mut word, &mut quoted)
             }
             (None, ';' | '&' | '|' | '(' | ')' | '`' | '\n') => {
+                end_word(&mut words, &mut word, &mut quoted);
+                if !words.is_empty() {
+                    out.push(std::mem::take(&mut words));
+                }
+            }
+            (None, '{' | '}') if windows => {
                 end_word(&mut words, &mut word, &mut quoted);
                 if !words.is_empty() {
                     out.push(std::mem::take(&mut words));
@@ -362,11 +401,64 @@ const PREFIXES: [&str; 16] = [
     "builtin", "nohup", "sudo", "env",
 ];
 
-/// Programs that run a script or package named after them (`sh x`, `npx tsx x.ts`, `uv run x`).
-const RUNNERS: [&str; 22] = [
-    "sh", "bash", "zsh", "dash", "fish", "node", "deno", "bun", "bunx", "npx", "pnpx", "tsx",
-    "ts-node", "python", "python3", "uv", "ruby", "perl", "php", "swift", "run", "exec",
+/// Programs that run a script or package named after them (`sh x`, `npx tsx x.ts`, `uv run x`,
+/// `powershell -File x.ps1`), or a command line given them (`cmd /c …`, `pwsh -c …`).
+const RUNNERS: [&str; 25] = [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "node",
+    "deno",
+    "bun",
+    "bunx",
+    "npx",
+    "pnpx",
+    "tsx",
+    "ts-node",
+    "python",
+    "python3",
+    "uv",
+    "ruby",
+    "perl",
+    "php",
+    "swift",
+    "run",
+    "exec",
+    "pwsh",
+    "powershell",
+    "cmd",
 ];
+
+/// What Windows runs for a program named without its extension (`.\scripts\app` is
+/// `scripts\app.cmd`): `path` without one of those, lowercased as the caller has it.
+fn without_program_extension(path: &str) -> &str {
+    [".exe", ".cmd", ".bat", ".com", ".ps1"]
+        .iter()
+        .find_map(|ext| path.strip_suffix(ext))
+        .unwrap_or(path)
+}
+
+/// Where a simple command (from its program on) goes, if it changes folder: `cd`, `pushd`, and on
+/// Windows (`windows`) PowerShell's `Set-Location` and `sl` and cmd.exe's `chdir` and `cd /d`.
+/// `Some(None)` for one that names no folder (`cd` alone goes home).
+fn changes_into(words: &[String], windows: bool) -> Option<Option<&String>> {
+    let first = words.first()?;
+    let cd = if windows {
+        matches!(
+            first.to_lowercase().as_str(),
+            "cd" | "chdir" | "pushd" | "set-location" | "sl"
+        )
+    } else {
+        first == "cd" || first == "pushd"
+    };
+    cd.then(|| {
+        words[1..]
+            .iter()
+            .find(|w| !w.starts_with('-') && !(windows && w.eq_ignore_ascii_case("/d")))
+    })
+}
 
 /// A simple command's words from its program on: past variables set for it (`FOO=1`), the
 /// prefixes above and their flags, and `timeout`'s duration.
@@ -407,27 +499,40 @@ fn program(words: &[String]) -> &[String] {
 /// runner (`sh scripts/app`, `npx tsx tools/app.ts`, `bash -c "./scripts/app check"`), or from a
 /// folder on its path (`cd .agents/skills/x && ./scripts/app`). Naming it to another program
 /// (`cat`, `sed -n`, `chmod +x`, `git diff`, `echo`) or to a shell that only parses it
-/// (`bash -n`) isn't running it.
+/// (`bash -n`) isn't running it. On Windows, as PowerShell and cmd.exe write it too
+/// (`.\scripts\app check`, `powershell -Command "…"`, `cmd /c …`).
 pub fn runs(needle: &str, command: &str) -> bool {
-    !invocations(needle, command).is_empty()
+    !invocations(needle, command, cfg!(windows)).is_empty()
 }
 
-/// The arguments of each run of the CLI `needle` stands for in `command` (see `runs`).
-fn invocations(needle: &str, command: &str) -> Vec<Vec<String>> {
+/// The arguments of each run of the CLI `needle` stands for in `command` (see `runs`), read as
+/// Windows' shells write it (`windows`) or as the Mac's do.
+fn invocations(needle: &str, command: &str, windows: bool) -> Vec<Vec<String>> {
     let target: Vec<&str> = needle.split_whitespace().collect();
+    // A name that is `path`: on Windows in any case, and without its extension
+    // (`.\scripts\app` runs `scripts\app.cmd`).
+    let same = |w: &str, path: &str| {
+        if !windows {
+            return w == path;
+        }
+        let (w, path) = (w.to_lowercase(), path.to_lowercase());
+        w == path || w == without_program_extension(&path)
+    };
     // `path` itself, wherever it's run from: `./scripts/app`, `/repo/scripts/app`.
     let is = |w: &str, path: &str| {
         let w = w.trim_end_matches('/');
         let w = w.strip_prefix("./").unwrap_or(w);
-        w == path || w.ends_with(&format!("/{path}"))
+        same(w, path) || w.match_indices('/').any(|(i, _)| same(&w[i + 1..], path))
     };
     let mut out = Vec::new();
     let mut cwd: Option<String> = None;
-    for words in simple_commands(command) {
+    for words in simple_commands(command, windows) {
         let words = program(&words);
-        let Some(first) = words.first() else { continue };
-        if first == "cd" {
-            cwd = words.get(1).cloned();
+        if words.is_empty() {
+            continue;
+        }
+        if let Some(to) = changes_into(words, windows) {
+            cwd = to.cloned();
             continue;
         }
         if target.len() > 1 {
@@ -441,7 +546,7 @@ fn invocations(needle: &str, command: &str) -> Vec<Vec<String>> {
         while let Some((w, after)) = rest.split_first() {
             let from_cwd = cwd.as_deref().is_some_and(|d| {
                 needle.match_indices('/').any(|(i, _)| {
-                    is(d, &needle[..i]) && w.strip_prefix("./").unwrap_or(w) == &needle[i + 1..]
+                    is(d, &needle[..i]) && same(w.strip_prefix("./").unwrap_or(w), &needle[i + 1..])
                 })
             });
             if is(w, needle) || from_cwd {
@@ -449,10 +554,19 @@ fn invocations(needle: &str, command: &str) -> Vec<Vec<String>> {
                 break;
             }
             let name = w.rsplit('/').next().unwrap_or(w);
-            if !RUNNERS.contains(&name) {
+            let name = if windows {
+                let lower = name.to_lowercase();
+                lower
+                    .strip_suffix(".exe")
+                    .map(str::to_string)
+                    .unwrap_or(lower)
+            } else {
+                name.to_string()
+            };
+            if !RUNNERS.contains(&name.as_str()) {
                 break;
             }
-            if matches!(name, "sh" | "bash" | "zsh" | "dash") {
+            if matches!(name.as_str(), "sh" | "bash" | "zsh" | "dash") {
                 // `bash -n` parses the script without running it.
                 if noexec(after) {
                     break;
@@ -463,8 +577,32 @@ fn invocations(needle: &str, command: &str) -> Vec<Vec<String>> {
                     .position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c'))
                 {
                     if let Some(line) = after.get(at + 1) {
-                        out.extend(invocations(needle, line));
+                        out.extend(invocations(needle, line, windows));
                     }
+                    break;
+                }
+            }
+            if matches!(name.as_str(), "pwsh" | "powershell") {
+                // `-Command` (`-c`, in any case, or any shortening) runs the rest of the line;
+                // `-File` (`-f`) the script after it, past whatever options come first.
+                let flag =
+                    |a: &str, full: &str| a.len() >= 2 && full.starts_with(&a.to_lowercase());
+                if let Some(at) = after.iter().position(|a| flag(a, "-command")) {
+                    out.extend(invocations(needle, &after[at + 1..].join(" "), windows));
+                    break;
+                }
+                if let Some(at) = after.iter().position(|a| flag(a, "-file")) {
+                    rest = &after[at + 1..];
+                    continue;
+                }
+            }
+            if name == "cmd" {
+                // `/c` (or `/k`) runs the rest of the line.
+                if let Some(at) = after
+                    .iter()
+                    .position(|a| a.eq_ignore_ascii_case("/c") || a.eq_ignore_ascii_case("/k"))
+                {
+                    out.extend(invocations(needle, &after[at + 1..].join(" "), windows));
                     break;
                 }
             }
@@ -527,14 +665,21 @@ fn subcommand(args: &[String]) -> &str {
         .map_or("", |a| a.as_str())
 }
 
-/// Whether a command line goes into `dir` (or a folder in it) with `cd`.
-fn goes_into(command: &str, dir: &Path) -> bool {
-    simple_commands(command).iter().any(|words| {
-        let words = program(words);
-        words.first().is_some_and(|w| w == "cd")
-            && words
-                .get(1)
-                .is_some_and(|d| Path::new(d.trim_end_matches('/')).starts_with(dir))
+/// Whether a command line goes into `dir` (or a folder in it) with `cd` (or, on Windows, as
+/// PowerShell and cmd.exe do, in any case).
+fn goes_into(command: &str, dir: &Path, windows: bool) -> bool {
+    simple_commands(command, windows).iter().any(|words| {
+        changes_into(program(words), windows)
+            .flatten()
+            .is_some_and(|d| {
+                let d = d.trim_end_matches('/');
+                if windows {
+                    Path::new(&d.to_lowercase())
+                        .starts_with(dir.to_string_lossy().to_lowercase().replace('\\', "/"))
+                } else {
+                    Path::new(d).starts_with(dir)
+                }
+            })
     })
 }
 
@@ -559,7 +704,17 @@ pub struct Verdict {
 /// the skill isn't verifying: only running its CLI counts, where the thread works, and not to ask
 /// it for help or a dry run.
 pub fn verdict(turn: &[Item], probe: &Probe) -> Option<Verdict> {
-    let here = |d: &str| probe.main.as_deref().is_none_or(|m| !goes_into(d, m));
+    verdict_on(turn, probe, cfg!(windows))
+}
+
+/// `verdict` with commands read as Windows' shells write them (`windows`) or as the Mac's do.
+fn verdict_on(turn: &[Item], probe: &Probe, windows: bool) -> Option<Verdict> {
+    let here = |d: &str| {
+        probe
+            .main
+            .as_deref()
+            .is_none_or(|m| !goes_into(d, m, windows))
+    };
     let mut commands = Vec::new();
     // Each subcommand's last result: a failed `check` isn't made good by a `--help` or `logs`.
     let mut last: Vec<(String, ToolStatus)> = Vec::new();
@@ -576,7 +731,7 @@ pub fn verdict(turn: &[Item], probe: &Probe) -> Option<Verdict> {
         if !is_command(title) || *status == ToolStatus::Running || !here(detail) {
             continue;
         }
-        let Some(args) = invocations(&probe.needle, detail)
+        let Some(args) = invocations(&probe.needle, detail, windows)
             .into_iter()
             .find(|a| !inspects(a))
         else {
@@ -887,6 +1042,108 @@ mod tests {
         );
     }
 
+    /// Commands as Windows' shells write them: PowerShell and cmd.exe take a backslash as a folder
+    /// separator, find `app.cmd` for `app`, ignore case, and run a command line given them. Read
+    /// with Windows' rules on every platform; the Mac's own reading is the test above.
+    #[test]
+    fn windows_commands_that_run_the_cli_are_recognised() {
+        let on = |needle: &str, command: &str| !invocations(needle, command, true).is_empty();
+        let cli = ".agents/skills/verify-app/scripts/app.cmd";
+        assert_eq!(
+            needle_on(r".\.agents\skills\verify-app\scripts\app.cmd check", true).as_deref(),
+            Some(cli)
+        );
+        assert_eq!(
+            needle_on("./.agents/skills/verify-app/scripts/app.cmd", true).as_deref(),
+            Some(cli)
+        );
+        for command in [
+            r".\.agents\skills\verify-app\scripts\app.cmd check --json",
+            r".\.agents\skills\verify-app\scripts\app check",
+            r"C:\repo\.agents\skills\verify-app\scripts\app.cmd check",
+            r".\.Agents\Skills\Verify-App\Scripts\App.CMD check",
+            r"& .\.agents\skills\verify-app\scripts\app.cmd check",
+            r"& '.\.agents\skills\verify-app\scripts\app.cmd' check",
+            r#"powershell.exe -NoProfile -Command ".\.agents\skills\verify-app\scripts\app.cmd check""#,
+            r#"pwsh -c "& {.\.agents\skills\verify-app\scripts\app.cmd check}""#,
+            r#"cmd /d /s /c ".\.agents\skills\verify-app\scripts\app.cmd check""#,
+            r"cd .agents\skills\verify-app; .\scripts\app.cmd check",
+            r"Set-Location C:\repo\.agents\skills\verify-app\scripts; .\app check",
+            "./.agents/skills/verify-app/scripts/app.cmd check",
+        ] {
+            assert!(on(cli, command), "{command}");
+        }
+        for command in [
+            r"Get-Content .\.agents\skills\verify-app\scripts\app.cmd",
+            r"type .agents\skills\verify-app\scripts\app.cmd",
+            r".\.agents\skills\verify-app\scripts\app.cmd.bak check",
+            r".\other\scripts\app.cmd check",
+            r#"powershell -Command "Get-Content .\.agents\skills\verify-app\scripts\app.cmd""#,
+        ] {
+            assert!(!on(cli, command), "{command}");
+        }
+        // PowerShell's -File runs the script after it, past the options before it.
+        assert!(on(
+            "scripts/app.ps1",
+            r"powershell -ExecutionPolicy Bypass -File .\scripts\app.ps1 check"
+        ));
+        // A Git Bash escape is still one: `\"` inside double quotes.
+        assert!(on(
+            "scripts/app",
+            r#"bash -c "./scripts/app check \"a b\"""#
+        ));
+        // On the Mac a backslash escapes: `.\scripts\app` is `.scriptsapp` there.
+        assert!(invocations("scripts/app", r".\scripts\app check", false).is_empty());
+
+        // A thread in a worktree that goes into the main checkout, the PowerShell way, hasn't
+        // checked its own changes; from its own folder it has.
+        let run = |detail: &str| Item::Tool {
+            id: "t".into(),
+            title: "Run command".into(),
+            detail: detail.into(),
+            output: String::new(),
+            status: ToolStatus::Done,
+        };
+        let away = Probe {
+            needle: "scripts/app.cmd".into(),
+            main: Some(r"C:\Repo".into()),
+        };
+        assert_eq!(
+            verdict_on(&[run(r"cd c:\repo; .\scripts\app.cmd check")], &away, true),
+            None
+        );
+        assert_eq!(
+            verdict_on(
+                &[run(r"Set-Location C:\Repo\src; ..\scripts\app check")],
+                &away,
+                true
+            ),
+            None
+        );
+        assert!(verdict_on(&[run(r".\scripts\app check")], &away, true).is_some_and(|v| v.passed));
+    }
+
+    /// Windows has no execute bit: a script that names what runs it (`#!/bin/sh`, as the guide's
+    /// `scripts/app`) is a program, as a file with a program's extension is; a text file isn't.
+    #[cfg(windows)]
+    #[test]
+    fn a_script_that_names_its_interpreter_is_a_program_on_windows() {
+        let p = project("shebang");
+        let file = |name: &str, body: &str| {
+            let path = p.join(name);
+            std::fs::write(&path, body).unwrap();
+            let metadata = path.metadata().unwrap();
+            is_executable(&path, &metadata)
+        };
+        assert!(file("app", "#!/bin/sh\necho ok\n"));
+        assert!(file("app.sh", "#!/usr/bin/env bash\n"));
+        assert!(file("app.cmd", "@echo off\r\n"));
+        assert!(file("app.ps1", "Write-Output ok\r\n"));
+        assert!(!file("notes", "# not a program\n"));
+        assert!(!file("notes.txt", "not a program\n"));
+        let _ = std::fs::remove_dir_all(p);
+    }
+
     #[test]
     fn a_turn_is_verified_by_running_the_cli_not_reading_the_skill() {
         let tool = |title: &str, detail: &str, status: ToolStatus| Item::Tool {
@@ -1049,7 +1306,13 @@ mod tests {
         // One without a copy reads the main checkout's, and runs its CLI by full path from its own folder.
         let bare = project("tell-bare");
         let text = instructions(&v, &p, &bare);
-        let cli = p.join(".agents/skills/control-app/scripts/app");
+        // In the platform's own separators, as its shells take it.
+        let cli = p
+            .join(".agents")
+            .join("skills")
+            .join("control-app")
+            .join("scripts")
+            .join("app");
         assert!(
             text.contains("has no copy of it yet")
                 && text.contains(&format!(

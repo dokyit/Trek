@@ -552,6 +552,30 @@ impl Script {
     }
 }
 
+/// The verification CLI the mock writes into the skill it sets up, in `scripts/`: a shell script on
+/// the Mac, a batch file on Windows (no execute bit there: a program is a file with a program's
+/// extension).
+const VERIFY_CLI: &str = if cfg!(windows) { "app.cmd" } else { "app" };
+
+/// What it does: `check` fails while `src/notes.rs` has a `todo!()` in it, and prints JSON.
+#[cfg(unix)]
+const VERIFY_CLI_SCRIPT: &str = "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check)\n    if grep -qs 'todo!()' src/notes.rs; then echo '{\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}'; exit 1; fi\n    echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n";
+#[cfg(windows)]
+const VERIFY_CLI_SCRIPT: &str = "@echo off\r\nrem The app's verification CLI.\r\nif \"%~1\"==\"check\" goto check\r\nif \"%~1\"==\"--help\" goto help\r\nif \"%~1\"==\"\" goto help\r\necho {\"ok\":false,\"error\":\"No command %~1: see app --help\"}\r\nexit /b 2\r\n:help\r\necho app ^<check^|open^|screenshot^> [--json] [--dry-run]\r\nexit /b 0\r\n:check\r\nfindstr /c:\"todo!()\" src\\notes.rs >nul 2>nul\r\nif not errorlevel 1 goto broken\r\necho {\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}\r\nexit /b 0\r\n:broken\r\necho {\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}\r\nexit /b 1\r\n";
+
+/// A CLI (`./.agents/…/app.cmd check`, or a full path) as the mock types it into its shell: on
+/// Windows with the program's path in backslashes (`.\.agents\…\app.cmd`), as a PowerShell or
+/// cmd.exe user writes it (cmd.exe can't run `./x`), so Trek reads Windows' commands too.
+fn typed(cli: &str) -> String {
+    if !cfg!(windows) {
+        return cli.to_string();
+    }
+    match cli.split_once(' ') {
+        Some((program, rest)) => format!("{} {rest}", program.replace('/', "\\")),
+        None => cli.replace('/', "\\"),
+    }
+}
+
 /// `path` is relative and stays in the session's folder: no `..`, not absolute.
 fn in_folder(path: &str) -> bool {
     // No root or drive either: `/etc/hosts` and `C:x` both leave the folder on Windows.
@@ -2235,7 +2259,8 @@ impl Session {
     /// Trek, a CLI, and a Feature Map. Then run its check.
     async fn setup_verification(&mut self) -> Step {
         let dir = self.cwd.join(Self::VERIFY_SKILL);
-        let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
+        let cli = format!("./{}/scripts/{VERIFY_CLI}", Self::VERIFY_SKILL);
+        let script = format!("scripts/{VERIFY_CLI}");
         self.think("Learn how the app runs, then build the lever: a CLI first, the notes after.")
             .await?;
         self.tool(
@@ -2247,7 +2272,7 @@ impl Session {
         .await?;
         let files: [(&str, String, bool); 4] = [
             ("SKILL.md", format!("---\nname: verify-app\ndescription: Drive, debug and verify the app. Use it to check any change works before calling it done.\nmetadata:\n  trek: verification\n  cli: {cli}\n---\n\n# Verify the app\n\nRun `{cli} check` before calling a change done. `{cli} --help` lists every command.\n\nThe Feature Map is in references/features/README.md.\n"), false),
-            ("scripts/app", "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check)\n    if grep -qs 'todo!()' src/notes.rs; then echo '{\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}'; exit 1; fi\n    echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n".to_string(), true),
+            (&script, VERIFY_CLI_SCRIPT.to_string(), true),
             ("references/features/README.md", "# Feature Map\n\n- [Notes](notes.md): write and find notes.\n".to_string(), false),
             ("references/features/notes.md", "# Notes\n\nWrite and find notes. Reach it from the sidebar's Notes item, or `app open notes`.\n".to_string(), false),
         ];
@@ -2283,7 +2308,7 @@ impl Session {
                 .await?;
             self.pause(paced(60)).await?;
         }
-        let passed = self.run(&format!("{cli} check --json")).await?;
+        let passed = self.run(&format!("{} check --json", typed(&cli))).await?;
         let check = if passed {
             "`check` passes."
         } else {
@@ -2310,8 +2335,8 @@ impl Session {
                 .say("There's no verification skill here to maintain yet: it has no Feature Map.")
                 .await;
         };
-        let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
-        let passed = self.run(&format!("{cli} check --json")).await?;
+        let cli = format!("./{}/scripts/{VERIFY_CLI}", Self::VERIFY_SKILL);
+        let passed = self.run(&format!("{} check --json", typed(&cli))).await?;
         let line = "- [Settings](settings.md): the app's preferences.\n";
         if !before.contains(line) {
             let id = self.id("tool");
@@ -2382,6 +2407,7 @@ impl Session {
         };
         self.emit(AgentEvent::ToolFinished { id, output, ok })
             .await?;
+        let cli = typed(&cli);
         if self.run(&format!("{cli} check --json")).await? {
             self.say(&format!("Changed `src/notes.rs` and verified it with `{cli} check`: build, launch and the smoke run pass.")).await
         } else {
@@ -2393,12 +2419,24 @@ impl Session {
     }
 
     /// Run `command` in the session's folder, for real, as a command row with what it printed.
-    /// Whether it succeeded.
+    /// Whether it succeeded. On Windows through cmd.exe, as written (`/s` and the outer quotes
+    /// make it take the line literally, as Trek's own executor does).
     async fn run(&mut self, command: &str) -> Step<bool> {
         let id = self.id("tool");
         self.tool_start(&id, "Run command", command).await?;
-        let mut sh = tokio::process::Command::new("/bin/sh");
-        sh.arg("-c").arg(command).current_dir(&self.cwd);
+        #[cfg(unix)]
+        let mut sh = {
+            let mut sh = tokio::process::Command::new("/bin/sh");
+            sh.arg("-c").arg(command);
+            sh
+        };
+        #[cfg(windows)]
+        let mut sh = {
+            let mut sh = trek_core::procs::async_command("cmd.exe");
+            sh.raw_arg(format!("/d /s /c \"{command}\""));
+            sh
+        };
+        sh.current_dir(&self.cwd);
         let out = crate::output_group(&mut sh, None, std::time::Duration::from_secs(600)).await;
         let (output, ok) = match out {
             Ok(o) => (
@@ -4739,11 +4777,9 @@ mod tests {
         });
     }
 
+    /// On both platforms: a shell script and `/bin/sh` on the Mac; a batch file, typed as
+    /// PowerShell and cmd.exe users write it (`.\.agents\…\app.cmd`) and run by cmd.exe, on Windows.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "the mock's verification CLI is a /bin/sh script; a Windows one comes with the Phase 2 verification work"
-    )]
     fn it_sets_up_a_verification_skill_then_verifies_with_its_cli() {
         let dir = std::env::temp_dir().join(format!("trek-mock-verify-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4756,19 +4792,21 @@ mod tests {
         });
         // Trek finds what it made, and its CLI really runs.
         let found = trek_core::verification::find(&dir).expect("a verification skill");
+        let cli = format!("./.agents/skills/verify-app/scripts/{VERIFY_CLI}");
         assert_eq!(
             (found.name.as_str(), found.cli.as_deref()),
-            (
-                "verify-app",
-                Some("./.agents/skills/verify-app/scripts/app")
-            )
+            ("verify-app", Some(cli.as_str()))
         );
         assert!(found.dir.join("references/features/README.md").exists());
-        let out = std::process::Command::new(found.dir.join("scripts/app"))
+        let out = std::process::Command::new(found.dir.join("scripts").join(VERIFY_CLI))
             .arg("check")
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("\"ok\":true"));
+        let ran_as = typed(&cli);
+        if cfg!(windows) {
+            assert_eq!(ran_as, r".\.agents\skills\verify-app\scripts\app.cmd");
+        }
         // Told about it, a session checks its change with the CLI.
         let notes = trek_core::verification::instructions(
             &trek_core::verification::record(&found, None, None),
@@ -4780,9 +4818,12 @@ mod tests {
             m.prompt("mock:verify the notes change").await;
             let events = m.turn().await;
             assert!(
-                events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { title, detail, .. } if title == "Run command" && detail == "./.agents/skills/verify-app/scripts/app check --json")),
+                events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { title, detail, .. } if title == "Run command" && *detail == format!("{ran_as} check --json"))),
                 "{events:?}"
             );
+            // Trek reads that command as running the CLI, on either platform.
+            let needle = trek_core::verification::needle(&cli).unwrap();
+            assert!(trek_core::verification::runs(&needle, &format!("{ran_as} check --json")));
             let ran = |events: &[AgentEvent]| events.iter().rev().find_map(|e| if let AgentEvent::ToolFinished { output, ok, .. } = e { Some((output.clone(), *ok)) } else { None }).unwrap();
             assert_eq!(ran(&events), ("{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}".to_string(), true), "what the CLI printed");
             // A change the CLI catches: the run fails, and the mock says so.
@@ -4790,7 +4831,7 @@ mod tests {
             let events = m.turn().await;
             let (output, ok) = ran(&events);
             assert!(!ok && output.contains("loading notes panics"), "{output}");
-            assert!(text(&events).contains("`./.agents/skills/verify-app/scripts/app check` fails"));
+            assert!(text(&events).contains(&format!("`{ran_as} check` fails")));
             // Without a skill, it says so.
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("mock:verify").await;
