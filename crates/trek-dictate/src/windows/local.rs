@@ -948,6 +948,109 @@ mod tests {
         );
     }
 
+    /// A long take as a person makes one, through the live path itself (`decode`, with its passes
+    /// about once a second, the open part settling past 20 s, and the last pass after ✓): the
+    /// recording arrives in real time, as the microphone's would, and what was said comes out once.
+    /// A mic test of the sort people do, "Hello?" three times with pauses, then sentences: the
+    /// text must hold three, not more (a phrase settled and then heard again past its edge would
+    /// repeat), and the sentences whole. Where `TREK_DICTATION_DIR` (or `TREK_DATA_DIR`'s
+    /// `dictation/`) has the model; otherwise it says so and passes. About 35 s.
+    #[test]
+    fn a_long_take_says_each_phrase_once() {
+        use super::{Control, Gauge, Shared, decode, model, ready, whisper};
+        use crate::Heard;
+        use std::sync::atomic::Ordering;
+        let models = std::env::var_os("TREK_DICTATION_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let data = std::path::PathBuf::from(std::env::var_os("TREK_DATA_DIR")?);
+                Some(data.join(model::FOLDER))
+            })
+            .filter(|dir| ready(dir).is_ok());
+        let Some(models) = models else {
+            eprintln!(
+                "skipped: no speech model (set TREK_DICTATION_DIR, or TREK_DATA_DIR to a data folder with one)"
+            );
+            return;
+        };
+        // Windows' synthesizer, with the pauses a person leaves while waiting to see words.
+        let wav =
+            std::env::temp_dir().join(format!("trek-dictate-long-{}.wav", std::process::id()));
+        let ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>\
+            Hello? <break time='2500ms'/> Hello? <break time='2500ms'/> Hello? <break time='3s'/> \
+            Can you hear me? <break time='3s'/> I am testing the microphone in Trek, to see whether \
+            my words come through properly. <break time='2500ms'/> The weather is lovely today, \
+            and I would like a cup of coffee. <break time='2s'/></speak>";
+        let say = format!(
+            "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SetOutputToWaveFile('{}'); $s.SpeakSsml(\"{ssml}\"); $s.Dispose()",
+            wav.display()
+        );
+        let spoke = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &say])
+            .status()
+            .expect("Windows PowerShell");
+        assert!(spoke.success(), "the speech synthesizer failed");
+        let sound = super::read_wav(&wav).expect("the synthesized take");
+        let _ = std::fs::remove_file(&wav);
+        let seconds = sound.len() as f32 / super::audio::RATE as f32;
+        assert!(
+            seconds > 22.,
+            "long enough for the open part to settle: {seconds} s"
+        );
+
+        let model = whisper::load(&ready(&models).unwrap()).expect("the model loads");
+        let rec = std::sync::Arc::new(Shared::default());
+        let control = std::sync::Arc::new(Control::default());
+        let (heard, said) = async_channel::unbounded();
+        let take = std::thread::spawn({
+            let (rec, control) = (rec.clone(), control.clone());
+            move || decode(&model, &rec, &control, &heard, &Gauge::default())
+        });
+        // The microphone: 100 ms packets, in real time.
+        let packet = super::audio::RATE as usize / 10;
+        let started = std::time::Instant::now();
+        for (i, chunk) in sound.chunks(packet).enumerate() {
+            rec.audio.lock().unwrap().extend_from_slice(chunk);
+            let due = std::time::Duration::from_millis(100 * (i as u64 + 1));
+            std::thread::sleep(due.saturating_sub(started.elapsed()));
+        }
+        // ✓: the mic stops, and the last pass runs.
+        rec.stop();
+        rec.stopped.store(true, Ordering::Relaxed);
+        control.finish.store(true, Ordering::Relaxed);
+        let finished = std::time::Instant::now();
+        take.join().unwrap();
+        let mut partials = 0;
+        let mut text = None;
+        while let Ok(h) = said.try_recv() {
+            match h {
+                Heard::Partial(_) => partials += 1,
+                Heard::Final(t) => text = Some(t),
+                Heard::Failed(why) => panic!("the take failed: {why}"),
+            }
+        }
+        let text = text.expect("the take's text");
+        eprintln!(
+            "{seconds:.1} s take, {partials} partial texts, the last pass {:?} after ✓: {text:?}",
+            finished.elapsed()
+        );
+        let lower = text.to_lowercase();
+        assert_eq!(lower.matches("hello").count(), 3, "{text:?}");
+        assert_eq!(lower.matches("can you hear me").count(), 1, "{text:?}");
+        for words in [
+            "testing the microphone",
+            "come through properly",
+            "cup of coffee",
+        ] {
+            assert_eq!(
+                lower.matches(words).count(),
+                1,
+                "{words:?} once in {text:?}"
+            );
+        }
+        assert!(partials >= 5, "the text came as it was spoken: {partials}");
+    }
+
     /// A spoken sentence through the whole of the engine but the microphone: Windows' speech
     /// synthesizer reads "Trek can now take dictation on Windows" into a WAV file (22 kHz, so the
     /// resampler is in it too), and the take's last pass, as ✓ runs it, must hear those words.
