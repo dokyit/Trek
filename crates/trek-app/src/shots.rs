@@ -269,12 +269,18 @@ fn self_contained() -> anyhow::Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
+        // dyld's list of what's loaded, from libSystem (the libc crate's copies are deprecated
+        // in favour of another crate, for these two calls alone).
+        unsafe extern "C" {
+            fn _dyld_image_count() -> u32;
+            fn _dyld_get_image_name(image_index: u32) -> *const std::ffi::c_char;
+        }
         let exe = std::env::current_exe()?;
         let own = exe.parent().map(Path::to_path_buf).unwrap_or_default();
         let mut foreign = Vec::new();
         // SAFETY: dyld's own list, read by index below its count; each name is NUL-terminated.
-        for i in 0..unsafe { libc::_dyld_image_count() } {
-            let name = unsafe { libc::_dyld_get_image_name(i) };
+        for i in 0..unsafe { _dyld_image_count() } {
+            let name = unsafe { _dyld_get_image_name(i) };
             if name.is_null() {
                 continue;
             }
