@@ -2421,7 +2421,8 @@ impl SimulatorPanel {
         {
             col = col.child(self.add_device_card(cx));
         }
-        col.into_any_element()
+        // Seen by the capture build's checks (`count sim-devices 1`).
+        col.test_support().into_any_element()
     }
 
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

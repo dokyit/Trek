@@ -348,8 +348,8 @@ area = "Browser"
 what = "A crashed page reloads, and a failed load says why"
 macos = "yes"
 windows = "yes"
-live = ["route project:{project}", "tools browser", "wait 600", "browser go http://127.0.0.1:9/", "wait 3000", "browser expect failed:127.0.0.1", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com"]
-note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:9) gets Trek's \"Can't reach this page\" with its reason, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari)."
+live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com", "browser go http://127.0.0.1:9/", "wait 3000", "browser expect failed:127.0.0.1"]
+note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:9) gets Trek's \"Can't reach this page\" with its reason, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari). On a Mac in CI, a refused address asked for the moment the Browser opened left the tab blank, with nothing logged: the page's first load and the one asked for may cross. The live check loads a page first; that case is still to be looked at on a Mac."
 how = { macos = "WebKit's errors (NSURLErrorDomain, WebKitErrorDomain) and its web content process ending.", windows = "WebView2's: a load it put its own error page up for (ContentLoading's IsErrorPage), with NavigationCompleted's WebErrorStatus in Trek's words (an unknown status, as for a refused connection, said as unreachable); a load only stopped (a link handed to another app, a download) and a server's own 404 page are left alone. ProcessFailed for the page's own process (exited, or unresponsive) is a crash: reloaded, then explained if it ends again." }
 tests = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser.rs", "crates/trek-app/tests/browser.rs"]
 code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs", "crates/trek-app/src/panels/browser/asks.rs"]
@@ -427,7 +427,7 @@ area = "Agent tools"
 what = "Computer use in the background, with a floating live picture"
 macos = "yes"
 windows = "no"
-live_macos = ["route project:{project}", "pace 0", "send mock:background", "wait 3000", "count-all background-use 1"]
+live_macos = ["route project:{project}", "pace 0", "send mock:background 1 800x600 Safari", "wait 3000", "count-all background-use 1", "background-use stop"]
 note = "Input goes to a window behind yours on the Mac. Windows would need per-window capture (Windows.Graphics.Capture) and input through UI Automation; idle and lock detection are there already."
 code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-app/src/background_use.rs"]
 
