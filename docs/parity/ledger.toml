@@ -529,12 +529,12 @@ id = "phone-reachable"
 area = "iPhone"
 what = "The phone server is reachable on the local network"
 macos = "yes"
-windows = "partial"
-live_skip = "Needs a phone on the network: tests/remote.rs; the isolated run's phone server is on the loopback alone."
-how = { macos = "macOS asks for Local Network access.", windows = "Windows Firewall asks the first time; Settings says so before the server runs." }
-note = "The installer adds no private-network rule and nothing notices a block. An install-time rule and a reachability self-test."
-code = ["crates/trek-app/src/settings_view/mobile.rs", "crates/trek-remote/src/server.rs"]
-tests = ["crates/trek-remote/tests/server.rs"]
+windows = "yes"
+live_skip = "Needs a phone on the network, and a server listening on it: the isolated run's is on the loopback alone, which the firewall asks nothing about. tests/remote.rs, and remote/firewall.rs's tests, which read the real Windows Firewall on Windows' CI."
+how = { macos = "macOS asks for Local Network access.", windows = "Windows Firewall asks the first time Trek listens, and writes rules for the kinds of network ticked then, so on a network of another kind (a Wi-Fi marked public, Tailscale's private one) phones stay out and nothing asks again. Settings says so before the server runs, and while it runs reads the firewall's rules for Trek on each network this PC is on: where they keep phones out it names the network and the way in (Allow Trek on that kind of network, or make a public one private), with the firewall's settings a click away." }
+note = "Found on the PC this was written on: Trek allowed on its public Wi-Fi and kept out on Tailscale, a private network, which nothing had said."
+code = ["crates/trek-app/src/settings_view/mobile.rs", "crates/trek-remote/src/server.rs", "crates/trek-app/src/remote/firewall.rs"]
+tests = ["crates/trek-remote/tests/server.rs", "crates/trek-app/src/remote/firewall.rs"]
 
 [[feature]]
 id = "phone-app-install"

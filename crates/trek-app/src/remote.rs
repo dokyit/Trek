@@ -39,6 +39,7 @@ mod basecamp;
 pub mod bonjour;
 mod cards;
 mod commands;
+pub mod firewall;
 mod git;
 mod icons;
 pub mod link;
