@@ -2059,13 +2059,19 @@ mod tests {
         assert!(restored.undo.is_some());
     }
 
-    /// Windows files have no execute bit; git keeps the mode the index has for a tracked file
-    /// (`core.filemode=false`), and a checkpoint must not lose it.
-    #[cfg(windows)]
+    /// A checkpoint keeps a tracked executable executable, on both platforms: on the Mac git reads
+    /// the bit on disk; Windows files have none, and git keeps the mode the index has for a
+    /// tracked file (`core.filemode=false`), where a checkpoint reads it.
     #[test]
     fn a_tracked_executable_stays_executable_in_a_checkpoint() {
         let s = Scratch::new(false);
         s.write("run.sh", "#!/bin/sh\n");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            s.0.join("run.sh"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
         s.git(&["add", "-A"]);
         s.git(&["update-index", "--chmod=+x", "run.sh"]);
         s.git(&[
