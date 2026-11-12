@@ -76,49 +76,15 @@ pub fn save(thread: &str, name: &str, value: &str) -> std::io::Result<PathBuf> {
         ));
     }
     let dir = thread_dir(thread);
-    private_dir(&root())?;
-    private_dir(&dir)?;
+    // The user's alone on both platforms (0700 and 0600 on the Mac, an owner-only access list on
+    // Windows), whether or not they were there already: a data folder moved somewhere others can
+    // reach doesn't hand them the secrets.
+    trek_private::create_dir(&root())?;
+    trek_private::create_dir(&dir)?;
     let path = dir.join(name);
-    write_private(&path, value)?;
+    trek_private::write(&path, value.as_bytes())?;
     remember(name, value);
     Ok(path)
-}
-
-#[cfg(unix)]
-fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    // It may have been there already, with other permissions.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-}
-
-// On Windows Trek's data folder is in the user's own profile, which only they can open.
-#[cfg(not(unix))]
-fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
-}
-
-#[cfg(unix)]
-fn write_private(path: &std::path::Path, value: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    // Before the value goes in, in case the file was already there with other permissions.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(value.as_bytes())
-}
-
-#[cfg(not(unix))]
-fn write_private(path: &std::path::Path, value: &str) -> std::io::Result<()> {
-    std::fs::write(path, value)
 }
 
 /// Whether `path` is in the secrets' folder (a secret's file, or the folder itself), however it's
@@ -216,6 +182,11 @@ mod tests {
                     .iter()
                     .any(|(n, v)| n == "TOKEN" && v == "hunter2-value")
             );
+            // The user's alone, the file and both folders, on both platforms.
+            let private = |p: &std::path::Path| trek_private::is_private(p).unwrap();
+            assert!(private(&path));
+            assert!(private(path.parent().unwrap()));
+            assert!(private(path.parent().unwrap().parent().unwrap()));
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt as _;
@@ -224,25 +195,26 @@ mod tests {
                 };
                 assert_eq!(mode(&path), 0o600);
                 assert_eq!(mode(path.parent().unwrap()), 0o700);
-                assert_eq!(mode(path.parent().unwrap().parent().unwrap()), 0o700);
-                // Saved again over one that had got looser: tight again.
+                // Got looser: saved again, it's tight again.
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-                save("thread-1", "TOKEN", "second").unwrap();
-                assert_eq!(mode(&path), 0o600);
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
             }
+            #[cfg(windows)]
+            {
+                // Got looser (a copy that took its folder's access list): saved again, it's the
+                // user's alone again.
+                std::fs::remove_file(&path).unwrap();
+                std::fs::write(&path, "loose").unwrap();
+            }
+            assert!(!private(&path));
+            save("thread-1", "TOKEN", "second").unwrap();
+            assert!(private(&path));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
             let other = save("thread-2", "TOKEN", "other").unwrap();
             assert_ne!(path, other);
             forget("thread-1");
             assert!(!path.exists());
             assert!(other.exists(), "another thread's stays");
-            // Its last value: saved again above only where file modes exist.
-            let last = if cfg!(unix) {
-                "second"
-            } else {
-                "hunter2-value"
-            };
-            assert!(known().iter().any(|(_, v)| v == last), "still known");
+            assert!(known().iter().any(|(_, v)| v == "second"), "still known");
             forget_all();
             assert!(!other.exists());
             assert!(known().is_empty());

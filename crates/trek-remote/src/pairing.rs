@@ -546,26 +546,10 @@ impl DeviceRegistry {
             devices: self.devices.clone(),
         })
         .map_err(io::Error::other)?;
-        // Two servers in one process (a restart) may save at once: each its own temp file.
-        static SAVES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
-        {
-            use std::io::Write as _;
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                opts.mode(0o600);
-            }
-            let mut f = opts.open(&tmp)?;
-            f.write_all(&json)?;
-            f.sync_all()?;
-        }
-        std::fs::rename(&tmp, path).inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp);
-        })
+        // The user's alone on both platforms: another account that could add a device here would
+        // pair a phone of its own without a code. Written beside it and moved over it, each save
+        // its own file (two servers in one process, a restart, may save at once).
+        trek_private::write(path, &json)
     }
 
     fn save_logged(&self) {
@@ -822,6 +806,8 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains(&token), "the token itself is never stored");
         assert!(raw.contains(&hash_token(&token)));
+        // The user's alone on both platforms: no other account can add a phone of its own.
+        assert!(trek_private::is_private(&path).unwrap());
         let r = DeviceRegistry::load(&path).unwrap();
         assert!(r.verify("dev-1", &token));
         assert_eq!(r.list()[0].name, "Phone");

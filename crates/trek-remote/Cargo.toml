@@ -6,6 +6,8 @@ license.workspace = true
 description = "Trek's WebSocket server for the iPhone companion app: pairing, device tokens and protocol v1"
 
 [dependencies]
+# The pairing key and the paired phones' list: the user's alone on both platforms.
+trek-private.workspace = true
 tokio.workspace = true
 futures-util = "0.3"
 async-channel.workspace = true

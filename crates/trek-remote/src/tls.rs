@@ -102,207 +102,15 @@ impl TlsIdentity {
     }
 }
 
+/// The key, the user's alone from before its bytes go in: mode 0600 on the Mac, an access list of
+/// the user's alone on Windows, where a new file would take its folder's (trek-private).
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    // `mode` applies only to a new file, and on Windows a new file takes its folder's ACL. Make it
-    // the user's alone before new key bytes touch it, then again after the write as an explicit
-    // postcondition.
-    #[cfg(unix)]
-    private_file_permissions(&file)?;
-    #[cfg(windows)]
-    owner_only::ensure(path)?;
-    file.set_len(0)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    private_permissions(path)
+    trek_private::write(path, bytes)
 }
 
+/// Make a key that's there the user's alone again, if it got looser.
 fn private_permissions(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    private_file_permissions(&std::fs::File::open(path)?)?;
-    #[cfg(windows)]
-    owner_only::ensure(path)?;
-    #[cfg(not(any(unix, windows)))]
-    let _ = path;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn private_file_permissions(file: &std::fs::File) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    let mut permissions = file.metadata()?.permissions();
-    if permissions.mode() & 0o777 != 0o600 {
-        permissions.set_mode(0o600);
-        file.set_permissions(permissions)?;
-    }
-    Ok(())
-}
-
-/// The key file's ACL on Windows: the user alone, as 0600 is elsewhere. A new file takes its
-/// folder's ACL (in the profile: the user, SYSTEM and the Administrators, and whoever else a data
-/// folder elsewhere lets in), so the key's is made one entry, the user's, inheriting nothing.
-#[cfg(windows)]
-mod owner_only {
-    use std::io;
-    use std::os::windows::ffi::OsStrExt as _;
-    use std::path::Path;
-    use std::ptr::{null, null_mut};
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree};
-    use windows_sys::Win32::Security::Authorization::{
-        GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
-    };
-    use windows_sys::Win32::Security::{
-        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAce, DACL_SECURITY_INFORMATION,
-        EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl, GetTokenInformation,
-        InitializeAcl, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER, TokenUser,
-    };
-    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    /// `ACCESS_ALLOWED_ACE_TYPE` (in a windows-sys module of its own).
-    const ACCESS_ALLOWED: u8 = 0;
-
-    /// The user this process runs as: its token's `TOKEN_USER`, in a buffer that holds the SID
-    /// it points to.
-    pub(super) struct User(Vec<u64>);
-
-    impl User {
-        pub(super) fn current() -> io::Result<User> {
-            let mut token: HANDLE = null_mut();
-            // SAFETY: this process's pseudo-handle, and a place for the token's handle.
-            if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let mut len = 0u32;
-            // SAFETY: a size query, with no buffer; `len` says what's needed.
-            unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut len) };
-            // In u64s, so the TOKEN_USER at its start (a pointer first) is aligned.
-            let mut buf = vec![0u64; (len as usize).div_ceil(8)];
-            // SAFETY: `buf` holds at least `len` bytes.
-            let ok = unsafe {
-                GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len)
-            };
-            let failed = io::Error::last_os_error();
-            // SAFETY: the handle opened above, closed once.
-            unsafe { CloseHandle(token) };
-            if ok == 0 {
-                return Err(failed);
-            }
-            Ok(User(buf))
-        }
-
-        pub(super) fn sid(&self) -> PSID {
-            // SAFETY: the buffer starts with the TOKEN_USER that GetTokenInformation wrote, whose
-            // SID is in the buffer too, alive as long as `self`.
-            unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
-        }
-    }
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain([0]).collect()
-    }
-
-    /// Make `path`'s ACL allow `sids` everything, and no one else anything: nothing inherited.
-    pub(super) fn set(path: &Path, sids: &[PSID]) -> io::Result<()> {
-        // Each entry is an ACCESS_ALLOWED_ACE whose last field is the SID's first four bytes.
-        let entry = std::mem::size_of::<ACCESS_ALLOWED_ACE>() - std::mem::size_of::<u32>();
-        let size = std::mem::size_of::<ACL>()
-            + sids
-                .iter()
-                // SAFETY: each is a valid SID (the caller's).
-                .map(|&sid| entry + unsafe { GetLengthSid(sid) } as usize)
-                .sum::<usize>();
-        // In u64s: an ACL must be aligned to four bytes at least.
-        let mut buf = vec![0u64; size.div_ceil(8)];
-        let acl = buf.as_mut_ptr().cast::<ACL>();
-        // SAFETY: `acl` is `size` bytes, and each SID is valid.
-        unsafe {
-            if InitializeAcl(acl, size as u32, ACL_REVISION) == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            for &sid in sids {
-                if AddAccessAllowedAce(acl, ACL_REVISION, FILE_ALL_ACCESS, sid) == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
-        }
-        let name = wide(path);
-        // SAFETY: a NUL-ended name, and the ACL built above; owner, group and SACL are left.
-        let e = unsafe {
-            SetNamedSecurityInfoW(
-                name.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                acl,
-                null(),
-            )
-        };
-        if e != ERROR_SUCCESS {
-            return Err(io::Error::from_raw_os_error(e as i32));
-        }
-        Ok(())
-    }
-
-    /// Whether `path`'s ACL is what `set(path, &[user])` makes: one entry, allowing `user`
-    /// everything, and nothing inherited.
-    pub(super) fn is_only(path: &Path, user: PSID) -> io::Result<bool> {
-        let name = wide(path);
-        let mut dacl: *mut ACL = null_mut();
-        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-        // SAFETY: a NUL-ended name, and places for the ACL and the descriptor that holds it.
-        let e = unsafe {
-            GetNamedSecurityInfoW(
-                name.as_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                &mut dacl,
-                null_mut(),
-                &mut descriptor,
-            )
-        };
-        if e != ERROR_SUCCESS {
-            return Err(io::Error::from_raw_os_error(e as i32));
-        }
-        // SAFETY: `dacl` (null for one that lets everyone in) is inside `descriptor`, which is
-        // freed once, after.
-        let only = unsafe {
-            let (mut control, mut revision) = (0u16, 0u32);
-            let mut ace: *mut core::ffi::c_void = null_mut();
-            let only = GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) != 0
-                && control & SE_DACL_PROTECTED != 0
-                && !dacl.is_null()
-                && (*dacl).AceCount == 1
-                && GetAce(dacl, 0, &mut ace) != 0
-                && {
-                    let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-                    ace.Header.AceType == ACCESS_ALLOWED
-                        && ace.Mask == FILE_ALL_ACCESS
-                        && EqualSid((&raw const ace.SidStart).cast_mut().cast(), user) != 0
-                };
-            LocalFree(descriptor);
-            only
-        };
-        Ok(only)
-    }
-
-    /// Make `path` the user's alone, unless it is already.
-    pub(super) fn ensure(path: &Path) -> io::Result<()> {
-        let user = User::current()?;
-        if !is_only(path, user.sid())? {
-            set(path, &[user.sid()])?;
-        }
-        Ok(())
-    }
+    trek_private::restrict(path)
 }
 
 #[cfg(test)]
@@ -438,21 +246,7 @@ mod tests {
     /// The user this test runs as, as SDDL names a SID (`S-1-5-21-…`).
     #[cfg(windows)]
     fn user_sid_text() -> String {
-        use windows_sys::Win32::Foundation::LocalFree;
-        use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-        let user = owner_only::User::current().unwrap();
-        let mut text = std::ptr::null_mut();
-        // SAFETY: a valid SID, and a place for the string, freed once.
-        unsafe {
-            assert_ne!(ConvertSidToStringSidW(user.sid(), &mut text), 0);
-            let mut len = 0;
-            while *text.add(len) != 0 {
-                len += 1;
-            }
-            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
-            LocalFree(text.cast());
-            sid
-        }
+        trek_private::user_sid().unwrap()
     }
 
     /// Let the Everyone group read `path` too, inheriting the folder's entries as well: a key

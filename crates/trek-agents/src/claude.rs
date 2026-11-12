@@ -1694,12 +1694,9 @@ impl TempFile {
                 "trek-{tag}-{}-{nanos}-{tries}.json",
                 std::process::id()
             ));
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            // Windows has no mode bits: the file inherits the ACL of the user's temp folder.
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-            match options.open(&path) {
+            // The user's alone from the moment it exists, on both platforms: it holds the MCP
+            // servers' tokens, and a %TEMP% others share would otherwise lend it its access list.
+            match trek_private::create_new(&path) {
                 Ok(mut file) => {
                     // Removed on failure too.
                     let made = Self(path);
@@ -2161,14 +2158,8 @@ mod tests {
         let a = TempFile::write_in(&dir, "mcp", "{\"token\":1}").unwrap();
         let b = TempFile::write_in(&dir, "mcp", "{}").unwrap();
         assert_ne!(a.0, b.0);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                std::fs::metadata(&a.0).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
+        // The user's alone on both platforms (0600; an owner-only access list on Windows).
+        assert!(trek_private::is_private(&a.0).unwrap());
         assert_eq!(std::fs::read_to_string(&a.0).unwrap(), "{\"token\":1}");
         let path = a.0.clone();
         drop(a);

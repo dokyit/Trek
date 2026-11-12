@@ -717,13 +717,12 @@ tests = ["crates/trek-core/src/verification.rs", "crates/trek-agents/src/mock.rs
 [[feature]]
 id = "private-files"
 area = "App"
-what = "Trek's secrets, machine list and uploaded files are readable by the user alone"
+what = "Trek's secrets, machine list, paired phones, agents' MCP config and uploaded files are readable by the user alone"
 macos = "yes"
-windows = "partial"
-how = { macos = "Mode 0600.", windows = "The profile's and %TEMP%'s inherited permissions; the pairing key alone gets an owner-only ACL (tls.rs)." }
-note = "Private by default on Windows, but a moved data folder or a redirected TEMP would loosen the session secrets, machines.json, uploaded .env files, the paired phones' list (devices.json: another account could add a phone of its own without a code) and Claude Code's --mcp-config file (MCP servers' tokens, in %TEMP%), where the Mac's 0600 holds. Fix: tls.rs's owner_only for them too, in a crate trek-core and trek-remote can share."
-code = ["crates/trek-core/src/session_secrets.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/remote/machines.rs", "crates/trek-remote/src/tls.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-agents/src/claude.rs"]
-tests = ["crates/trek-app/tests/remote.rs", "crates/trek-app/tests/permission_rules.rs", "crates/trek-app/tests/machines.rs"]
+windows = "yes"
+how = { macos = "Mode 0600 (a folder 0700), through trek-private.", windows = "An access list of one entry, the user's, inheriting nothing, that each file is made with (trek-private), so it's never readable by others in between, however its folder's list reads (a data folder moved to a second drive, a %TEMP% others share); a folder's entry passes to what's made in it." }
+code = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/remote/machines.rs", "crates/trek-remote/src/tls.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-agents/src/claude.rs"]
+tests = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-remote/src/tls.rs", "crates/trek-agents/src/claude.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/tests/permission_rules.rs", "crates/trek-app/tests/machines.rs"]
 
 [[feature]]
 id = "contrast-fixes"

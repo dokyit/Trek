@@ -4804,6 +4804,8 @@ fn put_files_writes_inside_the_project_and_never_through_a_symlink() {
                 0o600
             );
         }
+        // The user's alone on both platforms (Windows has no mode to carry over).
+        assert!(trek_private::is_private(&root.join(".env")).unwrap());
         // Again: replaced.
         let (project_id, files) = (id.clone(), vec![file(".env", b"KEY=2\n", 0o600)]);
         ask_later(&trek, cx, |reply| tr::HostRequest::PutFiles {

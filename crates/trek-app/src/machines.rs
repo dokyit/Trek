@@ -306,26 +306,8 @@ pub fn save(device_id: &str, machines: &[MachineEntry]) -> std::io::Result<()> {
         machines: machines.to_vec(),
     };
     let text = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    write_private(&tmp, &text)?;
-    std::fs::rename(&tmp, &path)
-}
-
-/// Write `text` to a new file at `path` that only its owner can read, from the moment it exists
-/// (a file made first and restricted after can be read by others in between). One left there
-/// by an earlier run is replaced.
-fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let _ = std::fs::remove_file(path);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(text.as_bytes())
+    // The user's alone from the moment it exists, on both platforms (trek-private).
+    trek_private::write(&path, text.as_bytes())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2370,22 +2352,20 @@ mod tests {
         assert_eq!(statuses, [ToolStatus::Failed, ToolStatus::Done]);
     }
 
-    #[cfg(unix)]
     #[test]
     fn machines_json_is_private_from_the_moment_it_exists() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("trek-private-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("machines.json.tmp");
-        // One left by an earlier run, readable by everyone, is replaced rather than reused.
+        let path = dir.join("machines.json");
+        // One there already, readable by others, is replaced by one that isn't.
         std::fs::write(&path, "old").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        write_private(&path, "token").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        assert!(!trek_private::is_private(&path).unwrap());
+        trek_private::write(&path, b"token").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "token");
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
+        assert!(trek_private::is_private(&path).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -373,11 +373,10 @@ fn write_file(root: &Path, file: &tr::FileUpload) -> std::io::Result<()> {
         N.fetch_add(1, Ordering::Relaxed)
     ));
     let written = (|| {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut out = options.open(&temp)?;
+        // The user's alone while its bytes go in (an ignored file is often a secret: `.env`), on
+        // both platforms; on the Mac it then takes the mode it had where it came from. Windows has
+        // no mode to give it, so it stays the user's alone.
+        let mut out = trek_private::create_new(&temp)?;
         out.write_all(&file.bytes)?;
         #[cfg(unix)]
         out.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(file.mode))?;

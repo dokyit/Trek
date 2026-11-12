@@ -319,15 +319,10 @@ fn machines_json_keeps_what_reconnecting_needs_and_survives_a_bad_entry() {
         let (device, read) = machines::load();
         assert_eq!(device, "this-mac");
         assert_eq!(read, vec![entry("a"), entry("b")]);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(machines::machines_file())
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o077, 0, "tokens are the owner's alone");
-        }
+        assert!(
+            trek_private::is_private(&machines::machines_file()).unwrap(),
+            "tokens are the owner's alone, on both platforms"
+        );
         // One entry another version wrote badly doesn't lose the other.
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(machines::machines_file()).unwrap())

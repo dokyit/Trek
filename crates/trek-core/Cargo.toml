@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Session secrets: the user's alone on both platforms.
+trek-private.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
