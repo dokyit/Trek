@@ -74,7 +74,7 @@ What parity-live's steps work in.
             "Start",
         ],
     ] {
-        let ran = std::process::Command::new("git")
+        let ran = std::process::Command::new("git") // spawn: a developer's console tool; trek-parity has no trek-core
             .args(args)
             .current_dir(&dir)
             .status()?;
@@ -256,7 +256,7 @@ fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Du
 /// The run as a page: what was shown working on this platform, what failed and why, and what has
 /// no live steps here.
 fn render(results: &[(&Feature, Outcome)], platform: Platform, root: &Path) -> String {
-    let commit = std::process::Command::new("git")
+    let commit = std::process::Command::new("git") // spawn: a developer's console tool; trek-parity has no trek-core
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(root)
         .output()
