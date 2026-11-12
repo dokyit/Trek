@@ -723,9 +723,8 @@ code = ["crates/trek-app/src/composer/look.rs", "crates/trek-app/src/composer/pi
 id = "editor-tabs"
 area = "Editor"
 what = "A tab in the editor is the editor's tab size wide, and a selection over it matches"
-macos = "partial"
+macos = "yes"
 windows = "yes"
-how = { macos = "CoreText's own tab stops.", windows = "DirectWrite's tab stops set to the tab size (with_tab_stops)." }
-note = "By reading, unverified: on the Mac with_tab_stops does nothing and the line layout sets no paragraph style, so CoreText's default 28 pt stops apply and a tab indents about 3.5 columns. Its test (tab_stops.rs) runs on Windows only: run it on both to find out."
+how = { macos = "CoreText lays a tab out to its own stops, every 28 points whatever the tab size: with_tab_stops puts its glyph's place at the editor's stop instead.", windows = "DirectWrite leaves a tab out of its glyphs: with_tab_stops puts a blank in its place, at the editor's stop." }
 code = ["vendor/gpui-base/src/input/base/tab_stops.rs"]
 tests = ["crates/trek-app/tests/tab_stops.rs"]

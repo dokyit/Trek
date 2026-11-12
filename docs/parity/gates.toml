@@ -224,7 +224,6 @@ unclaimed = [
 "crates/trek-app/tests/settings_pages.rs" = 1
 "crates/trek-app/tests/share.rs" = 3
 "crates/trek-app/tests/snapshots.rs" = 1
-"crates/trek-app/tests/tab_stops.rs" = 1
 "crates/trek-app/tests/tabs.rs" = 1
 "crates/trek-app/tests/terminal.rs" = 3
 "crates/trek-app/tests/titlebar.rs" = 7

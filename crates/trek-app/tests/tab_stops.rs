@@ -1,8 +1,8 @@
-//! Tabs in the editor: a tab shows as wide as its tab stop. DirectWrite leaves a tab out of the
-//! glyphs it shapes, which showed tab-indented code (Go, Makefiles) with no indentation at all;
-//! `with_tab_stops` (vendor/gpui-base) gives each one a glyph of its own. Windows only: CoreText
-//! lays tabs out itself, and the Mac's lines are left as it shapes them.
-#![cfg(windows)]
+//! Tabs in the editor: a tab shows as wide as its tab stop, on both platforms. DirectWrite leaves
+//! a tab out of the glyphs it shapes, which showed tab-indented code (Go, Makefiles) with no
+//! indentation at all; CoreText lays one out to stops of its own, every 28 points whatever the
+//! tab size. `with_tab_stops` (vendor/gpui-base) gives each tab a glyph of its own at the
+//! editor's stops. The tests lay text out with the platform's own shaper (`common`).
 
 mod common;
 
@@ -43,14 +43,16 @@ fn a_tab_is_as_wide_as_its_tab_stop_not_nothing() {
             };
 
             // `a⇥b`: the tab runs to the next stop, column 4, so `b` sits where it does after
-            // three spaces; `⇥⇥x` is eight columns in. (Windows' own shaping gives a tab no width.)
+            // three spaces; `⇥⇥x` is eight columns in. (Neither shaper does that: Windows' gives a
+            // tab no width, the Mac's runs it to a stop every 28 points.)
             let a = tabbed(window, "a\tb");
             let spaces = shape(window, "a   b");
             assert!(
                 near(x(&a, 2), x(&spaces, 4)),
-                "b at {} where three spaces put it at {}",
+                "b at {} where three spaces put it at {} (as shaped, at {})",
                 x(&a, 2),
-                x(&spaces, 4)
+                x(&spaces, 4),
+                x(&shape(window, "a\tb"), 2)
             );
             assert!(
                 near(f32::from(a.width), f32::from(spaces.width)),
