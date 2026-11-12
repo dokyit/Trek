@@ -243,6 +243,24 @@ pub fn clean(text: &str) -> String {
     text
 }
 
+/// What Whisper reads before decoding a pass again, for the style it writes in. Left to itself
+/// Whisper sometimes writes English plainly, all lowercase and without stops ("use the chain
+/// rule to find the derivative of sine of x squared"), where the Mac's recognizer punctuates
+/// every take. Tried beside others on Windows' voices, this one gets the capitals and stops back
+/// and never comes back itself; one that did ("Hi. Okay, so.") heard noise as "Thank you very
+/// much".
+pub const WRITTEN: &str = "Hello, how are you?";
+
+/// A pass in `language` (Whisper's short name) came back as English written plainly: letters,
+/// not one of them a capital. Only such a pass is decoded again with [`WRITTEN`]: the prompt is
+/// English, and given to every English pass it changes takes that were right ("Hello? Hello?"
+/// comes back "Hello Hello", now and then with a "Hello" too many).
+pub fn plain_english(language: Option<&str>, text: &str) -> bool {
+    language == Some("en")
+        && text.chars().any(char::is_alphabetic)
+        && !text.chars().any(char::is_uppercase)
+}
+
 /// The take's language: Whisper's guess from a pass with enough speech to go on, then kept, so
 /// later passes skip guessing (it costs a pass of the encoder) and a short pause can't flip it.
 #[derive(Debug, Default)]
@@ -490,5 +508,20 @@ mod tests {
         assert_eq!(l.kept(), Some(0));
         l.guessed(5, 10 * ENOUGH);
         assert_eq!(l.kept(), Some(0), "kept for the rest of the take");
+    }
+
+    #[test]
+    fn only_english_written_plainly_is_decoded_again() {
+        // Plain: decoded again, prompted to write as written.
+        let plain = "use the chain rule to find the derivative of sine of x squared";
+        assert!(plain_english(Some("en"), plain));
+        // As written, another language's (the prompt is English), or no words: kept.
+        assert!(!plain_english(Some("en"), "Use the chain rule."));
+        assert!(!plain_english(Some("en"), "Hello Hello Hello"));
+        assert!(!plain_english(Some("en"), "fix the bug in iOS"));
+        assert!(!plain_english(Some("es"), "usa la regla de la cadena"));
+        assert!(!plain_english(None, plain));
+        assert!(!plain_english(Some("en"), ""));
+        assert!(!plain_english(Some("en"), " 42 "));
     }
 }

@@ -68,6 +68,7 @@ pub use self::engine::{Decoder, Model};
 
 #[cfg(target_arch = "x86_64")]
 mod engine {
+    use super::super::transcript::{WRITTEN, plain_english};
     use super::{Decoded, Pass, Segment, threads};
     use std::path::Path;
     use std::sync::Arc;
@@ -118,6 +119,24 @@ mod engine {
 
     impl Decoder {
         pub fn decode(&mut self, pass: Pass) -> Result<Decoded, String> {
+            let kept = pass.language.and_then(whisper_rs::get_lang_str);
+            let decoded = self.run(&pass, kept, None)?;
+            // English that came back written plainly: again, prompted to write as written.
+            let language = kept.or_else(|| whisper_rs::get_lang_str(decoded.language));
+            let text: String = decoded.segments.iter().map(|s| s.text.as_str()).collect();
+            if plain_english(language, &text) {
+                return self.run(&pass, language, Some(WRITTEN));
+            }
+            Ok(decoded)
+        }
+
+        /// One decoding of `pass` in `language` (Whisper's guess when `None`), after `prompt`.
+        fn run(
+            &mut self,
+            pass: &Pass,
+            language: Option<&'static str>,
+            prompt: Option<&'static str>,
+        ) -> Result<Decoded, String> {
             let mut params = FullParams::new(if pass.last {
                 SamplingStrategy::BeamSearch {
                     beam_size: 5,
@@ -127,11 +146,13 @@ mod engine {
                 SamplingStrategy::Greedy { best_of: 1 }
             });
             params.set_n_threads(threads());
-            let language = pass.language.and_then(whisper_rs::get_lang_str);
             params.set_language(Some(language.unwrap_or("auto")));
             params.set_translate(false);
             // Each pass stands alone: the part of the take it decodes is all it needs.
             params.set_no_context(true);
+            if let Some(prompt) = prompt {
+                params.set_initial_prompt(prompt);
+            }
             params.set_suppress_blank(true);
             params.set_suppress_nst(true);
             if !pass.last {

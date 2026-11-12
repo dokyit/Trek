@@ -1051,6 +1051,65 @@ mod tests {
         assert!(partials >= 5, "the text came as it was spoken: {partials}");
     }
 
+    /// A sentence Whisper writes plainly when left to itself ("use the chain rule to find the
+    /// derivative of sine of x squared", read slowly by Windows' synthesizer) comes back with
+    /// its capital and full stop, as the Mac's recognizer writes it: a take as `dictate-file`
+    /// runs one, ✓ at once and its last pass over all of it. Where `TREK_DICTATION_DIR` (or
+    /// `TREK_DATA_DIR`'s `dictation/`) has the model; otherwise it says so and passes.
+    #[test]
+    fn a_take_comes_back_written_with_capitals_and_stops() {
+        use super::{Control, Gauge, Shared, decode, model, ready, whisper};
+        use crate::Heard;
+        use std::sync::atomic::Ordering;
+        let models = std::env::var_os("TREK_DICTATION_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let data = std::path::PathBuf::from(std::env::var_os("TREK_DATA_DIR")?);
+                Some(data.join(model::FOLDER))
+            })
+            .filter(|dir| ready(dir).is_ok());
+        let Some(models) = models else {
+            eprintln!(
+                "skipped: no speech model (set TREK_DICTATION_DIR, or TREK_DATA_DIR to a data folder with one)"
+            );
+            return;
+        };
+        let wav =
+            std::env::temp_dir().join(format!("trek-dictate-plain-{}.wav", std::process::id()));
+        let say = format!(
+            "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Rate = -1; $s.SetOutputToWaveFile('{}'); $s.Speak('Use the chain rule to find the derivative of sine of x squared.'); $s.Dispose()",
+            wav.display()
+        );
+        let spoke = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &say])
+            .status()
+            .expect("Windows PowerShell");
+        assert!(spoke.success(), "the speech synthesizer failed");
+        let sound = super::read_wav(&wav).expect("the synthesized take");
+        let _ = std::fs::remove_file(&wav);
+
+        let model = whisper::load(&ready(&models).unwrap()).expect("the model loads");
+        let rec = Shared::recorded(sound);
+        let control = Control::default();
+        control.finish.store(true, Ordering::Relaxed);
+        let (heard, said) = async_channel::unbounded();
+        decode(&model, &rec, &control, &heard, &Gauge::default());
+        let mut text = None;
+        while let Ok(h) = said.try_recv() {
+            match h {
+                Heard::Final(t) => text = Some(t),
+                Heard::Partial(_) => {}
+                Heard::Failed(why) => panic!("the take failed: {why}"),
+            }
+        }
+        let text = text.expect("the take's text");
+        eprintln!("heard {text:?}");
+        assert_eq!(
+            text, "Use the chain rule to find the derivative of sine of x squared.",
+            "written as the Mac writes it"
+        );
+    }
+
     /// A spoken sentence through the whole of the engine but the microphone: Windows' speech
     /// synthesizer reads "Trek can now take dictation on Windows" into a WAV file (22 kHz, so the
     /// resampler is in it too), and the take's last pass, as ✓ runs it, must hear those words.
