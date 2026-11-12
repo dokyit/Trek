@@ -60,17 +60,21 @@ const SCREEN_UNITS: &str = if cfg!(windows) { "pixels" } else { "points" };
 const KEY_DESCRIPTION: &str = if cfg!(windows) {
     "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"ctrl+shift+t\", \"ctrl+c\", \
 \"alt+tab\", \"win+r\", \"f5\". Modifiers: ctrl, shift, alt, win (cmd is taken as ctrl). Keys: letters, digits, punctuation, \
-return, tab, space, delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12."
+return, tab, space, delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, insert, \
+f1-f24, numpad0-numpad9 (and numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal), printscreen, pause, \
+scrolllock, numlock, apps (the menu key), win (the Windows key alone)."
 } else {
     "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"cmd+shift+t\", \"cmd+c\", \
 \"alt+left\", \"f5\". Modifiers: cmd, shift, alt/option, ctrl, fn. Keys: letters, digits, punctuation, return, tab, space, \
-delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12."
+delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f20, numpad0-numpad9 (and \
+numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadequals, numpadenter)."
 };
 
 const BACKGROUND_KEY_DESCRIPTION: &str = "Press a key or shortcut in the window you work in, in the background (the user's \
 front app keeps the keyboard), e.g. \"return\", \"escape\", \"tab\", \"up\", \"cmd+shift+t\", \"cmd+c\", \"alt+left\", \"f5\". \
 Modifiers: cmd, shift, alt/option, ctrl, fn. Keys: letters, digits, punctuation, return, tab, space, delete (backspace), \
-forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12.";
+forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f20, numpad0-numpad9 (and numpadadd, \
+numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadequals, numpadenter).";
 
 const OPEN_APP_DESCRIPTION: &str = if cfg!(windows) {
     "Launch a Windows app by name, e.g. \"Notepad\", \"Microsoft Edge\", \"Visual Studio Code\" (as named in the \

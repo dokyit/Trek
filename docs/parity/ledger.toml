@@ -354,10 +354,10 @@ id = "computer-use"
 area = "Agent tools"
 what = "Computer use in front: screenshots, clicks, keys and typing"
 macos = "yes"
-windows = "partial"
-how = { macos = "Asks for Accessibility and Screen Recording.", windows = "Asks for nothing; can't type into apps running as administrator." }
-note = "Found by the 2026-11 sweep: on Windows `open_app` always launches (ShellExecute), so it opens a second, empty window instead of bringing the running app forward (the Mac's `open -a` activates it), and a minimized window stays down; a fix looks for the app's window first and restores it. PC-only keys (Insert, PrintScreen, the Apps key, NumLock, ScrollLock, Pause, the numpad, F13-F24, a lone Win) aren't in the shared key table."
-code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-mcp/src/computer.rs", "crates/trek-mcp/src/keys.rs"]
+windows = "yes"
+how = { macos = "Asks for Accessibility and Screen Recording; `open_app` is `open -a`, which brings a running app forward. Keys: the keypad and F1-F20.", windows = "Asks for nothing; can't type into apps running as administrator. `open_app` brings a running app's window forward (restored if minimized) before it would launch another. Keys: the keypad, F1-F24, and the PC's own (Insert, Print Screen, Pause, the lock keys, the menu key, the Windows key alone); a key one keyboard lacks is refused there by name." }
+code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-mcp/src/desktop/windows.rs", "crates/trek-mcp/src/computer.rs", "crates/trek-mcp/src/keys.rs"]
+tests = ["crates/trek-mcp/src/keys.rs", "crates/trek-mcp/src/desktop/windows.rs"]
 
 [[feature]]
 id = "computer-use-elements"
@@ -663,9 +663,8 @@ id = "path-chips"
 area = "Threads"
 what = "File paths in an answer show as chips: the file's name and type, a preview or the file manager on a click"
 macos = "yes"
-windows = "partial"
-how = { macos = "`/Users/…` and `~/…` paths.", windows = "The same code, which reads `/` paths only." }
-note = "A Windows path (`C:\\…`, `C:/…`, `~\\…`) becomes a chip showing the whole path that does nothing on a click: md.rs's path_part cuts at the drive's `:`, labels split on `/` only, and resolve/in_folder/looks_like_path know only `/` and `~/`; a `file:///C:/x.png` link isn't unwrapped, so the image isn't drawn inline. Its test skips Windows (\"arrive with the paths phase\"). Fix: a drive-aware path_part, both separators, Windows prefixes in the three helpers, and the test on both."
+windows = "yes"
+how = { macos = "`/Users/…` and `~/…` paths.", windows = "Drive paths (`C:\\…`, `C:/…`), network ones (`\\\\server\\…`), `~\\…` and `.\\…`, with either separator, and `file:///C:/…` links (an image drawn inline); a `:line` after one is cut off, the drive's `C:` kept." }
 code = ["crates/trek-app/src/md.rs"]
 tests = ["crates/trek-app/src/md.rs"]
 
@@ -674,20 +673,20 @@ id = "mcp-servers"
 area = "Agents"
 what = "Agents get the MCP servers set up in Trek"
 macos = "yes"
-windows = "partial"
-how = { macos = "The server's command, as it is.", windows = "Node won't start a `.cmd`, so a server started through a batch script (npx.cmd) runs under `cmd /c` for Claude Code and ACP agents." }
-note = "On Windows, for Claude Code and ACP agents, such a server is refused when an argument has `& | < > ^ %` or a quote, or its program path a space (cmd.exe would act on them): its tools are missing, though Settings' check (mcp_check.rs) starts the same server. Fix: launch the `.cmd` through trek-mcp (Rust quotes batch files safely), or resolve npm's shim to node and its .js."
+windows = "yes"
+how = { macos = "The server's command, as it is.", windows = "Node won't start a `.cmd`, so for Claude Code and ACP agents a server started through a batch script (npx.cmd) runs under `cmd /c`; when cmd.exe can't carry its arguments (`& | < > ^ %`, a quote, a line break, a space in its folder) and the script is npm's shim (Node's own npx.cmd, a global package's), it goes to Node and the script the shim would run, global npm included. Codex is given the script, which it quotes itself. A batch script of the user's own can't be given such arguments: it's left out, with a notice saying why." }
 code = ["crates/trek-agents/src/lib.rs", "crates/trek-agents/src/acp.rs", "crates/trek-agents/src/mcp_check.rs", "crates/trek-core/src/mcp.rs"]
+tests = ["crates/trek-agents/src/lib.rs", "crates/trek-agents/src/tests_cmd_args.rs"]
 
 [[feature]]
 id = "codex-sandbox"
 area = "Agents"
 what = "Codex runs a thread's commands in its own sandbox under Supervised and Auto"
 macos = "yes"
-windows = "partial"
-how = { macos = "Seatbelt, with nothing to set up.", windows = "Codex's Windows sandbox, which needs a one-time setup." }
-note = "Until the user has run `codex` in a terminal once and accepted its sandbox setup, every command in a Supervised or Auto Codex thread fails before it starts, with one notice saying to run codex in a terminal or switch to Full access. Fix: a Set up button on the notice that opens Trek's terminal running `codex`."
-code = ["crates/trek-agents/src/codex.rs"]
+windows = "yes"
+how = { macos = "Seatbelt, with nothing to set up.", windows = "Codex's Windows sandbox, which needs a one-time setup: until it's done, commands in a Supervised or Auto thread fail before they start, with one notice whose Set up in Terminal runs `codex` in Trek's terminal to do it (or the thread can be set to Full access)." }
+code = ["crates/trek-agents/src/codex.rs", "crates/trek-app/src/thread_view.rs"]
+tests = ["crates/trek-agents/src/codex.rs", "crates/trek-app/src/thread_view.rs"]
 
 [[feature]]
 id = "verification-skills"

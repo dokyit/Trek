@@ -445,6 +445,11 @@ struct PathRef {
 /// unwrapped, and relative links resolved against the answer's folder. Only real paths count.
 pub fn link_path(url: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
+    // `file:///C:/x.png`: a drive after the slash that starts a file URL's path.
+    let raw = match raw.strip_prefix('/') {
+        Some(rest) if drive_prefix(rest) => rest,
+        _ => raw,
+    };
     let path = resolve_link(raw, cwd)?;
     if path.exists() {
         return Some(path);
@@ -485,21 +490,54 @@ fn is_url(s: &str) -> bool {
 
 /// Inline code that names a file or folder.
 fn looks_like_path(s: &str) -> bool {
+    looks_like_path_on(s, cfg!(windows))
+}
+
+/// A path as Windows writes it, on any platform: a drive (`C:\`, `C:/`), a share (`\\server`),
+/// or a start of `~\`, `.\` or `..\`. Its `\` separates as `/` does.
+fn windows_style(s: &str) -> bool {
+    drive_prefix(s)
+        || [r"\\", r"~\", r".\", r"..\"]
+            .iter()
+            .any(|p| s.starts_with(p))
+}
+
+/// `C:\` or `C:/` at the start.
+fn drive_prefix(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
+}
+
+/// The separators of `s`: `/`, and `\` in a Windows-style path, or anywhere on Windows
+/// (`windows`), where `src\main.rs` is a path; elsewhere a `\` is text (`\d+`).
+fn separators(s: &str, windows: bool) -> &'static [char] {
+    if windows || windows_style(s) {
+        &['/', '\\']
+    } else {
+        &['/']
+    }
+}
+
+/// `looks_like_path` on Windows (`windows`) or elsewhere: a value, so either platform's tests
+/// check both.
+fn looks_like_path_on(s: &str, windows: bool) -> bool {
     let s = s.trim();
-    if s.is_empty()
-        || s.len() > 260
-        || s.contains(char::is_whitespace) && !s.starts_with('/') && !s.starts_with('~')
-    {
+    let rooted =
+        s.starts_with('/') || s.starts_with('~') || drive_prefix(s) || s.starts_with(r"\\");
+    if s.is_empty() || s.len() > 260 || s.contains(char::is_whitespace) && !rooted {
         return false;
     }
+    let seps = separators(s, windows);
     if s.contains("://")
         || s.starts_with('-')
         || s.contains(['(', ')', '{', '}', '=', ';', '<', '>', '|', '`', '"', '\''])
+        // A `\` that doesn't separate is text: a regex, an escape.
+        || (s.contains('\\') && !seps.contains(&'\\'))
     {
         return false;
     }
-    let has_sep = s.contains('/');
-    let file = s.trim_end_matches('/').rsplit('/').next().unwrap_or(s);
+    let has_sep = s.contains(seps);
+    let file = s.trim_end_matches(seps).rsplit(seps).next().unwrap_or(s);
     let has_ext = file.rsplit_once('.').is_some_and(|(stem, ext)| {
         !stem.is_empty()
             && (1..=6).contains(&ext.len())
@@ -512,26 +550,26 @@ fn looks_like_path(s: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
     (has_sep
-        && (has_ext
-            || s.ends_with('/')
-            || s.starts_with('/')
-            || s.starts_with("~/")
-            || s.starts_with("./")))
+        && (has_ext || s.ends_with(seps) || rooted || s.starts_with("./") || s.starts_with(r".\")))
         || (has_ext && !file.contains(".."))
         || dotfile
 }
 
-/// The path in a chip's text, without a `:line[:col]` after it.
+/// The path in a chip's text, without a `:line[:col]` after it (a drive's `C:` stays).
 fn path_part(raw: &str) -> &str {
     let raw = raw.trim();
-    raw.split(':').next().unwrap_or(raw)
+    let skip = if drive_prefix(raw) { 2 } else { 0 };
+    match raw[skip..].find(':') {
+        Some(i) => &raw[..skip + i],
+        None => raw,
+    }
 }
 
 fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     let raw = path_part(raw);
-    let p = if let Some(rest) = raw.strip_prefix("~/") {
+    let p = if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix(r"~\")) {
         trek_core::paths::home().join(rest)
-    } else if raw.starts_with('/') {
+    } else if raw.starts_with('/') || Path::new(raw).is_absolute() {
         PathBuf::from(raw)
     } else {
         cwd?.join(raw)
@@ -545,8 +583,8 @@ fn resolve(raw: &str, cwd: Option<&Path>) -> Option<PathBuf> {
 fn in_folder(raw: &str, cwd: Option<&Path>) -> bool {
     let raw = path_part(raw);
     let path = match raw.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            trek_core::paths::home().join(rest.trim_start_matches('/'))
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            trek_core::paths::home().join(rest.trim_start_matches(['/', '\\']))
         }
         _ => PathBuf::from(raw),
     };
@@ -604,14 +642,16 @@ impl MarkdownPlugin for PathChips {
     ) -> Option<InlineElement> {
         let data = node.data::<PathRef>()?;
         let theme = cx.theme();
-        let dir = data.raw.ends_with('/')
+        // `\` separates here too: a chip is only made of a `\` path where it does.
+        let seps: &[char] = &['/', '\\'];
+        let dir = data.raw.ends_with(seps)
             || data
                 .resolved
                 .as_ref()
                 .is_some_and(|p| crate::system::lately::is_dir(p));
-        let trimmed = data.raw.trim_end_matches('/');
+        let trimmed = data.raw.trim_end_matches(seps);
         let label = trimmed
-            .rsplit('/')
+            .rsplit(seps)
             .next()
             .filter(|s| !s.is_empty())
             .unwrap_or(trimmed)
@@ -769,9 +809,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use super::resolve;
     use super::{
         COLUMN, IMAGE_MAX, Ink, LINE_HEIGHT, Metrics, Tone, column, image_size, in_folder, is_url,
-        link_path, looks_like_path, path_part,
+        link_path, looks_like_path, looks_like_path_on, path_part,
     };
     use gpui_kit::{Hsla, px, rgb};
     use std::path::Path;
@@ -971,7 +1013,7 @@ mod tests {
     #[test]
     #[cfg_attr(
         windows,
-        ignore = "the cases are Unix absolute paths (/Users/me, /tmp); Windows ones (drive-letter paths) arrive with the paths phase"
+        ignore = "the cases are Unix absolute paths (/Users/me, /tmp); windows_paths_resolve_and_belong_to_the_threads_folder is the Windows twin"
     )]
     fn only_the_threads_own_folders_are_the_projects() {
         let cwd = Some(Path::new("/Users/me/code/app"));
@@ -1025,6 +1067,87 @@ mod tests {
         ] {
             assert!(!looks_like_path(p), "{p}");
         }
+    }
+
+    /// Paths as agents write them on a PC are chips too: a drive, a share, `~\`, `.\`, and on
+    /// Windows a relative `src\main.rs`. Elsewhere a `\` that isn't a Windows path's is text (a
+    /// regex, an escape), so it never makes a chip. A value, so the Mac's CI checks Windows' too.
+    #[test]
+    fn spots_windows_paths() {
+        for p in [
+            r"C:\Users\me\app\src\main.rs",
+            "C:/Users/me/app/src/main.rs",
+            r"C:\Program Files\Trek\trek.exe",
+            r"\\server\share\report.pdf",
+            r"~\Documents\notes.md",
+            r".\src\main.rs",
+            r"C:\Users\me\app\",
+            r"C:\Users\me\app\src\main.rs:42",
+        ] {
+            assert!(looks_like_path_on(p, true), "{p} on Windows");
+            assert!(
+                looks_like_path_on(p, false),
+                "{p} elsewhere: still Windows' own"
+            );
+        }
+        assert!(
+            looks_like_path_on(r"src\main.rs", true),
+            "relative, on Windows"
+        );
+        for text in [r"src\main.rs", r"\d+\.txt", r"a\nb.c"] {
+            assert!(!looks_like_path_on(text, false), "{text} on a Mac is text");
+        }
+        for not in ["C: drive", r"\d+", "C:"] {
+            assert!(!looks_like_path_on(not, true), "{not}");
+        }
+        // A drive's colon isn't a line number.
+        assert_eq!(path_part(r"C:\app\src\main.rs:42"), r"C:\app\src\main.rs");
+        assert_eq!(path_part("C:/app/lib.rs:7:3"), "C:/app/lib.rs");
+        assert_eq!(path_part(r"C:\app\"), r"C:\app\");
+    }
+
+    /// On Windows a drive path resolves, its folders are the project's when they're the thread's,
+    /// and a `file:///C:/…` link is the file it names.
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_resolve_and_belong_to_the_threads_folder() {
+        let dir = std::env::temp_dir().join(format!("trek-md-win-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let file = dir.join("src").join("main.rs");
+        std::fs::write(&file, b"fn main() {}").unwrap();
+        let shown = file.display().to_string();
+        assert_eq!(resolve(&shown, None).as_deref(), Some(file.as_path()));
+        assert_eq!(
+            resolve(&format!("{shown}:12"), None).as_deref(),
+            Some(file.as_path()),
+            "the line number goes"
+        );
+        assert_eq!(
+            resolve(r"src\main.rs", Some(&dir)).as_deref(),
+            Some(file.as_path())
+        );
+        let url = format!("file:///{}", shown.replace('\\', "/"));
+        assert_eq!(link_path(&url, None).as_deref(), Some(file.as_path()));
+
+        let cwd = Some(Path::new(r"C:\Users\me\code\app"));
+        for inside in [
+            r"src\",
+            r".\src\",
+            r"C:\Users\me\code\app\src\",
+            r"src\main.rs:12",
+        ] {
+            assert!(in_folder(inside, cwd), "{inside}");
+        }
+        for outside in [
+            r"~\",
+            r"C:\Temp\",
+            r"..\other-repo\",
+            r"src\..\..\x\",
+            r"C:\Users\me\code\application\",
+        ] {
+            assert!(!in_folder(outside, cwd), "{outside}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
