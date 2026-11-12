@@ -347,6 +347,81 @@ pub struct Feature {
     /// What it holds to beyond being there (`[[feature.promise]]`).
     #[serde(default)]
     pub promise: Vec<Promise>,
+    /// How to see it working in the capture build (an isolated Trek driven by commands, as
+    /// `crates/trek-app/src/shots.rs` lists them), on every platform it's on: the commands, the
+    /// last of them checking what's on screen (`count <element id> <n>`). `bin/parity-live`
+    /// runs them against the app running on this computer.
+    #[serde(default)]
+    pub live: Vec<String>,
+    /// `live` for one platform, where it differs there.
+    #[serde(default)]
+    pub live_macos: Option<Vec<String>>,
+    #[serde(default)]
+    pub live_windows: Option<Vec<String>>,
+    /// Why a platform it's on has no live steps: what an isolated run can't show (a real
+    /// phone, a release, another app), and what checks it instead.
+    #[serde(default)]
+    pub live_skip: Option<String>,
+}
+
+impl Feature {
+    /// What it does on `platform`.
+    pub fn support(&self, platform: Platform) -> Support {
+        match platform {
+            Platform::Macos => self.macos,
+            Platform::Windows => self.windows,
+        }
+    }
+
+    /// Its live steps on `platform` (empty: none).
+    pub fn live_on(&self, platform: Platform) -> &[String] {
+        let own = match platform {
+            Platform::Macos => &self.live_macos,
+            Platform::Windows => &self.live_windows,
+        };
+        own.as_deref().unwrap_or(&self.live)
+    }
+}
+
+/// A live step that checks what's on screen, rather than doing something.
+pub fn checks(step: &str) -> bool {
+    let verb = step.split_whitespace().next().unwrap_or_default();
+    matches!(verb, "count" | "hittest")
+}
+
+/// What's wrong with `feature`'s live steps: a platform it's on with neither steps nor a word on
+/// why, steps that check nothing, or a reason given where every platform has steps.
+fn live_problems(f: &Feature) -> Vec<String> {
+    let id = &f.id;
+    let mut problems = vec![];
+    let skip = f.live_skip.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let mut without = 0;
+    for platform in [Platform::Macos, Platform::Windows] {
+        if !matches!(f.support(platform), Support::Yes | Support::Partial) {
+            continue;
+        }
+        let steps = f.live_on(platform);
+        if steps.is_empty() {
+            without += 1;
+            if !skip {
+                problems.push(format!(
+                    "{id}: no live steps on {}, and no word in `live_skip` on why",
+                    platform.name()
+                ));
+            }
+        } else if !steps.iter().any(|s| checks(s)) {
+            problems.push(format!(
+                "{id}: its live steps on {} check nothing (end with `count <element id> <n>`)",
+                platform.name()
+            ));
+        }
+    }
+    if skip && without == 0 {
+        problems.push(format!(
+            "{id}: `live_skip` says why there are no live steps, but every platform has some"
+        ));
+    }
+    problems
 }
 
 /// A behaviour a feature keeps on each platform it's on, beyond being there: what a fix made on
@@ -386,7 +461,16 @@ pub enum Platform {
 }
 
 impl Platform {
-    fn name(self) -> &'static str {
+    /// The platform this was built for (a Mac, unless it's Windows).
+    pub fn here() -> Platform {
+        if cfg!(windows) {
+            Platform::Windows
+        } else {
+            Platform::Macos
+        }
+    }
+
+    pub fn name(self) -> &'static str {
         match self {
             Platform::Macos => "macOS",
             Platform::Windows => "Windows",
@@ -540,6 +624,7 @@ pub fn ledger_problems(ledger: &Ledger, root: &Path) -> Vec<String> {
             }
         }
         problems.extend(promise_problems(f, root));
+        problems.extend(live_problems(f));
     }
     problems
 }
@@ -556,6 +641,8 @@ pub fn render_table(ledger: &Ledger) -> String {
         "# Platform parity\n\n\
          Generated from `docs/parity/ledger.toml` by `TREK_PARITY_UPDATE=1 cargo test -p trek-parity`: edit the\n\
          ledger, not this file. Why it exists and how it's kept true: `docs/CROSS_PLATFORM.md`.\n\n\
+         Each feature seen working on a platform, by the ledger's `live` steps: `docs/parity/live-<platform>.md`,\n\
+         written by `cargo run -p trek-parity --bin parity-live` against the capture build.\n\n\
          | Area | Feature | macOS | Windows | Notes |\n|---|---|---|---|---|\n",
     );
     for f in features_in_order(ledger) {
@@ -821,6 +908,46 @@ mod tests {
     }
 
     #[test]
+    fn a_feature_is_shown_live_on_each_platform_or_says_why_not() {
+        let problems = |keys: &str, windows: &str| {
+            let ledger: Ledger = toml::from_str(&format!(
+                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nnote = \"n\"\n{keys}\n"
+            ))
+            .unwrap();
+            ledger_problems(&ledger, Path::new("."))
+        };
+        let on_screen = "live = [\"route settings:general\", \"count prevent-sleep 1\"]";
+        // Steps on both, or a reason for both, or steps on one and a reason for the other.
+        assert!(problems(on_screen, "yes").is_empty());
+        assert!(problems("live_skip = \"The system's own window.\"", "yes").is_empty());
+        let one = "live_windows = [\"count phone-apps 1\"]\nlive_skip = \"Steps to be written on a Mac.\"";
+        assert!(problems(one, "yes").is_empty());
+        // Nothing for a platform it's on; nothing for one it isn't is fine.
+        let p = problems("", "yes");
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(p[0].contains("no live steps on macOS"), "{p:?}");
+        assert!(problems("live_macos = [\"count x 1\"]", "no").is_empty());
+        // Steps that check nothing, and a reason no platform needs.
+        let p = problems("live = [\"route settings:general\"]", "yes");
+        assert!(p.iter().any(|p| p.contains("check nothing")), "{p:?}");
+        let p = problems(&format!("{on_screen}\nlive_skip = \"x\""), "yes");
+        assert!(
+            p.iter().any(|p| p.contains("every platform has some")),
+            "{p:?}"
+        );
+        // Which steps a platform runs.
+        let ledger: Ledger = toml::from_str(&format!(
+            "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"yes\"\n{on_screen}\nlive_windows = [\"count phone-apps 1\"]\n"
+        ))
+        .unwrap();
+        let f = &ledger.feature[0];
+        assert_eq!(f.live_on(Platform::Macos).len(), 2);
+        assert_eq!(f.live_on(Platform::Windows), ["count phone-apps 1"]);
+        assert!(checks("count x 1") && checks("hittest title-text HTCAPTION"));
+        assert!(!checks("route draft"));
+    }
+
+    #[test]
     fn a_promise_is_held_by_a_test_on_each_platform_or_says_why_not() {
         let dir = std::env::temp_dir().join(format!("trek-parity-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -831,7 +958,7 @@ mod tests {
         .unwrap();
         let problems = |promise: &str, windows: &str| {
             let ledger: Ledger = toml::from_str(&format!(
-                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nnote = \"n\"\n\n[[feature.promise]]\n{promise}\n"
+                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nnote = \"n\"\nlive_skip = \"Not on screen.\"\n\n[[feature.promise]]\n{promise}\n"
             ))
             .unwrap();
             ledger_problems(&ledger, &dir)

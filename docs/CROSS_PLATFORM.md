@@ -26,7 +26,7 @@ A feature is built in four layers, and only the lowest knows which OS it's on:
                            that drives the layers above in tests anywhere.
 ```
 
-Three things keep it that way, run on both platforms' CI for every change:
+Four things keep it that way, the first three run on both platforms' CI for every change:
 
 1. **The parity ledger and the gate census** (`docs/parity`, `crates/trek-parity`). Every
    user-facing feature has a status per platform; every `#[cfg]` that names a platform is
@@ -45,6 +45,15 @@ Three things keep it that way, run on both platforms' CI for every change:
 3. **The build is one pipeline on both**: one workspace, the same test targets sharded on a Mac
    and a Windows runner, Clippy and the capture build on both, native code built with the runtime
    Trek ships (`/MT`), and a hardening test that refuses a `trek.exe` naming a redistributable.
+4. **Every feature is shown working on each platform, by the same steps.** A feature in the ledger
+   says how to see it in the capture build (`live`: an isolated Trek driven by commands, ending
+   in what must be on screen), or why an isolated run can't show it (`live_skip`: the system's
+   own windows, a real phone, a release). CI holds every feature to one or the other.
+   `cargo run -p trek-parity --bin parity-live` runs the steps against the capture build on
+   whichever computer it's on, and writes `docs/parity/live-<platform>.md`: the same steps on a
+   Mac and a PC, so a feature built on one is seen working, or not, on the other, before a user
+   finds it. On Windows: 54 of the 99 features shown working, 37 that an isolated run can't show
+   (each says what checks it instead), 8 that aren't on Windows.
 
 So a fix made on one platform lands in a shared layer (and both CIs test it), or in a backend
 whose counterpart the ledger names. A behaviour fix hidden behind `fluent::WINDOWS` fails review
@@ -253,6 +262,11 @@ In order of how much each removes the problem, smallest first where that's close
      and `PARITY.md` with the change.
 - Fixing a bug seen on one platform: check whether the other platform's path has it too, and say
   so in the pull request.
+- Adding a feature, or changing what one shows: give it `live` steps in the ledger (the capture
+  build's commands, `crates/trek-app/src/shots.rs`, ending in `count <element id> <n>`), or say in
+  `live_skip` why an isolated run can't show it; then start the capture build
+  (`.agents/skills/verify-trek`) and run
+  `cargo run -p trek-parity --bin parity-live -- --shot-dir <its runtime folder>/shot --feature <id>`.
 - Fixing how well something works (not whether it's there): add a `[[feature.promise]]` to the
   feature with the test that holds this platform to it, and the other platform's test, or under
   `untested` why there isn't one.

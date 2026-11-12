@@ -37,6 +37,17 @@ On a Mac the isolated app opens on an invisible display of its own, the [Trek Te
 ./.agents/skills/verify-trek/scripts/trek-dev reset --yes
 ```
 
+## Every feature at once
+
+Each feature in `docs/parity/ledger.toml` says how to see it working here (`live`: these commands, ending in what must be on screen), or why an isolated run can't show it (`live_skip`). With the app started, `parity-live` runs them all, or the ones named, and writes a page of what passed:
+
+```sh
+cargo run -p trek-parity --bin parity-live -- --shot-dir <runtime_dir from status>/shot \
+    [--feature dictation]... [--report docs/parity/live-<platform>.md]
+```
+
+It makes a small git project beside the command folder for steps to work in (`{project}` in a step; `{/}` is the path separator), and saves `live-<id>.png` for each feature. Commands written for it: `count <id>[*] <n>+` (n or more), `reveal <id>` (Settings scrolled until it's on screen; `reveal-in <scroller> <id>` for another), `pair-phone [name]|leave` (a stand-in iPhone paired over the real protocol, with a phone server on the loopback alone), and on Windows a real shell in the terminal when the app is started with `TREK_VERIFY_SHELL=1` (no profile, never a command). A check that counts an element below the fold fails: reveal it first; a row's id often carries an index (`tool-group#2`), so count it as `tool-group*`.
+
 Use `--help` after any command for its routes, arguments, dry-run behavior, and examples. `check --quick` is for iteration only: the full check parses shell scripts and runs `bin/agent-cli --selftest`, runs the same Rust package tests as CI, builds the `shots` feature, then launches isolated Trek and captures Basecamp and General Settings.
 
 ## Test display (macOS)

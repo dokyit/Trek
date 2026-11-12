@@ -13,7 +13,7 @@
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
-//! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
+//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
@@ -43,7 +43,7 @@
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
-//! `count <element id>[*] <n>` (fails unless n such elements are on screen; `*` ends a prefix),
+//! `count <element id>[*] <n>[+]` (fails unless n such elements are on screen, or n or more with `+`; `*` ends a prefix), `reveal <element id>` (Settings scrolled until it is on screen; `reveal-in <scrolling element id> <element id>` for another),
 //! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`,
 //! `down down enter`; `cmd`/`win`/`super` modifiers are read as `secondary`, so one manifest is
 //! right on both platforms), `scroll <element id> <px>`
@@ -1446,6 +1446,58 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // A stand-in iPhone pairs with this Trek as the iPhone app does: Trek's own client, pinned to
+    // the phone server's certificate, says `pair` with the code Settings shows and `ios` as its
+    // platform, and stays connected. An isolated run starts no phone server, so one starts on the
+    // loopback alone (`Workspace::start_loopback_remote`). `pair-phone [name]`; `pair-phone leave`
+    // disconnects it (the sidebar then says when it was last seen).
+    if verb == "pair-phone" {
+        static STAND_IN: std::sync::Mutex<Option<trek_remote::client::Client>> =
+            std::sync::Mutex::new(None);
+        let mut held = STAND_IN.lock().unwrap_or_else(|e| e.into_inner());
+        if arg == "leave" {
+            if let Some(phone) = held.take() {
+                phone.close();
+            }
+            return Ok(());
+        }
+        let link = ws.update(cx, |ws, cx| -> anyhow::Result<crate::machines::PairLink> {
+            ws.start_loopback_remote(cx)?;
+            ws.offer_pairing(cx);
+            let offer = ws
+                .remote
+                .as_ref()
+                .and_then(|r| r.offer.clone())
+                .ok_or_else(|| anyhow::anyhow!("pair-phone: no pairing code"))?;
+            crate::machines::PairLink::parse(&offer.url).map_err(anyhow::Error::msg)
+        })?;
+        let _runtime = trek_core::runtime().enter();
+        let phone = trek_remote::client::Client::connect_with(
+            link.routes,
+            &link.fingerprint,
+            trek_remote::client::Auth::Pair {
+                code: link.code,
+                device_id: "stand-in-iphone".into(),
+                device_name: if arg.is_empty() {
+                    "Stand-in iPhone"
+                } else {
+                    arg
+                }
+                .into(),
+            },
+            trek_remote::client::ClientOptions {
+                platform: Some("ios".into()),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("pair-phone: {e:?}"))?;
+        // What the machine sends it (snapshots, rows) is read and let go.
+        if let Some(mut events) = phone.events() {
+            trek_core::runtime().spawn(async move { while events.recv().await.is_some() {} });
+        }
+        *held = Some(phone);
+        return Ok(());
+    }
     // The iPhone tool with a made-up phone (an isolated run never touches the real one): opens the
     // tool, then `phone::PhonePanel::demo` puts it in `arg`'s situation (a PC's has its own).
     #[cfg(any(target_os = "macos", windows))]
@@ -1850,7 +1902,17 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     if matches!(
         verb,
-        "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements" | "count"
+        "click"
+            | "rclick"
+            | "hover"
+            | "scroll"
+            | "reveal"
+            | "reveal-in"
+            | "type"
+            | "key"
+            | "resize"
+            | "elements"
+            | "count"
     ) {
         let main = ws
             .read(cx)
@@ -1898,12 +1960,64 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     );
                     Ok(())
                 }
+                // `reveal <element id>`: Settings scrolled from its top, a wheel's turn at a time, until
+                // the element is on screen (`count` counts only what is); `reveal-in <scrolling
+                // element id> <element id>` scrolls another.
+                "reveal" | "reveal-in" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    let (within, id) = if verb == "reveal-in" {
+                        arg.split_once(' ').ok_or_else(|| {
+                            anyhow::anyhow!("reveal-in <scrolling element id> <element id>")
+                        })?
+                    } else {
+                        ("settings-content", arg)
+                    };
+                    let id = id.trim();
+                    anyhow::ensure!(!id.is_empty(), "{verb} needs an element id");
+                    // As `count` reads one: `name*` is any id that starts so.
+                    let on_screen = |window: &mut Window, cx: &mut App| {
+                        window.render_frame(cx);
+                        gpui_kit::base::test_support::snapshots(window)
+                            .into_iter()
+                            .filter(|s| s.visible())
+                            .any(|s| match (id.strip_suffix('*'), s.path().last()) {
+                                (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+                                (None, last) => last == Some(&element_id(id)),
+                                _ => false,
+                            })
+                    };
+                    pointer(window, "hover", within, cx)?;
+                    let wheel = |window: &mut Window, cx: &mut App, dy: f32| {
+                        window.scroll(
+                            element_id(within),
+                            ScrollDelta::Pixels(point(px(0.), px(dy))),
+                            cx,
+                        )
+                    };
+                    wheel(window, cx, 100_000.);
+                    for _ in 0..40 {
+                        if on_screen(window, cx) {
+                            return Ok(());
+                        }
+                        wheel(window, cx, -250.);
+                    }
+                    anyhow::ensure!(
+                        on_screen(window, cx),
+                        "{verb}: {id} isn't on screen anywhere in {within}"
+                    );
+                    Ok(())
+                }
                 "count" => {
                     use gpui_kit::test::TestWindowExt as _;
                     let (id, n) = arg
                         .rsplit_once(' ')
-                        .ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>"))?;
-                    let n: usize = n.trim().parse()?;
+                        .ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>[+]"))?;
+                    // `3+`: three or more.
+                    let (n, more) = match n.trim().strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n.trim(), false),
+                    };
+                    let n: usize = n.parse()?;
                     window.render_frame(cx);
                     let found = gpui_kit::base::test_support::snapshots(window)
                         .into_iter()
@@ -1914,7 +2028,11 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                             _ => false,
                         })
                         .count();
-                    anyhow::ensure!(found == n, "count {id}: {found} on screen, not {n}");
+                    anyhow::ensure!(
+                        found == n || more && found > n,
+                        "count {id}: {found} on screen, not {n}{}",
+                        if more { " or more" } else { "" }
+                    );
                     Ok(())
                 }
                 "resize" => {
@@ -2674,15 +2792,8 @@ fn import_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
         acme.display(),
         api.display(),
     );
-    let made = trek_core::procs::command("sqlite3")
-        .arg(&db)
-        .arg(sql)
-        .output()?;
-    anyhow::ensure!(
-        made.status.success(),
-        "sqlite3: {}",
-        String::from_utf8_lossy(&made.stderr)
-    );
+    // With the SQLite Trek links, not the sqlite3 program: a Mac has one, Windows doesn't.
+    rusqlite::Connection::open(&db)?.execute_batch(&sql)?;
     let t3 = repo("notes-app")?;
     worktree(
         &t3,

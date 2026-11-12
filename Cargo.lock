@@ -9266,6 +9266,7 @@ dependencies = [
  "reqwest",
  "resvg 0.46.0",
  "ropey",
+ "rusqlite",
  "rust-embed",
  "semver",
  "serde",

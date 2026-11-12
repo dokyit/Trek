@@ -89,6 +89,10 @@ pub struct ClientOptions {
     pub probe: Duration,
     /// Sent with `pair` and `hello`.
     pub app_version: Option<String>,
+    /// What it says it runs on, with `pair` and `hello`: this computer's OS (`macos`,
+    /// `windows`), so the machine lists it as a machine; `ios` is the iPhone app's, which a
+    /// stand-in phone says (Trek's capture harness, `pair-phone`).
+    pub platform: Option<String>,
 }
 
 impl Default for ClientOptions {
@@ -102,6 +106,7 @@ impl Default for ClientOptions {
             stagger: Duration::from_millis(300),
             probe: Duration::from_secs(5),
             app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            platform: Some(std::env::consts::OS.to_string()),
         }
     }
 }
@@ -1267,14 +1272,14 @@ async fn authenticate(ws: &mut Ws, auth: &Auth, options: &ClientOptions) -> Auth
             device_id,
             device_name,
             app_version: options.app_version.clone(),
-            platform: Some(std::env::consts::OS.to_string()),
+            platform: options.platform.clone(),
         },
         Auth::Hello { device_id, token } => ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             device_id,
             token,
             app_version: options.app_version.clone(),
-            platform: Some(std::env::consts::OS.to_string()),
+            platform: options.platform.clone(),
         },
     };
     let text = serde_json::to_string(&ClientEnvelope {

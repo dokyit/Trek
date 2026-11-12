@@ -679,6 +679,16 @@ fn interface_addresses() -> Vec<(String, Ipv4Addr)> {
     out
 }
 
+/// What this computer's phone server offers phones: all of it, but updating the iPhone app, which
+/// builds on a Mac alone (Xcode).
+fn server_features() -> Vec<String> {
+    tr::feature::ALL
+        .iter()
+        .filter(|f| cfg!(target_os = "macos") || **f != tr::feature::UPDATE_PHONE)
+        .map(|f| f.to_string())
+        .collect()
+}
+
 fn mobile_dir() -> PathBuf {
     trek_core::paths::data_dir().join("mobile")
 }
@@ -804,12 +814,7 @@ impl Workspace {
                     // What a Trek that quit mid-upload left of a phone's file.
                     uploads::sweep_stale(&uploads::uploads_dir(), uploads::STALE);
                     config.tls = Some(identity);
-                    // The iPhone app builds on a Mac only (Xcode).
-                    config.features = tr::feature::ALL
-                        .iter()
-                        .filter(|f| cfg!(target_os = "macos") || **f != tr::feature::UPDATE_PHONE)
-                        .map(|f| f.to_string())
-                        .collect();
+                    config.features = server_features();
                     #[cfg(target_os = "macos")]
                     phone_update::refresh_agent_copy();
                     let (host, requests) = tr::ChannelHost::new();
@@ -915,6 +920,52 @@ impl Workspace {
         );
         remote.connected.insert("phone".to_string());
         self.remote = Some(remote);
+    }
+
+    /// The phone server for the capture harness's stand-in iPhone (`pair-phone`), as
+    /// `start_remote` sets it up (TLS, the paired devices in the data folder, the same tasks), but
+    /// on the loopback alone: an isolated run lets nothing outside reach it, and Windows'
+    /// firewall has nothing to ask about. On the settings' port.
+    #[cfg(feature = "shots")]
+    pub fn start_loopback_remote(&mut self, cx: &mut Context<Self>) -> anyhow::Result<()> {
+        if self.remote.is_some() {
+            return Ok(());
+        }
+        let port = self.settings.mobile.port;
+        let reach = self.settings.mobile.reach;
+        let host = host_info();
+        let identity = tr::TlsIdentity::load_or_create(&mobile_dir(), &host.name)?;
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port)).to_string();
+        let mut config = tr::ServerConfig::new(host);
+        config.bind = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        config.advertise = Some(address.clone());
+        config.routes = vec![address.clone()];
+        config.devices_path = Some(mobile_dir().join("devices.json"));
+        config.tls = Some(identity);
+        config.features = server_features();
+        let routes = config.routes.clone();
+        let (host, requests) = tr::ChannelHost::new();
+        let handle =
+            trek_core::runtime().block_on(tr::RemoteServer::start(config, Arc::new(host)))?;
+        tracing::info!("phone server (loopback, for the capture harness): {address}");
+        let tasks = vec![
+            serve_requests(cx.weak_entity(), requests, cx),
+            push_changes(cx.weak_entity(), cx),
+            hear_notices(cx.weak_entity(), handle.notices(), cx),
+        ];
+        self.remote = Some(Remote::new(
+            handle,
+            Addresses::default(),
+            address,
+            routes,
+            (port, reach),
+            None,
+            tasks,
+        ));
+        // On, as its switch would be, so `sync_remote` keeps it rather than stopping it.
+        self.settings.mobile.enabled = true;
+        cx.notify();
+        Ok(())
     }
 
     fn stop_remote(&mut self, cx: &mut Context<Self>) {

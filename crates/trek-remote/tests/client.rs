@@ -617,6 +617,41 @@ async fn the_first_route_that_answers_wins() {
 }
 
 #[tokio::test]
+async fn it_says_what_it_runs_on_and_a_stand_in_phone_says_ios() {
+    let m = machine().await;
+    let platform = |id: &str| {
+        m.handle
+            .devices()
+            .into_iter()
+            .find(|d| d.device_id == id)
+            .and_then(|d| d.platform)
+    };
+    // As itself: this computer's OS, so the machine lists it as a machine.
+    let machine = Client::connect_with(
+        m.routes(),
+        &m.identity.fingerprint,
+        m.pair_auth("pc"),
+        quick(),
+    )
+    .unwrap();
+    connected(&mut machine.events().unwrap()).await;
+    assert_eq!(platform("pc").as_deref(), Some(std::env::consts::OS));
+    // As the iPhone app does: a phone, in the machine's list and sidebar.
+    let phone = Client::connect_with(
+        m.routes(),
+        &m.identity.fingerprint,
+        m.pair_auth("stand-in"),
+        ClientOptions {
+            platform: Some("ios".into()),
+            ..quick()
+        },
+    )
+    .unwrap();
+    connected(&mut phone.events().unwrap()).await;
+    assert_eq!(platform("stand-in").as_deref(), Some("ios"));
+}
+
+#[tokio::test]
 async fn put_files_refuses_paths_outside_the_project() {
     let m = machine().await;
     let (client, _events, _) = paired_client(&m, "machine-a").await;

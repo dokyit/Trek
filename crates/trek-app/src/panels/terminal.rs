@@ -265,6 +265,23 @@ fn shell_args(flavor: Flavor, command: Option<&str>) -> Vec<String> {
     }
 }
 
+/// The capture build asked for a real shell in an isolated run, for a live check of the terminal
+/// (`TREK_VERIFY_SHELL`): on Windows only, where it starts without the user's profile
+/// (`without_profile`); a Mac's login shell has no one flag for that.
+fn verify_shell() -> bool {
+    cfg!(all(feature = "shots", windows)) && std::env::var_os("TREK_VERIFY_SHELL").is_some()
+}
+
+/// The arguments that keep a `flavor` shell from running the user's start-up scripts: its
+/// profile (PowerShell) or the registry's AutoRun commands (cmd).
+fn without_profile(flavor: Flavor) -> &'static [&'static str] {
+    match flavor {
+        Flavor::PowerShell => &["-NoProfile"],
+        Flavor::Cmd => &["/d"],
+        Flavor::Posix => &[],
+    }
+}
+
 /// `path` without the `\\?\` that canonicalising puts on a Windows path: `\\?\C:\dir` is `C:\dir`
 /// and `\\?\UNC\host\share` is `\\host\share`. Shells show the prefix and `cmd.exe` mishandles it.
 fn plain_path(path: PathBuf) -> PathBuf {
@@ -387,6 +404,10 @@ fn shell_command(setting: &str, cwd: Option<PathBuf>, job: Option<&Job>) -> Comm
     let mut cmd = CommandBuilder::new(shell);
     cmd.args(execution_policy_args(flavor, job));
     cmd.args(shell_args(flavor, command));
+    // The capture build's shell for a live check reads no profile and runs no AutoRun.
+    if trek_core::paths::isolated() {
+        cmd.args(without_profile(flavor));
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "Trek");
@@ -888,8 +909,10 @@ impl TerminalPanel {
             bell_at: None,
         };
         // An isolated (test) process starts no shell: one would run the user's login profile,
-        // and the command (a project's tests, an agent's sign-in) for real.
-        if trek_core::paths::isolated() {
+        // and the command (a project's tests, an agent's sign-in) for real. Unless a live check
+        // asks the capture build for one (`verify_shell`): a shell without a profile, never a
+        // command.
+        if trek_core::paths::isolated() && (job.is_some() || !verify_shell()) {
             this.screen().process(
                 format!(
                     "$ {}\r\n(no shell in tests)\r\n",
