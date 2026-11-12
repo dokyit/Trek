@@ -1177,7 +1177,9 @@ mod tests {
         assert!(!alive_since(id, 0));
     }
 
-    #[cfg(windows)]
+    /// On both platforms: each has its own reading of a process's start and the boot (the Mac's
+    /// exact, Windows' within a few seconds).
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn this_process_and_boot_are_dated() {
         let now = chrono::Utc::now().timestamp();
