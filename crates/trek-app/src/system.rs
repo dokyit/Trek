@@ -232,13 +232,13 @@ fn set_dock_badge(_: usize, _: Option<AnyWindowHandle>, _: &mut App) -> bool {
 /// The rendered icon for `icon` (`assets/brand`).
 pub fn app_icon_image(icon: AppIcon) -> &'static str {
     match icon {
-        AppIcon::Ember => "brand/icon.png",
-        AppIcon::Night => "brand/icon-night.png",
+        AppIcon::Night => "brand/icon.png",
+        AppIcon::Paper => "brand/icon-paper.png",
         AppIcon::Glass => "brand/icon-glass.png",
     }
 }
 
-/// Show `icon` in the Dock while Trek runs. The bundle's own icon (Ember) is what Finder and a
+/// Show `icon` in the Dock while Trek runs. The bundle's own icon (Night) is what Finder and a
 /// quit app's Dock tile show: macOS only lets a running app change its tile. Whether it was put
 /// up (the Windows one, below, asks again when a window couldn't take it).
 #[cfg(all(target_os = "macos", not(any(test, feature = "test-support"))))]
@@ -262,7 +262,7 @@ fn set_app_icon(icon: AppIcon, _cx: &mut App) -> bool {
 
 /// On Windows the icon is each window's (`WM_SETICON`) and its class's, taken from the exe's icon
 /// resources (`winsys::icon_resource`): the taskbar button and title bar show it while Trek runs,
-/// and the exe's own icon (Explorer, a shortcut) stays Ember.
+/// and the exe's own icon (Explorer, a shortcut) stays Night.
 #[cfg(all(windows, not(any(test, feature = "test-support"))))]
 fn set_app_icon(icon: AppIcon, cx: &mut App) -> bool {
     let resource = crate::winsys::icon_resource(icon);

@@ -1,53 +1,74 @@
 ---
 name: trekdesktop.com
-description: "Trek's website: the app's Paper and Night, its ridges and its hiker, around real captures of the app."
+description: "Trek's website: one photograph of a trail, a pinned stage where an example Inbox acts as you scroll, and real captures of the app at their real size."
 colors:
   accent: "#B53C0B"
   accent-over: "#9C3308"
   on-accent: "#FFFFFF"
   ember: "#E85D1F"
+  ember-ink: "#B53C0B"
   amber: "#C98500"
   amber-ink: "#8A5A00"
   emerald: "#1E9E62"
   emerald-ink: "#14734A"
   ground: "#F3EEE6"
   raised: "#FBF8F3"
+  sky-top: "#BABACA"
   ink: "#1A1A1C"
   ink-2: "#45403A"
   mute: "#6A6259"
   line: "rgb(40 28 16 / 0.14)"
+  shade: "rgb(40 20 8)"
+  phone-body: "#131214"
   accent-night: "#FF7A3D"
   accent-over-night: "#FF8D58"
   on-accent-night: "#1A0E06"
   ember-night: "#FF7A3D"
+  ember-ink-night: "#FF7A3D"
   amber-night: "#FFB020"
+  amber-ink-night: "#FFB020"
   emerald-night: "#3FCF8E"
+  emerald-ink-night: "#3FCF8E"
   ground-night: "#0E0D12"
   raised-night: "#17161C"
-  sky-night: "#0B1222"
+  sky-top-night: "#18192B"
   ink-night: "#F3EEE6"
   ink-2-night: "#D2CBC3"
   mute-night: "#A69F98"
   line-night: "rgb(243 238 230 / 0.14)"
+  shade-night: "rgb(0 0 0)"
+  phone-body-night: "#2C2B31"
 typography:
   display:
     fontFamily: "Bricolage Grotesque, Hanken Grotesk, system-ui, sans-serif"
-    fontSize: "clamp(2.5rem, 4.75vw, 4.25rem)"
+    fontSize: "clamp(2.6rem, 5vw, 4.5rem)"
     fontWeight: 600
-    lineHeight: 1.03
-    letterSpacing: "-0.028em"
+    lineHeight: 1.02
+    letterSpacing: "-0.03em"
   headline:
     fontFamily: "Bricolage Grotesque, Hanken Grotesk, system-ui, sans-serif"
     fontSize: "clamp(2rem, 3.2vw, 2.75rem)"
     fontWeight: 600
     lineHeight: 1.06
     letterSpacing: "-0.024em"
+  caption:
+    fontFamily: "Bricolage Grotesque, Hanken Grotesk, system-ui, sans-serif"
+    fontSize: "clamp(1.75rem, 3.5vw, 3rem)"
+    fontWeight: 600
+    lineHeight: 1.12
+    letterSpacing: "-0.022em"
+  caption-still:
+    fontFamily: "Bricolage Grotesque, Hanken Grotesk, system-ui, sans-serif"
+    fontSize: "clamp(1.5rem, 2.6vw, 2.25rem)"
+    fontWeight: 600
+    lineHeight: 1.12
+    letterSpacing: "-0.022em"
   page-title:
     fontFamily: "Bricolage Grotesque, Hanken Grotesk, system-ui, sans-serif"
     fontSize: "clamp(2.25rem, 4vw, 3.25rem)"
     fontWeight: 600
     lineHeight: 1.05
-    letterSpacing: "-0.028em"
+    letterSpacing: "-0.03em"
   doc-heading:
     fontFamily: "Bricolage Grotesque, Hanken Grotesk, system-ui, sans-serif"
     fontSize: "1.5rem"
@@ -67,6 +88,11 @@ typography:
     lineHeight: 1.3
   lede:
     fontFamily: "Hanken Grotesk, system-ui, sans-serif"
+    fontSize: "clamp(1.0625rem, 1.45vw, 1.25rem)"
+    fontWeight: 400
+    lineHeight: 1.5
+  page-lede:
+    fontFamily: "Hanken Grotesk, system-ui, sans-serif"
     fontSize: "19px"
     fontWeight: 400
     lineHeight: 1.5
@@ -80,6 +106,11 @@ typography:
     fontSize: "16px"
     fontWeight: 500
     letterSpacing: "-0.005em"
+  compact:
+    fontFamily: "Hanken Grotesk, system-ui, sans-serif"
+    fontSize: "15px"
+    fontWeight: 400
+    lineHeight: 1.55
   label:
     fontFamily: "Hanken Grotesk, system-ui, sans-serif"
     fontSize: "14px"
@@ -96,15 +127,22 @@ typography:
     fontWeight: 400
     lineHeight: 1.45
 rounded:
+  code: "5px"
+  focus: "6px"
   sm: "10px"
   md: "12px"
-  lg: "16px"
-  phone: "56px"
+  lg: "14px"
+  panel: "18px"
+  phone-stage-screen: "27px"
+  phone-stage: "34px"
+  phone-screen: "36px"
+  phone: "44px"
 spacing:
   gutter: "24px"
   gutter-narrow: "16px"
-  nav: "68px"
+  bar: "68px"
   column-gap: "72px"
+  stage-gap: "44px"
   band-top: "120px"
   band-bottom: "132px"
   band-top-narrow: "84px"
@@ -119,107 +157,159 @@ components:
     height: "48px"
   button-fill-hover:
     backgroundColor: "{colors.accent-over}"
+  button-big:
+    rounded: "{rounded.lg}"
+    padding: "0 26px"
+    height: "54px"
+  button-small:
+    rounded: "{rounded.sm}"
+    padding: "0 14px"
+    height: "36px"
   button-plain:
     textColor: "{colors.ink}"
     typography: "{typography.button}"
     rounded: "{rounded.md}"
     padding: "0 20px"
     height: "48px"
-  button-small:
-    rounded: "{rounded.sm}"
-    padding: "0 14px"
-    height: "36px"
   nav-link:
     textColor: "{colors.ink-2}"
+    typography: "{typography.compact}"
   nav-link-hover:
     textColor: "{colors.ink}"
+  skip-link:
+    backgroundColor: "{colors.ink}"
+    textColor: "{colors.ground}"
+    rounded: "{rounded.sm}"
+    padding: "10px 14px"
+  first-screen:
+    backgroundColor: "{colors.sky-top}"
+    textColor: "{colors.ink}"
+    typography: "{typography.display}"
+  story-caption:
+    textColor: "{colors.ink}"
+    typography: "{typography.caption}"
+  story-caption-still:
+    textColor: "{colors.ink-2}"
+    typography: "{typography.caption-still}"
   inbox-rows:
     backgroundColor: "{colors.raised}"
-    rounded: "{rounded.lg}"
+    rounded: "{rounded.panel}"
     padding: "8px"
+    width: "440px"
   inbox-row:
     textColor: "{colors.ink}"
     rounded: "{rounded.sm}"
-    padding: "11px 12px"
-  approval-card:
+    padding: "12px"
+  question-card:
     textColor: "{colors.ink}"
-    rounded: "{rounded.lg}"
+    typography: "{typography.compact}"
+    rounded: "{rounded.panel}"
     padding: "16px"
-  approval-answer:
+  command-block:
+    textColor: "{colors.ink}"
+    typography: "{typography.mono}"
+    rounded: "{rounded.sm}"
+    padding: "10px 12px"
+  question-answer:
     backgroundColor: "{colors.raised}"
     textColor: "{colors.ink}"
     rounded: "{rounded.sm}"
     height: "40px"
+  question-answer-allow:
+    backgroundColor: "{colors.accent}"
+    textColor: "{colors.on-accent}"
+  question-answer-allow-pressed:
+    backgroundColor: "{colors.accent-over}"
+  phone:
+    backgroundColor: "{colors.phone-body}"
+    rounded: "{rounded.phone}"
+    padding: "8px"
+    width: "210px"
+  phone-night:
+    backgroundColor: "{colors.phone-body-night}"
+  phone-stage:
+    rounded: "{rounded.phone-stage}"
+    padding: "7px"
+    width: "183px"
+  staged-note:
+    textColor: "{colors.mute}"
+    typography: "{typography.note}"
   build-row:
     typography: "{typography.title}"
     padding: "20px 0"
-  phone:
-    backgroundColor: "#131214"
-    rounded: "{rounded.phone}"
-    padding: "10px"
-    width: "318px"
+  footer:
+    textColor: "{colors.mute}"
+    typography: "{typography.label}"
+    padding: "40px 0 48px"
 ---
 
 # Design System: trekdesktop.com
 
-This file records what was built, read from `index.html`, `assets/site.css`, `assets/site.js`,
-`privacy/index.html` and `404.html` on 11 November 2026. Where the build and the plan for it
-differ, the build is what is written here, and the difference is listed at the end.
+This file records what is built. It was read from `index.html`, `assets/site.css`, `assets/site.js`, `privacy/index.html`, `404.html`, `script/site/make_hero.py` and `script/site/make_icons.py` on 12 November 2026. A size given as measured was read from the page in headless Chrome on that day. Where the build and its direction differ, the build is what is written here, and the difference is listed at the end.
 
 ## Overview
 
 **Creative North Star: "The Trailhead"**
 
-The site is where a visitor meets Trek before installing it, and it shows the thing itself: the real app at its real size, on the app's own ground, with the app's own hiker at work on the window's top edge. One idea leads the home page, the Inbox, and each section under it adds one fact about it. The name is the form the owner chose for the home page.
+The site is where a visitor meets Trek before installing it. The first screen is one photograph of a trail going up a dry hill. A headline, two short sentences, one button and one fine line sit in its sky. Below the photograph the page takes the app's own ground: Paper by day, Night when the system is dark.
 
-The look is the app's two themes. Paper by day is a warm off-white with near-black ink. Night at dusk is a navy sky over an ember horizon. The backdrop is the app's dithered ridges and nothing else. Type is two grotesques, one for headlines and one for text, upright throughout. Surfaces are flat, with hairlines and small steps in tone, and the page draws a single shadow. The home page set aside what other sites of its kind do: a dark page, a shrunken dark window and a row of agent logos.
+Under the first screen the page shows the app three times. First a small stage is pinned while the visitor scrolls, and an example Inbox acts on it: three threads start, one stops to ask, the phone offers the same question, the thread goes back to work, finished work waits. Then the real window is shown at its real size, twice. A list of builds and a one-line footer end the page.
 
-Motion is small and each piece has a job. The hiker walks his trail as he does in the app, and the Inbox example plays once to show a thread stopping for an answer and going back to work. With the script off or Reduce Motion on, both stand still and the page says the same things.
+Type is two grotesques, upright throughout. Surfaces are flat, with hairlines and small steps in tone. The page draws two soft shadows, both on the stage. Decorative art is a photograph or it is absent. There is no drawn scenery, and the mark is never used as scenery. The home page does not use a dark page by default, a shrunken window under the headline, a row of agent logos or a wall of copy.
+
+Motion has one grammar. Things arrive by opacity and a short rise, most with a blur that clears. Scrolling plays the stage forwards and backwards. The hiker walks on a clock. Without the script, with Reduce Motion on, or in a window under 560 px tall, the story is a still layout that says the same things.
 
 **Key Characteristics:**
 - Paper by default and Night when the system is dark. There is no switch on the page.
+- One photograph on the first screen: the day picture on Paper, a dusk grade of the same frame at Night.
 - One accent, ember, for the action and for a thread at work. Amber and emerald mark the other two states.
-- Bricolage Grotesque at 600 for headlines, Hanken Grotesk at 400 and 500 for text, JetBrains Mono for commands.
-- Three pictures of the app, each a real capture, and one played example of the Inbox.
-- Flat surfaces, hairlines, and corners of 10 to 16 px.
-- The 12 by 16 pixel hiker on his dotted trail, in the app's own timing.
-- No trackers. One request leaves the page, to GitHub's API for the latest release.
+- Bricolage Grotesque at 600 for display, Hanken Grotesk at 400 and 500 for text, JetBrains Mono for commands.
+- A pinned story 430vh tall, with one caption on screen at a time.
+- Two window captures at one CSS pixel to the point. One reduced capture, the story's iPhone.
+- The 12 by 16 pixel hiker on a dotted trail, in the story only, in the app's own timing.
+- Flat surfaces, hairlines, and corners of 10 to 18 px.
+- No trackers, analytics or third-party fonts. One request leaves the page, to GitHub's API for the latest release.
 
 ## Colors
 
-Warm paper and near-black ink by day, navy and warm white at dusk, with ember as the only accent and the app's three state colours in the Inbox example.
+Warm paper and near-black ink by day, near-black and warm white at Night, with ember as the one accent and the app's three state colours in the story.
 
-Every colour is a custom property on `:root` in `assets/site.css`, with its Night value under `prefers-color-scheme: dark`. In the tokens above, a name ending in `-night` is the Night value of the name without it.
+Every colour in the tokens above but the phone's body is a custom property on `:root` in `assets/site.css`, with its Night value under `prefers-color-scheme: dark`. A name ending in `-night` is the Night value of the name without it.
 
 ### Primary
-- **Deep ember** (`accent`, #B53C0B; Night #FF7A3D): the filled button, the ring around the visitor's own build in the download list, and the words "At work" on Paper. It is darker than the app's ember so that white text on it reaches 5.8:1.
-- **Darker ember** (`accent-over`, #9C3308; Night #FF8D58): the filled button under the pointer.
-- **On ember** (`on-accent`, #FFFFFF; Night #1A0E06): text and the icon on the filled button.
+- **Deep ember** (`accent`, #B53C0B; Night #FF7A3D): the filled button, the Allow answer in the question card, and the ring around the visitor's own build. It is darker than the app's ember so that white text on it reaches 5.8:1.
+- **Darker ember** (`accent-over`, #9C3308; Night #FF8D58): the filled button under the pointer, and Allow while it is pressed.
+- **On ember** (`on-accent`, #FFFFFF; Night #1A0E06): the label and the icon on a filled button.
 - **Ember** (`ember`, #E85D1F; Night #FF7A3D): the turning ring of a thread at work, the focus outline, and the text selection at 30%. This is the app's ember, unchanged.
+- **Ember ink** (`ember-ink`, #B53C0B; Night #FF7A3D): the words "At work" in a row.
 
 ### Secondary
-- **Amber** (`amber`, #C98500; Night #FFB020): a thread that waits on the visitor. The dot, an 11% wash over its row, and the approval card's 9% wash and 55% outline.
-- **Amber ink** (`amber-ink`, #8A5A00): the words "Waiting: …" on Paper. At Night the amber itself is used.
+- **Amber** (`amber`, #C98500; Night #FFB020): a thread that waits on the visitor. The dot, an 11% wash over its row, and the question card's 9% wash and 55% outline.
+- **Amber ink** (`amber-ink`, #8A5A00; Night #FFB020): the words "Waiting: run ./migrate?" in a row.
 - **Emerald** (`emerald`, #1E9E62; Night #3FCF8E): the dot of a finished thread.
-- **Emerald ink** (`emerald-ink`, #14734A): the word "Finished" on Paper. At Night the emerald itself is used.
+- **Emerald ink** (`emerald-ink`, #14734A; Night #3FCF8E): the word "Finished" in a row.
 
 ### Neutral
-- **Paper** (`ground`, #F3EEE6; Night #0E0D12): the page. On Paper the hero's sky is this same colour.
-- **Dusk sky** (`sky-night`, #0B1222): the hero's ground at Night. It runs to the Night ground between 1150 px and 1296 px from the top.
-- **Raised paper** (`raised`, #FBF8F3; Night #17161C): the Inbox example's panel and the Deny and Allow buttons.
-- **Ink** (`ink`, #1A1A1C; Night #F3EEE6): headlines, titles, button labels.
-- **Second ink** (`ink-2`, #45403A; Night #D2CBC3): paragraphs, the lede, navigation links.
-- **Muted ink** (`mute`, #6A6259; Night #A69F98): captions, the fine line under the buttons, times, the footer.
+- **Paper** (`ground`, #F3EEE6; Night #0E0D12): the page under the first screen.
+- **Raised paper** (`raised`, #FBF8F3; Night #17161C): the Inbox panel, the Deny answer, and the base of the question card.
+- **Sky** (`sky-top`, #BABACA; Night #18192B): the first screen's own background. It is seen only until the photograph has loaded. Each value is the colour of its picture's top row, and the home page's `theme-color` uses the same two.
+- **Ink** (`ink`, #1A1A1C; Night #F3EEE6): headlines, captions, titles and button labels.
+- **Second ink** (`ink-2`, #45403A; Night #D2CBC3): paragraphs, the lede, the fine line, the bar's links, the footer's links, and the captions in the still layout.
+- **Muted ink** (`mute`, #6A6259; Night #A69F98): the line that says what is staged, a row's second line and its time, a build's requirement, the footer.
 - **Hairline** (`line`, rgb(40 28 16 / 0.14); Night rgb(243 238 230 / 0.14)): every rule and outline.
+- **Shade** (`shade`, rgb(40 20 8); Night rgb(0 0 0)): the colour of the two soft shadows. The stylesheet holds it as three numbers so that each shadow sets its own strength.
+- **Phone body** (`phone-body`, #131214; Night #2C2B31): the drawn body around the story's iPhone, with an inner edge of white at 10%. The stylesheet sets it directly. It is not a custom property.
 
-Washes are made in place with `color-mix`: ink at 6% under a plain button on hover, ink at 7% behind code, ink at 42% for the trail's dots, ink at 34% for the dot of a stopped thread. The phone's body (#131214, Night #2C2B31) is set directly, outside the properties.
+Washes are mixed in place with `color-mix`: ink at 6% under a plain button on hover, ink at 7% behind a command or inline code, ink at 40% for the trail's dots, ink at 30% for the scrollbar. A text link's underline is 34% of the text's own colour.
 
-The lowest text contrast measured is 5.0:1 (amber ink on a waiting row). Muted ink on Paper is 5.2:1; at Night it is 7.1:1 on the sky.
+Three sets of colour are outside the tokens. The mark's colours are in `script/site/make_icons.py`. The hiker's eight colours for each theme are in `assets/site.js`. The photograph brings its own.
+
+Contrast was computed from the tokens on 12 November 2026. The lowest pair is amber ink on a waiting row at 5.0:1. Muted ink is 5.2:1 on Paper and 5.1:1 on a waiting row. Text over the photograph was sampled from the review stills at 1440 by 900 and 390 by 844. By day the lowest is the bar's links at 5.3:1, then the lede at 6.0:1 and the fine line at 6.3:1. At Night the lowest is the fine line at 6.8:1.
 
 ### Named Rules
-**The One Accent Rule.** In what the page itself draws, colour beyond ink and paper belongs to two things: the action (the filled button, the ring on the visitor's own build, the focus outline) and a thread's state (ember at work, amber waiting, emerald finished). The art brings its own ember: the cairn, the hiker's pack and the horizon at dusk.
+**The One Accent Rule.** In what the page itself draws, colour beyond ink and paper belongs to two things: the action (the filled button, Allow, the ring on the visitor's own build, the focus outline) and a thread's state (ember at work, amber waiting, emerald finished). The pictures bring their own colour: the photograph, the mark, the hiker's pack.
 
-**The Two Themes Rule.** The page has the app's two themes and no others: Paper by day and Night at dusk, chosen by the visitor's system setting. Every colour is defined in both, and each picture of the app ships in both.
+**The Two Themes Rule.** The page has the app's two themes and no others: Paper by day and Night when the system is dark. Every colour is defined in both, and every picture ships in both.
 
 **The State Ink Rule.** On Paper a state's words use its ink shade, because the dot's colour is too light for text. At Night the dot's colour serves for both.
 
@@ -229,199 +319,308 @@ The lowest text contrast measured is 5.0:1 (amber ink on a waiting row). Muted i
 **Body Font:** Hanken Grotesk (with system-ui, sans-serif)
 **Label/Mono Font:** JetBrains Mono (with ui-monospace, monospace), for commands and code only
 
-**Character:** A grotesque with some life in its shapes for headlines, over a quiet, even one for reading. The app's own interface face, Inter, appears only inside the captures.
+**Character:** A grotesque with uneven, drawn shapes for display, over an even one for reading. The app's own interface face, Inter, appears only inside the captures.
 
 Bricolage Grotesque and Hanken Grotesk are variable files, Latin only, served from this domain. Both are under the SIL Open Font License 1.1 with no reserved font name, and each licence text sits beside its file in `assets/fonts/`. The two are preloaded on every page. `font-synthesis: none` is set on the body, so the browser never fakes a weight or a slant.
 
 ### Hierarchy
-- **Display** (600, clamp(2.5rem, 4.75vw, 4.25rem), 1.03, -0.028em): the home page's one `h1`. It reaches 68 px at 1440 px wide and sets in two lines, centred, balanced.
-- **Headline** (600, clamp(2rem, 3.2vw, 2.75rem), 1.06, -0.024em): each section's `h2`, left-aligned, balanced.
-- **Page title** (600, clamp(2.25rem, 4vw, 3.25rem), 1.05): the `h1` of the privacy and not-found pages.
+- **Display** (600, clamp(2.6rem, 5vw, 4.5rem), 1.02, -0.03em): the home page's one `h1`, centred and balanced, in two lines. It is 72 px from 1440 px wide and 41.6 px on a 390 px phone.
+- **Headline** (600, clamp(2rem, 3.2vw, 2.75rem), 1.06, -0.024em): each section's `h2`, left-aligned and balanced. It is 44 px from 1375 px wide.
+- **Caption** (600, clamp(1.75rem, 3.5vw, 3rem), 1.12, -0.022em): the story's one line on the pinned stage, centred. It is 48 px from 1372 px wide and 28 px on a phone. In the still layout the five lines are clamp(1.5rem, 2.6vw, 2.25rem) in second ink.
+- **Page title** (600, clamp(2.25rem, 4vw, 3.25rem), 1.05, -0.03em): the `h1` of the privacy and not-found pages.
 - **Document heading** (600, 1.5rem, 1.2, -0.015em): headings inside the privacy page's text.
-- **Wordmark** (Bricolage Grotesque 500, 18 px, -0.01em): "Trek" beside the cairn in the bar and the footer.
-- **Title** (Hanken Grotesk 500, 17 px, 1.3): a build's name in the download list. A thread's title in the Inbox example is 500 at 16 px, and the approval card's heading is 500 at 15 px.
-- **Lede** (400, 19 px, 1.5; 17 px under 860 px): the sentence under the `h1`, at most 34em wide.
-- **Body** (400, 17 px, 1.55): paragraphs, at most 30 to 31em wide beside a headline. `text-wrap: pretty`.
-- **Button** (500, 16 px, -0.005em; 14 px on small buttons): button labels. A file size inside a button is 400 at 13 px and 78% strength.
-- **Label** (400, 14 px): the fine line under the buttons, a build's requirement, the first-launch notes, the footer, a row's second line.
-- **Note** (400, 13 px): captions under pictures, times in rows, the footer's small print.
-- **Mono** (JetBrains Mono 400, 13 px, 1.45): the command in the approval card. Inline code on the privacy page is 0.88em.
+- **Wordmark** (Bricolage Grotesque 500, 18 px, -0.01em): "Trek" beside the mark in the bar and the footer.
+- **Title** (Hanken Grotesk 500, 17 px, 1.3): a build's name in the builds list. A thread's title in a row is 500 at 16 px.
+- **Lede** (400, clamp(1.0625rem, 1.45vw, 1.25rem), 1.5): the two sentences under the `h1`, at most 29em wide, in second ink. It is 17 px up to 1172 px wide and 20 px from 1380 px wide. On the privacy and not-found pages the lede is 19 px.
+- **Body** (400, 17 px, 1.55): paragraphs, at most 28 to 30em wide beside or under a headline. `text-wrap: pretty`.
+- **Button** (500, 16 px, -0.005em): button labels. The big button's label is 17 px and a small button's is 14 px. A file size inside a button is 400 at 13 px and 78% strength.
+- **Compact** (400, 15 px): the bar's links and the privacy page's table. The question card's heading and its two answers are this size at 500.
+- **Label** (400, 14 px): the fine line under the button, a build's requirement, a row's second line, the footer.
+- **Note** (400, 13 px): the line under a capture, the story's staged line and the times in rows.
+- **Mono** (JetBrains Mono 400, 13 px, 1.45): the command in the question card. Inline code on the privacy page is 0.88em.
 
-Numbers that change (times, sizes) use tabular figures.
+Times in the rows use tabular figures.
 
 ### Named Rules
-**The One Weight Rule.** Headlines are Bricolage Grotesque at 600. The owner's range is 500 to 700, and a light weight is never used. The wordmark, at 500, is the only other display weight on the site.
+**The One Weight Rule.** Display type is Bricolage Grotesque at 600. A headline's weight stays between 500 and 700, and a light weight is never used. The wordmark, at 500, is the only other display weight on the site.
 
 **The Upright Rule.** There are no italics. No italic file is shipped and the browser is told not to make one.
 
-**The Plain Headline Rule.** A headline is a plain statement in one colour. On the home page each one ends with a full stop. Nothing sits above it: no label, no pill. No paragraph or list item under it opens with a bold lead-in.
+**The Plain Headline Rule.** A headline is a plain statement in one colour. On the home page each headline and each caption ends with a full stop. Nothing sits above a headline: no label and no pill. Display copy has no colon and no semicolon. No paragraph of copy opens with a bold lead-in. The example row's "Waiting: run ./migrate?" is the app's own wording and is not display copy.
 
 ## Layout
 
-The home page is one column of full-width bands. Content sits in a centred measure of 1180 px with 24 px gutters (`--wide: min(1180px, 100% - 48px)`). Two measures are narrower because of what they hold: 1040 px for the hero's window and for the Inbox section, since the window is 1040 points wide, and 880 px for the hero's words. The privacy and not-found pages use 760 px.
+The home page is one column of full-width parts: the first screen, the story, two capture bands, the builds band and the footer. Content sits in a centred measure of 1180 px with 24 px gutters (`--wide: min(1180px, 100% - 48px)`). Three measures are narrower because of what they hold: 820 px for the first screen's words, 1040 px for the "This is Trek." band because that window is 1040 points wide, and 760 px for the reading column on the privacy and not-found pages.
 
-- **The bar.** 68 px tall, laid over the top of the page and not fixed to the screen: the cairn and wordmark at the left, four links at 15 px with 30 px between them, and a small filled Download button.
-- **The hero.** 1296 px tall. The words are centred: `h1`, the lede 20 px under it, two buttons 24 px under that with 10 px between them, and a fine line 14 px below. A 60 px strip that holds the trail starts 6 px below that, and the window sits directly under the strip, so its top edge is near 490 px and the fold cuts it. Its caption sits 22 px above the hero's foot.
-- **Bands.** 120 px above and 132 px below. Sections after the first two are parted by a hairline.
-- **Inbox section.** Two columns, 1fr and 1.25fr, 72 px apart, aligned at the top: words at the left, the played example at the right.
-- **iOS section.** The headline at the left and its paragraph at the right in one row (1.18fr and 1fr, 72 px apart, aligned at the foot), then the whole window 64 px under them across the full measure.
-- **iPhone section.** Words at the left with a three-line list between hairlines; the phone at the right, 56 px in from the edge, running 109 px off the foot of its band.
-- **Download section.** The headline and its sentence in one row, then one row per build 56 px under them: name, requirement and first-launch note at the left, small buttons at the right.
-- **Footer.** A hairline, the wordmark at the left, five links, then the small print at most 62em wide.
+- **The bar.** 68 px tall, laid over the top of the page and not fixed to the screen.
+- **The first screen.** As tall as the screen and never under 720 px (`max(100svh, 720px)`). The photograph covers it, anchored 40% across and 70% down, so the horizon holds at 70% of the height at any size. The words are centred and start between 104 and 260 px from the top (`30svh - 110px`), which is 160 px in a 900 px window.
+- **The story.** With the script it is 430vh tall. Its stage is pinned for that length, 100vh tall and never under 560 px. The block of trail, rows and question card is 440 px wide and centred. The caption sits 13vh above the foot of the stage. A line that says the example is staged sits 22 px above the same foot. The phone stands 44 px to the right of the block.
+- **Bands.** 120 px above and 132 px below. The two capture bands have 40 px above. The builds band opens with a hairline.
+- **"This is Trek."** The headline, one sentence 16 px under it, the window 56 px under that, and a note 28 px under the window.
+- **"Agents can run your iOS app."** The headline at the left and its paragraph at the right in one row (1.18fr and 1fr, 72 px apart, aligned at the foot), then the window 56 px under them across the full measure, and a note.
+- **"Get Trek."** The headline, one sentence that carries the version and its date once GitHub has answered, then one row per build 52 px under it.
+- **The footer.** A hairline, 40 px above and 48 px below, and one line.
 
-Headlines are left-aligned everywhere but the hero.
+Headlines are left-aligned. The first screen's words and the story's captions are centred.
 
-Two breakpoints:
+Width changes:
 
 - **Under 1240 px** the iOS window keeps its size and is cut at the right edge of the screen.
-- **Under 860 px** everything is one column with 16 px gutters. The bar keeps the wordmark and Download and drops its links. The hero takes its natural height; its buttons fill the row up to 340 px; the caption moves above the window; the front ridge is not drawn. The hero's window keeps its real size, starts 16 px from the left, runs off the right edge and is cut 468 px down. The iOS picture is moved so that the Simulator panel's own corner is at the top left, 640 px tall, fading out over its last 60 px. The phone is 290 px wide, centred, and runs 98 px off the foot. Bands are 84 px above and 96 px below.
+- **Under 1100 px** the "This is Trek." window does the same: it keeps its size and is cut at the right edge of the screen.
+- **Under 1000 px** there is no room beside the block. The phone takes the block's place for its one caption, and the rows and the question card fade out while it shows. The trail and the hiker stay.
+- **Under 860 px** everything is one column with 16 px gutters. The bar drops its two links. Bands are 84 px above and 96 px below. Each window keeps its real size, starts at the left gutter and runs off the right edge. The "This is Trek." window is cut 468 px down and fades out over its last 60 px. The iOS picture is moved so that the Simulator panel shows, 640 px tall, fading out over its last 60 px. In the builds list the buttons go under the text. The footer's copyright line takes a row of its own.
+
+Height changes:
+
+- **A short window** shrinks the stage's block to fit. See "Fit to a short window" under Components.
+- **Under 560 px tall** the story is the still layout.
 
 ### Named Rules
-**The Real Size Rule.** A window capture is set at one CSS pixel to the point: a 2x file at half its pixel size. On a screen too narrow for it the picture is cropped to the part that makes the point, and it is never scaled down.
+**The Real Size Rule.** A window capture is set at one CSS pixel to the point: a 2x file at half its pixel size. On a screen too narrow for it the picture is cropped to the part that makes the point. It is never scaled down.
 
-**The Few Pictures Rule.** The home page has three pictures of the app and one played example, and no section holds more than one. The owner's rule is few pictures, each a real capture.
+**The One Reduced Capture Rule.** The story's iPhone is the one capture that is not at real size. It is a prop beside the stage, not a product shot. Its screen is 169 px wide on the stage and 194 px wide in the still layout, against the phone's 390 points.
+
+**The Few Pictures Rule.** The home page has one photograph, two captures of the app's window and one reduced iPhone capture. No section holds more than one.
 
 ## Elevation & Depth
 
-The system is flat. A surface is set apart by a hairline (`line`, as a 1 px border or a 1 px inset ring) or by one step in tone (`raised` on `ground`). The ridges give the hero its depth: two layers, the far ridges behind the window and the near ridge in front of them, each faded out at the top and the foot with a mask.
+The system is flat. A surface is set apart by a hairline (`line`, as a 1 px border or a 1 px inset ring) or by one step in tone (`raised` on `ground`). The first screen's depth is the photograph's own. The bar has no ground of its own, so on the home page it sits on the photograph.
 
-The window pictures carry the shadow macOS drew for them inside the file. Each is placed with negative margins (16 px above, 23 px at the sides, 30 px below) so that the window, not its shadow, sits on the measure.
+The page draws two soft shadows, and both belong to things that stand on the story's stage: the Inbox panel and the phone. Their colour is `shade`, a warm brown on Paper and black at Night.
+
+The window captures carry the shadow macOS drew for them inside the file. Each is placed with negative margins (16 px above, 23 px at the sides, 30 px below) so that the window, not its shadow, sits on the measure. Where a window is cut at the edge of the screen, the shadow in its file is cut with it.
 
 ### Shadow Vocabulary
-- **Under the phone** (`box-shadow: 0 30px 60px -26px rgb(var(--shade) / 0.5), inset 0 0 0 1px rgb(255 255 255 / 0.1)`): the one soft shadow the page draws, with a faint inner edge on the phone's body. `--shade` is a warm brown (40 20 8) on Paper and black at Night.
-- **Hairline ring** (`box-shadow: inset 0 0 0 1px var(--line)`): the outline of a plain button, the Inbox panel, and the Deny and Allow buttons. It is an outline, not a shadow.
+- **Under the Inbox panel** (`box-shadow: inset 0 0 0 1px var(--line), 0 24px 48px -32px rgb(var(--shade) / 0.35)`): a hairline ring and a low, wide shadow under the panel of rows.
+- **Under the phone** (`box-shadow: 0 30px 60px -26px rgb(var(--shade) / 0.5), inset 0 0 0 1px rgb(255 255 255 / 0.1)`): the shadow under the phone, with a faint inner edge on its body.
+- **Hairline ring** (`box-shadow: inset 0 0 0 1px var(--line)`): the outline of a plain button and of the Deny answer. It is an outline, not a shadow.
 
 ### Named Rules
-**The One Shadow Rule.** The page draws one shadow, under the phone. Everything else is flat: a hairline or a step in tone.
+**The Two Shadows Rule.** The page draws two soft shadows, under the Inbox panel and under the phone. Everything else is flat: a hairline or a step in tone.
 
 ## Shapes
 
-Corners are gently rounded and grow with the size of the thing: 10 px for small buttons, a row in the Inbox example, and the Deny and Allow buttons; 12 px for the two main buttons; 16 px for the Inbox panel and the approval card. Smaller pieces inside those step down so the corners stay concentric: 9 px for the command inside the card, 5 px for inline code, 6 px for the focus outline. The phone's body is 56 px with a 46 px screen inside 10 px of padding. A state's dot is a 9 px circle.
+Corners are gently rounded and grow with the size of the thing. The scale is 5, 6, 10, 12, 14 and 18 px. A small button, the skip link, a row in the Inbox panel, the command block and the two answers in the question card are 10 px. A button is 12 px. The big button is 14 px. The Inbox panel and the question card are 18 px. Two small pieces are smaller: inline code on the privacy page is 5 px, and the focus outline rounds a focused link to 6 px.
 
-Nothing is a pill, and nothing has a coloured side stripe. Rules are 1 px in `line`.
+A row's 10 px is concentric with the Inbox panel: the panel's 18 px corner less its 8 px of padding. The pieces inside the question card take the 10 px step.
 
-The art is pixel art and is kept on its grid. The ridges are dithered on 3 px cells and drawn with `image-rendering: pixelated`. The hiker's cell is 3 CSS px, rounded to a whole number of device pixels, so no edge of him falls between two.
+The phone is a drawing of an object and has its own corners. In each layout the screen's corner is the body's corner less the padding. In the still layout the body is 44 px with a 36 px screen inside 8 px of padding. On the stage it is 34 px with a 27 px screen inside 7 px.
+
+A state's dot is a 9 px circle. The trail's dots are 3 px across and 12 px apart. Nothing is a pill, and nothing has a coloured side stripe. Rules are 1 px in `line`.
+
+The hiker is pixel art and is kept on his grid. His cell is 3 CSS px at full size and he is drawn with `image-rendering: pixelated`. The script sets the cell so that one art pixel is a whole number of device pixels, also when a short window has scaled the stage's block.
 
 ## Components
 
+### The bar
+The top of every page. It has no ground of its own.
+- **Left:** the mark at 26 px and the wordmark, 9 px apart, as one link to the home page.
+- **Right:** two links, "How it works" and "GitHub", in second ink at 15 px and 30 px apart. Under a pointer a link goes to ink over 150 ms. Then a small filled Download button.
+- **Narrow:** under 860 px the two links are dropped. There is no menu.
+- **Skip link:** "Skip to the page" comes in at the top left on keyboard focus, as a block of ink with paper text and 10 px corners.
+
 ### Buttons
-Two kinds, one filled and one plain, and a small size of each.
-- **Shape:** 48 px tall with 20 px at the sides and 12 px corners; small is 36 px tall with 14 px at the sides and 10 px corners.
-- **Filled:** `accent` under `on-accent`. Used for the download in the hero, Download in the bar, and "Back to Trek" on the not-found page. The hero's carries a 17 px line icon, drawn with a 1.8 stroke, 9 px before its label.
-- **Plain:** `ink` text inside a hairline ring. Used for "Source on GitHub" and every link in the download list.
-- **Hover / Focus:** the filled button goes to `accent-over` and the plain one takes a 6% wash of ink, both over 150 ms and only where there is a pointer that hovers. Pressed, either scales to 0.98 over 120 ms. Focus is a 2 px `ember` outline 3 px off the edge.
+Two kinds, one filled and one plain, in three sizes.
+- **Shape:** 48 px tall with 20 px at the sides and 12 px corners. Big is 54 px tall with 26 px at the sides and 14 px corners. Small is 36 px tall with 14 px at the sides and 10 px corners.
+- **Filled:** `accent` under `on-accent`. Big for the download on the first screen, with a 17 px line icon drawn with a 1.8 stroke 9 px before its label. Small for Download in the bar. Standard for "Back to Trek" on the not-found page.
+- **Plain:** `ink` text inside a hairline ring. The build uses it small, for every link in the builds list.
+- **Hover / Focus:** a filled button goes to `accent-over` and a plain one takes a 6% wash of ink, both over 150 ms and only where there is a pointer that hovers. Pressed, either scales to 0.98 over 120 ms. Focus is a 2 px `ember` outline 3 px off the edge.
 - **The visitor's build:** the plain button for the build that matches the visitor's computer has a 1.5 px `accent` ring in place of the hairline.
 
 ### Text links
-Underlined at 34% of the text's own colour, 3 px under the baseline. The underline goes to full strength over 150 ms on hover.
+Underlined at 34% of the text's own colour, 3 px under the baseline. The underline goes to full strength over 150 ms on hover. Used for the footer's links and for the "Take the Intel build" link the script adds to the fine line when it cannot tell which Mac it is on. Links in the privacy page's text carry the same underline without the hover change.
 
-### Navigation
-The bar's links are `ink-2` at 15 px and go to `ink` on hover. There is no menu on narrow screens: the links are dropped and the page's own sections carry them. A "Skip to the page" link appears at the top left on keyboard focus, as a block of `ink` with text in `ground`.
+### The mark
+A faceted mountain with a lit face and a shaded face, a dotted trail of nine dots that climbs to the summit, and a flag on the summit. It sits on a tile with rounded corners (22 of its 96 units).
+- **Two dresses:** on a Paper page the tile is ink (#1A1A1C), the mountain is #FF7A3D with a #C9551F shaded face, and the flag is #FFC7A0. In dark mode the tile is raised paper (#FBF8F3), the mountain is #E85D1F, and the shaded face and the flag are #B8461A. The tile always stands against the page.
+- **Where:** at 26 px beside the wordmark in the bar and the footer, and as the favicon, the touch icon, the manifest's icons and the share image's logo. Nowhere else.
+- **Small sizes:** each is drawn for its size. The favicon and the 32 px icon have four larger dots and a larger flag. The 16 px icon has no dots. The touch icon and the maskable icon use a square tile.
+- **Source:** `script/site/make_icons.py` writes every file from one set of paths.
 
-### The hiker and his trail
-The app's working animation, used on the hero's window and, standing, on the not-found page.
-- **Drawing:** a 12 by 16 cell sprite on a canvas, five poses and eight colours, in the Paper or Night set to match the theme. A cell is 3 CSS px, so he stands 36 by 48 px. The trail is a row of round dots one cell across, four cells apart, in ink at 42%, and his feet are half a cell above the dots.
-- **Walk:** a 16-frames-a-second clock moves him 16 cells a second, with 0.35 s to gather and to lose speed, a pose for every 4 cells of ground, and a 1.2 s rest at each end during which he turns. Time moves him. Scrolling only starts and stops the clock: it runs while the trail is on screen and the tab is in front.
+### The first screen
+One photograph and a few words in its sky.
+- **The photograph:** it fills the screen with `object-fit: cover`. It ships 1600 and 2880 px wide, chosen by `sizes="max(100vw, 160vh)"`, with a Night source for dark mode. It is decoration and has an empty `alt`.
+- **The words:** the `h1`, the lede 22 px under it, one big filled button 30 px under that, and a fine line 14 px under the button at 14 px in second ink.
+- **The button:** the script names the visitor's system on it ("Download for macOS" or "Download for Windows") and adds the version, the chip and the file's size to the fine line. On a phone or on Linux the button says "See the downloads" and goes to the builds list, and the fine line says why. Without the script the button says "Download for macOS", leads to the latest release, and the fine line says "Free and open source."
+- **Entrance:** on load the four pieces rise once. Each goes from clear to solid, comes up 14 px and loses an 8 px blur over 700 ms on `--out`. They start 0, 90, 180 and 260 ms in. This is CSS, so it runs without the script. It is off with Reduce Motion.
+- **Nothing else:** no hiker, no capture, no label above the headline.
+
+### The story
+One stage, pinned while the page scrolls past it. Scrolling plays it, forwards and backwards. It is built in HTML from the app's own parts and is not a capture. A visible line says so, and its list is named "An example Inbox" for assistive technology.
+
+**The moments.** The scroll through the story is cut at 18%, 40%, 60% and 80%.
+
+| Share of the scroll | Caption | What the stage shows |
+|---|---|---|
+| 0 to 18% | Start a few agents. | Three threads at work. |
+| 18 to 40% | One stops to ask. | "Migrate the schema" waits and goes to the top. The question card opens under the rows. |
+| 40 to 60% | Answer on your computer or your phone. | The same, and the phone comes up with the same question. |
+| 60 to 80% | It gets back to work. | Allow is pressed, the card goes, and the thread is at work again in its old place. |
+| 80 to 100% | Finished work waits for you. | Two threads have finished and sit at the top. One is still at work. |
+
+The played position follows the scroll position with easing: each frame it moves 16% of the way there.
+
+**Rows.** The example Inbox.
+- **Panel:** `raised` with a hairline ring, the shadow under the Inbox panel, 18 px corners and 8 px of padding. It holds three rows 2 px apart and is 440 px wide.
+- **Row:** 12 px of padding and 10 px corners. First line: the state's dot, the thread's title (500, 16 px) and a time at the right (13 px, muted, tabular). Second line (14 px, muted): the state in words at 500 in the state's ink, then the project. A row names its state in weight 500 because the app's row does. That is a picture of the app's row, not a bold lead-in.
+- **States:** at work is a 9 px ember ring with a gap that turns once every 1.1 s. Waiting is an amber dot and an 11% amber wash over the row. Finished is an emerald dot. A wash or a dot changes colour over 200 ms.
+- **Order:** what waits comes first, then what has finished, then what is at work. A row that changes place glides there over 420 ms on `--out`. Nothing jumps.
+- **Arrival:** the rows gather as the stage comes up the screen. Each comes in by opacity, a 26 px rise and a 7 px blur that clears, starting after the row above it.
+
+**Question card.** What the waiting thread asks.
+- **Shape:** 12 px under the panel, in a space kept for it so nothing below moves. 18 px corners, 16 px of padding, a 9% amber wash over `raised`, and a 55% amber ring.
+- **Parts:** a heading (500, 15 px), the command in mono on a 7% ink block, then Deny and Allow as equal halves, 40 px tall. The block and the two answers have 10 px corners. Deny is `raised` in a hairline ring. Allow is `accent` under `on-accent`. They are drawn, not buttons: the visitor does not press them.
+- **Motion:** the card comes and goes over 260 ms with opacity, a 10 px rise and a 6 px blur. Going forward into "It gets back to work." Allow is pressed first. It scales to 0.95 over 140 ms and goes to `accent-over`, and the stage settles 220 ms after the press.
+
+**Phone.** The story's iPhone, the one reduced capture.
+- **Body:** a drawn body around the real capture, in `phone-body`, with the shadow under the phone.
+- **On the stage:** 183 px wide with 7 px of padding, 34 px corners and a 27 px screen corner. It stands 44 px to the right of the block with its foot level with the block's foot, so it never reaches the caption.
+- **Motion:** scroll brings it up between 40% and 47% and takes it away between 58% and 63%. It comes by opacity with a 70 px rise and a 4 degree turn that straightens.
+- **Under 1000 px wide:** it is centred over the block, rises 60 px and does not turn. The rows and the question card fade out as it fades in. The trail and the hiker stay.
+
+**Captions.** One line at a time.
+- **Place:** a box 2.4em tall, 13vh above the foot of the stage, centred.
+- **Word by word:** the script splits each line into words. A word starts clear, 10 px low and blurred by 9 px. It arrives over 520 ms on `--out`. The first word starts 170 ms after the change, so the line before has gone, and each next word starts 55 ms later.
+- **Leaving:** all the words of a line go together over 180 ms.
+- **First line:** a line is said only once the stage has all but arrived, so the first one is not over before it is seen.
+
+**The staged line.** One line, "An example, with staged threads.", in 13 px muted ink, centred.
+- **On the stage:** 22 px above the foot of the stage, for the whole of the story.
+- **In the still layout:** under the captions, 72 px below them.
+
+**The hiker and his trail.** The app's working animation. On the site he walks only here.
+- **Trail:** a strip 54 px tall at the top of the block, 14 px in from each side of the panel, with a row of dots along its foot in ink at 40%. The trail's foot is the panel's top edge.
+- **Drawing:** a 12 by 16 cell sprite on a canvas, five poses and eight colours, in the Paper or Night set to match the theme. At full size a cell is 3 CSS px, so he stands 36 by 48 px, with his feet 5 px above the foot of the trail.
+- **Walk:** a 16-frames-a-second clock moves him 16 cells a second. He takes 0.35 s to gather and to lose speed, takes a pose for every 4 cells of ground, and rests 1.2 s at each end, where he turns. Time moves him. Scroll never sets his place. It only starts and stops the clock, which runs while the trail is on screen and the tab is in front.
 - **Pressing him:** a click, Enter or Space stops him, and the next one sends him on. He is a button to assistive technology, named "Stop the hiker" or "Let the hiker walk on".
-- **Still:** with Reduce Motion on he stands and is not a control. Without the script a 12 by 16 picture of the standing pose is shown at the start of the trail.
+- **Still:** with Reduce Motion on he stands at the start of the trail and is not a control. Without the script a 12 by 16 picture of the standing pose is shown there.
 
-### The Inbox example
-A played example of the app's Inbox, built in HTML and labelled "An example with staged threads". It is not presented as a picture of the app.
-- **Panel:** `raised` with a hairline ring, 16 px corners and 8 px of padding, holding three rows 2 px apart.
-- **Row:** 10 px corners, 11 px and 12 px of padding. First line: the state's dot, the thread's title (500, 16 px) and a time at the right (13 px, muted, tabular). Second line (14 px, muted): the state in words at 500 in the state's ink, then the project.
-- **States:** at work is a 9 px ember ring with a gap that turns once every 1.1 s; waiting is an amber dot and an 11% amber wash over the row; finished is an emerald dot; stopped is a dot in ink at 34%.
-- **Order:** what waits comes first, then what has finished or stopped, then what is at work. A row that changes place glides there over 380 ms on `cubic-bezier(0.23, 1, 0.32, 1)`.
-- **Approval card:** 12 px under the panel, in a space kept for it so nothing below moves. 16 px corners and padding, a 9% amber wash over `raised`, a 55% amber ring. A heading, the command in mono on a 7% ink block with 9 px corners, then Deny and Allow as equal halves, 40 px tall. It comes and goes with opacity and a 6 px rise over 200 ms.
-- **The play:** once, when 60% of it is on screen. Three threads are at work; after 1.6 s one stops for an approval and goes to the top; 3.6 s later Allow presses itself unless the visitor has pressed Deny or Allow first; the thread goes back to work, another finishes, then it finishes too. "Play it again" appears when it is over.
-- **Still:** without the script, and with Reduce Motion on, it shows the waiting moment.
+**Fit to a short window.** The script measures the room above the caption and scales the block from its top centre so the two never meet. The scale (`--k`) runs from 1 down to 0.62. It measured 0.81 in a window of 1366 by 650. The hiker's cell follows the scale: at 0.81 one art pixel measured 2 device pixels on a 1x screen and 5 on a 2x screen.
 
-### Pictures of the app
-- **Window captures:** a `picture` with a Night source and a Paper image, `width` and `height` set, no frame, border or drawn shadow. Each is followed by a caption in 13 px muted ink that says what is staged.
-- **The phone:** the iPhone capture inside a drawn body: #131214 (Night #2C2B31), 56 px corners, 10 px of padding, the one soft shadow. It is 318 px wide, so the screen is shown 298 px wide, about three quarters of the phone's 390 points. This is the one picture not at real size.
+**The still layout.** Used without the script, with Reduce Motion on, and in a window under 560 px tall.
+- **What it shows:** the asking moment. "Migrate the schema" waits at the top, two threads are at work, and the question card is open. The phone stands under the card, 210 px wide, 24 px below it and centred. All five captions are listed under it in second ink, 6 px apart, and the staged line follows them.
+- **Spacing:** not pinned. 110 px above and 96 px below, with 44 px between the block and the captions.
+- **What still moves:** without the script the ring of a thread at work turns and the first screen's entrance plays, because both are CSS. In a short window the hiker still walks. With Reduce Motion on nothing moves.
 
-### Download list
-One row per build between hairlines, 20 px above and below: the name (500, 17 px), the requirement under it (14 px, muted), small plain buttons at the right with the file size inside each once GitHub has answered, and a first-launch note (14 px, `ink-2`, at most 44em) under the row where there is one.
+### Capture figures
+The app's real window, twice.
+- **Markup:** a `picture` with a Night source and a Paper image, `width` and `height` set, loaded lazily. No frame, no border and no drawn shadow.
+- **"This is Trek.":** 2172 by 1492 px, shown at 1086 by 746. The window itself is 1040 by 700.
+- **"Agents can run your iOS app.":** 2452 by 1612 px, shown at 1226 by 806. The window itself is 1180 by 760.
+- **The note:** each capture is followed, 28 px under it, by one line in 13 px muted ink that says what is staged.
 
-### Plain pages
-The privacy and not-found pages share the bar and the type. Their text column is 760 px, 132 px from the top. The privacy page sets its body in `ink-2` with 52 px above each document heading, bulleted lists, inline code on a 7% ink block, and one table with hairline rows that scrolls sideways when narrow. The not-found page sets a 216 px trail with the standing hiker, a headline, one sentence and one filled button, left-aligned, in the middle of at least 72% of the screen's height.
+### Builds list
+One row per build between hairlines, with 20 px above and below.
+- **Left:** the build's name (500, 17 px), and under it in 14 px muted ink what it needs and what the first launch asks.
+- **Right:** small plain buttons 8 px apart. Each carries the file's size once GitHub has answered. The visitor's own build has the `accent` ring.
+- **Rows:** macOS, Windows, iPhone. The iPhone row's one button leads to the build instructions.
+
+### Footer
+One line at 14 px in muted ink between a hairline and the foot of the page: the mark and wordmark in ink, the copyright line, then four text links in second ink at the right. It has no small print and no font credit. The not-found page has no footer.
+
+### Reading column
+The privacy and not-found pages share the bar and the type. Their column is 760 px wide, 132 px from the top and 120 px from the foot (108 and 88 px under 860 px).
+- **Head:** the page title, and a 19 px lede in second ink 20 px under it.
+- **Privacy:** the text starts 56 px under the lede. A document heading has 52 px above it. Paragraphs and lists are 14 px apart in second ink. Lists are bulleted. Inline code is 0.88em mono on a 7% ink block with 5 px corners. One table at 15 px has hairline rows and scrolls sideways when the screen is narrow. A "Last updated" line in 14 px muted ink ends it.
+- **Not found:** the headline, one sentence and one filled button, left-aligned, in the middle of at least 72% of the screen's height.
 
 ### Named Rules
+**The Story Only Rule.** The hiker walks on the story's dotted trail and nowhere else. He is never in the first screen.
+
+**The Clock Not Scroll Rule.** Time moves the hiker. Scroll starts and stops his clock and never sets his place.
+
 **The No Pause Button Rule.** The hiker has no control beside him. Pressing the hiker stops him, and pressing him again sends him on.
 
-**The Staged Is Said Rule.** Every picture or example with staged content says so in a line beside it.
+**The One Line Rule.** On the pinned stage one caption is on screen at a time, and it arrives word by word.
 
-**The Reads Whole Rule.** Without the script, and with Reduce Motion on, every word, picture and link is still there and still true: the hiker stands, the Inbox example shows the waiting moment, and every download link leads to the latest release.
+**The Photograph Or Nothing Rule.** Decorative art is a photograph or it is absent. The hiker and his dotted trail are the app's own working animation, not scenery.
+
+**The Mark Is Not Scenery Rule.** The mark is a logo beside the name and an icon. It is never enlarged, repeated or laid behind anything.
+
+**The Staged Is Said Rule.** A capture or an example with staged content says so in a visible line under it.
+
+**The Reads Whole Rule.** Without the script, with Reduce Motion on, and in a short window, every word, picture and link is still there and still true: the story is the still layout, the hiker stands or walks his trail, and every download link leads to the latest release.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** set headlines in Bricolage Grotesque at 600, upright, in one colour.
-- **Do** place a window capture at real size, a 2x file at half its pixel size, and crop it on a narrow screen.
-- **Do** ship every picture of the app in Paper and in Night, and define every colour in both.
-- **Do** say in a line beside a picture or example when its content is staged.
+- **Do** set display type in Bricolage Grotesque at 600, upright, in one colour, and end a home-page headline with a full stop.
+- **Do** use a photograph for decorative art, or use nothing.
+- **Do** show a window capture at real size, a 2x file at half its pixel size, and crop it on a narrow screen.
+- **Do** ship every picture in Paper and in Night, and define every colour in both.
+- **Do** say in a visible line under a capture or an example when its content is staged.
+- **Do** keep the hiker on the story's dotted trail, on his own clock.
 - **Do** keep text at 4.5:1 or better against its ground. On Paper, write a state in its ink shade.
-- **Do** keep the page whole without its script and with Reduce Motion on.
-- **Do** keep what the page says about Trek within what the repository's README says.
+- **Do** keep the page whole without its script, with Reduce Motion on, and in a short window.
+- **Do** keep the site's words few, and within what the repository's README says.
+- **Do** write the origin of every new or retaken picture into the file or into the `.json` file beside it.
+- **Do** check a new mark against competitors' marks and popular app icons before it is shown.
 - **Do** serve type, pictures and script from this domain. The only request elsewhere is to GitHub's API for the latest release.
 
 ### Don't:
+- **Don't** put the hiker in the first screen, or anywhere but the story.
+- **Don't** add a pause button for the hiker. Pressing the hiker stops him.
+- **Don't** set the hiker's place by scroll.
+- **Don't** use the mark as scenery.
+- **Don't** draw scenery.
+- **Don't** use a letter as the mark.
+- **Don't** make the mark an orange tile with a white figure.
+- **Don't** copy a competitor's site or mark, or leave room for anyone to say so.
 - **Don't** set a headline lighter than 500 or heavier than 700.
-- **Don't** use italics, bold lead-ins, two-tone headlines, or a pill or label above a heading.
+- **Don't** use italics, bold lead-ins, a two-tone headline, or a pill or label above a headline.
+- **Don't** use a colon or a semicolon in display copy, or write a balanced "X, and Y" line. The copy must not read as machine-written.
+- **Don't** credit the fonts in the footer, or add words to it.
 - **Don't** use ember, amber or emerald in the page's own drawing for anything but the action and a thread's state.
 - **Don't** use a mock-up, a generated image or a retouched frame as a picture of the app. The one retouch is the three title-bar buttons in the window captures.
-- **Don't** scale a window capture down to fit.
-- **Don't** add a pause button for the hiker.
-- **Don't** add a second shadow, a pill shape or a coloured side stripe.
+- **Don't** scale a window capture down to fit. The story's iPhone is the one reduced capture.
+- **Don't** add a third soft shadow, a pill shape or a coloured side stripe.
 - **Don't** add trackers, analytics, cookies, or type or script from another domain.
 
 ## Provenance
 
-Everything on the site is the project's own or under an open licence. Nothing is stock and no picture was made by an image model.
+Everything on the site is the project's own or under an open licence. No picture was made by an image model.
 
 ### What it is built from
 
-| On the site | Where it comes from in the repository |
+| On the site | Where it comes from |
 |---|---|
-| Paper's ground (#F3EEE6) and the dusk sky (#0B1222) | The first sky stops of the Paper and Dawn backdrops in `assets/backgrounds/make_backgrounds.py`. |
+| Paper's ground (#F3EEE6) | The first sky stop of the Paper backdrop in `assets/backgrounds/make_backgrounds.py`. |
 | Ink (#1A1A1C) | The foreground of Trek Paper in `crates/trek-assets/assets/themes/trek.json`. |
-| Ember, amber and emerald | The primary, warning and success colours of Trek Paper and Trek Night in the same theme file. `crates/trek-palette/src/lib.rs` gives them their meaning: ember for a thread at work, amber for one that waits on the user. |
-| Deep ember, the two ink shades, and the other neutrals | The site's own, chosen so that text on them or in them passes 4.5:1. They are not in the app. |
-| The ridges | `assets/backgrounds/make_backgrounds.py`: the same ridge function, seeds, colours, glow and 4 by 4 Bayer step on 3-pixel cells. Rendered 2880 px wide in place of 1600, with the app's picture in the middle, and 1500 px tall, in two layers. Paper uses the Paper backdrop and Night uses the Dawn backdrop. |
-| The hiker and his walk | `crates/trek-mascot/src/lib.rs`: the five poses, the eight colours for each theme, and `Walk::step`, ported line for line into `assets/site.js` with the same constants (16 frames a second, 16 art pixels a second, a 0.35 s ramp, a 1.2 s rest, a pose every 4 pixels). The site draws him at twice the app's size. |
-| The cairn | `assets/img/trek-mark.svg` is a copy of `assets/brand/trek-mark.svg`. |
-| The icons | The app's ember icon in `assets/brand` (`trek-icon-ember.svg` and its small drawings). |
+| Ember, amber and emerald | The primary, warning and success colours of Trek Paper and Trek Night in the same theme file. |
+| Deep ember, the state inks and the other neutrals | The site's own. They are not in the app. |
+| The two sky colours | The top row of the day picture and of the Night picture. On 12 November 2026 each token equalled the mean colour of that row. |
+| The photograph | "Dried grass field under blue sky during daytime" by Chris Mongeau, from Unsplash under the Unsplash License (https://unsplash.com/photos/ZRdSZeVKBaE). `script/site/make_hero.py` composes the day picture and grades the Night one from it. |
+| The hiker and his walk | `crates/trek-mascot/src/lib.rs`: the five poses, the eight colours for each theme, and `Walk::step`, ported into `assets/site.js` with the same constants (16 frames a second, 16 art pixels a second, a 0.35 s ramp, a 1.2 s rest, a pose every 4 pixels). The site draws him at twice the app's size. |
+| The mark | Drawn as SVG paths in `script/site/make_icons.py`. It is not a copy of `assets/brand/trek-mark.svg`, which still held the earlier mark on 12 November 2026. |
 
 ### Pictures
 
-| File in `assets/img/` | What it is | Origin |
+| File | What it is | Origin |
 |---|---|---|
-| `window-paper.webp`, `window-night.webp` | The hero's window. 2172 by 1492 px, shown at 1086 by 746; the window itself is 1040 by 700 and the rest is its shadow. | A real capture of the isolated test app in its demo dress: believable names and staged threads. |
-| `simulator-paper.webp`, `simulator-night.webp` | The window with the Simulator tool open. 2452 by 1612 px, shown at 1226 by 806; the window is 1180 by 760. | The same app and scene, with a staged thread whose agent checks Trek's own iPhone app in the iOS Simulator. |
-| `iphone-paper.webp`, `iphone-night.webp` | Trek for iPhone with an approval waiting. 1170 by 2532 px, the phone's own 3x. | A real capture of the iPhone app in its demo mode, in the iOS Simulator, in light and dark. |
-| `ridges-paper-back.png`, `ridges-paper-front.png`, `ridges-dawn-back.png`, `ridges-dawn-front.png` | 2880 by 1500 px each. The back layer is the sky and the two far ridges. The front layer is the near ridge on transparency. | Drawn by the app's backdrop generator, as above. |
-| `hiker-stand-paper.png`, `hiker-stand-night.png` | 12 by 16 px. Shown only when the script has not run. | The sprite's standing pose in its Paper and Night colours. |
-| `og.jpg` | 1200 by 630 px, for link previews. | A render of the page's own headline and Paper window over the Paper ridges. |
-| `icon-192.png`, `icon-512.png`, `icon-maskable-512.png` | The web manifest's icons. | The app's ember icon from `assets/brand`. |
+| `assets/img/hero-day-2880.webp`, `hero-day-1600.webp` | The first screen's photograph by day. 2880 by 1800 px and 1600 by 1000 px. | The photograph above, scaled to 2880 px wide. 250 rows of sky are added above it from its own top row, the wisps of cloud behind the headline are softened, the colour is lifted slightly, and the foot is cropped so the horizon sits near 70% of the height. |
+| `assets/img/hero-night-2880.webp`, `hero-night-1600.webp` | The first screen's picture at Night, in the same two sizes. | A dusk grade of the day picture. Every pixel is the photograph's, multiplied by a colour that changes with height. It is not a photograph taken at dusk. |
+| `assets/img/window-paper.webp`, `window-night.webp` | The window under "This is Trek." 2172 by 1492 px, shown at 1086 by 746. | A real capture of the isolated test app in its demo dress: believable names and staged threads. |
+| `assets/img/simulator-paper.webp`, `simulator-night.webp` | The window with the Simulator tool open. 2452 by 1612 px, shown at 1226 by 806. | The same app and scene, with a staged thread whose agent checks Trek's own iPhone app in the iOS Simulator. |
+| `assets/img/iphone-paper.webp`, `iphone-night.webp` | Trek for iPhone with an approval waiting. 1170 by 2532 px, the phone's own 3x. Shown reduced in the story. | A real capture of the iPhone app in its demo mode, in the iOS Simulator, in light and dark. |
+| `assets/img/hiker-stand-paper.png`, `hiker-stand-night.png` | 12 by 16 px. Shown only when the script has not run. | The sprite's standing pose in its Paper and Night colours. |
+| `assets/img/og.jpg` | 1200 by 630 px, for link previews. | The day photograph with the page's headline and the mark, rendered from an HTML page in headless Chrome. |
+| `assets/img/trek-mark.svg`, `trek-mark-paper.svg`, `favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, `assets/img/icon-192.png`, `icon-512.png`, `icon-maskable-512.png` | The mark, in its two dresses and at each icon size. | Written by `script/site/make_icons.py`. |
 
-The captures are regenerated from the app and are not edited by hand: one script stages the scene in the test app and takes the masters at 2x, and a second converts the masters into the files here. There is one retouch. The three title-bar buttons are painted in, in macOS's own colours and places, because the test window is never the key window and macOS draws them grey. Nothing else in any picture is changed.
+The window captures are regenerated from the app and are not edited by hand. One script stages the scene in the test app and takes the masters at 2x, and a second converts the masters into the files here. There is one retouch. The three title-bar buttons are painted in, in macOS's own colours and places, because the test window is never the key window and macOS draws them grey.
 
-Each PNG and the JPEG carries its origin inside the file, and each WebP has it in a `.json` file of the same name beside it. The design skill's `embed-prompt --read <file>` prints it, and `embed-prompt --scan assets/img` lists any picture without one.
+Each PNG and the JPEG carries its origin inside the file, and each WebP has it in a `.json` file of the same name beside it. From the `site` folder, the design skill's `impeccable embed-prompt --read <file>` prints it, and `impeccable embed-prompt --scan .` lists any picture without one. On 12 November 2026 the scan found 17 pictures and none without an origin.
 
 ### Type
 
 | Face | Use | Licence |
 |---|---|---|
-| Bricolage Grotesque, variable, Latin | Headlines and the wordmark | SIL OFL 1.1, no reserved font name. `assets/fonts/OFL-BricolageGrotesque.txt` |
+| Bricolage Grotesque, variable, Latin | Headlines, captions and the wordmark | SIL OFL 1.1, no reserved font name. `assets/fonts/OFL-BricolageGrotesque.txt` |
 | Hanken Grotesk, variable, Latin | Text | SIL OFL 1.1, no reserved font name. `assets/fonts/OFL-HankenGrotesk.txt` |
 | JetBrains Mono Regular, subset | Commands and code | SIL OFL 1.1. `assets/fonts/OFL-JetBrainsMono.txt` |
 
 ## Where the build departs from its direction
 
-The direction for the home page is in `.impeccable/surfaces/index-html.md`. The build differs from it, or from the owner's rules, in these places. None of them is a rule for new work.
+The direction for the home page is in `.impeccable/surfaces/index-html.md`. The build differs from it in two places. Neither is a rule for new work.
 
-- **The phone is not at real size.** Its screen is shown 298 px wide against the phone's 390 points (270 px on a narrow screen). The window captures are at real size.
-- **More than the hiker and the rows move.** The ring of a thread at work turns without stopping, the approval card fades in and out, and buttons answer a press. All of it stops with Reduce Motion.
-- **States have three colours.** The direction gives ember to the action and the states; the build follows the app and uses amber for waiting and emerald for finished.
-- **Some corners are under 10 px.** The command block (9 px), inline code (5 px) and the focus outline (6 px) step below the 10 to 16 px range.
-- **The wordmark is at 500.** The stylesheet's opening note says the display face has one weight; the wordmark is the exception.
-- **The Mac and the iPhone now show the same thread.** The direction lists this as open. In the build the iPhone's approval is "Migrate the schema", the thread the Mac's Inbox shows waiting.
+- **States have three colours.** The direction gives ember to the action and the states. The build follows the app and uses amber for waiting and emerald for finished.
+- **A little more moves than the direction lists.** Its list of what moves does not name the question card or the pressed Allow. The build brings the card in and out and presses Allow, and buttons and links answer a hover or a press.

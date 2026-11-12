@@ -5,15 +5,15 @@ JavaScript. There is no framework and no build step; the folder is served as it 
 
 ```
 site/
-  index.html            the page: the hero with the app's window, then the Inbox, iOS, iPhone
-                        and download sections
+  index.html            the page: the first screen's photograph, the story played by scrolling,
+                        the app's window, the iOS section and the download list
   privacy/index.html    docs/PRIVACY.md in plain words, and what this site itself does
   404.html
   assets/site.css       every style (no inline styles: the CSP forbids them)
-  assets/site.js        the download button, the hiker's walk, and the Inbox example's play
+  assets/site.js        the download button, the hiker's walk, and the story played by scrolling
   assets/fonts/         Bricolage Grotesque, Hanken Grotesk and JetBrains Mono, with their OFL licences
-  assets/img/           captures of the app, the ridges, the standing hiker, the cairn, icons,
-                        the share image
+  assets/img/           the first screen's photograph, captures of the app, the standing hiker,
+                        the mark, icons, the share image
   _headers  _redirects  Cloudflare Pages: security headers, caching, short addresses
   robots.txt  sitemap.xml  site.webmanifest  favicon.ico  favicon.svg  apple-touch-icon.png
   DESIGN.md             the design record: colours, type, layout, components, the rules, and
@@ -39,9 +39,10 @@ Three views are worth a look before a change goes out:
 
 - **Paper and Night.** The page follows the system's light or dark setting and has no switch of
   its own. Change the system setting, or the browser's emulation of it, to see the other theme.
-- **Without the script, and with Reduce Motion on.** The hiker stands at the start of his trail,
-  the Inbox example shows the waiting moment, and every download link leads to the latest release.
-  The page must say the same things in both.
+- **Without the script, and with Reduce Motion on.** The story is a still: the asking moment, the
+  phone under it and all five lines. The hiker stands at the start of his trail, and every
+  download link leads to the latest release. The page must say the same things in both. A window
+  under 560 px tall gets the same still.
 - **Narrow, under 860 px.** The window pictures keep their real size and are cropped, not shrunk.
 
 ## How it is deployed
@@ -54,6 +55,12 @@ Cloudflare Pages serves the `site` folder of this repository's `main` branch.
 
 Every push to `main` that changes `site/` is live a minute or so later. `www` to the bare domain,
 and HTTP to HTTPS, are Cloudflare settings (a redirect rule and "Always Use HTTPS"), not files here.
+
+Before a push, run `python3 script/site/stamp.py site`. It writes `?v=<hash of the file>` on every
+link to the site's own stylesheet, script, pictures and fonts. Without it Cloudflare and browsers
+keep serving the copy they hold under the same name, and a new page arrives with the last
+version's stylesheet: that happened on 12 November 2026. The pre-push hook refuses a push whose
+stamps are out of date.
 
 Two things to leave off in Cloudflare, because the pages promise it and the CSP would block them
 anyway: **Web Analytics' JavaScript snippet** (and its automatic injection), and anything else
@@ -72,10 +79,10 @@ These places say a state in words, and should be read again when it changes:
 - `index.html`, the download list: the first launch. Today the Mac build is signed but not
   notarized and the Windows build has no code signature. Change the words the day that changes,
   and not before.
-- `index.html`, the iPhone section and the iPhone row of the download list: the iPhone app is
-  built from source. Change it when it is in TestFlight or the App Store.
-- `index.html`, the line under the hero's buttons, the page's description and its structured
-  data: the systems Trek needs (macOS 13 or later, Windows 11, iOS 26).
+- `index.html`, the iPhone row of the download list: the iPhone app is built from source. Change
+  it when it is in TestFlight or the App Store.
+- `index.html`, the download list, the page's description and its structured data: the systems
+  Trek needs (macOS 13 or later, Windows 11, iOS 26).
 - `assets/site.js`: the names of a release's files (`BUILDS`), and the line that says there is no
   Linux build.
 
@@ -106,13 +113,19 @@ staged in a line beside each picture.
 
 | File in `assets/img/` | What it is | How it is shown |
 |---|---|---|
-| `window-paper.webp`, `window-night.webp` | The app's window, 1040 by 700 points, with its shadow: 2172 by 1492 px | At real size, 1086 by 746, in the hero |
+| `hero-day-1600.webp`, `hero-day-2880.webp`, `hero-night-1600.webp`, `hero-night-2880.webp` | The first screen's photograph, 1600 by 1000 px and 2880 by 1800 px, by day and in its dusk grade | Filling the first screen, with the horizon at 70% of its height |
+| `window-paper.webp`, `window-night.webp` | The app's window, 1040 by 700 points, with its shadow: 2172 by 1492 px | At real size, 1086 by 746, under "This is Trek." |
 | `simulator-paper.webp`, `simulator-night.webp` | The window at 1180 by 760 points with the Simulator tool open on Trek's own iPhone app: 2452 by 1612 px | At real size, 1226 by 806. Under 860 px, cropped to the Simulator panel |
-| `iphone-paper.webp`, `iphone-night.webp` | Trek for iPhone in its demo mode in the iOS Simulator: 1170 by 2532 px, the phone's own 3x | 298 px wide inside a drawn phone body, running off the foot of its section |
-| `ridges-paper-back.png`, `ridges-paper-front.png`, `ridges-dawn-back.png`, `ridges-dawn-front.png` | The hero's backdrop, 2880 by 1500 px, in two layers: the sky with the two far ridges, and the near ridge on transparency | At one CSS pixel to the picture's pixel, centred, `image-rendering: pixelated` |
+| `iphone-paper.webp`, `iphone-night.webp` | Trek for iPhone in its demo mode in the iOS Simulator: 1170 by 2532 px, the phone's own 3x | Reduced, inside a drawn phone body in the story: the screen is 169 px wide on the pinned stage and 194 px wide in the still |
 | `hiker-stand-paper.png`, `hiker-stand-night.png` | The hiker's standing pose, 12 by 16 px | Only when the script has not run. With the script he is drawn on a canvas |
-| `og.jpg` | The share image, 1200 by 630 px: the page's headline and Paper window over the Paper ridges | In link previews |
-| `trek-mark.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The cairn (`assets/brand/trek-mark.svg`) and the app's ember icon (`assets/brand`) | The bar, the footer, the browser and the web manifest |
+| `og.jpg` | The share image, 1200 by 630 px: the day photograph with the page's headline and the mark | In link previews |
+| `trek-mark.svg`, `trek-mark-paper.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The mark, a faceted mountain with a dotted trail and a summit flag, written by `script/site/make_icons.py` | The bar, the footer, the browser and the web manifest |
+
+**The first screen's photograph.** `hero-day-*.webp` is "Dried grass field under blue sky during
+daytime" by Chris Mongeau, from Unsplash under the Unsplash License
+(https://unsplash.com/photos/ZRdSZeVKBaE), which allows free use without credit. `script/site/make_hero.py`
+composes it (more sky above, the horizon near 70% of the height) and makes `hero-night-*.webp`, a
+dusk grade of the same frame. The dusk picture is a grade, not a photograph taken at dusk.
 
 **Retaking a capture.** The captures are regenerated from the app, not edited by hand. One script,
 `masters.sh`, stages the scene in the test app with the verify-trek driver (the `dress`, `title`
@@ -126,14 +139,10 @@ and in Night. A second, `site_assets.sh`, converts the masters with
 colours and places: the test window is never the key window, so macOS draws them grey. Nothing
 else in any picture is changed.
 
-**The ridges** are drawn by the app's backdrop generator (`assets/backgrounds/make_backgrounds.py`):
-the same ridge function, seeds, colours, glow and 4 by 4 Bayer step on 3-pixel cells, rendered
-2880 px wide with the app's 1600 px picture in the middle, 1500 px tall, and split into two layers.
-Paper uses the generator's Paper backdrop and Night uses its Dawn backdrop.
-
 **The hiker** is the sprite and the walk of `crates/trek-mascot/src/lib.rs`, ported line for line
 into `assets/site.js`: 16 frames a second, 16 art pixels a second, a pose every 4 pixels, and a
-rest and a turn at each end of the trail. If the app's hiker changes, change both.
+rest and a turn at each end of the trail. He walks only on the story's dotted trail. If the app's
+hiker changes, change both.
 
 **Where a picture came from** is written into the picture. Each PNG and the JPEG carries its
 origin inside the file, and each WebP has it in a `.json` file of the same name beside it. From
@@ -142,8 +151,8 @@ this folder, the design skill's `impeccable embed-prompt --read assets/img/<file
 new or retaken picture the same way.
 
 Window captures are WebP at twice their shown size, with `width` and `height` set, and lazy below
-the hero. Each picture ships in Paper and in Night. Keep a picture's name when replacing it;
-`_headers` caches pictures for a day.
+the first screen. Each picture ships in Paper and in Night. Keep a picture's name when replacing it and
+run `script/site/stamp.py`, which gives its links a new address.
 
 ## Rules for the look
 
@@ -151,7 +160,8 @@ the hero. Each picture ships in Paper and in Night. Keep a picture's name when r
 
 - Headlines at a weight of 500 to 700, never light. No italics, no bold lead-ins, no two-tone
   headlines, no pill or label above a heading.
-- Few pictures, each a real capture, and a window capture always at real size.
+- Few pictures, each a real capture, and a window capture always at real size. The story's iPhone
+  is the one reduced capture.
 - No pause button: pressing the hiker stops him and sends him on.
 - The page reads whole without its script and with Reduce Motion on.
 - No trackers, no analytics, no cookies, and no type or script from another domain.

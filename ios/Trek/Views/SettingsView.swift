@@ -267,7 +267,7 @@ struct SettingsView: View {
         }
     }
 
-    /// "Ember icon · iPhone's text size", "Night icon · Larger text".
+    /// "Night icon · iPhone's text size", "Paper icon · Larger text".
     private var appearanceLine: String {
         let size = TextSizeChoice(rawValue: textSize) ?? .system
         return "\(icon.label) icon · " + (size == .system ? "iPhone's text size" : "\(size.label) text")

@@ -15,6 +15,9 @@ say() { printf '• %s\n' "$*"; }
 say "rustfmt"
 cargo fmt --all -- --check
 
+say "the site's links carry the hash of what they point to"
+python3 script/site/stamp.py site --check
+
 say "no Mac wording outside the word table (trek-words)"
 cargo test -q -p trek-words >/dev/null
 

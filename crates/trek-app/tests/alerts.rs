@@ -579,21 +579,24 @@ fn the_dock_shows_the_app_icon_picked_in_appearance() {
         let trek = open_with(cx, |_| {});
         APP_ICON.with(|i| i.set(None));
         cx.update(|cx| trek_app::system::init(trek.ws.clone(), cx));
-        // The cairn on Trek orange goes up at launch, whatever the bundle's icon is.
-        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Ember));
+        // The default (Night) goes up at launch, whatever the bundle's icon is.
+        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Night));
         trek.update(cx, |ws, cx| {
             ws.navigate(Route::Settings(SettingsPage::Appearance), cx)
         });
         trek.render(cx);
-        trek.click(cx, "app-icon-Night");
+        trek.click(cx, "app-icon-Paper");
         cx.run_until_parked();
         assert_eq!(
             trek.read(cx, |ws, _| ws.settings.appearance.app_icon),
-            AppIcon::Night
+            AppIcon::Paper
         );
-        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Night));
+        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Paper));
         trek.click(cx, "app-icon-Glass");
         cx.run_until_parked();
         assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Glass));
+        trek.click(cx, "app-icon-Night");
+        cx.run_until_parked();
+        assert_eq!(APP_ICON.with(|i| i.get()), Some(AppIcon::Night));
     });
 }

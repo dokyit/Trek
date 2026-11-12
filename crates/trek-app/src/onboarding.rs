@@ -1,4 +1,4 @@
-//! Onboarding: a short intro (the cairn stacks itself while the hiker walks up to it), then one
+//! Onboarding: a short intro (the mark draws itself while the hiker walks up to it), then one
 //! step at a time: Appearance → Permissions (macOS) → Agents → API keys → Local models →
 //! Approvals → Phone & machines → Finish.
 //!

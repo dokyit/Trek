@@ -1,7 +1,7 @@
 /* trekdesktop.com
    1. The download: which build is the visitor's, and where the latest release's files are.
-   2. The hiker, walking as he does in the app.
-   3. A day in the Inbox, played once.
+   2. The hiker, walking as he does in the app, on his trail in the story.
+   3. The story in the middle of the page, played by scrolling.
    The page reads whole without any of this. The only request it makes is to GitHub's API. */
 (() => {
   "use strict";
@@ -113,8 +113,8 @@
         primary.href = href(who.build);
         label.textContent = who.os === "windows" ? "Download for Windows" : "Download for macOS";
         const size = assets[who.build] && assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
-        const version = release && release.version ? `Version ${release.version} for ${CHIP[who.build]}${size}. ` : `For ${CHIP[who.build]}. `;
-        fine.textContent = `${version}Free and open source.`;
+        const version = release && release.version ? ` Version ${release.version}, ${CHIP[who.build]}${size}.` : "";
+        fine.textContent = `Free and open source.${version}`;
         if (who.os === "mac" && !who.sure) {
           const other = document.createElement("a");
           other.href = href("mac-intel");
@@ -134,9 +134,9 @@
     if (release && release.version) {
       const when = release.published ? new Date(release.published) : null;
       const date = when && !Number.isNaN(when.getTime())
-        ? `, released ${when.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })}`
+        ? `, ${when.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" })}`
         : "";
-      for (const el of all("[data-release]")) el.textContent = `The latest release is ${release.version}${date}.`;
+      for (const el of all("[data-release]")) el.textContent = `Version ${release.version}${date}.`;
     }
   }
 
@@ -199,26 +199,24 @@
     });
   }
 
-  for (const trail of all("[data-trail]")) {
-    const canvas = trail.querySelector("canvas");
+  // One art pixel is a whole number of device pixels, as the app's cell_size has it, also where the
+  // story's block has been scaled by `k` to fit a short window.
+  const cellSize = (k = 1) => Math.max(1, Math.round(3 * devicePixelRatio * k)) / (devicePixelRatio * k);
+
+  /** Set a hiker walking. `ground(cell)` says how far he may go, in art pixels, and
+      `place(canvas, x, cell)` puts him `x` art pixels along it. */
+  function walk(canvas, watch, ground, place) {
     const w = { at: 0, right: true, speed: 0, rest: 0.5, walked: 0 };
     let seen = false, paused = false, timer = 0, drawn = "";
 
-    // One art pixel is a whole number of device pixels, as the app's cell_size has it.
-    const cell = () => {
-      const want = parseFloat(getComputedStyle(trail).getPropertyValue("--px")) || 3;
-      const size = Math.max(1, Math.round(want * devicePixelRatio)) / devicePixelRatio;
-      trail.style.setProperty("--cell", `${size}px`);
-      return size;
-    };
-
     function draw() {
-      const size = cell();
-      const travel = Math.max(1, Math.floor(trail.clientWidth / size) - WIDE);
+      const cell = cellSize(parseFloat(getComputedStyle(canvas).getPropertyValue("--k")) || 1);
+      canvas.style.setProperty("--cell", `${cell}px`);
+      const travel = Math.max(1, ground(cell));
       const p = pose(w), right = facingRight(w), night = dark.matches;
       const key = `${p}${right}${night}`;
       if (key !== drawn) { paintHiker(canvas, p, right, night); drawn = key; }
-      canvas.style.translate = `${Math.round(w.at * travel) * size}px 0`;
+      place(canvas, Math.round(w.at * travel), cell);
       return travel;
     }
 
@@ -230,47 +228,71 @@
       if (still.matches) {
         canvas.removeAttribute("role"); canvas.removeAttribute("tabindex"); canvas.removeAttribute("title"); canvas.setAttribute("aria-hidden", "true");
       } else {
+        const label = paused ? "Let the hiker walk on" : "Stop the hiker";
         canvas.removeAttribute("aria-hidden");
         canvas.setAttribute("role", "button"); canvas.tabIndex = 0;
-        canvas.setAttribute("aria-label", paused ? "Let the hiker walk on" : "Stop the hiker");
-        canvas.title = paused ? "Let the hiker walk on" : "Stop the hiker";
+        canvas.setAttribute("aria-label", label); canvas.title = label;
       }
     }
 
-    new IntersectionObserver(([entry]) => { seen = entry.isIntersecting; sync(); }).observe(trail);
-    document.addEventListener("visibilitychange", sync);
-    still.addEventListener("change", sync);
-    dark.addEventListener("change", () => { drawn = ""; draw(); });
-    addEventListener("resize", draw);
     const press = () => { if (!still.matches) { paused = !paused; sync(); } };
     canvas.addEventListener("click", press);
     canvas.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); press(); } });
-    trail.classList.add("is-live");
+    new IntersectionObserver(([entry]) => { seen = entry.isIntersecting; sync(); }).observe(watch);
+    document.addEventListener("visibilitychange", sync);
+    still.addEventListener("change", sync);
+    dark.addEventListener("change", () => { drawn = ""; draw(); });
+    // A frame later, so the story has refitted its block before he is measured against it.
+    addEventListener("resize", () => requestAnimationFrame(draw));
+    canvas.classList.add("is-live");
     draw();
     sync();
   }
 
-  /* ---------- 3. A day in the Inbox ----------
-     Played once when it comes into view: three threads at work, one stops for an approval and goes
-     to the top, Allow sends it on, and finished work lines up to be read. Without this script, and
-     with Reduce Motion on, the page shows the waiting moment as a still. */
+  // On a trail: straight along it.
+  for (const trail of all("[data-trail]")) {
+    walk(trail.querySelector("canvas"), trail,
+      (cell) => Math.floor(trail.clientWidth / cell) - WIDE,
+      (canvas, x, cell) => { canvas.style.translate = `${x * cell}px 0`; });
+  }
 
-  const day = document.querySelector("[data-day]");
-  if (day) {
-    const list = day.querySelector(".rows"), card = day.querySelector(".ask-card");
-    const replay = (day.closest("section") || document).querySelector("[data-replay]");
+  /* ---------- 3. The story ----------
+     One stage, pinned while the page scrolls past it, and the scroll plays it: three threads at
+     work, one stops to ask and goes to the top, the phone can answer it too, it goes back to work,
+     and finished work waits. It runs backwards as readily as forwards. Without this script, and
+     with Reduce Motion on, the page shows the asking moment as a still, with every line under it. */
+
+  const story = document.querySelector("[data-story]");
+  // A window too short to hold the stage (a phone on its side) gets the still, as Reduce Motion does.
+  if (story && !still.matches && !matchMedia("(max-height: 559px)").matches) {
+    const stage = story.querySelector(".stage"), list = story.querySelector(".rows");
+    const card = story.querySelector(".ask-card"), yes = story.querySelector(".yes");
+    const lines = all(".captions li", story);
     const rows = Object.fromEntries(Array.from(list.children).map((li) => [li.dataset.id, li]));
     const base = ["tests", "migrate", "tour"];
-    const rank = { needs: 0, done: 1, stop: 1, work: 2 };
+    const rank = { needs: 0, done: 1, work: 2 };
     const project = { tests: "mobile", migrate: "mobile", tour: "atlas-web" };
-    const say = { work: "At work", done: "Finished", needs: "Waiting: run ./migrate?", stop: "Stopped: you denied the command" };
-    let timers = [], answered = null;
+    const say = { work: "At work", done: "Finished", needs: "Waiting: run ./migrate?" };
+    // What each moment of the story shows: [migrate, tour, the question is open].
+    const SCENES = [["work", "work", false], ["needs", "work", true], ["needs", "work", true], ["work", "work", false], ["done", "done", false]];
+    const ENDS = [0.18, 0.4, 0.6, 0.8]; // where one moment gives way to the next, as a share of the scroll
+    const actors = story.querySelector(".actors"), captions = story.querySelector(".captions");
+    let shown = -1, said = -2, target = 0, now = 0, near = 0, frame = 0, press = 0, small = 1;
 
-    const at = (ms, fn) => timers.push(setTimeout(fn, ms));
-    const clear = () => { timers.forEach(clearTimeout); timers = []; };
-    const show = (on) => { card.toggleAttribute("data-off", !on); card.inert = !on; };
+    // Each line of the story comes in a word at a time.
+    for (const li of lines) {
+      const words = li.textContent.trim().split(/\s+/);
+      li.textContent = "";
+      words.forEach((word, i) => {
+        const span = document.createElement("span");
+        span.textContent = word;
+        span.style.transitionDelay = `${170 + i * 55}ms`; // after the line before it has gone
+        li.append(span, " ");
+      });
+    }
 
     function set(id, state) {
+      if (rows[id].dataset.state === state) return;
       const why = rows[id].querySelector(".why"), strong = document.createElement("b");
       rows[id].dataset.state = state;
       strong.textContent = say[state];
@@ -279,48 +301,72 @@
 
     // What needs you first, then what has finished, then what is still at work. Rows glide to
     // their new places; nothing jumps.
-    function sort(glide = true) {
+    function sort() {
       const before = new Map(base.map((id) => [id, rows[id].getBoundingClientRect().top]));
       const order = [...base].sort((a, b) => rank[rows[a].dataset.state] - rank[rows[b].dataset.state] || base.indexOf(a) - base.indexOf(b));
+      if (order.every((id, i) => list.children[i] === rows[id])) return;
       order.forEach((id) => list.append(rows[id]));
-      if (!glide || still.matches) return;
       for (const id of base) {
         const d = before.get(id) - rows[id].getBoundingClientRect().top;
-        if (d) rows[id].animate([{ translate: `0 ${d}px` }, { translate: "0 0" }], { duration: 380, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+        // Measured on screen, moved inside the scaled block.
+        if (d) rows[id].animate([{ translate: `0 ${d / small}px` }, { translate: "0 0" }], { duration: 420, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
       }
     }
 
-    function reset(glide) {
-      clear(); answered = null; show(false);
-      if (replay) replay.hidden = true;
-      base.forEach((id) => set(id, "work"));
-      sort(glide);
+    function show(i) {
+      if (i === shown) return;
+      const forward = i > shown;
+      shown = i;
+      clearTimeout(press);
+      const [migrate, tour, open] = SCENES[i];
+      const settle = () => { set("migrate", migrate); set("tour", tour); sort(); card.toggleAttribute("data-off", !open); yes.removeAttribute("data-down"); };
+      // Going forward into "it gets back to work", Allow is pressed first.
+      if (i === 3 && forward) { yes.toggleAttribute("data-down", true); press = setTimeout(settle, 220); } else settle();
     }
 
-    function answer(kind) {
-      if (answered) return;
-      answered = kind; clear();
-      const button = card.querySelector(`[data-answer="${kind}"]`);
-      button.toggleAttribute("data-down", true);
-      at(170, () => { button.removeAttribute("data-down"); show(false); set("migrate", kind === "allow" ? "work" : "stop"); sort(); });
-      at(1900, () => { set("tour", "done"); sort(); });
-      if (kind === "allow") at(3500, () => { set("migrate", "done"); sort(); });
-      at(kind === "allow" ? 4500 : 2900, () => { if (replay) replay.hidden = false; });
+    // A line is said only once the stage has arrived, so the first one is not over before it is seen.
+    function speak() {
+      const line = near >= 0.9 ? shown : -1;
+      if (line === said) return;
+      said = line;
+      lines.forEach((li, n) => li.toggleAttribute("data-on", n === line));
     }
 
-    function play() {
-      reset(true);
-      at(1600, () => { set("migrate", "needs"); sort(); show(true); });
-      at(1600 + 3600, () => answer("allow"));
+    // Shrink the block to fit a short window, so it never meets the caption under it.
+    function fit() {
+      const tall = actors.offsetHeight; // its own height: scaling does not change it
+      const room = stage.clientHeight - captions.offsetHeight - parseFloat(getComputedStyle(captions).marginBottom)
+        - parseFloat(getComputedStyle(actors).marginTop) - 48;
+      small = Math.min(1, Math.max(0.62, room / tall));
+      stage.style.setProperty("--k", small.toFixed(3));
+      stage.style.setProperty("--tall", `${tall}px`);
     }
 
-    card.addEventListener("click", (e) => { const b = e.target.closest("[data-answer]"); if (b) answer(b.dataset.answer); });
-    if (replay) replay.addEventListener("click", play);
-    if (still.matches) {
-      if (replay) replay.hidden = false;
-    } else {
-      reset(false);
-      new IntersectionObserver((entries, io) => { if (entries[0].isIntersecting) { io.disconnect(); play(); } }, { threshold: 0.6 }).observe(day);
+    const clamp = (v) => Math.min(1, Math.max(0, v));
+    const ease = (a, b, v) => { const t = clamp((v - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+    function tick() {
+      now += (target - now) * 0.16;
+      if (Math.abs(target - now) < 0.0004) now = target;
+      const i = ENDS.findIndex((end) => now < end);
+      show(i < 0 ? ENDS.length : i);
+      speak();
+      stage.style.setProperty("--enter", near.toFixed(3));
+      stage.style.setProperty("--phone", (ease(0.4, 0.47, now) * (1 - ease(0.58, 0.63, now))).toFixed(3));
+      frame = now === target ? 0 : requestAnimationFrame(tick);
     }
+
+    function read() {
+      const box = story.getBoundingClientRect();
+      target = clamp(-box.top / (box.height - innerHeight));
+      near = clamp(1 - box.top / (innerHeight * 0.75)); // the rows gather as the stage comes up
+      if (!frame) frame = requestAnimationFrame(tick);
+    }
+
+    story.classList.add("is-live");
+    addEventListener("scroll", read, { passive: true });
+    addEventListener("resize", () => { fit(); read(); });
+    fit();
+    read();
   }
 })();

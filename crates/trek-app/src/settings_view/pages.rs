@@ -581,7 +581,7 @@ impl SettingsView {
     }
 
     /// Three small window previews instead of a word list.
-    /// The Dock icon: the bundle's cairn, or one of its alternatives.
+    /// The Dock icon: the bundle's own (Night), or one of its alternatives.
     fn app_icon_tiles(
         &self,
         current: trek_core::settings::AppIcon,
@@ -594,8 +594,8 @@ impl SettingsView {
             .gap(px(18.))
             .children(
                 [
-                    (AppIcon::Ember, "Ember"),
                     (AppIcon::Night, "Night"),
+                    (AppIcon::Paper, "Paper"),
                     (AppIcon::Glass, "Glass"),
                 ]
                 .into_iter()

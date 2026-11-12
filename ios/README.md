@@ -156,7 +156,7 @@ Trek/Net        TrekClient: URLSessionWebSocketTask over pinned TLS (PinningDele
 Trek/Demo       MockHost: the in-process demo Mac
 Trek/Design     Trek palette (the Mac's trek.json and palette.rs), Inter and JetBrains Mono NL (Resources/Fonts,
                 OFL), status colours, project hues, file-type chips, agent logos
-Trek/Assets     App icons: Ember (with iOS 18 dark and tinted variants), Night and Glass, rendered from
+Trek/Assets     App icons: Night (with iOS 18 dark and tinted variants), Paper and Glass, rendered from
                 assets/brand/trek-icon-*-ios.svg by scripts/app-icons.sh
 Trek/Views      Threads, Thread (transcript grouping, tool rows, request cards, composer, the side
                 chat's sheet, a picture's long-press menu), New thread sheet, Pairing (QR scanner,

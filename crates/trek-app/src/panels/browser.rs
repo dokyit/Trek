@@ -1187,14 +1187,25 @@ fn page_vars(cx: &App) -> String {
 
 fn internal_page(path: &str, vars: &str) -> (&'static str, Cow<'static, [u8]>) {
     match path {
+        // The mark in the page's theme (`page_vars` says which): Paper's is deeper, with a dark
+        // flag, where Night's flag is light.
         "/mark.png" => (
             "image/png",
-            Cow::Owned(crate::assets::brand_bytes("brand/mark.png").unwrap_or_default()),
+            Cow::Owned(crate::assets::brand_bytes(mark_image(vars)).unwrap_or_default()),
         ),
         _ => (
             "text/html; charset=utf-8",
             Cow::Owned(START_HTML.replace("/*VARS*/", vars).into_bytes()),
         ),
+    }
+}
+
+/// The mark's image for an internal page with these variables.
+fn mark_image(vars: &str) -> &'static str {
+    if vars.contains("color-scheme:dark;") {
+        "brand/mark.png"
+    } else {
+        "brand/mark-paper.png"
     }
 }
 
@@ -4288,6 +4299,26 @@ mod tests {
         assert!(!same_origin("https://evil.example.github.com/", here));
         assert!(!same_origin("about:blank", "about:blank"));
         assert!(same_origin("file:///a/b.html", "file:///c/d.html"));
+    }
+
+    #[test]
+    fn the_start_page_shows_the_mark_of_its_theme() {
+        // What `page_vars` ends with: the page's colour scheme.
+        let night = super::mark_image("--bg:rgba(10,10,11,1.000);color-scheme:dark;");
+        let paper = super::mark_image("--bg:rgba(255,255,255,1.000);color-scheme:light;");
+        assert_eq!((night, paper), ("brand/mark.png", "brand/mark-paper.png"));
+        for (vars, image) in [
+            ("color-scheme:dark;", night),
+            ("color-scheme:light;", paper),
+        ] {
+            let (mime, body) = super::internal_page("/mark.png", vars);
+            assert_eq!(mime, "image/png");
+            assert_eq!(
+                Some(body.into_owned()),
+                crate::assets::brand_bytes(image),
+                "{image} is embedded and served"
+            );
+        }
     }
 
     #[test]

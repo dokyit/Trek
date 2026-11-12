@@ -149,7 +149,7 @@ private struct TurnDetail: View {
     }
 }
 
-/// Trek's cairn while it works, a hand when it waits on the user, a tick when it's over.
+/// Trek's mountain while it works, a hand when it waits on the user, a tick when it's over.
 private struct TurnMark: View {
     var state: State
     var size: CGFloat

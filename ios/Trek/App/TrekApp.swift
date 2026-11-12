@@ -178,7 +178,11 @@ struct RootView: View {
         // Back in front: iOS shut the connection while the app was away, and waiting out a
         // retry (or a ping) before saying so would show stale threads as live.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { model.foregrounded() }
+            if phase == .active {
+                model.foregrounded()
+                // An icon picked in an earlier version that this one no longer ships.
+                AppIconChoice.dropRetired()
+            }
             if phase == .background { model.backgrounded() }
         }
         .overlay(alignment: .top) { ToastOverlay() }

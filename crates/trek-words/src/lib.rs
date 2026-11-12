@@ -115,7 +115,7 @@ const MACOS: Words = Words {
 
     badge_label: "Dock badge",
     badge_note: "Count of threads waiting on you, on Trek's Dock icon.",
-    app_icon_note: "Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed.",
+    app_icon_note: "Shown in the Dock while Trek runs. Finder and the Dock keep Night when Trek is closed.",
     tray_label: "Menu bar icon",
 
     glass_note: "Your desktop shows through the window, blurred, under translucent panels. Off while macOS reduces transparency.",
@@ -175,8 +175,8 @@ const WINDOWS: Words = Words {
     badge_label: "Taskbar badge",
     badge_note: "Count of threads waiting on you, on Trek's taskbar button.",
     // Windows lets an app change its windows' icons while it runs, but not the exe's own: that
-    // stays Ember until an installer makes a shortcut with another.
-    app_icon_note: "Shown on the taskbar and in Alt+Tab while Trek runs. Trek's file and its shortcuts keep Ember.",
+    // stays Night until an installer makes a shortcut with another.
+    app_icon_note: "Shown on the taskbar and in Alt+Tab while Trek runs. Trek's file and its shortcuts keep Night.",
     tray_label: "System tray icon",
 
     glass_note: "Your desktop and the windows behind show through the sidebars and title bar: blurred, and at Clear as they are. From the middle of Frost up, text reads over anything behind. Needs Windows 11 22H2 or later, and is off while Transparency effects are off or a contrast theme is on.",
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(w.tray_label, "Menu bar icon");
         assert_eq!(
             w.app_icon_note,
-            "Shown in the Dock while Trek runs. Finder and the Dock keep Ember when Trek is closed."
+            "Shown in the Dock while Trek runs. Finder and the Dock keep Night when Trek is closed."
         );
         assert_eq!(w.your_credential_store, "your Keychain");
         assert_eq!(w.this_computer, "this Mac");

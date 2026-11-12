@@ -2,7 +2,17 @@
   "images": [
     {
       "idiom": "universal",
-      "filename": "trek-mark.svg"
+      "filename": "trek-mark-paper.svg"
+    },
+    {
+      "idiom": "universal",
+      "filename": "trek-mark.svg",
+      "appearances": [
+        {
+          "appearance": "luminosity",
+          "value": "dark"
+        }
+      ]
     }
   ],
   "info": {

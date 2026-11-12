@@ -975,8 +975,7 @@ impl IdeWorkbench {
             .child(
                 div()
                     .pb(px(14.))
-                    .opacity(0.5)
-                    .child(crate::brand::logo_mark(px(56.))),
+                    .child(crate::brand::logo_mark_muted(px(56.))),
             )
             .child(row("Go to File", keys::hint(Id::QuickOpen)))
             .child(row("New Chat", keys::hint(Id::NewThread)))

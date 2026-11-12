@@ -1,21 +1,36 @@
-"""Trek's brand: a cairn, the stones hikers stack so the next person knows the way.
+"""Trek's brand: one mountain with a lit face and a shaded face, a dotted trail up the lit face
+and a small flag planted behind the summit.
 
 Writes, next to this script:
-  trek-icon-ember.svg  the app icon (the default): porcelain stones on a Trek-orange tile
-  trek-icon-night.svg  alternative: Trek-orange stones on the Night theme's charcoal
-  trek-icon-glass.svg  alternative: frosted glass stones over a sunset (Liquid Glass)
+  trek-icon-night.svg  the app icon (the default, and the one in the app bundle): Trek's orange
+                       on the Night theme's charcoal
+  trek-icon-paper.svg  alternative: the deeper orange on the Paper theme's cream
+  trek-icon-glass.svg  alternative: a frosted glass mountain against a dusk sky (Liquid Glass)
   trek-icon-*-ios.svg  the same three, full bleed, for iOS (ios/scripts/app-icons.sh renders them)
-  trek-icon-{dark,tinted}-ios.svg  the iOS icon's dark and tinted variants: the stones on clear
-  trek-icon-{ember,night,glass}-{16,32}.svg  the three drawn for 16 and 32 px: the title bar's
-                       small mark on the tile, on whole pixels, where the full art blurs
-  trek-mark.svg        the stones alone, for in-app use (title bar, About, welcome screens)
+  trek-icon-{dark,tinted}-ios.svg  the iOS icon's dark and tinted variants: the mountain on clear
+  trek-icon-{night,paper,glass}-{16,32}.svg  the three drawn for 16 and 32 px, on whole pixels,
+                       where the full art blurs: no trail at 16, a shorter one of larger dots at 32
+  trek-mark.svg        the mountain alone in Night's colours, the trail's dots cut through it so
+                       the ground shows, for in-app use (the browser's start page, the iPhone app)
+  trek-mark-paper.svg  the same in Paper's colours, for a light ground
   menubar-{idle,working,attention}.svg   44 pt template glyphs for the menu bar
 
-Run: python3 trek_icon.py. script/bundle.sh renders the .icns from trek-icon-ember.svg (its 16 and
-32 px from trek-icon-ember-16.svg and -32.svg); the app switches to the others at run time
-(Settings › Appearance › App icon). script/windows-icons.py makes the Windows .icos the same way.
+Run: python3 trek_icon.py. With resvg on PATH (cargo install resvg) it also renders the PNGs the
+app embeds (crates/trek-assets/assets/brand: icon.png, icon-paper.png, icon-glass.png, mark.png,
+mark-paper.png, menubar-*.png), docs/assets/trek-icon.png and the iPhone app's TrekMark image
+sets. script/bundle.sh renders the .icns from trek-icon-night.svg (its 16 and 32 px from
+trek-icon-night-16.svg and -32.svg); the app switches to the others at run time (Settings ›
+Appearance › App icon). script/windows-icons.py makes the Windows .icos the same way, and
+ios/scripts/app-icons.sh the iPhone's icons.
+
+crates/trek-brand draws the same mountain in the app (the title bar, About, the welcome screens)
+from the numbers below; its tests read this script's SVGs, so change the two together.
 """
-import math, random, sys, os
+import math, os, shutil, subprocess
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+os.chdir(HERE)
 
 def squircle(cx=512, cy=512, half=412, n=4.2, steps=240, places=1):
     pts = []
@@ -29,39 +44,9 @@ def squircle(cx=512, cy=512, half=412, n=4.2, steps=240, places=1):
 
 TILE = squircle()
 
-def smooth(pts):
-    """Closed Catmull-Rom through pts as cubic beziers."""
-    n = len(pts)
-    d = f"M{pts[0][0]:.1f} {pts[0][1]:.1f}"
-    for i in range(n):
-        p0, p1, p2, p3 = pts[(i - 1) % n], pts[i], pts[(i + 1) % n], pts[(i + 2) % n]
-        c1 = (p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6)
-        c2 = (p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6)
-        d += f" C{c1[0]:.1f} {c1[1]:.1f} {c2[0]:.1f} {c2[1]:.1f} {p2[0]:.1f} {p2[1]:.1f}"
-    return d + "Z"
-
-def stone_pts(cx, cy, w, h, seed=1, taper=0.12, n=2.6, wobble=0.035, tilt=0.0, flat_bottom=0.25, k=36):
-    rnd = random.Random(seed)
-    ph = [rnd.uniform(0, 6.28) for _ in range(3)]
-    pts = []
-    for i in range(k):
-        t = 2 * math.pi * i / k
-        c, s = math.cos(t), math.sin(t)
-        x = math.copysign(abs(c) ** (2 / n), c)
-        y = math.copysign(abs(s) ** (2 / n), s)
-        if y > 0:  # lower half flatter
-            y = y * (1 - flat_bottom) + (abs(y) ** 0.35) * flat_bottom * (1 if y > 0 else -1)
-        # top narrower
-        x *= 1 - taper * (-(y) if y < 0 else 0) - taper * 0.25 * (y if y > 0 else 0)
-        r = 1 + wobble * (math.sin(2 * t + ph[0]) + 0.6 * math.sin(3 * t + ph[1]) + 0.3 * math.sin(5 * t + ph[2]))
-        X, Y = x * w / 2 * r, y * h / 2 * r
-        Xr = X * math.cos(tilt) - Y * math.sin(tilt)
-        Yr = X * math.sin(tilt) + Y * math.cos(tilt)
-        pts.append((cx + Xr, cy + Yr))
-    return pts
-
-def stone(cx, cy, w, h, **kw):
-    return smooth(stone_pts(cx, cy, w, h, **kw))
+def num(v):
+    s = f"{v:.2f}".rstrip("0").rstrip(".")
+    return "0" if s in ("", "-0") else s
 
 def lin(id, stops, x1=0, y1=0, x2=0, y2=1, units=None):
     u = f' gradientUnits="{units}"' if units else ""
@@ -73,188 +58,321 @@ def rad(id, stops, cx=0.5, cy=0.5, r=0.5, fx=None, fy=None):
     s = "".join(f'<stop offset="{o}" stop-color="{c}"' + (f' stop-opacity="{a}"' if a is not None else "") + "/>" for o, c, a in [(st + (None,))[:3] for st in stops])
     return f'<radialGradient id="{id}" cx="{cx}" cy="{cy}" r="{r}"{f}>{s}</radialGradient>'
 
-COMMON = (
-    '<filter id="blur8" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="8"/></filter>'
-    '<filter id="blur16" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="16"/></filter>'
-    '<filter id="blur28" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="28"/></filter>'
-    '<filter id="blur4" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4"/></filter>'
-    + '<filter id="grain" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="1.6" numOctaves="2" seed="7"/><feColorMatrix values="0 0 0 0 .35  0 0 0 0 .25  0 0 0 0 .15  0 0 0 .5 0"/><feComposite in2="SourceGraphic" operator="in"/></filter>'
-    + lin("rim", [(0, "#fff", .55), (.18, "#fff", .08), (.6, "#fff", 0), (1, "#000", .25)])
-    + lin("sheen", [(0, "#fff", .22), (.5, "#fff", 0)])
-)
+def svg(body, defs="", box="0 0 1024 1024"):
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{box}">' + (f"<defs>{defs}</defs>" if defs else "") + body + "</svg>"
 
-def tile(fill_defs, fill, extra_bg=""):
-    return fill_defs, (
-        f'<path d="{TILE}" fill="{fill}"/>' + extra_bg +
-        f'<path d="{TILE}" fill="url(#sheen)"/>'
-    )
+def write(name, text):
+    with open(name, "w") as out:
+        out.write(text)
 
-def finish():
-    return f'<path d="{TILE}" fill="none" stroke="url(#rim)" stroke-width="5" opacity=".9"/>'
+# The mark, on a 96-unit square ---------------------------------------------------------------
+# The outline, clockwise from the foot of the lit face: foot, shoulder (two points), summit, the
+# shaded face's foot. It's filled and stroked EDGE wide in the same colour with round joins,
+# which is what rounds the summit and the feet.
+OUTLINE = [(9.5, 78.5), (32.8, 46.6), (43, 43.4), (56, 21), (86.5, 78.5)]
+EDGE = 4.5
+# The ridge, summit to base. The shaded face is the outline's own shape right of this line, so
+# the two faces share one silhouette and meet exactly at the summit. (A second stroked polygon
+# for the shade would cover the tip with its stroke.)
+RIDGE = [(56, 21), (60.6, 39.6), (55, 51.6), (62.6, 64.8), (58.8, 78.5)]
+# The trail up the lit face, from its foot: centre x, y, radius.
+DOTS = [(29, 74.2, 2.4), (36, 69.2, 2.4), (43, 66, 2.4), (47.2, 60, 2.4), (44, 53.2, 2.4),
+        (48, 47, 2.4), (51.6, 40.4, 2.4), (53.6, 34, 2.4), (54.6, 28.2, 2)]
+# The flag, drawn behind the mountain: the pole (x, foot, top, width; round caps) and the cloth
+# (a start, then curves and lines: three points are a cubic bezier, one a line).
+POLE = (56, 24, 8.6, 2)
+CLOTH = [(56.4, 8.6), [(59.3, 7.2), (61.5, 10.2), (65.7, 8.8)], [(65.7, 15.2)],
+         [(61.5, 16.6), (59.3, 13.6), (56.4, 15)]]
+# The mark's own box on that square (left, top, width, height), a little air included.
+MARK_BOX = (7, 7, 82, 74)
 
-def svg(defs, body):
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs>{COMMON}{defs}'
-            f'<clipPath id="tileclip"><path d="{TILE}"/></clipPath></defs>'
-            f'<g filter="url(#tileshadow)"></g>{body}</svg>')
+def unit(a, b):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    l = math.hypot(dx, dy)
+    return dx / l, dy / l
 
-def porcelain_stack(stones, light, mid, dark, idp, shadow_col="#5A1E05", shadow_op=.35, spec=.75, side=None, thick=.16):
-    """stones: (cx, cy, w, h, kw) bottom->top, drawn as slabs with a visible side edge."""
-    side = side or dark
-    defs = lin(f"{idp}fill", [(0, light), (.6, mid), (1, dark)]) + lin(f"{idp}side", [(0, side), (1, shadow_col)])
-    body = ""
-    b = stones[0]
-    body += f'<ellipse cx="{b[0]+12}" cy="{b[1]+b[3]*0.62}" rx="{b[2]*0.5}" ry="{b[3]*0.2}" fill="{shadow_col}" opacity="{shadow_op}" filter="url(#blur16)"/>'
-    for i, (cx, cy, w, h, kw) in enumerate(stones):
-        t = h * thick
-        top = stone(cx, cy - t / 2, w, h - t, **kw)
-        under = stone(cx, cy + t / 2, w, h - t, **kw)
-        body += f'<path d="{under}" fill="url(#{idp}side)"/>'
-        body += f'<path d="{top}" fill="url(#{idp}fill)"/>'
-        body += f'<clipPath id="{idp}c{i}"><path d="{top}"/></clipPath><g clip-path="url(#{idp}c{i})">'
-        body += f'<path d="{top}" fill="#fff" filter="url(#grain)" opacity=".22"/>'
-        body += f'<ellipse cx="{cx-w*0.12}" cy="{cy-h*0.5}" rx="{w*0.42}" ry="{h*0.3}" fill="#fff" opacity="{spec*0.6}" filter="url(#blur8)"/>'
-        if i + 1 < len(stones):
-            nx, ny, nw, nh, _ = stones[i + 1]
-            body += f'<ellipse cx="{nx+8}" cy="{ny+nh*0.48}" rx="{nw*0.5}" ry="{nh*0.24}" fill="{shadow_col}" opacity=".5" filter="url(#blur8)"/>'
-        body += "</g>"
-    return defs, body
+def grown(pts, r):
+    """A clockwise outline grown by r with round joins: what filling it and stroking it 2r wide
+    covers. [(kind, point)]: "L" a line to it, "A" a clockwise arc of radius r to it."""
+    out = []
+    for i, cur in enumerate(pts):
+        d0, d1 = unit(pts[i - 1], cur), unit(cur, pts[(i + 1) % len(pts)])
+        a = (cur[0] + r * d0[1], cur[1] - r * d0[0])
+        b = (cur[0] + r * d1[1], cur[1] - r * d1[0])
+        turn = d0[0] * d1[1] - d0[1] * d1[0]
+        if turn > 0:  # a corner that points out: the stroke's round join
+            out += [("L", a), ("A", b)]
+        else:  # the shoulder's inside corner: the two grown edges meet
+            t = ((b[0] - a[0]) * d1[1] - (b[1] - a[1]) * d1[0]) / turn
+            out.append(("L", (a[0] + t * d0[0], a[1] + t * d0[1])))
+    return out
 
-concepts = []
+class Mountain:
+    """The mark's shapes as SVG, scaled by k and moved to (ox, oy). The defaults are the mark
+    itself; the small sizes pass their own outline, ridge, trail and flag."""
+    def __init__(self, k=1.0, ox=0.0, oy=0.0, outline=OUTLINE, edge=EDGE, ridge=RIDGE, dots=DOTS, pole=POLE, cloth=CLOTH, cap="round"):
+        self.k, self.ox, self.oy = k, ox, oy
+        self.outline, self.r, self.ridge, self.dots, self.pole, self.cloth = outline, edge / 2, ridge, dots, pole, cloth
+        self.cap = cap  # the pole's ends: round on the mark, "butt" where it's drawn on whole pixels
+        assert ridge[0] == outline[-2], "the ridge starts at the summit, the outline's last corner but one"
 
-def add(slug, name, blurb, defs, body):
-    """Write the macOS icon (`trek-icon-<slug>.svg`, the tile on Apple's grid) and its iOS twin
-    (`trek-icon-<slug>-ios.svg`, full bleed: iOS masks the corners itself)."""
-    s = svg(defs, body)
-    open(f"trek-icon-{slug}.svg", "w").write(s)
-    ios = s.replace(finish(), "").replace(f'<path d="{TILE}" fill="url(#sheen)"/>', "").replace(TILE, "M0 0H1024V1024H0Z")
-    open(f"trek-icon-{slug}-ios.svg", "w").write(ios)
+    def at(self, p):
+        return f"{num(self.ox + self.k * p[0])} {num(self.oy + self.k * p[1])}"
 
-# Tile backgrounds -----------------------------------------------------------
-EMBER = lin("ember", [(0, "#FF9455"), (.5, "#F4692B"), (1, "#D9481A")]) + rad("emberlight", [(0, "#FFC08A", .55), (1, "#FFC08A", 0)], cx=.3, cy=.15, r=.75)
-NIGHT = lin("night", [(0, "#24252B"), (1, "#0B0B0D")]) + rad("nightlight", [(0, "#FF7A3D", .16), (1, "#FF7A3D", 0)], cx=.5, cy=.85, r=.7)
-PAPER = lin("paper", [(0, "#FFFCF7"), (1, "#EEE4D6")])
-DUSK = lin("dusk", [(0, "#2B3550"), (1, "#0E1220")])
-SUNSET = lin("sun3", [(0, "#FF9450"), (.5, "#E9531E"), (1, "#9E2A0C")]) + rad("sun3b", [(0, "#FFD9A8", .75), (1, "#FFD9A8", 0)], cx=.78, cy=.08, r=.55)
+    def path(self, steps):
+        d = ""
+        for i, (kind, p) in enumerate(steps):
+            if i == 0:
+                d += "M" + self.at(p)
+            elif kind == "A":
+                if self.r > 0:
+                    d += f"A{num(self.r * self.k)} {num(self.r * self.k)} 0 0 1 {self.at(p)}"
+            else:
+                d += "L" + self.at(p)
+        return d + "Z"
 
-def ember_tile():
-    return f'<path d="{TILE}" fill="url(#ember)"/><path d="{TILE}" fill="url(#emberlight)"/>'
-def night_tile():
-    return f'<path d="{TILE}" fill="url(#night)"/><path d="{TILE}" fill="url(#nightlight)"/>'
-def paper_tile():
-    return f'<path d="{TILE}" fill="url(#paper)"/>'
+    def body(self):
+        """The whole silhouette."""
+        return self.path(grown(self.outline, self.r))
 
-CAIRN = [
-    (506, 676, 500, 168, dict(seed=3, taper=.08, tilt=-0.035, n=3.2, wobble=.06)),
-    (530, 538, 356, 138, dict(seed=7, taper=.12, tilt=0.06, n=3.0, wobble=.07)),
-    (494, 418, 232, 116, dict(seed=11, taper=.16, tilt=-0.08, n=2.8, wobble=.07)),
-    (518, 322, 120, 82, dict(seed=5, taper=.1, tilt=0.12, n=2.4, wobble=.06)),
-]
+    def holes(self):
+        """The trail's dots as subpaths: with fill-rule evenodd they're cut through the body."""
+        d = ""
+        for x, y, r in self.dots:
+            R = num(r * self.k)
+            d += f"M{self.at((x - r, y))}A{R} {R} 0 1 0 {self.at((x + r, y))}A{R} {R} 0 1 0 {self.at((x - r, y))}Z"
+        return d
 
-# 1 Ember Cairn
-d, b = porcelain_stack(CAIRN, "#FFFBF4", "#F7EBDD", "#E6D2BA", "c1", side="#D8BE9F", shadow_col="#7A3510")
-add("ember", "Ember Cairn",
-    "The cairn you picked, made solid: four porcelain stones with real weight, contact shadows and a lit top edge, on a warm Trek-orange tile. The safest evolution, and the most \"Apple\" of the set.",
-    EMBER + d, ember_tile() + b + finish())
+    def shade(self):
+        """The silhouette right of the ridge: from the top of the summit's round join, round the
+        shaded face's foot, along the base to under the ridge's end, and back up the ridge."""
+        summit, foot, first = self.outline[-2], self.outline[-1], self.outline[0]
+        r = self.r
+        down, base = unit(summit, foot), unit(foot, first)
+        steps = [("L", (summit[0], summit[1] - r)), ("A", (summit[0] + r * down[1], summit[1] - r * down[0])),
+                 ("L", (foot[0] + r * down[1], foot[1] - r * down[0])), ("A", (foot[0] + r * base[1], foot[1] - r * base[0])),
+                 ("L", (self.ridge[-1][0], self.ridge[-1][1] + r))]
+        return self.path(steps + [("L", p) for p in reversed(self.ridge)])
 
-# 2 Night Cairn
-d, b = porcelain_stack(CAIRN, "#FFC08A", "#FF7A3D", "#D9531E", "c2", side="#B8410F", shadow_col="#000", shadow_op=.6, spec=.6)
-add("night", "Night Cairn",
-    "The same stack in Trek's own orange on the Night theme's charcoal. Sits naturally next to Cursor, Zed and Terminal in a developer's Dock, and matches the app's dark UI.",
-    NIGHT + d, night_tile() + b + finish())
+    def ridge_line(self):
+        """The ridge as an open line, for the one-colour mark, which cuts it out of the body."""
+        pts = [(self.ridge[0][0], self.ridge[0][1] - self.r)] + list(self.ridge) + [(self.ridge[-1][0], self.ridge[-1][1] + self.r)]
+        return "M" + "L".join(self.at(p) for p in pts)
 
-# 3 Glass Cairn
-gdefs = lin("glassfill", [(0, "#FFFFFF", .55), (.6, "#FFF1E6", .28), (1, "#FFFFFF", .16)]) + lin("glassedge", [(0, "#FFFFFF", 1), (.45, "#FFFFFF", .2), (1, "#FFFFFF", .55)])
-gb = f'<ellipse cx="520" cy="790" rx="260" ry="40" fill="#4A1200" opacity=".45" filter="url(#blur16)"/>'
-for i, (cx, cy, w, h, kw) in enumerate(CAIRN):
-    dd = stone(cx, cy, w, h, **kw)
-    gb += f'<path d="{dd}" fill="#4A1200" opacity=".28" transform="translate(6 16)" filter="url(#blur8)"/>'
-    gb += f'<path d="{dd}" fill="url(#glassfill)"/>'
-    gb += f'<clipPath id="g{i}"><path d="{dd}"/></clipPath><g clip-path="url(#g{i})">'
-    gb += f'<ellipse cx="{cx-w*.18}" cy="{cy-h*.42}" rx="{w*.36}" ry="{h*.2}" fill="#fff" opacity=".7" filter="url(#blur8)"/>'
-    gb += f'<ellipse cx="{cx+w*.2}" cy="{cy+h*.5}" rx="{w*.4}" ry="{h*.2}" fill="#FFB27A" opacity=".55" filter="url(#blur8)"/></g>'
-    gb += f'<path d="{dd}" fill="none" stroke="url(#glassedge)" stroke-width="4"/>'
-add("glass", "Glass Cairn",
-    "Liquid Glass: frosted, translucent stones over a deep sunset gradient, with lit edges and warm light passing through. It reads as made for macOS 26, like Freeform or Journal.",
-    SUNSET + gdefs,
-    f'<path d="{TILE}" fill="url(#sun3)"/><path d="{TILE}" fill="url(#sun3b)"/>' + gb + finish())
+    def pole_d(self):
+        x, foot, top, _ = self.pole
+        return f"M{self.at((x, foot))}L{self.at((x, top))}"
 
-# iOS 18's dark and tinted Home Screen icons: the stones alone on a clear ground (iOS draws the
-# dark tile, or tints the grey stones itself). Dark wears Night's orange; tinted is greyscale.
-def ios_variant(slug, defs, body):
-    open(f"trek-icon-{slug}-ios.svg", "w").write(svg(defs, body))
+    def pole_width(self):
+        return num(self.pole[3] * self.k)
 
-d, b = porcelain_stack(CAIRN, "#FFC08A", "#FF7A3D", "#D9531E", "cd", side="#B8410F", shadow_col="#000", shadow_op=.6, spec=.6)
-ios_variant("dark", d, b)
-d, b = porcelain_stack(CAIRN, "#FFFFFF", "#E4E4E4", "#BDBDBD", "ct", side="#8C8C8C", shadow_col="#000", shadow_op=.5, spec=.5)
-ios_variant("tinted", d, b)
+    def cloth_d(self):
+        d = "M" + self.at(self.cloth[0])
+        for seg in self.cloth[1:]:
+            d += ("C" if len(seg) == 3 else "L") + " ".join(self.at(p) for p in seg)
+        return d + "Z"
 
-# The mark: the cairn alone in Trek's orange, nearest the ground the deepest. Top and underside
-# colours, bottom stone first.
-MARK_COLORS = [("#E8541E", "#9E2F0C"), ("#FF6A2B", "#B23C12"), ("#FF8A4C", "#C24A18"), ("#FFB062", "#D5621F")]
-def mark():
-    body = ""
-    for (cx, cy, w, h, kw), (top, side) in zip(CAIRN, MARK_COLORS):
-        t = h * .26
-        body += f'<path d="{stone(cx, cy + t / 2, w, h - t, **kw)}" fill="{side}"/><path d="{stone(cx, cy - t / 2, w, h - t, **kw)}" fill="{top}"/>'
-    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="226 250 580 540">{body}</svg>'
-open("trek-mark.svg", "w").write(mark())
+    def flag(self, color):
+        return (f'<path d="{self.pole_d()}" stroke="{color}" stroke-width="{self.pole_width()}" stroke-linecap="{self.cap}"/>'
+                f'<path d="{self.cloth_d()}" fill="{color}"/>')
+
+    def flat(self, lit, shade, flag):
+        """The mark in flat colour: the flag, then the body with the trail cut through it (so the
+        dots are the colour of whatever it stands on), then the shaded face over its right."""
+        return (self.flag(flag)
+                + f'<path d="{self.body()}{self.holes()}" fill="{lit}" fill-rule="evenodd"/>'
+                + f'<path d="{self.shade()}" fill="{shade}"/>')
+
+# Colours ---------------------------------------------------------------------------------
+NIGHT = dict(tile="#1A1A1C", lit="#FF7A3D", shade="#C9551F", flag="#FFC7A0")
+PAPER = dict(tile="#FBF8F3", lit="#E85D1F", shade="#B8461A", flag="#B8461A")
+# Glass's sky: dusk. Deep navy at the top, through plum, to an ember glow low on the horizon,
+# behind the mountain's foot. (Not an orange tile: a pale peak on orange is other apps' icon.)
+DUSK = (lin("dusk", [(0, "#0B1222"), (.4, "#3A2740"), (.6, "#4A324E"), (.8, "#B0603F"), (.9, "#D6804F"), (1, "#B0603F")])
+        + rad("duskglow", [(0, "#D6804F", .55), (1, "#D6804F", 0)], cx=.5, cy=.86, r=.5))
+
+def colours(c):
+    return dict(lit=c["lit"], shade=c["shade"], flag=c["flag"])
+
+# The app icons ------------------------------------------------------------------------------
+# On the Mac the tile is Apple's grid: 824 of 1024 across, and the mark's 96-unit square is the
+# tile's box. On iOS the icon is full bleed (iOS masks the corners itself), the square the whole
+# canvas, so the mountain is as large on its tile there as here.
+ON_TILE = Mountain(824 / 96, 100, 100)
+FULL_BLEED = Mountain(1024 / 96, 0, 0)
+SQUARE = "M0 0H1024V1024H0Z"
+
+TILE_CLIP = f'<clipPath id="tileclip"><path d="{TILE}"/></clipPath>'
+
+def hairline(color, opacity):
+    """A faint line just inside the Mac tile's edge, so a flat tile keeps its shape on a ground
+    of its own colour (Night in a dark Dock, Paper in a white Finder window). 3 px of 1024."""
+    return f'<path d="{TILE}" fill="none" stroke="{color}" stroke-opacity="{opacity}" stroke-width="6" clip-path="url(#tileclip)"/>'
+
+def flat_icon(slug, c, edge):
+    """`trek-icon-<slug>.svg` and its iOS twin `trek-icon-<slug>-ios.svg`."""
+    write(f"trek-icon-{slug}.svg", svg(f'<path d="{TILE}" fill="{c["tile"]}"/>' + edge + ON_TILE.flat(**colours(c)), TILE_CLIP))
+    write(f"trek-icon-{slug}-ios.svg", svg(f'<path d="{SQUARE}" fill="{c["tile"]}"/>' + FULL_BLEED.flat(**colours(c))))
+
+flat_icon("night", NIGHT, hairline("#FFFFFF", ".09"))
+flat_icon("paper", PAPER, hairline("#3A2A1C", ".12"))
+
+# Glass: the mountain as a slab of frosted glass against the dusk, catching the last light: warm
+# where the horizon's glow comes through its foot, a lit edge along the top of the lit face, the
+# shaded face the same glass with the night on it. The trail's dots are holes in the glass, and
+# the flag is the pale ember of Night's.
+BLUR = ('<filter id="blur8" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="8"/></filter>'
+        '<filter id="blur16" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="16"/></filter>')
+GLASS = (lin("glassfill", [(0, "#FFE2C8", .86), (.5, "#FFC39A", .66), (1, "#FFA76B", .5)])
+         + lin("glassedge", [(0, "#FFFFFF", 1), (.45, "#FFE2CC", .3), (1, "#FFD0AC", .7)]))
+GLASS_FLAG = "#FFC7A0"
+
+def glass(m):
+    k = m.k
+    body, shade = m.body(), m.shade()
+    top = m.outline[-2][1] - m.r  # the summit's top, and the mountain's height from there to its base
+    tall = m.outline[0][1] + m.r - top
+    left, top = m.ox + k * MARK_BOX[0], m.oy + k * top
+    width, height = k * MARK_BOX[2], k * tall
+    cx = left + width / 2
+    g = f'<ellipse cx="{num(cx + 8)}" cy="{num(top + height + 4)}" rx="{num(width * .5)}" ry="{num(k * 3.4)}" fill="#3A1408" opacity=".4" filter="url(#blur16)"/>'
+    # The flag, behind the mountain.
+    g += f'<path d="{m.pole_d()}" stroke="{GLASS_FLAG}" stroke-width="{m.pole_width()}" stroke-linecap="round"/>'
+    g += f'<path d="{m.cloth_d()}" fill="{GLASS_FLAG}"/>'
+    g += f'<path d="{body}" fill="#1A0D14" opacity=".3" transform="translate(6 14)" filter="url(#blur8)"/>'
+    g += f'<path d="{body}{m.holes()}" fill="url(#glassfill)" fill-rule="evenodd"/>'
+    g += f'<clipPath id="gm"><path d="{body}{m.holes()}" clip-rule="evenodd"/></clipPath><g clip-path="url(#gm)">'
+    g += f'<ellipse cx="{num(left + width * .34)}" cy="{num(top + height * .36)}" rx="{num(width * .3)}" ry="{num(height * .22)}" fill="#FFEAD6" opacity=".55" filter="url(#blur16)"/>'
+    g += f'<path d="{shade}" fill="#241633" opacity=".5"/>'
+    g += f'<ellipse cx="{num(left + width * .55)}" cy="{num(top + height)}" rx="{num(width * .5)}" ry="{num(height * .2)}" fill="#FF9A5C" opacity=".6" filter="url(#blur8)"/></g>'
+    g += f'<path d="{m.ridge_line()}" fill="none" stroke="#FFE7D3" stroke-opacity=".5" stroke-width="{num(k * .42)}" stroke-linejoin="round"/>'
+    g += f'<path d="{body}" fill="none" stroke="url(#glassedge)" stroke-width="4"/>'
+    for x, y, r in m.dots:
+        g += f'<circle cx="{num(m.ox + k * x)}" cy="{num(m.oy + k * y)}" r="{num(k * r)}" fill="none" stroke="#FFE7D3" stroke-opacity=".55" stroke-width="2.5"/>'
+    return g
+
+def dusk(shape):
+    return f'<path d="{shape}" fill="url(#dusk)"/><path d="{shape}" fill="url(#duskglow)"/>'
+
+# The Mac tile's lit rim, as glass has: bright along the top, dark under the bottom.
+RIM = lin("rim", [(0, "#fff", .4), (.18, "#fff", .08), (.6, "#fff", 0), (1, "#000", .25)])
+GLASS_RIM = f'<path d="{TILE}" fill="none" stroke="url(#rim)" stroke-width="5" opacity=".9"/>'
+
+write("trek-icon-glass.svg", svg(dusk(TILE) + glass(ON_TILE) + GLASS_RIM, BLUR + DUSK + GLASS + RIM))
+write("trek-icon-glass-ios.svg", svg(dusk(SQUARE) + glass(FULL_BLEED), BLUR + DUSK + GLASS))
+
+# iOS 18's dark and tinted Home Screen icons: the mountain alone on a clear ground (iOS draws
+# the dark tile, or tints the grey mountain itself). Dark wears Night's colours; tinted is
+# greyscale, the shaded face the darker grey.
+write("trek-icon-dark-ios.svg", svg(FULL_BLEED.flat(**colours(NIGHT))))
+write("trek-icon-tinted-ios.svg", svg(FULL_BLEED.flat(lit="#FFFFFF", shade="#A6A6A6", flag="#E0E0E0")))
+
+# The mark: the mountain alone. The dots are cut through, so the ground it's put on shows.
+def mark(c):
+    x, y, w, h = MARK_BOX
+    return svg(Mountain().flat(**colours(c)), box=f"{x} {y} {w} {h}")
+write("trek-mark.svg", mark(NIGHT))
+write("trek-mark-paper.svg", mark(PAPER))
 
 # The app icon at 16 and 32 px (Finder's list view, the Dock at its smallest, Windows' small
-# icons). Scaled that far, the cairn above blurs into a smudge, as the title bar's did; these are
-# drawn for their size from the small mark the title bar draws instead (crates/trek-brand,
-# SMALL_STONES): the same tile, colours and corners, its flat sides on whole pixels, with flat
-# stones whose tops and heights are whole pixels. script/bundle.sh and script/windows-icons.py use
-# these at 16 and 32 px only: from 64 px up the full art reads (the .icos' 20, 24 and 48 px frames
-# still scale it).
-SMALL_MARK = [(0.5, 12, 15, 4), (3, 8, 11, 3), (3.5, 4, 8, 3), (5.5, 0, 5, 3)]
-# Per size: the tile's half width, then the stones (left, top, width, height), bottom first. The
-# full art's tile is 824 of 1024 across, 12.9 px at 16 and 25.75 at 32; here 14 px (1 to 15: at 12
-# the stones have no room) and 26 (3 to 29). At 32 the small mark sits in it at 1:1, a pixel a
-# point. At 16, half the mark would put every edge on a half pixel, so it's redrawn: 2 px stones
-# a pixel apart and a 1 px cap, stepping right, left and right again as the mark's do.
-SMALL_SIZES = {
-    16: (7, [(3, 11, 10, 2), (5, 8, 7, 2), (5, 5, 5, 2), (7, 3, 3, 1)]),
-    32: (13, [(x + 8, y + 8, w, h) for x, y, w, h in SMALL_MARK]),
+# icons). Scaled that far the full art blurs: the trail's dots are a third of a pixel across at
+# 16 px and the flag one pixel. These are drawn for their size, in pixels: the base, the flag
+# and the summit's column on whole pixels, the shaded face starting on a pixel's edge, the flag
+# a pole one pixel wide with a cloth of whole pixels (two by one at 16 px, three by two at 32),
+# no trail at 16 px and a shorter one of larger dots at 32. script/bundle.sh and script/windows-icons.py use these at 16 and 32 px only: from 64 px
+# up the full art reads (the .icos' 20, 24 and 48 px frames still scale it). The title bar's
+# 16 pt mark is drawn the same way, without the tile, in crates/trek-brand (SMALL_1X, SMALL_2X).
+#
+# Per size: the tile's half width, then the mountain in pixels. The full art's tile is 824 of
+# 1024 across, 12.9 px at 16 and 25.75 at 32; here 14 px (1 to 15) and 26 (3 to 29).
+def rect(x, y, w, h):
+    return [(x, y), [(x + w, y)], [(x + w, y + h)], [(x, y + h)]]
+
+SMALL = {
+    16: (7, dict(
+        outline=[(2.5, 13), (5.6, 8.6), (7.1, 8.1), (9.5, 4), (13.5, 13)], edge=0,
+        ridge=[(9.5, 4), (10, 5), (10, 13)],
+        dots=[],
+        pole=(9.5, 5, 2, 1), cap="butt",
+        cloth=rect(10, 2, 2, 1))),
+    32: (13, dict(
+        outline=[(5.6, 24.4), (11.9, 15.7), (14.7, 14.8), (18.5, 8.6), (26.4, 24.4)], edge=1.2,
+        ridge=[(18.5, 8.6), (19.7, 13.7), (18.2, 17), (20.3, 20.6), (19.3, 24.4)],
+        dots=[(10.5, 22.5, 1.1), (13.5, 20.5, 1.1), (15.5, 17.5, 1.1), (16.5, 14.5, 1.1)],
+        pole=(18.5, 10, 5, 1), cap="butt",
+        cloth=rect(19, 5, 3, 2))),
 }
-# Each icon's tile (its gradients, by id) and stone fill: Ember's porcelain (the full art's light
-# to dark), Night's the mark's own colours (as the title bar shows them on Night), Glass's frosted
-# white, more opaque than the full art's, which has its lit edges and glow to show it.
+# Each icon's tile and colours. Glass keeps its dusk; its mountain is the frosted glass's own
+# colours against it, flat (the full art has its lit edges and glow to show it's glass), and
+# light enough to read on the plum above and the ember below.
 SMALL_TILES = {
-    "ember": (EMBER, "ember", "emberlight", lin("smallstone", [(0, "#FFFBF4"), (.6, "#F7EBDD"), (1, "#E6D2BA")])),
-    "night": (NIGHT, "night", "nightlight", ""),
-    "glass": (SUNSET, "sun3", "sun3b", lin("smallstone", [(0, "#FFFFFF", .85), (1, "#FFF1E6", .45)])),
+    "night": ("", lambda t: f'<path d="{t}" fill="{NIGHT["tile"]}"/>', colours(NIGHT)),
+    "paper": ("", lambda t: f'<path d="{t}" fill="{PAPER["tile"]}"/>', colours(PAPER)),
+    "glass": (DUSK, dusk, dict(lit="#F6D2BC", shade="#8E6470", flag=GLASS_FLAG)),
 }
 
 def small_icon(slug, px):
-    """`trek-icon-<slug>-<px>.svg`. The stones are flat: a pixel a point is too few for the
-    mark's darker underside, which reads as an outline there (the title bar draws it from 2x)."""
-    defs, fill, light, stone_defs = SMALL_TILES[slug]
-    half, stones = SMALL_SIZES[px]
-    tile = squircle(px / 2, px / 2, half, steps=120, places=2)
-    body = f'<path d="{tile}" fill="url(#{fill})"/><path d="{tile}" fill="url(#{light})"/>'
-    for (x, y, w, h), (top, _) in zip(stones, MARK_COLORS):
-        color = top if slug == "night" else "url(#smallstone)"
-        body += f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{h / 2}" fill="{color}"/>'
-    open(f"trek-icon-{slug}-{px}.svg", "w").write(
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {px} {px}"><defs>{defs}{stone_defs}</defs>{body}</svg>')
+    """`trek-icon-<slug>-<px>.svg`."""
+    defs, tile, c = SMALL_TILES[slug]
+    half, shapes = SMALL[px]
+    body = tile(squircle(px / 2, px / 2, half, steps=120, places=2)) + Mountain(**shapes).flat(**c)
+    write(f"trek-icon-{slug}-{px}.svg", svg(body, defs, box=f"0 0 {px} {px}"))
 
 for slug in SMALL_TILES:
-    for px in SMALL_SIZES:
+    for px in SMALL:
         small_icon(slug, px)
 
-# Menu bar template glyphs (black on clear; macOS tints them): four stacked stones. "working"
-# shows the top stone as a ring (the tray blinks between the two); "attention" adds a dot.
-GLYPH = [(22, 36.5, 30, 9), (23, 27, 22, 8), (21.5, 18.5, 15, 7), (22.5, 10.5, 9, 6)]
+# Menu bar template glyphs (black on clear; macOS tints them), 44 units for 22 pt: the mountain
+# in one colour with its ridge cut out of it, and the flag, on even units (whole pixels at 22 px)
+# and larger than its share so it reads there. "working" shows the flag's cloth as an outline
+# (the tray blinks between the two); "attention" adds a dot beside the flag.
+GLYPH = Mountain(
+    outline=[(5, 39), (15, 24.9), (19.4, 23.5), (25, 14), (39, 39)], edge=2,
+    ridge=[(25, 14), (27.1, 21.8), (24.6, 27.1), (27.9, 33), (26.3, 39)],
+    dots=[],
+    pole=(25, 15, 6, 2), cap="butt",
+    cloth=rect(26, 6, 6, 4))
+GLYPH_DOT = (39.5, 8, 4.25)
+
 def menubar(state):
-    shapes = ""
-    for i, (cx, cy, w, h) in enumerate(GLYPH):
-        if state == "working" and i == len(GLYPH) - 1:
-            shapes += f'<ellipse cx="{cx}" cy="{cy}" rx="{w/2-1}" ry="{h/2-1}" fill="none" stroke="#000" stroke-width="2"/>'
-        else:
-            shapes += f'<ellipse cx="{cx}" cy="{cy}" rx="{w/2}" ry="{h/2}" fill="#000"/>'
+    m = GLYPH
+    if state == "working":
+        (x, y), (right, _), (_, bottom) = m.cloth[0], m.cloth[1][0], m.cloth[2][0]
+        cloth = f'<rect x="{x + .5}" y="{y + .5}" width="{right - x - 1}" height="{bottom - y - 1}" fill="none" stroke="#000"/>'
+    else:
+        cloth = f'<path d="{m.cloth_d()}" fill="#000"/>'
+    shapes = (f'<path d="{m.pole_d()}" stroke="#000" stroke-width="{m.pole_width()}"/>' + cloth
+              + f'<g mask="url(#ridge)"><path d="{m.body()}" fill="#000"/></g>')
     if state == "attention":
-        return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44"><mask id="m"><rect width="44" height="44" fill="#fff"/>'
-                f'<circle cx="37" cy="8" r="8" fill="#000"/></mask><g mask="url(#m)">{shapes}</g><circle cx="37" cy="8" r="5" fill="#000"/></svg>')
-    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44">{shapes}</svg>'
+        shapes += f'<circle cx="{GLYPH_DOT[0]}" cy="{GLYPH_DOT[1]}" r="{GLYPH_DOT[2]}" fill="#000"/>'
+    defs = f'<mask id="ridge"><rect width="44" height="44" fill="#fff"/><path d="{m.ridge_line()}" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/></mask>'
+    return svg(shapes, defs, box="0 0 44 44")
+
 for state in ("idle", "working", "attention"):
-    open(f"menubar-{state}.svg", "w").write(menubar(state))
+    write(f"menubar-{state}.svg", menubar(state))
+
+# The PNGs drawn from the above that the repository keeps ------------------------------------
+def render():
+    resvg = shutil.which("resvg")
+    if not resvg:
+        print("resvg isn't on PATH: wrote the SVGs only (cargo install resvg --locked, then run again for the PNGs)")
+        return
+    def png(src, out, w, h=None):
+        subprocess.run([resvg, "-w", str(w)] + (["-h", str(h)] if h else []) + [src, out], check=True)
+    embedded = os.path.join(ROOT, "crates", "trek-assets", "assets", "brand")
+    for name, slug in (("icon", "night"), ("icon-paper", "paper"), ("icon-glass", "glass")):
+        png(f"trek-icon-{slug}.svg", os.path.join(embedded, f"{name}.png"), 512, 512)
+    png("trek-mark.svg", os.path.join(embedded, "mark.png"), 256)
+    png("trek-mark-paper.svg", os.path.join(embedded, "mark-paper.png"), 256)
+    for state in ("idle", "working", "attention"):
+        png(f"menubar-{state}.svg", os.path.join(embedded, f"menubar-{state}.png"), 44, 44)
+    png("trek-icon-night.svg", os.path.join(ROOT, "docs", "assets", "trek-icon.png"), 256, 256)
+    # The iPhone app shows the mark for its theme (the image set's dark appearance is Night's);
+    # the Live Activity's ground is always dark.
+    for target, names in (("Trek", ("trek-mark.svg", "trek-mark-paper.svg")), ("TrekActivity", ("trek-mark.svg",))):
+        imageset = os.path.join(ROOT, "ios", target, "Assets.xcassets", "TrekMark.imageset")
+        for name in names:
+            shutil.copyfile(name, os.path.join(imageset, name))
+    print("wrote the SVGs here, the PNGs in crates/trek-assets/assets/brand and docs/assets, and ios/*/Assets.xcassets/TrekMark.imageset")
+
+render()

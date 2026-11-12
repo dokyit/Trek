@@ -2,7 +2,7 @@
 //! in `trek.exe`. GPUI loads the window's icon from resource 1 of the executable, which is what
 //! the title bar and the taskbar then show. Nothing on other platforms.
 //!
-//! The `.ico`s in `assets/brand` come from `script/windows-icons.py`: Ember (resource 1, the exe's
+//! The `.ico`s in `assets/brand` come from `script/windows-icons.py`: Night (resource 1, the exe's
 //! icon) and the two other choices of Appearance › App icon (resources 2 and 3), which Trek puts
 //! on its windows at run time (`winsys::icon_resource` is the app's side of these ids, and a test
 //! reads the list below). GPUI's own resource (its manifest) has other type and id, so they link
@@ -12,7 +12,7 @@
 #[cfg_attr(not(windows), allow(dead_code))]
 const ICONS: [(u16, &str); 3] = [
     (1, "trek.ico"),
-    (2, "trek-night.ico"),
+    (2, "trek-paper.ico"),
     (3, "trek-glass.ico"),
 ];
 
