@@ -383,8 +383,9 @@ mod wic {
         })
     }
 
-    /// A photo encoded as HEIF by Windows' own codec, for tests: `None` where it has none.
-    #[cfg(test)]
+    /// A photo encoded as HEIF by Windows' own codec, for tests and the capture build's
+    /// `heic-demo`: `None` where it has none.
+    #[cfg(any(test, feature = "shots"))]
     pub fn heif_of(width: u32, height: u32, out: &Path) -> Option<()> {
         use windows::Win32::Graphics::Imaging::GUID_WICPixelFormat32bppBGRA as BGRA;
         with_factory(|factory| unsafe {
@@ -412,6 +413,47 @@ mod wic {
             Ok(())
         })
         .ok()
+    }
+}
+
+/// A photo as an iPhone writes one (HEIC) at `out`, made by the system's own codec: Windows'
+/// HEIF encoder (with the HEIF and HEVC extensions), or a Mac's `sips`. For the capture build's
+/// `heic-demo`; `Err` says why there's none.
+#[cfg(feature = "shots")]
+pub fn heic_photo(out: &Path) -> anyhow::Result<()> {
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    #[cfg(windows)]
+    {
+        wic::heif_of(96, 64, out).ok_or_else(|| {
+            anyhow::anyhow!("Windows has no HEIF encoder here (the HEIF and HEVC extensions)")
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let png = out.with_extension("png");
+        image::RgbaImage::from_fn(96, 64, |x, y| {
+            image::Rgba([(x * 2) as u8, (y * 4) as u8, 200, 255])
+        })
+        .save(&png)?;
+        let made = std::process::Command::new("/usr/bin/sips")
+            .args(["-s", "format", "heic"])
+            .arg(&png)
+            .arg("--out")
+            .arg(out)
+            .output()?;
+        let _ = std::fs::remove_file(&png);
+        anyhow::ensure!(
+            made.status.success(),
+            "sips: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        anyhow::bail!("no HEIF encoder here")
     }
 }
 
@@ -820,6 +862,16 @@ fn file_tile(
                     ),
             )
         });
+    // Once its frame is made (kept in Trek's cache), the tile says so to tests and live checks.
+    let preview = preview.when(video && poster_file(path).is_file(), |el| {
+        el.child(
+            div()
+                .id(("attachment-poster", i))
+                .test_support()
+                .absolute()
+                .size(px(1.)),
+        )
+    });
     let (open, remove_path) = (path.to_path_buf(), path.to_path_buf());
     div()
         .id(("attachment-file", i))
@@ -1014,7 +1066,11 @@ impl Asset for Poster {
         let png = poster_file(&video);
         let read = ImageAssetLoader::load(Resource::Path(png.as_path().into()), cx);
         async move {
-            make_poster(&video, &png)?;
+            if let Err(e) = make_poster(&video, &png) {
+                // The tile keeps the file's icon; the log says why there's no frame.
+                tracing::info!("no poster frame for {}: {e:#}", video.display());
+                return Err(e.into());
+            }
             read.await
         }
     }
@@ -1135,6 +1191,9 @@ mod shell_thumbnail {
         // one of another kind answers with an error and stays as it is (thumbnails are made there
         // too). It's left uninitialized only when this call initialized it.
         let joined = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        // As Windows writes it: the shell takes `D:/media/clip.mp4` (an agent's, Git Bash's, a
+        // pasted one) for "The parameter is incorrect", and the tile went without its frame.
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
         // SAFETY: a NUL-ended path; the bitmap the factory hands over is ours, read, then freed.
         let result = unsafe {
             SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(
@@ -1607,10 +1666,63 @@ mod tests {
                 .collect();
             assert!(colours.len() > 8, "{} colours", colours.len());
 
+            // Written with forward slashes, as an agent or Git Bash writes a path: the same frame.
+            let slashed = std::path::PathBuf::from(video.to_string_lossy().replace('\\', "/"));
+            let again = dir.join("poster-slashed.png");
+            to_png(&slashed, POSTER_EDGE, &again).unwrap();
+            assert_eq!(image::open(&again).unwrap().width(), w);
+
             // A file Windows has no thumbnail of says so, rather than giving its icon.
             let text = dir.join("notes.txt");
             std::fs::write(&text, "not a video").unwrap();
             assert!(to_png(&text, POSTER_EDGE, &dir.join("x.png")).is_err());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A poster asked for from a thread already in the multithreaded apartment, as the app's
+        /// image loader can ask from its pool: still made, the shell's thumbnailers being free
+        /// of the asking thread's apartment.
+        #[test]
+        fn a_poster_is_made_from_a_thread_in_the_multithreaded_apartment() {
+            use std::process::Stdio;
+            use windows::Win32::System::Com::{
+                COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
+            };
+            let dir = temp_dir("poster-mta");
+            std::fs::create_dir_all(&dir).unwrap();
+            let video = dir.join("clip.mp4");
+            let made = std::process::Command::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error", "-y"])
+                .args(["-f", "lavfi", "-i"])
+                .arg("testsrc=size=160x120:rate=4:duration=1")
+                .args(["-pix_fmt", "yuv420p"])
+                .arg(&video)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !made || !windows_thumbnails("mp4") {
+                eprintln!("skipped: no ffmpeg, or no thumbnailer for MP4 here");
+                let _ = std::fs::remove_dir_all(dir);
+                return;
+            }
+            let png = dir.join("poster.png");
+            let (from, to) = (video.clone(), png.clone());
+            let made = std::thread::spawn(move || {
+                // SAFETY: plain calls, balanced on this thread.
+                unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+                    .ok()
+                    .unwrap();
+                let made = to_png(&from, POSTER_EDGE, &to);
+                unsafe { CoUninitialize() };
+                made
+            })
+            .join()
+            .unwrap();
+            made.unwrap();
+            let back = image::open(&png).unwrap();
+            assert!(back.width() > 0 && back.height() > 0);
             let _ = std::fs::remove_dir_all(dir);
         }
 
