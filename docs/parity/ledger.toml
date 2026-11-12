@@ -18,7 +18,7 @@ area = "App"
 what = "Agents keep working with Trek's window closed"
 macos = "yes"
 windows = "partial"
-live_skip = "Closing the window isn't a command the capture build has: tests/upkeep.rs and the tray's tests keep agents going without it."
+live = ["route project:{project}", "pace 1", "send mock:long 10s", "wait 1500", "keep-working", "wait 2500", "show-main", "wait 1500", "count working-bar 1", "click stop", "pace 0"]
 how = { macos = "The app stays up in the Dock; the Dock icon reopens the window.", windows = "Closing the window with agents at work asks: Keep Working closes Trek's windows and quits once the work is done (after a grace for its banners), and opening Trek or the tray icon brings the window back. With nothing at work, closing quits." }
 note = "Windows has no Dock: Trek doesn't stay up idle with no window. A setting to stay in the tray indefinitely would match the Mac fully."
 code = ["crates/trek-app/src/root.rs", "crates/trek-app/src/lib.rs"]
@@ -40,7 +40,7 @@ area = "App"
 what = "Threads waiting on you, counted on the app's icon"
 macos = "yes"
 windows = "yes"
-live_skip = "The badge is drawn by the system outside Trek's window (the taskbar's, the Dock's): the badge tests count what it says."
+live = ["route settings:notifications", "wait 300", "reveal dock-badge", "click dock-badge", "route project:{project}", "pace 0", "send Read the project, then run a command that needs permission", "wait permission 30000", "wait 1500", "badge 1+", "deny", "route settings:notifications", "wait 300", "reveal dock-badge", "click dock-badge"]
 how = { macos = "Dock badge.", windows = "Overlay badge on the main window's taskbar button." }
 code = ["crates/trek-app/src/system.rs"]
 
@@ -50,7 +50,7 @@ area = "App"
 what = "Idle, working and needs-you icon with a small menu"
 macos = "yes"
 windows = "yes"
-live_skip = "The icon is in the system's tray (the menu bar on a Mac), outside Trek's window: the tray's tests."
+live = ["route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon", "wait 800", "tray idle", "route project:{project}", "pace 1", "send mock:long 10s", "wait 1500", "tray working", "click stop", "pace 0", "wait 1000", "send Read the project, then run a command that needs permission", "wait permission 30000", "wait 800", "tray attention", "deny", "wait 800", "route settings:notifications", "wait 300", "reveal menu-bar-icon", "click menu-bar-icon", "wait 800", "tray off"]
 how = { macos = "Menu bar icon, with Show/Hide Background Use.", windows = "System tray icon drawn per taskbar theme and scale; left-click opens Trek. No Background Use item (see computer-use-background)." }
 code = ["crates/trek-app/src/tray.rs"]
 tests = ["crates/trek-app/tests/windows.rs"]
@@ -61,7 +61,8 @@ area = "App"
 what = "A second launch hands its links and files to the running Trek"
 macos = "yes"
 windows = "yes"
-live_skip = "A second launch is another process: tests/reentry.rs and trek-core's single-instance tests."
+live_macos = ["route project:{project}", "open-link trek://edit?path={project}{/}README.md&line=1", "wait 1500", "count editor-save 1", "click mode-agents"]
+live_windows = ["route project:{project}", "second-launch trek://edit?path={project}{/}README.md&line=1", "wait 1500", "count editor-save 1", "click mode-agents"]
 how = { macos = "The system hands it over (open-URL and reopen events).", windows = "Trek's own named pipe and the data folder's lock." }
 code = ["crates/trek-app/src/single_instance.rs", "crates/trek-ipc/src/instance.rs", "crates/trek-ipc/src/server.rs"]
 
@@ -115,7 +116,7 @@ area = "Install"
 what = "A native build for each kind of processor"
 macos = "yes"
 windows = "partial"
-live_skip = "A release's builds: the release workflow."
+live = ["native"]
 how = { macos = "Apple silicon and Intel; an Intel build under Rosetta moves to the native one.", windows = "x64." }
 note = "No ARM64 build: Windows on Arm runs the x64 one emulated. Needs an aarch64-pc-windows-msvc release job and manifest entry."
 code = ["crates/trek-core/src/update.rs"]
@@ -303,7 +304,7 @@ area = "Tools"
 what = "The iOS Simulator tool"
 macos = "yes"
 windows = "n/a"
-live_macos = ["route project:{project}", "tools simulator", "wait 1500", "count sim-devices 1"]
+live_macos = ["route project:{project}", "tools simulator", "wait shown sim-devices 60000", "count sim-devices 1"]
 how = { macos = "simctl and AXe.", windows = "The Simulator comes with Xcode, which is Mac-only: Settings says so. An Android emulator tool would be the Windows counterpart." }
 code = ["crates/trek-app/src/workspace.rs", "crates/trek-app/src/panels/simulator.rs"]
 tests = ["crates/trek-app/tests/words.rs"]
@@ -346,7 +347,7 @@ area = "Browser"
 what = "A crashed page reloads, and a failed load says why"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a page's process to crash: tests/browser.rs."
+live = ["route project:{project}", "tools browser", "wait 600", "browser go http://127.0.0.1:9/", "wait 3000", "browser expect failed:127.0.0.1", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com"]
 note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:9) gets Trek's \"Can't reach this page\" with its reason, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari)."
 how = { macos = "WebKit's errors (NSURLErrorDomain, WebKitErrorDomain) and its web content process ending.", windows = "WebView2's: a load it put its own error page up for (ContentLoading's IsErrorPage), with NavigationCompleted's WebErrorStatus in Trek's words (an unknown status, as for a refused connection, said as unreachable); a load only stopped (a link handed to another app, a download) and a server's own 404 page are left alone. ProcessFailed for the page's own process (exited, or unresponsive) is a crash: reloaded, then explained if it ends again." }
 tests = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser.rs", "crates/trek-app/tests/browser.rs"]
@@ -425,7 +426,7 @@ area = "Agent tools"
 what = "Computer use in the background, with a floating live picture"
 macos = "yes"
 windows = "no"
-live_skip = "The live picture is a window of its own (background_use.rs), and checks count what's in the main window; `background-use show|fold|stop` drive it on a Mac, and its tests cover it."
+live_macos = ["route project:{project}", "pace 0", "send mock:background", "wait 3000", "count-all background-use 1"]
 note = "Input goes to a window behind yours on the Mac. Windows would need per-window capture (Windows.Graphics.Capture) and input through UI Automation; idle and lock detection are there already."
 code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-app/src/background_use.rs"]
 
@@ -546,7 +547,7 @@ area = "iPhone"
 what = "Uploads from the phone check for free space first"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a phone sending a file: trek-remote's upload tests."
+live = ["pair-phone Live check iPhone", "wait 1500", "pair-phone upload live-check.txt", "wait 2500", "file uploads{/}*live-check.txt", "pair-phone leave"]
 how = { macos = "statvfs.", windows = "GetDiskFreeSpaceExW (this user's share of it, a quota counted)." }
 code = ["crates/trek-app/src/remote/uploads.rs"]
 tests = ["crates/trek-app/src/remote/uploads.rs"]
@@ -624,7 +625,7 @@ area = "App"
 what = "Onboarding asks for the permissions Trek uses"
 macos = "yes"
 windows = "n/a"
-live_macos = ["onboarding permissions", "wait 600", "count ob-perm-* 2+", "click ob-skip-all"]
+live_macos = ["onboarding permissions", "wait 600", "count ob-perm-* 2+", "click ob-skip"]
 how = { macos = "A step with each permission, and Trek's icon to drag into the lists that take one.", windows = "Windows asks for none of the Mac's: the step is left out, and Settings › Notifications says when banners are off." }
 code = ["crates/trek-app/src/onboarding.rs", "crates/trek-integrations/src/lib.rs"]
 tests = ["crates/trek-app/tests/screens.rs"]
@@ -706,7 +707,7 @@ area = "Agent tools"
 what = "Agents' Simulator, iPhone and Trek-update tools"
 macos = "yes"
 windows = "partial"
-live_macos = ["route project:{project}", "tools simulator", "wait 1500", "count sim-devices 1"]
+live_macos = ["route project:{project}", "tools simulator", "wait shown sim-devices 60000", "count sim-devices 1"]
 live_windows = ["phone agent", "wait 600", "count phone-agent-strip 1", "count phone-agent-stop 1"]
 note = "On Windows agents get the iPhone's apps and files tools (iphone-tool). The Simulator's need Xcode, and Trek's update helper for agents is the Mac's own."
 code = ["crates/trek-mcp/src/main.rs", "crates/trek-mcp/src/rpc.rs"]
@@ -850,7 +851,8 @@ area = "Agents"
 what = "Stopping a thread, quitting Trek or a crash ends every program Trek and its agents started"
 macos = "yes"
 windows = "yes"
-live_skip = "What's ended is what agents start, and the mock agent starts nothing: procs.rs's and trek-job's tests, on both CIs."
+live_macos = ["route project:{project}", "pace 0", "send mock:hold", "wait 2500", "programs sleep 1", "click stop", "wait 4000", "programs-ended"]
+live_windows = ["route project:{project}", "pace 0", "send mock:hold", "wait 2500", "programs ping 1", "click stop", "wait 4000", "programs-ended"]
 how = { macos = "Agents, language servers and probes each run in a process group of their own: TERM, a grace period, then KILL to the whole group. The groups are written down, and the next launch ends those a crashed Trek left.", windows = "Each runs in a job object that ends all of it when Trek's handle closes, so a crash takes them along. Windows has no TERM: the gentle stop is the end of the agent's input, then the job is ended after the grace period. A child that couldn't be put in a job is ended by its process tree, found by parent ids and start times." }
 code = ["crates/trek-core/src/procs.rs", "crates/trek-job/src/lib.rs", "crates/trek-agents/src/lib.rs"]
 tests = ["crates/trek-core/src/procs.rs", "crates/trek-agents/src/tests_stop.rs", "crates/trek-app/tests/hardening.rs"]
@@ -861,7 +863,7 @@ area = "App"
 what = "Trek, and the programs it and its agents start, open no console windows"
 macos = "n/a"
 windows = "yes"
-live_skip = "A console window is the system's, outside Trek's: procs.rs's tests that every program starts without one, on Windows' CI."
+live_windows = ["console-windows mark", "route project:{project}", "pace 0", "send mock:hold", "wait 2500", "programs ping 1", "console-windows new 0", "click stop", "wait 4000", "programs-ended", "console-windows new 0"]
 how = { macos = "A Mac app and the programs it starts have no console window to show.", windows = "A release trek.exe is a GUI program (a dev build keeps its console, where the log goes), and every program Trek starts goes through trek_core::procs::command (CREATE_NO_WINDOW), so a .cmd wrapper's node and git's helpers share one hidden console. A lint test holds every spawn to it, and another watches for console windows from a process with no console, as Trek is." }
 code = ["crates/trek-core/src/procs.rs", "crates/trek-app/src/main.rs"]
 tests = ["crates/trek-core/tests/spawn_lint.rs", "crates/trek-core/tests/quiet_spawns.rs"]
@@ -953,7 +955,7 @@ area = "Editor"
 what = "Format document runs the file's formatter (rustfmt, prettier, black, gofmt, shfmt) from your PATH"
 macos = "yes"
 windows = "yes"
-live_skip = "Runs the file's formatter from PATH (rustfmt, prettier...): tests/ide.rs."
+live = ["route project:{project}", "click mode-editor", "wait 900", "editor open {project}{/}src{/}main.rs", "wait 900", "key alt-shift-f", "wait 3000", "key secondary-s", "wait 800", "file {project}{/}src{/}main.rs contains     println", "click mode-agents"]
 how = { macos = "The formatter as the PATH has it, stopped after 30 s.", windows = "The same; a .cmd shim (prettier.cmd) runs in a job object, so giving up ends the node behind it too, and its cmd.exe is told not to look in the file's folder for programs (NoDefaultCurrentDirectoryInExePath)." }
 code = ["crates/trek-format/src/lib.rs"]
 tests = ["crates/trek-format/src/lib.rs"]
@@ -1010,7 +1012,7 @@ macos = "yes"
 windows = "partial"
 live = ["count title-text 1"]
 how = { macos = "trek-dev. No Dock tile, and every window opens on a display of the run's own (Trek Test Display), so nothing is on the owner's screens and macOS keeps drawing it; `windows` and `screenshot --real` capture its real pixels. Pages and previews are snapped by WebKit or cropped from a capture of the window (Screen Recording); `browser press` sends a page real keys through AppKit; extensions' popups and options pages can be driven.", windows = "trek-dev.ps1. The window opens behind the owner's (TREK_BACKGROUND), where Windows keeps drawing it, so it needs no display of its own (`--real` is refused); pages and previews are snapped by WebView2. `hittest`, `realclick`, `realmove` and `realleave` check what the window answers WM_NCHITTEST and send its own handle a real click or a leave." }
-note = "On Windows: no `browser press` (a key into a page that WebView2 handles itself; WebView2's DevTools Input.dispatchKeyEvent would do it), no capture of a whole window's real pixels with its web views (PrintWindow with PW_RENDERFULLCONTENT, or Windows.Graphics.Capture, would), and `checks-demo` writes its stand-in `gh` as an extensionless `#!/bin/sh` script Windows can't start, so the pull request card's states can't be shown (a `gh.cmd` would). Extensions' popups and options pages are the Mac's alone because WebView2 has none (browser-extensions). Its terminal starts a real shell for a live check on Windows alone (`TREK_VERIFY_SHELL`: PowerShell with -NoProfile, cmd with /d, never a job's command); an isolated run on a Mac keeps its stand-in, as a Mac's login shells have no one flag that skips their start-up files. Its stand-in iPhone (`pair-phone`) pairs over the real protocol with a phone server on the loopback alone, on both."
+note = "On Windows: no `browser press` (a key into a page that WebView2 handles itself; WebView2's DevTools Input.dispatchKeyEvent would do it), no capture of a whole window's real pixels with its web views (PrintWindow with PW_RENDERFULLCONTENT, or Windows.Graphics.Capture, would), and `checks-demo` writes its stand-in `gh` as an extensionless `#!/bin/sh` script Windows can't start, so the pull request card's states can't be shown (a `gh.cmd` would). Extensions' popups and options pages are the Mac's alone because WebView2 has none (browser-extensions). Its terminal starts a real shell for a live check on Windows alone (`TREK_VERIFY_SHELL`: PowerShell with -NoProfile, cmd with /d, never a job's command); an isolated run on a Mac keeps its stand-in, as a Mac's login shells have no one flag that skips their start-up files. Its stand-in iPhone (`pair-phone`) pairs over the real protocol with a phone server on the loopback alone, on both. Its `second-launch` (Trek started again, handing a link over through `single_instance`) is Windows' alone: a Mac hands a second launch to the running app itself, which its `open-link` stands for."
 code = ["crates/trek-app/src/shots.rs", "crates/trek-app/src/test_display.rs"]
 tests = ["crates/trek-app/src/test_display.rs"]
 
@@ -1020,10 +1022,11 @@ area = "Editor"
 what = "Hover, completion, go to definition and problems in the editor, from the language's server when it's installed"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a language's server installed (rust-analyzer, typescript-language-server): tests/ide.rs."
+live = ["route project:{project}", "click mode-editor", "wait 900", "editor open {project}{/}lsp{/}src{/}lib.rs", "wait shown ide-status-lsp 30000", "click ide-status-problems", "wait shown ide-problem#0 120000", "count ide-problem#0 1", "count ide-status-lsp 1"]
 how = { macos = "The server found on the login shell's PATH, in a process group of its own that's ended with it.", windows = "The server found on PATH as PATHEXT names it (npm's `.cmd` shims run through cmd.exe), in a job object that's ended with it; files on a drive or a share go to the server as `file:///C:/…` and `file://host/share/…`." }
 code = ["crates/trek-app/src/lsp_client.rs"]
 tests = ["crates/trek-app/src/lsp_client.rs"]
+note = "A server that stops (it exits, or never starts properly, as rustup's rust-analyzer does without its component: it answers with an error) no longer shows as running in the status bar and Output, on both. The live check opens a crate whose module file is missing, which rust-analyzer reports by itself, and waits for that in Problems."
 
 [[feature]]
 id = "editor-files"
@@ -1035,6 +1038,7 @@ live = ["route project:{project}", "click mode-editor", "wait 900", "count ide-w
 how = { macos = "A pipe is opened without waiting for a writer, and turned away; a save keeps the file's mode, the executable bit included.", windows = "Windows has no FIFOs in folders: a device or a pipe is turned away by what its handle says, and a folder before it's opened (Windows refuses to open one as a file); a save keeps the file's attributes (no mode bits), and a read-only file is made writable for the move over it and read-only again after, which Windows needs and the Mac doesn't." }
 code = ["crates/trek-app/src/editor.rs"]
 tests = ["crates/trek-app/tests/editor.rs", "crates/trek-app/tests/ide.rs"]
+note = "The status bar says CRLF for a file whose lines end in a carriage return and a line feed (Git for Windows checks files out that way unless told otherwise), and LF otherwise; it said LF for every file. The editor keeps either as it is."
 
 [[feature]]
 id = "background-tasks"
@@ -1116,7 +1120,7 @@ area = "Install"
 what = "Trek starts on a computer with nothing else installed"
 macos = "yes"
 windows = "yes"
-live_skip = "About the release's trek.exe: tests/hardening.rs refuses one that needs a redistributable."
+live = ["self-contained"]
 how = { macos = "What it links comes with macOS or with the app.", windows = "The Visual C++ runtime is built into Trek's programs (script/static_vcruntime.rs), whisper.cpp's C++ too (/MT, vendor/whisper-rs-sys/build.rs), so no redistributable is needed; the Universal CRT is Windows' own. tests/hardening.rs and release.ps1 refuse a trek.exe that names the redistributable's DLLs." }
 code = ["script/static_vcruntime.rs", "vendor/whisper-rs-sys/build.rs", "script/release.ps1"]
 tests = ["crates/trek-app/tests/hardening.rs"]

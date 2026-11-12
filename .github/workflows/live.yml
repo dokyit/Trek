@@ -29,13 +29,16 @@ jobs:
   live-macos:
     name: Live (macOS)
     runs-on: macos-15
-    timeout-minutes: 75
+    # A pull request builds the app cold until main has saved this workflow's cache.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
+      # rustfmt: Format Document runs it on a Rust file; rust-analyzer: the editor's language server.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.99.0'
+          components: rustfmt, rust-analyzer
 
       - name: Cache key
         id: key
@@ -67,8 +70,12 @@ jobs:
       - name: ffmpeg
         run: command -v ffmpeg || brew install ffmpeg
 
-      # Its output to a file: the app it starts would hold the step's own open otherwise.
+      # Its output to a file: the app it starts would hold the step's own open otherwise. The mic
+      # and Study's Talk show as in the installed app: an unbundled build hides them unless told
+      # (`TREK_DICTATE=1`; a tap then says it's the installed app's to ask for the microphone).
       - name: Start the capture build
+        env:
+          TREK_DICTATE: '1'
         run: |
           ./.agents/skills/verify-trek/scripts/trek-dev start > start.json 2>&1 < /dev/null || { cat start.json; exit 1; }
           cat start.json
@@ -113,7 +120,11 @@ jobs:
   live-windows:
     name: Live (Windows)
     runs-on: windows-2022
-    timeout-minutes: 75
+    # A pull request builds the app cold until main has saved this workflow's cache.
+    timeout-minutes: 120
+    # As the test jobs link (ci.yml): faster than link.exe for an app this size.
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
     defaults:
       run:
         shell: pwsh
@@ -123,9 +134,11 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # rustfmt: Format Document runs it on a Rust file; rust-analyzer: the editor's language server.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.99.0'
+          components: rustfmt, rust-analyzer
 
       - name: Cache key
         id: key

@@ -437,7 +437,7 @@ impl EditorView {
             // Weak: the language server can speak for as long as the app lives.
             let state = state.downgrade();
             let (ws, file) = (workspace.downgrade(), path.clone());
-            cx.spawn(async move |_, cx| {
+            cx.spawn(async move |this, cx| {
                 while let Ok((u, diags)) = rx.recv().await {
                     if u != uri {
                         continue;
@@ -461,6 +461,19 @@ impl EditorView {
                     // Problems and the status bar count them too.
                     cx.update_entity(&ws, |ws, cx| ws.set_diagnostics(file.clone(), diags, cx));
                 }
+                // The server stopped: it exited, or never started properly (rustup's
+                // `rust-analyzer` without its component answers with an error and exits). The
+                // status bar and Output stop showing it as running.
+                let _ = this.update(cx, |this, cx| {
+                    if this
+                        .lsp
+                        .as_ref()
+                        .is_some_and(|(client, _)| client.stopped())
+                    {
+                        this.lsp_name = None;
+                        cx.notify();
+                    }
+                });
             })
         });
         self.lsp_name = lsp
@@ -473,6 +486,13 @@ impl EditorView {
         }
         self.refresh_diff(cx);
         cx.notify();
+    }
+
+    /// Whether the file's lines end in `\r\n`, as its first line does: they're kept so, and saved
+    /// so (Git for Windows checks files out that way unless told otherwise). One byte is read,
+    /// however long that line.
+    pub fn crlf(&self, cx: &App) -> bool {
+        first_line_ends_crlf(self.state.read(cx).text())
     }
 
     /// The file is still being read.
@@ -1915,5 +1935,37 @@ impl Render for EditorView {
                 ),
             )
             .into_any_element()
+    }
+}
+
+/// `text`'s first line ends in `\r\n` (its `\r` is the byte before the line's end; a text with
+/// no line break has no ending to tell).
+fn first_line_ends_crlf(text: &gpui_kit::base::input::Rope) -> bool {
+    use gpui_kit::base::input::RopeExt as _;
+    let end = text.line_end_offset(0);
+    end > 0 && end < text.len() && text.byte(end - 1) == b'\r'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_line_ends_crlf;
+    use gpui_kit::base::input::Rope;
+
+    /// The status bar says CRLF for a file Git for Windows checked out with `\r\n`, LF otherwise.
+    #[test]
+    fn line_endings_are_read_from_the_first_line() {
+        let crlf = |s: &str| first_line_ends_crlf(&Rope::from(s));
+        assert!(crlf("fn main() {}\r\n"));
+        assert!(crlf("a\r\nb\nc\n"), "the first line's says");
+        assert!(crlf("\r\n"));
+        assert!(!crlf("fn main() {}\n"));
+        assert!(!crlf("a\nb\r\n"));
+        assert!(!crlf("no line break"));
+        assert!(!crlf("ends in a carriage return\r"));
+        assert!(!crlf(""));
+        assert!(
+            crlf("héllo wörld 中文\r\nmore"),
+            "past multi-byte characters"
+        );
     }
 }

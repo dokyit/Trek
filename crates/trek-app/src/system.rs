@@ -108,6 +108,10 @@ pub fn reduce_motion_as(system: bool, workspace: &Entity<Workspace>, cx: &mut Ap
     }
 }
 
+/// The count on the app's icon (the Dock tile's, the taskbar button's overlay) as last put up, the
+/// system having taken it: what the capture build's `badge` checks.
+pub static SHOWN_BADGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     apply_reduce_motion(workspace, cx);
     let ws = workspace.read(cx);
@@ -135,6 +139,7 @@ fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
         // opened), or the window be busy. Ask again soon rather than wait for a change.
         if set_dock_badge(badge, main, cx) {
             applied.badge = badge;
+            SHOWN_BADGE.store(badge, std::sync::atomic::Ordering::Relaxed);
             applied.badge_window = main;
         } else if main.is_some() {
             let workspace = workspace.downgrade();

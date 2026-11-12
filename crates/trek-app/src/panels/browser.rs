@@ -391,6 +391,24 @@ mod native {
         wv.webview().setAppearance(appearance.as_deref());
     }
 
+    /// End the page's web content process, as a crash would (the capture build's `browser
+    /// crash`), through WebKit's own `_killWebContentProcess`, which its tests use. How many
+    /// processes ended: one.
+    #[cfg(feature = "shots")]
+    pub fn end_page_process(wv: &wry::WebView) -> Result<usize, String> {
+        use objc2::{msg_send, sel};
+        let view = wv.webview();
+        // SAFETY: `respondsToSelector:` is NSObject's; the view is live, on the main thread.
+        let can: bool =
+            unsafe { msg_send![&*view, respondsToSelector: sel!(_killWebContentProcess)] };
+        if !can {
+            return Err("this WebKit can't end a page's process".into());
+        }
+        // SAFETY: as above; the selector takes nothing and returns nothing.
+        let () = unsafe { msg_send![&*view, _killWebContentProcess] };
+        Ok(1)
+    }
+
     /// The page as WebKit draws it, as TIFF bytes.
     #[cfg(feature = "shots")]
     pub fn snapshot(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
@@ -523,6 +541,59 @@ mod native {
             let _ = webview.add_ContentLoading(&on_error, &mut token);
             let _ = webview.add_HistoryChanged(&on_history, &mut token);
         }
+    }
+
+    /// End the page's own process, as a crash would (the capture build's `browser crash`): each
+    /// renderer WebView2 lists for the tab's environment (another tab's page sharing one ends
+    /// with it). How many ended.
+    #[cfg(feature = "shots")]
+    pub fn end_page_process(wv: &wry::WebView) -> Result<usize, String> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_PROCESS_KIND, COREWEBVIEW2_PROCESS_KIND_RENDERER, ICoreWebView2_2,
+            ICoreWebView2Environment8,
+        };
+        use windows_61::core::Interface as _;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        // SAFETY: COM calls on the tab's own WebView2, on the thread that made it; an older
+        // runtime without these interfaces answers with an error.
+        let infos = unsafe {
+            wv.webview()
+                .cast::<ICoreWebView2_2>()
+                .and_then(|w| w.Environment())
+                .and_then(|e| e.cast::<ICoreWebView2Environment8>())
+                .and_then(|e| e.GetProcessInfos())
+        }
+        .map_err(|e| format!("WebView2 won't list its processes: {e}"))?;
+        let mut count = 0u32;
+        // SAFETY: as above.
+        unsafe { infos.Count(&mut count) }.map_err(|e| e.to_string())?;
+        let mut ended = 0;
+        for i in 0..count {
+            let (mut pid, mut kind) = (0i32, COREWEBVIEW2_PROCESS_KIND::default());
+            // SAFETY: as above, on the collection WebView2 just handed over.
+            unsafe {
+                let info = infos.GetValueAtIndex(i).map_err(|e| e.to_string())?;
+                info.ProcessId(&mut pid).map_err(|e| e.to_string())?;
+                info.Kind(&mut kind).map_err(|e| e.to_string())?;
+            }
+            if kind != COREWEBVIEW2_PROCESS_KIND_RENDERER {
+                continue;
+            }
+            // SAFETY: plain calls on a handle that's checked, used once and closed.
+            unsafe {
+                let process = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
+                if !process.is_null() {
+                    if TerminateProcess(process, 1) != 0 {
+                        ended += 1;
+                    }
+                    CloseHandle(process);
+                }
+            }
+        }
+        Ok(ended)
     }
 
     /// The page as the view shows it: PNG bytes at the view's size in device pixels, which is what
@@ -3688,6 +3759,7 @@ impl BrowserPanel {
             "url": tab.map(|t| t.page.url.clone()),
             "label": tab.map(|t| t.page.label()),
             "failed": tab.and_then(|t| t.page.failed.clone()),
+            "crashed": tab.map(|t| t.crashed.is_some()),
             "loading": tab.map(|t| t.page.loading),
             "can_back": tab.map(|t| t.page.can_back),
             "can_forward": tab.map(|t| t.page.can_forward),
@@ -3728,6 +3800,13 @@ impl BrowserPanel {
     ) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
         self.active_tab()
             .map(|t| native::snapshot(t.view.read(cx).raw()))
+    }
+
+    /// End the active tab's page process, as a crash would (`browser crash`): how many ended.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn shots_crash(&self, cx: &App) -> Result<usize, String> {
+        let tab = self.active_tab().ok_or("no page")?;
+        native::end_page_process(tab.view.read(cx).raw())
     }
 
     /// The page as `screenshot` would capture it.

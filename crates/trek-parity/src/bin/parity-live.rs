@@ -21,18 +21,22 @@ use std::time::{Duration, Instant};
 use trek_parity::{Feature, Ledger, Platform, Support};
 
 /// Before each feature: what was open is closed, and the app is on a new thread's composer, in
-/// Agents mode.
+/// Agents mode. A route first: a feature that failed partway can leave a page without the mode
+/// switch on screen (onboarding, which is a route of its own), and the next feature mustn't fail
+/// for it.
 const FROM_THE_START: &[&str] = &[
     "key escape",
     "key escape",
     "tools off",
+    "route draft",
     "click mode-agents",
     "route draft",
     "wait 250",
 ];
 
 /// What steps can name, filled in here: `{project}`, a small git project made beside the
-/// command folder (a README, and a source file with a tab in it); `{data}`, the app's data
+/// command folder (a README, a source file with a tab in it, and a crate one folder down whose
+/// module is missing, for the language server); `{data}`, the app's data
 /// folder; `{/}`, this platform's path separator (an Explorer row's id is its path).
 fn fill(step: &str, project: &Path) -> String {
     // The app's data folder is beside the project, in the driver's runtime folder.
@@ -49,11 +53,31 @@ fn project_beside(shot_dir: &Path) -> std::io::Result<PathBuf> {
         return Ok(dir);
     }
     std::fs::create_dir_all(dir.join("src"))?;
+    std::fs::create_dir_all(dir.join("lsp").join("src"))?;
     std::fs::write(
         dir.join("README.md"),
         "# Live project
 
 What parity-live's steps work in.
+",
+    )?;
+    // A crate of its own one folder down, which rust-analyzer finds from the project's root, and
+    // in it what it reports by itself, no build needed: a module whose file isn't there. What
+    // rust-analyzer's Cargo writes beside it is ignored, so the project's changes stay the steps'.
+    std::fs::write(dir.join(".gitignore"), "target/\nCargo.lock\n")?;
+    std::fs::write(
+        dir.join("lsp").join("Cargo.toml"),
+        "[package]
+name = \"lsp\"
+version = \"0.1.0\"
+edition = \"2021\"
+",
+    )?;
+    std::fs::write(
+        dir.join("lsp").join("src").join("lib.rs"),
+        "//! What the language server check opens: a module whose file isn't there.
+
+mod missing;
 ",
     )?;
     std::fs::write(
@@ -234,6 +258,9 @@ fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Du
     let mut lines: Vec<String> = FROM_THE_START.iter().map(|s| s.to_string()).collect();
     lines.extend(f.live_on(platform).iter().map(|s| fill(s, project)));
     lines.push(format!("shot live-{}", f.id));
+    // The steps' own waits on top: a feature that waits two minutes for a language server isn't
+    // given up on after one and a half.
+    let timeout = timeout + waits(&lines);
     let done = dir.join("done");
     let _ = std::fs::remove_file(&done);
     let staged = dir.join("cmd.parity-live");
@@ -263,6 +290,14 @@ fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Du
             }
         }
         if start.elapsed() > timeout {
+            // Its answer may yet come: waited out and dropped, or it would be taken for the next
+            // feature's.
+            let late = Instant::now();
+            while late.elapsed() < timeout && !done.exists() {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = std::fs::remove_file(&done);
             return Outcome::Failed(vec![format!(
                 "no answer from the app in {} s (is the capture build running from {}?)",
                 timeout.as_secs(),
@@ -271,6 +306,27 @@ fn send(dir: &Path, project: &Path, f: &Feature, platform: Platform, timeout: Du
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// How long `steps` may take by their own waits: a `wait`'s milliseconds, or the cap of what it
+/// waits for (the app's own default where a step gives none: 30 s for `shown`, 60 s otherwise).
+fn waits(steps: &[String]) -> Duration {
+    let ms = |w: Option<&str>| w.and_then(|v| v.parse::<u64>().ok());
+    steps
+        .iter()
+        .map(|step| {
+            let mut words = step.split_whitespace();
+            if words.next() != Some("wait") {
+                return 0;
+            }
+            match words.next() {
+                Some("shown") => ms(words.nth(1)).unwrap_or(30_000),
+                Some(what) => ms(Some(what)).or(ms(words.next())).unwrap_or(60_000),
+                None => 0,
+            }
+        })
+        .map(Duration::from_millis)
+        .sum()
 }
 
 /// The run as a page: what was shown working on this platform, what failed and why, and what has
@@ -330,4 +386,30 @@ fn render(results: &[(&Feature, Outcome)], platform: Platform, root: &Path) -> S
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::waits;
+    use std::time::Duration;
+
+    /// A feature is given its steps' own waits on top of the base time.
+    #[test]
+    fn a_features_waits_add_up() {
+        let steps: Vec<String> = [
+            "route draft",
+            "wait 1500",
+            "wait idle 30000",
+            "wait permission",
+            "wait shown ide-problem#0 120000",
+            "wait shown sim-devices",
+            "count x 1",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            waits(&steps),
+            Duration::from_millis(1_500 + 30_000 + 60_000 + 120_000 + 30_000)
+        );
+    }
 }

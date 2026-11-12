@@ -437,6 +437,20 @@ pub fn open_trek(ws: &Entity<Workspace>, cx: &mut App) {
 struct TrayGlobal(#[allow(dead_code)] Entity<Tray>);
 impl Global for TrayGlobal {}
 
+/// The icon as it is, for the capture build's live checks: the state it shows (`idle`, `working`,
+/// `attention`), whether the system has it on screen (`TrayIcon::rect`, the system's own answer:
+/// `Shell_NotifyIconGetRect` on Windows, the status item's frame on a Mac) and its menu's first
+/// line. None while it's off.
+#[cfg(feature = "shots")]
+pub fn shown(cx: &App) -> Option<(&'static str, bool, String)> {
+    let tray = cx.try_global::<TrayGlobal>()?.0.read(cx);
+    Some((
+        tray.glyph.name(),
+        tray.icon.rect().is_some(),
+        tray.status.text(),
+    ))
+}
+
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let on = workspace.read(cx).settings.notifications.menu_bar_icon;
     set_enabled(workspace, on, cx);

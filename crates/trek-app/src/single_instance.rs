@@ -58,19 +58,33 @@ pub enum Claim {
     Failed(String),
 }
 
-/// The launch's decision, first thing in `main`. Off the Windows path (and in a capture run,
-/// which is isolated from any other Trek), always the Trek for its folder, as before.
+/// The launch's decision, first thing in `main`. Off the Windows path, always the Trek for its
+/// folder, as before.
 pub fn claim() -> Claim {
     #[cfg(windows)]
-    if std::env::var_os("TREK_SHOT_DIR").is_none() {
+    if let Some(dir) = folder() {
         let cwd = std::env::current_dir().unwrap_or_default();
         let open = Open {
             args: launch_args(std::env::args_os().skip(1), &cwd),
             background: background(),
         };
-        return claim_in(&trek_core::paths::data_dir(), open, WAIT);
+        return claim_in(&dir, open, WAIT);
     }
     Claim::Primary(Primary::default())
+}
+
+/// The data folder a launch is the one Trek for. A capture run (`TREK_SHOT_DIR`) is isolated from
+/// any other Trek, so it never looks at the user's folder: it claims the folder `TREK_DATA_DIR`
+/// gives it, which only its own launches share (its live check starts it a second time there,
+/// `shots`' `second-launch`), and without one it has a folder nothing else could launch into.
+#[cfg(windows)]
+fn folder() -> Option<PathBuf> {
+    if std::env::var_os("TREK_SHOT_DIR").is_none() {
+        return Some(trek_core::paths::data_dir());
+    }
+    std::env::var_os("TREK_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
 }
 
 /// `TREK_BACKGROUND=1`: this launch mustn't bring Trek forward (see `main`).

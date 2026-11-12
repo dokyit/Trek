@@ -76,6 +76,8 @@
 //! | `mock:watch` [dur]           | leaves a test watcher running; `dur` later (default 3s) it    |
 //! |                              | reports a failure and the agent takes a turn of its own       |
 //! | `mock:dev`                   | leaves a dev server and a quiet test watcher running          |
+//! | `mock:hold`                  | runs a real command until Stop, through Trek's own executor:  |
+//! |                              | a shell and a program under it (`ping`; `sleep` on a Mac)     |
 //! | `mock:cost` [`plan`]         | a turn on Claude Sonnet 5.5 at its API price, billed per      |
 //! |                              | token (or, with `plan`, on a Claude Max plan)                 |
 //! | `mock:verify` [`broken`]     | changes `src/notes.rs` (for real; `broken` leaves a `todo!()`  |
@@ -327,6 +329,8 @@ enum Script {
     NearLimit(Duration),
     /// Work on for a while, taking no notice of Stop (`mock:deaf`).
     Deaf(Duration),
+    /// A real command that runs until Stop, through Trek's own executor (`mock:hold`).
+    Hold,
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate {
         wait: bool,
@@ -491,6 +495,7 @@ impl Script {
                 "deaf" if w.starts_with("mock:") => {
                     Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60)))
                 }
+                "hold" if w.starts_with("mock:") => Script::Hold,
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "pair" if w.starts_with("mock:") => Script::Pair,
@@ -637,6 +642,7 @@ pub fn title(request: &str) -> String {
         Script::SimCheck => "Check the Threads screen",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
+        Script::Hold => "Keep a program running",
         Script::Delegate { .. } => "Get a second opinion",
         Script::Pair => "Get two opinions",
         Script::StartThread { .. } => "Split off the test work",
@@ -1444,6 +1450,7 @@ impl Session {
             Script::Limit(after) => return self.limit(after).await,
             Script::NearLimit(after) => return self.near_limit(after).await,
             Script::Deaf(d) => return self.deaf(d).await,
+            Script::Hold => self.hold().await?,
             Script::Cost { plan } => return self.priced_turn(plan).await,
             Script::Restate => self.restate(text).await?,
             Script::Arena => self.arena(text).await?,
@@ -1583,6 +1590,44 @@ impl Session {
         .await?;
         self.say("The migration ran to the end.").await?;
         self.finish().await
+    }
+
+    /// `mock:hold`: a real command, run as Trek's own sessions run their tools
+    /// (`direct::executor::LocalExecutor`: in a process group, a job on Windows), that keeps going
+    /// until the turn is stopped: a shell, and under it a program (`ping` on Windows, `sleep`
+    /// elsewhere). Stop drops the run, which must end both; the capture build's live checks look
+    /// for the program before and after (`shots`' `programs`).
+    async fn hold(&mut self) -> Step {
+        use crate::direct::executor::{LocalExecutor, ToolExecutor as _};
+        // Two commands, so the shell starts the program rather than becoming it; `&&` reads the
+        // same in cmd.exe and in a POSIX shell (Git Bash on Windows, when it's there).
+        let command = if cfg!(windows) {
+            "ping -n 600 127.0.0.1 && echo done"
+        } else {
+            "sleep 600 && echo done"
+        };
+        let id = self.id("tool");
+        self.tool_start(&id, "Run command", command).await?;
+        let cwd = self.cwd.clone();
+        let run = LocalExecutor.exec(command, &cwd, Some(Duration::from_secs(600)));
+        tokio::pin!(run);
+        let out = loop {
+            tokio::select! {
+                out = &mut run => break out,
+                cmd = self.commands.recv() => self.handle_midturn(cmd)?,
+            }
+        };
+        let (output, ok) = match out {
+            Ok(o) => (format!("{}{}", o.stdout, o.stderr), o.success()),
+            Err(e) => (format!("Couldn't run it: {e:#}"), false),
+        };
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: output.trim_end().to_string(),
+            ok,
+        })
+        .await?;
+        self.say("The program ran to its end.").await
     }
 
     /// Wait up to `d` of real time for the next message sent mid-turn.
@@ -3941,6 +3986,8 @@ mod tests {
             Script::Task(Duration::from_secs(2))
         );
         assert_eq!(Script::parse("mock:dev", false), Script::Dev);
+        assert_eq!(Script::parse("mock:hold", false), Script::Hold);
+        assert_eq!(Script::parse("hold on", false), Script::Answer);
         assert_eq!(
             Script::parse("explore the repo", false),
             Script::Answer,

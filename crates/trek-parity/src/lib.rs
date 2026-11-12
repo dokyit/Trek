@@ -386,8 +386,15 @@ impl Feature {
 /// A live step that checks something (what's on screen, a file the app wrote), rather than doing
 /// something.
 pub fn checks(step: &str) -> bool {
-    let verb = step.split_whitespace().next().unwrap_or_default();
-    matches!(verb, "count" | "hittest" | "file" | "private")
+    let mut words = step.split_whitespace();
+    match words.next().unwrap_or_default() {
+        "count" | "count-all" | "hittest" | "file" | "private" | "badge" | "tray" | "programs"
+        | "programs-ended" | "native" | "self-contained" => true,
+        // `mark` only notes what is there.
+        "console-windows" => words.next() == Some("new"),
+        "browser" => words.next() == Some("expect"),
+        _ => false,
+    }
 }
 
 /// What's wrong with `feature`'s live steps: a platform it's on with neither steps nor a word on
@@ -946,6 +953,11 @@ mod tests {
         assert_eq!(f.live_on(Platform::Windows), ["count phone-apps 1"]);
         assert!(checks("count x 1") && checks("hittest title-text HTCAPTION"));
         assert!(checks("private mobile/identity.key") && checks("file downloads/a.txt"));
+        assert!(checks("badge 1+") && checks("count-all background-use 1"));
+        assert!(checks("tray attention") && checks("programs ping 1") && checks("programs-ended"));
+        assert!(checks("console-windows new 0") && !checks("console-windows mark"));
+        assert!(checks("browser expect crashed loaded") && !checks("browser crash"));
+        assert!(checks("native") && checks("self-contained"));
         assert!(!checks("route draft"));
     }
 

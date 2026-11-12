@@ -334,18 +334,50 @@ pub fn session_locked() -> bool {
     }
 }
 
+/// Whether this process writes the identity toasts show under. The user's own Trek always does:
+/// its icon is the one to show. A process with a data folder of its own (a capture run, a trial
+/// build: `takes_over_links`) shares the app id with the installed Trek, so it writes only where
+/// none is registered yet; else the installed Trek's banners would point at an icon in a folder
+/// that's thrown away.
+#[cfg(any(windows, test, feature = "test-support"))]
+pub fn writes_toast_identity(own: bool, registered: bool) -> bool {
+    own || !registered
+}
+
 /// Register the identity and icon toasts show under, before the first is posted. GPUI registers
 /// the AppUserModelID's name (`set_app_identity`); an unpackaged app also needs an icon there, or
-/// its toasts show a blank one. Written once per run, to the current user's classes only.
+/// its toasts show a blank one. Written once per run, to the current user's classes only, and
+/// only as `writes_toast_identity` says.
 #[cfg(windows)]
 #[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
     use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
-        RegCreateKeyExW, RegSetValueExW,
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW,
     };
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain([0]).collect()
+    }
+    let key = wide(&format!(r"Software\Classes\AppUserModelId\{app_id}"));
+    let own = takes_over_links(
+        std::env::var_os("TREK_SHOT_DIR").as_deref(),
+        std::env::var_os("TREK_DATA_DIR").as_deref(),
+    );
+    let (icon_uri, mut size) = (wide("IconUri"), 0u32);
+    // SAFETY: NUL-ended names; with no buffer, the call only says whether the value is there.
+    let registered = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            icon_uri.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    } == 0;
+    if !writes_toast_identity(own, registered) {
+        return;
     }
     // Next to the other state, where the next run finds it again.
     let icon = trek_core::paths::data_dir().join("toast-icon.png");
@@ -353,7 +385,6 @@ pub fn register_toast_identity(app_id: &str, name: &str, icon_png: &[u8]) {
         tracing::warn!("toast icon: {e}");
         return;
     }
-    let key = wide(&format!(r"Software\Classes\AppUserModelId\{app_id}"));
     let mut hkey: HKEY = std::ptr::null_mut();
     // SAFETY: NUL-ended names, and a key handle that is closed below.
     unsafe {
@@ -969,6 +1000,22 @@ mod tests {
         assert!(
             !super::takes_over_links(Some(OsStr::new(r"D:\shots")), None),
             "a capture run"
+        );
+    }
+
+    /// A trial build or capture run shares the installed Trek's app id: it never replaces the
+    /// icon that Trek's banners show, which would point at a folder that's thrown away.
+    #[test]
+    fn only_the_users_own_trek_replaces_the_banners_icon() {
+        assert!(super::writes_toast_identity(true, true), "its own icon");
+        assert!(super::writes_toast_identity(true, false));
+        assert!(
+            !super::writes_toast_identity(false, true),
+            "a trial build leaves the installed Trek's"
+        );
+        assert!(
+            super::writes_toast_identity(false, false),
+            "with none there, its banners still get one"
         );
     }
 

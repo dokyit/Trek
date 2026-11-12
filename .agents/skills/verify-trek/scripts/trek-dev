@@ -51,7 +51,7 @@ port = 7431
 
 TOOLS = {"git", "explorer", "terminal", "browser", "sidechat", "simulator", "iphone"}
 BASIC_ROUTES = {"draft", "no-project", "basecamp", "notes", "study", "appearance", "first", "onboarding"}
-CONTROL_VERBS = {"browser", "range", "settled", "glass", "tint", "theme", "dress", "title", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "reveal", "reveal-in", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "attach", "pair", "limits-demo", "pr-demo", "dictate", "dictate-file", "dictate-demo", "onboarding", "phone", "pair-phone", "heic-demo", "open-link", "file", "private", "update-demo", "resume-demo", "accounts-demo", "compact-demo", "secret-demo", "import-demo", "checks-demo", "privacy-demo", "approve", "deny", "answer"}
+CONTROL_VERBS = {"browser", "range", "settled", "glass", "tint", "theme", "dress", "title", "pace", "wait", "new", "diff", "tools", "editor", "ide", "artifacts", "scroll", "reveal", "reveal-in", "click", "rclick", "hover", "elements", "key", "note", "background-use", "terminal", "type", "attach", "pair", "limits-demo", "pr-demo", "dictate", "dictate-file", "dictate-demo", "onboarding", "phone", "pair-phone", "heic-demo", "open-link", "file", "private", "second-launch", "keep-working", "show-main", "badge", "count-all", "tray", "programs", "programs-ended", "console-windows", "native", "self-contained", "update-demo", "resume-demo", "accounts-demo", "compact-demo", "secret-demo", "import-demo", "checks-demo", "privacy-demo", "approve", "deny", "answer"}
 
 
 # Values of TREK_TEST_DISPLAY that turn the test display off.
