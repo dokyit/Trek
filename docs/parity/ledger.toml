@@ -85,9 +85,8 @@ id = "open-in"
 area = "App"
 what = "Open a project in another app"
 macos = "yes"
-windows = "partial"
-how = { macos = "Finder, Terminal, Ghostty, Zed, Cursor, VS Code, Xcode, found in /Applications or the user's own ~/Applications.", windows = "File Explorer, Windows Terminal, Zed, Cursor, VS Code, found through App Paths and the PATH." }
-note = "JetBrains IDEs, Visual Studio and a PowerShell or Git Bash choice aren't offered yet."
+windows = "yes"
+how = { macos = "Finder, Terminal, Ghostty, Zed, Cursor, VS Code, the JetBrains IDEs and Xcode, found in /Applications or the user's own ~/Applications (one list, trek_core::open_in::MAC_APPS, for both menus).", windows = "File Explorer, Windows Terminal (its default profile: PowerShell, cmd or Git Bash as the user set it), Zed, Cursor, VS Code, the JetBrains IDEs (JetBrains Toolbox's scripts on the PATH) and Visual Studio, found through App Paths and the PATH." }
 code = ["crates/trek-core/src/open_in.rs", "crates/trek-app/src/hub.rs", "crates/trek-app/src/thread_menu.rs"]
 tests = ["crates/trek-app/tests/hub.rs"]
 
