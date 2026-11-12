@@ -418,16 +418,14 @@ mod native {
 #[cfg(windows)]
 mod native {
     use super::Msg;
-    use webview2_com::Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, ICoreWebView2,
-    };
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
     use webview2_com::{
         CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
         ContentLoadingEventHandler, HistoryChangedEventHandler,
     };
     use windows_61::Win32::System::Com::{IStream, STREAM_SEEK_SET};
     use windows_61::Win32::UI::Shell::SHCreateMemStream;
-    use windows_61::core::{BOOL, PWSTR, w};
+    use windows_61::core::{BOOL, w};
     use wry::WebViewExtWindows as _;
 
     pub fn can_go_back(wv: &wry::WebView) -> bool {
@@ -493,31 +491,25 @@ mod native {
         }
     }
 
-    fn source(wv: &ICoreWebView2) -> String {
-        let mut url = PWSTR::null();
-        match unsafe { wv.Source(&mut url) } {
-            Ok(()) => webview2_com::take_pwstr(url),
-            Err(_) => String::new(),
-        }
-    }
-
     /// Report what the page-load handler doesn't: a load that ended on WebView2's own error page
     /// (Trek shows its error page instead, as on macOS), and history moving within a page (a
-    /// fragment, `pushState`), which changes back and forward without a new load.
+    /// fragment, `pushState`), which changes back and forward without a new load. The error page
+    /// is only noted here: the load's `NavigationCompleted` says why it failed, and sends the one
+    /// message for it (`webview2::hook`).
     pub fn watch(wv: &wry::WebView, tab: u64, tx: &async_channel::Sender<Msg>) {
         let webview = wv.webview();
-        let failed = tx.clone();
-        let on_error = ContentLoadingEventHandler::create(Box::new(move |wv, args| {
-            let (Some(wv), Some(args)) = (wv, args) else {
+        let on_error = ContentLoadingEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
                 return Ok(());
             };
             let mut error = BOOL::default();
-            unsafe { args.IsErrorPage(&mut error)? };
+            let mut navigation = 0u64;
+            unsafe {
+                args.IsErrorPage(&mut error)?;
+                args.NavigationId(&mut navigation)?;
+            }
             if error.as_bool() {
-                let _ = failed.try_send(Msg::Failed {
-                    tab,
-                    url: source(&wv),
-                });
+                super::webview2::error_page_shown(navigation);
             }
             Ok(())
         }));
@@ -724,12 +716,6 @@ enum Msg {
     Drawn {
         tab: u64,
         dark: Option<bool>,
-    },
-    /// WebView2 is showing its own error page for `url`: the load failed.
-    #[cfg(windows)]
-    Failed {
-        tab: u64,
-        url: String,
     },
     /// History moved without a load (a fragment, `pushState`): back and forward may have changed.
     #[cfg(windows)]
@@ -2171,10 +2157,20 @@ impl BrowserPanel {
                 domain,
                 code,
             } => {
+                let Some(tab) = self.tab_mut(id) else { return };
                 let url = from_view(url);
-                if url.starts_with("trek://") || self.tab_mut(id).is_none() {
+                // Trek's own page failing (its error page too) leaves the view's own showing:
+                // another error page of Trek's would fail the same way, again and again.
+                if url.starts_with("trek://") {
+                    tracing::warn!("browser: Trek's page {url} didn't load");
                     return;
                 }
+                // WebView2 may not say which address failed: the tab's own, then.
+                let url = if url.is_empty() {
+                    tab.page.url.clone()
+                } else {
+                    url
+                };
                 if let Some((heading, why)) = asks::load_failure(&domain, code, &url) {
                     tracing::info!("browser: {url} failed: {domain} {code}");
                     self.show_load_failure(id, url, Some((heading, &why)), cx);
@@ -2235,23 +2231,6 @@ impl BrowserPanel {
                     tab.scheme_reloads -= 1;
                     let _ = tab.view.read(cx).raw().reload();
                 }
-            }
-            #[cfg(windows)]
-            Msg::Failed { tab: id, url } => {
-                let Some(tab) = self.tab_mut(id) else { return };
-                let failed = from_view(url);
-                // Trek's own page failing (its error page too) leaves WebView2's showing: another
-                // error page of Trek's would fail the same way, again and again.
-                if failed.starts_with("trek://") {
-                    tracing::warn!("browser: Trek's page {failed} didn't load");
-                    return;
-                }
-                let url = if failed.is_empty() {
-                    tab.page.url.clone()
-                } else {
-                    failed
-                };
-                self.show_load_error(id, url, cx);
             }
             #[cfg(windows)]
             Msg::History(id) => self.refresh_nav(id, cx),
@@ -4809,13 +4788,19 @@ mod tests {
         let size = wv.bounds().expect("bounds").size.to_physical::<u32>(1.0);
         assert_eq!((info.width, info.height), (size.width, size.height));
 
-        // A load that fails ends on WebView2's error page, which Trek is told of.
+        // A load that fails is told to Trek once, with WebView2's reason, which reads in Trek's
+        // words: nothing listens on port 9, so it's refused.
         wv.load_url("http://127.0.0.1:9/").expect("navigate");
-        let failed = wait_for("the failure", || match rx.try_recv() {
-            Ok(Msg::Failed { url, .. }) => Some(url),
+        let (failed, domain, code) = wait_for("the failure", || match rx.try_recv() {
+            Ok(Msg::LoadFailed {
+                url, domain, code, ..
+            }) => Some((url, domain, code)),
             _ => None,
         });
         assert!(failed.starts_with("http://127.0.0.1:9"), "{failed}");
+        let (heading, why) =
+            super::asks::load_failure(&domain, code, &failed).expect("in Trek's words");
+        assert_eq!(heading, "Can’t reach this page", "{domain} {code}: {why}");
 
         // The window goes first (a closed Trek window), then the view: no crash.
         unsafe { DestroyWindow(parent as _) };
@@ -5149,7 +5134,7 @@ mod tests {
             let failed = view
                 .drain(Duration::from_millis(300))
                 .iter()
-                .any(|m| matches!(m, Msg::Failed { .. }));
+                .any(|m| matches!(m, Msg::LoadFailed { .. }));
             assert!(!failed, "{to} ended on an error page");
             assert_eq!(
                 eval(&view.wv, "location.pathname"),

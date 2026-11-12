@@ -13,31 +13,38 @@
 //!   its own while WebView2 waits, the panel makes it on the opener's environment, and wry hands it
 //!   to WebView2 (`SetNewWindow`), so the popup keeps `window.opener` and a sign-in can post its
 //!   answer back. `window.close()` closes the tab.
+//! - A load that fails (`NavigationCompleted` without success) gets Trek's page saying why, in
+//!   place of WebView2's, and a page whose own process ends (`ProcessFailed`) is reloaded, then
+//!   explained if it ends again: the panel does both from `Msg`, as for WebKit.
 
 use super::Msg;
-use super::asks::{AskKind, LinkKind, Reply, link_kind, scheme_of, site_of_url};
+use super::asks::{
+    AskKind, LinkKind, Reply, UNEXPLAINED, WEBVIEW2, link_kind, scheme_of, site_of_url,
+};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
     COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
     COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
-    COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_SCRIPT_DIALOG_KIND,
-    COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT, COREWEBVIEW2_SCRIPT_DIALOG_KIND_CONFIRM,
-    COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT, ICoreWebView2, ICoreWebView2_18, ICoreWebView2Deferral,
+    COREWEBVIEW2_PERMISSION_STATE_DENY, COREWEBVIEW2_PROCESS_FAILED_KIND,
+    COREWEBVIEW2_SCRIPT_DIALOG_KIND, COREWEBVIEW2_SCRIPT_DIALOG_KIND_ALERT,
+    COREWEBVIEW2_SCRIPT_DIALOG_KIND_CONFIRM, COREWEBVIEW2_SCRIPT_DIALOG_KIND_PROMPT,
+    COREWEBVIEW2_WEB_ERROR_STATUS, ICoreWebView2, ICoreWebView2_18, ICoreWebView2Deferral,
     ICoreWebView2LaunchingExternalUriSchemeEventHandler,
-    ICoreWebView2NavigationStartingEventHandler, ICoreWebView2PermissionRequestedEventArgs,
-    ICoreWebView2PermissionRequestedEventArgs3, ICoreWebView2PermissionRequestedEventHandler,
+    ICoreWebView2NavigationCompletedEventHandler, ICoreWebView2NavigationStartingEventHandler,
+    ICoreWebView2PermissionRequestedEventArgs, ICoreWebView2PermissionRequestedEventArgs3,
+    ICoreWebView2PermissionRequestedEventHandler, ICoreWebView2ProcessFailedEventHandler,
     ICoreWebView2ScriptDialogOpeningEventArgs, ICoreWebView2ScriptDialogOpeningEventHandler,
 };
 use webview2_com::{
-    LaunchingExternalUriSchemeEventHandler, NavigationStartingEventHandler,
-    PermissionRequestedEventHandler, ScriptDialogOpeningEventHandler,
-    WindowCloseRequestedEventHandler,
+    LaunchingExternalUriSchemeEventHandler, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, PermissionRequestedEventHandler, ProcessFailedEventHandler,
+    ScriptDialogOpeningEventHandler, WindowCloseRequestedEventHandler,
 };
-use windows_61::core::{HSTRING, Interface as _, PCWSTR, PWSTR};
+use windows_61::core::{BOOL, HSTRING, Interface as _, PCWSTR, PWSTR};
 use wry::WebViewExtWindows as _;
 
 /// A page's request waiting for the user's answer: what to answer, and the deferral that holds
@@ -230,6 +237,102 @@ pub fn hook(wv: &wry::WebView, tab: u64, tx: &async_channel::Sender<Msg>) {
             let _ = webview.add_LaunchingExternalUriScheme(&apps(tab, tx.clone()), &mut token);
         }
         let _ = webview.add_NavigationStarting(&no_app(tab, tx.clone()), &mut token);
+        // A failed load gets Trek's page saying why, and a page whose process ended is reloaded
+        // (then explained, if it ends again), as WebKit's do: the panel does both (`Msg`).
+        let _ = webview.add_NavigationCompleted(&failed_loads(tab, tx.clone()), &mut token);
+        let _ = webview.add_ProcessFailed(&crashes(tab, tx.clone()), &mut token);
+    }
+}
+
+thread_local! {
+    /// The navigations that ended on WebView2's own error page (`ContentLoading` says so, before
+    /// the navigation completes), until their `NavigationCompleted` says why.
+    static ERROR_PAGES: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+}
+
+/// Navigation `id` is showing WebView2's own error page (`native::watch`).
+pub fn error_page_shown(id: u64) {
+    ERROR_PAGES.with(|pages| pages.borrow_mut().insert(id));
+}
+
+/// A load that failed: one message to the panel, with WebView2's reason, which Trek's page puts
+/// in words (`asks::load_failure`). A failure is a load WebView2 put its own error page up for:
+/// one it only stopped (a newer load, a link handed to another app, a download) reports failing
+/// too, with a reason, but the page it was on stays, and a server's own 404 page shows as it is.
+/// WebView2 calls some failures "unknown" (a refused connection): said as unreachable
+/// (`UNEXPLAINED`).
+fn failed_loads(
+    tab: u64,
+    tx: async_channel::Sender<Msg>,
+) -> ICoreWebView2NavigationCompletedEventHandler {
+    NavigationCompletedEventHandler::create(Box::new(move |view, args| {
+        let (Some(view), Some(args)) = (view, args) else {
+            return Ok(());
+        };
+        let mut ok = BOOL::default();
+        let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+        let mut navigation = 0u64;
+        // SAFETY: the event's own view and arguments, on the thread it's raised on.
+        unsafe {
+            args.NavigationId(&mut navigation)?;
+            args.IsSuccess(&mut ok)?;
+        }
+        let error_page = ERROR_PAGES.with(|pages| pages.borrow_mut().remove(&navigation));
+        if ok.as_bool() || !error_page {
+            return Ok(());
+        }
+        unsafe { args.WebErrorStatus(&mut status)? };
+        let url = text(|p| unsafe { view.Source(p) });
+        let code = i64::from(status.0);
+        let code = if super::asks::load_failure(WEBVIEW2, code, &url).is_some() {
+            code
+        } else {
+            UNEXPLAINED
+        };
+        let _ = tx.try_send(Msg::LoadFailed {
+            tab,
+            url,
+            domain: WEBVIEW2.into(),
+            code,
+        });
+        Ok(())
+    }))
+}
+
+/// The page's own process ending (it exited, or stopped responding): to the panel as a crash.
+fn crashes(tab: u64, tx: async_channel::Sender<Msg>) -> ICoreWebView2ProcessFailedEventHandler {
+    ProcessFailedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+        // SAFETY: the event's own arguments, on the thread it's raised on.
+        unsafe { args.ProcessFailedKind(&mut kind)? };
+        if page_process_ended(kind) {
+            let _ = tx.try_send(Msg::Crashed(tab));
+        }
+        Ok(())
+    }))
+}
+
+/// WebView2's process failure is the page's own process ending, as WebKit's web content process
+/// does: it exited (`RENDER_PROCESS_EXITED`, 1), or stopped responding (`…_UNRESPONSIVE`, 2). A
+/// frame's, the GPU's or a helper's ending leaves the page as it is.
+fn page_process_ended(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) -> bool {
+    matches!(kind.0, 1 | 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_pages_own_process_ending_is_a_crash() {
+        let kind = COREWEBVIEW2_PROCESS_FAILED_KIND;
+        assert!(page_process_ended(kind(1)) && page_process_ended(kind(2)));
+        for other in [0, 3, 4, 5, 6, 7, 8, 9] {
+            assert!(!page_process_ended(kind(other)), "{other}");
+        }
     }
 }
 

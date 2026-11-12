@@ -257,6 +257,52 @@ pub fn load_failure(domain: &str, code: i64, url: &str) -> Option<(&'static str,
         ("NSURLErrorDomain", -999) | ("WebKitErrorDomain", 102) => return None,
         // A plug-in took over the load: the page is showing.
         ("WebKitErrorDomain", 204) => return None,
+        // WebView2's COREWEBVIEW2_WEB_ERROR_STATUS (Windows, `WEBVIEW2`). Cancelled (a newer
+        // load, Stop, a download, a link handed to an app) isn't a failure; nor is "unknown",
+        // which is what a page the server answered with a 4xx or 5xx gets: that page shows.
+        (WEBVIEW2, 14) | (WEBVIEW2, 0) => return None,
+        (WEBVIEW2, 13) => (
+            REACH,
+            format!("Trek can’t find the server at {host}. Check the address for typos."),
+        ),
+        (WEBVIEW2, 12) | (WEBVIEW2, 6) => (
+            REACH,
+            format!("{host} refused to connect. If it’s your own server, make sure it’s running."),
+        ),
+        (WEBVIEW2, UNEXPLAINED) => (
+            REACH,
+            format!("{host} couldn’t be reached. If it’s your own server, make sure it’s running."),
+        ),
+        (WEBVIEW2, 7) => (REACH, format!("{host} took too long to respond.")),
+        (WEBVIEW2, 9) | (WEBVIEW2, 10) => (
+            REACH,
+            "The network connection was lost while the page loaded.".into(),
+        ),
+        (WEBVIEW2, 11) => (
+            REACH,
+            format!("{} isn’t connected to the internet.", capitalized(crate::words::words().this_computer)),
+        ),
+        (WEBVIEW2, 1) | (WEBVIEW2, 4) | (WEBVIEW2, 5) => (
+            SECURE,
+            format!("{host}’s certificate isn’t valid, so the connection could be someone else’s. Edge would warn here too."),
+        ),
+        (WEBVIEW2, 2) => (
+            SECURE,
+            format!(
+                "{host}’s certificate has expired or isn’t valid yet. Check {}’s date and time.",
+                crate::words::words().this_computer
+            ),
+        ),
+        (WEBVIEW2, 3) => (SECURE, format!("A secure connection to {host} couldn’t be made.")),
+        (WEBVIEW2, 8) => (REACH, format!("{host} sent an answer the browser couldn’t read.")),
+        (WEBVIEW2, 15) => (
+            OPEN,
+            format!("{host} redirected too many times. Clearing its cookies (⋯ menu) may help."),
+        ),
+        (WEBVIEW2, 17) | (WEBVIEW2, 18) => (
+            OPEN,
+            format!("{host} asks for a sign-in the browser can’t show here. Open it in your default browser from the ⋯ menu."),
+        ),
         ("NSURLErrorDomain", -1003) => (
             REACH,
             format!("Trek can’t find the server at {host}. Check the address for typos."),
@@ -326,10 +372,28 @@ pub fn load_failure(domain: &str, code: i64, url: &str) -> Option<(&'static str,
 }
 
 /// What the error page says when a page's process ends (it crashed, or used too much memory).
+/// The ⋯ menu's "Open in default browser" is there on both platforms (Safari's only on the Mac).
 pub const CRASHED: (&str, &str) = (
     "This page stopped working",
-    "Its web content process ended, more than once. Try again, or open it in Safari from the ⋯ menu.",
+    "Its web content process ended, more than once. Try again, or open it in your default browser from the ⋯ menu.",
 );
+
+/// The error domain `load_failure` reads WebView2's failures under (Windows): its
+/// `COREWEBVIEW2_WEB_ERROR_STATUS` is the code.
+pub const WEBVIEW2: &str = "WebView2";
+
+/// WebView2 put up its own error page and called the failure "unknown" (it does for a refused
+/// connection). Not one of its codes: Trek's, so the page can say what it can.
+pub const UNEXPLAINED: i64 = -1;
+
+/// `text` with its first letter a capital: "this PC" as a sentence starts.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
 
 /// The page area a popup's sheet takes: the size the page asked for (`window.open`'s `width`
 /// and `height`), never past the panel's area less a margin, and never too small to use.
@@ -405,6 +469,55 @@ mod tests {
         assert_eq!(scheme_of("1http:x"), None);
         assert_eq!(scheme_of("no scheme"), None);
         assert_eq!(scheme_of(":x"), None);
+    }
+
+    /// WebView2's failures read as WebKit's do: the same headings and sentences for the same
+    /// trouble, and no error page over a page that did load (a server's own 404) or a load that
+    /// was only replaced. Pure code: the Mac's CI checks the Windows words too.
+    #[test]
+    fn a_failed_load_on_windows_says_why_in_trek_words() {
+        let fail = |code| load_failure(WEBVIEW2, code, "https://nope.invalid/a");
+        let (title, why) = fail(13).unwrap();
+        assert_eq!(title, "Can’t reach this page");
+        assert!(
+            why.contains("can’t find the server at nope.invalid"),
+            "{why}"
+        );
+        let (_, why) = load_failure(WEBVIEW2, 12, "http://localhost:5173/").unwrap();
+        assert!(
+            why.contains("localhost:5173") && why.contains("running"),
+            "{why}"
+        );
+        for code in [1, 2, 3, 4, 5] {
+            assert_eq!(fail(code).unwrap().0, "Can’t connect securely", "{code}");
+        }
+        assert!(fail(2).unwrap().1.contains("date and time"));
+        assert!(
+            fail(11)
+                .unwrap()
+                .1
+                .contains("isn’t connected to the internet")
+        );
+        assert!(fail(11).unwrap().1.starts_with(char::is_uppercase));
+        assert!(fail(7).unwrap().1.contains("too long"));
+        assert!(fail(15).unwrap().1.contains("redirected too many times"));
+        // Cancelled, and "unknown" (a server's error page, which shows): no page of Trek's.
+        assert_eq!(fail(14), None);
+        assert_eq!(fail(0), None);
+        // "Unknown" with WebView2's own error page up (a refused connection) still says something.
+        let (title, why) = load_failure(WEBVIEW2, UNEXPLAINED, "http://127.0.0.1:9/").unwrap();
+        assert_eq!(title, "Can’t reach this page");
+        assert!(
+            why.contains("127.0.0.1:9") && why.contains("running"),
+            "{why}"
+        );
+        // Anything else still says something, with the code to look up.
+        assert_eq!(
+            fail(99).unwrap().1,
+            "The load stopped with an error (WebView2 99)."
+        );
+        // The crash page points to a menu item both platforms have.
+        assert!(CRASHED.1.contains("default browser") && !CRASHED.1.contains("Safari"));
     }
 
     #[test]
