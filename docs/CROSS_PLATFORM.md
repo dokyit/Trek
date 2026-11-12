@@ -60,24 +60,30 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    page's own process ended and the reload that follows, the banners in Windows' notification
    center, Trek's switch in Windows' notification settings, a default app of the check's own
    that Trek hands a file to, how often each view draws while an agent works, the processor Trek
-   runs as, the libraries loaded in it, a real rust-analyzer's problems in the editor, and `gh`
-   having no login inside the run.
+   runs as, the libraries loaded in it, a real rust-analyzer's problems in the editor, `gh`
+   having no login inside the run, a file that lives only in the cloud (a real Cloud Files
+   placeholder whose data a sync provider of the check's own hands over when Windows asks), the
+   Photos picker's sheet as AppKit has it, and the phone server's Bonjour record resolved through
+   the system's DNS-SD as a phone resolves it.
 
-   On Windows (`bcfc3dd2`, a fresh profile, rust-analyzer on PATH): 82 of the
-   99 features shown working, 0 failing, 8 that aren't on Windows, and 9 that an isolated run
+   On Windows (`3d1f161f`, a fresh profile, rust-analyzer on PATH): 84 of the
+   99 features shown working, 0 failing, 8 that aren't on Windows, and 7 that an isolated run
    can't show, each saying what checks it instead: other apps' accessibility trees, the real Codex
    and OpenCode CLIs (an isolated run starts no real agent, and never acts as the user), the
    system's share window (Windows shows it only over the window in front, and a capture run stays
-   behind the user's), voice typing (a person checked it), a file only in OneDrive, where the
-   installed Trek lives, and the phone on a real network.
+   behind the user's), voice typing (a person checked it), where the installed Trek lives, and
+   the phone server reached from another device on the network.
 
-   On CI's Mac (`7e5e6c77`): 80 shown working, 0 failing. Getting there took four runs, each
+   On CI's Mac (`7d49b3a6`): 84 shown working, 0 failing. Getting there took four runs, each
    failure in steps written from the Mac's code alone and never run on one: the wrong id for a
    button, a chip an unbundled build hides, a list and a window never marked for the checks, a
    script given no window, a simulator list that comes a minute later the first time on a fresh
-   runner, and port 9, which WebKit refuses outright (on browsers' restricted list) where
-   WebView2 explains it, leaving the tab blank on a Mac (still to be looked at there). Steps have
-   to run on each platform, not only be written for it. CI's Windows jobs first never reached
+   runner, and port 9, on browsers' restricted list, which left the tab blank on a Mac: the
+   runner's WebKit (macOS 15) stops such a load before it starts and then shows an empty page,
+   telling no one (its own source shows the path). Trek's navigation delegate now says it before
+   WebKit is asked, and both platforms say a restricted port is why (it had read as the ad
+   blocker's on a Mac, and as a server that isn't running on Windows). Steps have to run on each
+   platform, not only be written for it. CI's Windows jobs first never reached
    their checks: the verify driver started the app with the step's output pipe among the handles
    it inherited, so the step waited on the app until the job ran out of time. Then the runner's
    1024×768 screen folded away the column five checks look in (the job now sets 1920×1080), and
@@ -289,7 +295,10 @@ In order of how much each removes the problem, smallest first where that's close
    the browser's asks and popups, HEIC photos, the share window, banners that start Trek,
    dictation on the PC and video transcripts without whisper have closed. The biggest left for Windows users are computer use in the
    background, window snapshots through Windows.Graphics.Capture, signed builds, an ARM64 build,
-   updating while Trek is closed, and the iPhone app's own build, which needs a Mac.
+   updating while Trek is closed, and the iPhone app's own build, which needs a Mac. The iPhone's
+   screen and taps from a PC no longer need one: CoreDevice's own services (the ones Xcode's Device
+   Hub uses) reach the phone over its tunnel with no driver to sign (`trek-phone`'s `pc_screen`
+   example), and are left to run against a phone, then to put in the panel.
 
 ## For someone changing Trek
 

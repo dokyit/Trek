@@ -134,34 +134,23 @@ pub fn resolve(name: &str, wait: Duration) -> anyhow::Result<Found> {
             }
         }
     });
+    // What it printed so far, read as it comes (`remote::bonjour::read_lookup`, tested on both).
     let deadline = std::time::Instant::now() + wait;
-    let mut port = None;
+    let mut lines = Vec::new();
     let mut found = None;
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         let Ok(line) = rx.recv_timeout(left) else {
             break;
         };
-        match port {
-            // `<name>._trek._tcp.local. can be reached at <host>.local.:<port> (interface 1)`
-            None => {
-                port = line
-                    .split_once(" can be reached at ")
-                    .and_then(|(_, at)| at.split(" (").next())
-                    .and_then(|at| at.rsplit_once(':'))
-                    .and_then(|(_, p)| p.trim().parse::<u16>().ok());
-            }
-            // The TXT entries, space-separated, with a space inside one written `\032`.
-            Some(port) => {
-                let entries = line
-                    .split_whitespace()
-                    .map(|e| e.replace("\\032", " ").replace("\\\\", "\\"))
-                    .collect();
-                found = Some(Found { port, entries });
-                break;
-            }
+        lines.push(line);
+        if let Some((port, entries)) = crate::remote::bonjour::read_lookup(&lines) {
+            found = Some(Found { port, entries });
+            break;
         }
     }
     let _ = child.kill();
     let _ = child.wait();
-    found.ok_or_else(|| anyhow::anyhow!("dns-sd found no {name} within {wait:?}"))
+    found.ok_or_else(|| {
+        anyhow::anyhow!("dns-sd found no {name} within {wait:?} (it said {lines:?})")
+    })
 }

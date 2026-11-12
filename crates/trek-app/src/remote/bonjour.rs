@@ -355,8 +355,51 @@ mod ffi {
     }
 }
 
+/// What `dns-sd -L <name> _trek._tcp local.` (a Mac's look-up of one record) printed so far: the
+/// record's port and its TXT entries once both have come. It prints where the record can be
+/// reached (`… can be reached at <host>:<port> (interface 1)`), then the TXT entries on the next
+/// line, space-separated, a space inside one written `\032`. Plain text, so both CIs test it; the
+/// capture build's `bonjour found` reads a Mac's answer with it.
+#[cfg(any(test, feature = "shots"))]
+pub fn read_lookup(lines: &[String]) -> Option<(u16, Vec<String>)> {
+    let reached = lines
+        .iter()
+        .position(|line| line.contains(" can be reached at "))?;
+    let port = lines[reached]
+        .split_once(" can be reached at ")
+        .and_then(|(_, at)| at.split(" (").next())
+        .and_then(|at| at.rsplit_once(':'))
+        .and_then(|(_, port)| port.trim().parse().ok())?;
+    let entries = lines
+        .get(reached + 1)?
+        .split_whitespace()
+        .map(|entry| entry.replace("\\032", " ").replace("\\\\", "\\"))
+        .collect();
+    Some((port, entries))
+}
+
 #[cfg(test)]
 mod tests {
+    /// A Mac's `dns-sd -L` as it prints a record: the header, then where it can be reached, then
+    /// its TXT entries; read once the entries have come.
+    #[test]
+    fn a_macs_lookup_reads_as_the_port_and_the_entries() {
+        let lines: Vec<String> = [
+            "Lookup Trek live check._trek._tcp.local",
+            "DATE: ---Thu 12 Nov 2026---",
+            "14:20:01.123  ...STARTING...",
+            "14:20:01.456  Trek\\032live\\032check._trek._tcp.local. can be reached at runner.local.:7431 (interface 1) Flags: 1",
+            " id=0123abcd name=Trek\\032live\\032check",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(super::read_lookup(&lines[..4]), None, "no entries yet");
+        let (port, entries) = super::read_lookup(&lines).expect("the record");
+        assert_eq!(port, 7431);
+        assert_eq!(entries, ["id=0123abcd", "name=Trek live check"]);
+        assert_eq!(super::read_lookup(&lines[..3]), None);
+    }
+
     #[test]
     fn the_txt_record_carries_the_id_and_the_name_length_led() {
         assert_eq!(
