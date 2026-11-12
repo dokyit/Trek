@@ -972,6 +972,14 @@ fn read_text(path: &Path) -> std::io::Result<String> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NONBLOCK);
     }
+    // A folder, before it's opened: Windows won't open one as a file at all ("Access is
+    // denied"), which would read as a file Trek can't read and offer a Retry that can't work.
+    if std::fs::metadata(path).is_ok_and(|m| m.is_dir()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a file",
+        ));
+    }
     let mut file = options.open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() {

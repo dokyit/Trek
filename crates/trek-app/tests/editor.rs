@@ -277,6 +277,10 @@ fn pipes_devices_and_huge_files_open_read_only_without_hanging() {
             cases.push((std::path::PathBuf::from("/dev/zero"), "Not a file"));
         }
         cases.push((big, "Too big"));
+        // A folder (a `trek://edit` link can name one): on both platforms the same message.
+        let folder = trek.project.join("a folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        cases.push((folder, "Not a file"));
         for (path, why) in cases {
             trek.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx));
             let editor = loaded(&trek, cx).await;

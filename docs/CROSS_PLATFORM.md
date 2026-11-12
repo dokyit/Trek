@@ -65,10 +65,10 @@ had 1,308 platform gates in 187 files, 595 of them in trek-app.
     until the counts are recorded again. The failure message says to update the feature in the
     ledger first.
   - **Every gated file belongs to a feature.** A file with gates must be named in the `code` or
-    `tests` of the ledger feature whose platforms it makes differ. The 139 files that predate
-    the rule are listed as `unclaimed` in `gates.toml`. That list only shrinks: a file new to it,
-    or one on it that gains a gate, fails even when the counts are being recorded, so a new
-    platform split can't land without a feature that owns it.
+    `tests` of the ledger feature whose platforms it makes differ. The 139 files that predated
+    the rule were listed as `unclaimed` in `gates.toml` and have all been claimed since, so the
+    list is empty, and it can't grow: a file new to it fails even when the counts are being
+    recorded, so a new platform split can't land without a feature that owns it.
 
   ```
   TREK_PARITY_UPDATE=1 cargo test -p trek-parity   # record the counts and regenerate PARITY.md
@@ -148,16 +148,17 @@ In order of how much each removes the problem, smallest first where that's close
    screens that differ most: Settings › Tools, the composer's + menu and mic, onboarding, the
    tools panel and the title bar. GPUI's test platform needs one knob for it
    (`can_select_mixed_files_and_dirs` is fixed at `true` today).
-3. **Claim the rest of the gated files** (ongoing). The check now requires a feature for any
-   file that gains a gate (see above). What's left is the `unclaimed` list in `gates.toml`:
-   each file comes off it when the feature it belongs to names it.
+3. **Claim the rest of the gated files** (done, 2026-11-12). Every gated file belongs to a
+   feature, and the check holds new ones to it (see above). Claiming them was a sweep of every
+   split: it found the gaps the ledger records since (a deny rule past cmd.exe's `^`, files that
+   aren't the user's alone on Windows, tests that run on one platform only).
 4. **Draft until complete** (small, needs one real release to try). `release.sh` creates the
    GitHub release as soon as the Mac half is done, so a Windows failure leaves a public release
    without Windows downloads. Create it as a draft, and let `complete` publish it once every
    platform is attached. `complete` today only says what's missing.
-5. **The capture build in CI** (small). The `shots` feature (the verify driver and the
-   screenshots) is never built in CI, so it breaks unnoticed. A `cargo check -p trek-app
-   --features shots` on both platforms, in the lint jobs, would catch that.
+5. **The capture build in CI** (done). The `shots` feature (the verify driver and the
+   screenshots) is checked in both platforms' lint jobs (`cargo check -p trek-app --features
+   shots`), so a change can't break it unnoticed.
 6. **Screens checked on both platforms** (medium to large). A handful of key screens rendered by
    the capture build on each runner, compared with checked-in references and with each other where
    they should match (spacing, wording, what's present). The verify driver
