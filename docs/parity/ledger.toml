@@ -919,7 +919,7 @@ area = "Threads"
 what = "What an agent left running (a dev server, a watcher) above the composer: its last line, the end of its output, Stop, and its whole output in a text editor"
 macos = "yes"
 windows = "yes"
-how = { macos = "Full output opens in the default text editor (open -t).", windows = "Full output opens in Notepad (the output files have no extension Windows knows); a path the agent names with spaces in it (C:\\Users\\Toby J\\…) is read whole." }
+how = { macos = "Full output opens in the default text editor (open -t).", windows = "Full output opens in the editor that opens .txt files (the output files have no extension Windows knows, so they are opened as a .txt would be), Notepad if the shell can't; a path the agent names with spaces in it (C:\\Users\\Toby J\\…) is read whole." }
 code = ["crates/trek-app/src/background_strip.rs"]
 tests = ["crates/trek-app/src/background_strip.rs", "crates/trek-app/tests/background.rs"]
 
