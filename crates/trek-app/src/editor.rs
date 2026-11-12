@@ -1051,12 +1051,32 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        if let Ok(meta) = std::fs::metadata(&target) {
-            file.set_permissions(meta.permissions())?;
+        let kept = std::fs::metadata(&target).ok().map(|m| m.permissions());
+        // The Mac's bits go on before the text, so the new file is never looser than the old.
+        #[cfg(unix)]
+        if let Some(kept) = &kept {
+            file.set_permissions(kept.clone())?;
         }
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&temp, &target)
+        drop(file);
+        // Windows won't move a file over a read-only one, which the Mac replaces as any other
+        // (it takes the folder's permission, not the file's): the old one is made writable for the
+        // move, and the new one gets the old one's attributes, read-only and hidden included.
+        #[cfg(windows)]
+        if let Some(kept) = kept.as_ref().filter(|k| k.readonly()) {
+            let mut open = kept.clone();
+            #[allow(clippy::permissions_set_readonly_false)]
+            open.set_readonly(false);
+            std::fs::set_permissions(&target, open)?;
+        }
+        let moved = std::fs::rename(&temp, &target);
+        #[cfg(windows)]
+        if let Some(kept) = kept {
+            // Whether it moved or not: what's at `target` (new or old) is as the file was.
+            let _ = std::fs::set_permissions(&target, kept);
+        }
+        moved
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&temp);

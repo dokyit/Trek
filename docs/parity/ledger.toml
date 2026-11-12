@@ -910,7 +910,7 @@ area = "Editor"
 what = "The editor opens a file without hanging on a pipe, a device or a huge one, says why one can't be read (with Retry), and saves a file whole, keeping its permissions and links"
 macos = "yes"
 windows = "yes"
-how = { macos = "A pipe is opened without waiting for a writer, and turned away; a save keeps the file's mode, the executable bit included.", windows = "Windows has no FIFOs in folders: a device or a pipe is turned away by what its handle says, and a folder before it's opened (Windows refuses to open one as a file); a save keeps the file's attributes, as there are no mode bits." }
+how = { macos = "A pipe is opened without waiting for a writer, and turned away; a save keeps the file's mode, the executable bit included.", windows = "Windows has no FIFOs in folders: a device or a pipe is turned away by what its handle says, and a folder before it's opened (Windows refuses to open one as a file); a save keeps the file's attributes (no mode bits), and a read-only file is made writable for the move over it and read-only again after, which Windows needs and the Mac doesn't." }
 code = ["crates/trek-app/src/editor.rs"]
 tests = ["crates/trek-app/tests/editor.rs", "crates/trek-app/tests/ide.rs"]
 
