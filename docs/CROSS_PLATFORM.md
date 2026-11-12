@@ -58,15 +58,18 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    the system has it, the programs under Trek's own process and their end at Stop, the console
    windows on screen, a second launch handing its link to the running Trek through its pipe, a
    page's own process ended and the reload that follows, the banners in Windows' notification
-   center, the processor Trek runs as, the libraries loaded in it, and a real rust-analyzer's
-   problems in the editor.
+   center, Trek's switch in Windows' notification settings, a default app of the check's own
+   that Trek hands a file to, how often each view draws while an agent works, the processor Trek
+   runs as, the libraries loaded in it, a real rust-analyzer's problems in the editor, and `gh`
+   having no login inside the run.
 
-   On Windows (`1491bfc8`, a fresh profile, rust-analyzer on PATH): 78 of the 99 features shown
-   working, 0 failing, 8 that aren't on Windows, and 13 that an isolated run can't show, each
-   saying what checks it instead: other apps' accessibility trees, the real Codex and OpenCode
-   CLIs (an isolated run starts no real agent), render counts, the system's share window, preview
-   app and voice typing, a file only in OneDrive, where the installed Trek lives, the system's
-   banner permission, the phone on a real network, and the transcript's scrolling.
+   On Windows (`bcfc3dd2`, a fresh profile, rust-analyzer on PATH): 82 of the
+   99 features shown working, 0 failing, 8 that aren't on Windows, and 9 that an isolated run
+   can't show, each saying what checks it instead: other apps' accessibility trees, the real Codex
+   and OpenCode CLIs (an isolated run starts no real agent, and never acts as the user), the
+   system's share window (Windows shows it only over the window in front, and a capture run stays
+   behind the user's), voice typing (a person checked it), a file only in OneDrive, where the
+   installed Trek lives, and the phone on a real network.
 
    On CI's Mac (`7e5e6c77`): 80 shown working, 0 failing. Getting there took four runs, each
    failure in steps written from the Mac's code alone and never run on one: the wrong id for a
@@ -89,7 +92,9 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    for Windows checked out with CRLF; and the verify driver handing the app its caller's output
    pipe, so anything reading the driver's output (a CI step, an agent's tool) waited on the app
    until it quit. On both: a language server that had stopped (rustup's `rust-analyzer` without
-   its component exits at once) still showed as running.
+   its component exits at once) still showed as running; and a capture run could act as the user
+   on GitHub through their own `gh` login. A live check made a real (secret) gist that way; it was
+   deleted at once, and a capture run now signs itself out of `gh` before anything starts.
 
 So a fix made on one platform lands in a shared layer (and both CIs test it), or in a backend
 whose counterpart the ledger names. A behaviour fix hidden behind `fluent::WINDOWS` fails review
