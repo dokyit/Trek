@@ -19,7 +19,7 @@
 //! microphone; with none installed there's no dictation.
 
 use async_channel::Sender;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -143,6 +143,58 @@ pub fn remove_model() -> Result<(), String> {
 /// How long ✓ waits for a take's text before what was shown goes in, unless the take says
 /// otherwise (`Dictation::grace`).
 pub const GRACE: Duration = Duration::from_millis(1500);
+
+/// A phrase heard in a recording: where it starts and ends, in seconds, and its words.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Phrase {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+/// The folder dictation's own speech model is kept in, given Trek's local data folder, where
+/// dictation has an engine of its own (Whisper on a Windows PC); `None` elsewhere. Trek tells
+/// `watch_video` (trek-mcp) about it, so a video's audio is transcribed with the same model.
+pub fn model_dir_in(local_data: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        Some(local_data.join(windows::model::FOLDER))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = local_data;
+        None
+    }
+}
+
+/// Whether a recording can be transcribed here with the speech model in `models`: why not if it
+/// can't (no engine on this computer, the model not downloaded yet). Nothing is downloaded for it.
+pub fn can_transcribe(models: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        windows::local::ready(models).map(|_| ())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = models;
+        Err("Trek has no speech engine of its own on this computer".into())
+    }
+}
+
+/// The speech in a WAV recording, decoded on this computer by dictation's engine with the speech
+/// model in `models` (for `watch_video`): its phrases, in order. Nothing is downloaded; `Err` says
+/// why there's no transcript.
+pub fn transcribe_wav(models: &Path, wav: &Path) -> Result<Vec<Phrase>, String> {
+    #[cfg(windows)]
+    {
+        windows::local::transcribe_wav(models, wav)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (models, wav);
+        Err("Trek has no speech engine of its own on this computer".into())
+    }
+}
 
 /// Where Trek can't take dictation but the system's own dictation can (Windows' Win+H): what a
 /// dimmed mic says instead. `None` where Trek can, or where there's nothing to point to.

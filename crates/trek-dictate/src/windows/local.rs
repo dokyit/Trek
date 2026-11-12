@@ -20,7 +20,7 @@ use super::transcript::{Language, Speech, Transcript};
 use super::whisper::{self, Model, Pass};
 use crate::{Heard, Progress};
 use async_channel::Sender;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
@@ -205,15 +205,65 @@ pub fn abandon() {
     post(Msg::Abandon);
 }
 
-/// A take over a recording in a WAV file: no mic, and its text comes once, when it's decoded.
-pub fn transcribe_file(file: PathBuf, heard: Sender<Heard>) -> Result<Take, String> {
+/// A WAV file's sound as the engine takes it: one channel at 16 kHz.
+fn read_wav(file: &Path) -> Result<Vec<f32>, String> {
     let bytes =
-        std::fs::read(&file).map_err(|e| format!("Couldn't read {}: {e}", file.display()))?;
+        std::fs::read(file).map_err(|e| format!("Couldn't read {}: {e}", file.display()))?;
     let (format, data) = audio::wav(&bytes)?;
     let mut mono = Vec::new();
     audio::mono(data, format, &mut mono);
     let mut sound = Vec::new();
     Resampler::new(format.rate).push(&mono, &mut sound);
+    Ok(sound)
+}
+
+/// The speech model in `models`, where this PC can run it and it's been downloaded: why not
+/// otherwise, in words that end a sentence an agent is told (`watch_video`'s "No transcript: …").
+pub fn ready(models: &Path) -> Result<PathBuf, String> {
+    if !can_run() {
+        return Err("this PC's processor can't run Trek's speech engine, which needs AVX2".into());
+    }
+    model::present(&BASE, models).ok_or_else(|| {
+        format!(
+            "Trek's speech model isn't on this PC yet: clicking the mic in Trek's composer once downloads it ({})",
+            model::size(&BASE)
+        )
+    })
+}
+
+/// A recording's speech, decoded once with the care a take's last pass gets (beam search, all of
+/// it), with the model in `models`: for `watch_video`, which has no take. It runs on the calling
+/// thread, apart from dictation's own, and never downloads the model.
+pub fn transcribe_wav(models: &Path, wav: &Path) -> Result<Vec<crate::Phrase>, String> {
+    let path = ready(models)?;
+    let sound = read_wav(wav)?;
+    let model = whisper::load(&path)?;
+    let mut decoder = model.decoder()?;
+    let decoded = decoder.decode(Pass {
+        audio: &sound,
+        offset: 0,
+        language: None,
+        last: true,
+        stop: Vec::new(),
+    })?;
+    let rate = f64::from(audio::RATE);
+    Ok(decoded
+        .segments
+        .into_iter()
+        .filter_map(|s| {
+            let text = super::transcript::clean(&s.text);
+            (!text.is_empty()).then(|| crate::Phrase {
+                start: s.span.start as f64 / rate,
+                end: s.span.end as f64 / rate,
+                text,
+            })
+        })
+        .collect())
+}
+
+/// A take over a recording in a WAV file: no mic, and its text comes once, when it's decoded.
+pub fn transcribe_file(file: PathBuf, heard: Sender<Heard>) -> Result<Take, String> {
+    let sound = read_wav(&file)?;
     let take = TAKES.fetch_add(1, Ordering::Relaxed);
     let gauge = Arc::new(Gauge::default());
     let posted = post(Msg::File {
@@ -805,6 +855,99 @@ fn pass(
 
 #[cfg(test)]
 mod tests {
+    /// Windows' speech synthesizer reads `words` into a WAV file at `wav` (22 kHz, so the
+    /// resampler is in what reads it too).
+    fn say_into(words: &str, wav: &std::path::Path) {
+        let say = format!(
+            "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SetOutputToWaveFile('{}'); $s.Speak('{words}'); $s.Dispose()",
+            wav.display()
+        );
+        let spoke = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &say])
+            .status()
+            .expect("Windows PowerShell");
+        assert!(spoke.success(), "the speech synthesizer failed");
+    }
+
+    /// `watch_video` is told why there's no transcript rather than getting a download: a folder
+    /// without the model says the mic gets it.
+    #[test]
+    fn a_recording_without_the_model_says_where_to_get_it() {
+        let empty = std::env::temp_dir().join(format!("trek-dictate-none-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&empty);
+        let why = super::ready(&empty).unwrap_err();
+        if super::can_run() {
+            assert_eq!(
+                why,
+                "Trek's speech model isn't on this PC yet: clicking the mic in Trek's composer once downloads it (141 MB)"
+            );
+        } else {
+            assert!(why.contains("AVX2"), "{why}");
+        }
+        assert_eq!(
+            crate::transcribe_wav(&empty, &empty.join("none.wav")).unwrap_err(),
+            why,
+            "nothing is read, or downloaded, before the model is there"
+        );
+        assert!(
+            std::fs::read_dir(&empty).unwrap().next().is_none(),
+            "and nothing is written"
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// A video's audio, as `watch_video` hands it over (a WAV file), transcribed on this PC with
+    /// dictation's model, its phrases timed: where `TREK_DICTATION_DIR` (or `TREK_DATA_DIR`'s
+    /// `dictation/`) has the model; otherwise it says so and passes.
+    #[test]
+    fn a_recording_is_transcribed_with_dictations_model() {
+        let models = std::env::var_os("TREK_DICTATION_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let data = std::path::PathBuf::from(std::env::var_os("TREK_DATA_DIR")?);
+                Some(data.join(super::model::FOLDER))
+            })
+            .filter(|dir| super::ready(dir).is_ok());
+        let Some(models) = models else {
+            eprintln!(
+                "skipped: no speech model (set TREK_DICTATION_DIR, or TREK_DATA_DIR to a data folder with one)"
+            );
+            return;
+        };
+        let wav =
+            std::env::temp_dir().join(format!("trek-dictate-video-{}.wav", std::process::id()));
+        say_into(
+            "The meeting starts at nine. Bring the slides about the Windows build.",
+            &wav,
+        );
+        let started = std::time::Instant::now();
+        let heard = crate::transcribe_wav(&models, &wav).expect("a transcript");
+        let _ = std::fs::remove_file(&wav);
+        eprintln!("transcribed in {:?}: {heard:?}", started.elapsed());
+        let text: String = heard
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for word in ["meeting", "slides", "windows", "build"] {
+            assert!(text.contains(word), "{word:?} in {text:?}");
+        }
+        // Whisper writes a spoken number as a figure ("at 9").
+        assert!(text.contains('9') || text.contains("nine"), "{text:?}");
+        assert!(
+            heard
+                .windows(2)
+                .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end),
+            "in order"
+        );
+        let last = heard.last().unwrap();
+        assert!(
+            last.end > 3. && last.end < 10.,
+            "timed in seconds: {last:?}"
+        );
+    }
+
     /// A spoken sentence through the whole of the engine but the microphone: Windows' speech
     /// synthesizer reads "Trek can now take dictation on Windows" into a WAV file (22 kHz, so the
     /// resampler is in it too), and the take's last pass, as ✓ runs it, must hear those words.

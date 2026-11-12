@@ -5,12 +5,13 @@
 //! ffmpeg takes frames from it (a long side of 1024, at the rate asked, at most `MAX_FRAMES` and
 //! `FRAME_BUDGET` bytes), and its audio is transcribed: by `whisper` when that's installed, else on
 //! a Mac by the Speech framework (in a child process, `trek-mcp transcribe`, in pieces under a
-//! minute). The answer is one text block (what the video is, the frames' times, the transcript
-//! with times) and then the frames as images, in order. The scratch folder keeps a manifest
-//! (`watch.json`) that Trek reads to show the user the same frames under a player.
+//! minute), and on a Windows PC by Whisper in Trek itself (trek-dictate), with the speech model
+//! dictation downloaded. The answer is one text block (what the video is, the frames' times, the
+//! transcript with times) and then the frames as images, in order. The scratch folder keeps a
+//! manifest (`watch.json`) that Trek reads to show the user the same frames under a player.
 //!
 //! ffmpeg and ffprobe aren't bundled: without them the tool says how to install them.
-// Speech and its pieces are the Mac's: Windows transcribes with whisper or not at all.
+// Speech and its pieces are the Mac's: Windows transcribes with whisper, or Trek's own Whisper.
 #![cfg_attr(windows, allow(dead_code))]
 
 use std::path::{Path, PathBuf};
@@ -44,6 +45,8 @@ const KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
 pub const MANIFEST: &str = "watch.json";
 /// Where Trek asks for the scratch folders to go.
 pub const ENV_VIDEO_DIR: &str = "TREK_VIDEO_DIR";
+/// Where Trek keeps dictation's speech model (Windows): a transcript without whisper uses it.
+pub const ENV_DICTATION_DIR: &str = "TREK_DICTATION_DIR";
 
 #[cfg(windows)]
 pub const FFMPEG_MISSING: &str = "watch_video needs ffmpeg and ffprobe, and they aren't installed. Ask the user to \
@@ -53,18 +56,25 @@ pub const FFMPEG_MISSING: &str = "watch_video needs ffmpeg and ffprobe, and they
 install them with `brew install ffmpeg`, and try again.";
 
 /// The tool family: `scratch` is where the scratch folders go (`TREK_VIDEO_DIR`, else a folder in
-/// the system's temp).
+/// the system's temp); `speech` the folder of dictation's speech model, where Trek has one
+/// (`TREK_DICTATION_DIR`).
 pub struct Video {
     scratch: PathBuf,
+    speech: Option<PathBuf>,
 }
 
 impl Default for Video {
     fn default() -> Self {
-        let scratch = std::env::var_os(ENV_VIDEO_DIR)
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| std::env::temp_dir().join("trek-videos"));
-        Self { scratch }
+        let absolute = |var: &str| {
+            std::env::var_os(var)
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+        };
+        Self {
+            scratch: absolute(ENV_VIDEO_DIR)
+                .unwrap_or_else(|| std::env::temp_dir().join("trek-videos")),
+            speech: absolute(ENV_DICTATION_DIR),
+        }
     }
 }
 
@@ -501,7 +511,19 @@ impl Video {
     /// Scratch folders in `scratch` (the tests' own).
     #[cfg(test)]
     pub fn with_scratch(scratch: PathBuf) -> Self {
-        Self { scratch }
+        Self {
+            scratch,
+            speech: None,
+        }
+    }
+
+    /// And dictation's speech model in `speech`.
+    #[cfg(test)]
+    pub fn with_speech(self, speech: PathBuf) -> Self {
+        Self {
+            speech: Some(speech),
+            ..self
+        }
     }
 
     /// A new, empty scratch folder; folders past `KEEP` go first.
@@ -633,7 +655,7 @@ impl Video {
         if ask.transcript && meta.audio.is_none() {
             notes.push("It has no audio, so there's no transcript.".into());
         } else if ask.transcript {
-            match transcribe(&ffmpeg, &input, start, end, &dir) {
+            match transcribe(&ffmpeg, &input, start, end, &dir, self.speech.as_deref()) {
                 Ok((how, segments, failed)) => {
                     if !failed.is_empty() {
                         notes.push(format!(
@@ -854,13 +876,15 @@ fn extract_audio(
 }
 
 /// The audio between `start` and `end`, transcribed: by whisper when it's installed, else by the
-/// Speech framework on a Mac. Says which, with what it heard and the parts that failed.
+/// Speech framework on a Mac, or on a Windows PC by Whisper in Trek itself, with the speech model
+/// dictation downloaded (in `speech`). Says which, with what it heard and the parts that failed.
 fn transcribe(
     ffmpeg: &str,
     input: &str,
     start: f64,
     end: f64,
     dir: &Path,
+    speech: Option<&Path>,
 ) -> Result<(String, Vec<Segment>, Vec<String>), String> {
     if let Some(whisper) = find("whisper") {
         let wav = dir.join("audio.wav");
@@ -877,8 +901,26 @@ fn transcribe(
             .collect();
         return Ok(("whisper".into(), shifted, vec![]));
     }
+    #[cfg(windows)]
+    {
+        let models = own_speech_model(speech)?;
+        let wav = dir.join("audio.wav");
+        extract_audio(ffmpeg, input, start, end - start, &wav)?;
+        let heard = trek_dictate::transcribe_wav(models, &wav);
+        let _ = std::fs::remove_file(&wav);
+        let segments = heard?
+            .into_iter()
+            .map(|p| Segment {
+                start: p.start + start,
+                end: p.end + start,
+                text: p.text,
+            })
+            .collect();
+        return Ok(("Whisper on this PC".into(), segments, vec![]));
+    }
     #[cfg(target_os = "macos")]
     {
+        let _ = speech;
         let me = std::env::current_exe().map_err(|e| format!("can't find trek-mcp itself: {e}"))?;
         let chunks = chunk_plan(start, end, CHUNK_SECS);
         let (segments, failed) = transcribe_chunks(&chunks, |offset, len| {
@@ -890,11 +932,28 @@ fn transcribe(
         })?;
         return Ok(("macOS Speech".into(), segments, failed));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = (ffmpeg, input, start, end, dir);
-        return Err("on Windows a transcript needs whisper (`pip install openai-whisper`), which isn't installed".into());
+        let _ = (ffmpeg, input, start, end, dir, speech);
+        return Err(
+            "a transcript needs whisper (`pip install openai-whisper`), which isn't installed"
+                .into(),
+        );
     }
+}
+
+/// The folder of dictation's speech model, where Trek's own engine can transcribe with it: why
+/// not otherwise, pointing to whisper as the other way.
+#[cfg(windows)]
+fn own_speech_model(speech: Option<&Path>) -> Result<&Path, String> {
+    const WHISPER: &str = "or install whisper (`pip install openai-whisper`)";
+    let models = speech.ok_or_else(|| {
+        format!(
+            "Trek didn't say where its speech model is (an older Trek?): update Trek, {WHISPER}"
+        )
+    })?;
+    trek_dictate::can_transcribe(models).map_err(|why| format!("{why}, {WHISPER}"))?;
+    Ok(models)
 }
 
 fn run_whisper(whisper: &Path, wav: &Path, dir: &Path) -> Result<Vec<Segment>, String> {
@@ -1667,5 +1726,134 @@ mod tests {
             "brew install ffmpeg"
         };
         assert!(FFMPEG_MISSING.contains(how));
+    }
+
+    /// Without whisper, a Windows transcript is Trek's own Whisper's, with dictation's model: an
+    /// agent is told why there's none (and the way to get one) rather than Trek downloading it.
+    #[cfg(windows)]
+    #[test]
+    fn without_the_speech_model_the_agent_is_told_how_to_get_one() {
+        let why = own_speech_model(None).unwrap_err();
+        assert!(
+            why.contains("update Trek") && why.contains("pip install openai-whisper"),
+            "{why}"
+        );
+        let empty = std::env::temp_dir().join(format!("trek-video-models-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&empty);
+        let why = own_speech_model(Some(&empty)).unwrap_err();
+        assert!(
+            why.contains("clicking the mic in Trek's composer once downloads it (141 MB)")
+                || why.contains("AVX2"),
+            "{why}"
+        );
+        assert!(
+            why.ends_with("or install whisper (`pip install openai-whisper`)"),
+            "{why}"
+        );
+        assert!(
+            std::fs::read_dir(&empty).unwrap().next().is_none(),
+            "nothing downloaded"
+        );
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// A video with someone talking, watched on Windows without whisper: Trek's own Whisper writes
+    /// its transcript, timed on the video's clock. Where `TREK_DICTATION_DIR` has dictation's model
+    /// (the isolated app's mic downloads it); otherwise it says so and passes.
+    #[cfg(windows)]
+    #[test]
+    fn a_video_on_windows_is_transcribed_with_dictations_model() {
+        let models = std::env::var_os(ENV_DICTATION_DIR)
+            .map(PathBuf::from)
+            .filter(|dir| trek_dictate::can_transcribe(dir).is_ok());
+        let (Some(models), Some(ffmpeg), Some(_)) = (models, find("ffmpeg"), find("ffprobe"))
+        else {
+            eprintln!("skipped: needs ffmpeg and dictation's speech model in TREK_DICTATION_DIR");
+            return;
+        };
+        if find("whisper").is_some() {
+            eprintln!("skipped: whisper is installed, and transcripts go to it first");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("trek-video-talk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let speech = root.join("speech.wav");
+        let say = format!(
+            "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SetOutputToWaveFile('{}'); $s.Speak('Welcome to the demo. Today we test video transcripts on Windows.'); $s.Dispose()",
+            speech.display()
+        );
+        let spoke = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &say])
+            .status()
+            .expect("Windows PowerShell");
+        assert!(spoke.success(), "the speech synthesizer failed");
+        // A second of picture before the talking starts, so the transcript's times are the video's.
+        let clip = root.join("talk.mp4");
+        util::run_ok(
+            ffmpeg.to_str().unwrap(),
+            &[
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=8:size=640x360:rate=10",
+                "-i",
+                speech.to_str().unwrap(),
+                "-filter_complex",
+                "[1:a]adelay=1000:all=1,apad[a]",
+                "-map",
+                "0:v",
+                "-map",
+                "[a]",
+                "-t",
+                "8",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-y",
+                clip.to_str().unwrap(),
+            ],
+            None,
+            Duration::from_secs(60),
+        )
+        .expect("ffmpeg makes a clip with speech");
+        let mut video = Video::with_scratch(root.join("scratch")).with_speech(models);
+        let started = std::time::Instant::now();
+        let out = video
+            .call(
+                "watch_video",
+                &json!({ "source": clip.to_str().unwrap(), "start": 1, "fps": 1 }),
+            )
+            .unwrap();
+        let summary = out[0]["text"].as_str().unwrap();
+        eprintln!("watched in {:?}:\n{summary}", started.elapsed());
+        assert!(
+            summary.contains("Transcript (Whisper on this PC):"),
+            "{summary}"
+        );
+        let said = summary.to_lowercase();
+        for word in ["welcome", "demo", "video", "transcripts", "windows"] {
+            assert!(said.contains(word), "{word:?} in {summary}");
+        }
+        assert!(
+            !said.contains("no transcript"),
+            "no note that it failed: {summary}"
+        );
+        // Watched from a second in: the phrases are timed on the video's clock, from there.
+        let first = summary
+            .split("Transcript (Whisper on this PC):\n")
+            .nth(1)
+            .and_then(|t| t.lines().next())
+            .unwrap_or_default();
+        assert!(
+            first.starts_with("  [0:0") && !first.starts_with("  [0:00"),
+            "{first:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -10876,10 +10876,17 @@ pub(crate) fn agent_notes(
 /// may take minutes (a download, a transcript), past what agents give a tool by default.
 fn video_server(bin: &str) -> McpServer {
     let dir = trek_core::media::video_cache_dir();
-    let env = vec![(
+    let mut env = vec![(
         trek_core::media::ENV_VIDEO_DIR.to_string(),
         dir.display().to_string(),
     )];
+    // Where dictation keeps a speech model of its own (Windows), the watcher transcribes with it.
+    if let Some(models) = crate::dictate::model_dir_in(&trek_core::paths::local_data_dir()) {
+        env.push((
+            trek_core::media::ENV_DICTATION_DIR.to_string(),
+            models.display().to_string(),
+        ));
+    }
     McpServer {
         tool_timeout_secs: Some(VIDEO_TIMEOUT_SECS),
         ..McpServer::stdio(
@@ -11067,6 +11074,17 @@ mod tests {
                     std::path::Path::new(&env[0].1).ends_with("videos"),
                     "{env:?}"
                 );
+                // Dictation's speech model, where it has one (Windows): transcripts without
+                // whisper are made with it. Nothing on a Mac, whose Speech framework has its own.
+                let models = env
+                    .iter()
+                    .find(|(k, _)| k == "TREK_DICTATION_DIR")
+                    .map(|(_, v)| std::path::PathBuf::from(v));
+                assert_eq!(
+                    models,
+                    crate::dictate::model_dir_in(&trek_core::paths::local_data_dir())
+                );
+                assert!(models.is_none_or(|m| m.ends_with("dictation")), "{env:?}");
             }
             other => panic!("{other:?}"),
         }

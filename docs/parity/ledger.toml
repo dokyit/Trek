@@ -219,10 +219,11 @@ id = "video-transcripts"
 area = "Agent tools"
 what = "watch_video gives agents a transcript of a video's audio"
 macos = "yes"
-windows = "partial"
-how = { macos = "whisper when it's installed, else the Speech framework.", windows = "whisper only." }
-note = "Without whisper a Windows transcript is missing: Windows' speech recognizer can't read a file. Bundling whisper (or whisper.cpp) would close it."
-code = ["crates/trek-mcp/src/video.rs"]
+windows = "yes"
+how = { macos = "whisper when it's installed, else the Speech framework.", windows = "whisper when it's installed, else Whisper in Trek itself: trek-mcp transcribes on the PC with dictation's engine (trek-dictate) and the speech model the mic downloaded, whose folder Trek names in TREK_DICTATION_DIR. It never downloads the model for a video: without it, the agent is told the composer's mic gets it (141 MB) or to install whisper." }
+note = "Checked on a Windows 11 PC (i7-13700H): a generated clip with a sentence spoken a second in, watched from 0:01, comes back word for word as [0:01.0–0:06.0] on the video's clock, in 2.7 s for the whole call (trek-mcp's video tests, where the model is present; they pass as skipped where it isn't, as on CI). A first-time Windows user gets transcripts once dictation has been used once, where a Mac asks for Speech Recognition the first time."
+code = ["crates/trek-mcp/src/video.rs", "crates/trek-dictate/src/lib.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-app/src/workspace.rs"]
+tests = ["crates/trek-mcp/src/video.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-app/src/workspace.rs"]
 
 # ---------- Notifications ----------
 

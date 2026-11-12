@@ -9529,6 +9529,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "trek-core",
+ "trek-dictate",
  "trek-ipc",
  "trek-phone",
  "trek-test-fixtures",

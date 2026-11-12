@@ -162,8 +162,8 @@ In order of how much each removes the problem, smallest first where that's close
    Device Service, WebView2's events, DWM: each backend keeps its pure logic in a module tested
    everywhere, and a thin OS layer with a few tests on its own runner.
 8. **Close the recorded gaps** (ongoing). The ledger is the backlog. Computer use by element,
-   the browser's asks and popups, HEIC photos, the share window, banners that start Trek and
-   dictation on the PC have closed. The biggest left for Windows users are computer use in the
+   the browser's asks and popups, HEIC photos, the share window, banners that start Trek,
+   dictation on the PC and video transcripts without whisper have closed. The biggest left for Windows users are computer use in the
    background, window snapshots through Windows.Graphics.Capture, signed builds, an ARM64 build,
    updating while Trek is closed, and the iPhone app's own build, which needs a Mac.
 

@@ -161,7 +161,7 @@
 "crates/trek-core/tests/quiet_spawns.rs" = 1
 "crates/trek-core/tests/spawn_lint.rs" = 1
 "crates/trek-dictate/examples/winrt_probe.rs" = 6
-"crates/trek-dictate/src/lib.rs" = 6
+"crates/trek-dictate/src/lib.rs" = 12
 "crates/trek-dictate/src/windows/hints.rs" = 3
 "crates/trek-dictate/src/windows/mod.rs" = 7
 "crates/trek-dictate/src/windows/model.rs" = 4
@@ -184,7 +184,7 @@
 "crates/trek-mcp/src/phone.rs" = 9
 "crates/trek-mcp/src/rpc.rs" = 7
 "crates/trek-mcp/src/util.rs" = 5
-"crates/trek-mcp/src/video.rs" = 10
+"crates/trek-mcp/src/video.rs" = 14
 "crates/trek-mentions/src/lib.rs" = 1
 "crates/trek-phone/examples/devices.rs" = 1
 "crates/trek-phone/examples/driver_bench.rs" = 3
