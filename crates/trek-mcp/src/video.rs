@@ -517,8 +517,8 @@ impl Video {
         }
     }
 
-    /// And dictation's speech model in `speech`.
-    #[cfg(test)]
+    /// And dictation's speech model in `speech` (Windows', the one platform that has one).
+    #[cfg(all(test, windows))]
     pub fn with_speech(self, speech: PathBuf) -> Self {
         Self {
             speech: Some(speech),
