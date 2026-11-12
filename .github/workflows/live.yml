@@ -176,7 +176,9 @@ jobs:
       - name: Build the capture build
         run: cargo build --locked -p trek-app --features shots
 
-      # Its output to a file: the app it starts would hold the step's own open otherwise.
+      # The driver starts the app through the shell, handing it none of the step's handles, so the
+      # step ends once the app answers (an app holding the step's output pipe kept it waiting
+      # until the job ran out of time). Its JSON goes to a file, kept with the artifacts.
       - name: Start the capture build
         run: |
           pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 start *> start.json

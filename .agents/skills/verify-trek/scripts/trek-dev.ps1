@@ -260,16 +260,28 @@ function Start-Trek([bool]$Build, [string]$Size) {
     # Arguments goes on cmd's command line verbatim; Start-Process would re-quote it. The /c
     # string needs a whole extra pair of quotes around it: with more than two quote marks cmd
     # strips the first and the last, which would unbalance the redirect's quoting.
+    # Started through the shell (ShellExecute), which hands the app none of this process's
+    # handles. CreateProcess as .NET calls it (UseShellExecute off) passes every inheritable one,
+    # this script's own output among them: when that's a pipe (a CI step, an agent's tool,
+    # PowerShell's `*>`), the app would hold it open for its whole life, and whatever reads it
+    # would wait until the step or the call timed out. The shell takes no environment of its
+    # own, so the app's settings go on this process's for the moment it starts.
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = 'cmd.exe'
     $psi.Arguments = "/d /c `"`"$binary`" >> `"$LogPath`" 2>&1`""
     $psi.WorkingDirectory = $Root
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    foreach ($kv in @{ TREK_DATA_DIR = $DataDir; TREK_SHOT_DIR = $ShotDir; TREK_MOCK_AGENT = '1'; TREK_BACKGROUND = '1'; TREK_FORCE_ACTIVE = '1'; TREK_WINDOW_SIZE = $Size; RUST_LOG = 'warn,trek=info' }.GetEnumerator()) {
-        $psi.EnvironmentVariables[$kv.Key] = $kv.Value
+    $psi.UseShellExecute = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $appEnv = @{ TREK_DATA_DIR = $DataDir; TREK_SHOT_DIR = $ShotDir; TREK_MOCK_AGENT = '1'; TREK_BACKGROUND = '1'; TREK_FORCE_ACTIVE = '1'; TREK_WINDOW_SIZE = $Size; RUST_LOG = 'warn,trek=info' }
+    $before = @{}
+    foreach ($kv in $appEnv.GetEnumerator()) {
+        $before[$kv.Key] = [Environment]::GetEnvironmentVariable($kv.Key)
+        [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value)
     }
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    try { $proc = [System.Diagnostics.Process]::Start($psi) }
+    finally {
+        foreach ($kv in $before.GetEnumerator()) { [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value) }
+    }
     Start-Sleep -Milliseconds 300
     $state = [ordered]@{ root = $Root; pid = $proc.Id; binary = $binary; isolated = $true; mock_only = $true
                         started_at = (Get-Date).ToUniversalTime().ToString('o'); size = $Size }
