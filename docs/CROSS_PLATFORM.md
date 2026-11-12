@@ -4,6 +4,46 @@ Trek is one tree that builds for macOS and Windows. This document is about why f
 keep landing on one of them only, and about the system that stops that: what's in place, and
 what comes next.
 
+## The architecture, in one picture
+
+A feature is built in four layers, and only the lowest knows which OS it's on:
+
+```
+  UI (trek-app)            reads runtime values: "can this machine dictate?", words from
+                           trek-words, fluent::WINDOWS for looks only. Never #[cfg] for behaviour.
+        │
+  Shared core              every decision and reading as plain code that takes the platform
+  (trek-core, agents…)     as an argument (`windows: bool`): paths, command lines, permission
+                           rules, verification, key tables, names. Built and tested on both CIs.
+        │
+  Cross-cutting crates     one crate per difference that recurs in many places: trek-private
+                           (files only the user can read), trek-job (process groups and job
+                           objects), trek-words (each platform's names). The #[cfg] pair lives
+                           there once instead of in every caller.
+        │
+  OS backends              the only #[cfg]-gated code: one trait (Desktop, dictation's engine,
+                           the web view, the text system), an implementation per OS, and a fake
+                           that drives the layers above in tests anywhere.
+```
+
+Three things keep it that way, run on both platforms' CI for every change:
+
+1. **The parity ledger and the gate census** (`docs/parity`, `crates/trek-parity`). Every
+   user-facing feature has a status per platform; every `#[cfg]` that names a platform is
+   counted, and every file with one is claimed by the feature it serves. A new split can't land
+   without a feature saying how each platform does it, or why one doesn't.
+2. **Every test runs on both CIs.** The core's readings are tested with each platform's rules on
+   each runner; a program a test needs is the fixture binary, never a shell script; the other
+   platform's keys and words can be switched on (`keys::with_mac`, `trek_words::pretend`). A test
+   gated to one platform says why the other can't run it.
+3. **The build is one pipeline on both**: one workspace, the same test targets sharded on a Mac
+   and a Windows runner, Clippy and the capture build on both, native code built with the runtime
+   Trek ships (`/MT`), and a hardening test that refuses a `trek.exe` naming a redistributable.
+
+So a fix made on one platform lands in a shared layer (and both CIs test it), or in a backend
+whose counterpart the ledger names. A behaviour fix hidden behind `fluent::WINDOWS` fails review
+(see "For someone changing Trek").
+
 ## What goes wrong
 
 A feature or a fix is made on the platform its author is using. The other platform's side is a
