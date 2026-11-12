@@ -127,9 +127,14 @@ what = "Dictate a message with the mic button, with live words and a level meter
 macos = "yes"
 windows = "yes"
 how = { macos = "AVAudioEngine into Apple's Speech framework (on the device when it can).", windows = "On the PC: Whisper (whisper.cpp, the multilingual base model) over the default microphone as WASAPI records it, resampled to 16 kHz; the words are decoded about once a second as they come and once more after ✓. The model (141 MB) downloads from Hugging Face the first time the mic is clicked, with its progress in the voice row, resumed if interrupted and checked against its SHA-256; Settings › General › Dictation removes it. A muted or switched-off microphone, being offline and a full disk are said in words. A packaged Trek uses Windows' own online recognizer (Windows.Media.SpeechRecognition) instead, which Windows answers only with package identity; Win+H only where neither can run (a processor without AVX2), and the mic says so." }
-note = "Checked on a Windows 11 PC (i7-13700H): \"Trek can now take dictation on Windows\" from Windows' speech synthesizer comes back word for word through the engine's own passes (the test runs where the model is downloaded; the last pass takes 0.9 s over 3.6 s of speech). The isolated app downloaded the model on the first click of the mic with its progress in the voice row, opened the microphone (48 kHz stereo, resampled), put a recording's words in the composer, and Settings removed the model. A sentence played through the same laptop's speakers isn't heard at all (its Intel Smart Sound microphone array cancels the PC's own output and the room's noise), so a person tested it: speaking into the PC's microphone in the isolated app, their words (\"Hello? … Can you hear me?\") went into the composer as typed text after ✓, the model loaded in 0.12 s, and a second take ended with ✕ added nothing. Whisper is slower than Apple's on-device recognizer: the first words show a second or two after speaking starts. The model is kept in %LOCALAPPDATA% (not the roaming profile)."
+note = "Checked on a Windows 11 PC (i7-13700H): \"Trek can now take dictation on Windows\" from Windows' speech synthesizer comes back word for word through the engine's own passes (the test runs where the model is downloaded; the last pass takes 0.9 s over 3.6 s of speech). The isolated app downloaded the model on the first click of the mic with its progress in the voice row, opened the microphone (48 kHz stereo, resampled), put a recording's words in the composer, and Settings removed the model. A sentence played through the same laptop's speakers isn't heard at all (its Intel Smart Sound microphone array cancels the PC's own output and the room's noise), so a person tested it: speaking into the PC's microphone in the isolated app, their words (\"Hello? … Can you hear me?\") went into the composer as typed text after ✓, the model loaded in 0.12 s, and a second take ended with ✕ added nothing. Whisper is slower than Apple's on-device recognizer: the first words show a second or two after speaking starts. The model is kept in %LOCALAPPDATA% (not the roaming profile). Whisper left to itself writes some takes plainly, all lowercase without stops (a slow \"Use the chain rule to find the derivative of sine of x squared.\" came back as \"use the chain rule … squared\"); such a pass of English is decoded again after a punctuated prompt and comes back written, as the Mac's does. Given to every pass, the prompt changed takes that were right (\"Hello? Hello?\" lost its stops and now and then gained a \"Hello\"), so it is only the fallback."
 code = ["crates/trek-dictate/src/lib.rs", "crates/trek-dictate/src/windows/mod.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-dictate/src/windows/model.rs", "crates/trek-app/src/composer.rs", "crates/trek-app/src/composer/voice.rs", "crates/trek-dictate/src/windows/hints.rs"]
 tests = ["crates/trek-dictate/src/windows/logic.rs", "crates/trek-dictate/src/windows/local.rs", "crates/trek-dictate/src/windows/model.rs", "crates/trek-dictate/src/windows/transcript.rs", "crates/trek-dictate/src/windows/audio.rs", "crates/trek-app/tests/composer.rs", "crates/trek-dictate/examples/winrt_probe.rs"]
+
+[[feature.promise]]
+what = "A take comes back written, with capitals and full stops"
+windows = "crates/trek-dictate/src/windows/local.rs::a_take_comes_back_written_with_capitals_and_stops"
+untested = { macos = "Apple's recognizer is asked to punctuate (setAddsPunctuation, crates/trek-dictate/src/lib.rs); no test drives Speech, which asks the user's permission first." }
 
 [[feature]]
 id = "study-talk"
@@ -407,6 +412,11 @@ how = { macos = "npm, Bun, pnpm, Volta, Homebrew, and vendors' own updaters.", w
 code = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/detect.rs", "crates/trek-core/src/elevated.rs", "crates/trek-core/src/procs.rs", "crates/trek-app/src/agent_updates.rs"]
 tests = ["crates/trek-core/src/agent_update.rs", "crates/trek-core/src/detect.rs", "crates/trek-app/tests/agent_updates.rs"]
 
+[[feature.promise]]
+what = "An update waits for its agent's running turn"
+macos = "crates/trek-app/tests/agent_updates.rs::an_update_waits_for_its_agents_running_turn"
+windows = "crates/trek-app/tests/agent_updates.rs::an_update_waits_for_its_agents_running_turn"
+
 [[feature]]
 id = "model-names"
 area = "Agents"
@@ -416,6 +426,11 @@ windows = "yes"
 how = { macos = "The same on both.", windows = "The same on both: a Claude Code without its downloaded model list is named from the model ids (Opus 5.5, not opus)." }
 code = ["crates/trek-core/src/catalog.rs"]
 tests = ["crates/trek-core/src/catalog.rs", "crates/trek-agents/src/status.rs"]
+
+[[feature.promise]]
+what = "A Claude model is named by its version (\"Opus 5.5\") before Claude Code's own catalog is in"
+macos = "crates/trek-agents/src/status.rs::claude_models_without_their_catalog_are_named_by_version"
+windows = "crates/trek-agents/src/status.rs::claude_models_without_their_catalog_are_named_by_version"
 
 [[feature]]
 id = "accounts"
@@ -724,6 +739,11 @@ how = { macos = "Mode 0600 (a folder 0700), through trek-private.", windows = "A
 code = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/src/remote/machines.rs", "crates/trek-remote/src/tls.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-agents/src/claude.rs"]
 tests = ["crates/trek-private/src/lib.rs", "crates/trek-core/src/session_secrets.rs", "crates/trek-remote/src/pairing.rs", "crates/trek-remote/src/tls.rs", "crates/trek-agents/src/claude.rs", "crates/trek-app/src/machines.rs", "crates/trek-app/tests/remote.rs", "crates/trek-app/tests/permission_rules.rs", "crates/trek-app/tests/machines.rs"]
 
+[[feature.promise]]
+what = "A file of secrets is the user's alone from the moment it's made, and when written again"
+macos = "crates/trek-private/src/lib.rs::a_file_is_the_users_alone_from_the_start_and_when_written_again"
+windows = "crates/trek-private/src/lib.rs::a_file_is_the_users_alone_from_the_start_and_when_written_again"
+
 [[feature]]
 id = "contrast-fixes"
 area = "App"
@@ -742,6 +762,11 @@ windows = "yes"
 how = { macos = "CoreText lays a tab out to its own stops, every 28 points whatever the tab size: with_tab_stops puts its glyph's place at the editor's stop instead.", windows = "DirectWrite leaves a tab out of its glyphs: with_tab_stops puts a blank in its place, at the editor's stop." }
 code = ["vendor/gpui-base/src/input/base/tab_stops.rs"]
 tests = ["crates/trek-app/tests/tab_stops.rs", "crates/trek-app/tests/common/mod.rs"]
+
+[[feature.promise]]
+what = "A tab is as wide as the editor's tab stop"
+macos = "crates/trek-app/tests/tab_stops.rs::a_tab_is_as_wide_as_its_tab_stop_not_nothing"
+windows = "crates/trek-app/tests/tab_stops.rs::a_tab_is_as_wide_as_its_tab_stop_not_nothing"
 
 [[feature]]
 id = "process-cleanup"
@@ -813,6 +838,11 @@ how = { macos = "Shell lines read as sh reads them (quotes, escapes, substitutio
 note = "The rule through a link is tested with a symlink on macOS only; a junction would test it on Windows."
 code = ["crates/trek-core/src/permission_rules.rs", "crates/trek-core/src/permission_rules/shell.rs", "crates/trek-agents/src/rules.rs"]
 tests = ["crates/trek-core/src/permission_rules/tests.rs", "crates/trek-agents/src/rules.rs"]
+
+[[feature.promise]]
+what = "A deny sees a command however the platform's shell would run it"
+macos = "crates/trek-core/src/permission_rules/tests.rs::a_deny_sees_a_command_the_way_a_shell_would"
+windows = "crates/trek-core/src/permission_rules/tests.rs::cmd_lines_are_read_as_cmd_exe_reads_them"
 
 [[feature]]
 id = "logs-and-reports"

@@ -344,6 +344,148 @@ pub struct Feature {
     /// The tests that cover it (files that exist), on whichever platforms they run.
     #[serde(default)]
     pub tests: Vec<String>,
+    /// What it holds to beyond being there (`[[feature.promise]]`).
+    #[serde(default)]
+    pub promise: Vec<Promise>,
+}
+
+/// A behaviour a feature keeps on each platform it's on, beyond being there: what a fix made on
+/// one platform promised, so the other is held to it too. "yes" on both sides of the ledger said
+/// nothing of Windows' dictation writing "use the chain rule" where the Mac's writes "Use the
+/// chain rule.": a promise names, for each platform the feature is on, the test that checks it
+/// there (`path::name`, a `fn name` in that file, which its `cfg` doesn't keep off that
+/// platform), or says why there isn't one (`untested`). One test that runs on both can be named
+/// on both.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Promise {
+    pub what: String,
+    #[serde(default)]
+    pub macos: Option<String>,
+    #[serde(default)]
+    pub windows: Option<String>,
+    #[serde(default)]
+    pub untested: Option<Untested>,
+}
+
+/// Why a platform has no test holding it to a promise.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Untested {
+    #[serde(default)]
+    pub macos: Option<String>,
+    #[serde(default)]
+    pub windows: Option<String>,
+}
+
+/// The two platforms, as the ledger names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Macos,
+    Windows,
+}
+
+impl Platform {
+    fn name(self) -> &'static str {
+        match self {
+            Platform::Macos => "macOS",
+            Platform::Windows => "Windows",
+        }
+    }
+}
+
+/// Where `fn name` is in `source`, and the one platform its attributes keep it to, if they do
+/// (`cfg(windows)`; `cfg(target_os = "macos")`, `cfg(unix)` or `cfg(not(windows))`). `None` when
+/// there's no such `fn`. A gate on the module the file is (in its parent) isn't seen.
+pub fn test_runs_on(source: &str, name: &str) -> Option<Option<Platform>> {
+    let lines: Vec<&str> = source.lines().collect();
+    let at = lines.iter().position(|l| {
+        let l = l.trim_start();
+        let l = l.strip_prefix("async ").unwrap_or(l);
+        l.strip_prefix("fn ")
+            .and_then(|rest| rest.strip_prefix(name))
+            .is_some_and(|rest| rest.starts_with('(') || rest.starts_with('<'))
+    })?;
+    let mut only = None;
+    for line in lines[..at].iter().rev() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with("//") {
+            continue;
+        }
+        if !l.starts_with("#[") {
+            break;
+        }
+        let squeezed: String = l.chars().filter(|c| !c.is_whitespace()).collect();
+        if squeezed.contains("cfg(windows)") || squeezed.contains("target_os=\"windows\"") {
+            only = Some(Platform::Windows);
+        } else if squeezed.contains("target_os=\"macos\"")
+            || squeezed.contains("cfg(unix)")
+            || squeezed.contains("cfg(not(windows))")
+        {
+            only = Some(Platform::Macos);
+        }
+    }
+    Some(only)
+}
+
+/// What's wrong with `feature`'s promises, read against the tree at `root`.
+fn promise_problems(f: &Feature, root: &Path) -> Vec<String> {
+    let mut problems = vec![];
+    let id = &f.id;
+    for p in &f.promise {
+        let what = p.what.trim();
+        if what.is_empty() {
+            problems.push(format!("{id}: a promise that says nothing"));
+            continue;
+        }
+        let untested = p.untested.clone().unwrap_or_default();
+        for (platform, support, test, why) in [
+            (Platform::Macos, f.macos, &p.macos, &untested.macos),
+            (Platform::Windows, f.windows, &p.windows, &untested.windows),
+        ] {
+            let on = matches!(support, Support::Yes | Support::Partial);
+            let said = why.as_deref().is_some_and(|w| !w.trim().is_empty());
+            let platform_name = platform.name();
+            if !on {
+                if test.is_some() || why.is_some() {
+                    problems.push(format!(
+                        "{id}: \"{what}\" names {platform_name}, where the feature isn't"
+                    ));
+                }
+                continue;
+            }
+            let Some(test) = test else {
+                if !said {
+                    problems.push(format!(
+                        "{id}: \"{what}\" has no test on {platform_name}, and no word in `untested` on why"
+                    ));
+                }
+                continue;
+            };
+            if said {
+                problems.push(format!(
+                    "{id}: \"{what}\" names a test on {platform_name} and says it's untested there"
+                ));
+            }
+            let Some((path, name)) = test.split_once("::") else {
+                problems.push(format!("{id}: \"{what}\": {test} isn't `path::test_name`"));
+                continue;
+            };
+            let Ok(source) = std::fs::read_to_string(root.join(path)) else {
+                problems.push(format!("{id}: \"{what}\": {path} isn't there"));
+                continue;
+            };
+            match test_runs_on(&source, name) {
+                None => problems.push(format!("{id}: \"{what}\": {path} has no `fn {name}`")),
+                Some(Some(only)) if only != platform => problems.push(format!(
+                    "{id}: \"{what}\": `{name}` runs on {} only, so it holds {platform_name} to nothing",
+                    only.name()
+                )),
+                Some(_) => {}
+            }
+        }
+    }
+    problems
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -397,6 +539,7 @@ pub fn ledger_problems(ledger: &Ledger, root: &Path) -> Vec<String> {
                 }
             }
         }
+        problems.extend(promise_problems(f, root));
     }
     problems
 }
@@ -415,9 +558,7 @@ pub fn render_table(ledger: &Ledger) -> String {
          ledger, not this file. Why it exists and how it's kept true: `docs/CROSS_PLATFORM.md`.\n\n\
          | Area | Feature | macOS | Windows | Notes |\n|---|---|---|---|---|\n",
     );
-    let mut features: Vec<&Feature> = ledger.feature.iter().collect();
-    features.sort_by(|a, b| a.area.cmp(&b.area).then(a.id.cmp(&b.id)));
-    for f in features {
+    for f in features_in_order(ledger) {
         let mut notes = vec![];
         if let Some(how) = &f.how {
             notes.push(format!("macOS: {} Windows: {}", how.macos, how.windows));
@@ -435,7 +576,50 @@ pub fn render_table(ledger: &Ledger) -> String {
             cell(&notes.join(" ")),
         ));
     }
+    let promised: Vec<&Feature> = features_in_order(ledger)
+        .into_iter()
+        .filter(|f| !f.promise.is_empty())
+        .collect();
+    if promised.is_empty() {
+        return out;
+    }
+    out.push_str(
+        "\n## Promises\n\n\
+         What a feature keeps to on each platform beyond being there, and the test that holds each \
+         platform to it (one that runs on both is named on both).\n\n\
+         | Feature | Promise | macOS | Windows |\n|---|---|---|---|\n",
+    );
+    let cell = |s: &str| s.replace('|', "\\|").replace('\n', " ");
+    for f in promised {
+        for p in &f.promise {
+            let untested = p.untested.clone().unwrap_or_default();
+            let side = |support: Support, test: &Option<String>, why: &Option<String>| {
+                if !matches!(support, Support::Yes | Support::Partial) {
+                    return "—".to_string();
+                }
+                match (test, why) {
+                    (Some(t), _) => format!("`{}`", t.rsplit("::").next().unwrap_or(t)),
+                    (None, Some(w)) => format!("untested: {}", cell(w)),
+                    (None, None) => "untested".to_string(),
+                }
+            };
+            out.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                cell(&f.what),
+                cell(&p.what),
+                side(f.macos, &p.macos, &untested.macos),
+                side(f.windows, &p.windows, &untested.windows),
+            ));
+        }
+    }
     out
+}
+
+/// The features as the table lists them: by area, then id.
+fn features_in_order(ledger: &Ledger) -> Vec<&Feature> {
+    let mut features: Vec<&Feature> = ledger.feature.iter().collect();
+    features.sort_by(|a, b| a.area.cmp(&b.area).then(a.id.cmp(&b.id)));
+    features
 }
 
 #[cfg(test)]
@@ -621,5 +805,99 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_test_is_seen_with_the_platform_its_cfg_keeps_it_to() {
+        let source = "#[test]\nfn both() {}\n\n#[test]\n#[cfg(windows)]\nfn pc() {}\n\n\
+             #[cfg(target_os = \"macos\")]\n/// Doc.\n#[test]\nasync fn mac() {}\n\n\
+             #[cfg(not(windows))]\n#[test]\nfn not_pc() {}\n";
+        assert_eq!(test_runs_on(source, "both"), Some(None));
+        assert_eq!(test_runs_on(source, "pc"), Some(Some(Platform::Windows)));
+        assert_eq!(test_runs_on(source, "mac"), Some(Some(Platform::Macos)));
+        assert_eq!(test_runs_on(source, "not_pc"), Some(Some(Platform::Macos)));
+        assert_eq!(test_runs_on(source, "bot"), None, "a prefix isn't the name");
+        assert_eq!(test_runs_on(source, "nowhere"), None);
+    }
+
+    #[test]
+    fn a_promise_is_held_by_a_test_on_each_platform_or_says_why_not() {
+        let dir = std::env::temp_dir().join(format!("trek-parity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("t.rs"),
+            "#[test]\nfn held() {}\n\n#[cfg(windows)]\n#[test]\nfn on_a_pc() {}\n",
+        )
+        .unwrap();
+        let problems = |promise: &str, windows: &str| {
+            let ledger: Ledger = toml::from_str(&format!(
+                "[[feature]]\nid = \"f\"\narea = \"A\"\nwhat = \"W\"\nmacos = \"yes\"\nwindows = \"{windows}\"\nnote = \"n\"\n\n[[feature.promise]]\n{promise}\n"
+            ))
+            .unwrap();
+            ledger_problems(&ledger, &dir)
+        };
+        // One test on both, or one each, or a reason for the side without.
+        assert!(
+            problems(
+                "what = \"P\"\nmacos = \"t.rs::held\"\nwindows = \"t.rs::held\"",
+                "yes"
+            )
+            .is_empty()
+        );
+        assert!(
+            problems(
+                "what = \"P\"\nmacos = \"t.rs::held\"\nwindows = \"t.rs::on_a_pc\"",
+                "yes"
+            )
+            .is_empty()
+        );
+        assert!(problems("what = \"P\"\nwindows = \"t.rs::held\"\nuntested = { macos = \"Speech needs permission.\" }", "yes").is_empty());
+        // Nothing for a side the feature is on.
+        let p = problems("what = \"P\"\nwindows = \"t.rs::held\"", "yes");
+        assert!(p.iter().any(|p| p.contains("no test on macOS")), "{p:?}");
+        // A test that isn't there, or that its cfg keeps off that side.
+        let p = problems(
+            "what = \"P\"\nmacos = \"t.rs::gone\"\nwindows = \"t.rs::held\"",
+            "yes",
+        );
+        assert!(p.iter().any(|p| p.contains("has no `fn gone`")), "{p:?}");
+        let p = problems(
+            "what = \"P\"\nmacos = \"t.rs::on_a_pc\"\nwindows = \"t.rs::held\"",
+            "yes",
+        );
+        assert!(
+            p.iter().any(|p| p.contains("runs on Windows only")),
+            "{p:?}"
+        );
+        let p = problems(
+            "what = \"P\"\nmacos = \"nowhere.rs::held\"\nwindows = \"held\"",
+            "yes",
+        );
+        assert!(
+            p.iter().any(|p| p.contains("nowhere.rs isn't there")),
+            "{p:?}"
+        );
+        assert!(
+            p.iter().any(|p| p.contains("isn't `path::test_name`")),
+            "{p:?}"
+        );
+        // A side the feature isn't on is named for nothing; a side can't be both.
+        let p = problems(
+            "what = \"P\"\nmacos = \"t.rs::held\"\nwindows = \"t.rs::held\"",
+            "no",
+        );
+        assert!(
+            p.iter().any(|p| p.contains("where the feature isn't")),
+            "{p:?}"
+        );
+        let p = problems(
+            "what = \"P\"\nmacos = \"t.rs::held\"\nwindows = \"t.rs::held\"\nuntested = { macos = \"x\" }",
+            "yes",
+        );
+        assert!(
+            p.iter().any(|p| p.contains("says it's untested there")),
+            "{p:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -31,7 +31,13 @@ Three things keep it that way, run on both platforms' CI for every change:
 1. **The parity ledger and the gate census** (`docs/parity`, `crates/trek-parity`). Every
    user-facing feature has a status per platform; every `#[cfg]` that names a platform is
    counted, and every file with one is claimed by the feature it serves. A new split can't land
-   without a feature saying how each platform does it, or why one doesn't.
+   without a feature saying how each platform does it, or why one doesn't. Being there isn't
+   being as good, so a feature also keeps **promises** (`[[feature.promise]]`): what a fix on
+   one platform established ("a take comes back with its capitals and full stops"), with the
+   test that holds each platform to it, or a written reason a platform has none. The check
+   fails a promise whose test is missing, or whose `#[cfg]` keeps it off the platform it's
+   named for; `docs/PARITY.md` lists them under "Promises". A quality fix adds a promise in the
+   same change, and the other platform's column is then a test or a decision, never a blank.
 2. **Every test runs on both CIs.** The core's readings are tested with each platform's rules on
    each runner; a program a test needs is the fixture binary, never a shell script; the other
    platform's keys and words can be switched on (`keys::with_mac`, `trek_words::pretend`). A test
@@ -66,6 +72,7 @@ that way:
 | The other way round: three fixes made on Windows never reached the Mac. An opened timeline row scrolled out of view, the context bar's slivers ran over "Free", and "Compacted" showed while the summary was still being written. | They sat behind `fluent::WINDOWS`, the Windows *styling* switch, so behaviour rode along with corner radii. |
 | Windows code is never linted: CI runs Clippy on macOS only. | Removed to speed CI up (d610eb41). |
 | Releases went out without their Windows downloads (v0.4.6, v0.4.9, v0.4.10), and after a red CI run (v0.4.49). | The release workflow doesn't look at CI, nor check what it published. |
+| Once dictation was on Windows, some takes came back all lowercase and without stops ("use the chain rule to find the derivative of sine of x squared"), where the Mac's recognizer punctuates every take. | The ledger said "yes" for both: it tracked being there, not how well. Whisper writes that way now and then when given nothing to go on. Promises now name the test that holds each platform to it. |
 
 When the audit started, about 343 of the workspace's 3,525 tests ran on one OS only, and the code
 had 1,308 platform gates in 187 files, 595 of them in trek-app.
@@ -246,6 +253,9 @@ In order of how much each removes the problem, smallest first where that's close
      and `PARITY.md` with the change.
 - Fixing a bug seen on one platform: check whether the other platform's path has it too, and say
   so in the pull request.
+- Fixing how well something works (not whether it's there): add a `[[feature.promise]]` to the
+  feature with the test that holds this platform to it, and the other platform's test, or under
+  `untested` why there isn't one.
 - Writing a test: make it run on both CIs. A reading takes the platform as an argument; a program
   it needs is the fixture binary (a verb, or copied under the program's name), not a script; a
   platform's keys are bound with `keys::with_mac`; a link on Windows is a junction. A test gated
