@@ -302,25 +302,14 @@ mod tests {
     }
 
     /// A stand-in `gh` that writes its arguments and stdin where the test reads them, then
-    /// answers as `gh` would.
-    #[cfg(unix)]
+    /// answers as `gh` would: the test-fixtures program's `record`, on both platforms (a shell
+    /// script would be the Mac's alone).
     fn fake_gh(dir: &Path, reply: &str, code: i32) -> std::process::Command {
-        use std::os::unix::fs::PermissionsExt as _;
-        let script = dir.join("gh");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{d}/args\"\ncat > \"{d}/stdin\"\nprintf '%s' '{reply}' >&{fd}\nexit {code}\n",
-                d = dir.display(),
-                fd = if code == 0 { 1 } else { 2 },
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::process::Command::new(script)
+        let mut gh = std::process::Command::new(trek_test_fixtures::bin("fixture"));
+        gh.arg("record").arg(dir).arg(code.to_string()).arg(reply);
+        gh
     }
 
-    #[cfg(unix)]
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("trek-gist-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -328,7 +317,6 @@ mod tests {
         dir
     }
 
-    #[cfg(unix)]
     #[test]
     fn create_hands_gh_the_markdown_and_keeps_the_link() {
         let dir = temp_dir("create");
@@ -357,7 +345,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[test]
     fn update_and_delete_name_the_gist() {
         let dir = temp_dir("edit");

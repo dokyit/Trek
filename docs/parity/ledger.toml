@@ -949,9 +949,8 @@ area = "Threads"
 what = "Share a thread as a link: a secret GitHub gist that Trek remembers, updates and deletes"
 macos = "yes"
 windows = "yes"
-note = "The same on both, through the GitHub CLI. Its create, update and delete tests run on macOS only: their stand-in gh is a shell script (share/gist.rs). A test-fixtures binary standing in for gh would run them on Windows too."
 code = ["crates/trek-app/src/share/gist.rs"]
-tests = ["crates/trek-app/src/share/gist.rs", "crates/trek-app/tests/share.rs"]
+tests = ["crates/trek-app/src/share/gist.rs", "crates/trek-app/tests/share.rs", "crates/test-fixtures/src/fixture.rs"]
 
 [[feature]]
 id = "pr-checks"

@@ -9,6 +9,10 @@
 //!   exit [<code>]          exit with `code` (0 when absent or not a number); later args ignored
 //!   upper                  stdin, upper-cased, on stdout (a formatter for tests)
 //!   fail <code> <line>…    each line on stderr, then exit with `code` (a formatter that rejects its input)
+//!   record <dir> <code> <reply> <args…>
+//!                          the args one per line into `dir/args` and stdin into `dir/stdin`, then
+//!                          `reply` on stdout (on stderr when `code` isn't 0), and exit with `code`:
+//!                          a CLI that notes what it was asked (a stand-in `gh gist`)
 //!   fake-acp               run the stand-in ACP agent
 //!   fake-mcp [<mode>]      run the stand-in MCP server
 //!   serve <dir> [<port>]   the files in `dir` over HTTP on 127.0.0.1 (see `serve`)
@@ -93,6 +97,28 @@ pub fn run() -> i32 {
             code
         }
         Some("exit") => args.next().and_then(|c| c.parse().ok()).unwrap_or(0),
+        Some("record") => {
+            let dir = std::path::PathBuf::from(args.next().unwrap_or_default());
+            let code: i32 = args.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+            let reply = args.next().unwrap_or_default();
+            let lines: String = args
+                .map(|a| {
+                    a + "
+"
+                })
+                .collect();
+            std::fs::write(dir.join("args"), lines).unwrap();
+            let mut stdin = Vec::new();
+            std::io::stdin().lock().read_to_end(&mut stdin).unwrap();
+            std::fs::write(dir.join("stdin"), stdin).unwrap();
+            if code == 0 {
+                print!("{reply}");
+                std::io::stdout().flush().unwrap();
+            } else {
+                eprint!("{reply}");
+            }
+            code
+        }
         Some("fake-acp") => {
             crate::fake_acp::run();
             0

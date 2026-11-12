@@ -82,7 +82,6 @@ unclaimed = [
 "crates/trek-app/src/settings_view/mobile.rs" = 1
 "crates/trek-app/src/settings_view/pages.rs" = 4
 "crates/trek-app/src/share.rs" = 7
-"crates/trek-app/src/share/gist.rs" = 4
 "crates/trek-app/src/shots.rs" = 16
 "crates/trek-app/src/sidebar.rs" = 1
 "crates/trek-app/src/single_instance.rs" = 9
