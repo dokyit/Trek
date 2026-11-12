@@ -1574,6 +1574,15 @@ impl BrowserPanel {
                 let (t5, t6) = (tx.clone(), tx.clone());
                 builder
                     .with_download_started_handler(move |url, path| {
+                        // An isolated run (tests, the capture build) keeps what it downloads in
+                        // its own data folder: the user's Downloads isn't its to write in.
+                        if trek_core::paths::isolated()
+                            && let Some(name) = path.file_name().map(ToOwned::to_owned)
+                        {
+                            let dir = trek_core::paths::data_dir().join("downloads");
+                            let _ = std::fs::create_dir_all(&dir);
+                            *path = dir.join(name);
+                        }
                         let _ = t5.try_send(Msg::Download {
                             tab: id,
                             url,
