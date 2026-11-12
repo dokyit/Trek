@@ -1,6 +1,7 @@
 /* trekdesktop.com. Paper by day and Night at dusk, as the app has them. One display face at one
-   weight, one text face at two, no italics, one accent. Every picture of the app is a real capture
-   shown at its real size. */
+   weight (the wordmark alone is lighter), one text face at two, no italics, one accent. Few words. The first screen is one
+   photograph of a trail; every picture of the app is a real capture shown at its real size; the
+   story between them is built from the app's own parts. */
 
 @font-face { font-family: "Bricolage Grotesque"; src: url("/assets/fonts/BricolageGrotesque.woff2") format("woff2"); font-weight: 200 800; font-display: swap; }
 @font-face { font-family: "Hanken Grotesk"; src: url("/assets/fonts/HankenGrotesk.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
@@ -8,7 +9,8 @@
 
 :root {
   color-scheme: light dark;
-  --ground: #F3EEE6; --raised: #FBF8F3; --sky: #F3EEE6;
+  --ground: #F3EEE6; --raised: #FBF8F3;
+  --sky-top: #BABACA;
   --ink: #1A1A1C; --ink-2: #45403A; --mute: #6A6259;
   --line: rgb(40 28 16 / 0.14); --shade: 40 20 8;
   --accent: #B53C0B; --accent-over: #9C3308; --on-accent: #FFFFFF;
@@ -22,7 +24,8 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --ground: #0E0D12; --raised: #17161C; --sky: #0B1222;
+    --ground: #0E0D12; --raised: #17161C;
+    --sky-top: #18192B;
     --ink: #F3EEE6; --ink-2: #D2CBC3; --mute: #A69F98;
     --line: rgb(243 238 230 / 0.14); --shade: 0 0 0;
     --accent: #FF7A3D; --accent-over: #FF8D58; --on-accent: #1A0E06;
@@ -48,6 +51,7 @@ p { text-wrap: pretty; }
 .num { font-variant-numeric: tabular-nums; }
 .text-link { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 34%, transparent); text-underline-offset: 3px; transition: text-decoration-color 150ms var(--out); }
 @media (hover: hover) and (pointer: fine) { .text-link:hover { text-decoration-color: currentColor; } }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .skip { position: absolute; z-index: 20; left: 16px; top: -64px; padding: 10px 14px; border-radius: 10px; background: var(--ink); color: var(--ground); font-weight: 500; transition: top 150ms var(--out); }
 .skip:focus { top: 12px; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
@@ -56,7 +60,8 @@ p { text-wrap: pretty; }
 .nav { position: absolute; z-index: 10; inset: 0 0 auto 0; }
 .nav-in { display: flex; align-items: center; gap: 30px; height: 68px; width: var(--wide); margin-inline: auto; }
 .brand { display: inline-flex; align-items: center; gap: 9px; margin-right: auto; font: 500 18px/1 var(--display); letter-spacing: -0.01em; }
-.brand img { width: 22px; height: 22px; }
+.brand picture { display: flex; }
+.brand img { width: 26px; height: 26px; }
 .nav-links { display: flex; gap: 30px; }
 .nav .link { font-size: 15px; color: var(--ink-2); transition: color 150ms var(--out); }
 @media (hover: hover) and (pointer: fine) { .nav .link:hover { color: var(--ink); } }
@@ -66,6 +71,7 @@ p { text-wrap: pretty; }
 .btn:active { scale: 0.98; }
 .btn-fill { background: var(--accent); color: var(--on-accent); }
 .btn-plain { color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.btn-big { height: 54px; padding: 0 26px; border-radius: 14px; font-size: 17px; }
 .btn-small { height: 36px; padding: 0 14px; font-size: 14px; border-radius: 10px; }
 .btn svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .btn small { font-size: 13px; font-weight: 400; opacity: 0.78; }
@@ -74,56 +80,46 @@ p { text-wrap: pretty; }
   .btn-plain:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
 }
 
-/* ---------- The hiker on his trail, as in the app ---------- */
-.working { display: flex; align-items: flex-end; height: 60px; padding: 0 16px; }
-.trail { --px: 3; position: relative; flex: 1; min-width: 0; height: calc(18 * var(--cell, 3px));
-  background: radial-gradient(circle, color-mix(in srgb, var(--ink) 42%, transparent) 0 calc(var(--cell, 3px) / 2), transparent calc(var(--cell, 3px) / 2 + 0.5px)) 0 100% / calc(4 * var(--cell, 3px)) var(--cell, 3px) repeat-x; }
-.hiker { position: absolute; left: 0; bottom: calc(1.5 * var(--cell, 3px)); width: calc(12 * var(--cell, 3px)); height: calc(16 * var(--cell, 3px)); image-rendering: pixelated; }
-.trail.is-live .hiker { cursor: pointer; }
-/* Without the script he stands at the start of the trail, facing along it. */
-.trail:not(.is-live) .hiker { background: url("/assets/img/hiker-stand-paper.png") 0 0 / 100% 100% no-repeat; }
-@media (prefers-color-scheme: dark) { .trail:not(.is-live) .hiker { background-image: url("/assets/img/hiker-stand-night.png"); } }
+/* ---------- The hiker, as in the app ---------- */
+.hiker { --cell: 3px; position: absolute; left: 0; width: calc(12 * var(--cell)); height: calc(16 * var(--cell)); image-rendering: pixelated; }
+.hiker[role="button"] { cursor: pointer; }
+/* Without the script he stands still, facing along the trail. */
+.hiker:not(.is-live) { background: url("/assets/img/hiker-stand-paper.png") 0 0 / 100% 100% no-repeat; }
+@media (prefers-color-scheme: dark) { .hiker:not(.is-live) { background-image: url("/assets/img/hiker-stand-night.png"); } }
+.trail { position: relative; height: 54px; background: radial-gradient(circle, color-mix(in srgb, var(--ink) 40%, transparent) 0 1.5px, transparent 2px) 0 100% / 12px 3px repeat-x; }
+.trail .hiker { bottom: 5px; }
 
-/* ---------- The first screen ---------- */
-.hero { position: relative; isolation: isolate; background: var(--sky); padding-top: 68px; height: 1296px; overflow: clip; }
-.land { position: absolute; z-index: -1; left: 50%; width: 2880px; margin-left: -1440px; height: 1500px; background-repeat: no-repeat; image-rendering: pixelated; pointer-events: none; }
-.land-back { top: 196px; background-image: url("/assets/img/ridges-paper-back.png"); -webkit-mask-image: linear-gradient(to bottom, transparent 270px, #000 520px, #000 940px, transparent 1076px); mask-image: linear-gradient(to bottom, transparent 270px, #000 520px, #000 940px, transparent 1076px); }
-.land-front { top: 262px; background-image: url("/assets/img/ridges-paper-front.png"); -webkit-mask-image: linear-gradient(to bottom, #000 880px, transparent 1006px); mask-image: linear-gradient(to bottom, #000 880px, transparent 1006px); }
-@media (prefers-color-scheme: dark) {
-  .land-back { background-image: url("/assets/img/ridges-dawn-back.png"); }
-  .land-front { background-image: url("/assets/img/ridges-dawn-front.png"); }
-  .hero { background: linear-gradient(to bottom, var(--sky) 0 1150px, var(--ground) 1296px); }
+/* ---------- The first screen: one photograph, a few words in its sky ---------- */
+.hero { position: relative; isolation: isolate; min-height: max(100svh, 720px); overflow: clip; background: var(--sky-top); }
+.hero-photo { position: absolute; z-index: -1; inset: 0; }
+/* The picture's horizon sits at 70% of its height and stays there at any size. */
+.hero-photo img { width: 100%; height: 100%; object-fit: cover; object-position: 40% 70%; }
+.copy { width: min(820px, 100% - 48px); margin-inline: auto; padding-top: clamp(104px, calc(30svh - 110px), 260px); text-align: center; }
+h1 { font-size: clamp(2.6rem, 5vw, 4.5rem); line-height: 1.02; letter-spacing: -0.03em; }
+.lede { margin: 22px auto 0; max-width: 29em; font-size: clamp(1.0625rem, 1.45vw, 1.25rem); line-height: 1.5; color: var(--ink-2); }
+.cta { margin-top: 30px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+.fine { margin-top: 14px; font-size: 14px; color: var(--ink-2); text-wrap: balance; }
+@media (prefers-reduced-motion: no-preference) {
+  .copy > * { animation: rise 700ms var(--out) both; }
+  .copy > :nth-child(2) { animation-delay: 90ms; }
+  .copy > :nth-child(3) { animation-delay: 180ms; }
+  .copy > :nth-child(4) { animation-delay: 260ms; }
 }
-.copy { width: min(880px, 100% - 48px); margin: 30px auto 0; text-align: center; }
-h1 { font-size: clamp(2.5rem, 4.75vw, 4.25rem); line-height: 1.03; letter-spacing: -0.028em; }
-.lede { margin: 20px auto 0; max-width: 34em; font-size: 19px; line-height: 1.5; color: var(--ink-2); }
-.cta { margin-top: 24px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
-.fine { margin-top: 14px; font-size: 14px; color: var(--mute); }
-.stage { position: relative; z-index: 1; width: 1040px; max-width: calc(100% - 48px); margin: 6px auto 0; }
-.win img { max-width: none; }
-.stage .win img { width: 1086px; height: auto; margin: -16px -23px -30px; }
-.staged { position: absolute; z-index: 3; inset: auto 0 22px 0; text-align: center; font-size: 13px; color: var(--mute); }
+@keyframes rise { from { opacity: 0; translate: 0 14px; filter: blur(8px); } }
 
-/* ---------- Sections ---------- */
-.band { padding: 120px 0 132px; }
-.band-in { width: var(--wide); margin-inline: auto; }
-.band p { color: var(--ink-2); }
-.band h2 + p { margin-top: 18px; max-width: 31em; }
-.note { margin-top: 20px; font-size: 13px; color: var(--mute); }
-.band .note { color: var(--mute); }
-.note button { margin-left: 6px; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
-
-/* Answer one, and it goes back to work: text beside the played example */
-.needs .band-in { width: min(1040px, 100% - 48px); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 72px; align-items: start; }
-.rows { display: grid; gap: 2px; padding: 8px; border-radius: 16px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
-.rows li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; align-items: baseline; padding: 11px 12px; border-radius: 10px; transition: background-color 200ms var(--out); }
+/* ---------- How it goes: one stage, told by scrolling ---------- */
+.story { padding: 110px 0 96px; }
+.stage { width: var(--wide); margin-inline: auto; display: grid; gap: 44px; justify-items: center; }
+.actors { position: relative; width: min(440px, 100%); }
+.actors .trail { margin: 0 14px; }
+.rows { display: grid; gap: 2px; padding: 8px; border-radius: 18px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line), 0 24px 48px -32px rgb(var(--shade) / 0.35); }
+.rows li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; align-items: baseline; padding: 12px; border-radius: 10px; transition: background-color 200ms var(--out); }
 .rows li[data-state="needs"] { background: color-mix(in srgb, var(--amber) 11%, transparent); }
 .rows .dot { width: 9px; height: 9px; border-radius: 50%; align-self: center; justify-self: center; background: var(--c); transition: background-color 200ms var(--out); }
 .rows li[data-state="work"] { --c: transparent; }
 .rows li[data-state="work"] .dot { box-shadow: inset 0 0 0 2px var(--ember); clip-path: polygon(0 0, 100% 0, 100% 62%, 50% 50%, 62% 100%, 0 100%); animation: turn 1.1s linear infinite; }
 .rows li[data-state="needs"] { --c: var(--amber); }
 .rows li[data-state="done"] { --c: var(--emerald); }
-.rows li[data-state="stop"] { --c: color-mix(in srgb, var(--ink) 34%, transparent); }
 .rows .title { font-weight: 500; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rows .when { font-size: 13px; color: var(--mute); }
 .rows .why { grid-column: 2 / 4; font-size: 14px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -131,73 +127,91 @@ h1 { font-size: clamp(2.5rem, 4.75vw, 4.25rem); line-height: 1.03; letter-spacin
 .rows li[data-state="needs"] .why b { color: var(--amber-ink); }
 .rows li[data-state="done"] .why b { color: var(--emerald-ink); }
 @keyframes turn { to { rotate: 1turn; } }
-.ask { margin-top: 12px; min-height: 164px; }
-.ask-card { padding: 16px; border-radius: 16px; background: color-mix(in srgb, var(--amber) 9%, var(--raised)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent); transition: opacity 200ms var(--out), translate 200ms var(--out); }
-.ask-card[data-off] { opacity: 0; translate: 0 6px; pointer-events: none; }
-.ask-card h3 { font: 500 15px/1.3 var(--text); }
-.ask-card code { display: block; margin-top: 10px; padding: 10px 12px; border-radius: 9px; background: color-mix(in srgb, var(--ink) 7%, transparent); font: 400 13px/1.45 var(--mono); overflow-wrap: anywhere; }
+.ask { position: relative; margin-top: 12px; min-height: 160px; }
+.ask-card { padding: 16px; border-radius: 18px; background: color-mix(in srgb, var(--amber) 9%, var(--raised)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent); transition: opacity 260ms var(--out), translate 260ms var(--out), filter 260ms var(--out); }
+.ask-card[data-off] { opacity: 0; translate: 0 10px; filter: blur(6px); pointer-events: none; }
+.ask-title { font: 500 15px/1.3 var(--text); color: var(--ink); }
+.ask-card code { display: block; margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--ink) 7%, transparent); font: 400 13px/1.45 var(--mono); }
 .ask-card .pair { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.ask-card .pair button { height: 40px; border-radius: 10px; font-weight: 500; font-size: 15px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); transition: scale 120ms var(--out), background-color 150ms var(--out); }
-.ask-card .pair button:active, .ask-card .pair button[data-down] { scale: 0.97; background: color-mix(in srgb, var(--ink) 8%, var(--raised)); }
-/* Allow is the filled one, as on the iPhone. */
-.ask-card .pair [data-answer="allow"] { background: var(--accent); color: var(--on-accent); box-shadow: none; }
-.ask-card .pair [data-answer="allow"]:active, .ask-card .pair [data-answer="allow"][data-down] { background: var(--accent-over); }
-@media (prefers-reduced-motion: reduce) {
-  .rows li[data-state="work"] .dot { animation: none; }
-  .rows li, .ask-card { transition: none; }
-}
-
-/* Your agent can run the app it just built: words in one line across the top, the whole window under them */
-.loop { padding-bottom: 0; overflow: clip; }
-.loop .head { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(0, 1fr); gap: 72px; align-items: end; }
-.loop .head p { max-width: 30em; }
-.loop .win { margin-top: 64px; }
-.loop .win img { width: 1226px; height: auto; margin: -16px -23px -30px; }
-.loop .note { margin: 34px 0 0; padding-bottom: 120px; }
-
-/* The phone is the inbox and the remote: words at the left, the phone at the side, running off the bottom */
-.pocket { padding-bottom: 0; overflow: clip; border-top: 1px solid var(--line); }
-.pocket .band-in { display: grid; grid-template-columns: minmax(0, 1.5fr) auto; gap: 88px; align-items: start; }
-.pocket ul { margin-top: 26px; max-width: 31em; border-top: 1px solid var(--line); }
-.pocket li { padding: 13px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); }
-.pocket .note a { color: var(--ink-2); }
-.phone { justify-self: end; width: 318px; margin: 0 56px -109px 0; padding: 10px; border-radius: 56px; background: #131214; box-shadow: 0 30px 60px -26px rgb(var(--shade) / 0.5), inset 0 0 0 1px rgb(255 255 255 / 0.1); }
-.phone img { width: 100%; height: auto; border-radius: 46px; }
+.ask-card .pair span { display: grid; place-items: center; height: 40px; border-radius: 10px; font-weight: 500; font-size: 15px; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); transition: scale 140ms var(--out), background-color 150ms var(--out); }
+.ask-card .pair .yes { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+.ask-card .pair .yes[data-down] { scale: 0.95; background: var(--accent-over); }
+.phone { width: 210px; padding: 8px; border-radius: 44px; background: #131214; box-shadow: 0 30px 60px -26px rgb(var(--shade) / 0.5), inset 0 0 0 1px rgb(255 255 255 / 0.1); }
+.phone img { width: 100%; height: auto; border-radius: 36px; }
 @media (prefers-color-scheme: dark) { .phone { background: #2C2B31; } }
+.captions { display: grid; gap: 6px; text-align: center; font: 600 clamp(1.5rem, 2.6vw, 2.25rem)/1.12 var(--display); letter-spacing: -0.022em; }
 
-/* Download: a heading and a sentence, then one row for each build */
+/* Without the script, and with Reduce Motion on, it is a still: the asking moment, the phone under
+   it, and every line under them. */
+.story:not(.is-live) .phone { margin: 24px auto 0; }
+.story:not(.is-live) .captions { color: var(--ink-2); }
+.staged { margin-top: 28px; text-align: center; font-size: 13px; color: var(--mute); }
+
+/* With the script the stage is pinned and scrolling plays it, one line at a time. */
+.story.is-live { padding: 0; height: 430vh; }
+.story.is-live .stage { position: sticky; top: 0; height: 100vh; min-height: 560px; grid-template-rows: 1fr auto; gap: 0; align-items: center; overflow: clip; }
+/* The script sets --k so the block fits a short window whole. */
+.story.is-live .actors { margin-top: 5vh; transform: scale(var(--k, 1)); transform-origin: 50% 0; margin-bottom: calc((var(--k, 1) - 1) * var(--tall, 0px)); }
+.story.is-live .rows li { --e: clamp(0, calc(var(--enter, 1) * 2 - var(--i, 0) * 0.5), 1); opacity: var(--e); translate: 0 calc((1 - var(--e)) * 26px); filter: blur(calc((1 - var(--e)) * 7px)); }
+.story.is-live .rows li[data-id="migrate"] { --i: 1; }
+.story.is-live .rows li[data-id="tour"] { --i: 2; }
+.story.is-live .rows, .story.is-live .actors .trail { opacity: clamp(0, calc(var(--enter, 1) * 3), 1); }
+/* The phone stands beside the block and is as tall as the rows and the question together, so it
+   can never reach the caption. It is a reduced picture, not the phone's real size. */
+.story.is-live .phone { position: absolute; z-index: 2; left: calc(100% + 44px); bottom: 0; width: 183px; padding: 7px; border-radius: 34px; opacity: var(--phone, 0); translate: 0 calc((1 - var(--phone, 0)) * 70px); rotate: calc((1 - var(--phone, 0)) * 4deg); }
+.story.is-live .phone img { border-radius: 27px; }
+.story.is-live .captions { position: relative; width: 100%; height: 2.4em; margin-bottom: 13vh; font-size: clamp(1.75rem, 3.5vw, 3rem); }
+.story.is-live .captions li { position: absolute; inset: 0 0 auto 0; }
+.story.is-live .staged { position: absolute; inset: auto 0 22px 0; margin: 0; }
+.story.is-live .captions li span { display: inline-block; opacity: 0; translate: 0 10px; filter: blur(9px); transition: opacity 320ms var(--out), translate 320ms var(--out), filter 320ms var(--out); }
+.story.is-live .captions li[data-on] span { opacity: 1; translate: 0 0; filter: none; transition-duration: 520ms; }
+.story.is-live .captions li:not([data-on]) span { transition-delay: 0ms !important; transition-duration: 180ms; }
+
+/* ---------- Sections ---------- */
+.band { padding: 120px 0 132px; }
+.band-in { width: var(--wide); margin-inline: auto; }
+.band p { color: var(--ink-2); }
+.band h2 + p { margin-top: 16px; max-width: 30em; }
+.head { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(0, 1fr); gap: 72px; align-items: end; }
+.head p { max-width: 28em; }
+.note { margin-top: 28px; font-size: 13px; color: var(--mute); }
+.band .note { color: var(--mute); }
+.win img { max-width: none; height: auto; }
+.shot { padding-top: 40px; }
+.shot .win { margin-top: 56px; }
+.shot .win img { margin: -16px -23px -30px; }
+.shot-app .band-in { width: min(1040px, 100% - 48px); }
+.shot-app .win img { width: 1086px; }
+.shot-ios .win img { width: 1226px; }
+
+/* Download: a few words, then one row for each build */
 .get { border-top: 1px solid var(--line); }
-.get .head { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(0, 1fr); gap: 72px; align-items: start; }
-.get .head p { max-width: 30em; }
-.get .note { margin-top: 12px; }
-.builds { margin-top: 56px; border-top: 1px solid var(--line); }
+.builds { margin-top: 52px; border-top: 1px solid var(--line); }
 .builds > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 20px; align-items: center; padding: 20px 0; border-bottom: 1px solid var(--line); }
 .builds h3 { font: 500 17px/1.3 var(--text); }
 .builds .needs-os { font-size: 14px; color: var(--mute); }
 .builds .links { grid-row: 1 / 3; grid-column: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.builds .first { grid-column: 1 / -1; margin-top: 6px; font-size: 14px; line-height: 1.5; color: var(--ink-2); max-width: 44em; }
 .is-yours.btn-plain { box-shadow: inset 0 0 0 1.5px var(--accent); }
 
 /* ---------- The foot of the page ---------- */
-.foot { border-top: 1px solid var(--line); padding: 44px 0 56px; font-size: 14px; color: var(--mute); }
-.foot-in { width: var(--wide); margin-inline: auto; }
-.foot-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; }
-.foot-row .brand { margin-right: auto; color: var(--ink); }
-.foot-row a:not(.brand) { color: var(--ink-2); }
-.foot .small { margin-top: 26px; max-width: 62em; font-size: 13px; line-height: 1.55; }
+.foot { border-top: 1px solid var(--line); padding: 40px 0 48px; font-size: 14px; color: var(--mute); }
+.foot-in { width: var(--wide); margin-inline: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; }
+.foot .brand { color: var(--ink); margin-right: 0; }
+.foot .who { margin-right: auto; }
+.foot a:not(.brand) { color: var(--ink-2); }
 
 /* ---------- The plain pages: privacy, not found ---------- */
 .page { padding: 132px 0 120px; }
 .page .wrap { width: min(760px, 100% - 48px); margin-inline: auto; }
 .page h1 { font-size: clamp(2.25rem, 4vw, 3.25rem); line-height: 1.05; }
-.page .lede { margin: 20px 0 0; max-width: none; }
+.page .lede { margin: 20px 0 0; max-width: none; font-size: 19px; }
 .doc { margin-top: 56px; }
 .doc h2 { margin-top: 52px; font-size: 1.5rem; line-height: 1.2; letter-spacing: -0.015em; }
 .doc p, .doc ul, .doc ol { margin-top: 14px; color: var(--ink-2); }
 .doc ul { padding-left: 1.2em; list-style: disc; }
 .doc ol { padding-left: 1.4em; list-style: decimal; }
 .doc li + li { margin-top: 6px; }
-.doc a, .page .lede a, .foot .small a { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 34%, transparent); text-underline-offset: 3px; }
+.doc a, .page .lede a { text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 34%, transparent); text-underline-offset: 3px; }
 .doc code { font: 400 0.88em var(--mono); padding: 1px 5px; border-radius: 5px; background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .table-scroll { margin-top: 18px; overflow-x: auto; }
 .doc table { width: 100%; border-collapse: collapse; font-size: 15px; }
@@ -205,42 +219,43 @@ h1 { font-size: clamp(2.5rem, 4.75vw, 4.25rem); line-height: 1.03; letter-spacin
 .doc th { font-weight: 500; color: var(--ink); }
 .updated { margin-top: 44px; font-size: 14px; color: var(--mute); }
 .lost { min-height: 72svh; display: grid; align-content: center; }
-.lost .trail { flex: none; width: 216px; margin-bottom: 40px; }
 .lost .cta { justify-content: flex-start; }
 
 /* ---------- Narrower screens ---------- */
 @media (max-width: 1240px) {
-  .loop .win { overflow: hidden; margin-right: calc((100vw - 100%) / -2); }
+  .shot-ios .win { overflow: hidden; margin-right: calc((100vw - 100%) / -2); }
+}
+@media (max-width: 1100px) {
+  .shot-app .win { overflow: hidden; margin-right: calc((100vw - 100%) / -2); }
+}
+@media (max-width: 1000px) {
+  /* No room beside the block: the phone takes its place for that one line, and the Mac's rows and
+     question step back while it does. */
+  .story.is-live .actors { margin-top: 2vh; }
+  .story.is-live .phone { left: 50%; translate: -50% calc((1 - var(--phone, 0)) * 60px); rotate: 0deg; }
+  .story.is-live .rows { opacity: calc(clamp(0, calc(var(--enter, 1) * 3), 1) * (1 - var(--phone, 0))); }
+  .story.is-live .ask-card:not([data-off]) { opacity: calc(1 - var(--phone, 0)); }
 }
 @media (max-width: 860px) {
   :root { --wide: calc(100% - 32px); }
   .nav-links { display: none; }
-  .hero { height: auto; display: flex; flex-direction: column; }
-  .copy { margin-top: 30px; width: calc(100% - 32px); }
-  .lede { font-size: 17px; }
-  .cta .btn { flex: 1 1 100%; max-width: 340px; }
-  /* On a phone the window keeps its real size and runs off the right edge and the foot of the hero. */
-  .staged { position: static; order: 1; margin-top: 8px; }
-  .stage { order: 2; width: auto; max-width: none; margin: 22px 0 0 16px; }
-  .stage .working { padding-right: 16px; }
-  .stage .win { height: 468px; overflow: hidden; }
-  .land-back { top: 250px; -webkit-mask-image: linear-gradient(to bottom, transparent 200px, #000 420px); mask-image: linear-gradient(to bottom, transparent 200px, #000 420px); }
-  .land-front { display: none; }
+  .copy { width: calc(100% - 32px); padding-top: clamp(100px, calc(30svh - 110px), 220px); }
   .band { padding: 84px 0 96px; }
-  .needs .band-in, .pocket .band-in { width: calc(100% - 32px); grid-template-columns: 1fr; gap: 36px; }
-  .loop .head, .get .head { grid-template-columns: 1fr; gap: 0; }
-  .loop .head p, .get .head p { margin-top: 18px; }
+  .head { grid-template-columns: 1fr; gap: 0; }
+  .head p { margin-top: 16px; }
+  /* On a phone each window keeps its real size and runs off the right edge. */
+  .shot .win { margin: 40px -16px 0 0; overflow: hidden; }
+  .shot-app .band-in { width: calc(100% - 32px); }
+  .shot-app .win { height: 468px; -webkit-mask-image: linear-gradient(to bottom, #000 408px, transparent 468px); mask-image: linear-gradient(to bottom, #000 408px, transparent 468px); }
+  .shot-ios .win { height: 640px; -webkit-mask-image: linear-gradient(to bottom, #000 580px, transparent 640px); mask-image: linear-gradient(to bottom, #000 580px, transparent 640px); }
+  .shot-ios .win img { margin-left: -758px; margin-top: -46px; }
   .builds { margin-top: 36px; }
-  /* On a phone the picture is the Simulator panel itself, the part of the window that makes the
-     point: its own corner at the top left, running off the right edge. */
-  .loop .win { margin: 40px -16px 0 0; height: 640px; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 580px, transparent 640px); mask-image: linear-gradient(to bottom, #000 580px, transparent 640px); }
-  .loop .win img { margin-left: -758px; margin-top: -46px; }
-  .loop .note { margin-top: 20px; padding-bottom: 84px; }
-  .loop, .pocket { padding-bottom: 0; }
-  .phone { justify-self: center; width: 290px; margin: 12px 0 -98px; }
   .builds > li { grid-template-columns: 1fr; }
   .builds .links { grid-row: auto; grid-column: 1; justify-content: flex-start; margin-top: 6px; }
-  .foot-row .brand { flex-basis: 100%; }
+  .foot .who { flex-basis: 100%; }
   .page { padding: 108px 0 88px; }
   .page .wrap { width: calc(100% - 32px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rows li[data-state="work"] .dot { animation: none; }
 }

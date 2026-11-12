@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-11T21:01:02Z",
+  "generatedAt": "2026-11-12T17:19:27Z",
   "title": "Design System: trekdesktop.com",
   "extensions": {
     "colorMeta": {
@@ -10,12 +10,12 @@
         "canonical": "#B53C0B",
         "tonalRamp": [
           "#1E0100",
-          "#440F00",
-          "#752202",
-          "#A9380A",
-          "#D65A31",
-          "#FA8560",
-          "#FFBBA6",
+          "#481100",
+          "#792403",
+          "#B03701",
+          "#D95E35",
+          "#F98B69",
+          "#FFC0AC",
           "#FEE9E3"
         ]
       },
@@ -25,12 +25,12 @@
         "canonical": "#9C3308",
         "tonalRamp": [
           "#1E0100",
-          "#440F00",
-          "#742303",
-          "#A63C16",
-          "#CE613E",
-          "#F38A69",
-          "#FEBCA6",
+          "#481000",
+          "#792401",
+          "#A93F19",
+          "#D26441",
+          "#F29071",
+          "#FDC1AD",
           "#FFE9E2"
         ]
       },
@@ -40,12 +40,12 @@
         "canonical": "#FFFFFF",
         "tonalRamp": [
           "#0B0B0B",
-          "#242424",
-          "#424242",
-          "#636363",
-          "#868686",
-          "#ABABAB",
-          "#CECECE",
+          "#262626",
+          "#454545",
+          "#666666",
+          "#898989",
+          "#AEAEAE",
+          "#D1D1D1",
           "#EEEEEE"
         ]
       },
@@ -55,13 +55,28 @@
         "canonical": "#E85D1F",
         "tonalRamp": [
           "#1D0200",
-          "#431100",
-          "#732500",
-          "#A63C05",
-          "#DD530E",
-          "#FE8354",
-          "#FDBDA5",
-          "#FEE9E2"
+          "#461300",
+          "#762802",
+          "#AC3C00",
+          "#E15615",
+          "#FE895D",
+          "#FEC1AA",
+          "#FFE9E1"
+        ]
+      },
+      "ember-ink": {
+        "role": "primary",
+        "displayName": "Ember ink",
+        "canonical": "#B53C0B",
+        "tonalRamp": [
+          "#1E0100",
+          "#481100",
+          "#792403",
+          "#B03701",
+          "#D95E35",
+          "#F98B69",
+          "#FFC0AC",
+          "#FEE9E3"
         ]
       },
       "amber": {
@@ -70,13 +85,13 @@
         "canonical": "#C98500",
         "tonalRamp": [
           "#150800",
-          "#341F00",
-          "#5C3A00",
-          "#875804",
-          "#B4780D",
-          "#DC9D3F",
-          "#F3C588",
-          "#FEEBD4"
+          "#382100",
+          "#603D00",
+          "#8A5B04",
+          "#B87B0C",
+          "#DDA14D",
+          "#F1CA97",
+          "#FCECD8"
         ]
       },
       "amber-ink": {
@@ -85,13 +100,13 @@
         "canonical": "#8A5A00",
         "tonalRamp": [
           "#150800",
-          "#341F00",
-          "#5B3B02",
-          "#86590A",
-          "#AD7B32",
-          "#D1A161",
-          "#EBC79A",
-          "#FEEBD4"
+          "#372100",
+          "#5F3D03",
+          "#8B5B01",
+          "#B07E36",
+          "#D2A56A",
+          "#E9CCA6",
+          "#F8ECDE"
         ]
       },
       "emerald": {
@@ -100,13 +115,13 @@
         "canonical": "#1E9E62",
         "tonalRamp": [
           "#001005",
-          "#002D17",
-          "#06502E",
-          "#007746",
-          "#1F9E62",
-          "#5CC389",
-          "#9BE0B5",
-          "#D6F9E2"
+          "#003019",
+          "#015330",
+          "#0C7A49",
+          "#24A265",
+          "#66C58E",
+          "#A7E1BD",
+          "#DFF5E6"
         ]
       },
       "emerald-ink": {
@@ -115,13 +130,13 @@
         "canonical": "#14734A",
         "tonalRamp": [
           "#001005",
-          "#012C19",
-          "#025031",
-          "#18754C",
-          "#449A6E",
-          "#72BE94",
-          "#A7DCBD",
-          "#DBF6E6"
+          "#012F1B",
+          "#005332",
+          "#1C784F",
+          "#479D71",
+          "#79C098",
+          "#B1DDC3",
+          "#E2F4E9"
         ]
       },
       "ground": {
@@ -130,13 +145,13 @@
         "canonical": "#F3EEE6",
         "tonalRamp": [
           "#0D0B08",
-          "#27231E",
-          "#46423B",
-          "#67635C",
-          "#8A857E",
-          "#AEAAA3",
-          "#D0CDC8",
-          "#F0EEEB"
+          "#292621",
+          "#48443E",
+          "#6A655F",
+          "#8D8881",
+          "#B1ADA7",
+          "#D3D0CC",
+          "#EFEEEC"
         ]
       },
       "raised": {
@@ -145,13 +160,28 @@
         "canonical": "#FBF8F3",
         "tonalRamp": [
           "#0C0B09",
-          "#262420",
-          "#44423E",
-          "#65635F",
-          "#888681",
-          "#ADAAA6",
-          "#CFCDCA",
+          "#282623",
+          "#474541",
+          "#686661",
+          "#8B8984",
+          "#B0ADA9",
+          "#D2D1CE",
           "#EFEEED"
+        ]
+      },
+      "sky-top": {
+        "role": "neutral",
+        "displayName": "Sky",
+        "canonical": "#BABACA",
+        "tonalRamp": [
+          "#0B0A11",
+          "#252530",
+          "#444351",
+          "#656473",
+          "#888797",
+          "#ACACBA",
+          "#D0D0D9",
+          "#EEEEF2"
         ]
       },
       "ink": {
@@ -160,12 +190,12 @@
         "canonical": "#1A1A1C",
         "tonalRamp": [
           "#0B0B0C",
-          "#242426",
-          "#424244",
-          "#636365",
-          "#868688",
-          "#AAAAAD",
-          "#CDCDCF",
+          "#262628",
+          "#454547",
+          "#666668",
+          "#89898B",
+          "#AEAEB0",
+          "#D1D1D2",
           "#EEEEEF"
         ]
       },
@@ -175,13 +205,13 @@
         "canonical": "#45403A",
         "tonalRamp": [
           "#0D0B08",
-          "#27231E",
-          "#46413B",
-          "#68625C",
-          "#8B857E",
-          "#AFAAA3",
-          "#D1CDC8",
-          "#F0EEEB"
+          "#2A2621",
+          "#49443E",
+          "#6A655F",
+          "#8E8881",
+          "#B2ADA7",
+          "#D4D0CC",
+          "#EFEEEC"
         ]
       },
       "mute": {
@@ -189,14 +219,14 @@
         "displayName": "Muted ink",
         "canonical": "#6A6259",
         "tonalRamp": [
-          "#0E0A06",
-          "#29231C",
-          "#484139",
-          "#6A6259",
-          "#8D857B",
-          "#B1A9A0",
-          "#D3CDC6",
-          "#F1EEEA"
+          "#0E0A07",
+          "#2B251E",
+          "#4B443B",
+          "#6D655C",
+          "#90887E",
+          "#B4ADA4",
+          "#D5D0CA",
+          "#F0EEEC"
         ]
       },
       "line": {
@@ -204,14 +234,44 @@
         "displayName": "Hairline",
         "canonical": "rgb(40 28 16 / 0.14)",
         "tonalRamp": [
-          "#110A04",
-          "#2D2216",
-          "#4D4033",
-          "#6F6052",
-          "#928375",
-          "#B7A89A",
-          "#D7CCC1",
-          "#F3EDE8"
+          "#100A05",
+          "#2F2419",
+          "#504235",
+          "#726355",
+          "#958678",
+          "#B9AB9E",
+          "#D8CFC6",
+          "#F1EEEA"
+        ]
+      },
+      "shade": {
+        "role": "neutral",
+        "displayName": "Shade",
+        "canonical": "rgb(40 20 8)",
+        "tonalRamp": [
+          "#130804",
+          "#342116",
+          "#563F32",
+          "#796052",
+          "#9D8374",
+          "#C0A89B",
+          "#DDCDC5",
+          "#F3EDE9"
+        ]
+      },
+      "phone-body": {
+        "role": "neutral",
+        "displayName": "Phone body",
+        "canonical": "#131214",
+        "tonalRamp": [
+          "#0B0B0C",
+          "#272628",
+          "#464447",
+          "#676568",
+          "#8A888B",
+          "#AEADB0",
+          "#D1D0D2",
+          "#EEEEEF"
         ]
       },
       "accent-night": {
@@ -220,13 +280,13 @@
         "canonical": "#FF7A3D",
         "tonalRamp": [
           "#1C0200",
-          "#421300",
-          "#712800",
-          "#A33F05",
-          "#D9580E",
-          "#FE844E",
-          "#FFBCA1",
-          "#FEEAE1"
+          "#451500",
+          "#742A02",
+          "#A94000",
+          "#DD5B14",
+          "#FD8A59",
+          "#FDC1A9",
+          "#FFE9E1"
         ]
       },
       "accent-over-night": {
@@ -235,12 +295,12 @@
         "canonical": "#FF8D58",
         "tonalRamp": [
           "#1C0300",
-          "#401400",
-          "#6F2A02",
-          "#A1420A",
-          "#CF622A",
-          "#F38B5B",
-          "#FFBC9F",
+          "#441600",
+          "#732C01",
+          "#A5440A",
+          "#D3652E",
+          "#F39164",
+          "#FEC1A7",
           "#FFE9E0"
         ]
       },
@@ -249,14 +309,14 @@
         "displayName": "On ember, Night",
         "canonical": "#1A0E06",
         "tonalRamp": [
-          "#110905",
-          "#2D2119",
-          "#4E3F35",
-          "#6F6055",
-          "#938277",
-          "#B7A79D",
-          "#D7CBC3",
-          "#F3EDE9"
+          "#100906",
+          "#30241B",
+          "#504238",
+          "#726358",
+          "#96857A",
+          "#BAABA1",
+          "#D9CFC8",
+          "#F2EDEB"
         ]
       },
       "ember-night": {
@@ -265,13 +325,28 @@
         "canonical": "#FF7A3D",
         "tonalRamp": [
           "#1C0200",
-          "#421300",
-          "#712800",
-          "#A33F05",
-          "#D9580E",
-          "#FE844E",
-          "#FFBCA1",
-          "#FEEAE1"
+          "#451500",
+          "#742A02",
+          "#A94000",
+          "#DD5B14",
+          "#FD8A59",
+          "#FDC1A9",
+          "#FFE9E1"
+        ]
+      },
+      "ember-ink-night": {
+        "role": "primary",
+        "displayName": "Ember ink, Night",
+        "canonical": "#FF7A3D",
+        "tonalRamp": [
+          "#1C0200",
+          "#451500",
+          "#742A02",
+          "#A94000",
+          "#DD5B14",
+          "#FD8A59",
+          "#FDC1A9",
+          "#FFE9E1"
         ]
       },
       "amber-night": {
@@ -280,13 +355,28 @@
         "canonical": "#FFB020",
         "tonalRamp": [
           "#140800",
-          "#331F00",
-          "#5B3B00",
-          "#855904",
-          "#B2790D",
-          "#E29B16",
-          "#F8C47A",
-          "#FEEBD2"
+          "#372100",
+          "#5E3D00",
+          "#895C06",
+          "#B67C0F",
+          "#E29F31",
+          "#F4C98D",
+          "#FDECD4"
+        ]
+      },
+      "amber-ink-night": {
+        "role": "secondary",
+        "displayName": "Amber ink, Night",
+        "canonical": "#FFB020",
+        "tonalRamp": [
+          "#140800",
+          "#372100",
+          "#5E3D00",
+          "#895C06",
+          "#B67C0F",
+          "#E29F31",
+          "#F4C98D",
+          "#FDECD4"
         ]
       },
       "emerald-night": {
@@ -295,13 +385,28 @@
         "canonical": "#3FCF8E",
         "tonalRamp": [
           "#001006",
-          "#002C19",
-          "#005031",
-          "#04764B",
-          "#0F9F67",
-          "#47C68A",
-          "#91E3B6",
-          "#D2FAE2"
+          "#002F1B",
+          "#055334",
+          "#047A4D",
+          "#0CA269",
+          "#55C78F",
+          "#A0E3BD",
+          "#DCF6E7"
+        ]
+      },
+      "emerald-ink-night": {
+        "role": "secondary",
+        "displayName": "Emerald ink, Night",
+        "canonical": "#3FCF8E",
+        "tonalRamp": [
+          "#001006",
+          "#002F1B",
+          "#055334",
+          "#047A4D",
+          "#0CA269",
+          "#55C78F",
+          "#A0E3BD",
+          "#DCF6E7"
         ]
       },
       "ground-night": {
@@ -310,13 +415,13 @@
         "canonical": "#0E0D12",
         "tonalRamp": [
           "#0B0B0E",
-          "#242328",
-          "#424148",
-          "#636269",
-          "#86858C",
-          "#ABAAB0",
-          "#CECDD2",
-          "#EEEEF1"
+          "#27262B",
+          "#45444A",
+          "#66656C",
+          "#89888F",
+          "#AEADB3",
+          "#D1D0D4",
+          "#EEEEF0"
         ]
       },
       "raised-night": {
@@ -325,28 +430,28 @@
         "canonical": "#17161C",
         "tonalRamp": [
           "#0B0B0E",
-          "#242329",
-          "#424148",
-          "#63626A",
-          "#86858D",
-          "#ABAAB1",
-          "#CECDD2",
-          "#EEEEF1"
+          "#26262B",
+          "#45444B",
+          "#66656C",
+          "#898890",
+          "#AEADB4",
+          "#D1D0D5",
+          "#EEEEF0"
         ]
       },
-      "sky-night": {
+      "sky-top-night": {
         "role": "neutral",
-        "displayName": "Dusk sky",
-        "canonical": "#0B1222",
+        "displayName": "Sky, Night",
+        "canonical": "#18192B",
         "tonalRamp": [
-          "#070B15",
-          "#1C2434",
-          "#394255",
-          "#5A6378",
-          "#7C869C",
-          "#A1ABC0",
-          "#C6CEDD",
-          "#EBEFF7"
+          "#090A14",
+          "#232536",
+          "#414358",
+          "#62647A",
+          "#85879F",
+          "#AAACC1",
+          "#CED0DE",
+          "#EDEEF4"
         ]
       },
       "ink-night": {
@@ -355,13 +460,13 @@
         "canonical": "#F3EEE6",
         "tonalRamp": [
           "#0D0B08",
-          "#27231E",
-          "#46423B",
-          "#67635C",
-          "#8A857E",
-          "#AEAAA3",
-          "#D0CDC8",
-          "#F0EEEB"
+          "#292621",
+          "#48443E",
+          "#6A655F",
+          "#8D8881",
+          "#B1ADA7",
+          "#D3D0CC",
+          "#EFEEEC"
         ]
       },
       "ink-2-night": {
@@ -369,14 +474,14 @@
         "displayName": "Second ink, Night",
         "canonical": "#D2CBC3",
         "tonalRamp": [
-          "#0E0B07",
-          "#28231E",
-          "#47413B",
-          "#68625B",
-          "#8B857E",
-          "#B0AAA3",
-          "#D1CDC8",
-          "#F0EEEB"
+          "#0D0B08",
+          "#2A2620",
+          "#4A443D",
+          "#6B655E",
+          "#8E8881",
+          "#B3ADA6",
+          "#D4D0CC",
+          "#F0EEEC"
         ]
       },
       "mute-night": {
@@ -384,14 +489,14 @@
         "displayName": "Muted ink, Night",
         "canonical": "#A69F98",
         "tonalRamp": [
-          "#0E0B08",
-          "#28231E",
-          "#47413B",
-          "#68625C",
-          "#8C857E",
-          "#B0AAA3",
-          "#D2CDC8",
-          "#F0EEEB"
+          "#0D0B08",
+          "#2A2520",
+          "#4A443E",
+          "#6B655E",
+          "#8F8881",
+          "#B3ADA7",
+          "#D4D0CC",
+          "#F0EEEC"
         ]
       },
       "line-night": {
@@ -400,13 +505,43 @@
         "canonical": "rgb(243 238 230 / 0.14)",
         "tonalRamp": [
           "#0D0B08",
-          "#27231E",
-          "#46423B",
-          "#67635C",
-          "#8A857E",
-          "#AEAAA3",
-          "#D0CDC8",
-          "#F0EEEB"
+          "#292621",
+          "#48443E",
+          "#6A655F",
+          "#8D8881",
+          "#B1ADA7",
+          "#D3D0CC",
+          "#EFEEEC"
+        ]
+      },
+      "shade-night": {
+        "role": "neutral",
+        "displayName": "Shade, Night",
+        "canonical": "rgb(0 0 0)",
+        "tonalRamp": [
+          "#0B0B0B",
+          "#262626",
+          "#454545",
+          "#666666",
+          "#898989",
+          "#AEAEAE",
+          "#D1D1D1",
+          "#EEEEEE"
+        ]
+      },
+      "phone-body-night": {
+        "role": "neutral",
+        "displayName": "Phone body, Night",
+        "canonical": "#2C2B31",
+        "tonalRamp": [
+          "#0B0B0E",
+          "#26262B",
+          "#45444A",
+          "#66656C",
+          "#89888F",
+          "#AEADB3",
+          "#D1D0D5",
+          "#EEEEF0"
         ]
       }
     },
@@ -419,6 +554,14 @@
         "displayName": "Headline",
         "purpose": "Each section's h2, left-aligned."
       },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "The story's one line on the pinned stage, centred, arriving word by word."
+      },
+      "caption-still": {
+        "displayName": "Caption, still",
+        "purpose": "The story's five lines in the still layout, in second ink."
+      },
       "page-title": {
         "displayName": "Page title",
         "purpose": "The h1 of the privacy and not-found pages."
@@ -429,15 +572,19 @@
       },
       "wordmark": {
         "displayName": "Wordmark",
-        "purpose": "\"Trek\" beside the cairn in the bar and the footer."
+        "purpose": "\"Trek\" beside the mark in the bar and the footer."
       },
       "title": {
         "displayName": "Title",
-        "purpose": "A build's name in the download list."
+        "purpose": "A build's name in the builds list."
       },
       "lede": {
         "displayName": "Lede",
-        "purpose": "The sentence under the h1."
+        "purpose": "The two sentences under the home page's h1."
+      },
+      "page-lede": {
+        "displayName": "Page lede",
+        "purpose": "The sentence under the h1 of the privacy and not-found pages."
       },
       "body": {
         "displayName": "Body",
@@ -445,15 +592,19 @@
       },
       "button": {
         "displayName": "Button",
-        "purpose": "Button labels."
+        "purpose": "Button labels. 17 px on the big button, 14 px on small ones."
+      },
+      "compact": {
+        "displayName": "Compact",
+        "purpose": "The bar's links and the privacy table. The question card's heading and answers are this size at 500."
       },
       "label": {
         "displayName": "Label",
-        "purpose": "The fine line under the buttons, a build's requirement, the footer, a row's second line."
+        "purpose": "The fine line under the button, a build's requirement, a row's second line, the footer."
       },
       "note": {
         "displayName": "Note",
-        "purpose": "Captions under pictures, times in rows, the footer's small print."
+        "purpose": "The line under a capture, the story's staged line and the times in rows."
       },
       "mono": {
         "displayName": "Mono",
@@ -462,31 +613,36 @@
     },
     "shadows": [
       {
+        "name": "under-the-inbox-panel",
+        "value": "inset 0 0 0 1px var(--line), 0 24px 48px -32px rgb(var(--shade) / 0.35)",
+        "purpose": "A hairline ring and a low, wide shadow under the story's panel of rows. --shade is 40 20 8 on Paper and 0 0 0 at Night."
+      },
+      {
         "name": "under-the-phone",
         "value": "0 30px 60px -26px rgb(var(--shade) / 0.5), inset 0 0 0 1px rgb(255 255 255 / 0.1)",
-        "purpose": "The one soft shadow the page draws, under the phone, with a faint inner edge on its body. --shade is 40 20 8 on Paper and 0 0 0 at Night."
+        "purpose": "The shadow under the story's phone, with a faint inner edge on its body."
       },
       {
         "name": "hairline-ring",
         "value": "inset 0 0 0 1px var(--line)",
-        "purpose": "The outline of a plain button, the Inbox panel, and the Deny and Allow buttons. An outline, not a shadow."
+        "purpose": "The outline of a plain button and of the Deny answer. An outline, not a shadow."
       },
       {
         "name": "own-build-ring",
         "value": "inset 0 0 0 1.5px var(--accent)",
-        "purpose": "Marks the build that matches the visitor's computer in the download list."
+        "purpose": "Marks the build that matches the visitor's computer in the builds list."
       },
       {
-        "name": "approval-ring",
+        "name": "question-ring",
         "value": "inset 0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent)",
-        "purpose": "The outline of the approval card."
+        "purpose": "The outline of the question card."
       }
     ],
     "motion": [
       {
         "name": "out",
         "value": "cubic-bezier(0.23, 1, 0.32, 1)",
-        "purpose": "The one easing curve (--out): hovers, presses, state changes and the rows' glide."
+        "purpose": "The one easing curve (--out): entrances, hovers, presses, the captions' words and the rows' glide."
       },
       {
         "name": "hover",
@@ -496,17 +652,52 @@
       {
         "name": "press",
         "value": "120ms",
-        "purpose": "A button scaling to 0.98 (0.97 for Deny and Allow) while pressed."
+        "purpose": "A button scaling to 0.98 while pressed."
       },
       {
-        "name": "state",
-        "value": "200ms",
-        "purpose": "A row's wash and dot changing colour; the approval card coming and going with opacity and a 6px rise."
+        "name": "entrance-rise",
+        "value": "700ms, starting 0, 90, 180 and 260ms in",
+        "purpose": "The first screen's headline, lede, button and fine line on load: opacity, a 14px rise and an 8px blur that clears. CSS, so it runs without the script. Off with Reduce Motion."
+      },
+      {
+        "name": "story-scroll",
+        "value": "430vh, cut at 18%, 40%, 60% and 80%",
+        "purpose": "The pinned story. Scrolling plays its five moments forwards and backwards. The played position moves 16% of the way to the scroll position each frame."
+      },
+      {
+        "name": "caption-word",
+        "value": "520ms in, 55ms between words, the first 170ms after the change; 180ms out",
+        "purpose": "A caption arriving word by word: opacity, a 10px rise and a 9px blur that clears. A line's words leave together."
+      },
+      {
+        "name": "row-arrival",
+        "value": "tied to scroll",
+        "purpose": "The rows gathering as the stage comes up the screen: opacity, a 26px rise and a 7px blur that clears, each row starting after the one above it."
       },
       {
         "name": "row-glide",
-        "value": "380ms",
-        "purpose": "A row moving to its new place in the Inbox example."
+        "value": "420ms",
+        "purpose": "A row moving to its new place when the order changes."
+      },
+      {
+        "name": "row-state",
+        "value": "200ms",
+        "purpose": "A row's wash and its dot changing colour."
+      },
+      {
+        "name": "question-card",
+        "value": "260ms",
+        "purpose": "The question card coming and going: opacity, a 10px rise and a 6px blur."
+      },
+      {
+        "name": "allow-press",
+        "value": "140ms, then 220ms",
+        "purpose": "Going forward into \"It gets back to work.\": Allow scales to 0.95 and goes to accent-over, and the stage settles 220ms after the press."
+      },
+      {
+        "name": "phone",
+        "value": "tied to scroll: in from 40% to 47%, out from 58% to 63%",
+        "purpose": "The phone coming up beside the block: opacity, a 70px rise and a 4 degree turn that straightens. Under 1000px wide it rises 60px over the block and does not turn."
       },
       {
         "name": "ring-turn",
@@ -516,22 +707,39 @@
       {
         "name": "hiker-clock",
         "value": "16 frames a second",
-        "purpose": "The hiker's walk, as in the app: 16 art pixels a second, 0.35s to gather and lose speed, a pose every 4 pixels, a 1.2s rest and a turn at each end. Runs while the trail is on screen and the tab is in front; off with Reduce Motion."
+        "purpose": "The hiker's walk, as in the app: 16 art pixels a second, 0.35s to gather and lose speed, a pose every 4 pixels, a 1.2s rest and a turn at each end. Time moves him and scroll never sets his place. Runs while the trail is on screen and the tab is in front. Off with Reduce Motion."
       },
       {
-        "name": "inbox-play",
-        "value": "1.6s, then 3.6s, then 0.17s, 1.9s, 3.5s, 4.5s",
-        "purpose": "The Inbox example, played once at 60% in view: a thread stops for an approval, Allow presses itself, the press lands, a second thread finishes, the first finishes, and Play it again appears."
+        "name": "fit",
+        "value": "scale 0.62 to 1",
+        "purpose": "The stage's block shrinking from its top centre to fit a short window (--k), so it never meets the caption. The hiker's cell follows the scale, so one art pixel stays a whole number of device pixels."
+      },
+      {
+        "name": "still",
+        "value": "no script, Reduce Motion, or a window under 560px tall",
+        "purpose": "The story as a still layout: the asking moment, the phone under it, all five captions and the staged line. Not pinned."
       }
     ],
     "breakpoints": [
       {
-        "name": "window-cut",
+        "name": "ios-window-cut",
         "value": "1240px"
+      },
+      {
+        "name": "app-window-cut",
+        "value": "1100px"
+      },
+      {
+        "name": "phone-over-block",
+        "value": "1000px"
       },
       {
         "name": "narrow",
         "value": "860px"
+      },
+      {
+        "name": "still-height",
+        "value": "559px"
       }
     ]
   },
@@ -540,94 +748,104 @@
       "name": "Filled button",
       "kind": "button",
       "refersTo": "button-fill",
-      "description": "The one action: the download in the hero, Download in the bar, Back to Trek on the not-found page.",
-      "html": "<a class=\"ds-btn-fill\" href=\"#\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 15V3\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"m7 10 5 5 5-5\"/></svg><span>Download for macOS</span></a>",
-      "css": ".ds-btn-fill { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 48px; padding: 0 20px; border-radius: 12px; background: var(--accent, #B53C0B); color: var(--on-accent, #FFFFFF); font: 500 16px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-btn-fill svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .ds-btn-fill:hover { background: var(--accent-over, #9C3308); } .ds-btn-fill:active { scale: 0.98; } .ds-btn-fill:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; }"
-    },
-    {
-      "name": "Plain button",
-      "kind": "button",
-      "refersTo": "button-plain",
-      "description": "The second choice beside the filled button: ink text inside a hairline ring.",
-      "html": "<a class=\"ds-btn-plain\" href=\"#\">Source on GitHub</a>",
-      "css": ".ds-btn-plain { display: inline-flex; align-items: center; justify-content: center; height: 48px; padding: 0 20px; border-radius: 12px; color: var(--ink, #1A1A1C); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); font: 500 16px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-btn-plain:hover { background: color-mix(in srgb, var(--ink, #1A1A1C) 6%, transparent); } .ds-btn-plain:active { scale: 0.98; } .ds-btn-plain:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; }"
+      "description": "The one action. Big with an icon for the download on the first screen, standard for Back to Trek on the not-found page, small for Download in the bar.",
+      "html": "<span class=\"ds-btn-set\"><a class=\"ds-btn-fill ds-btn-big\" href=\"#\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 15V3\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"m7 10 5 5 5-5\"/></svg><span>Download for macOS</span></a><a class=\"ds-btn-fill\" href=\"#\">Back to Trek</a></span>",
+      "css": ".ds-btn-set { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 10px; } .ds-btn-fill { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 48px; padding: 0 20px; border-radius: 12px; font: 500 16px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); background: var(--accent, #B53C0B); color: var(--on-accent, #FFFFFF); } .ds-btn-fill.ds-btn-big { height: 54px; padding: 0 26px; border-radius: 14px; font-size: 17px; } .ds-btn-fill svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; } .ds-btn-fill:hover { background: var(--accent-over, #9C3308); } .ds-btn-fill:active { scale: 0.98; } .ds-btn-fill:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; }"
     },
     {
       "name": "Small plain button",
       "kind": "button",
       "refersTo": "button-small",
-      "description": "A build's link in the download list, with the file's size inside it. The visitor's own build has an ember ring in place of the hairline.",
-      "html": "<span class=\"ds-build-links\"><a class=\"ds-btn-small ds-is-yours\" href=\"#\">Apple silicon <small>38 MB</small></a><a class=\"ds-btn-small\" href=\"#\">Intel <small>40 MB</small></a></span>",
-      "css": ".ds-build-links { display: inline-flex; flex-wrap: wrap; gap: 8px; } .ds-btn-small { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 36px; padding: 0 14px; border-radius: 10px; color: var(--ink, #1A1A1C); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); font: 500 14px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-btn-small small { font-size: 13px; font-weight: 400; opacity: 0.78; } .ds-btn-small:hover { background: color-mix(in srgb, var(--ink, #1A1A1C) 6%, transparent); } .ds-btn-small:active { scale: 0.98; } .ds-btn-small:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; } .ds-btn-small.ds-is-yours { box-shadow: inset 0 0 0 1.5px var(--accent, #B53C0B); }"
+      "description": "A build's link in the builds list, with the file's size inside it. The visitor's own build has an ember ring in place of the hairline.",
+      "html": "<span class=\"ds-build-links\"><a class=\"ds-btn-plain ds-is-yours\" href=\"#\">Apple silicon <small>38 MB</small></a><a class=\"ds-btn-plain\" href=\"#\">Intel <small>40 MB</small></a></span>",
+      "css": ".ds-build-links { display: inline-flex; flex-wrap: wrap; gap: 8px; } .ds-btn-plain { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 48px; padding: 0 20px; border-radius: 12px; font: 500 16px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); height: 36px; padding: 0 14px; font-size: 14px; border-radius: 10px; color: var(--ink, #1A1A1C); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); } .ds-btn-plain small { font-size: 13px; font-weight: 400; opacity: 0.78; } .ds-btn-plain:hover { background: color-mix(in srgb, var(--ink, #1A1A1C) 6%, transparent); } .ds-btn-plain:active { scale: 0.98; } .ds-btn-plain:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; } .ds-btn-plain.ds-is-yours { box-shadow: inset 0 0 0 1.5px var(--accent, #B53C0B); }"
     },
     {
       "name": "The bar",
       "kind": "nav",
       "refersTo": "nav-link",
-      "description": "The top of every page: the wordmark (the cairn sits before it at 22 px), four links, and a small filled Download. Under 860 px the links are dropped.",
-      "html": "<nav class=\"ds-nav\" aria-label=\"Trek\"><a class=\"ds-nav-brand\" href=\"#\">Trek</a><span class=\"ds-nav-links\"><a href=\"#\">How it works</a><a href=\"#\">iOS</a><a href=\"#\">iPhone</a><a href=\"#\">GitHub</a></span><a class=\"ds-nav-dl\" href=\"#\">Download</a></nav>",
-      "css": ".ds-nav { display: flex; align-items: center; gap: 30px; height: 68px; } .ds-nav-brand { margin-right: auto; color: var(--ink, #1A1A1C); font: 500 18px/1 var(--display, \"Bricolage Grotesque\", \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.01em; text-decoration: none; } .ds-nav-links { display: flex; gap: 30px; } .ds-nav-links a { color: var(--ink-2, #45403A); font: 400 15px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); text-decoration: none; transition: color 150ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-nav-links a:hover { color: var(--ink, #1A1A1C); } .ds-nav-dl { display: inline-flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 10px; background: var(--accent, #B53C0B); color: var(--on-accent, #FFFFFF); font: 500 14px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-nav-dl:hover { background: var(--accent-over, #9C3308); } .ds-nav-dl:active { scale: 0.98; } .ds-nav a:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; border-radius: 6px; }"
+      "description": "The top of every page: the mark at 26 px and the wordmark, two links, and a small filled Download. It has no ground of its own. Under 860 px the links are dropped.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Trek\"><a class=\"ds-nav-brand\" href=\"#\"><svg class=\"ds-mark ds-mark-day\" viewBox=\"0 0 96 96\" aria-hidden=\"true\"><rect width=\"96\" height=\"96\" rx=\"22\" fill=\"#1A1A1C\"/><path d=\"M56 24V8.6\" stroke=\"#FFC7A0\" stroke-width=\"2\" stroke-linecap=\"round\"/><path d=\"M56.4 8.6C59.3 7.2 61.5 10.2 65.7 8.8V15.2C61.5 16.6 59.3 13.6 56.4 15Z\" fill=\"#FFC7A0\"/><path d=\"M9.5 78.5 32.8 46.6 43 43.4 56 21 86.5 78.5Z\" fill=\"#FF7A3D\" stroke=\"#FF7A3D\" stroke-width=\"4.5\" stroke-linejoin=\"round\"/><clipPath id=\"ds-bar-ridge-day\"><path d=\"M56 4L56 21L60.6 39.6L55 51.6L62.6 64.8L58.8 78.5L58.8 96H100V4Z\"/></clipPath><g clip-path=\"url(#ds-bar-ridge-day)\"><path d=\"M9.5 78.5 32.8 46.6 43 43.4 56 21 86.5 78.5Z\" fill=\"#C9551F\" stroke=\"#C9551F\" stroke-width=\"4.5\" stroke-linejoin=\"round\"/></g><g fill=\"#1A1A1C\"><circle cx=\"29\" cy=\"74.2\" r=\"2.4\"/><circle cx=\"36\" cy=\"69.2\" r=\"2.4\"/><circle cx=\"43\" cy=\"66\" r=\"2.4\"/><circle cx=\"47.2\" cy=\"60\" r=\"2.4\"/><circle cx=\"44\" cy=\"53.2\" r=\"2.4\"/><circle cx=\"48\" cy=\"47\" r=\"2.4\"/><circle cx=\"51.6\" cy=\"40.4\" r=\"2.4\"/><circle cx=\"53.6\" cy=\"34\" r=\"2.4\"/><circle cx=\"54.6\" cy=\"28.2\" r=\"2\"/></g></svg><svg class=\"ds-mark ds-mark-night\" viewBox=\"0 0 96 96\" aria-hidden=\"true\"><rect width=\"96\" height=\"96\" rx=\"22\" fill=\"#FBF8F3\"/><path d=\"M56 24V8.6\" stroke=\"#B8461A\" stroke-width=\"2\" stroke-linecap=\"round\"/><path d=\"M56.4 8.6C59.3 7.2 61.5 10.2 65.7 8.8V15.2C61.5 16.6 59.3 13.6 56.4 15Z\" fill=\"#B8461A\"/><path d=\"M9.5 78.5 32.8 46.6 43 43.4 56 21 86.5 78.5Z\" fill=\"#E85D1F\" stroke=\"#E85D1F\" stroke-width=\"4.5\" stroke-linejoin=\"round\"/><clipPath id=\"ds-bar-ridge-night\"><path d=\"M56 4L56 21L60.6 39.6L55 51.6L62.6 64.8L58.8 78.5L58.8 96H100V4Z\"/></clipPath><g clip-path=\"url(#ds-bar-ridge-night)\"><path d=\"M9.5 78.5 32.8 46.6 43 43.4 56 21 86.5 78.5Z\" fill=\"#B8461A\" stroke=\"#B8461A\" stroke-width=\"4.5\" stroke-linejoin=\"round\"/></g><g fill=\"#FBF8F3\"><circle cx=\"29\" cy=\"74.2\" r=\"2.4\"/><circle cx=\"36\" cy=\"69.2\" r=\"2.4\"/><circle cx=\"43\" cy=\"66\" r=\"2.4\"/><circle cx=\"47.2\" cy=\"60\" r=\"2.4\"/><circle cx=\"44\" cy=\"53.2\" r=\"2.4\"/><circle cx=\"48\" cy=\"47\" r=\"2.4\"/><circle cx=\"51.6\" cy=\"40.4\" r=\"2.4\"/><circle cx=\"53.6\" cy=\"34\" r=\"2.4\"/><circle cx=\"54.6\" cy=\"28.2\" r=\"2\"/></g></svg>Trek</a><span class=\"ds-nav-links\"><a href=\"#\">How it works</a><a href=\"#\">GitHub</a></span><a class=\"ds-nav-dl\" href=\"#\">Download</a></nav>",
+      "css": ".ds-nav { display: flex; align-items: center; gap: 30px; height: 68px; } .ds-nav-brand { display: inline-flex; align-items: center; gap: 9px; margin-right: auto; color: var(--ink, #1A1A1C); font: 500 18px/1 var(--display, \"Bricolage Grotesque\", \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.01em; text-decoration: none; } .ds-nav .ds-mark { width: 26px; height: 26px; } .ds-nav .ds-mark-night { display: none; } @media (prefers-color-scheme: dark) { .ds-nav .ds-mark-day { display: none; } .ds-nav .ds-mark-night { display: block; } } .ds-nav-links { display: flex; gap: 30px; } .ds-nav-links a { color: var(--ink-2, #45403A); font: 400 15px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); text-decoration: none; transition: color 150ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-nav-links a:hover { color: var(--ink, #1A1A1C); } .ds-nav-dl { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 48px; padding: 0 20px; border-radius: 12px; font: 500 16px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); height: 36px; padding: 0 14px; font-size: 14px; border-radius: 10px; background: var(--accent, #B53C0B); color: var(--on-accent, #FFFFFF); } .ds-nav-dl:hover { background: var(--accent-over, #9C3308); } .ds-nav-dl:active { scale: 0.98; } .ds-nav a:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; border-radius: 6px; } .ds-nav a.ds-nav-dl:focus-visible { border-radius: 10px; }"
     },
     {
       "name": "Text link",
       "kind": "custom",
-      "description": "A link inside a sentence or the footer: a faint underline that comes to full strength under the pointer.",
-      "html": "<a class=\"ds-text-link\" href=\"#\">All releases</a>",
+      "description": "A link in the footer or inside a sentence: a faint underline that comes to full strength under the pointer.",
+      "html": "<a class=\"ds-text-link\" href=\"#\">Releases</a>",
       "css": ".ds-text-link { color: var(--ink-2, #45403A); font: 400 14px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 34%, transparent); text-underline-offset: 3px; transition: text-decoration-color 150ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-text-link:hover { text-decoration-color: currentColor; } .ds-text-link:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; border-radius: 6px; }"
     },
     {
       "name": "Inbox rows",
       "kind": "custom",
       "refersTo": "inbox-rows",
-      "description": "The played example of the app's Inbox: a thread that waits, one at work, one finished. Staged, and said to be.",
+      "description": "The story's example Inbox with one thread in each state: waiting, at work and finished. Built in HTML, not a capture.",
       "html": "<ol class=\"ds-rows\" aria-label=\"An example Inbox\"><li data-state=\"needs\"><span class=\"ds-dot\"></span><span class=\"ds-title\">Migrate the schema</span><span class=\"ds-when\">2m</span><span class=\"ds-why\"><b>Waiting: run ./migrate?</b> · mobile</span></li><li data-state=\"work\"><span class=\"ds-dot\"></span><span class=\"ds-title\">Run the full test suite</span><span class=\"ds-when\">1m 29s</span><span class=\"ds-why\"><b>At work</b> · mobile</span></li><li data-state=\"done\"><span class=\"ds-dot\"></span><span class=\"ds-title\">Tour the startup code</span><span class=\"ds-when\">3m</span><span class=\"ds-why\"><b>Finished</b> · atlas-web</span></li></ol>",
-      "css": ".ds-rows { display: grid; gap: 2px; margin: 0; padding: 8px; list-style: none; border-radius: 16px; background: var(--raised, #FBF8F3); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); color: var(--ink, #1A1A1C); font: 400 17px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); } .ds-rows li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; align-items: baseline; padding: 11px 12px; border-radius: 10px; transition: background-color 200ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-rows li[data-state=\"needs\"] { --ds-c: var(--amber, #C98500); background: color-mix(in srgb, var(--amber, #C98500) 11%, transparent); } .ds-rows li[data-state=\"done\"] { --ds-c: var(--emerald, #1E9E62); } .ds-rows li[data-state=\"work\"] { --ds-c: transparent; } .ds-rows .ds-dot { width: 9px; height: 9px; border-radius: 50%; align-self: center; justify-self: center; background: var(--ds-c); } .ds-rows li[data-state=\"work\"] .ds-dot { box-shadow: inset 0 0 0 2px var(--ember, #E85D1F); clip-path: polygon(0 0, 100% 0, 100% 62%, 50% 50%, 62% 100%, 0 100%); animation: ds-turn 1.1s linear infinite; } .ds-rows .ds-title { font-weight: 500; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-rows .ds-when { font-size: 13px; color: var(--mute, #6A6259); font-variant-numeric: tabular-nums; } .ds-rows .ds-why { grid-column: 2 / 4; font-size: 14px; color: var(--mute, #6A6259); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-rows .ds-why b { font-weight: 500; } .ds-rows li[data-state=\"work\"] .ds-why b { color: var(--ember-ink, #B53C0B); } .ds-rows li[data-state=\"needs\"] .ds-why b { color: var(--amber-ink, #8A5A00); } .ds-rows li[data-state=\"done\"] .ds-why b { color: var(--emerald-ink, #14734A); } @keyframes ds-turn { to { rotate: 1turn; } } @media (prefers-reduced-motion: reduce) { .ds-rows li[data-state=\"work\"] .ds-dot { animation: none; } .ds-rows li { transition: none; } }"
+      "css": ".ds-rows { display: grid; gap: 2px; width: min(440px, 100%); margin: 0; padding: 8px; list-style: none; border-radius: 18px; background: var(--raised, #FBF8F3); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)), 0 24px 48px -32px rgb(var(--shade, 40 20 8) / 0.35); color: var(--ink, #1A1A1C); font: 400 17px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); } .ds-rows li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 10px; align-items: baseline; padding: 12px; border-radius: 10px; transition: background-color 200ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-rows li[data-state=\"needs\"] { --ds-c: var(--amber, #C98500); background: color-mix(in srgb, var(--amber, #C98500) 11%, transparent); } .ds-rows li[data-state=\"done\"] { --ds-c: var(--emerald, #1E9E62); } .ds-rows li[data-state=\"work\"] { --ds-c: transparent; } .ds-rows .ds-dot { width: 9px; height: 9px; border-radius: 50%; align-self: center; justify-self: center; background: var(--ds-c); transition: background-color 200ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-rows li[data-state=\"work\"] .ds-dot { box-shadow: inset 0 0 0 2px var(--ember, #E85D1F); clip-path: polygon(0 0, 100% 0, 100% 62%, 50% 50%, 62% 100%, 0 100%); animation: ds-turn 1.1s linear infinite; } .ds-rows .ds-title { font-weight: 500; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-rows .ds-when { font-size: 13px; color: var(--mute, #6A6259); font-variant-numeric: tabular-nums; } .ds-rows .ds-why { grid-column: 2 / 4; font-size: 14px; color: var(--mute, #6A6259); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-rows .ds-why b { font-weight: 500; } .ds-rows li[data-state=\"work\"] .ds-why b { color: var(--ember-ink, #B53C0B); } .ds-rows li[data-state=\"needs\"] .ds-why b { color: var(--amber-ink, #8A5A00); } .ds-rows li[data-state=\"done\"] .ds-why b { color: var(--emerald-ink, #14734A); } @keyframes ds-turn { to { rotate: 1turn; } } @media (prefers-reduced-motion: reduce) { .ds-rows li[data-state=\"work\"] .ds-dot { animation: none; } }"
     },
     {
-      "name": "Approval card",
+      "name": "Question card",
       "kind": "card",
-      "refersTo": "approval-card",
-      "description": "What a waiting thread asks, under the Inbox rows: a heading, the command, and Deny and Allow as equal halves.",
-      "html": "<div class=\"ds-ask\"><h3>Claude Code wants to run a command</h3><code>./migrate</code><div class=\"ds-pair\"><button type=\"button\">Deny</button><button type=\"button\">Allow</button></div></div>",
-      "css": ".ds-ask { padding: 16px; border-radius: 16px; background: color-mix(in srgb, var(--amber, #C98500) 9%, var(--raised, #FBF8F3)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber, #C98500) 55%, transparent); color: var(--ink, #1A1A1C); } .ds-ask h3 { margin: 0; font: 500 15px/1.3 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); } .ds-ask code { display: block; margin-top: 10px; padding: 10px 12px; border-radius: 9px; background: color-mix(in srgb, var(--ink, #1A1A1C) 7%, transparent); font: 400 13px/1.45 var(--mono, \"JetBrains Mono\", ui-monospace, monospace); overflow-wrap: anywhere; } .ds-ask .ds-pair { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .ds-ask .ds-pair button { height: 40px; border: 0; border-radius: 10px; background: var(--raised, #FBF8F3); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); color: var(--ink, #1A1A1C); font: 500 15px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); cursor: pointer; transition: scale 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color 150ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-ask .ds-pair button:active { scale: 0.97; background: color-mix(in srgb, var(--ink, #1A1A1C) 8%, var(--raised, #FBF8F3)); } .ds-ask .ds-pair button:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; }"
+      "refersTo": "question-card",
+      "description": "What the waiting thread asks, under the rows: a heading, the command, and Deny and Allow as equal halves. The two answers are drawn, not buttons.",
+      "html": "<div class=\"ds-ask\"><p class=\"ds-ask-title\">Claude Code wants to run a command</p><code>./migrate</code><div class=\"ds-pair\"><span>Deny</span><span class=\"ds-yes\">Allow</span></div></div>",
+      "css": ".ds-ask { width: min(440px, 100%); box-sizing: border-box; padding: 16px; border-radius: 18px; background: color-mix(in srgb, var(--amber, #C98500) 9%, var(--raised, #FBF8F3)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber, #C98500) 55%, transparent); color: var(--ink, #1A1A1C); } .ds-ask .ds-ask-title { margin: 0; font: 500 15px/1.3 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); } .ds-ask code { display: block; margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--ink, #1A1A1C) 7%, transparent); font: 400 13px/1.45 var(--mono, \"JetBrains Mono\", ui-monospace, monospace); } .ds-ask .ds-pair { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .ds-ask .ds-pair span { display: grid; place-items: center; height: 40px; border-radius: 10px; font: 500 15px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); background: var(--raised, #FBF8F3); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); } .ds-ask .ds-pair .ds-yes { background: var(--accent, #B53C0B); color: var(--on-accent, #FFFFFF); box-shadow: none; }"
     },
     {
-      "name": "Download row",
+      "name": "Story caption",
+      "kind": "custom",
+      "refersTo": "story-caption",
+      "description": "The story's one line on the pinned stage, and the line under it that says the example is staged. The caption arrives word by word: each word clears from a 9 px blur and rises 10 px over 520 ms, 55 ms after the word before it.",
+      "html": "<div class=\"ds-story-words\"><p class=\"ds-caption\"><span>One</span> <span>stops</span> <span>to</span> <span>ask.</span></p><p class=\"ds-staged\">An example, with staged threads.</p></div>",
+      "css": ".ds-story-words { display: grid; gap: 44px; } .ds-staged { margin: 0; text-align: center; color: var(--mute, #6A6259); font: 400 13px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); } .ds-caption { margin: 0; text-align: center; color: var(--ink, #1A1A1C); font: 600 clamp(1.75rem, 3.5vw, 3rem)/1.12 var(--display, \"Bricolage Grotesque\", \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.022em; } .ds-caption span { display: inline-block; } @media (prefers-reduced-motion: no-preference) { .ds-caption span { animation: ds-word 520ms cubic-bezier(0.23, 1, 0.32, 1) both; animation-delay: 170ms; } .ds-caption span:nth-child(2) { animation-delay: 225ms; } .ds-caption span:nth-child(3) { animation-delay: 280ms; } .ds-caption span:nth-child(4) { animation-delay: 335ms; } } @keyframes ds-word { from { opacity: 0; translate: 0 10px; filter: blur(9px); } }"
+    },
+    {
+      "name": "The phone",
+      "kind": "custom",
+      "refersTo": "phone-stage",
+      "description": "The drawn body around the story's iPhone capture, at its size on the pinned stage. This snippet leaves the screen blank. On the page it holds the real capture, reduced.",
+      "html": "<div class=\"ds-phone\" role=\"img\" aria-label=\"The phone body, with its screen left blank\"><span class=\"ds-phone-screen\"></span></div>",
+      "css": ".ds-phone { width: 183px; box-sizing: border-box; padding: 7px; border-radius: 34px; background: #131214; box-shadow: 0 30px 60px -26px rgb(var(--shade, 40 20 8) / 0.5), inset 0 0 0 1px rgb(255 255 255 / 0.1); } .ds-phone-screen { display: block; aspect-ratio: 1170 / 2532; border-radius: 27px; background: var(--raised, #FBF8F3); } @media (prefers-color-scheme: dark) { .ds-phone { background: #2C2B31; } }"
+    },
+    {
+      "name": "Build row",
       "kind": "custom",
       "refersTo": "build-row",
-      "description": "One build in the download list: its name, what it needs, its links, and what the first launch asks.",
-      "html": "<ul class=\"ds-builds\"><li><h3>macOS</h3><p class=\"ds-needs-os\">13 or later.</p><div class=\"ds-links\"><a class=\"ds-build-link\" href=\"#\">Apple silicon</a><a class=\"ds-build-link\" href=\"#\">Intel</a></div><p class=\"ds-first\">The first launch: the Mac build is signed but not yet notarized, so macOS stops it once. Open System Settings, then Privacy &amp; Security, and choose <b>Open Anyway</b>.</p></li></ul>",
-      "css": ".ds-builds { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line, rgb(40 28 16 / 0.14)); font: 400 17px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); color: var(--ink, #1A1A1C); } .ds-builds > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 20px; align-items: center; padding: 20px 0; border-bottom: 1px solid var(--line, rgb(40 28 16 / 0.14)); } .ds-builds h3 { margin: 0; font: 500 17px/1.3 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); } .ds-builds p { margin: 0; } .ds-builds .ds-needs-os { font-size: 14px; color: var(--mute, #6A6259); } .ds-builds .ds-links { grid-row: 1 / 3; grid-column: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; } .ds-builds .ds-first { grid-column: 1 / -1; margin-top: 6px; font-size: 14px; line-height: 1.5; color: var(--ink-2, #45403A); max-width: 44em; } .ds-builds .ds-first b { font-weight: 500; } .ds-build-link { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 36px; padding: 0 14px; border-radius: 10px; color: var(--ink, #1A1A1C); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); font: 500 14px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); } .ds-build-link small { font-size: 13px; font-weight: 400; opacity: 0.78; } .ds-build-link:hover { background: color-mix(in srgb, var(--ink, #1A1A1C) 6%, transparent); } .ds-build-link:active { scale: 0.98; } .ds-build-link:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; } .ds-build-link.ds-is-yours { box-shadow: inset 0 0 0 1.5px var(--accent, #B53C0B); }"
+      "description": "One build in the builds list: its name, what it needs and what the first launch asks, and its links at the right.",
+      "html": "<ul class=\"ds-builds\"><li><h3>Windows</h3><p class=\"ds-needs-os\">11, x64. SmartScreen asks once: choose More info, then Run anyway.</p><div class=\"ds-links\"><a class=\"ds-build-link\" href=\"#\">Installer <small>27 MB</small></a><a class=\"ds-build-link\" href=\"#\">Zip <small>39 MB</small></a></div></li></ul>",
+      "css": ".ds-builds { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line, rgb(40 28 16 / 0.14)); font: 400 17px/1.55 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); color: var(--ink, #1A1A1C); } .ds-builds > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 20px; align-items: center; padding: 20px 0; border-bottom: 1px solid var(--line, rgb(40 28 16 / 0.14)); } .ds-builds h3 { margin: 0; font: 500 17px/1.3 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); } .ds-builds p { margin: 0; } .ds-builds .ds-needs-os { font-size: 14px; color: var(--mute, #6A6259); } .ds-builds .ds-links { grid-row: 1 / 3; grid-column: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; } .ds-build-link { display: inline-flex; align-items: center; justify-content: center; gap: 9px; height: 48px; padding: 0 20px; border-radius: 12px; font: 500 16px/1 var(--text, \"Hanken Grotesk\", system-ui, sans-serif); letter-spacing: -0.005em; white-space: nowrap; text-decoration: none; transition: background-color 150ms cubic-bezier(0.23, 1, 0.32, 1), scale 120ms cubic-bezier(0.23, 1, 0.32, 1); height: 36px; padding: 0 14px; font-size: 14px; border-radius: 10px; color: var(--ink, #1A1A1C); box-shadow: inset 0 0 0 1px var(--line, rgb(40 28 16 / 0.14)); } .ds-build-link small { font-size: 13px; font-weight: 400; opacity: 0.78; } .ds-build-link:hover { background: color-mix(in srgb, var(--ink, #1A1A1C) 6%, transparent); } .ds-build-link:active { scale: 0.98; } .ds-build-link:focus-visible { outline: 2px solid var(--ember, #E85D1F); outline-offset: 3px; }"
     },
     {
       "name": "The hiker on his trail",
       "kind": "custom",
-      "description": "The app's hiker, standing at the start of his dotted trail, as the page shows him before its script runs. The walk is in assets/site.js.",
+      "description": "The app's hiker, standing at the start of the story's dotted trail, as the page shows him before its script runs and with Reduce Motion on. The walk is in assets/site.js. He appears in the story only.",
       "html": "<div class=\"ds-trail\"><span class=\"ds-hiker\" role=\"img\" aria-label=\"The hiker, standing\"></span></div>",
-      "css": ".ds-trail { --ds-cell: 3px; position: relative; width: 216px; height: calc(18 * var(--ds-cell)); background: radial-gradient(circle, color-mix(in srgb, var(--ink, #1A1A1C) 42%, transparent) 0 calc(var(--ds-cell) / 2), transparent calc(var(--ds-cell) / 2 + 0.5px)) 0 100% / calc(4 * var(--ds-cell)) var(--ds-cell) repeat-x; } .ds-hiker { position: absolute; left: 0; bottom: calc(1.5 * var(--ds-cell)); width: calc(12 * var(--ds-cell)); height: calc(16 * var(--ds-cell)); image-rendering: pixelated; background: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAQCAYAAAAiYZ4HAAAAnElEQVR42mNkQANbu2L+I/O9y5YwIvMZcSlEBzCNjOgSL/dPRdEo7piNooYJl4mG0e24rXsRK///Raz8f2Rb0G2C+wFZIQMDA0PuDxsUBatXLyXOSTAQGhr9H0PDhZe/cWqYkmXFQJINGKEksfgho4E4KwOxgIWBgYFBYvFDRoSbbfBGIF4noYcQUX6gvwYMN2a7KKN4euqeuyhqAP+mMIj3QGiVAAAAAElFTkSuQmCC\") 0 0 / 100% 100% no-repeat; } @media (prefers-color-scheme: dark) { .ds-hiker { background-image: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAQCAYAAAAiYZ4HAAAAnElEQVR42mNkQAMnl9T8R+abx7QwIvMZcSlEBzCNjOgSr48tQNEoapWAooYJl4n6ITW4rftfZfv/f5Xtf2Rb0G2C+wFZIQMDA8NshVQUBWlpccQ5CQZmzVr0H0PDqduPcGoI1PnHQJINGKHE2HaY0UxVjoFYwMLAwMDA2HaYEeHmVLwRiNdJ6CFElB/orwHDjV1ReiieLlt2CUUNALFkMH6WGUzcAAAAAElFTkSuQmCC\"); } }"
+      "css": ".ds-trail { position: relative; width: min(412px, 100%); height: 54px; background: radial-gradient(circle, color-mix(in srgb, var(--ink, #1A1A1C) 40%, transparent) 0 1.5px, transparent 2px) 0 100% / 12px 3px repeat-x; } .ds-hiker { position: absolute; left: 0; bottom: 5px; width: 36px; height: 48px; image-rendering: pixelated; background: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAQCAYAAAAiYZ4HAAAAnElEQVR42mNkQANbu2L+I/O9y5YwIvMZcSlEBzCNjOgSL/dPRdEo7piNooYJl4mG0e24rXsRK///Raz8f2Rb0G2C+wFZIQMDA0PuDxsUBatXLyXOSTAQGhr9H0PDhZe/cWqYkmXFQJINGKEksfgho4E4KwOxgIWBgYFBYvFDRoSbbfBGIF4noYcQUX6gvwYMN2a7KKN4euqeuyhqAP+mMIj3QGiVAAAA0HRFWHRpbXBlY2NhYmxlOnByb21wdABPcmlnaW4gKGRyYXduLCBub3QgZ2VuZXJhdGVkKTogdGhlIHN0YW5kaW5nIHBvc2Ugb2YgVHJlaydzIHBpeGVsIGhpa2VyLCBwYWludGVkIGZyb20gdGhlIHBvc2UgdGFibGUgaW4gY3JhdGVzL3RyZWstbWFzY290LCAxMiBieSAxNiBhcnQgcGl4ZWxzLiBTaG93biBvbmx5IHdoZW4gdGhlIHBhZ2UncyBzY3JpcHQgaGFzIG5vdCBydW4uUpYaNwAAAABJRU5ErkJggg==\") 0 0 / 100% 100% no-repeat; } @media (prefers-color-scheme: dark) { .ds-hiker { background-image: url(\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAQCAYAAAAiYZ4HAAAAnElEQVR42mNkQAMnl9T8R+abx7QwIvMZcSlEBzCNjOgSr48tQNEoapWAooYJl4n6ITW4rftfZfv/f5Xtf2Rb0G2C+wFZIQMDA8NshVQUBWlpccQ5CQZmzVr0H0PDqduPcGoI1PnHQJINGKHE2HaY0UxVjoFYwMLAwMDA2HaYEeHmVLwRiNdJ6CFElB/orwHDjV1ReiieLlt2CUUNALFkMH6WGUzcAAAA0HRFWHRpbXBlY2NhYmxlOnByb21wdABPcmlnaW4gKGRyYXduLCBub3QgZ2VuZXJhdGVkKTogdGhlIHN0YW5kaW5nIHBvc2Ugb2YgVHJlaydzIHBpeGVsIGhpa2VyLCBwYWludGVkIGZyb20gdGhlIHBvc2UgdGFibGUgaW4gY3JhdGVzL3RyZWstbWFzY290LCAxMiBieSAxNiBhcnQgcGl4ZWxzLiBTaG93biBvbmx5IHdoZW4gdGhlIHBhZ2UncyBzY3JpcHQgaGFzIG5vdCBydW4uUpYaNwAAAABJRU5ErkJggg==\"); } }"
     }
   ],
   "narrative": {
     "northStar": "The Trailhead",
-    "overview": "The site is where a visitor meets Trek before installing it, and it shows the thing itself: the real app at its real size, on the app's own ground, with the app's own hiker at work on the window's top edge. One idea leads the home page, the Inbox, and each section under it adds one fact about it. The name is the form the owner chose for the home page.\n\nThe look is the app's two themes. Paper by day is a warm off-white with near-black ink. Night at dusk is a navy sky over an ember horizon. The backdrop is the app's dithered ridges and nothing else. Type is two grotesques, one for headlines and one for text, upright throughout. Surfaces are flat, with hairlines and small steps in tone, and the page draws a single shadow. The home page set aside what other sites of its kind do: a dark page, a shrunken dark window and a row of agent logos.\n\nMotion is small and each piece has a job. The hiker walks his trail as he does in the app, and the Inbox example plays once to show a thread stopping for an answer and going back to work. With the script off or Reduce Motion on, both stand still and the page says the same things.",
+    "overview": "The site is where a visitor meets Trek before installing it. The first screen is one photograph of a trail going up a dry hill. A headline, two short sentences, one button and one fine line sit in its sky. Below the photograph the page takes the app's own ground: Paper by day, Night when the system is dark.\n\nUnder the first screen the page shows the app three times. First a small stage is pinned while the visitor scrolls, and an example Inbox acts on it: three threads start, one stops to ask, the phone offers the same question, the thread goes back to work, finished work waits. Then the real window is shown at its real size, twice. A list of builds and a one-line footer end the page.\n\nType is two grotesques, upright throughout. Surfaces are flat, with hairlines and small steps in tone. The page draws two soft shadows, both on the stage. Decorative art is a photograph or it is absent. There is no drawn scenery, and the mark is never used as scenery. The home page does not use a dark page by default, a shrunken window under the headline, a row of agent logos or a wall of copy.\n\nMotion has one grammar. Things arrive by opacity and a short rise, most with a blur that clears. Scrolling plays the stage forwards and backwards. The hiker walks on a clock. Without the script, with Reduce Motion on, or in a window under 560 px tall, the story is a still layout that says the same things.",
     "keyCharacteristics": [
       "Paper by default and Night when the system is dark. There is no switch on the page.",
+      "One photograph on the first screen: the day picture on Paper, a dusk grade of the same frame at Night.",
       "One accent, ember, for the action and for a thread at work. Amber and emerald mark the other two states.",
-      "Bricolage Grotesque at 600 for headlines, Hanken Grotesk at 400 and 500 for text, JetBrains Mono for commands.",
-      "Three pictures of the app, each a real capture, and one played example of the Inbox.",
-      "Flat surfaces, hairlines, and corners of 10 to 16 px.",
-      "The 12 by 16 pixel hiker on his dotted trail, in the app's own timing.",
-      "No trackers. One request leaves the page, to GitHub's API for the latest release."
+      "Bricolage Grotesque at 600 for display, Hanken Grotesk at 400 and 500 for text, JetBrains Mono for commands.",
+      "A pinned story 430vh tall, with one caption on screen at a time.",
+      "Two window captures at one CSS pixel to the point. One reduced capture, the story's iPhone.",
+      "The 12 by 16 pixel hiker on a dotted trail, in the story only, in the app's own timing.",
+      "Flat surfaces, hairlines, and corners of 10 to 18 px.",
+      "No trackers, analytics or third-party fonts. One request leaves the page, to GitHub's API for the latest release."
     ],
     "rules": [
       {
         "name": "The One Accent Rule",
-        "body": "In what the page itself draws, colour beyond ink and paper belongs to two things: the action (the filled button, the ring on the visitor's own build, the focus outline) and a thread's state (ember at work, amber waiting, emerald finished). The art brings its own ember: the cairn, the hiker's pack and the horizon at dusk.",
+        "body": "In what the page itself draws, colour beyond ink and paper belongs to two things: the action (the filled button, Allow, the ring on the visitor's own build, the focus outline) and a thread's state (ember at work, amber waiting, emerald finished). The pictures bring their own colour: the photograph, the mark, the hiker's pack.",
         "section": "colors"
       },
       {
         "name": "The Two Themes Rule",
-        "body": "The page has the app's two themes and no others: Paper by day and Night at dusk, chosen by the visitor's system setting. Every colour is defined in both, and each picture of the app ships in both.",
+        "body": "The page has the app's two themes and no others: Paper by day and Night when the system is dark. Every colour is defined in both, and every picture ships in both.",
         "section": "colors"
       },
       {
@@ -637,7 +855,7 @@
       },
       {
         "name": "The One Weight Rule",
-        "body": "Headlines are Bricolage Grotesque at 600. The owner's range is 500 to 700, and a light weight is never used. The wordmark, at 500, is the only other display weight on the site.",
+        "body": "Display type is Bricolage Grotesque at 600. A headline's weight stays between 500 and 700, and a light weight is never used. The wordmark, at 500, is the only other display weight on the site.",
         "section": "typography"
       },
       {
@@ -647,23 +865,38 @@
       },
       {
         "name": "The Plain Headline Rule",
-        "body": "A headline is a plain statement in one colour. On the home page each one ends with a full stop. Nothing sits above it: no label, no pill. No paragraph or list item under it opens with a bold lead-in.",
+        "body": "A headline is a plain statement in one colour. On the home page each headline and each caption ends with a full stop. Nothing sits above a headline: no label and no pill. Display copy has no colon and no semicolon. No paragraph of copy opens with a bold lead-in. The example row's \"Waiting: run ./migrate?\" is the app's own wording and is not display copy.",
         "section": "typography"
       },
       {
         "name": "The Real Size Rule",
-        "body": "A window capture is set at one CSS pixel to the point: a 2x file at half its pixel size. On a screen too narrow for it the picture is cropped to the part that makes the point, and it is never scaled down.",
+        "body": "A window capture is set at one CSS pixel to the point: a 2x file at half its pixel size. On a screen too narrow for it the picture is cropped to the part that makes the point. It is never scaled down.",
+        "section": "layout"
+      },
+      {
+        "name": "The One Reduced Capture Rule",
+        "body": "The story's iPhone is the one capture that is not at real size. It is a prop beside the stage, not a product shot. Its screen is 169 px wide on the stage and 194 px wide in the still layout, against the phone's 390 points.",
         "section": "layout"
       },
       {
         "name": "The Few Pictures Rule",
-        "body": "The home page has three pictures of the app and one played example, and no section holds more than one. The owner's rule is few pictures, each a real capture.",
+        "body": "The home page has one photograph, two captures of the app's window and one reduced iPhone capture. No section holds more than one.",
         "section": "layout"
       },
       {
-        "name": "The One Shadow Rule",
-        "body": "The page draws one shadow, under the phone. Everything else is flat: a hairline or a step in tone.",
+        "name": "The Two Shadows Rule",
+        "body": "The page draws two soft shadows, under the Inbox panel and under the phone. Everything else is flat: a hairline or a step in tone.",
         "section": "elevation"
+      },
+      {
+        "name": "The Story Only Rule",
+        "body": "The hiker walks on the story's dotted trail and nowhere else. He is never in the first screen.",
+        "section": "components"
+      },
+      {
+        "name": "The Clock Not Scroll Rule",
+        "body": "Time moves the hiker. Scroll starts and stops his clock and never sets his place.",
+        "section": "components"
       },
       {
         "name": "The No Pause Button Rule",
@@ -671,34 +904,62 @@
         "section": "components"
       },
       {
+        "name": "The One Line Rule",
+        "body": "On the pinned stage one caption is on screen at a time, and it arrives word by word.",
+        "section": "components"
+      },
+      {
+        "name": "The Photograph Or Nothing Rule",
+        "body": "Decorative art is a photograph or it is absent. The hiker and his dotted trail are the app's own working animation, not scenery.",
+        "section": "components"
+      },
+      {
+        "name": "The Mark Is Not Scenery Rule",
+        "body": "The mark is a logo beside the name and an icon. It is never enlarged, repeated or laid behind anything.",
+        "section": "components"
+      },
+      {
         "name": "The Staged Is Said Rule",
-        "body": "Every picture or example with staged content says so in a line beside it.",
+        "body": "A capture or an example with staged content says so in a visible line under it.",
         "section": "components"
       },
       {
         "name": "The Reads Whole Rule",
-        "body": "Without the script, and with Reduce Motion on, every word, picture and link is still there and still true: the hiker stands, the Inbox example shows the waiting moment, and every download link leads to the latest release.",
+        "body": "Without the script, with Reduce Motion on, and in a short window, every word, picture and link is still there and still true: the story is the still layout, the hiker stands or walks his trail, and every download link leads to the latest release.",
         "section": "components"
       }
     ],
     "dos": [
-      "Do set headlines in Bricolage Grotesque at 600, upright, in one colour.",
-      "Do place a window capture at real size, a 2x file at half its pixel size, and crop it on a narrow screen.",
-      "Do ship every picture of the app in Paper and in Night, and define every colour in both.",
-      "Do say in a line beside a picture or example when its content is staged.",
+      "Do set display type in Bricolage Grotesque at 600, upright, in one colour, and end a home-page headline with a full stop.",
+      "Do use a photograph for decorative art, or use nothing.",
+      "Do show a window capture at real size, a 2x file at half its pixel size, and crop it on a narrow screen.",
+      "Do ship every picture in Paper and in Night, and define every colour in both.",
+      "Do say in a visible line under a capture or an example when its content is staged.",
+      "Do keep the hiker on the story's dotted trail, on his own clock.",
       "Do keep text at 4.5:1 or better against its ground. On Paper, write a state in its ink shade.",
-      "Do keep the page whole without its script and with Reduce Motion on.",
-      "Do keep what the page says about Trek within what the repository's README says.",
+      "Do keep the page whole without its script, with Reduce Motion on, and in a short window.",
+      "Do keep the site's words few, and within what the repository's README says.",
+      "Do write the origin of every new or retaken picture into the file or into the `.json` file beside it.",
+      "Do check a new mark against competitors' marks and popular app icons before it is shown.",
       "Do serve type, pictures and script from this domain. The only request elsewhere is to GitHub's API for the latest release."
     ],
     "donts": [
+      "Don't put the hiker in the first screen, or anywhere but the story.",
+      "Don't add a pause button for the hiker. Pressing the hiker stops him.",
+      "Don't set the hiker's place by scroll.",
+      "Don't use the mark as scenery.",
+      "Don't draw scenery.",
+      "Don't use a letter as the mark.",
+      "Don't make the mark an orange tile with a white figure.",
+      "Don't copy a competitor's site or mark, or leave room for anyone to say so.",
       "Don't set a headline lighter than 500 or heavier than 700.",
-      "Don't use italics, bold lead-ins, two-tone headlines, or a pill or label above a heading.",
+      "Don't use italics, bold lead-ins, a two-tone headline, or a pill or label above a headline.",
+      "Don't use a colon or a semicolon in display copy, or write a balanced \"X, and Y\" line. The copy must not read as machine-written.",
+      "Don't credit the fonts in the footer, or add words to it.",
       "Don't use ember, amber or emerald in the page's own drawing for anything but the action and a thread's state.",
       "Don't use a mock-up, a generated image or a retouched frame as a picture of the app. The one retouch is the three title-bar buttons in the window captures.",
-      "Don't scale a window capture down to fit.",
-      "Don't add a pause button for the hiker.",
-      "Don't add a second shadow, a pill shape or a coloured side stripe.",
+      "Don't scale a window capture down to fit. The story's iPhone is the one reduced capture.",
+      "Don't add a third soft shadow, a pill shape or a coloured side stripe.",
       "Don't add trackers, analytics, cookies, or type or script from another domain."
     ]
   }

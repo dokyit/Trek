@@ -61,13 +61,18 @@ the iPhone app.
 ## Brand Commitments
 
 - The name Trek, and the line "Every agent. One trail."
-- The cairn mark, the ember accent, and the two themes the app really has: Paper (light, warm) and
-  Night (dusk).
-- The pixel-art hiker from the app, and the dotted trail it walks.
+- The mark: a mountain with a dotted trail and a summit flag (adopted 2026-11-12, replacing the
+  cairn). The ember accent, and the two themes the app really has: Paper (light, warm) and Night
+  (dusk).
+- The pixel-art hiker from the app, and the dotted trail it walks. On the site he appears only in
+  the story section, never in the first screen, and the mark is never used as scenery.
 - The owner's standing requirements for the site: it should look official and professional; clean,
   modern and a little minimal; nothing that reads as AI-made (default typefaces, italic or bold
   lead-ins); nobody should be able to say it copies a competitor's site; few product pictures, each a
   real capture of the app shown large and sharp; real animation or none.
+- Few words, in short plain sentences, claiming only what the README says. Decorative art is a
+  photograph or nothing. No letter marks, and any mark is checked against
+  competitors' and popular app icons before it is shown.
 - Public contact: support@trekdesktop.com.
 - No trackers and no analytics.
 
@@ -75,8 +80,9 @@ the iPhone app.
 
 - Real captures of the app, taken from the isolated test app in its demo dress (believable names,
   staged work). Staged content is said to be staged.
-- The app's own art: the ridge backdrops (`assets/backgrounds/make_backgrounds.py`), the hiker's
-  frames (`crates/trek-mascot`), the mark (`assets/brand`).
+- The app's own art: the hiker's frames (`crates/trek-mascot`) and the mark (`assets/brand`; the
+  site's copies of it are drawn by `script/site/make_icons.py`). The first screen's picture is a
+  licensed photograph, credited in `site/README.md`.
 - There are no testimonials, customer logos, usage numbers, benchmarks or press. None may be
   invented, and the site should not be built to need them.
 

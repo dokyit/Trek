@@ -11,8 +11,9 @@ into the repository. `TREK_SITE_PYTHON` names a Python with Pillow and numpy (de
 |---|---|
 | `masters.sh` | Stages the isolated test app in its demo dress on the invisible test display and takes the Mac window masters at 2x (`all`, `stage`, `shoot W H`, `loop` for the Simulator scene, `stop`). |
 | `iphone_masters.sh` | Takes the iPhone app's demo frames from the simulator with `simctl` only. |
-| `site_assets.sh` | Converts the masters into `site/assets/img`; with `ridges`, redraws the backdrop with `gen_ridges.py`. |
-| `gen_ridges.py` | The app's backdrop generator (`assets/backgrounds/make_backgrounds.py`), drawn wider and in two layers. |
+| `site_assets.sh` | Converts the masters into `site/assets/img`. |
+| `make_hero.py` | Composes the first screen's photograph (`PHOTO OUT_DIR`): the day picture and its dusk grade, at 2880 and 1600 px. The photograph and its licence are named in `site/README.md`. |
+| `make_icons.py` | Draws the mark into the site's favicons, touch and manifest icons and the two `trek-mark` SVGs (`SITE_DIR SCRATCH_DIR`). |
 | `shoot_site.sh` | Serves `site/` for the length of the run and takes stills: desktop and phone, light and dark. |
 | `rec.sh`, `record.mjs` | A real-time recording of a page from headless Chrome. |
 | `check_links.py` | Checks every link in the site; `--online` asks outside addresses too. |
