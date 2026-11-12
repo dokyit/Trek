@@ -1068,7 +1068,7 @@ area = "Editor"
 what = "Keep or Undo what a thread's agent changed, file by file and hunk by hunk"
 macos = "yes"
 windows = "yes"
-live = ["route project:{project}", "pace 0", "send mock:write", "wait idle 30000", "wait 1500", "count changes-review* 1", "count changes-undo* 1"]
+live = ["route project:{project}", "pace 1", "send mock:write", "wait idle 30000", "wait 3000", "pace 0", "count changes-review* 1", "count changes-undo* 1"]
 how = { macos = "The thread's folder and git's top folder are matched as the file system names them.", windows = "They're matched regardless of case and of `/` or `\\`, with the `\\\\?\\` that resolving a path adds taken off, so git's `C:/…` meets the thread's `C:\\…`." }
 code = ["crates/trek-app/src/workspace/review.rs"]
 tests = ["crates/trek-app/src/workspace/review.rs", "crates/trek-app/tests/ide.rs"]

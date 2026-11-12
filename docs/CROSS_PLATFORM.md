@@ -66,19 +66,30 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    saying what checks it instead: other apps' accessibility trees, the real Codex and OpenCode
    CLIs (an isolated run starts no real agent), render counts, the system's share window, preview
    app and voice typing, a file only in OneDrive, where the installed Trek lives, the system's
-   banner permission, the phone on a real network, and the transcript's scrolling. The first run
-   of every step on a Mac failed five features whose Mac steps had been written from the code
-   alone (a device list that comes later on a fresh runner, the wrong id for a button, a chip an
-   unbundled build hides, and one failure carried into the next feature): steps have to run on
-   each platform, not only be written for it.
+   banner permission, the phone on a real network, and the transcript's scrolling.
+
+   On CI's Mac (`7e5e6c77`): 80 shown working, 0 failing. Getting there took four runs, each
+   failure in steps written from the Mac's code alone and never run on one: the wrong id for a
+   button, a chip an unbundled build hides, a list and a window never marked for the checks, a
+   script given no window, a simulator list that comes a minute later the first time on a fresh
+   runner, and port 9, which WebKit refuses outright (on browsers' restricted list) where
+   WebView2 explains it, leaving the tab blank on a Mac (still to be looked at there). Steps have
+   to run on each platform, not only be written for it. CI's Windows jobs first never reached
+   their checks: the verify driver started the app with the step's output pipe among the handles
+   it inherited, so the step waited on the app until the job ran out of time. Then the runner's
+   1024×768 screen folded away the column five checks look in (the job now sets 1920×1080), and
+   a turn the mock agent ran at full speed ended before the slow runner's first git checkpoint
+   (the check now paces it as an agent would take it).
 
    Building the checks found bugs. On Windows: video posters missing for a path written with
    `/`; an isolated run's Browser saving downloads into the user's Downloads folder; the capture
    build's import demo needing a `sqlite3` program Windows lacks; the capture build never taking
    the second-launch path at all; a trial build or capture run replacing the installed Trek's
    banner icon with one in its own throwaway folder; and the status bar saying LF for files Git
-   for Windows checked out with CRLF. On both: a language server that had stopped (rustup's
-   `rust-analyzer` without its component exits at once) still showed as running.
+   for Windows checked out with CRLF; and the verify driver handing the app its caller's output
+   pipe, so anything reading the driver's output (a CI step, an agent's tool) waited on the app
+   until it quit. On both: a language server that had stopped (rustup's `rust-analyzer` without
+   its component exits at once) still showed as running.
 
 So a fix made on one platform lands in a shared layer (and both CIs test it), or in a backend
 whose counterpart the ledger names. A behaviour fix hidden behind `fluent::WINDOWS` fails review
