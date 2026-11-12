@@ -353,9 +353,9 @@ windows = "yes"
 how = { macos = "A PTY and WebKit.", windows = "ConPTY and WebView2 (artifacts InPrivate)." }
 note = "On Windows a live inline artifact's clipping window ignores round_bottom, so its square bottom corners cover the card's rounded ones, and every web-view failure there says the WebView2 runtime is needed, dropping the real reason the Mac shows (artifact/native.rs, artifact/mod.rs)."
 code = ["crates/trek-app/src/panels/terminal.rs", "crates/trek-app/src/artifact/native.rs", "crates/trek-app/src/artifact/mod.rs"]
+tests = ["crates/trek-app/tests/ide.rs", "crates/trek-app/tests/terminal.rs"]
 
 # ---------- Agent tools ----------
-tests = ["crates/trek-app/tests/ide.rs", "crates/trek-app/tests/terminal.rs"]
 
 [[feature]]
 id = "computer-use"
@@ -504,11 +504,12 @@ area = "Machines"
 what = "Run threads on this computer from another one"
 macos = "yes"
 windows = "partial"
+how = { macos = "An ignored file copied to the other machine keeps its permission bits.", windows = "Windows has none to read: an ignored file copied to the other machine goes as 0644, one that starts with #! (a script) as 0755." }
 note = "Untested with a Windows PC as the target (docs/MULTI-MACHINE.md): needs a run on real hardware."
 code = ["crates/trek-app/src/machines.rs", "crates/trek-app/src/machines/clone.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/clone.rs"]
 
 # ---------- The rest of the census (November 2026 audit): at parity, Windows-only, and polish ----------
-tests = ["crates/trek-app/tests/remote.rs"]
 
 [[feature]]
 id = "app-icon"
