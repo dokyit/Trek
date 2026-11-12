@@ -47,18 +47,38 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    Trek ships (`/MT`), and a hardening test that refuses a `trek.exe` naming a redistributable.
 4. **Every feature is shown working on each platform, by the same steps.** A feature in the ledger
    says how to see it in the capture build (`live`: an isolated Trek driven by commands, ending
-   in what must be on screen), or why an isolated run can't show it (`live_skip`: the system's
-   own windows, a real phone, a release). CI holds every feature to one or the other.
-   `cargo run -p trek-parity --bin parity-live` runs the steps against the capture build on
-   whichever computer it's on, and writes `docs/parity/live-<platform>.md`: the same steps on a
-   Mac and a PC, so a feature built on one is seen working, or not, on the other, before a user
-   finds it. On Windows: 65 of the 99 features shown working, 0 failing, 26 that an isolated run
-   can't show (the system's own windows, real accounts, releases, a real phone; each says what
-   checks it instead), 8 that aren't on Windows. The Mac-only features' steps are written from the
-   Mac's code and wait for a run on a Mac (`docs/parity/live-macos.md`). Building the checks found
-   three bugs on Windows: video posters missing for a path written with `/`, the capture build's
-   import demo needing a `sqlite3` program Windows lacks, and an isolated run's Browser saving
-   downloads into the user's Downloads folder.
+   in a check), or why an isolated run can't show it (`live_skip`). CI holds every feature to one
+   or the other, and `.github/workflows/live.yml` runs every feature's steps on a Mac and on a PC
+   for each pull request, the report in the run's summary and each feature's screenshot kept.
+   `cargo run -p trek-parity --bin parity-live` runs them on whichever computer it's on and writes
+   `docs/parity/live-<platform>.md`: the same steps on both, so a feature built on one is seen
+   working, or not, on the other, before a user finds it.
+
+   Where it can, a check asks the system rather than the window: the tray icon's rectangle as
+   the system has it, the programs under Trek's own process and their end at Stop, the console
+   windows on screen, a second launch handing its link to the running Trek through its pipe, a
+   page's own process ended and the reload that follows, the banners in Windows' notification
+   center, the processor Trek runs as, the libraries loaded in it, and a real rust-analyzer's
+   problems in the editor.
+
+   On Windows (`1491bfc8`, a fresh profile, rust-analyzer on PATH): 78 of the 99 features shown
+   working, 0 failing, 8 that aren't on Windows, and 13 that an isolated run can't show, each
+   saying what checks it instead: other apps' accessibility trees, the real Codex and OpenCode
+   CLIs (an isolated run starts no real agent), render counts, the system's share window, preview
+   app and voice typing, a file only in OneDrive, where the installed Trek lives, the system's
+   banner permission, the phone on a real network, and the transcript's scrolling. The first run
+   of every step on a Mac failed five features whose Mac steps had been written from the code
+   alone (a device list that comes later on a fresh runner, the wrong id for a button, a chip an
+   unbundled build hides, and one failure carried into the next feature): steps have to run on
+   each platform, not only be written for it.
+
+   Building the checks found bugs. On Windows: video posters missing for a path written with
+   `/`; an isolated run's Browser saving downloads into the user's Downloads folder; the capture
+   build's import demo needing a `sqlite3` program Windows lacks; the capture build never taking
+   the second-launch path at all; a trial build or capture run replacing the installed Trek's
+   banner icon with one in its own throwaway folder; and the status bar saying LF for files Git
+   for Windows checked out with CRLF. On both: a language server that had stopped (rustup's
+   `rust-analyzer` without its component exits at once) still showed as running.
 
 So a fix made on one platform lands in a shared layer (and both CIs test it), or in a backend
 whose counterpart the ledger names. A behaviour fix hidden behind `fluent::WINDOWS` fails review
