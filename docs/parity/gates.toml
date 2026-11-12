@@ -113,7 +113,6 @@ unclaimed = [
 "crates/trek-app/tests/interactions.rs" = 2
 "crates/trek-app/tests/iphone.rs" = 1
 "crates/trek-app/tests/notes.rs" = 4
-"crates/trek-app/tests/pr_checks.rs" = 1
 "crates/trek-app/tests/pstack.rs" = 5
 "crates/trek-app/tests/remote.rs" = 2
 "crates/trek-app/tests/render.rs" = 6

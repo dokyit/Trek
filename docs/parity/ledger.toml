@@ -959,8 +959,8 @@ area = "Threads"
 what = "A pull request's failing checks show on its thread and go back to the agent, by Send to agent or by themselves"
 macos = "yes"
 windows = "yes"
-note = "The same on both (gh found through PATHEXT on Windows). Its tests run on macOS only: their stand-in gh is a /bin/sh script, and a .cmd one can't carry `--jq`'s `|` past cmd.exe; the test-fixtures binary copied as gh.exe would run them on Windows."
-tests = ["crates/trek-app/tests/pr_checks.rs"]
+how = { macos = "gh from the login PATH.", windows = "gh found through PATHEXT, started as itself (no cmd.exe, so `--jq`'s `|` reaches it as written)." }
+tests = ["crates/trek-app/tests/pr_checks.rs", "crates/test-fixtures/src/fixture.rs"]
 
 [[feature]]
 id = "opencode"

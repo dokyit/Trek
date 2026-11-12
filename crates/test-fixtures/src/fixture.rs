@@ -15,10 +15,16 @@
 //!   minisign-keygen <dir>  a test update-signing key (see `minisign`); prints the key line
 //!   minisign-sign <seed file> <file> <trusted comment>
 //!                          sign `file` into `<file>.minisig` with that key
+//!
+//! Copied as `gh` (`gh.exe` on Windows), it's a stand-in GitHub CLI instead, on both platforms
+//! (a shell script would be the Mac's alone): see `fake_gh`.
 
 use std::io::{Read, Write};
 
 pub fn run() -> i32 {
+    if let Some(dir) = copied_as("gh") {
+        return fake_gh(&dir, &std::env::args().skip(1).collect::<Vec<_>>());
+    }
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("sleep") => {
@@ -143,4 +149,42 @@ pub fn run() -> i32 {
             2
         }
     }
+}
+
+/// The folder this program is in, when it was started under the name `name` (a copy of it:
+/// `gh`, `gh.exe`).
+fn copied_as(name: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    (exe.file_stem()? == name).then(|| exe.parent().map(std::path::Path::to_path_buf))?
+}
+
+/// A made-up `gh` answering from files in `dir`, its own folder: `pr view` prints `view.json`,
+/// `run view` `log.txt`, `api rate_limit` `rate.json`, and every call is noted in `calls`
+/// (its arguments joined by spaces). With `offline` there, it fails as `gh` does with no
+/// connection.
+fn fake_gh(dir: &std::path::Path, args: &[String]) -> i32 {
+    let mut calls = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("calls"))
+        .unwrap();
+    writeln!(calls, "{}", args.join(" ")).unwrap();
+    if dir.join("offline").exists() {
+        eprintln!("error connecting to api.github.com");
+        return 1;
+    }
+    let file = match (
+        args.first().map(String::as_str),
+        args.get(1).map(String::as_str),
+    ) {
+        (Some("pr"), Some("view")) => "view.json",
+        (Some("run"), Some("view")) => "log.txt",
+        (Some("api"), Some("rate_limit")) => "rate.json",
+        _ => return 0,
+    };
+    let mut out = std::io::stdout().lock();
+    out.write_all(&std::fs::read(dir.join(file)).unwrap_or_default())
+        .unwrap();
+    out.flush().unwrap();
+    0
 }
