@@ -396,6 +396,9 @@ pub fn checks(step: &str) -> bool {
         "banners" => words.next() == Some("new"),
         "renders" => words.next().is_some_and(|w| w != "mark"),
         "within" | "signed-out" => true,
+        "editor" => matches!(words.next(), Some("has" | "note")),
+        "cloud-file" => words.next() == Some("fetched"),
+        "photos" => words.next() == Some("shown"),
         _ => false,
     }
 }

@@ -16,7 +16,7 @@
 //! as each view is made (`hook`).
 
 use super::Msg;
-use super::asks::{AskKind, LinkKind, Reply, link_kind, scheme_of};
+use super::asks::{AskKind, LinkKind, Reply, link_kind, restricted_port, scheme_of};
 use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol, ProtocolObject, Sel};
@@ -369,6 +369,22 @@ define_class!(
             if main && link && (command || middle) && url.starts_with("http") {
                 decide.call((POLICY_CANCEL,));
                 let _ = v.tx.try_send(Msg::NewWindow(url));
+                return;
+            }
+            // A port browsers keep pages off: WebKit stops the load before it starts, and an
+            // older WebKit (macOS 15's, seen in CI) then shows an empty page and reports nothing,
+            // leaving a blank tab. Said here as a newer one says it ("restricted port", 103), so
+            // Trek's page explains. Only for the tab's own page: one opening a window gets its
+            // own view, which says it there.
+            let own_page = unsafe { action.targetFrame() }.is_some_and(|f| unsafe { f.isMainFrame() });
+            if own_page && restricted_port(&url).is_some() {
+                decide.call((POLICY_CANCEL,));
+                let _ = v.tx.try_send(Msg::LoadFailed {
+                    tab: v.tab,
+                    url,
+                    domain: "WebKitErrorDomain".into(),
+                    code: 103,
+                });
                 return;
             }
             unsafe {

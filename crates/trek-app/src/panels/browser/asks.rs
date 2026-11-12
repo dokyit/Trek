@@ -251,6 +251,22 @@ pub fn load_failure(domain: &str, code: i64, url: &str) -> Option<(&'static str,
     const REACH: &str = "Can’t reach this page";
     const OPEN: &str = "Can’t open this page";
     const SECURE: &str = "Can’t connect securely";
+    // A port browsers keep pages off stops the load before it starts: WebKit says "restricted
+    // port" (103), and WebView2 shows its own page with a status it calls unknown. Said as that,
+    // not as a server that isn't running: one could be, and the browser still wouldn't go.
+    if let Some(port) = restricted_port(url)
+        && matches!(
+            (domain, code),
+            ("WebKitErrorDomain", 103) | (WEBVIEW2, UNEXPLAINED)
+        )
+    {
+        return Some((
+            OPEN,
+            format!(
+                "Port {port} is kept for another kind of service, so browsers don’t open pages on it. If it’s your own server, run it on another port."
+            ),
+        ));
+    }
     let words = match (domain, code) {
         // Cancelled (a newer load, Stop), and WebKit's "frame load interrupted" (a download, a
         // link handed to another app, a policy that said no).
@@ -351,7 +367,13 @@ pub fn load_failure(domain: &str, code: i64, url: &str) -> Option<(&'static str,
             OPEN,
             "The page sent a kind of file the browser can’t show.".into(),
         ),
-        ("WebKitErrorDomain", 103) | ("WebKitErrorDomain", 104) => (
+        // WebKit's "restricted port" for an address it won't go to otherwise (a redirect to a
+        // data: or about: address, an address it keeps pages off).
+        ("WebKitErrorDomain", 103) => (
+            OPEN,
+            "The browser doesn’t allow this address, so it can’t be opened here.".into(),
+        ),
+        ("WebKitErrorDomain", 104) => (
             OPEN,
             "The ad and tracker blocker stopped this page. Allow ads on this site from the ⋯ menu to load it.".into(),
         ),
@@ -385,6 +407,41 @@ pub const WEBVIEW2: &str = "WebView2";
 /// WebView2 put up its own error page and called the failure "unknown" (it does for a refused
 /// connection). Not one of its codes: Trek's, so the page can say what it can.
 pub const UNEXPLAINED: i64 = -1;
+
+/// The ports browsers keep pages off, from the Fetch standard's list (with 0), which WebView2
+/// keeps as it is (Chromium's `kRestrictedPorts`) and WebKit with `WEBKIT_ALSO` (WTF's
+/// `portAllowed`). Sorted, for the search.
+const RESTRICTED_PORTS: [u16; 81] = [
+    0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101,
+    102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427,
+    465, 512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+    993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
+    6669, 6697, 10080,
+];
+
+/// Two more WebKit keeps pages off (ManageSieve, IRC over TLS): Apple's additions.
+const WEBKIT_ALSO: [u16; 2] = [4190, 6679];
+
+/// The port `url` names when it's one this platform's browser keeps pages off
+/// (`RESTRICTED_PORTS`): a load there stops before it starts. Web addresses only: a file's port
+/// means nothing, and another scheme is another app's.
+pub fn restricted_port(url: &str) -> Option<u16> {
+    let (scheme, rest) = url.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    // An IPv6 address's colons are inside its brackets.
+    let after = match host.strip_prefix('[') {
+        Some(v6) => v6.split_once(']')?.1,
+        None => host.find(':').map_or("", |at| &host[at..]),
+    };
+    let port: u16 = after.strip_prefix(':')?.parse().ok()?;
+    let restricted = RESTRICTED_PORTS.binary_search(&port).is_ok()
+        || cfg!(target_os = "macos") && WEBKIT_ALSO.contains(&port);
+    restricted.then_some(port)
+}
 
 /// `text` with its first letter a capital: "this PC" as a sentence starts.
 fn capitalized(text: &str) -> String {
@@ -504,11 +561,11 @@ mod tests {
         // Cancelled, and "unknown" (a server's error page, which shows): no page of Trek's.
         assert_eq!(fail(14), None);
         assert_eq!(fail(0), None);
-        // "Unknown" with WebView2's own error page up (a refused connection) still says something.
-        let (title, why) = load_failure(WEBVIEW2, UNEXPLAINED, "http://127.0.0.1:9/").unwrap();
+        // "Unknown" with WebView2's own error page up still says something.
+        let (title, why) = load_failure(WEBVIEW2, UNEXPLAINED, "http://127.0.0.1:39999/").unwrap();
         assert_eq!(title, "Can’t reach this page");
         assert!(
-            why.contains("127.0.0.1:9") && why.contains("running"),
+            why.contains("127.0.0.1:39999") && why.contains("running"),
             "{why}"
         );
         // Anything else still says something, with the code to look up.
@@ -518,6 +575,52 @@ mod tests {
         );
         // The crash page points to a menu item both platforms have.
         assert!(CRASHED.1.contains("default browser") && !CRASHED.1.contains("Safari"));
+    }
+
+    /// A port browsers keep pages off (9, discard) is said as that on both platforms, not as a
+    /// server that isn't running: WebKit's "restricted port" and WebView2's unknown status with
+    /// its own page up. Other ports, other schemes and addresses without one aren't.
+    #[test]
+    fn a_port_browsers_keep_pages_off_is_said_as_that() {
+        for (url, port) in [
+            ("http://127.0.0.1:9/", Some(9)),
+            ("HTTPS://example.com:22/login", Some(22)),
+            ("http://[::1]:25/", Some(25)),
+            ("http://user:secret@localhost:0", Some(0)),
+            ("http://localhost:09/", Some(9)),
+            ("http://localhost:3000/", None),
+            ("http://[::1]:8080/", None),
+            ("http://[::1]/", None),
+            ("http://localhost/", None),
+            ("http://localhost:/", None),
+            ("http://localhost:99999/", None),
+            ("ftp://example.com:21/", None),
+            ("file:///Users/me/a.html", None),
+            ("trek://newtab", None),
+        ] {
+            assert_eq!(restricted_port(url), port, "{url}");
+        }
+        // WebKit keeps two more off; WebView2 opens them.
+        assert_eq!(
+            restricted_port("https://irc.example.com:6679/"),
+            cfg!(target_os = "macos").then_some(6679)
+        );
+        for (domain, code) in [("WebKitErrorDomain", 103), (WEBVIEW2, UNEXPLAINED)] {
+            let (title, why) = load_failure(domain, code, "http://127.0.0.1:9/").unwrap();
+            assert_eq!(title, "Can’t open this page", "{domain} {code}");
+            assert!(
+                why.starts_with("Port 9 is kept") && why.contains("another port"),
+                "{why}"
+            );
+        }
+        // A refused connection on such a port can't happen: the words stay WebKit's own.
+        let (_, why) = load_failure("NSURLErrorDomain", -1004, "http://127.0.0.1:9/").unwrap();
+        assert!(why.contains("refused"), "{why}");
+        // WebKit's 103 for an address it won't go to otherwise, and its content blocker's 104.
+        let (_, why) = load_failure("WebKitErrorDomain", 103, "data:text/html,hi").unwrap();
+        assert!(why.contains("doesn’t allow this address"), "{why}");
+        let (_, why) = load_failure("WebKitErrorDomain", 104, "https://ads.example/").unwrap();
+        assert!(why.contains("tracker blocker"), "{why}");
     }
 
     #[test]

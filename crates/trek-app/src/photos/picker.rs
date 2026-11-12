@@ -248,6 +248,33 @@ fn end_sheet(delegate: &Delegate) {
     }
 }
 
+/// The picker's sheet is up, attached to the window it was begun on, as AppKit has it (the
+/// capture build's check).
+#[cfg(feature = "shots")]
+pub fn showing() -> bool {
+    SHOWING.with(|s| {
+        s.borrow().as_ref().is_some_and(|s| {
+            s.parent.load().is_some_and(|parent| {
+                // SAFETY: NSWindow's `attachedSheet`, on the main thread (where `SHOWING` lives).
+                let attached: Option<Retained<NSWindow>> =
+                    unsafe { msg_send![&*parent, attachedSheet] };
+                attached.is_some_and(|attached| std::ptr::eq(&*attached, &*s.sheet))
+            })
+        })
+    })
+}
+
+/// Close the picker as its Cancel does, nothing picked (the capture build's check).
+#[cfg(feature = "shots")]
+pub fn cancel() {
+    let delegate = SHOWING.with(|s| s.borrow().as_ref().map(|s| s.delegate.clone()));
+    if let Some(delegate) = delegate {
+        // Its channel closed with nothing on it: the composer stops waiting, as for Cancel.
+        delegate.ivars().tx.borrow_mut().take();
+        end_sheet(&delegate);
+    }
+}
+
 /// What's left to copy out of a pick's results, and what's in so far, in the order picked.
 struct Copies {
     done: Vec<Option<Result<Pick, Failed>>>,

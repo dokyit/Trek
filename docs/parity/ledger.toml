@@ -187,7 +187,7 @@ area = "Composer"
 what = "Pick from the Photos library"
 macos = "yes"
 windows = "n/a"
-live_skip = "The Photos library opens from the + menu, whose items carry no ids to check by; the Photos picker's tests cover it on a Mac."
+live_macos = ["route project:{project}", "photos open", "wait 2500", "photos shown 1", "photos close", "wait 1200", "photos shown 0"]
 how = { macos = "The system's Photos picker, as a sheet.", windows = "Windows has no library picker: photos are files, picked in the open dialog." }
 code = ["crates/trek-app/src/photos.rs"]
 
@@ -350,8 +350,8 @@ area = "Browser"
 what = "A crashed page reloads, and a failed load says why"
 macos = "yes"
 windows = "yes"
-live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com", "browser go http://127.0.0.1:39999/", "wait 3000", "browser expect failed:127.0.0.1"]
-note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:9) gets Trek's \"Can't reach this page\" with its reason, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari). On a Mac in CI, http://127.0.0.1:9/ (port 9 is on browsers' list of restricted ports) left the tab blank with nothing logged, where WebView2 says why: WebKit likely refuses a restricted port outright, in a way Trek doesn't yet explain. The live check uses a closed port that isn't restricted; port 9 on a Mac is still to be looked at there."
+live = ["route project:{project}", "tools browser", "wait 600", "browser go https://example.com", "wait 3000", "browser expect loaded", "browser crash", "wait 3000", "browser expect crashed loaded", "browser crash", "wait 3000", "browser expect crashed failed:example.com", "browser go http://127.0.0.1:39999/", "wait 3000", "browser expect failed:127.0.0.1:39999 why:running", "browser go http://127.0.0.1:9/", "wait 3000", "browser expect failed:127.0.0.1:9 why:kept"]
+note = "Checked against a real WebView2 on Windows 11: a refused connection (127.0.0.1:39999) gets Trek's \"Can't reach this page\" with its reason, and port 9 \"Can't open this page\", saying why, and links handed to another app (mailto:, a custom scheme) leave the page as it was; the six real-WebView2 tests pass. The mapping is plain code, so the Mac's CI checks the Windows words too. The crash page now points to \"Open in default browser\", which both platforms' ⋯ menus have (it said Safari). A port browsers keep pages off (the Fetch standard's list: 9, 22, 25…) is said as that on both platforms (\"Port 9 is kept for another kind of service…\"), not as a server that isn't running: WebView2 shows its own page for it with a status it calls unknown, and WebKit stops it before it starts. A newer WebKit reports that as its \"restricted port\" error (103, which Trek called its ad blocker's), and an older one, macOS 15's in CI, showed an empty page and reported nothing, leaving the tab blank; Trek's delegate now says it before WebKit is asked. The live check loads a closed port and port 9, and reads the reason Trek's page gives for each."
 how = { macos = "WebKit's errors (NSURLErrorDomain, WebKitErrorDomain) and its web content process ending.", windows = "WebView2's: a load it put its own error page up for (ContentLoading's IsErrorPage), with NavigationCompleted's WebErrorStatus in Trek's words (an unknown status, as for a refused connection, said as unreachable); a load only stopped (a link handed to another app, a download) and a server's own 404 page are left alone. ProcessFailed for the page's own process (exited, or unresponsive) is a crash: reloaded, then explained if it ends again." }
 tests = ["crates/trek-app/src/panels/browser/asks.rs", "crates/trek-app/src/panels/browser.rs", "crates/trek-app/tests/browser.rs"]
 code = ["crates/trek-app/src/panels/browser.rs", "crates/trek-app/src/panels/browser/webview2.rs", "crates/trek-app/src/panels/browser/asks.rs"]
@@ -690,7 +690,7 @@ area = "Editor"
 what = "The preview opens files that live only in the cloud"
 macos = "n/a"
 windows = "yes"
-live_skip = "Needs a file that lives only in OneDrive: the editor's cloud placeholder tests."
+live_windows = ["cloud-file {project}{/}OneDrive{/}notes.txt Fetched from the cloud", "cloud-file {project}{/}OneDrive{/}away.txt Never fetched", "route project:{project}", "editor on", "editor open {project}{/}OneDrive{/}notes.txt", "wait 800", "editor note Fetching notes.txt from OneDrive", "wait 4000", "editor has Fetched from the cloud", "cloud-file fetched 1", "cloud-file away", "editor open {project}{/}OneDrive{/}away.txt", "wait 1500", "editor note OneDrive isn't running", "cloud-file off", "editor off"]
 how = { macos = "iCloud Drive's files open as any others.", windows = "OneDrive's online-only files are fetched first, and the button names the default app." }
 code = ["crates/trek-app/src/ide/preview.rs"]
 

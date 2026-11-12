@@ -859,6 +859,8 @@ struct Page {
     url: String,
     /// The address that failed to load, while the error page is showing.
     failed: Option<String>,
+    /// The error page’s heading (its tab says it too), when it was given one.
+    failed_heading: Option<String>,
     title: String,
     favicon: Option<Arc<Image>>,
     favicon_url: Option<String>,
@@ -878,6 +880,7 @@ impl Page {
         Self {
             url: url.to_string(),
             failed: None,
+            failed_heading: None,
             title: String::new(),
             favicon: None,
             favicon_url: None,
@@ -931,6 +934,7 @@ impl Page {
         let error_page = format!("{ERROR_URL}{query}#{}", percent_encode(&url));
         self.loading = false;
         self.failed = Some(url);
+        self.failed_heading = why.map(|(heading, _)| heading.to_string());
         self.nav_seq += 1;
         self.ready = true;
         error_page
@@ -960,7 +964,11 @@ impl Page {
             return "New Tab".into();
         }
         if self.failed.is_some() {
-            return "Can’t reach page".into();
+            // The error page’s heading, made short for a tab: “Can’t open page”.
+            return match &self.failed_heading {
+                Some(heading) => heading.replace(" this ", " "),
+                None => "Can’t reach page".into(),
+            };
         }
         if !self.title.trim().is_empty() {
             return self.title.trim().to_string();
@@ -1094,6 +1102,36 @@ fn percent_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The reason Trek's error page at `url` gives (`failed_to_load`'s `why`), if it's that page.
+#[cfg(any(test, feature = "shots"))]
+fn error_page_why(url: &str) -> Option<String> {
+    let query = url.strip_prefix(ERROR_URL)?.split('#').next()?;
+    let why = query
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("why="))?;
+    let bytes = why.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = bytes
+            .get(at + 1..at + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[at], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                at += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// "3000" → http://localhost:3000, "example.com" → https://example.com, anything else searches Google.
@@ -3770,6 +3808,8 @@ impl BrowserPanel {
             "url": tab.map(|t| t.page.url.clone()),
             "label": tab.map(|t| t.page.label()),
             "failed": tab.and_then(|t| t.page.failed.clone()),
+            // What Trek's error page says went wrong (its address carries it).
+            "why": tab.and_then(|t| error_page_why(&t.page.url)),
             "crashed": tab.map(|t| t.crashed.is_some()),
             "loading": tab.map(|t| t.page.loading),
             "can_back": tab.map(|t| t.page.can_back),
@@ -4281,9 +4321,9 @@ mod tests {
     use super::{Captures, Msg, PAGES_SCHEME, native, webview2};
     use super::{
         DRAWN_DARK_JS, ERROR_URL, FAVICON_MAX_BYTES, Page, SAFARI_FALLBACK, START_URL,
-        decode_favicon, download_favicon, extract_title, favicon_url, force_dark_js, from_view,
-        from_webview2, host_of, normalize, plist_version, safari_user_agent, same_origin,
-        scheme_lags_a_load, snap_frame, to_view, to_webview2,
+        decode_favicon, download_favicon, error_page_why, extract_title, favicon_url,
+        force_dark_js, from_view, from_webview2, host_of, normalize, plist_version,
+        safari_user_agent, same_origin, scheme_lags_a_load, snap_frame, to_view, to_webview2,
     };
     use gpui_kit::ImageFormat;
 
@@ -4436,11 +4476,26 @@ mod tests {
             error_page,
             format!("{ERROR_URL}#http%3A%2F%2Flocalhost%3A9%2Fapp")
         );
-        // WebKit's reason goes along, in Trek's words.
+        // WebKit's reason goes along, in Trek's words, and reads back as it was.
+        let with_why = Page::new(START_URL)
+            .failed_to_load("https://x.dev/".into(), Some(("Can’t", "a & b’s")));
         assert_eq!(
-            Page::new(START_URL).failed_to_load("https://x.dev/".into(), Some(("Can’t", "a & b"))),
-            format!("{ERROR_URL}?h=Can%E2%80%99t&why=a%20%26%20b#https%3A%2F%2Fx.dev%2F")
+            with_why,
+            format!("{ERROR_URL}?h=Can%E2%80%99t&why=a%20%26%20b%E2%80%99s#https%3A%2F%2Fx.dev%2F")
         );
+        assert_eq!(error_page_why(&with_why).as_deref(), Some("a & b’s"));
+        assert_eq!(error_page_why(&error_page), None);
+        assert_eq!(error_page_why("https://x.dev/?why=no"), None);
+        // Its tab says the page's heading, made short.
+        let mut refused = Page::new(START_URL);
+        refused.failed_to_load(
+            "http://127.0.0.1:9/".into(),
+            Some(("Can’t open this page", "Port 9 is kept…")),
+        );
+        assert_eq!(refused.label(), "Can’t open page");
+        let mut crashed = Page::new(START_URL);
+        crashed.failed_to_load("https://x.dev/".into(), Some(super::asks::CRASHED));
+        assert_eq!(crashed.label(), "This page stopped working");
         assert!(!page.loading && page.ready);
         // The error page loading keeps the failure on show.
         page.loaded(false, error_page.clone());
@@ -4908,18 +4963,27 @@ mod tests {
         assert_eq!((info.width, info.height), (size.width, size.height));
 
         // A load that fails is told to Trek once, with WebView2's reason, which reads in Trek's
-        // words: nothing listens on port 9, so it's refused.
-        wv.load_url("http://127.0.0.1:9/").expect("navigate");
-        let (failed, domain, code) = wait_for("the failure", || match rx.try_recv() {
-            Ok(Msg::LoadFailed {
-                url, domain, code, ..
-            }) => Some((url, domain, code)),
-            _ => None,
-        });
-        assert!(failed.starts_with("http://127.0.0.1:9"), "{failed}");
-        let (heading, why) =
-            super::asks::load_failure(&domain, code, &failed).expect("in Trek's words");
-        assert_eq!(heading, "Can’t reach this page", "{domain} {code}: {why}");
+        // words: nothing listens on port 39999, so it's refused.
+        let failure = |url: &str| {
+            wv.load_url(url).expect("navigate");
+            let (failed, domain, code) = wait_for("the failure", || match rx.try_recv() {
+                Ok(Msg::LoadFailed {
+                    url, domain, code, ..
+                }) => Some((url, domain, code)),
+                _ => None,
+            });
+            assert!(failed.starts_with(url.trim_end_matches('/')), "{failed}");
+            let (heading, why) =
+                super::asks::load_failure(&domain, code, &failed).expect("in Trek's words");
+            (heading, why)
+        };
+        let (heading, why) = failure("http://127.0.0.1:39999/");
+        assert_eq!(heading, "Can’t reach this page", "{why}");
+        // Port 9 (discard) is one browsers keep pages off: WebView2 doesn't try it, and Trek says
+        // that rather than a server that isn't running.
+        let (heading, why) = failure("http://127.0.0.1:9/");
+        assert_eq!(heading, "Can’t open this page", "{why}");
+        assert!(why.starts_with("Port 9 is kept"), "{why}");
 
         // The window goes first (a closed Trek window), then the view: no crash.
         unsafe { DestroyWindow(parent as _) };

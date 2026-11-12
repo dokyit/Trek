@@ -13,7 +13,7 @@
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
-//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded` (the page's process ended; the tab as the panel has it), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
+//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `cloud-file <abs-path> <text>|fetched <n>[+]|away|off` (Windows: a file that lives only in the cloud, from a sync provider of the check's own), `editor has <text>|note <text>` (the file in front shows it; the preview in front says it), `photos open|shown <0|1>|close` (Mac: the system's Photos picker as the + menu opens it, a sheet on the window), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded|why:<word>` (the page's process ended; the tab as the panel has it, and the reason Trek's page gives), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
@@ -77,6 +77,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+mod cloud_files;
 
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else {
@@ -1233,10 +1236,10 @@ async fn browser(
             anyhow::ensure!(ended > 0, "browser crash: no page process to end");
             Ok(())
         }
-        // `browser expect <crashed|failed[:<part of its address>]|loaded>…`: the active tab as the
-        // panel has it: it heard its page's process end (`crashed`); it shows Trek's page saying
-        // why a load failed (`failed`, of an address with that in it); or it shows the page
-        // itself, neither failed nor loading (`loaded`).
+        // `browser expect <crashed|failed[:<part of its address>]|loaded|why:<word>>…`: the active
+        // tab as the panel has it: it heard its page's process end (`crashed`); it shows Trek's
+        // page saying why a load failed (`failed`, of an address with that in it; `why`, with that
+        // word in its reason); or it shows the page itself, neither failed nor loading (`loaded`).
         "expect" => {
             let state = main.update(cx, |_, window, cx| panel.read(cx).shots_state(window, cx))?;
             let url = state["url"].as_str().unwrap_or_default().to_string();
@@ -1259,7 +1262,12 @@ async fn browser(
                         state["failed"],
                         state["loading"]
                     ),
-                    _ => anyhow::bail!("browser expect: {want}? (crashed, failed, loaded)"),
+                    ("why", part) => anyhow::ensure!(
+                        state["why"].as_str().is_some_and(|why| why.contains(part)),
+                        "browser expect: Trek's page doesn't say {part:?} ({url}: why {})",
+                        state["why"]
+                    ),
+                    _ => anyhow::bail!("browser expect: {want}? (crashed, failed, loaded, why)"),
                 }
             }
             Ok(())
@@ -2425,6 +2433,18 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     let transcript = ide.read(cx).ai.read(cx).transcript.clone();
                     transcript.update(cx, |t, cx| t.confirm_last_undo(cx));
                 }
+                // `editor has <text>`: the file in front shows `text`; `editor note <text>`: the
+                // preview in front says it (a file being fetched, or why one can't be shown).
+                ("has", text) => {
+                    let editor = ide.read(cx).active_editor().ok_or_else(|| anyhow::anyhow!("editor has: no file in front"))?;
+                    let shown = editor.read(cx).text_state().read(cx).text().to_string();
+                    anyhow::ensure!(shown.contains(text), "editor has: {text:?} isn't in the file in front ({} bytes)", shown.len());
+                }
+                ("note", text) => {
+                    let preview = ide.read(cx).active_preview().ok_or_else(|| anyhow::anyhow!("editor note: no preview in front"))?;
+                    let note = preview.read(cx).note_text().unwrap_or_default();
+                    anyhow::ensure!(note.contains(text), "editor note: the preview says {note:?}, not {text:?}");
+                }
                 ("chat", "new") => ws.update(cx, |ws, cx| ws.ide_new_chat(cx)),
                 ("chat", r) if r.starts_with("send ") => ws.update(cx, |ws, cx| ws.send_in(&crate::workspace::Scope::Ide, r["send ".len()..].to_string(), vec![], cx)),
                 ("chat", n) => {
@@ -2955,6 +2975,37 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         }
         return Ok(());
     }
+    // `cloud-file <abs-path> <text…>` (Windows): a file that lives only in the cloud, as OneDrive's
+    // online-only files do: a placeholder whose data, `text`, comes from a sync provider of the
+    // check's own (`shots/cloud_files.rs`), its folder the provider's sync root. Windows asks the
+    // provider for the data when something reads the file, and it answers after a moment.
+    // `cloud-file fetched <n>[+]`: how often it was asked; `cloud-file away`: it stops answering,
+    // as OneDrive not running does; `cloud-file off`: the folder an ordinary one again.
+    if verb == "cloud-file" {
+        anyhow::ensure!(cfg!(windows), "cloud-file: Windows' alone");
+        #[cfg(windows)]
+        {
+            match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
+                ("away", "") => cloud_files::away()?,
+                ("off", "") => cloud_files::off()?,
+                ("fetched", n) => {
+                    let (n, more) = match n.trim().strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n.trim(), false),
+                    };
+                    let n: usize = n.parse()?;
+                    let fetched = cloud_files::fetched();
+                    anyhow::ensure!(
+                        fetched == n || more && fetched > n,
+                        "cloud-file fetched: asked {fetched} times, not {n}{}",
+                        if more { " or more" } else { "" }
+                    );
+                }
+                (path, text) => cloud_files::file(Path::new(path), text.trim())?,
+            }
+        }
+        return Ok(());
+    }
     // `programs-stop`: end the programs `programs` found that still run (a preview window a check
     // opened, say).
     if verb == "programs-stop" {
@@ -3074,6 +3125,59 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             .join("IMG_0001.HEIC");
         crate::attachments::heic_photo(&photo)?;
         return run(ws, "attach", &photo.to_string_lossy(), cx);
+    }
+    // `photos open|shown <0|1>|close` (Mac): the system's Photos picker, as the + menu's Photos
+    // Library opens it (`Composer::attach_photos`), a sheet on Trek's window; whether that sheet
+    // is up, as AppKit has it; and closed as its Cancel does. No open panel in its stead, as the
+    // menu has where there's no picker: one left up would hold the rest of the run.
+    #[cfg(target_os = "macos")]
+    if verb == "photos" {
+        use crate::photos::picker::{self, Opened};
+        match arg.trim() {
+            "open" => {
+                let main = ws
+                    .read(cx)
+                    .main_window
+                    .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+                main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+                    let trek = root
+                        .downcast::<gpui_kit::component::Root>()
+                        .ok()
+                        .and_then(|r| {
+                            r.read(cx)
+                                .view()
+                                .clone()
+                                .downcast::<crate::root::TrekWindow>()
+                                .ok()
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("photos: no Trek window"))?;
+                    let composer = trek.read(cx).composer.clone();
+                    match picker::open(window, crate::photos::dir()) {
+                        Opened::Showing(picked) => {
+                            composer.update(cx, |c, cx| c.take_photos(picked, window, cx))
+                        }
+                        Opened::AlreadyShowing => {}
+                        Opened::Unavailable => anyhow::bail!("photos open: no Photos picker here"),
+                    }
+                    Ok(())
+                })??;
+            }
+            "close" => picker::cancel(),
+            other => {
+                let want = match other.strip_prefix("shown").map(str::trim) {
+                    Some("1") => true,
+                    Some("0") => false,
+                    _ => anyhow::bail!("photos open|shown <0|1>|close"),
+                };
+                let up = picker::showing();
+                anyhow::ensure!(
+                    up == want,
+                    "photos shown: the picker's sheet {} up",
+                    if up { "is" } else { "isn't" }
+                );
+            }
+        }
+        return Ok(());
     }
     if verb == "attach" && !arg.is_empty() {
         let main = ws

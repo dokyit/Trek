@@ -131,13 +131,17 @@ objc2-user-notifications = "0.3"
 [target.'cfg(windows)'.dependencies]
 # LockFileEx on the data folder, a job object per language server, the registry for the OS name,
 # the session's idle time and lock state for push notifications' away-detection, and the exe's
-# icon resources for the windows' icons, at the size their display's scale wants (HiDpi).
+# icon resources for the windows' icons, at the size their display's scale wants (HiDpi). The
+# capture build's live check of files that live only in the cloud: a sync provider of its own
+# (CloudFilters).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Security",
+    "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
+    "Win32_System_CorrelationVector",
     "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
