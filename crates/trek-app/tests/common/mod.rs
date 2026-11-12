@@ -428,6 +428,13 @@ impl Trek {
         .expect("window")
     }
 
+    /// `render`, in another of Trek's windows (a thread window).
+    pub fn render_in(&self, cx: &mut TestAppContext, window: AnyWindowHandle) {
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("window");
+    }
+
     /// Open `id` in a window of its own; returns that window.
     pub fn open_thread_window(&self, cx: &mut TestAppContext, id: &str) -> AnyWindowHandle {
         let ws = self.ws.clone();
