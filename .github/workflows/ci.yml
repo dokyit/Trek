@@ -109,6 +109,11 @@ jobs:
       - name: Test (workspace, except trek-app)
         run: cargo test --config "$CI_PROFILE" --workspace --exclude trek-app --locked --no-fail-fast
 
+      # The iPhone's screen and taps through CoreDevice (trek-phone's `coredevice` feature, the
+      # `pc_screen` example): built here, as a test run leaves out an example whose feature is off.
+      - name: Build the CoreDevice example (trek-phone)
+        run: cargo build --config "$CI_PROFILE" -p trek-phone --features coredevice --example pc_screen --locked
+
       # trek-app's doc tests: what `cargo test -p trek-app` ran last. Here rather than in a trek-app
       # job: a `--doc` run resolves features apart from the test targets (it compiles a graph of
       # its own), and this job has the time.
@@ -260,6 +265,11 @@ jobs:
         run: cargo test --config $env:CI_PROFILE --workspace --exclude trek-app --locked --no-fail-fast
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
+
+      # The iPhone's screen and taps through CoreDevice (trek-phone's `coredevice` feature, the
+      # `pc_screen` example): built here, as a test run leaves out an example whose feature is off.
+      - name: Build the CoreDevice example (trek-phone)
+        run: cargo build --config $env:CI_PROFILE -p trek-phone --features coredevice --example pc_screen --locked
 
       - name: Cache contents
         if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'

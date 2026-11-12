@@ -297,9 +297,9 @@ windows = "partial"
 live_macos = ["phone touch", "wait 800", "count phone-mirror 1"]
 live_windows = ["phone ready", "wait 600", "count phone-apps 1", "count phone-install 1", "phone files", "wait 600", "count phone-files 1"]
 how = { macos = "Live screen over USB, keyboard and mouse over Bluetooth, iPhone Mirroring or Trek Driver for taps, apps and files.", windows = "Through Apple Devices (Apple Mobile Device Service, from the Microsoft Store): the phone's details, its apps (list, install an .ipa) and files (media, and apps' Documents: add, save, remove), AssistiveTouch, and agents' eight phone tools for them, one agent at a time, with installs and file changes asked first. The panel says what's missing: Apple Devices, its service, a phone, Trust, unlocking." }
-note = "The live screen and taps need Trek on a Mac: CoreMediaIO capture, Bluetooth HID, iPhone Mirroring and starting Trek Driver (Xcode) are Mac-only. idevice's XCTest and screenshots build on Windows, but iOS 17 and later need the developer disk image mounted, and the driver is built and signed on a Mac."
+note = "The live screen and taps: the Mac's ways (CoreMediaIO capture, Bluetooth HID, iPhone Mirroring, Trek Driver built and signed in Xcode) are Mac-only, but CoreDevice's own services, the ones Xcode's Device Hub uses (a screenshot service, the display service's media stream, and the HID back channel dtuhidd serves), reach a phone from a PC over its RemoteXPC tunnel with nothing to build or sign: `cargo run -p trek-phone --features coredevice --example pc_screen -- --ddi <folder> --tap <x> <y>` mounts the developer disk image (Xcode's personalized one, signed for the phone by Apple's server), saves a screenshot and taps. It builds and runs on Windows (Apple Mobile Device Service answered on the PC it was written on; no phone was plugged in), and hasn't yet run against a phone: that, then the panel's screen and agents' screenshot and tap tools on it, is what's left. The disk image is Apple's, from Xcode on a Mac."
 code = ["crates/trek-phone/src/lib.rs", "crates/trek-phone/src/pc.rs", "crates/trek-app/src/panels/mod.rs", "crates/trek-app/src/panels/phone/windows.rs", "crates/trek-mcp/src/phone.rs", "crates/trek-phone/src/driver.rs", "crates/trek-phone/src/device.rs", "crates/trek-app/src/panels/phone.rs", "crates/trek-app/src/workspace/phone_use.rs", "crates/trek-app/src/settings_view.rs"]
-tests = ["crates/trek-app/tests/iphone.rs", "crates/trek-phone/src/pc.rs", "crates/trek-phone/examples/driver_bench.rs", "crates/trek-phone/examples/driver_run.rs", "crates/trek-phone/examples/driver_get.rs", "crates/trek-phone/examples/mirror.rs", "crates/trek-phone/examples/devices.rs"]
+tests = ["crates/trek-app/tests/iphone.rs", "crates/trek-phone/src/pc.rs", "crates/trek-phone/examples/driver_bench.rs", "crates/trek-phone/examples/driver_run.rs", "crates/trek-phone/examples/driver_get.rs", "crates/trek-phone/examples/mirror.rs", "crates/trek-phone/examples/devices.rs", "crates/trek-phone/examples/pc_screen.rs"]
 
 [[feature]]
 id = "simulator"
@@ -518,9 +518,10 @@ area = "iPhone"
 what = "The phone finds the computer again when its address changes (Bonjour)"
 macos = "yes"
 windows = "yes"
-live_skip = "Bonjour on a real network, with a phone on it: remote/bonjour.rs's tests."
-how = { macos = "NSNetService.", windows = "Windows' own DNS-SD (DnsServiceRegister, Windows 10 1809 and later), with the same _trek._tcp name and record the Mac publishes." }
+live = ["bonjour on", "wait 1500", "bonjour found", "bonjour off"]
+how = { macos = "Its mDNS responder (dns_sd's DNSServiceRegister).", windows = "Windows' own DNS-SD (DnsServiceRegister, Windows 10 1809 and later), with the same _trek._tcp name and record the Mac publishes." }
 code = ["crates/trek-app/src/remote/bonjour.rs"]
+tests = ["crates/trek-app/src/remote/bonjour.rs", "crates/trek-app/src/shots/dns_sd.rs"]
 
 [[feature]]
 id = "phone-reachable"

@@ -399,6 +399,7 @@ pub fn checks(step: &str) -> bool {
         "editor" => matches!(words.next(), Some("has" | "note")),
         "cloud-file" => words.next() == Some("fetched"),
         "photos" => words.next() == Some("shown"),
+        "bonjour" => words.next() == Some("found"),
         _ => false,
     }
 }
