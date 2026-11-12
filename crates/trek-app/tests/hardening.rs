@@ -76,18 +76,28 @@ fn a_link_that_climbs_out_of_a_project_asks_too() {
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Cancel");
 
-        // A symlink inside the project that leads out of it. Making one needs a privilege
-        // Windows test runners don't have, so this step stays Unix-only.
+        // A link inside the project that leads out of it: a symlink on the Mac; on Windows a
+        // junction, which needs no privilege (a symlink does), as a user would make with
+        // `mklink /J`.
+        let link = trek.project.join("out");
         #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        #[cfg(windows)]
         {
-            let link = trek.project.join("out");
-            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
-            let url = format!("trek://edit?path={}", link.join("b.rs").display());
-            cx.update(|cx| trek_app::deep_link::open(&url, cx));
-            trek.render(cx);
-            assert!(cx.has_pending_prompt());
-            cx.simulate_prompt_answer("Cancel");
+            let windows = |p: &std::path::Path| p.to_string_lossy().replace('/', "\\");
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(windows(&link))
+                .arg(windows(&elsewhere))
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "mklink /J: {made:?}");
         }
+        let url = format!("trek://edit?path={}", link.join("b.rs").display());
+        cx.update(|cx| trek_app::deep_link::open(&url, cx));
+        trek.render(cx);
+        assert!(cx.has_pending_prompt(), "a link out of the project asks");
+        cx.simulate_prompt_answer("Cancel");
 
         // A relative path is never followed.
         cx.update(|cx| trek_app::deep_link::open("trek://edit?path=b.rs", cx));
