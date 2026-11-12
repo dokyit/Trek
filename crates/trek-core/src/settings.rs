@@ -968,7 +968,7 @@ pub enum AppIcon {
     Night,
     /// The mountain on the Paper theme's cream.
     Paper,
-    /// A frosted glass mountain over a sunset.
+    /// A frosted glass mountain against a dusk sky.
     Glass,
 }
 

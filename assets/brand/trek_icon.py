@@ -5,7 +5,7 @@ Writes, next to this script:
   trek-icon-night.svg  the app icon (the default, and the one in the app bundle): Trek's orange
                        on the Night theme's charcoal
   trek-icon-paper.svg  alternative: the deeper orange on the Paper theme's cream
-  trek-icon-glass.svg  alternative: a frosted glass mountain over a sunset (Liquid Glass)
+  trek-icon-glass.svg  alternative: a frosted glass mountain against a dusk sky (Liquid Glass)
   trek-icon-*-ios.svg  the same three, full bleed, for iOS (ios/scripts/app-icons.sh renders them)
   trek-icon-{dark,tinted}-ios.svg  the iOS icon's dark and tinted variants: the mountain on clear
   trek-icon-{night,paper,glass}-{16,32}.svg  the three drawn for 16 and 32 px, on whole pixels,
@@ -186,7 +186,10 @@ class Mountain:
 # Colours ---------------------------------------------------------------------------------
 NIGHT = dict(tile="#1A1A1C", lit="#FF7A3D", shade="#C9551F", flag="#FFC7A0")
 PAPER = dict(tile="#FBF8F3", lit="#E85D1F", shade="#B8461A", flag="#B8461A")
-SUNSET = lin("sun3", [(0, "#FF9450"), (.5, "#E9531E"), (1, "#9E2A0C")]) + rad("sun3b", [(0, "#FFD9A8", .75), (1, "#FFD9A8", 0)], cx=.78, cy=.08, r=.55)
+# Glass's sky: dusk. Deep navy at the top, through plum, to an ember glow low on the horizon,
+# behind the mountain's foot. (Not an orange tile: a pale peak on orange is other apps' icon.)
+DUSK = (lin("dusk", [(0, "#0B1222"), (.4, "#3A2740"), (.6, "#4A324E"), (.8, "#B0603F"), (.9, "#D6804F"), (1, "#B0603F")])
+        + rad("duskglow", [(0, "#D6804F", .55), (1, "#D6804F", 0)], cx=.5, cy=.86, r=.5))
 
 def colours(c):
     return dict(lit=c["lit"], shade=c["shade"], flag=c["flag"])
@@ -214,45 +217,49 @@ def flat_icon(slug, c, edge):
 flat_icon("night", NIGHT, hairline("#FFFFFF", ".09"))
 flat_icon("paper", PAPER, hairline("#3A2A1C", ".12"))
 
-# Glass: the mountain as a slab of frosted glass over a deep sunset, with lit edges and warm
-# light coming through; the trail's dots are holes in the glass, and the shaded face is the
-# same glass with the light off it.
+# Glass: the mountain as a slab of frosted glass against the dusk, catching the last light: warm
+# where the horizon's glow comes through its foot, a lit edge along the top of the lit face, the
+# shaded face the same glass with the night on it. The trail's dots are holes in the glass, and
+# the flag is the pale ember of Night's.
 BLUR = ('<filter id="blur8" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="8"/></filter>'
         '<filter id="blur16" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="16"/></filter>')
-GLASS = (lin("glassfill", [(0, "#FFFFFF", .62), (.6, "#FFF1E6", .34), (1, "#FFFFFF", .2)])
-         + lin("glassedge", [(0, "#FFFFFF", 1), (.45, "#FFFFFF", .2), (1, "#FFFFFF", .55)]))
+GLASS = (lin("glassfill", [(0, "#FFE2C8", .86), (.5, "#FFC39A", .66), (1, "#FFA76B", .5)])
+         + lin("glassedge", [(0, "#FFFFFF", 1), (.45, "#FFE2CC", .3), (1, "#FFD0AC", .7)]))
+GLASS_FLAG = "#FFC7A0"
 
 def glass(m):
     k = m.k
     body, shade = m.body(), m.shade()
-    left, top = m.ox + k * MARK_BOX[0], m.oy + k * 18.75
-    width, height = k * MARK_BOX[2], k * 62
+    top = m.outline[-2][1] - m.r  # the summit's top, and the mountain's height from there to its base
+    tall = m.outline[0][1] + m.r - top
+    left, top = m.ox + k * MARK_BOX[0], m.oy + k * top
+    width, height = k * MARK_BOX[2], k * tall
     cx = left + width / 2
-    g = f'<ellipse cx="{num(cx + 8)}" cy="{num(top + height + 4)}" rx="{num(width * .5)}" ry="{num(k * 4.4)}" fill="#4A1200" opacity=".45" filter="url(#blur16)"/>'
-    # The flag: glass too, behind the mountain.
-    g += f'<path d="{m.pole_d()}" stroke="#FFFFFF" stroke-opacity=".8" stroke-width="{m.pole_width()}" stroke-linecap="round"/>'
-    g += f'<path d="{m.cloth_d()}" fill="#FFFFFF" fill-opacity=".8"/>'
-    g += f'<path d="{body}" fill="#4A1200" opacity=".28" transform="translate(6 16)" filter="url(#blur8)"/>'
+    g = f'<ellipse cx="{num(cx + 8)}" cy="{num(top + height + 4)}" rx="{num(width * .5)}" ry="{num(k * 3.4)}" fill="#3A1408" opacity=".4" filter="url(#blur16)"/>'
+    # The flag, behind the mountain.
+    g += f'<path d="{m.pole_d()}" stroke="{GLASS_FLAG}" stroke-width="{m.pole_width()}" stroke-linecap="round"/>'
+    g += f'<path d="{m.cloth_d()}" fill="{GLASS_FLAG}"/>'
+    g += f'<path d="{body}" fill="#1A0D14" opacity=".3" transform="translate(6 14)" filter="url(#blur8)"/>'
     g += f'<path d="{body}{m.holes()}" fill="url(#glassfill)" fill-rule="evenodd"/>'
     g += f'<clipPath id="gm"><path d="{body}{m.holes()}" clip-rule="evenodd"/></clipPath><g clip-path="url(#gm)">'
-    g += f'<ellipse cx="{num(left + width * .3)}" cy="{num(top + height * .38)}" rx="{num(width * .3)}" ry="{num(height * .2)}" fill="#fff" opacity=".5" filter="url(#blur16)"/>'
-    g += f'<path d="{shade}" fill="#7A2408" opacity=".34"/>'
-    g += f'<ellipse cx="{num(left + width * .62)}" cy="{num(top + height)}" rx="{num(width * .42)}" ry="{num(height * .16)}" fill="#FFB27A" opacity=".55" filter="url(#blur8)"/></g>'
-    g += f'<path d="{m.ridge_line()}" fill="none" stroke="#FFFFFF" stroke-opacity=".38" stroke-width="{num(k * .42)}" stroke-linejoin="round"/>'
+    g += f'<ellipse cx="{num(left + width * .34)}" cy="{num(top + height * .36)}" rx="{num(width * .3)}" ry="{num(height * .22)}" fill="#FFEAD6" opacity=".55" filter="url(#blur16)"/>'
+    g += f'<path d="{shade}" fill="#241633" opacity=".5"/>'
+    g += f'<ellipse cx="{num(left + width * .55)}" cy="{num(top + height)}" rx="{num(width * .5)}" ry="{num(height * .2)}" fill="#FF9A5C" opacity=".6" filter="url(#blur8)"/></g>'
+    g += f'<path d="{m.ridge_line()}" fill="none" stroke="#FFE7D3" stroke-opacity=".5" stroke-width="{num(k * .42)}" stroke-linejoin="round"/>'
     g += f'<path d="{body}" fill="none" stroke="url(#glassedge)" stroke-width="4"/>'
     for x, y, r in m.dots:
-        g += f'<circle cx="{num(m.ox + k * x)}" cy="{num(m.oy + k * y)}" r="{num(k * r)}" fill="none" stroke="#FFFFFF" stroke-opacity=".5" stroke-width="2.5"/>'
+        g += f'<circle cx="{num(m.ox + k * x)}" cy="{num(m.oy + k * y)}" r="{num(k * r)}" fill="none" stroke="#FFE7D3" stroke-opacity=".55" stroke-width="2.5"/>'
     return g
 
-def sunset(shape):
-    return f'<path d="{shape}" fill="url(#sun3)"/><path d="{shape}" fill="url(#sun3b)"/>'
+def dusk(shape):
+    return f'<path d="{shape}" fill="url(#dusk)"/><path d="{shape}" fill="url(#duskglow)"/>'
 
 # The Mac tile's lit rim, as glass has: bright along the top, dark under the bottom.
-RIM = lin("rim", [(0, "#fff", .55), (.18, "#fff", .08), (.6, "#fff", 0), (1, "#000", .25)])
+RIM = lin("rim", [(0, "#fff", .4), (.18, "#fff", .08), (.6, "#fff", 0), (1, "#000", .25)])
 GLASS_RIM = f'<path d="{TILE}" fill="none" stroke="url(#rim)" stroke-width="5" opacity=".9"/>'
 
-write("trek-icon-glass.svg", svg(sunset(TILE) + glass(ON_TILE) + GLASS_RIM, BLUR + SUNSET + GLASS + RIM))
-write("trek-icon-glass-ios.svg", svg(sunset(SQUARE) + glass(FULL_BLEED), BLUR + SUNSET + GLASS))
+write("trek-icon-glass.svg", svg(dusk(TILE) + glass(ON_TILE) + GLASS_RIM, BLUR + DUSK + GLASS + RIM))
+write("trek-icon-glass-ios.svg", svg(dusk(SQUARE) + glass(FULL_BLEED), BLUR + DUSK + GLASS))
 
 # iOS 18's dark and tinted Home Screen icons: the mountain alone on a clear ground (iOS draws
 # the dark tile, or tints the grey mountain itself). Dark wears Night's colours; tinted is
@@ -295,12 +302,13 @@ SMALL = {
         pole=(18.5, 10, 5, 1), cap="butt",
         cloth=rect(19, 5, 3, 2))),
 }
-# Each icon's tile and colours. Glass keeps its sunset; its mountain is the frosted glass's own
-# colours over it, flat (the full art has its lit edges and glow to show it's glass).
+# Each icon's tile and colours. Glass keeps its dusk; its mountain is the frosted glass's own
+# colours against it, flat (the full art has its lit edges and glow to show it's glass), and
+# light enough to read on the plum above and the ember below.
 SMALL_TILES = {
     "night": ("", lambda t: f'<path d="{t}" fill="{NIGHT["tile"]}"/>', colours(NIGHT)),
     "paper": ("", lambda t: f'<path d="{t}" fill="{PAPER["tile"]}"/>', colours(PAPER)),
-    "glass": (SUNSET, sunset, dict(lit="#FBDDD2", shade="#DFA797", flag="#FFFFFF")),
+    "glass": (DUSK, dusk, dict(lit="#F6D2BC", shade="#8E6470", flag=GLASS_FLAG)),
 }
 
 def small_icon(slug, px):
