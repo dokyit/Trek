@@ -139,6 +139,9 @@ pub struct Call {
     pub target: String,
     /// The agent's name for the tool (`Bash`, `Write`, `mcp__github__create_issue`).
     pub tool: String,
+    /// cmd.exe runs the command line (Trek's own agent on a PC without Git Bash), so it's read as
+    /// cmd.exe reads it: `d^el x` runs `del` there.
+    pub in_cmd: bool,
 }
 
 impl Call {
@@ -147,6 +150,15 @@ impl Call {
             kind: RuleKind::Command,
             target: line.into(),
             tool: tool.to_string(),
+            in_cmd: false,
+        }
+    }
+
+    /// A command line cmd.exe runs.
+    pub fn command_in_cmd(tool: &str, line: impl Into<String>) -> Call {
+        Call {
+            in_cmd: true,
+            ..Call::command(tool, line)
         }
     }
 
@@ -155,6 +167,7 @@ impl Call {
             kind: RuleKind::Edit,
             target: path.into(),
             tool: tool.to_string(),
+            in_cmd: false,
         }
     }
 
@@ -163,6 +176,7 @@ impl Call {
             kind: RuleKind::Fetch,
             target: address.into(),
             tool: tool.to_string(),
+            in_cmd: false,
         }
     }
 
@@ -171,6 +185,7 @@ impl Call {
             kind: RuleKind::Tool,
             target: String::new(),
             tool: name.to_string(),
+            in_cmd: false,
         }
     }
 }
@@ -194,7 +209,13 @@ pub fn decide(rules: &[PermissionRule], call: &Call, cwd: Option<&Path>) -> Opti
     if rules.is_empty() {
         return None;
     }
-    let line = (call.kind == RuleKind::Command).then(|| shell::parse(&call.target));
+    let line = (call.kind == RuleKind::Command).then(|| {
+        if call.in_cmd {
+            shell::parse_cmd(&call.target)
+        } else {
+            shell::parse(&call.target)
+        }
+    });
     for action in [RuleAction::Deny, RuleAction::Ask] {
         for (i, rule) in rules.iter().enumerate().filter(|(_, r)| r.action == action) {
             if let Some((part, unreadable)) = catches(rule, call, line.as_ref(), cwd) {

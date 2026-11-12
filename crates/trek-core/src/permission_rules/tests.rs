@@ -723,3 +723,73 @@ fn what_is_shown_is_clipped_and_on_one_line() {
     assert!(long.contains('…') && long.len() < 200, "{long}");
     assert!(refusal(&deny("rm")).contains("Deny command `rm`"));
 }
+
+/// cmd.exe's own reading, for what `cmd /c` runs and for a line Trek runs in cmd.exe (its own
+/// agent on a PC without Git Bash): `^` keeps the next character as it is, a command's name ends
+/// at `/`, a leading `@` only hides the echo, `if`, `for`, `call` and `start` run what follows,
+/// and `%X%` is only known when it runs. The Mac's escapes (`\rm`, `'r'm`) are undone the same way.
+#[test]
+fn cmd_lines_are_read_as_cmd_exe_reads_them() {
+    for line in [
+        "cmd /c d^el x",
+        "cmd /c d^e^l x",
+        "cmd /c \"d^el x\"",
+        "cmd.exe /C del/q x",
+        "cmd /c @del x",
+        "cmd /c echo a&&del x",
+        "cmd /c (del x)",
+        "cmd /c if exist x del x",
+        "cmd /c for %f in (*) do del %f",
+        "cmd /c call del x",
+        "cmd /c start \"\" del x",
+        "cmd //c del x",
+        "cmd /d /s /c \"del x\"",
+        "cmd /c %X% y",
+        "cmd /c !X! y",
+        "cmd /c cmd /c d^el x",
+        "cmd /c powershell -c \"del x\"",
+    ] {
+        denied("del", line);
+    }
+
+    let in_cmd = |rules: &[PermissionRule], line: &str| {
+        decide(rules, &Call::command_in_cmd("bash", line), None).map(|v| v.action)
+    };
+    for line in [
+        "d^el x",
+        "del/q x",
+        "@del x",
+        "echo a & del x",
+        "echo a | del x",
+        "(echo a) && del x",
+        "if not exist y del x",
+        "for %f in (*.tmp) do @del %f",
+        "%X% y",
+        "echo a > out.txt & d^el x",
+    ] {
+        assert_eq!(
+            in_cmd(&[deny("del")], line),
+            Some(RuleAction::Deny),
+            "`{line}` must not get past a deny on `del` in cmd.exe"
+        );
+    }
+    // An escaped or quoted separator is only text; a lone `%` is a percent sign.
+    for line in [
+        "echo a ^& del x",
+        "echo \"a & del x\"",
+        "echo del",
+        "echo 100% sure",
+        "dir /w",
+    ] {
+        assert_eq!(in_cmd(&[deny("del")], line), None, "`{line}` runs no del");
+    }
+    // An allow covers a line with its escapes undone, and nothing only known when it runs.
+    assert_eq!(
+        in_cmd(&[allow("git status")], "git st^atus"),
+        Some(RuleAction::Allow)
+    );
+    assert_eq!(in_cmd(&[allow("git status")], "git status & del x"), None);
+    assert_eq!(in_cmd(&[allow("git status")], "%G% status"), None);
+    // The same line read as a POSIX shell's: there `d^el` is a program of that name.
+    passes("del", "d^el x");
+}

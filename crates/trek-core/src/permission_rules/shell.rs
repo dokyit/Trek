@@ -117,6 +117,205 @@ pub fn parse(line: &str) -> Line {
     parse_at(line, 0)
 }
 
+/// A command line as cmd.exe reads it: what `cmd /c` runs, and a line Trek runs in cmd.exe (its
+/// own agent, on a PC without Git Bash). Its commands are followed as any line's are.
+pub fn parse_cmd(line: &str) -> Line {
+    parse_cmd_at(line, 0)
+}
+
+fn parse_cmd_at(line: &str, depth: usize) -> Line {
+    let mut out = Line::default();
+    if depth > MAX_DEPTH {
+        out.opaque = Some("It nests commands too deeply to follow.");
+        return out;
+    }
+    for part in read_cmd(line) {
+        follow(part, &mut out, depth);
+    }
+    out
+}
+
+/// A cmd.exe line's simple commands. cmd.exe joins commands with `&`, `&&`, `||` and `|`, and
+/// groups them in brackets; outside quotes `^` keeps the next character as it is (`d^el` is
+/// `del`, `^&` an ampersand); `%NAME%`, and `!NAME!` with delayed expansion, is only known when
+/// it runs, in quotes too; a command's name ends at `/`, `,`, `;` and `=` as well as a space
+/// (`del/q x` runs `del`); a leading `@` only keeps it from being echoed. `if`, `for`, `call` and
+/// `start` run a command given in their words, and `do` and `else` begin one.
+fn read_cmd(line: &str) -> Vec<Part> {
+    struct Reader {
+        parts: Vec<Part>,
+        part: Part,
+        text: String,
+        kind: WordKind,
+        /// A word has begun (`""` is one, empty).
+        open: bool,
+        /// The word being read is a redirect's file (`true`: output), not an argument.
+        redirect: Option<bool>,
+    }
+    impl Reader {
+        fn end_word(&mut self) {
+            if !self.open {
+                return;
+            }
+            self.open = false;
+            let word = Word {
+                text: std::mem::take(&mut self.text),
+                kind: std::mem::replace(&mut self.kind, WordKind::Fixed),
+                raw: None,
+            };
+            match self.redirect.take() {
+                Some(output) => {
+                    if output && !word.text.eq_ignore_ascii_case("nul") {
+                        self.part.writes = true;
+                    }
+                }
+                None => self.part.words.push(word),
+            }
+        }
+        fn end_part(&mut self) {
+            self.end_word();
+            let mut done = std::mem::take(&mut self.part);
+            while let Some(first) = done.words.first_mut() {
+                if let Some(rest) = first.text.strip_prefix('@') {
+                    first.text = rest.to_string();
+                }
+                let opens = matches!(first.text.to_ascii_lowercase().as_str(), "do" | "else");
+                if first.text.is_empty() || opens {
+                    done.words.remove(0);
+                    continue;
+                }
+                break;
+            }
+            if done
+                .program()
+                .is_some_and(|p| matches!(p.as_str(), "if" | "for" | "call" | "start"))
+            {
+                done.wraps_from = Some(1);
+            }
+            if !done.words.is_empty() {
+                self.parts.push(done);
+            }
+        }
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut r = Reader {
+        parts: vec![],
+        part: Part::default(),
+        text: String::new(),
+        kind: WordKind::Fixed,
+        open: false,
+        redirect: None,
+    };
+    let mut quoted = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // A variable is put in before cmd.exe reads anything else, in quotes too.
+        if matches!(c, '%' | '!')
+            && let Some(len) = cmd_variable(&chars[i..])
+        {
+            r.text.extend(&chars[i..i + len]);
+            r.kind = WordKind::Dynamic;
+            r.open = true;
+            i += len;
+            continue;
+        }
+        if quoted {
+            if c == '"' {
+                quoted = false;
+            } else {
+                r.text.push(c);
+            }
+            i += 1;
+            continue;
+        }
+        // Still reading the command's own name.
+        let in_name = r.part.words.is_empty() && r.redirect.is_none();
+        match c {
+            '"' => {
+                quoted = true;
+                r.open = true;
+                i += 1;
+            }
+            '^' => {
+                if let Some(&next) = chars.get(i + 1).filter(|n| !matches!(n, '\n' | '\r')) {
+                    r.text.push(next);
+                    r.open = true;
+                }
+                i += 2;
+            }
+            '&' | '|' => {
+                r.end_part();
+                i += if chars.get(i + 1) == Some(&c) { 2 } else { 1 };
+            }
+            '(' | ')' | '\n' | '\r' => {
+                r.end_part();
+                i += 1;
+            }
+            '>' | '<' => {
+                // `2>`: the digits before it name a stream, not an argument.
+                if r.open && r.kind == WordKind::Fixed && r.text.chars().all(|d| d.is_ascii_digit())
+                {
+                    r.text.clear();
+                    r.open = false;
+                } else {
+                    r.end_word();
+                }
+                i += 1;
+                if c == '>' && chars.get(i) == Some(&'>') {
+                    i += 1;
+                }
+                // `>&2` goes to another stream, not a file.
+                if chars.get(i) == Some(&'&') {
+                    i += 1;
+                    while chars.get(i).is_some_and(|d| d.is_ascii_digit()) {
+                        i += 1;
+                    }
+                    continue;
+                }
+                r.redirect = Some(c == '>');
+            }
+            c if c.is_whitespace() => {
+                r.end_word();
+                i += 1;
+            }
+            ',' | ';' | '=' if in_name => {
+                r.end_word();
+                i += 1;
+            }
+            '/' if in_name && r.open => {
+                r.end_word();
+                r.text.push('/');
+                r.open = true;
+                i += 1;
+            }
+            _ => {
+                r.text.push(c);
+                r.open = true;
+                i += 1;
+            }
+        }
+    }
+    r.end_part();
+    r.parts
+}
+
+/// How long the variable at the start of `chars` is, if one is: `%NAME%` (any name), or
+/// `!NAME!` (a plain one, as delayed expansion reads it). `%%` and a lone `%` aren't.
+fn cmd_variable(chars: &[char]) -> Option<usize> {
+    let mark = *chars.first()?;
+    let len = chars[1..]
+        .iter()
+        .take(128)
+        .position(|&c| c == mark || c == '\n')?;
+    let name = &chars[1..1 + len];
+    let plain = name
+        .iter()
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '~'));
+    (chars.get(1 + len) == Some(&mark) && !name.is_empty() && (mark == '%' || plain))
+        .then_some(len + 2)
+}
+
 fn parse_at(line: &str, depth: usize) -> Line {
     let mut out = Line::default();
     if depth > MAX_DEPTH {
@@ -795,9 +994,11 @@ fn follow(mut part: Part, out: &mut Line, depth: usize) {
             part.transparent = true;
         }
         "cmd" => {
+            // `//c` is how Git Bash users write `/c` (its path conversion would turn `/c` into
+            // `C:/`).
             let at = part.words[1..].iter().position(|w| {
                 let flag = w.text.to_ascii_lowercase();
-                flag == "/c" || flag == "/k" || flag == "/r"
+                matches!(flag.trim_start_matches('/'), "c" | "k" | "r") && flag.starts_with('/')
             });
             match at {
                 Some(at)
@@ -805,8 +1006,13 @@ fn follow(mut part: Part, out: &mut Line, depth: usize) {
                         .iter()
                         .all(|w| w.kind == WordKind::Fixed) =>
                 {
+                    // What follows is read as cmd.exe reads it: `cmd /c d^el x` runs `del`.
                     let text = join(&part.words[at + 2..]);
-                    nested(&text, out);
+                    let inner = parse_cmd_at(&text, depth + 1);
+                    if let Some(why) = inner.opaque {
+                        out.opaque.get_or_insert(why);
+                    }
+                    out.parts.extend(inner.parts);
                     part.transparent = true;
                 }
                 _ => as_opaque("It runs text only known when it runs.", out),
