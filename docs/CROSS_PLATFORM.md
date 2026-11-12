@@ -65,9 +65,10 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    placeholder whose data a sync provider of the check's own hands over when Windows asks), the
    Photos picker's sheet as AppKit has it, the phone server's Bonjour record resolved through the
    system's DNS-SD as a phone resolves it, and the close button leaving Trek in the tray with no
-   window, its icon still there.
+   window, its icon still there. Windows Firewall's own rules are read too, by Trek itself: Settings
+   › iPhone names the network where they keep phones out (on the PC this was written on, Tailscale).
 
-   On Windows (`c48a1d3d`, a fresh profile, rust-analyzer on PATH): 84 of the
+   On Windows (`fe748976`, a fresh profile, rust-analyzer on PATH): 84 of the
    99 features shown working, 0 failing, 8 that aren't on Windows, and 7 that an isolated run
    can't show, each saying what checks it instead: other apps' accessibility trees, the real Codex
    and OpenCode CLIs (an isolated run starts no real agent, and never acts as the user), the
@@ -75,7 +76,7 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    behind the user's), voice typing (a person checked it), where the installed Trek lives, and
    the phone server reached from another device on the network.
 
-   On CI's Mac (`7d49b3a6`): 84 shown working, 0 failing. Getting there took four runs, each
+   On CI's Mac (`e93fd3d9`): 85 shown working, 0 failing. Getting there took four runs, each
    failure in steps written from the Mac's code alone and never run on one: the wrong id for a
    button, a chip an unbundled build hides, a list and a window never marked for the checks, a
    script given no window, a simulator list that comes a minute later the first time on a fresh
