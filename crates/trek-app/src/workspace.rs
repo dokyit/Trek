@@ -1770,6 +1770,12 @@ impl Workspace {
             }
         };
         let alone = hold_data_folder();
+        // The PATH agents get comes from the user's login shell, asked once a launch: 100 to 300
+        // ms of `zsh -ilc` (its rc files). Asked now, on a thread of its own, so the first message
+        // doesn't wait for it on the UI thread, as it did when its session started.
+        std::thread::spawn(|| {
+            trek_core::detect::login_path();
+        });
         // Agents and language servers a crashed run left behind go first.
         cx.background_executor()
             .spawn(async { trek_core::procs::reap_stale() })
