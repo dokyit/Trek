@@ -585,6 +585,20 @@ fn the_dock_shows_the_app_icon_picked_in_appearance() {
             ws.navigate(Route::Settings(SettingsPage::Appearance), cx)
         });
         trek.render(cx);
+        // The app icons are under the theme gallery: scrolled to, as a user would.
+        let page = trek.bounds(cx, "settings-content").expect("the page");
+        let wheel = gpui_kit::ScrollWheelEvent {
+            position: page.center(),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                gpui_kit::px(0.),
+                gpui_kit::px(-600.),
+            )),
+            ..Default::default()
+        };
+        trek.window(cx, |window, cx| {
+            _ = window.dispatch_event(gpui_kit::InputEvent::to_platform_input(wheel), cx)
+        });
+        trek.render(cx);
         trek.click(cx, "app-icon-Paper");
         cx.run_until_parked();
         assert_eq!(
