@@ -86,15 +86,51 @@ p { text-wrap: pretty; }
 /* Without the script he stands still, facing along the trail. */
 .hiker:not(.is-live) { background: url("/assets/img/hiker-stand-paper.png?v=df266ae1") 0 0 / 100% 100% no-repeat; }
 @media (prefers-color-scheme: dark) { .hiker:not(.is-live) { background-image: url("/assets/img/hiker-stand-night.png?v=50d26f2e"); } }
-.trail { position: relative; height: 54px; background: radial-gradient(circle, color-mix(in srgb, var(--ink) 40%, transparent) 0 1.5px, transparent 2px) 0 100% / 12px 3px repeat-x; }
+.trail { position: relative; height: 54px; }
+.trail::before { content: ""; position: absolute; inset: 0; background: radial-gradient(circle, color-mix(in srgb, var(--ink) 40%, transparent) 0 1.5px, transparent 2px) 0 100% / 12px 3px repeat-x; }
 .trail .hiker { bottom: 5px; }
 
-/* ---------- The first screen: one photograph, a few words in its sky ---------- */
-.hero { position: relative; isolation: isolate; min-height: max(100svh, 720px); overflow: clip; background: var(--sky-top); }
-.hero-photo { position: absolute; z-index: -1; inset: 0; }
-/* The picture's horizon sits at 70% of its height and stays there at any size. */
-.hero-photo img { width: 100%; height: 100%; object-fit: cover; object-position: 40% 70%; }
-.copy { width: min(820px, 100% - 48px); margin-inline: auto; padding-top: clamp(104px, calc(30svh - 110px), 260px); text-align: center; }
+/* ---------- The first screen: one photograph, a few words in its sky ----------
+   The photograph is in two planes, the sky and the land, cut along the ridge. They lie exactly over
+   each other, so without the script it is one still picture. With it, the land shifts a little
+   more than the sky as the pointer moves, and scrolling walks up the trail: the scene holds while
+   the land draws nearer, and the dusk comes up from the valley and down from the sky until only
+   the horizon is lit. That last line of light is where the story's trail begins. */
+/* The scene and the words share one cell, so the first screen still grows if the words need more room. */
+.hero { --h: max(100svh, 720px); position: relative; isolation: isolate; display: grid; min-height: var(--h); }
+.scene, .copy { grid-area: 1 / 1; }
+.copy { align-self: start; }
+.scene { position: sticky; top: 0; z-index: -1; overflow: clip; background: var(--sky-top); }
+.scene picture, .scene img { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* The picture's horizon sits at 70% of its height and stays there at any size. The trail meets the
+   ridge at 41% across and 71% down, and that is where the camera walks. */
+.scene img { object-fit: cover; object-position: 40% 70%; }
+.scene picture { transform-origin: 41% 71%; }
+/* The dusk: ground that comes up from below and down from above, each led by a soft edge. At rest
+   the lower one is the foot of the picture, where the grass fades into the page. */
+.dusk { position: absolute; inset-inline: 0; height: 100%; background: var(--ground); pointer-events: none; }
+.dusk::before { content: ""; position: absolute; inset-inline: 0; height: 100%; }
+.dusk-low { top: 100%; transform: translateY(var(--low, 0px)); }
+.dusk-low::before { bottom: calc(100% - 2px); transform-origin: 50% 100%; transform: scaleY(var(--low-edge, 0.14)); background: linear-gradient(to top, var(--fall)); }
+.dusk-high { bottom: 100%; transform: translateY(var(--high, 0px)); }
+.dusk-high::before { top: calc(100% - 2px); transform-origin: 50% 0; transform: scaleY(var(--high-edge, 0)); background: linear-gradient(to bottom, var(--fall)); }
+/* At the last the sides close in, each with an 80 px soft edge, to the two ends of the story's trail. */
+.dusk-left, .dusk-right { inset-block: 0; width: 100%; height: auto; }
+.dusk-left { left: auto; right: 100%; background: linear-gradient(to left, transparent, var(--ground) 80px); }
+.dusk-right { right: auto; left: 100%; background: linear-gradient(to right, transparent, var(--ground) 80px); }
+.dusk-left::before, .dusk-right::before { content: none; }
+:root {
+  /* ground to clear along a smoothstep, so the edge of the dusk never shows a line */
+  --fall: var(--ground) 0%, color-mix(in srgb, var(--ground) 97.2%, transparent) 10%, color-mix(in srgb, var(--ground) 89.6%, transparent) 20%,
+    color-mix(in srgb, var(--ground) 78.4%, transparent) 30%, color-mix(in srgb, var(--ground) 64.8%, transparent) 40%, color-mix(in srgb, var(--ground) 50%, transparent) 50%,
+    color-mix(in srgb, var(--ground) 35.2%, transparent) 60%, color-mix(in srgb, var(--ground) 21.6%, transparent) 70%, color-mix(in srgb, var(--ground) 10.4%, transparent) 80%,
+    color-mix(in srgb, var(--ground) 2.8%, transparent) 90%, transparent 100%;
+}
+/* With the script the first screen is held while the page scrolls one more screen, less a little. */
+.hero.is-live { height: calc(var(--h) * 1.85); }
+.hero.is-live .scene { align-self: start; height: var(--h); }
+.hero.is-live .scene picture, .hero.is-live .dusk, .hero.is-live .dusk::before { will-change: transform; }
+.copy { width: min(820px, 100% - 48px); margin-inline: auto; padding-bottom: 48px; padding-top: clamp(104px, calc(30svh - 110px), 260px); text-align: center; }
 h1 { font-size: clamp(2.6rem, 5vw, 4.5rem); line-height: 1.02; letter-spacing: -0.03em; }
 .lede { margin: 22px auto 0; max-width: 29em; font-size: clamp(1.0625rem, 1.45vw, 1.25rem); line-height: 1.5; color: var(--ink-2); }
 .cta { margin-top: 30px; display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
@@ -148,14 +184,19 @@ h1 { font-size: clamp(2.6rem, 5vw, 4.5rem); line-height: 1.02; letter-spacing: -
 .staged { margin-top: 28px; text-align: center; font-size: 13px; color: var(--mute); }
 
 /* With the script the stage is pinned and scrolling plays it, one line at a time. */
-.story.is-live { padding: 0; height: 430vh; }
+/* It is drawn up under the held first screen, and over it, by an amount the script works out. */
+.story.is-live { position: relative; z-index: 1; padding: 0; height: 430vh; }
 .story.is-live .stage { position: sticky; top: 0; height: 100vh; min-height: 560px; grid-template-rows: 1fr auto; gap: 0; align-items: center; overflow: clip; }
 /* The script sets --k so the block fits a short window whole. */
 .story.is-live .actors { margin-top: 5vh; transform: scale(var(--k, 1)); transform-origin: 50% 0; margin-bottom: calc((var(--k, 1) - 1) * var(--tall, 0px)); }
 .story.is-live .rows li { --e: clamp(0, calc(var(--enter, 1) * 2 - var(--i, 0) * 0.5), 1); opacity: var(--e); translate: 0 calc((1 - var(--e)) * 26px); filter: blur(calc((1 - var(--e)) * 7px)); }
 .story.is-live .rows li[data-id="migrate"] { --i: 1; }
 .story.is-live .rows li[data-id="tour"] { --i: 2; }
-.story.is-live .rows, .story.is-live .actors .trail { opacity: clamp(0, calc(var(--enter, 1) * 3), 1); }
+.story.is-live .rows { opacity: calc(clamp(0, calc(var(--enter, 1) * 3), 1) * var(--panel, 1)); }
+/* The trail's dots come in as the first screen's last light closes on the horizon, in the same
+   place, and the hiker steps on once it has gone. */
+.story.is-live .actors .trail::before { opacity: var(--dots, clamp(0, calc(var(--enter, 1) * 3), 1)); }
+.story.is-live .actors .hiker { opacity: var(--walker, clamp(0, calc(var(--enter, 1) * 3), 1)); }
 /* The phone stands beside the block and is as tall as the rows and the question together, so it
    can never reach the caption. It is a reduced picture, not the phone's real size. */
 .story.is-live .phone { position: absolute; z-index: 2; left: calc(100% + 44px); bottom: 0; width: 183px; padding: 7px; border-radius: 34px; opacity: var(--phone, 0); translate: 0 calc((1 - var(--phone, 0)) * 70px); rotate: calc((1 - var(--phone, 0)) * 4deg); }
@@ -233,7 +274,7 @@ h1 { font-size: clamp(2.6rem, 5vw, 4.5rem); line-height: 1.02; letter-spacing: -
      question step back while it does. */
   .story.is-live .actors { margin-top: 2vh; }
   .story.is-live .phone { left: 50%; translate: -50% calc((1 - var(--phone, 0)) * 60px); rotate: 0deg; }
-  .story.is-live .rows { opacity: calc(clamp(0, calc(var(--enter, 1) * 3), 1) * (1 - var(--phone, 0))); }
+  .story.is-live .rows { opacity: calc(clamp(0, calc(var(--enter, 1) * 3), 1) * var(--panel, 1) * (1 - var(--phone, 0))); }
   .story.is-live .ask-card:not([data-off]) { opacity: calc(1 - var(--phone, 0)); }
 }
 @media (max-width: 860px) {

@@ -30,8 +30,8 @@
 <link rel="manifest" href="/site.webmanifest?v=fa84d735">
 <link rel="preload" href="/assets/fonts/BricolageGrotesque.woff2?v=a79fdb52" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/assets/fonts/HankenGrotesk.woff2?v=e9201edd" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/assets/site.css?v=2980db24">
-<script src="/assets/site.js?v=ed5fb484" defer></script>
+<link rel="stylesheet" href="/assets/site.css?v=9d4fefe8">
+<script src="/assets/site.js?v=6b4cfda8" defer></script>
 
 <script type="application/ld+json">
 {
@@ -76,11 +76,21 @@
 </div></header>
 
 <main id="main">
-<section class="hero">
-  <picture class="hero-photo">
-    <source media="(prefers-color-scheme: dark)" sizes="max(100vw, 160vh)" srcset="/assets/img/hero-night-1600.webp?v=a849ea08 1600w, /assets/img/hero-night-2880.webp?v=32bf06a6 2880w">
-    <img src="/assets/img/hero-day-1600.webp?v=d307981c" sizes="max(100vw, 160vh)" srcset="/assets/img/hero-day-1600.webp?v=d307981c 1600w, /assets/img/hero-day-2880.webp?v=81c399d7 2880w" width="2880" height="1800" fetchpriority="high" alt="">
-  </picture>
+<section class="hero" data-hero>
+  <div class="scene">
+    <picture class="sky">
+      <source media="(prefers-color-scheme: dark)" sizes="max(100vw, 160vh)" srcset="/assets/img/hero-sky-night-1600.webp?v=8638c8bd 1600w, /assets/img/hero-sky-night-2880.webp?v=6417aa73 2880w">
+      <img src="/assets/img/hero-sky-day-1600.webp?v=49489d14" sizes="max(100vw, 160vh)" srcset="/assets/img/hero-sky-day-1600.webp?v=49489d14 1600w, /assets/img/hero-sky-day-2880.webp?v=9dd5ab4c 2880w" width="2880" height="1800" fetchpriority="high" alt="">
+    </picture>
+    <picture class="land">
+      <source media="(prefers-color-scheme: dark)" sizes="max(100vw, 160vh)" srcset="/assets/img/hero-land-night-1600.webp?v=a79e9323 1600w, /assets/img/hero-land-night-2880.webp?v=b0998017 2880w">
+      <img src="/assets/img/hero-land-day-1600.webp?v=561d592c" sizes="max(100vw, 160vh)" srcset="/assets/img/hero-land-day-1600.webp?v=561d592c 1600w, /assets/img/hero-land-day-2880.webp?v=6052a70b 2880w" width="2880" height="1800" fetchpriority="high" alt="">
+    </picture>
+    <div class="dusk dusk-low"></div>
+    <div class="dusk dusk-high"></div>
+    <div class="dusk dusk-left"></div>
+    <div class="dusk dusk-right"></div>
+  </div>
   <div class="copy">
     <h1>One inbox for your coding agents.</h1>
     <p class="lede">Trek runs Claude Code, Codex, Cursor and more, side by side on your Mac or PC. When one needs you, it goes to the top.</p>
