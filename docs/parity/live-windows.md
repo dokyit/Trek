@@ -1,6 +1,6 @@
 # Live check on Windows
 
-Written by `cargo run -p trek-parity --bin parity-live` against the capture build of `fe748976`: each feature's `live` steps in `docs/parity/ledger.toml`, run in an isolated Trek, then a screenshot (`live-<id>.png` in its command folder). Run it again after a change; the steps are the same on every platform unless the ledger says otherwise.
+Written by `cargo run -p trek-parity --bin parity-live` against the capture build of `22299774`: each feature's `live` steps in `docs/parity/ledger.toml`, run in an isolated Trek, then a screenshot (`live-<id>.png` in its command folder). Run it again after a change; the steps are the same on every platform unless the ledger says otherwise.
 
 **84 shown working, 0 failed, 7 with no live steps here, 8 not on Windows.**
 
@@ -95,7 +95,7 @@ Written by `cargo run -p trek-parity --bin parity-live` against the capture buil
 | Threads | The thought streaming in after a group of tool calls, in the timeline and the working bar | shown working | `route project:{project}` · `pace 1` · `send mock:long 6s` · `wait 2500` · `count working-bar 1` · `click stop` · `pace 0` |
 | Threads | An opened timeline row stays in view while following the end; the context bar's slivers stay within it; Compact now stays until the summary is done | shown working | `route project:{project}` · `pace 0` · `send Show a short answer` · `wait idle 30000` · `click hub-context` · `wait 800` · `within context-bar-* context-bar` · `key escape` |
 | Tools | New files and renames in the Explorer stay in their folder, with names the platform allows | shown working | `route project:{project}` · `tools explorer` · `wait 700` · `count {project}{/}README.md 1` · `count {project}{/}src 1` |
-| Tools | The iPhone tool: your real iPhone for you and agents | shown working | `phone ready` · `wait 600` · `count phone-apps 1` · `count phone-install 1` · `phone files` · `wait 600` · `count phone-files 1` |
+| Tools | The iPhone tool: your real iPhone for you and agents | shown working | `phone ready` · `wait 600` · `count phone-apps 1` · `count phone-install 1` · `phone files` · `wait 600` · `count phone-files 1` · `phone screen` · `wait 600` · `click phone-tab#2` · `wait 1500` · `count phone-screen 1` · `click phone-screen` · `wait 800` · `phone tapped 1` · `phone disk-image` · `wait 600` · `click phone-tab#2` · `wait 800` · `count phone-screen-choose 1` |
 | Tools | The iOS Simulator tool | n/a on Windows |  |
 | Tools | Terminal, editor previews and interactive artifacts | shown working | `route project:{project}` · `tools terminal` · `wait 1500` · `count terminal 1` |
 | iPhone | The sidebar's Devices: the paired iPhone (connected, or when it was last seen) and other machines' threads | shown working | `pair-phone Live check iPhone` · `wait 1500` · `count phone-stand-in-iphone 1` · `pair-phone leave` · `wait 800` · `count phone-seen-stand-in-iphone 1` |

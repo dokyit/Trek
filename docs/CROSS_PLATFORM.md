@@ -68,7 +68,7 @@ Four things keep it that way, the first three run on both platforms' CI for ever
    window, its icon still there. Windows Firewall's own rules are read too, by Trek itself: Settings
    › iPhone names the network where they keep phones out (on the PC this was written on, Tailscale).
 
-   On Windows (`fe748976`, a fresh profile, rust-analyzer on PATH): 84 of the
+   On Windows (`22299774`, a fresh profile, rust-analyzer on PATH): 84 of the
    99 features shown working, 0 failing, 8 that aren't on Windows, and 7 that an isolated run
    can't show, each saying what checks it instead: other apps' accessibility trees, the real Codex
    and OpenCode CLIs (an isolated run starts no real agent, and never acts as the user), the
