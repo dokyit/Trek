@@ -50,22 +50,13 @@ async fn ask_small_model(system: &str, prompt: &str) -> Result<String> {
     }
     let bin = detect::which("claude").context("Claude Code isn't installed")?;
     let mut command = trek_core::procs::async_command(bin);
-    // No tools: a small model handed "map the codebase" would otherwise start mapping it.
     command
-        .args([
-            "-p",
-            "--model",
-            "claude-haiku-4-5",
-            "--no-session-persistence",
-            "--strict-mcp-config",
-            "--tools",
-            "",
-            "--system-prompt",
-            system,
-        ])
+        .args(small_model_args(system))
         .current_dir(std::env::temp_dir())
         .env("PATH", detect::login_path())
-        .env("CLAUDE_CODE_ENTRYPOINT", crate::claude::ENTRYPOINT);
+        .env("CLAUDE_CODE_ENTRYPOINT", crate::claude::ENTRYPOINT)
+        // The variable too: it outranks a thinking budget the user's environment sets.
+        .env("MAX_THINKING_TOKENS", "0");
     let out = crate::output_group(
         &mut command,
         Some(prompt.as_bytes().to_vec()),
@@ -76,6 +67,27 @@ async fn ask_small_model(system: &str, prompt: &str) -> Result<String> {
         bail!("claude exited with {}", out.status);
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The CLI's arguments for one short answer from the small model. No tools: a small model handed
+/// "map the codebase" would otherwise start mapping it. No thinking: left to itself, Claude Code
+/// sends the call with a thinking budget of 31,999 tokens, for a title.
+fn small_model_args(system: &str) -> Vec<String> {
+    [
+        "-p",
+        "--model",
+        "claude-haiku-4-5",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--settings",
+        r#"{"alwaysThinkingEnabled":false}"#,
+        "--system-prompt",
+        system,
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// `text` without one pair of quotes (or backticks) wrapped around all of it. A quote at an end
@@ -135,7 +147,25 @@ pub fn clean_title(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_commit_message, clean_title};
+    use super::{clean_commit_message, clean_title, small_model_args};
+
+    /// Claude Code sent a title's call with `thinking: {budget_tokens: 31999}` until thinking was
+    /// turned off in its settings (checked against a local stand-in for the API: the request then
+    /// says `thinking: {type: disabled}`). `--effort low` alone left the budget in.
+    #[test]
+    fn the_small_model_never_thinks() {
+        let args = small_model_args("You name conversations.");
+        let at = args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("--settings");
+        let settings: serde_json::Value = serde_json::from_str(&args[at + 1]).expect("JSON");
+        assert_eq!(settings["alwaysThinkingEnabled"], false);
+        let pair = |flag: &str, value: &str| args.windows(2).any(|w| w[0] == flag && w[1] == value);
+        assert!(pair("--tools", ""));
+        assert!(pair("--system-prompt", "You name conversations."));
+        assert!(pair("--model", "claude-haiku-4-5"));
+    }
 
     #[test]
     fn cleans_titles() {
