@@ -10,15 +10,17 @@ use std::time::Duration;
 use trek_app::workspace::Route;
 
 /// `trek.exe` starts on a Windows without the Visual C++ redistributable, as it carries the runtime
-/// (`script/static_vcruntime.rs`). A program asking for the DLL names it in its imports.
+/// (`script/static_vcruntime.rs`): the C runtime, and the C++ one that whisper.cpp (dictation)
+/// would otherwise ask for (`vendor/whisper-rs-sys/build.rs`), with no OpenMP. A program asking
+/// for one of the redistributable's DLLs names it in its imports.
 #[cfg(windows)]
 #[test]
 fn trek_carries_the_visual_c_runtime() {
     let exe = std::fs::read(env!("CARGO_BIN_EXE_trek")).unwrap();
-    let asks = exe
-        .windows(12)
-        .any(|w| w.eq_ignore_ascii_case(b"vcruntime140"));
-    assert!(!asks, "trek.exe needs vcruntime140.dll");
+    for dll in [&b"vcruntime140"[..], b"msvcp140", b"vcomp140"] {
+        let asks = exe.windows(dll.len()).any(|w| w.eq_ignore_ascii_case(dll));
+        assert!(!asks, "trek.exe needs {}.dll", String::from_utf8_lossy(dll));
+    }
 }
 
 fn editing(path: &PathBuf) -> impl Fn(&Route) -> bool + '_ {
@@ -74,18 +76,28 @@ fn a_link_that_climbs_out_of_a_project_asks_too() {
         assert!(cx.has_pending_prompt());
         cx.simulate_prompt_answer("Cancel");
 
-        // A symlink inside the project that leads out of it. Making one needs a privilege
-        // Windows test runners don't have, so this step stays Unix-only.
+        // A link inside the project that leads out of it: a symlink on the Mac; on Windows a
+        // junction, which needs no privilege (a symlink does), as a user would make with
+        // `mklink /J`.
+        let link = trek.project.join("out");
         #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        #[cfg(windows)]
         {
-            let link = trek.project.join("out");
-            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
-            let url = format!("trek://edit?path={}", link.join("b.rs").display());
-            cx.update(|cx| trek_app::deep_link::open(&url, cx));
-            trek.render(cx);
-            assert!(cx.has_pending_prompt());
-            cx.simulate_prompt_answer("Cancel");
+            let windows = |p: &std::path::Path| p.to_string_lossy().replace('/', "\\");
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(windows(&link))
+                .arg(windows(&elsewhere))
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "mklink /J: {made:?}");
         }
+        let url = format!("trek://edit?path={}", link.join("b.rs").display());
+        cx.update(|cx| trek_app::deep_link::open(&url, cx));
+        trek.render(cx);
+        assert!(cx.has_pending_prompt(), "a link out of the project asks");
+        cx.simulate_prompt_answer("Cancel");
 
         // A relative path is never followed.
         cx.update(|cx| trek_app::deep_link::open("trek://edit?path=b.rs", cx));

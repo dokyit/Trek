@@ -296,6 +296,47 @@ impl SettingsView {
                 out.push(Self::note(&note, cx));
             }
         }
+        // Windows Firewall keeping phones out on a network this PC is on, which nothing else says
+        // (`remote::firewall`): read when the page opens, and again on Check again. Only for a
+        // server listening on a network (a loopback one is asked nothing).
+        let on_a_network = addresses.lan.is_some() || addresses.tailscale.is_some();
+        if let Some(note) = self
+            .firewall
+            .value
+            .as_ref()
+            .filter(|_| on_a_network)
+            .and_then(|read| read.as_ref())
+            .and_then(|firewall| firewall.note())
+        {
+            out.push(div().h(px(8.)).into_any_element());
+            out.push(ui::group(
+                vec![Self::row(
+                    "Windows Firewall",
+                    note,
+                    h_flex()
+                        .gap(px(8.))
+                        .child(
+                            Button::new("mobile-firewall-open")
+                                .small()
+                                .outline()
+                                .label("Open firewall settings")
+                                .on_click(|_, _, _| crate::remote::firewall::open_settings()),
+                        )
+                        .child(
+                            Button::new("mobile-firewall-check")
+                                .small()
+                                .ghost()
+                                .label("Check again")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.firewall.invalidate();
+                                    cx.notify();
+                                })),
+                        ),
+                    cx,
+                )],
+                cx,
+            ));
+        }
 
         // Pairing.
         out.push(Self::heading("Pair an iPhone", cx));

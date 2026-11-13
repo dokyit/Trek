@@ -4804,6 +4804,8 @@ fn put_files_writes_inside_the_project_and_never_through_a_symlink() {
                 0o600
             );
         }
+        // The user's alone on both platforms (Windows has no mode to carry over).
+        assert!(trek_private::is_private(&root.join(".env")).unwrap());
         // Again: replaced.
         let (project_id, files) = (id.clone(), vec![file(".env", b"KEY=2\n", 0o600)]);
         ask_later(&trek, cx, |reply| tr::HostRequest::PutFiles {
@@ -4839,13 +4841,32 @@ fn put_files_writes_inside_the_project_and_never_through_a_symlink() {
         .unwrap_err();
         assert_eq!(err.code, tr::ErrorCode::NotFound);
 
+        // A link to a file and one to a folder, inside the project, leading out of it. On Windows
+        // the folder's is a junction, which needs no privilege; a file's symlink needs Developer
+        // Mode or an elevated process (CI's is one), and that case is left out without either.
+        let outside = common::new_project("outside");
+        std::fs::write(outside.join("secret"), "untouched\n").unwrap();
         #[cfg(unix)]
-        {
-            let outside = common::new_project("outside");
-            std::fs::write(outside.join("secret"), "untouched\n").unwrap();
+        let file_linked = {
             std::os::unix::fs::symlink(outside.join("secret"), root.join("linked")).unwrap();
             std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
-            for path in ["linked", "out/new", "out/secret"] {
+            true
+        };
+        #[cfg(windows)]
+        let file_linked = {
+            let windows = |p: &std::path::Path| p.to_string_lossy().replace('/', "\\");
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(windows(&root.join("out")))
+                .arg(windows(&outside))
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "mklink /J: {made:?}");
+            std::os::windows::fs::symlink_file(outside.join("secret"), root.join("linked")).is_ok()
+        };
+        {
+            let paths = ["linked", "out/new", "out/secret"];
+            for path in paths.into_iter().filter(|p| file_linked || *p != "linked") {
                 // With a good file first: nothing is written when one can't be.
                 let (project_id, files) = (
                     id.clone(),
@@ -4871,10 +4892,11 @@ fn put_files_writes_inside_the_project_and_never_through_a_symlink() {
             );
             assert!(!outside.join("new").exists());
             assert!(
-                std::fs::symlink_metadata(root.join("linked"))
-                    .unwrap()
-                    .file_type()
-                    .is_symlink(),
+                !file_linked
+                    || std::fs::symlink_metadata(root.join("linked"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink(),
                 "the link itself stays"
             );
         }

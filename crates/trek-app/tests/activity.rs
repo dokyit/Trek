@@ -305,6 +305,9 @@ fn titles_animate_in_only_when_they_change() {
         trek.update(cx, |ws, _| {
             ws.retitled.get_mut(&id).expect("retitled").1 = at_its_start()
         });
+        // Drawn again with it: nothing above asks for a frame, and the last one may be from after
+        // the reveal had run its course (as on a loaded runner, where that frame came late).
+        trek.render(cx);
         assert_eq!(
             trek.read(cx, |ws, _| ws
                 .title_reveal(&id)
@@ -336,6 +339,8 @@ fn titles_animate_in_only_when_they_change() {
         trek.update(cx, |ws, _| {
             ws.retitled.get_mut(&id).expect("retitled").1 = at_its_start()
         });
+        // Drawn again with it, as above: its last frame may be from after the reveal ended.
+        trek.render_in(cx, own);
         assert!(trek.visible_in(cx, own, "window-title"));
         assert_eq!(
             trek.read(cx, |ws, _| ws

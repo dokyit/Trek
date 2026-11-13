@@ -355,8 +355,91 @@ mod ffi {
     }
 }
 
+/// What `dns-sd -L <name> _trek._tcp local.` (a Mac's look-up of one record) printed so far: the
+/// record's port and its TXT entries once both have come. It prints where the record can be
+/// reached (`… can be reached at <host>:<port> (interface 1)`), then the TXT entries on the next
+/// line, space-separated, with a backslash before a space or backslash inside one (`name=Trek\
+/// live\ check`, as CI's Mac printed it) and `\DDD` for a byte it won't print. Plain text, so both
+/// CIs test it; the capture build's `bonjour found` reads a Mac's answer with it.
+#[cfg(any(test, feature = "shots"))]
+pub fn read_lookup(lines: &[String]) -> Option<(u16, Vec<String>)> {
+    let reached = lines
+        .iter()
+        .position(|line| line.contains(" can be reached at "))?;
+    let port = lines[reached]
+        .split_once(" can be reached at ")
+        .and_then(|(_, at)| at.split(" (").next())
+        .and_then(|at| at.rsplit_once(':'))
+        .and_then(|(_, port)| port.trim().parse().ok())?;
+    let line = lines.get(reached + 1)?.as_bytes();
+    let (mut entries, mut entry) = (Vec::new(), Vec::new());
+    let mut at = 0;
+    while at < line.len() {
+        match line[at] {
+            b'\\' => {
+                let digits = line
+                    .get(at + 1..at + 4)
+                    .filter(|d| d.iter().all(u8::is_ascii_digit));
+                match digits.and_then(|d| std::str::from_utf8(d).ok()?.parse::<u8>().ok()) {
+                    Some(byte) => {
+                        entry.push(byte);
+                        at += 4;
+                    }
+                    None => {
+                        entry.extend(line.get(at + 1));
+                        at += 2;
+                    }
+                }
+            }
+            b' ' => {
+                if !entry.is_empty() {
+                    entries.push(String::from_utf8_lossy(&std::mem::take(&mut entry)).into_owned());
+                }
+                at += 1;
+            }
+            byte => {
+                entry.push(byte);
+                at += 1;
+            }
+        }
+    }
+    if !entry.is_empty() {
+        entries.push(String::from_utf8_lossy(&entry).into_owned());
+    }
+    Some((port, entries))
+}
+
 #[cfg(test)]
 mod tests {
+    /// A Mac's `dns-sd -L` as it prints a record: the header, then where it can be reached, then
+    /// its TXT entries; read once the entries have come.
+    #[test]
+    fn a_macs_lookup_reads_as_the_port_and_the_entries() {
+        let lines: Vec<String> = [
+            "Lookup Trek live check._trek._tcp.local",
+            "DATE: ---Thu 12 Nov 2026---",
+            "14:20:01.123  ...STARTING...",
+            "14:20:01.456  Trek\\032live\\032check._trek._tcp.local. can be reached at runner.local.:7431 (interface 1) Flags: 1",
+            // As CI's Mac printed it.
+            " id=032ed02c3793cd0500006f16 name=Trek\\ live\\ check",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(super::read_lookup(&lines[..4]), None, "no entries yet");
+        let (port, entries) = super::read_lookup(&lines).expect("the record");
+        assert_eq!(port, 7431);
+        assert_eq!(
+            entries,
+            ["id=032ed02c3793cd0500006f16", "name=Trek live check"]
+        );
+        assert_eq!(super::read_lookup(&lines[..3]), None);
+        // A byte written as `\DDD`, and a backslash of its own.
+        let mut other = lines[..4].to_vec();
+        other.push(r" name=Caf\195\169\032one path=C:\\Trek".into());
+        let (_, entries) = super::read_lookup(&other).expect("the record");
+        assert_eq!(entries, ["name=Café one", r"path=C:\Trek"]);
+    }
+
     #[test]
     fn the_txt_record_carries_the_id_and_the_name_length_led() {
         assert_eq!(

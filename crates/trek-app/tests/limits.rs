@@ -747,11 +747,13 @@ fn a_resume_that_meets_the_limit_again_keeps_its_messages_and_waits_longer() {
             ["first follow-up", "second follow-up"]
         );
         assert_eq!((p.resume, p.tries), (true, 1));
-        // The mock's reset is long gone by this clock: tried again in five minutes, then ten.
+        // The mock's reset is long gone by this clock: tried again in five minutes, then ten, from
+        // when it paused (not from now: a slow runner can take ten seconds to get here).
         let now = trek.read(cx, |ws, _| ws.now());
         assert!(
             p.resets_at
-                .is_some_and(|at| (at - now - trek_core::limit::late_retry(1)).abs() < 10_000),
+                .is_some_and(|at| (at - p.since - trek_core::limit::late_retry(1)).abs() < 10_000)
+                && p.since <= now,
             "{p:?} at {now}"
         );
         let alerts = |seen: &Rc<RefCell<Vec<String>>>, prefix: &str| {

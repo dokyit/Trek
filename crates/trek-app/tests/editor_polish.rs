@@ -92,15 +92,6 @@ fn the_shortcuts_and_the_palette_close_a_file_shown_on_its_own() {
         );
         assert_eq!(open_tabs(&trek, cx), 0);
 
-        // Ctrl+F4 as well, on Windows.
-        if cfg!(windows) {
-            trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
-            loaded(&trek, cx).await;
-            trek.press(cx, "ctrl-f4");
-            trek.render(cx);
-            assert!(route(&trek, cx) == Route::Thread(id.clone()), "Ctrl+F4");
-        }
-
         // And "Close file" in the palette.
         trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
         loaded(&trek, cx).await;
@@ -109,6 +100,29 @@ fn the_shortcuts_and_the_palette_close_a_file_shown_on_its_own() {
         trek.press(cx, "enter");
         trek.render(cx);
         assert!(route(&trek, cx) == Route::Thread(id), "the palette");
+        assert_eq!(open_tabs(&trek, cx), 0);
+    });
+}
+
+/// Ctrl+F4 closes a file too, as Windows apps do: with Windows' keys bound, on both platforms'
+/// runners.
+#[test]
+fn ctrl_f4_closes_a_file_shown_on_its_own_on_windows() {
+    run(async |cx| {
+        let trek = trek_app::keys::with_mac(false, || open(cx));
+        let id = trek.send(cx, "hello");
+        let file = trek.project.join("a.ini");
+        std::fs::write(
+            &file, "[a]
+",
+        )
+        .unwrap();
+        trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
+        loaded(&trek, cx).await;
+        assert!(matches!(route(&trek, cx), Route::Editor { .. }));
+        trek.press(cx, "ctrl-f4");
+        trek.render(cx);
+        assert!(route(&trek, cx) == Route::Thread(id), "Ctrl+F4");
         assert_eq!(open_tabs(&trek, cx), 0);
     });
 }

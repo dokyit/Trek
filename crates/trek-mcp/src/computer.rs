@@ -22,12 +22,13 @@ macOS may be showing a permission prompt for trek-mcp now — allow it in System
 (no restart needed). If nothing asked, grant it to the app that launched the agent (Trek, or your terminal) in that same list.";
 
 const INSTRUCTIONS: &str = if cfg!(windows) {
-    "Windows computer use for the primary display. Call `screenshot` first: it returns an image plus \
-the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel coordinates in the most recent \
-full-screen screenshot (origin top-left); trek-mcp converts them to screen pixels. Take a new screenshot after acting \
-to verify the result. Prefer `key` shortcuts (ctrl+c, alt+tab, win+r) and `open_app` over hunting for UI when possible. \
-Trek's own windows are off limits: clicks, drags and scrolls in them are refused, and so are keys while Trek is in front \
-(bring the app you mean forward first)."
+    "Windows computer use for the primary display. Read the window in front with `elements` first: an outline \
+whose controls carry refs (e12) that `press`, `click` and `type_text` act on (a ref lasts while its element stays; read \
+again after the window changes); `wait` waits for text or an element. Take a `screenshot` when looks matter: it returns \
+an image plus the coordinate scale. All x/y arguments to click, move_mouse, drag and scroll are pixel coordinates in the \
+most recent full-screen screenshot (origin top-left), as frames are; trek-mcp converts them to screen pixels. Prefer \
+`key` shortcuts (ctrl+c, alt+tab, win+r) and `open_app` over hunting for UI. Trek's own windows are off limits: clicks, \
+drags and scrolls in them are refused, and so are keys while Trek is in front (bring the app you mean forward first)."
 } else {
     "macOS computer use for the main display. Read the window in front with `elements` first: an outline whose \
 controls carry refs (e12) that `press`, `click` and `type_text` act on (a ref lasts while its element stays; read \
@@ -59,17 +60,21 @@ const SCREEN_UNITS: &str = if cfg!(windows) { "pixels" } else { "points" };
 const KEY_DESCRIPTION: &str = if cfg!(windows) {
     "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"ctrl+shift+t\", \"ctrl+c\", \
 \"alt+tab\", \"win+r\", \"f5\". Modifiers: ctrl, shift, alt, win (cmd is taken as ctrl). Keys: letters, digits, punctuation, \
-return, tab, space, delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12."
+return, tab, space, delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, insert, \
+f1-f24, numpad0-numpad9 (and numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal), printscreen, pause, \
+scrolllock, numlock, apps (the menu key), win (the Windows key alone)."
 } else {
     "Press a key or shortcut, e.g. \"return\", \"escape\", \"tab\", \"up\", \"cmd+shift+t\", \"cmd+c\", \
 \"alt+left\", \"f5\". Modifiers: cmd, shift, alt/option, ctrl, fn. Keys: letters, digits, punctuation, return, tab, space, \
-delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12."
+delete (backspace), forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f20, numpad0-numpad9 (and \
+numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadequals, numpadenter)."
 };
 
 const BACKGROUND_KEY_DESCRIPTION: &str = "Press a key or shortcut in the window you work in, in the background (the user's \
 front app keeps the keyboard), e.g. \"return\", \"escape\", \"tab\", \"up\", \"cmd+shift+t\", \"cmd+c\", \"alt+left\", \"f5\". \
 Modifiers: cmd, shift, alt/option, ctrl, fn. Keys: letters, digits, punctuation, return, tab, space, delete (backspace), \
-forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f12.";
+forwarddelete, escape, up/down/left/right, home, end, pageup, pagedown, f1-f20, numpad0-numpad9 (and numpadadd, \
+numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadequals, numpadenter).";
 
 const OPEN_APP_DESCRIPTION: &str = if cfg!(windows) {
     "Launch a Windows app by name, e.g. \"Notepad\", \"Microsoft Edge\", \"Visual Studio Code\" (as named in the \
@@ -2309,11 +2314,31 @@ impl Computer {
             self.keep_out_of_users_app(&w)?;
         }
         let what = now.describe();
-        let Some(frame) = now.frame else {
+        let Some(mut frame) = now.frame else {
             return Err(format!(
                 "{what} doesn't say where it is, so there's nowhere to click. Nothing was done: use press with its ref."
             ));
         };
+        // Scrolled out of view: where the element can scroll itself into view (Windows' ScrollItem
+        // pattern), it's asked to, and found again where it is then, the same object.
+        let mut revealed = "";
+        if Self::centre_in(&w, Some(frame)).is_none()
+            && let Some(identity) = now.identity
+            && self.desktop.reveal(&w, identity) == Ok(true)
+        {
+            std::thread::sleep(FOCUS_SETTLE);
+            let again = self
+                .desktop
+                .element_at(&w, &now.place)?
+                .filter(|a| a.identity == now.identity && a.role == now.role && a.name == now.name);
+            let Some(shown) = again.and_then(|a| a.frame) else {
+                return Err(format!(
+                    "{what} was out of view, so it was asked to scroll itself into view; it isn't where it was among the window's elements now, so nothing was clicked. Read the elements again and click it by the ref it has then."
+                ));
+            };
+            frame = shown;
+            revealed = " (scrolled into view first)";
+        }
         let Some((cx, cy)) = Self::centre_in(&w, Some(frame)) else {
             return Err(format!(
                 "{what} is outside what the window shows (scrolled out of view), so there's nowhere to click. Nothing was done: scroll it into view and read the elements again, or use press with its ref."
@@ -2335,7 +2360,7 @@ impl Computer {
                     None,
                 ));
                 Ok(vec![text(format!(
-                    "{did} {what} at its centre ({}, {}) in {}'s window, in the background.{raised}{}",
+                    "{did} {what} at its centre ({}, {}) in {}'s window, in the background{revealed}.{raised}{}",
                     fmt_num(px),
                     fmt_num(py),
                     w.owner,
@@ -2343,7 +2368,7 @@ impl Computer {
                 ))])
             }
             Mode::Front => Ok(vec![text(format!(
-                "{did} {what} at its centre ({}, {}).",
+                "{did} {what} at its centre ({}, {}){revealed}.",
                 fmt_num(px),
                 fmt_num(py)
             ))]),
@@ -2382,19 +2407,41 @@ impl Computer {
                 .is_some_and(|n| n.focused);
             how = " (it took the focus from a click in it, not when asked)";
         }
+        // A field that won't take the focus may still take the text as its own value, through
+        // accessibility (Windows' Value pattern): after what it holds, with no key sent. Never a
+        // secure field's, nor text with a Return or a Tab in it, which typing would press.
+        let mut added = false;
         if !focused {
-            return Err(format!(
-                "{what} didn't take the keyboard focus (asked through accessibility, then by a click in it), so nothing was typed: the text could have gone somewhere else. Read the elements to see what's [focused]; to type where the focus is, call type_text without ref."
-            ));
-        }
-        match self.mode {
-            Mode::Background => {
-                raised.push_str(&self.post_watched(&w, &Input::Type(s.to_string()))?);
-                self.tell(activity("type", typing(s), &w, None, None));
+            let tried = match now.identity {
+                Some(identity) if !now.secure && !s.chars().any(char::is_control) => {
+                    self.desktop.add_text(&w, identity, s)
+                }
+                _ => Err(desktop::NO_ELEMENTS.into()),
+            };
+            if let Err(e) = tried {
+                let either = if e == desktop::NO_ELEMENTS {
+                    String::new()
+                } else {
+                    format!(" Nor could the text be added to its value through accessibility: {e}")
+                };
+                return Err(format!(
+                    "{what} didn't take the keyboard focus (asked through accessibility, then by a click in it), so nothing was typed: the text could have gone somewhere else. Read the elements to see what's [focused]; to type where the focus is, call type_text without ref.{either}"
+                ));
             }
-            Mode::Front => {
-                self.desktop.type_text(s)?;
-                std::thread::sleep(AFTER_INPUT);
+            added = true;
+        }
+        if added {
+            how = " through accessibility, after what it held (it didn't take the keyboard focus, so no key was sent)";
+        } else {
+            match self.mode {
+                Mode::Background => {
+                    raised.push_str(&self.post_watched(&w, &Input::Type(s.to_string()))?);
+                    self.tell(activity("type", typing(s), &w, None, None));
+                }
+                Mode::Front => {
+                    self.desktop.type_text(s)?;
+                    std::thread::sleep(AFTER_INPUT);
+                }
             }
         }
         let after = self.desktop.element_at(&w, &now.place).ok().flatten();
@@ -2411,8 +2458,10 @@ impl Computer {
             ),
         };
         Ok(vec![text(format!(
-            "Typed {} characters into {what}{how}{reads}{raised}{}",
+            "{} {} characters {} {what}{how}{reads}{raised}{}",
+            if added { "Added" } else { "Typed" },
             s.chars().count(),
+            if added { "to" } else { "into" },
             if self.mode == Mode::Background {
                 self.elsewhere()
             } else {
@@ -5478,14 +5527,12 @@ mod tests {
                 .get("window_id")
                 .is_none()
         );
-        // Both modes' instructions point at elements before screenshots.
+        // Both modes' instructions point at elements before screenshots, on both platforms.
         for said in [INSTRUCTIONS, BACKGROUND_INSTRUCTIONS] {
-            if cfg!(target_os = "macos") {
-                assert!(
-                    said.contains("elements") && said.contains("refs (e12)"),
-                    "{said}"
-                );
-            }
+            assert!(
+                said.contains("elements") && said.contains("refs (e12)"),
+                "{said}"
+            );
         }
     }
 
@@ -5988,5 +6035,317 @@ mod tests {
             c.call("click", &json!({"ref": "e3"})),
             Err("Another window covers button \"Save\" now, so the click would land there. Nothing was done.".into())
         );
+    }
+
+    /// Safari in front at (400, 100), reading as the form.
+    fn the_form_in_front() -> Recording {
+        let mut fake = behind_the_users().with_elements(form());
+        if let Ok(ws) = &mut fake.windows {
+            ws.remove(0);
+        }
+        fake
+    }
+
+    #[test]
+    fn a_field_that_wont_take_the_focus_is_given_the_text_as_its_value_where_it_can_be() {
+        // Its fields take the focus neither when asked nor when clicked; the platform can add to
+        // a value through accessibility (as Windows' Value pattern does).
+        let mut fake = the_form_in_front();
+        fake.focuses = false;
+        fake.adds_text = true;
+        let mut c = on(&fake);
+        reply(c.call("elements", &json!({})));
+        assert_eq!(
+            reply(c.call("type_text", &json!({"ref": "e1", "text": " Lovelace"}))),
+            "Added 9 characters to text field \"Name\" through accessibility, after what it held (it didn't take the keyboard focus, so no key was sent); it now reads \"Ada Lovelace\"."
+        );
+        // Asked for the focus, clicked in as a person would, then given the text: nothing typed.
+        assert_eq!(
+            acted(&fake),
+            vec![
+                Event::Focus {
+                    window: 7,
+                    identity: 1
+                },
+                Event::Click {
+                    x: 520.0,
+                    y: 151.0,
+                    button: Button::Left,
+                    count: 1
+                },
+            ]
+        );
+        let added = |fake: &Recording| {
+            fake.events()
+                .into_iter()
+                .filter(|e| matches!(e, Event::AddText { .. }))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            added(&fake),
+            vec![Event::AddText {
+                window: 7,
+                identity: 1,
+                text: " Lovelace".into()
+            }]
+        );
+        // Never a secure field's, nor text with a Return or a Tab in it (typing would press
+        // them): refused as before, with nothing typed or added.
+        for (r, text) in [("e5", "hunter2"), ("e1", "Ada\n"), ("e1", "a\tb")] {
+            let err = c
+                .call("type_text", &json!({"ref": r, "text": text}))
+                .unwrap_err();
+            assert!(
+                err.starts_with("text field") && err.contains("didn't take the keyboard focus"),
+                "{err}"
+            );
+        }
+        assert_eq!(added(&fake).len(), 1);
+        // A field that does take the focus is typed into, as ever.
+        let mut typed = the_form_in_front();
+        typed.adds_text = true;
+        let mut c = on(&typed);
+        reply(c.call("elements", &json!({})));
+        assert!(
+            reply(c.call("type_text", &json!({"ref": "e1", "text": "x"})))
+                .starts_with("Typed 1 characters into")
+        );
+        assert!(added(&typed).is_empty());
+    }
+
+    #[test]
+    fn an_element_scrolled_out_of_view_is_scrolled_into_view_for_its_click_where_it_can_be() {
+        // "Far down" is below the window (y 900 of 600); asked, it scrolls itself up to y 500.
+        let mut fake = the_form_in_front();
+        fake.reveals = Some(Frame {
+            x: 20.0,
+            y: 500.0,
+            w: 80.0,
+            h: 24.0,
+        });
+        let mut c = on(&fake);
+        reply(c.call("elements", &json!({})));
+        assert_eq!(
+            reply(c.call("click", &json!({"ref": "e6"}))),
+            "Clicked button \"Far down\" at its centre (460, 612) (scrolled into view first)."
+        );
+        assert_eq!(
+            acted(&fake),
+            vec![Event::Click {
+                x: 460.0,
+                y: 612.0,
+                button: Button::Left,
+                count: 1
+            }]
+        );
+        assert!(fake.events().contains(&Event::Reveal {
+            window: 7,
+            identity: 6
+        }));
+        // One in view isn't asked to move.
+        reply(c.call("click", &json!({"ref": "e3"})));
+        let reveals = fake
+            .events()
+            .into_iter()
+            .filter(|e| matches!(e, Event::Reveal { .. }))
+            .count();
+        assert_eq!(reveals, 1);
+    }
+
+    /// The real desktop's elements, of a window of the test's own taken to be the one in front.
+    /// Input is recorded, never sent, and nothing is given the focus (that could bring the
+    /// window in front of the user's): nothing reaches the user's windows.
+    #[cfg(windows)]
+    struct OwnWindow {
+        real: desktop::Native,
+        window: WindowInfo,
+        sent: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    #[cfg(windows)]
+    impl OwnWindow {
+        fn sent(&self, what: String) -> Result<(), String> {
+            self.sent.borrow_mut().push(what);
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    impl Desktop for OwnWindow {
+        fn may_post_input(&self) -> bool {
+            true
+        }
+        fn display(&self) -> Display {
+            self.real.display()
+        }
+        fn windows(&self) -> Result<Vec<WindowInfo>, String> {
+            Ok(vec![self.window.clone()])
+        }
+        fn key_window(&self) -> Result<Option<WindowInfo>, String> {
+            Ok(Some(self.window.clone()))
+        }
+        fn capture(
+            &self,
+            _region: Option<desktop::Rect>,
+            _max_side: u32,
+        ) -> Result<desktop::Capture, String> {
+            Err("No pictures of the user's screen in tests.".into())
+        }
+        fn move_to(&self, x: f64, y: f64) -> Result<(), String> {
+            self.sent(format!("move {x},{y}"))
+        }
+        fn click(&self, x: f64, y: f64, _button: Button, count: u32) -> Result<(), String> {
+            self.sent(format!("click {x},{y} x{count}"))
+        }
+        fn drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
+            self.sent(format!("drag {from:?} {to:?}"))
+        }
+        fn scroll(&self, x: f64, y: f64, dx: i32, dy: i32) -> Result<(), String> {
+            self.sent(format!("scroll {x},{y} {dx},{dy}"))
+        }
+        fn type_text(&self, text: &str) -> Result<(), String> {
+            self.sent(format!("type {text}"))
+        }
+        fn key(&self, combo: &keys::Combo) -> Result<(), String> {
+            self.sent(format!("key {combo:?}"))
+        }
+        fn open_app(&self, name: &str) -> Result<(), String> {
+            self.sent(format!("open {name}"))
+        }
+        fn has_elements(&self) -> bool {
+            self.real.has_elements()
+        }
+        fn elements(&self, w: &WindowInfo, r: &Reading) -> Result<desktop::Elements, String> {
+            self.real.elements(w, r)
+        }
+        fn element_at(&self, w: &WindowInfo, place: &[usize]) -> Result<Option<Node>, String> {
+            self.real.element_at(w, place)
+        }
+        fn perform(&self, w: &WindowInfo, id: u64, action: Action) -> Result<Performed, String> {
+            self.real.perform(w, id, action)
+        }
+        fn focus(&self, _w: &WindowInfo, _identity: u64) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn add_text(&self, w: &WindowInfo, identity: u64, text: &str) -> Result<(), String> {
+            self.real.add_text(w, identity, text)
+        }
+        fn reveal(&self, w: &WindowInfo, identity: u64) -> Result<bool, String> {
+            self.real.reveal(w, identity)
+        }
+    }
+
+    /// The ref on the outline's line that holds `what`.
+    #[cfg(windows)]
+    fn ref_in(outline: &str, what: &str) -> String {
+        outline
+            .lines()
+            .find(|l| l.contains(what))
+            .and_then(|l| l.split("[ref=").nth(1))
+            .and_then(|r| r.split(']').next())
+            .unwrap_or_else(|| panic!("no ref for {what} in {outline}"))
+            .to_string()
+    }
+
+    /// On Windows the tools work a real window by its elements, through UI Automation, as they
+    /// work a Mac's: a window of the test's own (never the user's), read, pressed, typed into
+    /// and waited on, with nothing sent to the real pointer or keyboard.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_a_real_window_is_worked_by_its_elements() {
+        let real = desktop::Native::default();
+        let window = desktop::TestWindow::open("Trek computer test");
+        let sent = std::rc::Rc::default();
+        let mut c = Computer {
+            desktop: Box::new(OwnWindow {
+                real,
+                window: window.info.clone(),
+                sent: std::rc::Rc::clone(&sent),
+            }),
+            last: None,
+            ..on(&Recording::new())
+        };
+        // The tools are the Mac's in front: elements and press, with click, type_text and wait
+        // taking a ref or a condition. trek-mcp's own desktop here offers the same.
+        let names = |c: &Computer| c.tools().iter().map(|t| t.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(&c),
+            [
+                "screenshot",
+                "click",
+                "move_mouse",
+                "drag",
+                "scroll",
+                "type_text",
+                "key",
+                "open_app",
+                "list_windows",
+                "wait",
+                "elements",
+                "press"
+            ]
+        );
+        assert_eq!(names(&Computer::default()), names(&c));
+        let read = reply(c.call("elements", &json!({})));
+        eprintln!("{read}");
+        assert!(
+            read.starts_with(&format!(
+                "Elements of {}'s window “Trek computer test”, the one in front.",
+                window.info.owner
+            )),
+            "{read}"
+        );
+        let name = ref_in(&read, "text field \"Name:\"");
+        let remember = ref_in(&read, "checkbox \"Remember me\"");
+        let hello = ref_in(&read, "button \"Say hello\"");
+        assert_eq!(
+            reply(c.call("press", &json!({"ref": remember}))),
+            "Pressed checkbox \"Remember me\" by its own accessibility action: no pointer or key was sent. It's now checked."
+        );
+        assert_eq!(
+            reply(c.call("type_text", &json!({"ref": name, "text": " Lovelace"}))),
+            "Added 9 characters to text field \"Name:\" through accessibility, after what it held (it didn't take the keyboard focus, so no key was sent); it now reads \"Ada Lovelace\"."
+        );
+        assert_eq!(
+            reply(c.call("press", &json!({"ref": hello}))),
+            "Pressed button \"Say hello\" by its own accessibility action: no pointer or key was sent."
+        );
+        let said = reply(c.call(
+            "wait",
+            &json!({"text": "Hello, Ada Lovelace!", "timeout_ms": 5000}),
+        ));
+        eprintln!("{said}");
+        assert!(
+            said.starts_with("Found the text \"Hello, Ada Lovelace!\" after"),
+            "{said}"
+        );
+        assert!(
+            said.contains("- text \"Hello, Ada Lovelace!\" [frame="),
+            "{said}"
+        );
+        // What was read at first keeps its refs.
+        assert!(
+            said.contains(&format!("- button \"Say hello\" [ref={hello}]")),
+            "{said}"
+        );
+        // Its menus, read with menu_bar as the Mac's are, and an item pressed by its ref: no
+        // menu opens.
+        let menus = reply(c.call("elements", &json!({"menu_bar": true, "filter": "greet"})));
+        let greet = ref_in(&menus, "- menu item \"Greet\"");
+        assert_eq!(
+            reply(c.call("press", &json!({"ref": greet}))),
+            "Pressed menu item \"Greet\" by its own accessibility action: no pointer or key was sent."
+        );
+        assert!(
+            reply(c.call(
+                "wait",
+                &json!({"text": "Greeted from the menu", "timeout_ms": 5000}),
+            ))
+            .starts_with("Found the text")
+        );
+        // Nothing reached the real pointer or keyboard: the one click (in the field, for the
+        // focus) was only recorded.
+        let sent = sent.borrow();
+        assert!(sent.len() == 1 && sent[0].starts_with("click "), "{sent:?}");
     }
 }

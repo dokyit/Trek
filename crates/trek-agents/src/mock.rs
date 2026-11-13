@@ -38,6 +38,8 @@
 //! |                              | and an answer with markdown, code and a table: five items a   |
 //! |                              | round (for long transcripts: `mock:history 500` is 2500)      |
 //! | `error`                      | a turn that fails                                             |
+//! | `mock:sandbox`               | a command Codex's Windows sandbox stops before its one-time   |
+//! |                              | setup, and Codex's notice on how to set it up                 |
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write [file]`          | adds a line to `NOTES.md` (or `file`) in its folder (for real) |
 //! | `mock:watch-run` id          | runs `gh run watch id` (for real) as a command call           |
@@ -76,6 +78,8 @@
 //! | `mock:watch` [dur]           | leaves a test watcher running; `dur` later (default 3s) it    |
 //! |                              | reports a failure and the agent takes a turn of its own       |
 //! | `mock:dev`                   | leaves a dev server and a quiet test watcher running          |
+//! | `mock:hold`                  | runs a real command until Stop, through Trek's own executor:  |
+//! |                              | a shell and a program under it (`ping`; `sleep` on a Mac)     |
 //! | `mock:cost` [`plan`]         | a turn on Claude Sonnet 5.5 at its API price, billed per      |
 //! |                              | token (or, with `plan`, on a Claude Max plan)                 |
 //! | `mock:verify` [`broken`]     | changes `src/notes.rs` (for real; `broken` leaves a `todo!()`  |
@@ -296,6 +300,8 @@ enum Script {
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
     Error,
+    /// A command stopped by Codex's Windows sandbox before its one-time setup, and the notice.
+    Sandbox,
     /// Add a note to a file in the session's folder: `NOTES.md`, or the file named after it.
     Write(Option<String>),
     /// `gh run watch <id>` run for real, as an agent's command call (Trek's run card).
@@ -327,6 +333,8 @@ enum Script {
     NearLimit(Duration),
     /// Work on for a while, taking no notice of Stop (`mock:deaf`).
     Deaf(Duration),
+    /// A real command that runs until Stop, through Trek's own executor (`mock:hold`).
+    Hold,
     /// Start a sub-agent through Trek's orchestration tools: waiting for its answer, or not.
     Delegate {
         wait: bool,
@@ -491,6 +499,7 @@ impl Script {
                 "deaf" if w.starts_with("mock:") => {
                     Script::Deaf(duration_after(i).unwrap_or(Duration::from_secs(60)))
                 }
+                "hold" if w.starts_with("mock:") => Script::Hold,
                 "consult" if w.starts_with("mock:") => Script::Delegate { wait: true },
                 "delegate" if w.starts_with("mock:") => Script::Delegate { wait: false },
                 "pair" if w.starts_with("mock:") => Script::Pair,
@@ -524,6 +533,7 @@ impl Script {
                 "design" if w.starts_with("mock:") => Script::Design,
                 "judge" if w.starts_with("mock:") => Script::Judge,
                 "error" => Script::Error,
+                "sandbox" if w.starts_with("mock:") => Script::Sandbox,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
                 "plan" => Script::Plan,
@@ -549,6 +559,30 @@ impl Script {
             None if plan => Script::Plan,
             None => Script::Answer,
         }
+    }
+}
+
+/// The verification CLI the mock writes into the skill it sets up, in `scripts/`: a shell script on
+/// the Mac, a batch file on Windows (no execute bit there: a program is a file with a program's
+/// extension).
+const VERIFY_CLI: &str = if cfg!(windows) { "app.cmd" } else { "app" };
+
+/// What it does: `check` fails while `src/notes.rs` has a `todo!()` in it, and prints JSON.
+#[cfg(unix)]
+const VERIFY_CLI_SCRIPT: &str = "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check)\n    if grep -qs 'todo!()' src/notes.rs; then echo '{\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}'; exit 1; fi\n    echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n";
+#[cfg(windows)]
+const VERIFY_CLI_SCRIPT: &str = "@echo off\r\nrem The app's verification CLI.\r\nif \"%~1\"==\"check\" goto check\r\nif \"%~1\"==\"--help\" goto help\r\nif \"%~1\"==\"\" goto help\r\necho {\"ok\":false,\"error\":\"No command %~1: see app --help\"}\r\nexit /b 2\r\n:help\r\necho app ^<check^|open^|screenshot^> [--json] [--dry-run]\r\nexit /b 0\r\n:check\r\nfindstr /c:\"todo!()\" src\\notes.rs >nul 2>nul\r\nif not errorlevel 1 goto broken\r\necho {\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}\r\nexit /b 0\r\n:broken\r\necho {\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}\r\nexit /b 1\r\n";
+
+/// A CLI (`./.agents/…/app.cmd check`, or a full path) as the mock types it into its shell: on
+/// Windows with the program's path in backslashes (`.\.agents\…\app.cmd`), as a PowerShell or
+/// cmd.exe user writes it (cmd.exe can't run `./x`), so Trek reads Windows' commands too.
+fn typed(cli: &str) -> String {
+    if !cfg!(windows) {
+        return cli.to_string();
+    }
+    match cli.split_once(' ') {
+        Some((program, rest)) => format!("{} {rest}", program.replace('/', "\\")),
+        None => cli.replace('/', "\\"),
     }
 }
 
@@ -598,6 +632,7 @@ pub fn title(request: &str) -> String {
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
+        Script::Sandbox => "Run the tests",
         Script::Write(_) => "Add a note",
         Script::WatchRun(_) => "Watch the CI run",
         Script::InlineEdit { .. } => "Edit the selection",
@@ -613,6 +648,7 @@ pub fn title(request: &str) -> String {
         Script::SimCheck => "Check the Threads screen",
         Script::Limit(_) | Script::NearLimit(_) => "Refactor the parser",
         Script::Deaf(_) => "Run the long migration",
+        Script::Hold => "Keep a program running",
         Script::Delegate { .. } => "Get a second opinion",
         Script::Pair => "Get two opinions",
         Script::StartThread { .. } => "Split off the test work",
@@ -1420,6 +1456,7 @@ impl Session {
             Script::Limit(after) => return self.limit(after).await,
             Script::NearLimit(after) => return self.near_limit(after).await,
             Script::Deaf(d) => return self.deaf(d).await,
+            Script::Hold => self.hold().await?,
             Script::Cost { plan } => return self.priced_turn(plan).await,
             Script::Restate => self.restate(text).await?,
             Script::Arena => self.arena(text).await?,
@@ -1428,6 +1465,23 @@ impl Session {
             Script::SetupVerification => self.setup_verification().await?,
             Script::MaintainVerification => self.maintain_verification().await?,
             Script::Verify { broken } => self.verify(broken).await?,
+            // As Codex on Windows before its sandbox's one-time setup: the command fails before
+            // it starts, and the notice says how to set it up (`codex::SANDBOX_SETUP_NOTICE`).
+            Script::Sandbox => {
+                let id = self.id("tool");
+                self.tool_start(&id, "Run command", "cargo test").await?;
+                self.pause(paced(300)).await?;
+                self.emit(AgentEvent::ToolFinished {
+                    id,
+                    output: "windows sandbox: setup refresh failed".into(),
+                    ok: false,
+                })
+                .await?;
+                self.emit(AgentEvent::Notice(
+                    crate::codex::SANDBOX_SETUP_NOTICE.into(),
+                ))
+                .await?;
+            }
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");
@@ -1559,6 +1613,44 @@ impl Session {
         .await?;
         self.say("The migration ran to the end.").await?;
         self.finish().await
+    }
+
+    /// `mock:hold`: a real command, run as Trek's own sessions run their tools
+    /// (`direct::executor::LocalExecutor`: in a process group, a job on Windows), that keeps going
+    /// until the turn is stopped: a shell, and under it a program (`ping` on Windows, `sleep`
+    /// elsewhere). Stop drops the run, which must end both; the capture build's live checks look
+    /// for the program before and after (`shots`' `programs`).
+    async fn hold(&mut self) -> Step {
+        use crate::direct::executor::{LocalExecutor, ToolExecutor as _};
+        // Two commands, so the shell starts the program rather than becoming it; `&&` reads the
+        // same in cmd.exe and in a POSIX shell (Git Bash on Windows, when it's there).
+        let command = if cfg!(windows) {
+            "ping -n 600 127.0.0.1 && echo done"
+        } else {
+            "sleep 600 && echo done"
+        };
+        let id = self.id("tool");
+        self.tool_start(&id, "Run command", command).await?;
+        let cwd = self.cwd.clone();
+        let run = LocalExecutor.exec(command, &cwd, Some(Duration::from_secs(600)));
+        tokio::pin!(run);
+        let out = loop {
+            tokio::select! {
+                out = &mut run => break out,
+                cmd = self.commands.recv() => self.handle_midturn(cmd)?,
+            }
+        };
+        let (output, ok) = match out {
+            Ok(o) => (format!("{}{}", o.stdout, o.stderr), o.success()),
+            Err(e) => (format!("Couldn't run it: {e:#}"), false),
+        };
+        self.emit(AgentEvent::ToolFinished {
+            id,
+            output: output.trim_end().to_string(),
+            ok,
+        })
+        .await?;
+        self.say("The program ran to its end.").await
     }
 
     /// Wait up to `d` of real time for the next message sent mid-turn.
@@ -2235,7 +2327,8 @@ impl Session {
     /// Trek, a CLI, and a Feature Map. Then run its check.
     async fn setup_verification(&mut self) -> Step {
         let dir = self.cwd.join(Self::VERIFY_SKILL);
-        let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
+        let cli = format!("./{}/scripts/{VERIFY_CLI}", Self::VERIFY_SKILL);
+        let script = format!("scripts/{VERIFY_CLI}");
         self.think("Learn how the app runs, then build the lever: a CLI first, the notes after.")
             .await?;
         self.tool(
@@ -2247,7 +2340,7 @@ impl Session {
         .await?;
         let files: [(&str, String, bool); 4] = [
             ("SKILL.md", format!("---\nname: verify-app\ndescription: Drive, debug and verify the app. Use it to check any change works before calling it done.\nmetadata:\n  trek: verification\n  cli: {cli}\n---\n\n# Verify the app\n\nRun `{cli} check` before calling a change done. `{cli} --help` lists every command.\n\nThe Feature Map is in references/features/README.md.\n"), false),
-            ("scripts/app", "#!/bin/sh\n# The app's verification CLI.\ncase \"$1\" in\n  check)\n    if grep -qs 'todo!()' src/notes.rs; then echo '{\"ok\":false,\"checks\":[\"build\",\"launch\"],\"error\":\"The smoke run failed: loading notes panics (src/notes.rs has a todo!())\"}'; exit 1; fi\n    echo '{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}' ;;\n  --help|\"\") echo 'app <check|open|screenshot> [--json] [--dry-run]' ;;\n  *) echo \"{\\\"ok\\\":false,\\\"error\\\":\\\"No command $1: see app --help\\\"}\"; exit 2 ;;\nesac\n".to_string(), true),
+            (&script, VERIFY_CLI_SCRIPT.to_string(), true),
             ("references/features/README.md", "# Feature Map\n\n- [Notes](notes.md): write and find notes.\n".to_string(), false),
             ("references/features/notes.md", "# Notes\n\nWrite and find notes. Reach it from the sidebar's Notes item, or `app open notes`.\n".to_string(), false),
         ];
@@ -2283,7 +2376,7 @@ impl Session {
                 .await?;
             self.pause(paced(60)).await?;
         }
-        let passed = self.run(&format!("{cli} check --json")).await?;
+        let passed = self.run(&format!("{} check --json", typed(&cli))).await?;
         let check = if passed {
             "`check` passes."
         } else {
@@ -2310,8 +2403,8 @@ impl Session {
                 .say("There's no verification skill here to maintain yet: it has no Feature Map.")
                 .await;
         };
-        let cli = format!("./{}/scripts/app", Self::VERIFY_SKILL);
-        let passed = self.run(&format!("{cli} check --json")).await?;
+        let cli = format!("./{}/scripts/{VERIFY_CLI}", Self::VERIFY_SKILL);
+        let passed = self.run(&format!("{} check --json", typed(&cli))).await?;
         let line = "- [Settings](settings.md): the app's preferences.\n";
         if !before.contains(line) {
             let id = self.id("tool");
@@ -2382,6 +2475,7 @@ impl Session {
         };
         self.emit(AgentEvent::ToolFinished { id, output, ok })
             .await?;
+        let cli = typed(&cli);
         if self.run(&format!("{cli} check --json")).await? {
             self.say(&format!("Changed `src/notes.rs` and verified it with `{cli} check`: build, launch and the smoke run pass.")).await
         } else {
@@ -2393,12 +2487,24 @@ impl Session {
     }
 
     /// Run `command` in the session's folder, for real, as a command row with what it printed.
-    /// Whether it succeeded.
+    /// Whether it succeeded. On Windows through cmd.exe, as written (`/s` and the outer quotes
+    /// make it take the line literally, as Trek's own executor does).
     async fn run(&mut self, command: &str) -> Step<bool> {
         let id = self.id("tool");
         self.tool_start(&id, "Run command", command).await?;
-        let mut sh = tokio::process::Command::new("/bin/sh");
-        sh.arg("-c").arg(command).current_dir(&self.cwd);
+        #[cfg(unix)]
+        let mut sh = {
+            let mut sh = tokio::process::Command::new("/bin/sh");
+            sh.arg("-c").arg(command);
+            sh
+        };
+        #[cfg(windows)]
+        let mut sh = {
+            let mut sh = trek_core::procs::async_command("cmd.exe");
+            sh.raw_arg(format!("/d /s /c \"{command}\""));
+            sh
+        };
+        sh.current_dir(&self.cwd);
         let out = crate::output_group(&mut sh, None, std::time::Duration::from_secs(600)).await;
         let (output, ok) = match out {
             Ok(o) => (
@@ -3903,6 +4009,8 @@ mod tests {
             Script::Task(Duration::from_secs(2))
         );
         assert_eq!(Script::parse("mock:dev", false), Script::Dev);
+        assert_eq!(Script::parse("mock:hold", false), Script::Hold);
+        assert_eq!(Script::parse("hold on", false), Script::Answer);
         assert_eq!(
             Script::parse("explore the repo", false),
             Script::Answer,
@@ -4739,11 +4847,9 @@ mod tests {
         });
     }
 
+    /// On both platforms: a shell script and `/bin/sh` on the Mac; a batch file, typed as
+    /// PowerShell and cmd.exe users write it (`.\.agents\…\app.cmd`) and run by cmd.exe, on Windows.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "the mock's verification CLI is a /bin/sh script; a Windows one comes with the Phase 2 verification work"
-    )]
     fn it_sets_up_a_verification_skill_then_verifies_with_its_cli() {
         let dir = std::env::temp_dir().join(format!("trek-mock-verify-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4756,19 +4862,21 @@ mod tests {
         });
         // Trek finds what it made, and its CLI really runs.
         let found = trek_core::verification::find(&dir).expect("a verification skill");
+        let cli = format!("./.agents/skills/verify-app/scripts/{VERIFY_CLI}");
         assert_eq!(
             (found.name.as_str(), found.cli.as_deref()),
-            (
-                "verify-app",
-                Some("./.agents/skills/verify-app/scripts/app")
-            )
+            ("verify-app", Some(cli.as_str()))
         );
         assert!(found.dir.join("references/features/README.md").exists());
-        let out = std::process::Command::new(found.dir.join("scripts/app"))
+        let out = std::process::Command::new(found.dir.join("scripts").join(VERIFY_CLI))
             .arg("check")
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("\"ok\":true"));
+        let ran_as = typed(&cli);
+        if cfg!(windows) {
+            assert_eq!(ran_as, r".\.agents\skills\verify-app\scripts\app.cmd");
+        }
         // Told about it, a session checks its change with the CLI.
         let notes = trek_core::verification::instructions(
             &trek_core::verification::record(&found, None, None),
@@ -4780,9 +4888,12 @@ mod tests {
             m.prompt("mock:verify the notes change").await;
             let events = m.turn().await;
             assert!(
-                events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { title, detail, .. } if title == "Run command" && detail == "./.agents/skills/verify-app/scripts/app check --json")),
+                events.iter().any(|e| matches!(e, AgentEvent::ToolStarted { title, detail, .. } if title == "Run command" && *detail == format!("{ran_as} check --json"))),
                 "{events:?}"
             );
+            // Trek reads that command as running the CLI, on either platform.
+            let needle = trek_core::verification::needle(&cli).unwrap();
+            assert!(trek_core::verification::runs(&needle, &format!("{ran_as} check --json")));
             let ran = |events: &[AgentEvent]| events.iter().rev().find_map(|e| if let AgentEvent::ToolFinished { output, ok, .. } = e { Some((output.clone(), *ok)) } else { None }).unwrap();
             assert_eq!(ran(&events), ("{\"ok\":true,\"checks\":[\"build\",\"launch\",\"smoke\"]}".to_string(), true), "what the CLI printed");
             // A change the CLI catches: the run fails, and the mock says so.
@@ -4790,7 +4901,7 @@ mod tests {
             let events = m.turn().await;
             let (output, ok) = ran(&events);
             assert!(!ok && output.contains("loading notes panics"), "{output}");
-            assert!(text(&events).contains("`./.agents/skills/verify-app/scripts/app check` fails"));
+            assert!(text(&events).contains(&format!("`{ran_as} check` fails")));
             // Without a skill, it says so.
             let m = Live::start(HandHolding::Auto, false);
             m.prompt("mock:verify").await;

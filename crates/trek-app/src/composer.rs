@@ -2108,16 +2108,20 @@ impl Composer {
         if effect.ask {
             self.ask_to_dictate(window, cx);
         }
+        if effect.abandon {
+            dictate::abandon();
+        }
         if effect.finish {
             if let Some(d) = self.dictation.as_mut() {
                 d.finish();
             }
             // A live take has its words on screen already: if the recognizer is slow to settle
-            // them, they go in as shown.
+            // them, they go in as shown (after as long as the take says its last pass may take).
             if self.voice.live {
+                let grace = self.dictation.as_ref().map_or(voice::GRACE, |d| d.grace());
                 self.voice_tasks
                     .push(cx.spawn_in(window, async move |this, cx| {
-                        cx.background_executor().timer(voice::GRACE).await;
+                        cx.background_executor().timer(grace).await;
                         let _ = this.update_in(cx, |c, window, cx| {
                             c.voice_step(voice::Event::GraceOver, window, cx)
                         });
@@ -2141,14 +2145,41 @@ impl Composer {
         cx.notify();
     }
 
-    /// Ask for the mic and speech recognition (on Windows that readies the recognizer and opens
-    /// the mic, so the mic spins until it listens); once allowed, open the take. A take given up
-    /// while it started (another draft, the composer closed) is abandoned instead, so whatever
-    /// was opened for it lets go of the mic.
+    /// Ask for the mic and speech recognition (on Windows that loads the speech model and opens
+    /// the mic, so the mic spins until it listens; the first time, the model downloads, and the
+    /// voice row shows how far it's got); once allowed, open the take. A take given up while it
+    /// started (another draft, the composer closed) is abandoned instead, so whatever was opened
+    /// for it lets go of the mic.
     fn ask_to_dictate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let take = self.voice.take;
         let (tx, rx) = async_channel::bounded(1);
         dictate::ensure_permission(tx);
+        // While the ask waits, whatever dictation is getting ready (a download) shows.
+        self.voice_tasks
+            .push(cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    let going = this.update_in(cx, |c, window, cx| {
+                        if c.voice.take != take
+                            || !matches!(
+                                c.voice.phase,
+                                voice::Phase::Asking | voice::Phase::Preparing
+                            )
+                        {
+                            return false;
+                        }
+                        if let Some(progress) = dictate::getting_ready()
+                            && c.voice.progress != Some(progress)
+                        {
+                            c.voice_step(voice::Event::Preparing(progress), window, cx);
+                        }
+                        true
+                    });
+                    if !going.unwrap_or(false) {
+                        break;
+                    }
+                    cx.background_executor().timer(voice::PREPARING).await;
+                }
+            }));
         cx.spawn_in(window, async move |this, cx| {
             let allowed = rx
                 .recv()
@@ -2156,7 +2187,13 @@ impl Composer {
                 .unwrap_or_else(|_| Err("Dictation ended.".into()));
             let opened = allowed.is_ok();
             let started = this.update_in(cx, |c, window, cx| {
-                if c.voice.take != take || c.voice.phase != voice::Phase::Asking {
+                // Still this take's ask (spinning, or showing what it got ready).
+                if c.voice.take != take
+                    || !matches!(
+                        c.voice.phase,
+                        voice::Phase::Asking | voice::Phase::Preparing
+                    )
+                {
                     return false;
                 }
                 let (heard, results) = async_channel::unbounded();
@@ -2316,6 +2353,12 @@ impl Composer {
     #[cfg(any(test, feature = "test-support"))]
     pub fn voice_phase(&self) -> voice::Phase {
         self.voice.phase
+    }
+
+    /// What the voice row says while dictation gets ready.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn voice_preparing_text(&self) -> Option<String> {
+        self.voice.preparing()
     }
 
     /// A note for the user (dictation problems, mostly) up as a workspace toast.
@@ -4242,7 +4285,7 @@ const ACCOUNT_ROOM: f32 = 130.;
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("Composer");
         self.redraw_when_chip_goes(cx);
         self.redraw_when_cache_lapses(cx);
@@ -4401,9 +4444,10 @@ impl Render for Composer {
         };
 
         // The mic opens voice mode where Trek can dictate (see dictate::available): a Mac bundle
-        // that can ask, or Windows with its speech recognizer. Where Trek can't but the system
-        // can (Windows without the recognizer, or an organization's policy against it), a dimmed
-        // mic points to Win+H, and pressing it says why Trek's own isn't there.
+        // that can ask, or Windows (Whisper on the PC; Windows' own recognizer for a packaged
+        // Trek). Only where neither of Windows' engines can run (a processor without AVX2) does
+        // the mic open Windows' voice typing (Win+H) into the composer instead, the last resort,
+        // with a toast that says why Trek's own isn't there.
         let asking = self.voice.phase == voice::Phase::Asking;
         let elsewhere = dictate::fallback().map(|tip| {
             square("dictate-elsewhere")
@@ -4415,10 +4459,13 @@ impl Render for Composer {
                 .child(
                     Icon::new(crate::assets::Lucide::Mic)
                         .size(px(look::ICON))
-                        .text_color(theme.muted_foreground.opacity(0.45)),
+                        .text_color(theme.muted_foreground),
                 )
+                // The system's dictation types into the field with the focus: the composer's.
+                // Either way the ask's answer says, in a toast, why Trek's own isn't there.
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.focus(window, cx);
+                    dictate::open_system_dictation();
                     this.dictate(window, cx)
                 }))
                 .into_any_element()
@@ -4432,7 +4479,7 @@ impl Render for Composer {
                     gpui_kit::component::tooltip::Tooltip::new(if asking {
                         "Starting dictation…"
                     } else {
-                        crate::words::words().dictate_tip
+                        dictate::tip()
                     })
                     .build(window, cx)
                 })
@@ -4453,9 +4500,12 @@ impl Render for Composer {
                 .into_any_element()
         });
         let mic = mic.or(elsewhere);
-        // Voice mode: the waveform, ✕ and ✓ in place of the toolbar.
-        let voice_row = self.voice.active().then(|| {
-            let finishing = self.voice.phase == voice::Phase::Finishing;
+        // Voice mode: the waveform, ✕ and ✓ in place of the toolbar. While dictation gets ready
+        // (its speech model downloading, the first time on Windows), the same row says how far
+        // it's got over the waveform's dotted line, filling as it goes, with ✓ spinning.
+        let voice_row = self.voice.row().then(|| {
+            let preparing = self.voice.preparing();
+            let finishing = self.voice.phase == voice::Phase::Finishing || preparing.is_some();
             // `#EDEDED`, a shade darker under the pointer. Night's rest is already firmer than 0.12,
             // so there the hover needs to go past it to be seen.
             let hover = if fluent::WINDOWS && theme.mode.is_dark() {
@@ -4464,7 +4514,10 @@ impl Render for Composer {
                 0.12
             };
             let (rest, hover) = (look::pressed(cx), theme.foreground.opacity(hover));
+            // ✕ and ✓ are circles on every platform, as the design draws voice mode: Windows'
+            // 4 px corners (`fluent::PillExt`) are for the toolbar's controls they replace.
             let cancel = square("voice-cancel")
+                .rounded_full()
                 .test_support()
                 .cursor_pointer()
                 .bg(rest)
@@ -4481,12 +4534,18 @@ impl Render for Composer {
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.voice_step(voice::Event::Cancel, window, cx)
                 }));
+            let waiting = if preparing.is_some() {
+                "Getting ready…"
+            } else {
+                "Finishing…"
+            };
             let confirm = square("voice-confirm")
+                .rounded_full()
                 .test_support()
                 .bg(blue)
                 .tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(crate::keys::shared(if finishing {
-                        "Finishing…"
+                        waiting
                     } else {
                         "Insert the text (↩)" // keys::shared
                     }))
@@ -4514,6 +4573,30 @@ impl Render for Composer {
                 });
             // The strip runs from the text's left edge to 16 px short of ✕; ✕ and ✓ sit where
             // the mic and send were, 4 px apart.
+            let strip = match preparing {
+                Some(said) => {
+                    let fraction = self.voice.progress.map_or(0., |p| p.fraction());
+                    h_flex()
+                        .id("voice-preparing")
+                        .test_support()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(relative(0.7))
+                                .truncate()
+                                .text_size(px(look::LABEL))
+                                .text_color(theme.muted_foreground)
+                                .child(said),
+                        )
+                        .child(voice::progress_line(fraction, theme.muted_foreground))
+                        .into_any_element()
+                }
+                None => voice::waveform(self.voice.levels.bars().collect(), theme.muted_foreground)
+                    .into_any_element(),
+            };
             h_flex()
                 .id("voice-row")
                 .test_support()
@@ -4521,10 +4604,7 @@ impl Render for Composer {
                 .pt(px(4.))
                 .pb(px(look::PAD))
                 .min_w_0()
-                .child(voice::waveform(
-                    self.voice.levels.bars().collect(),
-                    theme.muted_foreground,
-                ))
+                .child(strip)
                 .child(div().w(px(16.)).flex_none())
                 .child(cancel)
                 .child(div().w(px(4.)).flex_none())
@@ -4612,7 +4692,7 @@ impl Render for Composer {
                 }
             })).children(pickers::slash_ghost_overlay(self, cx)) }))
             .when_some(voice_row, |el, row| el.child(row))
-            .when(!self.voice.active(), |el| el.child(
+            .when(!self.voice.row(), |el| el.child(
                 // 30 px controls, 5 px apart, 13 px in from the card's edges.
                 h_flex()
                     .px(px(look::PAD))
@@ -4875,8 +4955,10 @@ impl Render for Composer {
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                 // ⌥↩ sends the other way from the default while a turn runs (steer ⇄ queue).
                 let k = &ev.keystroke;
-                // Voice mode: esc is ✕ and ↩ is ✓.
-                if this.voice.active()
+                // Voice mode: esc is ✕ and ↩ is ✓ (and while dictation gets ready, esc gives up;
+                // ↩ is the composer's own, as its text is still typed).
+                if (this.voice.active()
+                    || this.voice.phase == voice::Phase::Preparing && k.key == "escape")
                     && !k.modifiers.modified()
                     && matches!(k.key.as_str(), "escape" | "enter")
                 {

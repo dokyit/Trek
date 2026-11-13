@@ -182,6 +182,59 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Where dictation runs a speech model of its own (Windows, on the PC): which one, whether
+    /// it's downloaded, and a way to remove it (the mic downloads it again when it's next used).
+    fn dictation_row(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let model = crate::dictate::model()?;
+        let size = format!("{} MB", crate::dictate::megabytes(model.bytes, false));
+        let downloading = crate::dictate::getting_ready();
+        let description = match downloading {
+            Some(progress) => format!(
+                "Speech turns into text on this PC with {}. Its speech model is downloading: {}.",
+                model.name,
+                progress.said()
+            ),
+            None if model.on_disk => format!(
+                "Speech turns into text on this PC with {}, so what you say stays on it. Its speech model takes {size}; removed, it downloads again the next time you click the mic.",
+                model.name
+            ),
+            None => format!(
+                "Speech turns into text on this PC with {}, so what you say stays on it. Its speech model ({size}) downloads the first time you click the mic.",
+                model.name
+            ),
+        };
+        let control = if model.on_disk && downloading.is_none() {
+            Button::new("dictation-model-remove")
+                .small()
+                .outline()
+                .label("Remove")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Err(message) = crate::dictate::remove_model() {
+                        this.workspace.update(cx, |_, cx| {
+                            cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                                message,
+                                undo: None,
+                            })
+                        });
+                    }
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .id("dictation-model-state")
+                .text_size(to_rems(text::META))
+                .text_color(cx.theme().muted_foreground)
+                .child(if downloading.is_some() {
+                    "Downloading"
+                } else {
+                    "Not downloaded"
+                })
+                .into_any_element()
+        };
+        Some(Self::row("Dictation", description, control, cx))
+    }
+
     pub(super) fn general_page(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let ws = self.workspace.read(cx);
         let agents = ws.ready_agents();
@@ -425,7 +478,10 @@ impl SettingsView {
                         self.usage_shown_picker(cx),
                         cx,
                     ),
-                ],
+                ]
+                .into_iter()
+                .chain(self.dictation_row(cx))
+                .collect(),
                 cx,
             ),
             Self::heading("Inbox", cx),
@@ -494,8 +550,8 @@ impl SettingsView {
             ),
             Self::heading("System", cx),
             ui::group(
-                vec![
-                    Self::row(
+                [
+                    Some(Self::row(
                         crate::words::words().keep_awake_label,
                         "Stops idle sleep until every running turn has finished. The display can still sleep.",
                         self.switch(
@@ -504,8 +560,28 @@ impl SettingsView {
                             |s, v| s.general.prevent_sleep_while_running = v,
                         ),
                         cx,
-                    ),
-                    Self::row(
+                    )),
+                    // Where closing the window would end Trek: stay in the tray instead, which
+                    // needs the tray icon to come back through.
+                    crate::words::words().stay_in_tray.map(|(label, note)| {
+                        let note = if s.notifications.menu_bar_icon {
+                            note.to_string()
+                        } else {
+                            format!(
+                                "{note} It needs the {} on, in Notifications.",
+                                crate::words::words().tray_label.to_lowercase()
+                            )
+                        };
+                        Self::row(
+                            label,
+                            note,
+                            self.switch("stay-in-tray", s.general.stay_in_tray, |s, v| {
+                                s.general.stay_in_tray = v
+                            }),
+                            cx,
+                        )
+                    }),
+                    Some(Self::row(
                         "Onboarding",
                         "Appearance, permissions, your agents and keys, local models and your phone, one step at a time. Nothing is reset.",
                         Button::new("show-onboarding")
@@ -517,8 +593,11 @@ impl SettingsView {
                                     .update(cx, |ws, cx| ws.open_onboarding(None, cx))
                             })),
                         cx,
-                    ),
-                ],
+                    )),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
                 cx,
             ),
         ]
@@ -919,6 +998,14 @@ impl SettingsView {
                 // Where to find it: Keychain Access lists it by its service name, not "Trek".
                 (SavedKey::Saved, _) if cfg!(target_os = "macos") => format!(
                     "Saved in your login Keychain (Keychain Access › login › {})", // words: ok, macOS only
+                    trek_core::keychain::SERVICE
+                )
+                .into(),
+                // Credential Manager lists it under Windows Credentials by its target name, which
+                // the keyring crate makes `<account>.<service>`.
+                (SavedKey::Saved, _) if cfg!(windows) => format!(
+                    "Saved in {} (Windows Credentials › {id}.{})",
+                    crate::words::words().your_credential_store,
                     trek_core::keychain::SERVICE
                 )
                 .into(),
@@ -1531,7 +1618,19 @@ impl SettingsView {
                     self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
                     cx,
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(cfg!(windows).then(|| {
+                Self::row(
+                    "Update while Trek is closed",
+                    "Every half hour while you're signed in to Windows, a closed Trek is updated to the newest release on its channel (a task in Task Scheduler, under Trek).",
+                    self.switch("update-while-closed", s.updates.while_closed, |s, v| {
+                        s.updates.while_closed = v
+                    }),
+                    cx,
+                )
+            }))
+            .collect(),
             cx,
         ));
         if !history.is_empty() {

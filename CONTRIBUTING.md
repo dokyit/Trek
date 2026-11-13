@@ -12,7 +12,7 @@ Thanks for helping. Bug reports, ideas, docs fixes and pull requests are all wel
 | | macOS | Windows |
 | --- | --- | --- |
 | OS | 13+ on Apple silicon | 11 on x64 |
-| Toolchain | Full Xcode (not just the Command Line Tools) | Visual Studio 2022 Build Tools (C++ workload) + Windows SDK |
+| Toolchain | Full Xcode (not just the Command Line Tools) | Visual Studio 2022 Build Tools (C++ workload) + Windows SDK, CMake, and LLVM (libclang, for whisper.cpp's bindings; or set `LIBCLANG_PATH` to a folder with `libclang.dll`) |
 | Rust | pinned in [`rust-toolchain.toml`](rust-toolchain.toml); rustup installs it | same, MSVC toolchain |
 | Scripts | zsh | PowerShell 7 (`pwsh`) |
 

@@ -8,7 +8,8 @@
 //!   background computer use, and snapshots of a window.
 //! - Microphone and Speech Recognition: dictation in the composer (`trek-dictate`); Speech also
 //!   transcribes videos for `watch_video`. (On Windows these are Settings switches dictation
-//!   reads for itself: the microphone for desktop apps, and online speech recognition.)
+//!   reads for itself: the microphone for desktop apps, and, for a packaged Trek, whose dictation
+//!   is Windows' online recognizer, online speech recognition. Dictation on the PC needs none.)
 //! - Notifications: banners when a thread needs you or finishes.
 //! - Full Disk Access (optional): agents run as Trek, so a project in Documents, Desktop or
 //!   iCloud Drive otherwise brings one macOS prompt per folder.

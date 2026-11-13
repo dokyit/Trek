@@ -30,7 +30,7 @@
 //! A target whose elements have accessibility identifiers (what an app's developer named them)
 //! gives them beside the tree, as [`Ids`], to `Refs::outline_with`: each is written as `[id=…]`.
 //! The others give none and read as they did.
-// Windows computer use has no elements yet: the types are part of `Desktop`, the rest is unused.
+// Off macOS some helpers go unused (Windows reads elements through UI Automation, `desktop::uia`).
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::collections::HashMap;

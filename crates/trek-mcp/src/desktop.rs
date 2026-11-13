@@ -11,8 +11,14 @@ mod macos;
 mod skylight;
 #[cfg(target_os = "macos")]
 mod spaces;
+// Windows' elements through UI Automation: what they read as is plain data, built and tested
+// everywhere; the COM that reads them (`uia::com`) is Windows'.
+mod uia;
 #[cfg(windows)]
 mod windows;
+
+#[cfg(all(test, windows))]
+pub use uia::com::testing::TestWindow;
 
 #[cfg(target_os = "macos")]
 pub use macos::Mac as Native;
@@ -132,9 +138,11 @@ pub enum Whereabouts {
 /// How far `Desktop::elements` reads a window's accessibility tree: it's bounded, so a huge or
 /// slow one costs a known amount.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub struct Reading {
-    /// The app's menu bar as well (its menus and their items), as a second root.
+    /// The app's menu bar as well (its menus and their items), as a second root. On Windows,
+    /// a classic app's (its Win32 menu), read without opening anything; the menu bar titles that
+    /// UI Automation sees are part of the window either way.
     pub menu_bar: bool,
     pub max_nodes: usize,
     pub max_depth: usize,
@@ -155,7 +163,7 @@ impl Default for Reading {
 /// A window's elements as read: the window (place `[0]`), then its app's menu bar (place `[1]`)
 /// when asked for. Frames are in the window's own coordinates.
 #[derive(Debug, Clone, PartialEq, Default)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub struct Elements {
     pub roots: Vec<Node>,
     /// Why the reading stopped early (a bound of `Reading` was reached); `None` when it's whole.
@@ -164,7 +172,7 @@ pub struct Elements {
 
 /// How an element's own action went, as far as the app said.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 pub enum Performed {
     /// The app took it.
     Done,
@@ -324,8 +332,9 @@ pub trait Desktop {
         None
     }
 
-    // Elements: a window's accessibility tree, and its elements' own actions. Reading and acting
-    // go to the window's app alone: nothing is activated or raised, no pointer or key is posted.
+    // Elements: a window's accessibility tree (macOS: Accessibility, `ax`; Windows: UI
+    // Automation, `uia`), and its elements' own actions. Reading and acting go to the window's
+    // app alone: nothing is activated or raised, no pointer or key is posted.
 
     /// Whether this platform can read a window's elements.
     fn has_elements(&self) -> bool {
@@ -355,6 +364,18 @@ pub trait Desktop {
     fn focus(&self, _w: &WindowInfo, _identity: u64) -> Result<bool, String> {
         Err(NO_ELEMENTS.into())
     }
+    /// Put `text` after what the element read with `identity` holds, as its own value (Windows:
+    /// its Value pattern), for a field that won't take the keyboard focus: no key is posted.
+    /// Never a password field's. A platform without it says `NO_ELEMENTS`.
+    fn add_text(&self, _w: &WindowInfo, _identity: u64, _text: &str) -> Result<(), String> {
+        Err(NO_ELEMENTS.into())
+    }
+    /// Ask the element read with `identity` to scroll itself into view within its window
+    /// (Windows: its ScrollItem pattern). Whether it was asked; where it is now is for a fresh
+    /// look to say. A platform without it says `false`.
+    fn reveal(&self, _w: &WindowInfo, _identity: u64) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -365,6 +386,7 @@ pub mod fake {
     use std::rc::Rc;
 
     use super::*;
+    use crate::outline::Frame;
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum Event {
@@ -417,6 +439,17 @@ pub mod fake {
         },
         /// `focus`, by the element's identity.
         Focus {
+            window: i64,
+            identity: u64,
+        },
+        /// `add_text`, by the element's identity, where the platform has it (`adds_text`).
+        AddText {
+            window: i64,
+            identity: u64,
+            text: String,
+        },
+        /// `reveal`, by the element's identity, where it moves the element (`reveals`).
+        Reveal {
             window: i64,
             identity: u64,
         },
@@ -528,6 +561,10 @@ pub mod fake {
         /// After this many more readings, the node joins the window's children (something that
         /// shows a moment later).
         pub shows_later: Rc<RefCell<Option<(u32, Node)>>>,
+        /// Text can be added to an element's value (`add_text`, as Windows' Value pattern does).
+        pub adds_text: bool,
+        /// An element asked to scroll into view (`reveal`) moves there.
+        pub reveals: Option<Frame>,
     }
 
     impl Recording {
@@ -580,6 +617,8 @@ pub mod fake {
                 deaf: false,
                 busy: Rc::default(),
                 shows_later: Rc::default(),
+                adds_text: false,
+                reveals: None,
             }
         }
 
@@ -981,6 +1020,39 @@ pub mod fake {
                 self.each_node(|n| n.focused = n.identity == Some(identity));
             }
             Ok(self.focuses)
+        }
+        /// The text joins the element's value, when `adds_text`.
+        fn add_text(&self, w: &WindowInfo, identity: u64, text: &str) -> Result<(), String> {
+            if !self.adds_text {
+                return Err(NO_ELEMENTS.into());
+            }
+            self.record(Event::AddText {
+                window: w.id,
+                identity,
+                text: text.into(),
+            })?;
+            self.each_node(|n| {
+                if n.identity == Some(identity) {
+                    n.value = Some(format!("{}{text}", n.value.as_deref().unwrap_or("")));
+                }
+            });
+            Ok(())
+        }
+        /// The element moves to `reveals`, when there's one.
+        fn reveal(&self, w: &WindowInfo, identity: u64) -> Result<bool, String> {
+            let Some(frame) = self.reveals else {
+                return Ok(false);
+            };
+            self.record(Event::Reveal {
+                window: w.id,
+                identity,
+            })?;
+            self.each_node(|n| {
+                if n.identity == Some(identity) {
+                    n.frame = Some(frame);
+                }
+            });
+            Ok(true)
         }
     }
 }

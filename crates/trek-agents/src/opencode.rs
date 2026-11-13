@@ -653,8 +653,11 @@ async fn scratch_schema(bin: &Path) -> anyhow::Result<Scratch> {
     ] {
         command.env_remove(var);
     }
+    // The home folder too as Windows names it: Node's and Bun's `os.homedir()` read USERPROFILE
+    // there, not HOME, so without it the scratch run would read the user's ~/.config/opencode.
     for (var, sub) in [
         ("HOME", "home"),
+        ("USERPROFILE", "home"),
         ("XDG_DATA_HOME", "data"),
         ("XDG_CONFIG_HOME", "config"),
         ("XDG_CACHE_HOME", "cache"),

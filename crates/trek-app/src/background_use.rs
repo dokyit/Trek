@@ -894,6 +894,8 @@ impl Render for Pip {
                             ),
                     ),
             )
+            // Seen by the capture build's checks (`count-all background-use 1`).
+            .test_support()
             .into_any_element()
     }
 }

@@ -530,18 +530,7 @@ impl BackgroundStrip {
                 .icon(Icon::new(IconName::ExternalLink))
                 .label("Full output")
                 .tooltip(file.display().to_string())
-                .on_click(move |_, _, _| {
-                    // A text editor, as `open -t` is: output files have no extension Windows knows.
-                    let mut editor = trek_core::procs::command(if cfg!(windows) {
-                        "notepad.exe"
-                    } else {
-                        "/usr/bin/open"
-                    });
-                    if !cfg!(windows) {
-                        editor.arg("-t");
-                    }
-                    let _ = editor.arg(&file).spawn();
-                })
+                .on_click(move |_, _, _| open_in_text_editor(&file))
         });
         let note = if !r.readable {
             format!(
@@ -611,6 +600,45 @@ impl BackgroundStrip {
                     .child(note),
             )
             .into_any_element()
+    }
+}
+
+/// `file` in the user's text editor, as the Mac's `open -t` does. Output files have no extension
+/// Windows knows, so there it's opened as a `.txt` would be (whatever opens those: Notepad,
+/// Notepad++, VS Code), and in Notepad if the shell can't.
+fn open_in_text_editor(file: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::UI::Shell::{
+            SEE_MASK_CLASSNAME, SHELLEXECUTEINFOW, ShellExecuteExW,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let wide = |s: &std::ffi::OsStr| s.encode_wide().chain([0]).collect::<Vec<u16>>();
+        let (path, class, verb) = (
+            wide(file.as_os_str()),
+            wide(".txt".as_ref()),
+            wide("open".as_ref()),
+        );
+        // SAFETY: all zeroes is a valid SHELLEXECUTEINFOW (integers, null pointers and handles).
+        let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.fMask = SEE_MASK_CLASSNAME;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = path.as_ptr();
+        info.lpClass = class.as_ptr();
+        info.nShow = SW_SHOWNORMAL;
+        // SAFETY: the strings it points at outlive the call.
+        if unsafe { ShellExecuteExW(&mut info) } == 0 {
+            let _ = trek_core::procs::command("notepad.exe").arg(file).spawn();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = trek_core::procs::command("/usr/bin/open")
+            .arg("-t")
+            .arg(file)
+            .spawn();
     }
 }
 
@@ -702,7 +730,7 @@ impl RenderOnce for Trigger {
 
 impl Render for BackgroundStrip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("BackgroundStrip");
         let Some(shown) = self.shown.clone() else {
             return div().into_any_element();

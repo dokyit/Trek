@@ -93,7 +93,8 @@ pub mod workspace;
 pub mod worktree_apps_ui;
 pub mod worktree_ui;
 
-#[cfg(any(test, feature = "test-support"))]
+// The capture build counts renders too, for its live checks (`renders`).
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
 pub mod test_support;
 
 use gpui_kit::component::highlighter::HighlightTheme;
@@ -269,8 +270,14 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 }
 
 pub fn run() {
+    // A capture run is signed out of the user's accounts before anything else starts.
+    #[cfg(feature = "shots")]
+    shots::isolate_accounts();
     perf::start();
     logging::init();
+    // Dictation keeps a speech model of its own on Windows: `dictation/` in the local data folder,
+    // which a roaming profile doesn't carry between PCs (it downloads again wherever it's needed).
+    dictate::keep_data_in(trek_core::paths::local_data_dir);
 
     // On Windows, one Trek per data folder: a second launch hands its links and paths to the
     // running one and exits (macOS does this itself, through `on_open_urls` and `on_reopen`).

@@ -338,6 +338,9 @@ pub struct SettingsView {
     /// Whether the Figma desktop app's MCP server answers (Tools › Connections).
     figma_desktop: Probe<bool>,
     snapshots: Probe<SnapshotsProbe>,
+    /// iPhone page, on Windows: what the firewall does to a phone dialing in on each network this
+    /// PC is on (`remote::firewall`; `None` inside when it couldn't be read).
+    pub(super) firewall: Probe<Option<crate::remote::firewall::Firewall>>,
     icon_file: Probe<(String, bool)>,
     /// Trek's data folder, found once (finding it makes sure it exists).
     pub(super) data_dir: std::path::PathBuf,
@@ -723,6 +726,7 @@ impl SettingsView {
             figma_desktop: Probe::default(),
             snapshots: Probe::default(),
             icon_file: Probe::default(),
+            firewall: Probe::default(),
             data_dir: trek_core::paths::data_dir(),
             installing_agents: Started::default(),
             signing_in_agents: Started::default(),
@@ -769,6 +773,17 @@ impl SettingsView {
             SettingsPage::Agents => self.scan_locked_secrets(cx),
             SettingsPage::Snapshots => {
                 self.probe(|this| &mut this.snapshots, SnapshotsProbe::read, cx)
+            }
+            SettingsPage::Mobile if cfg!(windows) => {
+                let port = self.workspace.read(cx).settings.mobile.port;
+                self.probe(
+                    |this| &mut this.firewall,
+                    move || {
+                        let exe = std::env::current_exe().ok()?;
+                        crate::remote::firewall::read(&exe, port)
+                    },
+                    cx,
+                )
             }
             SettingsPage::Skills => {
                 let project = self.workspace.read(cx).current_cwd();
@@ -3029,6 +3044,10 @@ impl Render for SettingsView {
         let page = self.page(cx);
         if page == SettingsPage::Project {
             self.sync_project_name(window, cx);
+        }
+        // The firewall can have changed since the iPhone page was last open: read it again.
+        if page == SettingsPage::Mobile && self.scrolled_page != Some(page) {
+            self.firewall.invalidate();
         }
         let body = self.content(cx);
         if self

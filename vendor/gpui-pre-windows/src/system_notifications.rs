@@ -46,12 +46,13 @@ impl SystemNotificationState {
         has_package_identity: bool,
         app_identity: Option<(&str, &str)>,
         notification: SystemNotification,
+        launch: Option<&str>,
     ) -> windows::core::Result<()> {
         let Some(notifier) = self.notifier(has_package_identity, app_identity)? else {
             return Ok(());
         };
 
-        let document = toast_document(&notification)?;
+        let document = toast_document(&notification, launch)?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         // Windows caps toast tags at 64 characters (post-Creators Update),
         // so hash the arbitrary GPUI tag down to a fixed-width value.
@@ -64,13 +65,15 @@ impl SystemNotificationState {
 
         let sender = self.response_sender.clone();
         let response_tag = notification.tag.clone();
+        // Trek: a click on the body of a toast with a launch link has the link as its arguments.
+        let body = launch.map(windows::core::HSTRING::from);
         toast.Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
             move |_sender, arguments| {
                 let action_id = arguments
                     .as_ref()
                     .and_then(|arguments| arguments.cast::<ToastActivatedEventArgs>().ok())
                     .and_then(|arguments| arguments.Arguments().ok())
-                    .filter(|arguments| !arguments.is_empty())
+                    .filter(|arguments| !arguments.is_empty() && Some(arguments) != body.as_ref())
                     .map(|arguments| SharedString::from(arguments.to_string()));
                 sender
                     .unbounded_send(SystemNotificationResponse {
@@ -154,9 +157,20 @@ impl SystemNotificationState {
     }
 }
 
-fn toast_document(notification: &SystemNotification) -> windows::core::Result<XmlDocument> {
+/// The toast's XML. Trek: with a `launch` link, a click on the body opens the link by protocol
+/// activation (`activationType="protocol"`): the system starts the link's app on it, so the click
+/// works after the app that posted the toast has quit, which a foreground toast's in-process
+/// `Activated` doesn't.
+fn toast_document(
+    notification: &SystemNotification,
+    launch: Option<&str>,
+) -> windows::core::Result<XmlDocument> {
     let document = XmlDocument::new()?;
     let toast = document.CreateElement(h!("toast"))?;
+    if let Some(launch) = launch {
+        toast.SetAttribute(h!("launch"), &launch.into())?;
+        toast.SetAttribute(h!("activationType"), h!("protocol"))?;
+    }
     document.AppendChild(&toast)?;
 
     let visual = document.CreateElement(h!("visual"))?;
@@ -194,5 +208,88 @@ fn register_app_user_model_id(app_identifier: &str, app_name: &str) {
         .and_then(|key| key.set_string("DisplayName", app_name));
     if let Err(error) = result {
         log::warn!("failed to register AppUserModelID; notifications may not display: {error}");
+    }
+}
+
+// Trek: the toast's XML, with and without a launch link.
+#[cfg(test)]
+mod tests {
+    use super::toast_document;
+    use gpui::{SharedString, SystemNotification, SystemNotificationAction};
+    use windows::core::h;
+
+    fn banner() -> SystemNotification {
+        SystemNotification {
+            tag: "trek-attention-0197c2b4".into(),
+            title: "Finished: Fix the login bug".into(),
+            body: SharedString::default(),
+            actions: Vec::new(),
+        }
+    }
+
+    fn xml(notification: &SystemNotification, launch: Option<&str>) -> String {
+        toast_document(notification, launch)
+            .and_then(|document| document.GetXml())
+            .expect("the toast's XML")
+            .to_string()
+    }
+
+    #[test]
+    fn a_launch_link_is_opened_by_protocol_activation() {
+        let xml = xml(&banner(), Some("trek://thread/0197c2b4-3e5a"));
+        assert!(
+            xml.starts_with(
+                r#"<toast launch="trek://thread/0197c2b4-3e5a" activationType="protocol"><visual><binding template="ToastGeneric"><text>Finished: Fix the login bug</text>"#
+            ),
+            "{xml}"
+        );
+        assert!(xml.ends_with(r#"<audio silent="true"/></toast>"#), "{xml}");
+        assert_eq!(xml.matches("activationType").count(), 1, "{xml}");
+    }
+
+    #[test]
+    fn a_toast_without_a_launch_link_is_activated_in_the_app() {
+        let xml = xml(&banner(), None);
+        assert!(
+            xml.starts_with(r#"<toast><visual><binding template="ToastGeneric">"#),
+            "{xml}"
+        );
+        assert!(
+            !xml.contains("launch") && !xml.contains("activationType"),
+            "{xml}"
+        );
+    }
+
+    /// A link is an attribute's value, whatever it carries; the buttons still answer in the app.
+    #[test]
+    fn the_link_is_escaped_and_buttons_stay_the_app_s() {
+        let link = r#"trek://thread/a&b="c"<d>"#;
+        let notification = SystemNotification {
+            actions: vec![SystemNotificationAction {
+                id: "approve".into(),
+                label: "Approve".into(),
+            }],
+            ..banner()
+        };
+        let document = toast_document(&notification, Some(link)).unwrap();
+        let toast = document.DocumentElement().unwrap();
+        assert_eq!(toast.GetAttribute(h!("launch")).unwrap().to_string(), link);
+        let xml = document.GetXml().unwrap().to_string();
+        assert!(!xml.contains(link), "written out escaped: {xml}");
+        // The serialized form reads back as the same link.
+        let back = windows::Data::Xml::Dom::XmlDocument::new().unwrap();
+        back.LoadXml(&xml.as_str().into()).unwrap();
+        assert_eq!(
+            back.DocumentElement()
+                .unwrap()
+                .GetAttribute(h!("launch"))
+                .unwrap()
+                .to_string(),
+            link
+        );
+        assert!(
+            xml.contains(r#"<actions><action content="Approve" arguments="approve"/></actions>"#),
+            "{xml}"
+        );
     }
 }

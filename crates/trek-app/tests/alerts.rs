@@ -407,6 +407,95 @@ fn a_banner_is_the_message_alone_and_clicking_it_needs_no_button() {
     });
 }
 
+/// A Windows banner carries its thread's `trek://` link, which Windows opens when it's clicked:
+/// that starts Trek after it has quit, where the click on its own reaches no one. Only from the
+/// Trek the links open (a trial build's would open the user's own Trek); a Mac's goes as it did.
+#[test]
+fn a_banner_opens_its_thread_s_link_only_from_the_trek_the_links_open() {
+    run(async |cx| {
+        let trek = alerting(cx, NotifyMode::Banner);
+        let id = titled(&trek, cx, "Fix the login bug");
+        let tag = format!("trek-attention-{id}");
+        blur(&trek, cx);
+        trek_app::winsys::set_owns_links(false);
+        finish(&trek, cx, &id, None);
+        assert_eq!(banners(cx).len(), 1);
+        assert_eq!(
+            cx.system_notification_launch(&tag),
+            None,
+            "not this Trek's links"
+        );
+
+        trek_app::winsys::set_owns_links(true);
+        ask(&trek, cx, &id);
+        assert_eq!(banners(cx).len(), 2);
+        let link = cx.system_notification_launch(&tag).map(|l| l.to_string());
+        trek_app::winsys::set_owns_links(false);
+        if cfg!(windows) {
+            assert_eq!(link, Some(format!("trek://thread/{id}")));
+        } else {
+            assert_eq!(link, None);
+        }
+    });
+}
+
+/// What the link does when Windows launches Trek on it: a Trek that had quit opens on the thread,
+/// and a running one is handed the link and shows the thread as a click on the banner would, in
+/// its own window when it has one.
+#[test]
+fn a_banner_s_link_reveals_its_thread_at_launch_and_when_handed_over() {
+    use trek_app::single_instance::Forwarded;
+    use trek_ipc::instance::Open;
+    run(async |cx| {
+        let trek = alerting(cx, NotifyMode::Banner);
+        let quiet = titled(&trek, cx, "Quiet");
+        let finished = titled(&trek, cx, "Finished one");
+        let popped = titled(&trek, cx, "Popped out");
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(quiet.clone()), cx));
+        let (links, heard) = async_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
+        let ws = trek.ws.clone();
+        // Started by the click: the link is the launch's own, opened once the window is up.
+        cx.update(|cx| {
+            trek_app::single_instance::hear(
+                Some(rx),
+                vec![format!("trek://thread/{finished}")],
+                ws,
+                links,
+                cx,
+            )
+        });
+        trek.update(cx, |ws, cx| ws.hear_deep_links(heard, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(finished.clone())
+        );
+
+        // Running, with the thread in a window of its own: that window comes forward.
+        let own = trek.open_thread_window(cx, &popped);
+        blur(&trek, cx);
+        VisualTestContext::from_window(own, cx).deactivate_window();
+        let (done, answer) = async_channel::bounded(1);
+        tx.try_send(Forwarded {
+            open: Open {
+                args: vec![format!("trek://thread/{popped}")],
+                background: false,
+            },
+            done,
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(answer.try_recv(), Ok(Ok(())));
+        assert_eq!(cx.update(|cx| cx.active_window()), Some(own));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(finished.clone()),
+            "the main window is left as it was"
+        );
+    });
+}
+
 #[test]
 fn the_mac_stays_awake_exactly_while_agents_work() {
     run(async |cx| {

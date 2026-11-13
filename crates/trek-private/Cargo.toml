@@ -1,0 +1,10 @@
+[package]
+name = "trek-private"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Files only the user can read, on both platforms from the moment they exist: mode 0600 on the Mac, an owner-only ACL on Windows"
+
+[target.'cfg(windows)'.dependencies]
+# The file's or folder's access list: one entry, the user's, inheriting nothing.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }

@@ -674,7 +674,7 @@ impl AiPane {
 
 impl Render for AiPane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("AiPane");
         let ws = self.workspace.read(cx);
         let draft = ws.chats(&self.scope).is_draft();

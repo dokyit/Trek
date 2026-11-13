@@ -543,6 +543,48 @@ mod ends_with_its_main_window {
         });
     }
 
+    /// Kept in the tray (Settings › General, Windows'), the close button closes the windows and
+    /// Trek stays up, as a Mac's does in the Dock: nothing asked even with a turn running, and no
+    /// quitting once it's done. Without the tray icon to come back through, it quits as before.
+    #[test]
+    fn kept_in_the_tray_the_close_button_leaves_trek_running() {
+        run(async |cx| {
+            let trek = open(cx);
+            let quit = ending_with_main_window(&trek, cx);
+            trek.update(cx, |ws, _| {
+                ws.settings.general.stay_in_tray = true;
+                ws.settings.notifications.menu_bar_icon = true;
+            });
+            let id = trek.send(cx, "mock:long 2s");
+            let tid = id.clone();
+            trek.wait(cx, "the turn to start", |ws| ws.turn_running(&tid))
+                .await;
+            trek.window(cx, |window, cx| trek_app::root::close_main(window, cx));
+            cx.run_until_parked();
+            assert!(!cx.has_pending_prompt(), "nothing to ask");
+            assert!(cx.windows().is_empty(), "its windows are closed");
+            let tid = id.clone();
+            trek.wait(cx, "the turn to end", |ws| !ws.turn_running(&tid))
+                .await;
+            cx.run_until_parked();
+            assert!(!quit.load(Ordering::SeqCst), "it stays in the tray");
+            // Back on screen, the tray icon off: the close button is the Quit command again.
+            cx.update(|cx| trek_app::root::show_main(trek.ws.clone(), cx));
+            cx.run_until_parked();
+            trek.update(cx, |ws, _| ws.settings.notifications.menu_bar_icon = false);
+            let main = trek
+                .read(cx, |ws, _| ws.main_window)
+                .expect("the main window again");
+            main.update(cx, |_, window, cx| trek_app::root::close_main(window, cx))
+                .expect("the window");
+            cx.run_until_parked();
+            assert!(
+                quit.load(Ordering::SeqCst),
+                "nothing to come back through: it quits"
+            );
+        });
+    }
+
     #[test]
     fn working_in_the_background_quits_once_nothing_is_at_work() {
         run(async |cx| {

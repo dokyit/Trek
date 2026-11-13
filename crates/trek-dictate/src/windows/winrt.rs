@@ -398,6 +398,12 @@ impl Worker {
         }
         let session = recognizer.ContinuousRecognitionSession().map_err(problem)?;
         let _ = session.SetAutoStopSilenceTimeout(SILENCE);
+        // Nor does a slow start: the recognizer's own wait for the first words is 5 s, and a
+        // take ended there with nothing when someone clicked the mic and then took a breath.
+        // (The pause that ends a phrase, Windows' 150 ms, stays: it's what settles each phrase.)
+        if let Ok(timeouts) = recognizer.Timeouts() {
+            let _ = timeouts.SetInitialSilenceTimeout(SILENCE);
+        }
 
         let posts = self.posts.clone();
         let hypothesis = recognizer
@@ -517,7 +523,7 @@ fn within<T: Send + 'static>(
 
 /// The default capture endpoint: the microphone Windows' recognizer listens with. Getting it
 /// doesn't open it.
-fn microphone() -> ::windows::core::Result<IMMDevice> {
+pub(super) fn microphone() -> ::windows::core::Result<IMMDevice> {
     // SAFETY: COM is initialized on the calling thread (this module's thread, or the probe's
     // main); the enumerator is released when it drops.
     unsafe {
@@ -527,7 +533,7 @@ fn microphone() -> ::windows::core::Result<IMMDevice> {
 }
 
 /// The default microphone is muted in Windows. One whose state can't be read counts as not.
-fn microphone_muted() -> bool {
+pub(super) fn microphone_muted() -> bool {
     microphone()
         // SAFETY: on the thread that made `device`; `Activate` makes the interface its type
         // names, with no activation parameters, and `GetMute` only reads.

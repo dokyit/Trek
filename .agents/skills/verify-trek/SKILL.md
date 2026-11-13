@@ -10,7 +10,7 @@ metadata:
 
 Run the CLI from the checkout or worktree being verified. Its state is keyed to `git rev-parse --show-toplevel`, so it builds that checkout. JSON is the default output; add `--human` for readable text. On Windows the driver is `scripts/trek-dev.ps1` — run it with `pwsh` in place of `./scripts/trek-dev` (same subcommands and output).
 
-The driver always launches with `TREK_SHOT_DIR`, a throwaway `TREK_DATA_DIR`, imports and notifications off, and `direct:mock` as the only agent. Never replace those safeguards or point the driver at a normal Trek process: imported threads can resume real sessions.
+The driver always launches with `TREK_SHOT_DIR`, a throwaway `TREK_DATA_DIR`, imports and notifications off, and `direct:mock` as the only agent; the app signs itself out of `gh` (an empty `GH_CONFIG_DIR` of its own, no GitHub token variables), so nothing it starts acts as the user on GitHub (`signed-out` checks it). Never replace those safeguards or point the driver at a normal Trek process: imported threads can resume real sessions.
 
 On a Mac the isolated app opens on an invisible display of its own, the [Trek Test Display](#test-display-macos): none of its windows is on the owner's screens, and nothing of theirs moves.
 
@@ -36,6 +36,17 @@ On a Mac the isolated app opens on an invisible display of its own, the [Trek Te
 ./.agents/skills/verify-trek/scripts/trek-dev reset --dry-run
 ./.agents/skills/verify-trek/scripts/trek-dev reset --yes
 ```
+
+## Every feature at once
+
+Each feature in `docs/parity/ledger.toml` says how to see it working here (`live`: these commands, ending in what must be on screen), or why an isolated run can't show it (`live_skip`). With the app started, `parity-live` runs them all, or the ones named, and writes a page of what passed:
+
+```sh
+cargo run -p trek-parity --bin parity-live -- --shot-dir <runtime_dir from status>/shot \
+    [--feature dictation]... [--report docs/parity/live-<platform>.md]
+```
+
+It makes a small git project beside the command folder for steps to work in (`{project}` in a step; `{/}` is the path separator), and saves `live-<id>.png` for each feature. Commands written for it: `count <id>[*] <n>+` (n or more), `reveal <id>` (Settings scrolled until it's on screen; `reveal-in <scroller> <id>` for another), `pair-phone [name]|leave` (a stand-in iPhone paired over the real protocol, with a phone server on the loopback alone), and on Windows a real shell in the terminal when the app is started with `TREK_VERIFY_SHELL=1` (no profile, never a command). Checks that ask the system rather than the window: `tray off|on|<state>` (the tray or menu bar icon, as the system has it on screen), `programs <name> <n>` then `programs-ended` (a program under Trek, as `mock:hold` leaves one running through Trek's own executor, gone after Stop), `console-windows mark|new <n>` and `banners mark|new <n>` (Windows: the notification center's own list, the new ones taken away again), `second-launch <link>` (Windows: Trek started again hands it over and exits), `native` and `self-contained`, and `browser crash` (the page's own process ended) with `browser expect crashed|failed[:<address>]|loaded|why:<word>` (`why`: a word in the reason Trek's error page gives). Also `renders mark` then `renders <view> <n>+|<n>-|<=<view>` (how often views drew, as the render tests count; `motion on` first where the system has animations off), `within <id>[*] <id>` (drawn inside another), and on Windows `banner-permission off|restore` (Trek's switch in Windows' notification settings, put back as it was) `file-app <ext> on|off` (a default app of the check's own, which copies what it's given into the data folder) and `cloud-file <abs-path> <text>` (a file that lives only in the cloud, as OneDrive's online-only ones: a placeholder whose data a sync provider of the check's own hands over when Windows asks, after a moment; `cloud-file fetched <n>`, `away` as OneDrive not running, `off`), with `editor has <text>` and `editor note <text>` (the file in front shows it; the preview in front says it). On a Mac, `photos open|shown <0|1>|close`: the system's Photos picker as the + menu opens it, a sheet on Trek's window (as AppKit has it), closed as its Cancel does. On both, `bonjour on|found|off`: the phone server announced on the local network through the system's own responder, under a name of the check's own (`Trek live check`, never the computer's), and found as a phone finds it (resolved through the system's DNS-SD: the server's port, this Trek's id). A check that counts an element below the fold fails: reveal it first; a row's id often carries an index (`tool-group#2`), so count it as `tool-group*`.
 
 Use `--help` after any command for its routes, arguments, dry-run behavior, and examples. `check --quick` is for iteration only: the full check parses shell scripts and runs `bin/agent-cli --selftest`, runs the same Rust package tests as CI, builds the `shots` feature, then launches isolated Trek and captures Basecamp and General Settings.
 

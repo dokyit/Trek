@@ -5,7 +5,9 @@
 .DESCRIPTION
     Uninstalls Trek from the user's computer ($env:LOCALAPPDATA\Programs\Trek by default).
     Terminates running Trek processes, deletes desktop and Start Menu shortcuts,
-    removes the Add/Remove Programs registry entry, and removes the program directory.
+    removes the Add/Remove Programs registry entry and the keys Trek writes for itself
+    (the trek:// link protocol and its notification identity), and removes the program
+    directory.
 
 .PARAMETER InstallDir
     Directory where Trek is installed. Defaults to $env:LOCALAPPDATA\Programs\Trek.
@@ -25,6 +27,30 @@ param (
 )
 
 $ErrorActionPreference = "Continue"
+
+# The keys Trek writes for itself at launch, in the user's classes (crates/trek-app/src/winsys.rs):
+# the trek:// link protocol, while it still opens this install's trek.exe (another Trek the user
+# runs may have taken the links since, and keeps them), and the identity (AppUserModelID) its
+# notifications show under. Nothing outside $Classes is touched; a test passes a key of its own.
+function Remove-TrekKeys([string]$Classes, [string]$Exe) {
+    $protocol = Join-Path $Classes "trek"
+    $command = (Get-ItemProperty -LiteralPath (Join-Path $protocol "shell\open\command") -ErrorAction SilentlyContinue).'(default)'
+    # The command is `"C:\...\trek.exe" --link "%1"`.
+    if ($command -match '^\s*"([^"]+)"') {
+        $registered = $Matches[1]
+        $same = $false
+        try {
+            $same = [string]::Equals([IO.Path]::GetFullPath($registered), [IO.Path]::GetFullPath($Exe), [StringComparison]::OrdinalIgnoreCase)
+        } catch { }
+        if ($same) {
+            Remove-Item -LiteralPath $protocol -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $identity = Join-Path $Classes "AppUserModelId\dev.trek.Trek"
+    if (Test-Path -LiteralPath $identity) {
+        Remove-Item -LiteralPath $identity -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 
 # 1. User confirmation if interactive
 if (-not $Silent -and -not $Force) {
@@ -86,6 +112,7 @@ $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Trek"
 if (Test-Path $uninstallKey) {
     Remove-Item $uninstallKey -Recurse -Force -ErrorAction SilentlyContinue
 }
+Remove-TrekKeys -Classes "HKCU:\Software\Classes" -Exe (Join-Path $InstallDir "trek.exe")
 
 # 6. Delete installation directory
 # The folder may be one the user picked (Documents, C:\Tools...), so remove only the files the

@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 
 /// Where Trek tells `trek-mcp video` to keep what it watches.
 pub const ENV_VIDEO_DIR: &str = "TREK_VIDEO_DIR";
+/// Where Trek tells `trek-mcp video` dictation's speech model is kept, where dictation has a model
+/// of its own (Windows): a transcript without whisper is made with it.
+pub const ENV_DICTATION_DIR: &str = "TREK_DICTATION_DIR";
 /// The manifest's name in each scratch folder.
 pub const MANIFEST: &str = "watch.json";
 /// The tool's name, as the server declares it.

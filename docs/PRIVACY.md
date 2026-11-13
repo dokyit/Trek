@@ -8,7 +8,7 @@ Trek asks once, on the first launch after onboarding (and once for anyone who us
 
 Everything goes to [PostHog](https://posthog.com) (US cloud, `us.i.posthog.com`), through its capture API, from `crates/trek-telemetry`.
 
-Dictation is apart from all of this: on Windows the composer's mic uses Windows' online speech recognition, so what it hears goes to Microsoft's speech service as it does for Windows' own voice typing, and Trek sends it nowhere itself.
+Dictation is apart from all of this. On Windows the composer's mic turns speech into text on the PC itself, with Whisper (whisper.cpp running OpenAI's multilingual base model): what the mic hears never leaves the PC, and Trek sends it nowhere. The first time the mic is clicked, the speech model (141 MB) downloads from Hugging Face (`huggingface.co`, a fixed revision of `ggerganov/whisper.cpp`, checked against its SHA-256 before it's used). That download is the only request dictation makes, and nothing downloads before that click. The model is kept in `%LOCALAPPDATA%\trek\Trek\data\dictation` (the local data folder, which a roaming profile doesn't copy between PCs), and **Settings › General › Dictation** removes it. Agents' `watch_video` uses the same model to transcribe a video's audio on the PC when whisper isn't installed; it never downloads the model itself, and the audio stays on the PC too. A Trek installed as a Windows package would use Windows' online speech recognition instead, and then what the mic hears goes to Microsoft's speech service, as it does for Windows' own voice typing.
 
 ## When nothing is sent
 

@@ -125,6 +125,7 @@ impl Render for IdeStatus {
                 e.lsp_name,
                 e.problem().is_some(),
                 crate::languages::of(&e.path).hard_tabs,
+                e.crlf(cx),
             )
         });
         let preview = self.preview.as_ref().map(|p| p.read(cx).status_items());
@@ -173,12 +174,13 @@ impl Render for IdeStatus {
                     .child(warnings.to_string())
                     .on_click(self.on_workbench(|wb, window, cx| {
                         wb.show_panel(PanelTab::Problems, window, cx)
-                    })),
+                    }))
+                    .test_support(),
             )
             .child(div().flex_1())
             .when_some(
                 editor,
-                |el, ((line, col), lang, lsp, read_only, hard_tabs)| {
+                |el, ((line, col), lang, lsp, read_only, hard_tabs, crlf)| {
                     el.child(
                         Self::item("ide-status-caret", cx).child(format!("Ln {line}, Col {col}")),
                     )
@@ -191,13 +193,18 @@ impl Render for IdeStatus {
                         "Spaces: 4"
                     }))
                     .child(Self::item("ide-status-encoding", cx).child("UTF-8"))
-                    .child(Self::item("ide-status-eol", cx).child("LF"))
+                    .child(
+                        Self::item("ide-status-eol", cx)
+                            .child(if crlf { "CRLF" } else { "LF" })
+                            .test_support(),
+                    )
                     .child(Self::item("ide-status-language", cx).child(lang))
                     .when_some(lsp, |el, name| {
                         el.child(
                             Self::item("ide-status-lsp", cx)
                                 .child(div().text_color(crate::palette::emerald(cx)).child("●"))
-                                .child(name),
+                                .child(name)
+                                .test_support(),
                         )
                     })
                 },

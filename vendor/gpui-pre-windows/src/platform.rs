@@ -787,6 +787,28 @@ impl Platform for WindowsPlatform {
                     .as_ref()
                     .map(|(identifier, name)| (identifier.as_str(), name.as_str())),
                 notification,
+                None,
+            )
+            .log_err();
+    }
+
+    // Trek: a toast that opens its link by protocol activation, which works after the app has
+    // quit (see `toast_document`).
+    fn show_system_notification_with_launch(
+        &self,
+        notification: gpui::SystemNotification,
+        launch: SharedString,
+    ) {
+        let app_identity = self.app_identity.borrow().clone();
+        self.system_notifications
+            .borrow_mut()
+            .show(
+                self.has_package_identity,
+                app_identity
+                    .as_ref()
+                    .map(|(identifier, name)| (identifier.as_str(), name.as_str())),
+                notification,
+                Some(&launch),
             )
             .log_err();
     }

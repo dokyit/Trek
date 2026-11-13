@@ -277,6 +277,10 @@ fn pipes_devices_and_huge_files_open_read_only_without_hanging() {
             cases.push((std::path::PathBuf::from("/dev/zero"), "Not a file"));
         }
         cases.push((big, "Too big"));
+        // A folder (a `trek://edit` link can name one): on both platforms the same message.
+        let folder = trek.project.join("a folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        cases.push((folder, "Not a file"));
         for (path, why) in cases {
             trek.update(cx, |ws, cx| ws.open_editor(path.clone(), None, cx));
             let editor = loaded(&trek, cx).await;
@@ -307,6 +311,61 @@ fn a_deep_link_lands_on_its_line_once_the_file_is_read() {
         });
         let editor = loaded(&trek, cx).await;
         assert_eq!(editor.read_with(cx, |e, cx| e.caret(cx)).0, 3);
+    });
+}
+
+/// A file marked read-only (by a version control that checks files out that way, or by hand) is
+/// saved as on the Mac, where replacing one needs only its folder's permission: its text is the
+/// new one, it's still read-only, and nothing is left beside it. On both platforms.
+#[test]
+fn saving_a_read_only_file_keeps_it_read_only() {
+    run(async |cx| {
+        let trek = open(cx);
+        let file = trek.project.join("locked.txt");
+        std::fs::write(
+            &file, "one
+",
+        )
+        .unwrap();
+        let mut locked = std::fs::metadata(&file).unwrap().permissions();
+        locked.set_readonly(true);
+        std::fs::set_permissions(&file, locked).unwrap();
+        trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
+        let editor = loaded(&trek, cx).await;
+        trek.window(cx, |window, cx| {
+            editor.update(cx, |e, cx| {
+                e.text_state().update(cx, |s, cx| {
+                    s.insert(
+                        "zero
+", window, cx,
+                    )
+                })
+            })
+        });
+        cx.run_until_parked();
+        editor.update(cx, |e, cx| e.save_now(cx));
+        let left: Vec<String> = std::fs::read_dir(&trek.project)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("trek-save"))
+            .collect();
+        assert!(left.is_empty(), "no temporary file left behind: {left:?}");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "zero
+one
+"
+        );
+        assert!(!editor.read_with(cx, |e, _| e.dirty()));
+        assert!(
+            std::fs::metadata(&file).unwrap().permissions().readonly(),
+            "still read-only"
+        );
+        let mut open = std::fs::metadata(&file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        open.set_readonly(false);
+        std::fs::set_permissions(&file, open).unwrap();
     });
 }
 

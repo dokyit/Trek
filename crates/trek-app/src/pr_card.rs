@@ -2460,12 +2460,8 @@ fn ink(cx: &App) -> Ink {
     } else {
         a(0.034, 0.045)
     };
-    // Windows holds grey text on the band and the pills to 4.5:1.
-    let (faint, mono) = if fluent::WINDOWS {
-        (a(0.6, 0.55), a(0.64, 0.62))
-    } else {
-        (a(0.42, 0.45), a(0.52, 0.58))
-    };
+    // Grey text on the band and the pills is held to 4.5:1.
+    let (faint, mono) = (a(0.6, 0.55), a(0.64, 0.62));
     Ink {
         fg,
         muted: theme.muted_foreground,

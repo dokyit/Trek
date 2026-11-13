@@ -123,7 +123,7 @@ impl Phrases {
 
 /// Written without spaces between words or sentences (Chinese and Japanese): phrases in it
 /// follow one another directly.
-fn unspaced(c: char) -> bool {
+pub(crate) fn unspaced(c: char) -> bool {
     matches!(
         c as u32,
         0x3000..=0x30FF // CJK punctuation, hiragana, katakana
@@ -183,6 +183,24 @@ pub enum Problem {
     Stopped,
     /// Anything else, by its code (an HRESULT, or a status that can't be told apart).
     Code(u32),
+    // Trek's on-device engine (`local`):
+    /// The speech model downloads the first time, and the internet couldn't be reached.
+    ModelOffline,
+    /// The speech model's download stopped part of the way: why, in a few words.
+    ModelDownload(String),
+    /// The download finished but wasn't the model (its checksum), so it was deleted.
+    ModelCorrupt,
+    /// No room on the disk for the speech model.
+    NoRoom,
+    /// The speech model is on disk but Whisper couldn't load it, so it was deleted.
+    ModelUnusable,
+    /// Trek doesn't know its data folder, so there's nowhere to keep the model (the app tells
+    /// it at launch: only a build that doesn't would say this).
+    NoDataFolder,
+    /// Whisper failed on the recording: why, in its words.
+    Transcribe(String),
+    /// This processor can't run the on-device engine (it needs AVX2), and there's no other.
+    CantRun,
 }
 
 /// Windows' settings pages for the two switches dictation needs on.
@@ -260,7 +278,34 @@ impl Problem {
             Problem::Unclear => "The sound from the microphone was too poor for Windows to make out.".into(),
             Problem::Stopped => "Windows speech recognition stopped without saying why.".into(),
             Problem::Code(code) => format!("Windows speech recognition failed (error 0x{code:08X})."),
+            Problem::ModelOffline => format!("Dictation runs on {}, but its speech model ({}) downloads the first time, and Trek couldn't reach the internet. Connect, then try again.", WINDOWS.this_computer, super::model::size(&super::model::BASE)),
+            Problem::ModelDownload(why) => format!("The speech model's download stopped ({why}). Try again: it carries on from where it stopped."),
+            Problem::ModelCorrupt => "The speech model didn't download correctly, so it was deleted. Try again to download it afresh.".into(),
+            Problem::NoRoom => format!("There isn't room on {} for dictation's speech model ({}). Free up some space, then try again.", WINDOWS.this_computer, super::model::size(&super::model::BASE)),
+            Problem::ModelUnusable => "Trek couldn't load its speech model, so it was deleted. Try again to download it afresh.".into(),
+            Problem::NoDataFolder => "Dictation has nowhere to keep its speech model.".into(),
+            Problem::Transcribe(why) => format!("Dictation couldn't turn the recording into text ({why})."),
+            Problem::CantRun => match WINDOWS.dictate_fallback {
+                Some(fallback) => format!("This PC's processor can't run Trek's dictation, which needs AVX2. {fallback} with Windows' voice typing instead."),
+                None => "This PC's processor can't run Trek's dictation, which needs AVX2.".into(),
+            },
         }
+    }
+
+    /// What a failed download of the speech model is to the user; `None` for one given up.
+    pub fn fetching(failed: &super::model::Fetch) -> Option<Problem> {
+        use super::model::Fetch;
+        Some(match failed {
+            Fetch::Offline => Problem::ModelOffline,
+            Fetch::Status(status) => {
+                Problem::ModelDownload(format!("the server answered {status}"))
+            }
+            Fetch::Interrupted => Problem::ModelDownload("the connection dropped".into()),
+            Fetch::Corrupt => Problem::ModelCorrupt,
+            Fetch::NoRoom => Problem::NoRoom,
+            Fetch::Disk(why) => Problem::ModelDownload(format!("it couldn't be saved: {why}")),
+            Fetch::Cancelled => return None,
+        })
     }
 
     /// Nothing the user can do about it in Trek (no recognizer, an organization's policy): the
@@ -530,10 +575,67 @@ mod tests {
             Problem::Unclear,
             Problem::Stopped,
             Problem::Code(1),
+            Problem::ModelOffline,
+            Problem::ModelDownload("the connection dropped".into()),
+            Problem::ModelCorrupt,
+            Problem::NoRoom,
+            Problem::ModelUnusable,
+            Problem::NoDataFolder,
+            Problem::Transcribe("failed to encode".into()),
+            Problem::CantRun,
         ] {
             let s = problem.sentence();
             assert!(s.ends_with('.'), "{problem:?}: {s}");
             assert!(!s.contains("Mac") && !s.contains("System Settings"), "{s}");
+        }
+    }
+
+    #[test]
+    fn the_on_device_engines_problems_say_what_to_do() {
+        use super::super::model::Fetch;
+        assert_eq!(
+            Problem::ModelOffline.sentence(),
+            "Dictation runs on this PC, but its speech model (141 MB) downloads the first time, and Trek couldn't reach the internet. Connect, then try again."
+        );
+        assert_eq!(
+            Problem::NoRoom.sentence(),
+            "There isn't room on this PC for dictation's speech model (141 MB). Free up some space, then try again."
+        );
+        assert_eq!(
+            Problem::CantRun.sentence(),
+            "This PC's processor can't run Trek's dictation, which needs AVX2. Press Win+H to dictate with Windows' voice typing instead."
+        );
+        assert_eq!(
+            Problem::fetching(&Fetch::Offline),
+            Some(Problem::ModelOffline)
+        );
+        assert_eq!(
+            Problem::fetching(&Fetch::Status(404)).map(|p| p.sentence()),
+            Some("The speech model's download stopped (the server answered 404). Try again: it carries on from where it stopped.".into())
+        );
+        assert_eq!(
+            Problem::fetching(&Fetch::Interrupted),
+            Some(Problem::ModelDownload("the connection dropped".into()))
+        );
+        assert_eq!(
+            Problem::fetching(&Fetch::Corrupt),
+            Some(Problem::ModelCorrupt)
+        );
+        assert_eq!(Problem::fetching(&Fetch::NoRoom), Some(Problem::NoRoom));
+        assert_eq!(
+            Problem::fetching(&Fetch::Cancelled),
+            None,
+            "given up: nothing to say"
+        );
+        // None of them lasts or opens Settings: each can be tried again.
+        for p in [
+            Problem::ModelOffline,
+            Problem::ModelCorrupt,
+            Problem::NoRoom,
+            Problem::ModelUnusable,
+            Problem::Transcribe("x".into()),
+        ] {
+            assert!(!p.lasting() && p.switch().is_none(), "{p:?}");
         }
     }
 

@@ -562,18 +562,26 @@ fn a_skill_without_a_cli_says_why_no_turn_is_verified() {
     });
 }
 
+/// The CLI as the mock agent types it into its shell: on Windows with the program's path in
+/// backslashes (`.\.agents\…\app.cmd`), as PowerShell and cmd.exe users write it.
+fn typed(cli: &str) -> String {
+    if !cfg!(windows) {
+        return cli.to_string();
+    }
+    match cli.split_once(' ') {
+        Some((program, rest)) => format!("{} {rest}", program.replace('/', "\\")),
+        None => cli.replace('/', "\\"),
+    }
+}
+
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "the mock's verification CLI is a /bin/sh script (trek-agents mock.rs); a Windows one comes with the Phase 2 verification work"
-)]
 fn a_thread_in_a_worktree_verifies_its_own_folder() {
     run(async |cx| {
         let trek = open(cx);
         common::make_repo(&trek, cx);
         let project = trek.project.clone();
         // A skill made in the project folder and not committed yet.
-        let skill = project.join(".agents/skills/verify-app");
+        let skill = project.join(".agents").join("skills").join("verify-app");
         std::fs::create_dir_all(skill.join("scripts")).unwrap();
         std::fs::create_dir_all(skill.join("references/features")).unwrap();
         // Windows has no execute bit: a program is a file with a program's extension (app.cmd).
@@ -641,18 +649,17 @@ fn a_thread_in_a_worktree_verifies_its_own_folder() {
         );
         assert!(
             trek.answers(cx, &id)
-                .contains(&format!("verified it with `{cli} check`")),
+                .contains(&format!("verified it with `{} check`", typed(&cli))),
             "{}",
             trek.answers(cx, &id)
         );
+        let end = last_end(&trek, cx, &id);
+        trek.render(cx);
+        assert!(trek.visible(cx, ("verified", end)));
     });
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "the mock's verification CLI is a /bin/sh script (trek-agents mock.rs); a Windows one comes with the Phase 2 verification work"
-)]
 fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
     run(async |cx| {
         let trek = open(cx);
@@ -706,12 +713,17 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         let v = trek
             .read(cx, |ws, _| ws.verification(&project))
             .expect("recorded");
+        // A batch file on Windows, which has no execute bit; typed there as PowerShell and
+        // cmd.exe users write it, and still read as running the CLI.
+        let cli = if cfg!(windows) {
+            "./.agents/skills/verify-app/scripts/app.cmd"
+        } else {
+            "./.agents/skills/verify-app/scripts/app"
+        };
+        let ran = typed(cli);
         assert_eq!(
             (v.name.as_str(), v.cli.as_deref()),
-            (
-                "verify-app",
-                Some("./.agents/skills/verify-app/scripts/app")
-            )
+            ("verify-app", Some(cli))
         );
         assert!(
             std::path::Path::new(&v.skill)
@@ -742,7 +754,7 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         trek.wait_done(cx, &id, RunState::Idle).await;
         assert!(
             trek.answers(cx, &id)
-                .contains("verified it with `./.agents/skills/verify-app/scripts/app check`"),
+                .contains(&format!("verified it with `{ran} check`")),
             "{}",
             trek.answers(cx, &id)
         );
@@ -762,7 +774,7 @@ fn a_project_s_verification_skill_is_set_up_told_to_agents_and_maintained() {
         assert!(trek.visible(cx, ("verify-failed", end)) && !trek.visible(cx, ("verified", end)));
         assert!(
             trek.answers(cx, &id)
-                .contains("`./.agents/skills/verify-app/scripts/app check` fails")
+                .contains(&format!("`{ran} check` fails"))
         );
         // Fixed, it passes again.
         trek.send(cx, "mock:verify the fix");

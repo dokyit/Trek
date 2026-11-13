@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Session secrets: the user's alone on both platforms.
+trek-private.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -44,8 +46,9 @@ keyring = { version = "3", features = ["windows-native", "linux-native"] }
 [target.'cfg(windows)'.dependencies]
 # Process ids, start times and trees, for `procs`; an update's version from trek.exe's version
 # resource (`update`); an agent's update run as an administrator (`elevated`: ShellExecuteExW,
-# which needs the COM and registry types its structure names).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# which needs the COM and registry types its structure names); a junction a skill keeps in place
+# of a linked folder (`skills`: DeviceIoControl).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # The user and machine PATH, for a GUI launch that has an older one.
 winreg = "0.55"
 # A job object for each version probe (`detect::version_within`): one that doesn't answer ends

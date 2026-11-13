@@ -3,10 +3,15 @@
 //! goes; ✓ (↩) puts it in as typed text, ✕ (esc) drops it. The textarea itself is untouched
 //! until ✓, so a draft put away mid-take never holds words that weren't confirmed.
 //!
+//! Where dictation has to get ready first (Windows' on-device engine downloading its speech model,
+//! the first time), the same row comes up while it does: what's happening and how far it's got,
+//! over a dotted line that fills as it goes, and ✕ to give up.
+//!
 //! The state machine, the preview and the level smoothing here are pure, so tests drive them
 //! without a microphone; `composer.rs` does the effects and `trek-dictate` the audio (macOS's
-//! Speech framework, or Windows' speech recognition).
+//! Speech framework, or Whisper on a Windows PC).
 
+use crate::dictate::Progress;
 use gpui_kit::*;
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -17,8 +22,11 @@ pub enum Phase {
     /// The usual toolbar, with the mic.
     Idle,
     /// The mic was pressed and the system is asked for the mic and speech recognition (macOS's
-    /// prompts; on Windows, its recognizer readied and the mic opened); the mic spins.
+    /// prompts; on Windows, the speech model loaded and the mic opened); the mic spins.
     Asking,
+    /// The ask waits for dictation to get ready (Windows' on-device engine downloading its
+    /// speech model, the first time): the voice row shows how far it's got, and ✕ gives up.
+    Preparing,
     /// The waveform, ✕ and ✓: the take is open and partial text comes in.
     Listening,
     /// ✓ was pressed: the mic is off and the last words are being settled (the ✓ spins).
@@ -39,6 +47,8 @@ pub enum Event {
         value: String,
         cursor: usize,
     },
+    /// While asking: dictation is getting ready, this far along (`dictate::getting_ready`).
+    Preparing(Progress),
     /// The recognizer's best text for the whole take so far.
     Partial(String),
     /// The recognizer is done; this is its text.
@@ -65,6 +75,9 @@ pub struct Effect {
     pub finish: bool,
     /// The take is over: mic off, recognizer cancelled, the waveform gone.
     pub end: bool,
+    /// The ask was given up while dictation got ready: stop that now (`dictate::abandon`), as
+    /// its answer may never come.
+    pub abandon: bool,
     /// Text to put in at the cursor, as if typed.
     pub commit: Option<String>,
     /// A note for the user.
@@ -76,6 +89,9 @@ pub const GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// How often the waveform takes a level and redraws while listening (20 fps).
 pub const TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How often an ask looks at what dictation is getting ready while it waits.
+pub const PREPARING: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Voice mode's state: the phase, the text heard so far, and the levels for the waveform.
 pub struct Voice {
@@ -90,6 +106,8 @@ pub struct Voice {
     pub levels: Levels,
     /// Counts takes, so a permission answer for one already abandoned starts nothing.
     pub take: u64,
+    /// While preparing: how far it's got.
+    pub progress: Option<Progress>,
 }
 
 impl Default for Voice {
@@ -102,14 +120,31 @@ impl Default for Voice {
             cursor: 0,
             levels: Levels::default(),
             take: 0,
+            progress: None,
         }
     }
 }
 
 impl Voice {
-    /// The waveform row is up (rather than the toolbar).
+    /// A take is open: the waveform row is up and the text shows what's heard (rather than the
+    /// toolbar and the editable text).
     pub fn active(&self) -> bool {
         matches!(self.phase, Phase::Listening | Phase::Finishing)
+    }
+
+    /// The voice row is up in place of the toolbar: a take is open, or getting ready.
+    pub fn row(&self) -> bool {
+        self.active() || self.phase == Phase::Preparing
+    }
+
+    /// While preparing, what the row says: "Getting dictation ready: 31 of 141 MB".
+    pub fn preparing(&self) -> Option<String> {
+        let progress = self.progress.filter(|_| self.phase == Phase::Preparing)?;
+        Some(if progress.done >= progress.total {
+            "Getting dictation ready…".to_string()
+        } else {
+            format!("Getting dictation ready: {}", progress.said())
+        })
     }
 
     pub fn step(&mut self, event: Event) -> Effect {
@@ -123,8 +158,14 @@ impl Voice {
                     ..Default::default()
                 }
             }
+            // The ask waits for a download: the row shows it.
+            (Asking | Preparing, Event::Preparing(progress)) => {
+                self.phase = Preparing;
+                self.progress = Some(progress);
+                Effect::default()
+            }
             (
-                Idle | Asking,
+                Idle | Asking | Preparing,
                 Event::Started {
                     live,
                     value,
@@ -132,6 +173,7 @@ impl Voice {
                 },
             ) => {
                 self.phase = Listening;
+                self.progress = None;
                 self.live = live;
                 self.interim.clear();
                 self.cursor = cursor.min(value.len());
@@ -142,8 +184,9 @@ impl Voice {
                 self.levels = Levels::default();
                 Effect::default()
             }
-            (Asking, Event::Failed(why)) => {
+            (Asking | Preparing, Event::Failed(why)) => {
                 self.phase = Idle;
+                self.progress = None;
                 Effect {
                     end: true,
                     toast: Some(why),
@@ -154,6 +197,16 @@ impl Voice {
                 self.phase = Idle;
                 Effect {
                     end: true,
+                    ..Default::default()
+                }
+            }
+            // ✕ while getting ready: the download stops (what came stays for next time).
+            (Preparing, Event::Cancel) => {
+                self.phase = Idle;
+                self.progress = None;
+                Effect {
+                    end: true,
+                    abandon: true,
                     ..Default::default()
                 }
             }
@@ -298,6 +351,53 @@ impl Levels {
     }
 }
 
+/// The waveform's dotted line as a progress bar, while dictation gets ready: solid as far as
+/// it's got (`fraction`, 0 to 1), the waveform's dots after.
+pub fn progress_line(fraction: f32, color: Hsla) -> impl IntoElement {
+    let fraction = if fraction.is_finite() {
+        fraction.clamp(0., 1.)
+    } else {
+        0.
+    };
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let h = f32::from(bounds.size.height);
+            let w = f32::from(bounds.size.width);
+            let left = f32::from(bounds.origin.x);
+            let mid = f32::from(bounds.origin.y) + h / 2.;
+            let done = (w * fraction / PITCH).floor() * PITCH;
+            if done > 0. {
+                window.paint_quad(
+                    fill(
+                        Bounds::new(point(px(left), px(mid - 1.)), size(px(done), px(2.))),
+                        color,
+                    )
+                    // scale: ok, the progress line's ends
+                    .corner_radii(px(1.)),
+                );
+            }
+            // As `waveform` shades a silent slot's dot.
+            let dot = color.opacity(0.45);
+            let mut x = left + done;
+            while x + 2. <= left + w {
+                window.paint_quad(
+                    fill(
+                        Bounds::new(point(px(x), px(mid - 1.)), size(px(2.), px(2.))),
+                        dot,
+                    )
+                    // scale: ok, the waveform's dots
+                    .corner_radii(px(1.)),
+                );
+                x += PITCH;
+            }
+        },
+    )
+    .flex_1()
+    .min_w_0()
+    .h(px(22.))
+}
+
 /// The scrolling bar strip: newest at the right edge, silence as dots, the left end faded.
 pub fn waveform(levels: Vec<f32>, color: Hsla) -> impl IntoElement {
     canvas(
@@ -328,7 +428,10 @@ pub fn waveform(levels: Vec<f32>, color: Hsla) -> impl IntoElement {
                 window.paint_quad(
                     fill(
                         Bounds::new(point(px(x), px(mid - bar / 2.)), size(px(2.), px(bar))),
-                        shade.opacity(shade.a * alpha),
+                        // `opacity` multiplies: a dot is 0.45 of the colour, as the design
+                        // draws it (multiplying by its own alpha again left it at 0.2, a line
+                        // barely there).
+                        shade.opacity(alpha),
                     )
                     // scale: ok, the waveform's bars
                     .corner_radii(px(1.)),

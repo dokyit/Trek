@@ -1218,13 +1218,9 @@ pub fn slash_ghost_overlay<H: PickerHost>(host: &H, cx: &App) -> Option<AnyEleme
                 };
                 let bounds = s.input_bounds();
                 let origin = point(
-                    // Windows sets it against the typed text: past the caret's width the two read
-                    // as separate words, where the design draws one.
-                    if fluent::WINDOWS {
-                        caret.left()
-                    } else {
-                        caret.right()
-                    },
+                    // Against the typed text: past the caret's width the two read as separate
+                    // words, where the design draws one.
+                    caret.left(),
                     caret.top() - (height - caret.size.height) / 2. + s.scroll_offset().y,
                 );
                 let run = TextRun {

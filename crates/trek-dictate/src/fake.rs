@@ -6,9 +6,11 @@
 //!
 //! The fake opens the mic as Windows does: on an ask that's allowed (`ensure_permission`), so a
 //! take given up before it starts must be abandoned (`abandon`), and `mic_open` tells whether
-//! anything still holds it.
+//! anything still holds it. An ask can wait the way Windows' on-device engine's first one waits
+//! for its speech model (`hold`, with `getting_ready` saying how far the download has got), and
+//! abandoning it gives it up, as the engine stops the download.
 
-use crate::{Access, Heard};
+use crate::{Access, Heard, Progress};
 use async_channel::Sender;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -33,11 +35,15 @@ struct State {
     asked: usize,
     takes: usize,
     abandoned: usize,
+    /// Times the system's own dictation was asked to open.
+    system_opened: usize,
     /// The take alive now, and whether ✓ stopped its mic.
     alive: bool,
     finished: bool,
     heard: Option<Sender<Heard>>,
     level: f32,
+    /// A download the asks wait for, and how far it has got.
+    progress: Option<Progress>,
 }
 
 /// The fake for this thread, while it lives.
@@ -57,10 +63,12 @@ pub fn install() -> Fake {
         asked: 0,
         takes: 0,
         abandoned: 0,
+        system_opened: 0,
         alive: false,
         finished: false,
         heard: None,
         level: 0.,
+        progress: None,
     }));
     FAKE.with(|f| *f.borrow_mut() = Some(state.clone()));
     Fake(state)
@@ -127,6 +135,16 @@ impl Fake {
         self.0.borrow_mut().level = level;
     }
 
+    /// A download the held asks wait for has got this far (`None`: there's none).
+    pub fn downloading(&self, progress: Option<Progress>) {
+        self.0.borrow_mut().progress = progress;
+    }
+
+    /// Asks waiting to be answered.
+    pub fn waiting(&self) -> usize {
+        self.0.borrow().pending.len()
+    }
+
     /// A take is open and its mic hasn't been stopped by ✓.
     pub fn listening(&self) -> bool {
         let s = self.0.borrow();
@@ -156,6 +174,11 @@ impl Fake {
     /// Asks given up before their take started.
     pub fn abandoned(&self) -> usize {
         self.0.borrow().abandoned
+    }
+
+    /// Times the mic asked for the system's own dictation (Windows' voice typing) to open.
+    pub fn system_opened(&self) -> usize {
+        self.0.borrow().system_opened
     }
 }
 
@@ -224,12 +247,44 @@ pub(crate) fn start(heard: Sender<Heard>) -> Result<Take, String> {
     Ok(Take(state))
 }
 
+pub(crate) fn open_system_dictation() -> bool {
+    if let Some(state) = installed() {
+        state.borrow_mut().system_opened += 1;
+    }
+    false
+}
+
+/// An ask still waiting is given up (its answer never comes, and with none left waiting the
+/// download stops); otherwise the mic an allowed ask opened is let go of.
 pub(crate) fn abandon() {
     if let Some(state) = installed() {
         let mut s = state.borrow_mut();
         s.abandoned += 1;
-        s.readied = s.readied.saturating_sub(1);
+        if s.pending.is_empty() {
+            s.readied = s.readied.saturating_sub(1);
+        } else {
+            s.pending.remove(0);
+            if s.pending.is_empty() {
+                s.progress = None;
+            }
+        }
     }
+}
+
+pub(crate) fn tip() -> &'static str {
+    crate::DICTATE
+}
+
+pub(crate) fn getting_ready() -> Option<Progress> {
+    installed().and_then(|s| s.borrow().progress)
+}
+
+pub(crate) fn model() -> Option<crate::Model> {
+    None
+}
+
+pub(crate) fn remove_model() -> Result<(), String> {
+    Ok(())
 }
 
 pub(crate) fn mic_access() -> Access {
@@ -263,6 +318,10 @@ impl Take {
 
     pub fn finish(&mut self) {
         self.0.borrow_mut().finished = true;
+    }
+
+    pub fn grace(&self) -> std::time::Duration {
+        crate::GRACE
     }
 }
 
@@ -324,6 +383,34 @@ mod tests {
         assert_eq!(answer.try_recv().unwrap(), Ok(()));
         assert!(fake.mic_open());
         crate::abandon();
+        assert!(!fake.mic_open());
+        assert_eq!(fake.abandoned(), 1);
+    }
+
+    #[test]
+    fn an_ask_waiting_on_a_download_is_given_up_by_abandoning_it() {
+        let fake = install();
+        fake.hold();
+        let ten = Progress {
+            done: 10,
+            total: 100,
+        };
+        fake.downloading(Some(ten));
+        let (reply, answer) = async_channel::bounded(1);
+        crate::ensure_permission(reply);
+        assert_eq!(crate::getting_ready(), Some(ten));
+        assert_eq!(fake.waiting(), 1);
+        crate::abandon();
+        assert_eq!(fake.waiting(), 0);
+        assert_eq!(
+            crate::getting_ready(),
+            None,
+            "nothing waits: the download stops"
+        );
+        assert!(
+            answer.try_recv().is_err() && answer.is_closed(),
+            "its answer never comes"
+        );
         assert!(!fake.mic_open());
         assert_eq!(fake.abandoned(), 1);
     }

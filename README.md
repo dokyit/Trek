@@ -253,7 +253,7 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 
 ## Build from source
 
-macOS needs full Xcode (GPUI compiles Metal shaders); Windows needs Visual Studio 2022 Build Tools (C++) and the Windows SDK. Rust comes from [`rust-toolchain.toml`](rust-toolchain.toml).
+macOS needs full Xcode (GPUI compiles Metal shaders); Windows needs Visual Studio 2022 Build Tools (C++), the Windows SDK, CMake and LLVM (dictation's whisper.cpp is built from source, and its bindings need libclang). Rust comes from [`rust-toolchain.toml`](rust-toolchain.toml).
 
 ```sh
 git clone https://github.com/dokyit/Trek && cd Trek

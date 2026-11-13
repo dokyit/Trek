@@ -109,6 +109,11 @@ jobs:
       - name: Test (workspace, except trek-app)
         run: cargo test --config "$CI_PROFILE" --workspace --exclude trek-app --locked --no-fail-fast
 
+      # The iPhone's screen and taps through CoreDevice (trek-phone's `coredevice` feature, the
+      # `pc_screen` example): built here, as a test run leaves out an example whose feature is off.
+      - name: Build the CoreDevice example (trek-phone)
+        run: cargo build --config "$CI_PROFILE" -p trek-phone --features coredevice --example pc_screen --locked
+
       # trek-app's doc tests: what `cargo test -p trek-app` ran last. Here rather than in a trek-app
       # job: a `--doc` run resolves features apart from the test targets (it compiles a graph of
       # its own), and this job has the time.
@@ -220,9 +225,12 @@ jobs:
           }
 
       # Assertions over the release-manifest merge the Windows release runs (the step above
-      # only checks syntax).
+      # only checks syntax), and over the uninstallers' clean-up of Trek's registry keys (run
+      # against throwaway keys of the test's own).
       - name: Script tests
-        run: script\tests\release-manifest.Tests.ps1
+        run: |
+          script\tests\release-manifest.Tests.ps1
+          script\tests\uninstall-keys.Tests.ps1
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -257,6 +265,11 @@ jobs:
         run: cargo test --config $env:CI_PROFILE --workspace --exclude trek-app --locked --no-fail-fast
         env:
           TREK_QUIET_SPAWNS_CONTROL: "1"
+
+      # The iPhone's screen and taps through CoreDevice (trek-phone's `coredevice` feature, the
+      # `pc_screen` example): built here, as a test run leaves out an example whose feature is off.
+      - name: Build the CoreDevice example (trek-phone)
+        run: cargo build --config $env:CI_PROFILE -p trek-phone --features coredevice --example pc_screen --locked
 
       - name: Cache contents
         if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'
@@ -396,6 +409,11 @@ jobs:
       - name: Clippy (workspace lib and bins)
         run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
 
+      # The capture build (`--features shots`: the verify driver's screenshots and `control` verbs)
+      # is built by no test, so a change could break it unnoticed until someone verifies a screen.
+      - name: Check the capture build
+        run: cargo check -p trek-app --features shots --locked
+
       # Intel Macs get a build of their own at release (`release.yml`'s `intel` job): a change that
       # only breaks that target is caught here, not at release time. A check, not a build, and in
       # a target folder of its own so the Apple-silicon cache above stays as it is.
@@ -461,6 +479,11 @@ jobs:
 
       - name: Clippy (workspace lib and bins)
         run: cargo clippy --workspace --lib --bins --locked -- -A clippy::all -D clippy::correctness -D clippy::suspicious
+
+      # The capture build, as on the Mac: the Windows driver's screenshots and verbs (`dictate`,
+      # `dictate-file`, the iPhone tool) are only built with it.
+      - name: Check the capture build
+        run: cargo check -p trek-app --features shots --locked
 
       - name: Cache contents
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'

@@ -420,20 +420,9 @@ pub fn open_in_items(mut menu: PopupMenu, dir: PathBuf) -> PopupMenu {
         }
         return menu;
     }
-    let apps = [
-        (crate::words::words().file_manager, "Finder"), // words: ok, the app's own name for `open -a`
-        ("Terminal", "Terminal"),
-        ("Ghostty", "Ghostty"),
-        ("Zed", "Zed"),
-        ("Cursor", "Cursor"),
-        ("VS Code", "Visual Studio Code"),
-        ("Xcode", "Xcode"),
-    ]
-    .into_iter()
-    .filter(|(_, app)| {
-        matches!(*app, "Finder" | "Terminal") // words: ok
-            || std::path::Path::new(&format!("/Applications/{app}.app")).exists()
-    });
+    // The file manager, then the apps this Mac has (one list for both Open in menus).
+    let apps = std::iter::once((crate::words::words().file_manager, "Finder")) // words: ok, the app's own name for `open -a`
+        .chain(trek_core::open_in::mac_apps());
     for (label, app) in apps {
         let dir = dir.clone();
         menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, _| {

@@ -322,12 +322,10 @@ fn a_secret_goes_to_a_private_file_and_the_agent_only_gets_the_path() {
             .and_then(|r| r.split(". Its value").next())
             .expect("a path");
         assert_eq!(std::fs::read_to_string(path).unwrap(), value);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
+        assert!(
+            trek_private::is_private(std::path::Path::new(path)).unwrap(),
+            "the user's alone, on both platforms"
+        );
         nowhere_in_the_thread(&trek, cx, &id, value);
         let noted = trek
             .items(cx, &id)

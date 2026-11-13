@@ -1,0 +1,300 @@
+name: Live
+
+# Every feature in docs/parity/ledger.toml with live steps, run in the capture build (an isolated
+# Trek driven by commands, `crates/trek-app/src/shots.rs`) on a Mac and on a PC: the same steps on
+# both, so a feature that works on one and not the other fails here, rather than being found by a
+# user. `cargo run -p trek-parity --bin parity-live` runs them (it's what a developer runs against
+# their own capture build); each job writes its report to the run's summary and keeps it, every
+# feature's screenshot and the app's log as artifacts.
+on:
+  pull_request:
+    paths-ignore: ['media/**', 'ios/**', 'assets/brand/**']
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  live-macos:
+    name: Live (macOS)
+    runs-on: macos-15
+    # A pull request builds the app cold until main has saved this workflow's cache.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustfmt: Format Document runs it on a Rust file; rust-analyzer: the editor's language server.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+          components: rustfmt, rust-analyzer
+
+      - name: Cache key
+        id: key
+        run: python3 script/ci-cache.py key live
+
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python3 script/ci-cache.py restore
+
+      - name: Metal toolchain
+        run: |
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+
+      # The mock agent's video makes its clip with ffmpeg.
+      - name: ffmpeg
+        run: command -v ffmpeg || brew install ffmpeg
+
+      # The capture build in the log (its time, and any error) before the driver starts the app; the
+      # driver's own build then finds it done. It builds into target/shots: the shots feature
+      # changes the whole GPUI stack's fingerprints.
+      - name: Build the capture build
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/shots
+        run: cargo build --locked -p trek-app --features shots
+
+      # Computer use by element reads another app through Trek's own computer tools (`trek-mcp
+      # computer`), as an agent does: built here and named to the app. It reads the Accessibility
+      # tree, which only a process the user allowed may read: allowed here, on CI's own Mac, for
+      # trek-mcp and for the capture build that starts it (the one macOS holds responsible).
+      - name: Computer use's trek-mcp, allowed Accessibility
+        continue-on-error: true
+        run: |
+          cargo build --locked -p trek-mcp
+          echo "TREK_MCP_BIN=$PWD/target/debug/trek-mcp" >> "$GITHUB_ENV"
+          runtime=$(./.agents/skills/verify-trek/scripts/trek-dev status | python3 -c 'import json, sys; print(json.load(sys.stdin)["runtime_dir"])')
+          for client in "$PWD/target/debug/trek-mcp" "$runtime/bin/trek"; do
+            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$client', 1, 2, 4, 1, 0, CAST(strftime('%s','now') AS INTEGER));" \
+              && echo "Accessibility allowed: $client"
+          done
+
+      # Its output to a file: the app it starts would hold the step's own open otherwise. The mic
+      # and Study's Talk show as in the installed app: an unbundled build hides them unless told
+      # (`TREK_DICTATE=1`; a tap then says it's the installed app's to ask for the microphone).
+      - name: Start the capture build
+        env:
+          TREK_DICTATE: '1'
+        run: |
+          ./.agents/skills/verify-trek/scripts/trek-dev start > start.json 2>&1 < /dev/null || { cat start.json; exit 1; }
+          cat start.json
+
+      - name: Live checks
+        run: |
+          runtime=$(./.agents/skills/verify-trek/scripts/trek-dev status | python3 -c 'import json, sys; print(json.load(sys.stdin)["runtime_dir"])')
+          echo "RUNTIME=$runtime" >> "$GITHUB_ENV"
+          cargo build -p trek-parity --bin parity-live --locked
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$runtime/shot" --report live-macos.md --ci
+
+      - name: Report
+        if: always()
+        run: |
+          if [ -f live-macos.md ]; then cat live-macos.md >> "$GITHUB_STEP_SUMMARY"; fi
+          ./.agents/skills/verify-trek/scripts/trek-dev stop > /dev/null 2>&1 || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-macos
+          path: |
+            live-macos.md
+            start.json
+            ${{ env.RUNTIME }}/shot/live-*.png
+            ${{ env.RUNTIME }}/trek.log
+          if-no-files-found: warn
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python3 script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+
+  live-windows:
+    name: Live (Windows)
+    runs-on: windows-2022
+    # A pull request builds the app cold until main has saved this workflow's cache.
+    timeout-minutes: 120
+    # As the test jobs link (ci.yml): faster than link.exe for an app this size.
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld.exe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      # rustfmt: Format Document runs it on a Rust file; rust-analyzer: the editor's language server.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+          components: rustfmt, rust-analyzer
+
+      - name: Cache key
+        id: key
+        run: python script/ci-cache.py key live
+
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: ${{ steps.key.outputs.restore }}
+
+      - name: Cache freshness
+        run: python script/ci-cache.py restore
+
+      # The mock agent's video makes its clip with ffmpeg.
+      - name: ffmpeg
+        run: if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { choco install ffmpeg -y --no-progress }
+
+      # The capture build in the log (its time, and any error) before the driver starts the app; the
+      # driver's own build then finds it done.
+      - name: Build the capture build
+        run: cargo build --locked -p trek-app --features shots
+
+      # The runner's screen is 1024×768, where the app's 1280-wide window can't fit: Trek narrows
+      # and folds away the hub column (it needs 916 points beside the sidebar), and the checks
+      # that look in it fail. A screen the size people use, the first mode the display takes.
+      - name: Screen
+        continue-on-error: true
+        run: |
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class TrekScreen {
+              [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+              public struct DEVMODE {
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+                  public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+                  public int dmFields, dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+                  public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+                  public short dmLogPixels;
+                  public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+                  public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2;
+                  public int dmPanningWidth, dmPanningHeight;
+              }
+              [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+              static extern int EnumDisplaySettings(string device, int mode, ref DEVMODE dm);
+              [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+              static extern int ChangeDisplaySettings(ref DEVMODE dm, int flags);
+              public static int Set(int width, int height) {
+                  var dm = new DEVMODE();
+                  dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+                  if (EnumDisplaySettings(null, -1, ref dm) == 0) return -100;
+                  dm.dmPelsWidth = width;
+                  dm.dmPelsHeight = height;
+                  dm.dmFields = 0x80000 | 0x100000;
+                  return ChangeDisplaySettings(ref dm, 0);
+              }
+          }
+          '@
+          foreach ($mode in @(@(1920, 1080), @(1680, 1050), @(1600, 900), @(1440, 900), @(1280, 1024))) {
+              $result = [TrekScreen]::Set($mode[0], $mode[1])
+              "$($mode[0])x$($mode[1]): $result"
+              if ($result -eq 0) { break }
+          }
+          Add-Type -AssemblyName System.Windows.Forms
+          "The screen: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds)"
+
+      # Computer use by element reads another app through Trek's own computer tools (`trek-mcp
+      # computer`), as an agent does: built here, and named to the app.
+      - name: Build trek-mcp
+        run: |
+          cargo build --locked -p trek-mcp
+          "TREK_MCP_BIN=$((Get-Location).Path)\target\debug\trek-mcp.exe" >> $env:GITHUB_ENV
+
+      # The driver starts the app through the shell, handing it none of the step's handles, so the
+      # step ends once the app answers (an app holding the step's output pipe kept it waiting
+      # until the job ran out of time). Its JSON goes to a file, kept with the artifacts.
+      - name: Start the capture build
+        run: |
+          pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 start *> start.json
+          Get-Content start.json
+          if (-not (Select-String -Path start.json -Pattern '"running": true' -Quiet)) { exit 1 }
+
+      # The runner's Windows has no HEIF or HEVC codec (Microsoft's HEIF and HEVC Video
+      # Extensions): no HEIC photo can be made there to attach. And it's Windows Server, which has
+      # no share window: Windows asks an app for nothing to share there.
+      - name: Live checks
+        run: |
+          $status = pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 status | ConvertFrom-Json
+          "RUNTIME=$($status.runtime_dir)" >> $env:GITHUB_ENV
+          cargo build -p trek-parity --bin parity-live --locked
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$($status.runtime_dir)\shot" --report live-windows.md --ci --skip "heic-photos=the runner's Windows has no HEIF or HEVC codec" --skip "share-sheet=the runner's Windows Server has no share window (its steps pass on Windows 11: the ledger's note)"
+          exit $LASTEXITCODE
+
+      - name: Report
+        if: always()
+        run: |
+          if (Test-Path live-windows.md) { Get-Content live-windows.md | Add-Content $env:GITHUB_STEP_SUMMARY }
+          pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 stop *> $null
+          # Into the workspace: the runtime is on C: and the checkout on D:, and an artifact's files
+          # need a folder in common.
+          New-Item -ItemType Directory -Force live-files | Out-Null
+          if ($env:RUNTIME) { Copy-Item "$env:RUNTIME/shot/live-*.png", "$env:RUNTIME/trek.log" live-files -ErrorAction SilentlyContinue }
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-windows
+          path: |
+            live-windows.md
+            start.json
+            live-files/
+          if-no-files-found: warn
+
+      - name: Cache contents
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        run: python script/ci-cache.py prune
+
+      - uses: actions/cache/save@v4
+        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.key.outputs.key }}

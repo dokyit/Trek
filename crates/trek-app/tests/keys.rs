@@ -22,12 +22,12 @@ fn the_palette_opens_with_the_platforms_own_keys() {
     });
 }
 
-/// Ctrl+K itself, as a Windows keyboard sends it (no ⌘ there).
-#[cfg(windows)]
+/// Ctrl+K itself, as a Windows keyboard sends it (no ⌘ there). Windows' keys are bound on both
+/// platforms' runners (`with_mac(false, …)`), so the Mac's CI checks them too.
 #[test]
 fn ctrl_k_opens_the_palette_on_windows() {
     run(async |cx| {
-        let trek = open(cx);
+        let trek = keys::with_mac(false, || open(cx));
         trek.press(cx, "ctrl-k");
         trek.render(cx);
         assert!(trek.visible(cx, "palette"));
@@ -39,12 +39,12 @@ fn ctrl_k_opens_the_palette_on_windows() {
     });
 }
 
-/// On Windows, Alt+Shift+E (not Ctrl+Alt+E, which is AltGr on many layouts) switches Agents and Editor.
-#[cfg(windows)]
+/// On Windows, Alt+Shift+E (not Ctrl+Alt+E, which is AltGr on many layouts) switches Agents and
+/// Editor. Bound as Windows binds it, on both platforms' runners.
 #[test]
 fn alt_shift_e_switches_to_the_editor_on_windows() {
     run(async |cx| {
-        let trek = open(cx);
+        let trek = keys::with_mac(false, || open(cx));
         assert!(!trek.read(cx, |ws, _| ws.ide()));
         trek.press(cx, "ctrl-alt-e");
         assert!(
@@ -56,11 +56,14 @@ fn alt_shift_e_switches_to_the_editor_on_windows() {
     });
 }
 
-/// Windows has no Hide and no Minimize shortcut: nothing is bound to the Mac's keys for them.
-#[cfg(windows)]
+/// Windows has no Hide and no Minimize shortcut: nothing is bound to the Mac's keys for them,
+/// and the Mac keeps its own. Read for both platforms on either.
 #[test]
 fn windows_has_no_hide_or_minimize_keys() {
-    assert!(keys::hint(Id::HideApp).is_empty() && keys::hint(Id::Minimize).is_empty());
+    assert!(keys::hint_for(Id::HideApp, false).is_empty());
+    assert!(keys::hint_for(Id::Minimize, false).is_empty());
+    assert!(!keys::hint_for(Id::HideApp, true).is_empty());
+    assert!(!keys::hint_for(Id::Minimize, true).is_empty());
 }
 
 /// The page draws the table's rows (the ones on the first screen; the rest scroll).

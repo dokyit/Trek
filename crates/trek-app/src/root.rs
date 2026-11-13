@@ -986,7 +986,7 @@ impl WindowTitle {
 
 impl Render for WindowTitle {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("WindowTitle");
         if self.workspace.read(cx).ide() {
             return self.render_editor(cx);
@@ -1371,7 +1371,8 @@ pub fn show_palette(workspace: Entity<Workspace>, cx: &mut App) {
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     // A click on one of Trek's banners opens its thread. GPUI keeps one handler for the app,
     // which replaces GPUI Kit's own; that one only serves toasts delivered to the system as
-    // well, and Trek posts none (see `attention`).
+    // well, and Trek posts none (see `attention`). A Windows banner with a link opens it by
+    // starting Trek on it instead (`banner_link`), and the link reveals the thread as this does.
     let ws = workspace.downgrade();
     cx.on_system_notification_response(move |response, cx| {
         let Some(thread) = attention_thread(&response.tag) else {
@@ -1425,6 +1426,17 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
 /// as closing the Mac's window lets agents carry on; or quit now, stopping it.
 pub fn close_main(window: &mut Window, cx: &mut App) {
     let ws = crate::workspace::workspace_global(cx);
+    // Kept in the tray, its icon there to bring the window back: the windows close and Trek stays
+    // up whatever is at work, as a Mac's does in the Dock.
+    let stays = {
+        let settings = &ws.read(cx).settings;
+        settings.general.stay_in_tray && settings.notifications.menu_bar_icon
+    };
+    if stays {
+        // Once the window's own update is over: inside it, the window can't be closed.
+        cx.defer(|cx| keep_working(STAY, cx));
+        return;
+    }
     let (titles, updating) = {
         let ws = ws.read(cx);
         let titles: Vec<String> = ws
@@ -1514,17 +1526,26 @@ impl Global for InBackground {}
 /// saying they're done can still bring a thread back (a click on one reaches a Trek that runs).
 pub const BACKGROUND_GRACE: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// How long a Trek kept in the tray (`general.stay_in_tray`) waits once nothing is at work before
+/// it quits: for ever. The tray's Quit, or the Quit command, ends it.
+pub const STAY: std::time::Duration = std::time::Duration::MAX;
+
 /// How often a Trek working in the background looks to see whether it's done.
 const BACKGROUND_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Close Trek's windows and let its agents finish: it quits once nothing has been at work for
-/// `grace`, unless a window of its opens meanwhile (a launch of Trek, a banner clicked).
+/// `grace` (never, for `STAY`), unless a window of its opens meanwhile (a launch of Trek, a banner
+/// clicked, the tray icon).
 pub fn keep_working(grace: std::time::Duration, cx: &mut App) {
     static TIMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let this = TIMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     cx.set_global(InBackground(this));
     for window in cx.windows() {
         let _ = window.update(cx, |_, window, _| window.remove_window());
+    }
+    // In the tray for good: nothing to watch for.
+    if grace == STAY {
+        return;
     }
     cx.spawn(async move |cx| {
         let mut idle_since: Option<std::time::Instant> = None;
@@ -1673,12 +1694,16 @@ fn attention(
         register_toast_identity();
         // Posted by Trek rather than through a toast's system delivery, so it goes out with no
         // window open too, and its tag says which thread to open when it's clicked.
-        cx.show_system_notification(SystemNotification {
+        let banner = SystemNotification {
             tag: attention_tag(thread),
             title: message.clone().into(),
             body: SharedString::default(),
             actions: Vec::new(),
-        });
+        };
+        match banner_link(thread) {
+            Some(link) => cx.show_system_notification_with_launch(banner, link),
+            None => cx.show_system_notification(banner),
+        }
     }
     if alert.toast {
         let Some(target) = notice_window(workspace, front, cx) else {
@@ -1741,13 +1766,30 @@ fn register_toast_identity() {
 const ATTENTION_TAG: &str = "trek-attention-";
 
 /// The system notification tag for an alert about `thread`; a newer alert replaces an older one.
-fn attention_tag(thread: &str) -> SharedString {
+pub(crate) fn attention_tag(thread: &str) -> SharedString {
     format!("{ATTENTION_TAG}{thread}").into()
 }
 
 /// The thread a banner Trek posted is about.
 fn attention_thread(tag: &str) -> Option<&str> {
     tag.strip_prefix(ATTENTION_TAG).filter(|id| !id.is_empty())
+}
+
+/// What a banner about `thread` opens when it's clicked, on Windows: its `trek://` link, which
+/// Windows hands to Trek however things stand then. Trek running, the launch it makes passes the
+/// link to it (`single_instance`); Trek quit (it does, once the work it kept going for is done),
+/// the launch is Trek, which opens on the thread. Without one, a click reaches only the Trek that
+/// posted the banner, while it runs (`init`'s handler).
+///
+/// Only from the Trek the links open (`winsys::owns_links`): a trial build's or a test's banner
+/// would open the user's own Trek. None on macOS, whose banners go as they did.
+fn banner_link(thread: &str) -> Option<String> {
+    #[cfg(windows)]
+    if crate::winsys::owns_links() {
+        return Some(crate::thread_menu::link(thread));
+    }
+    let _ = thread;
+    None
 }
 
 /// Bring `thread` on screen: its own window if it has one, else the main window (reopened if
@@ -1943,7 +1985,7 @@ impl TrekWindow {
 
 impl Render for TrekWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("TrekWindow");
         crate::perf::frame_begins();
         crate::chrome::let_go_of_hover(window, cx);

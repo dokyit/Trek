@@ -854,6 +854,10 @@ pub struct General {
     /// Give new threads a short title with a small, fast model after the first message.
     pub auto_title: bool,
     pub prevent_sleep_while_running: bool,
+    /// Where closing the main window would end Trek (Windows, with no Dock to keep it up): keep it
+    /// running in the tray instead, as a Mac's stays in the Dock (`root::close_main`). Its tray
+    /// icon (`notifications.menu_bar_icon`) brings the window back, so it needs that on.
+    pub stay_in_tray: bool,
     /// Favorite models as `agent-key/model-id`.
     pub favorite_models: Vec<String>,
     /// What a thread does when its agent hits a usage limit.
@@ -888,6 +892,7 @@ impl Default for General {
             send_with_cmd_enter: false,
             auto_title: true,
             prevent_sleep_while_running: true,
+            stay_in_tray: false,
             favorite_models: vec![],
             on_usage_limit: OnUsageLimit::Ask,
             continue_on_other_account: false,
@@ -1119,6 +1124,9 @@ pub struct Updates {
     pub seen_notes: String,
     /// Look for new versions of the agent CLIs (`agent_update`) at launch and every 12 hours.
     pub check_agents: bool,
+    /// Windows: update the installed Trek while it's closed, every half hour while the user is
+    /// signed in (a scheduled task runs `trek-mcp win-update`: `update::closed::task`).
+    pub while_closed: bool,
 }
 
 impl Default for Updates {
@@ -1130,6 +1138,7 @@ impl Default for Updates {
             feed_url: crate::update::OFFICIAL_FEED.into(),
             seen_notes: String::new(),
             check_agents: true,
+            while_closed: false,
         }
     }
 }

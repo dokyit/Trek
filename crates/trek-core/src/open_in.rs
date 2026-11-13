@@ -45,9 +45,10 @@ struct Spec {
     path_first: bool,
 }
 
-/// In the order the Mac's menu has them (after the file manager): Terminal, then Zed, Cursor and
-/// VS Code. Ghostty and Xcode are Mac programs.
-const SPECS: [Spec; 4] = [
+/// In the order the Mac's menu has them (after the file manager): Terminal, then Zed, Cursor, VS
+/// Code and the JetBrains IDEs (JetBrains Toolbox puts a script for each on the PATH: `idea.cmd`),
+/// then Visual Studio. Ghostty and Xcode are Mac programs.
+const SPECS: [Spec; 12] = [
     Spec {
         label: "Windows Terminal",
         exe: "wt.exe",
@@ -76,11 +77,112 @@ const SPECS: [Spec; 4] = [
         terminal: false,
         path_first: false,
     },
+    Spec {
+        label: "IntelliJ IDEA",
+        exe: "idea64.exe",
+        command: "idea",
+        terminal: false,
+        path_first: false,
+    },
+    Spec {
+        label: "PyCharm",
+        exe: "pycharm64.exe",
+        command: "pycharm",
+        terminal: false,
+        path_first: false,
+    },
+    Spec {
+        label: "WebStorm",
+        exe: "webstorm64.exe",
+        command: "webstorm",
+        terminal: false,
+        path_first: false,
+    },
+    Spec {
+        label: "Rider",
+        exe: "rider64.exe",
+        command: "rider",
+        terminal: false,
+        path_first: false,
+    },
+    Spec {
+        label: "GoLand",
+        exe: "goland64.exe",
+        command: "goland",
+        terminal: false,
+        path_first: false,
+    },
+    Spec {
+        label: "CLion",
+        exe: "clion64.exe",
+        command: "clion",
+        terminal: false,
+        path_first: false,
+    },
+    Spec {
+        label: "RustRover",
+        exe: "rustrover64.exe",
+        command: "rustrover",
+        terminal: false,
+        path_first: false,
+    },
+    Spec {
+        label: "Visual Studio",
+        exe: "devenv.exe",
+        command: "devenv",
+        terminal: false,
+        path_first: false,
+    },
 ];
 
 /// How many folders up from a `.cmd`'s own to look for the editor's exe: VS Code's `code.cmd` is in
 /// `<root>\bin`, Cursor's in `<root>\resources\app\bin`.
 const ROOT_SEARCH: usize = 4;
+
+/// The Mac's Open in apps after the file manager, in its menu's order: the label and the app's name
+/// for `open -a`. One list for every Open in menu.
+pub const MAC_APPS: &[(&str, &str)] = &[
+    ("Terminal", "Terminal"),
+    ("Ghostty", "Ghostty"),
+    ("Zed", "Zed"),
+    ("Cursor", "Cursor"),
+    ("VS Code", "Visual Studio Code"),
+    ("IntelliJ IDEA", "IntelliJ IDEA"),
+    ("PyCharm", "PyCharm"),
+    ("WebStorm", "WebStorm"),
+    ("Rider", "Rider"),
+    ("GoLand", "GoLand"),
+    ("CLion", "CLion"),
+    ("RustRover", "RustRover"),
+    ("Xcode", "Xcode"),
+];
+
+/// Those of `MAC_APPS` this Mac has: Terminal always (it comes with macOS), the rest when installed.
+pub fn mac_apps() -> Vec<(&'static str, &'static str)> {
+    MAC_APPS
+        .iter()
+        .copied()
+        .filter(|(_, app)| *app == "Terminal" || mac_app_installed(app))
+        .collect()
+}
+
+/// Whether the Mac app `name` (`Zed`, `Visual Studio Code`) is installed where `open -a` finds
+/// one: /Applications, or the user's own ~/Applications (JetBrains Toolbox puts its IDEs there,
+/// and an app dragged in without an administrator's password goes there too).
+pub fn mac_app_installed(name: &str) -> bool {
+    mac_app_installed_in(name, &crate::paths::home(), |p| p.exists())
+}
+
+/// `mac_app_installed` with the home folder and the lookup given, for tests on either platform.
+pub fn mac_app_installed_in(name: &str, home: &Path, exists: impl Fn(&Path) -> bool) -> bool {
+    let bundle = format!("{name}.app");
+    [
+        Path::new("/Applications").join(&bundle),
+        home.join("Applications").join(&bundle),
+    ]
+    .iter()
+    .any(|p| exists(p))
+}
 
 /// The menu's rows for this machine (after the file manager's): each program found, as
 /// `windows_targets_with` answers them from the machine's registry and PATH.
@@ -218,6 +320,30 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
 
+    #[test]
+    fn a_mac_app_is_found_in_either_applications_folder() {
+        let home = Path::new("/Users/me");
+        let there = |found: &'static [&'static str]| {
+            move |p: &Path| found.iter().any(|f| Path::new(f) == p)
+        };
+        assert!(mac_app_installed_in(
+            "Zed",
+            home,
+            there(&["/Applications/Zed.app"])
+        ));
+        // JetBrains Toolbox, or an app dragged in without an administrator.
+        assert!(mac_app_installed_in(
+            "IntelliJ IDEA",
+            home,
+            there(&["/Users/me/Applications/IntelliJ IDEA.app"])
+        ));
+        assert!(!mac_app_installed_in(
+            "Cursor",
+            home,
+            there(&["/Applications/Zed.app"])
+        ));
+    }
+
     /// A machine: its registered programs (by exe name), its PATH commands, and the files that exist.
     #[derive(Default)]
     struct Machine {
@@ -264,6 +390,46 @@ mod tests {
         assert_eq!(got[0].1, App::Terminal("C:/apps/wt.exe".into()));
         assert_eq!(got[1].1, App::Editor("C:/zed/zed.exe".into()));
         assert_eq!(got[3].1, App::Editor("C:/vs/Code.exe".into()));
+    }
+
+    /// JetBrains Toolbox's scripts on the PATH (`idea.cmd`, kept: there's no exe near them) and
+    /// Visual Studio from App Paths come after VS Code, as on the Mac's menu.
+    #[test]
+    fn the_jetbrains_ides_and_visual_studio_are_offered() {
+        let toolbox = "C:/Users/me/AppData/Local/JetBrains/Toolbox/scripts";
+        let m = Machine {
+            registered: HashMap::from([(
+                "devenv.exe",
+                "C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/devenv.exe",
+            )]),
+            path: HashMap::from([
+                ("code", "C:/vs/Code.exe"),
+                (
+                    "idea",
+                    "C:/Users/me/AppData/Local/JetBrains/Toolbox/scripts/idea.cmd",
+                ),
+                (
+                    "rider",
+                    "C:/Users/me/AppData/Local/JetBrains/Toolbox/scripts/rider.cmd",
+                ),
+            ]),
+            files: HashSet::from([
+                "C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/devenv.exe",
+            ]),
+        };
+        let got = m.targets();
+        assert_eq!(
+            labels(&got),
+            ["VS Code", "IntelliJ IDEA", "Rider", "Visual Studio"]
+        );
+        assert_eq!(
+            got[1].1,
+            App::Editor(PathBuf::from(format!("{toolbox}/idea.cmd")))
+        );
+        // The Mac's list has them too, in the same order, and Terminal is always offered.
+        let mac: Vec<_> = MAC_APPS.iter().map(|(label, _)| *label).collect();
+        let at = |l: &str| mac.iter().position(|m| *m == l).unwrap();
+        assert!(at("VS Code") < at("IntelliJ IDEA") && at("RustRover") < at("Xcode"));
     }
 
     #[test]

@@ -47,6 +47,9 @@ pub struct Words {
 
     /// General › System: the row that holds off idle sleep.
     pub keep_awake_label: &'static str,
+    /// General › System, where closing the window would end Trek (no Dock keeps it up): the row
+    /// that keeps it running in the tray instead, as (label, note). `None` where it stays anyway.
+    pub stay_in_tray: Option<(&'static str, &'static str)>,
 
     /// Settings › Phone, before the phone server is on: what the system will ask the first time it
     /// listens. `None` where it asks nothing Trek needs to explain.
@@ -73,11 +76,9 @@ pub struct Words {
     /// photos), whatever the system opens that kind of file with on Windows.
     pub open_in_viewer: &'static str,
 
-    /// The mic button's tip. On Windows it says whose recognizer listens: Windows' online one.
-    pub dictate_tip: &'static str,
-    /// The system's own dictation, for where Trek's can't work (Windows without its speech
-    /// recognizer): a dimmed mic's tip, and the end of the sentence that says why. `None` where
-    /// Trek's always can (a Mac build that can't ask hides the mic instead).
+    /// The system's own dictation, for where Trek's can't work (a Windows PC whose processor
+    /// can't run Trek's): a dimmed mic's tip, and the end of the sentence that says why. `None`
+    /// where Trek's always can (a Mac build that can't ask hides the mic instead).
     pub dictate_fallback: Option<&'static str>,
 
     /// The Browser tool when the system's web view can't be made (WebView2 on Windows).
@@ -89,9 +90,9 @@ pub struct Words {
     /// The release a platform downloads, as "the ... build" names it: "Mac", "Windows".
     pub build_name: &'static str,
 
-    /// Settings › Tools › Video watcher: what it does, and what its transcripts take. A Mac
-    /// transcribes with its own speech recognition when whisper isn't installed; Windows has none
-    /// that reads a file.
+    /// Settings › Tools › Video watcher: what it does, and what its transcripts take. Without
+    /// whisper, a Mac transcribes with its own speech recognition, and Windows with Trek's own
+    /// speech model, once dictation has downloaded it.
     pub video_watcher_note: &'static str,
 
     /// The local model servers Trek finds, as a list in a sentence. MLX runs on Apple silicon
@@ -131,6 +132,7 @@ const MACOS: Words = Words {
     computer_fingerprint: "This Mac's fingerprint",
 
     keep_awake_label: "Keep the Mac awake while agents work",
+    stay_in_tray: None,
 
     firewall_note: None,
 
@@ -147,7 +149,6 @@ const MACOS: Words = Words {
 
     open_in_viewer: "Open in Preview",
 
-    dictate_tip: "Dictate",
     dictate_fallback: None,
 
     browser_unavailable: "The embedded browser isn't available on this system.",
@@ -193,6 +194,10 @@ const WINDOWS: Words = Words {
     computer_fingerprint: "This PC's fingerprint",
 
     keep_awake_label: "Keep the PC awake while agents work",
+    stay_in_tray: Some((
+        "Keep Trek in the tray when its window closes",
+        "Agents keep working and banners still come. The tray icon, or opening Trek, brings the window back. Off, closing quits once nothing is at work.",
+    )),
 
     firewall_note: Some(
         "The first time this is on, Windows Firewall asks whether Trek may communicate on private networks. Allow it, or your iPhone can't reach this PC.",
@@ -205,14 +210,13 @@ const WINDOWS: Words = Words {
     ),
 
     computer_use_note: Some(
-        "Windows asks for no permission: once computer use is on, agents can see the screen, click and type. They can't type into apps running as administrator.",
+        "Windows asks for no permission: once computer use is on, agents can see the screen, read apps' controls, click and type. They can't reach apps running as administrator.",
     ),
 
     trash: "Recycle Bin",
 
     open_in_viewer: "Open in default app",
 
-    dictate_tip: "Dictate with Windows' online speech recognition",
     dictate_fallback: Some("Press Win+H to dictate"),
 
     browser_unavailable: "The embedded browser needs Microsoft Edge WebView2, which couldn't be started on this PC.",
@@ -221,7 +225,7 @@ const WINDOWS: Words = Words {
 
     build_name: "Windows",
 
-    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp, and transcripts need whisper (pip install openai-whisper). Applies to new sessions.",
+    video_watcher_note: "Agents can watch a video file or link: they get its frames and a transcript of its audio, and you get a player with the frames they saw. YouTube and X links need yt-dlp; transcripts use whisper when it's installed, else Trek's own speech model, which the composer's mic downloads the first time it's clicked. Applies to new sessions.",
 
     local_servers: "Ollama, LM Studio, and llama.cpp",
 
@@ -296,6 +300,7 @@ mod tests {
             computer,
             computer_fingerprint,
             keep_awake_label,
+            stay_in_tray,
             firewall_note,
             window_shadow_note,
             screen_recording,
@@ -303,7 +308,6 @@ mod tests {
             computer_use_note,
             trash,
             open_in_viewer,
-            dictate_tip,
             dictate_fallback,
             browser_unavailable,
             quit_app,
@@ -334,6 +338,14 @@ mod tests {
             ("computer", computer),
             ("computer_fingerprint", computer_fingerprint),
             ("keep_awake_label", keep_awake_label),
+            (
+                "stay_in_tray_label",
+                stay_in_tray.map_or(nothing, |(label, _)| label),
+            ),
+            (
+                "stay_in_tray_note",
+                stay_in_tray.map_or(nothing, |(_, note)| note),
+            ),
             ("firewall_note", firewall_note.unwrap_or(nothing)),
             ("window_shadow_note", window_shadow_note.unwrap_or(nothing)),
             (
@@ -348,7 +360,6 @@ mod tests {
             ("computer_use_note", computer_use_note.unwrap_or(nothing)),
             ("trash", trash),
             ("open_in_viewer", open_in_viewer),
-            ("dictate_tip", dictate_tip),
             ("dictate_fallback", dictate_fallback.unwrap_or(nothing)),
             ("browser_unavailable", browser_unavailable),
             ("quit_app", quit_app),
@@ -440,7 +451,6 @@ mod tests {
             "the Mac's Phone page says nothing of a firewall"
         );
         assert_eq!(w.open_in_viewer, "Open in Preview");
-        assert_eq!(w.dictate_tip, "Dictate");
         assert_eq!(
             w.dictate_fallback, None,
             "a Mac build that can't dictate hides the mic"
@@ -499,10 +509,6 @@ mod tests {
         assert_eq!(
             w.open_in_viewer, "Open in default app",
             "Windows has no Preview, or Quick Look"
-        );
-        assert_eq!(
-            w.dictate_tip,
-            "Dictate with Windows' online speech recognition"
         );
         assert_eq!(w.dictate_fallback, Some("Press Win+H to dictate"));
         assert_eq!(w.quit_app, "Exit Trek", "Windows apps exit; a Mac's quit");

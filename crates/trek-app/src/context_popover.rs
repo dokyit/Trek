@@ -957,7 +957,9 @@ impl Card {
                 }
             })
             .collect();
+        // Named, so the capture build's checks can see the segments stay inside it (`within`).
         let bar = div()
+            .id("context-bar")
             .relative()
             .w_full()
             .h(px(fluent::pick(height, BAR)))
@@ -970,7 +972,8 @@ impl Card {
                     .h(px(height))
                     .gap(px(2.))
                     .children(segments),
-            );
+            )
+            .test_support();
         let legend = div()
             .grid()
             .grid_cols(2)

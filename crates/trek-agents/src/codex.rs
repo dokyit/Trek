@@ -854,7 +854,7 @@ fn sandbox_not_set_up(item: &Value, windows: bool) -> bool {
 }
 
 /// What the user is told when `sandbox_not_set_up`.
-const SANDBOX_SETUP_NOTICE: &str = "Codex's Windows sandbox needs its one-time setup, so its commands fail before they start. Run codex once in a terminal and accept the sandbox setup it asks for, or set this thread's access to Full access.";
+pub const SANDBOX_SETUP_NOTICE: &str = "Codex's Windows sandbox needs its one-time setup, so its commands fail before they start. Run codex once in a terminal and accept the sandbox setup it asks for (Set up in Terminal does it in Trek's), or set this thread's access to Full access.";
 
 impl Session {
     fn new(thread_id: String, config: &SessionConfig, opened: &Value, next_id: i64) -> Self {

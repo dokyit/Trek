@@ -1,6 +1,7 @@
 //! Windows: input via `SendInput`, windows via `EnumWindows` and DWM, screenshots via GDI, apps via
-//! `ShellExecuteW`. trek-mcp is per-monitor DPI aware, so every coordinate here is a physical pixel
-//! with the primary display's top-left at (0, 0).
+//! `ShellExecuteW`, a window's elements via UI Automation (`uia`). trek-mcp is per-monitor DPI
+//! aware, so every coordinate here is a physical pixel with the primary display's top-left at
+//! (0, 0), UI Automation's included.
 //!
 //! The pure parts (coordinate normalisation, key strokes, the window filter, app lookup) are at
 //! the top and tested; the Win32 calls below them only translate.
@@ -23,7 +24,8 @@ use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -37,15 +39,17 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW, GetForegroundWindow,
-    GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
-    SystemParametersInfoW, WS_EX_TRANSPARENT, WindowFromPoint,
+    BringWindowToTop, EnumWindows, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetClassNameW,
+    GetForegroundWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsGUIThread, IsIconic, IsWindowVisible, SM_CXSCREEN,
+    SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SPI_GETWHEELSCROLLLINES, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
+    SystemParametersInfoW, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WindowFromPoint,
 };
 
-use super::{Button, Capture, Desktop, Display, Rect, WindowInfo};
+use super::{Button, Capture, Desktop, Display, Elements, Performed, Reading, Rect, WindowInfo};
 use crate::keys::{self, VkCombo};
+use crate::outline::{Action, Node};
 
 // ---- pure: tested below ----
 
@@ -147,8 +151,9 @@ fn is_extended(vk: u16) -> bool {
     matches!(
         vk,
         0x21..=0x28 // page up/down, end, home, arrows
+            | 0x2C // print screen
             | 0x2D | 0x2E // insert, delete
-            | 0x5B | 0x5C // left and right Windows keys
+            | 0x5B | 0x5C | 0x5D // left and right Windows keys, the menu key
             | 0x6F // numpad divide
             | 0x90 // num lock
             | 0xA3 | 0xA5 // right ctrl, right alt
@@ -176,6 +181,82 @@ struct Raw {
     class: String,
     w: f64,
     h: f64,
+}
+
+/// Whether a process named `owner` (an executable's name: `Notepad`, `explorer`, `Code`) is the
+/// app `name` the agent asked `open_app` for: by its name ("notepad", "notepad.exe"), a path to
+/// it, or a word of its Start menu name ("File Explorer" is explorer's, "Visual Studio Code"
+/// Code's).
+fn runs_as(owner: &str, name: &str) -> bool {
+    let owner = owner.to_lowercase();
+    if owner.is_empty() {
+        return false;
+    }
+    let name = name.trim();
+    let name = std::path::Path::new(name)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_string())
+        .to_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    owner == name || (owner.len() >= 4 && name.split_whitespace().any(|word| word == owner))
+}
+
+/// The front-most window of a running app the agent named (`runs_as`), minimized ones included,
+/// for `open_app` to bring forward. The shell's own windows (the taskbar, the desktop, tool
+/// windows) are never one, though explorer owns them.
+fn running_window(name: &str) -> Option<HWND> {
+    unsafe extern "system" fn collect(hwnd: HWND, out: LPARAM) -> i32 {
+        // SAFETY: `out` is the `&mut Vec<HWND>` passed to `EnumWindows` below, which calls this
+        // synchronously on this thread while that vector is alive and not otherwise borrowed.
+        unsafe { (*(out as *mut Vec<HWND>)).push(hwnd) };
+        1
+    }
+    let mut hwnds: Vec<HWND> = Vec::new();
+    // SAFETY: `collect` has the callback's signature and `hwnds` outlives the call (see there).
+    if unsafe { EnumWindows(Some(collect), &mut hwnds as *mut Vec<HWND> as LPARAM) } == 0 {
+        return None;
+    }
+    hwnds.into_iter().find(|&h| {
+        let r = raw(h);
+        r.visible
+            && !r.cloaked
+            && r.ex_style & (WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW) == 0
+            && !matches!(
+                r.class.as_str(),
+                "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+            )
+            && (r.iconic || (r.w >= 2.0 && r.h >= 2.0))
+            && runs_as(&process_name(window_pid(h)), name)
+    })
+}
+
+/// Restore `hwnd` if it's minimized and make it the foreground window. Windows lets a background
+/// process take the foreground only in some cases, so when it refuses, this thread shares input
+/// with the window in front for a moment, which may. `false` if Windows still kept it back (the
+/// window is restored, and a click in it brings it forward).
+fn bring_forward(hwnd: HWND) -> bool {
+    // SAFETY: every call takes the handle by value (Windows checks it; a window gone since just
+    // fails them) or thread ids by value; the threads are detached again before returning.
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        if SetForegroundWindow(hwnd) != 0 && GetForegroundWindow() == hwnd {
+            return true;
+        }
+        // A thread needs a message queue to share input.
+        let _ = IsGUIThread(1);
+        let theirs = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+        let ours = GetCurrentThreadId();
+        let attached = theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, 1) != 0;
+        BringWindowToTop(hwnd);
+        SetForegroundWindow(hwnd);
+        if attached {
+            AttachThreadInput(ours, theirs, 0);
+        }
+        GetForegroundWindow() == hwnd
+    }
 }
 
 /// Whether a top-level window is listed. Like the Mac's on-screen list: shown, not minimised and
@@ -443,6 +524,13 @@ impl Desktop for Win {
     }
 
     fn open_app(&self, name: &str) -> Result<(), String> {
+        // Running already: its window comes forward, restored if minimized, as the Mac's
+        // `open -a` brings a running app forward, rather than a second copy opening (an empty
+        // Notepad, a new Explorer window).
+        if let Some(hwnd) = running_window(name) {
+            bring_forward(hwnd);
+            return Ok(());
+        }
         let target = resolve_app(name, start_menu_shortcut, app_path);
         let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (verb, file) = (wide("open"), wide(&target));
@@ -462,6 +550,36 @@ impl Desktop for Win {
             return Err(shell_error(code));
         }
         Ok(())
+    }
+
+    // Elements, through UI Automation (`uia::com`, on a thread of its own).
+
+    fn has_elements(&self) -> bool {
+        true
+    }
+
+    fn elements(&self, w: &WindowInfo, reading: &Reading) -> Result<Elements, String> {
+        super::uia::com::elements(w, reading)
+    }
+
+    fn element_at(&self, w: &WindowInfo, place: &[usize]) -> Result<Option<Node>, String> {
+        super::uia::com::element_at(w, place)
+    }
+
+    fn perform(&self, w: &WindowInfo, identity: u64, action: Action) -> Result<Performed, String> {
+        super::uia::com::perform(w, identity, action)
+    }
+
+    fn focus(&self, w: &WindowInfo, identity: u64) -> Result<bool, String> {
+        super::uia::com::focus(w, identity)
+    }
+
+    fn add_text(&self, w: &WindowInfo, identity: u64, text: &str) -> Result<(), String> {
+        super::uia::com::add_text(w, identity, text)
+    }
+
+    fn reveal(&self, w: &WindowInfo, identity: u64) -> Result<bool, String> {
+        super::uia::com::reveal(w, identity)
     }
 }
 
@@ -634,7 +752,7 @@ fn describe(hwnd: HWND, names: &mut std::collections::HashMap<u32, String>) -> W
 }
 
 /// The executable's name for a process, or "" when Windows won't say (a protected process).
-fn process_name(pid: u32) -> String {
+pub(super) fn process_name(pid: u32) -> String {
     // SAFETY: plain values in; a null handle (refused) is checked below.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
@@ -981,10 +1099,29 @@ mod tests {
             "pageup",
             "pagedown",
             "forwarddelete",
+            "insert",
+            "printscreen",
+            "apps",
+            "win",
+            "numpaddivide",
+            "numlock",
         ] {
             assert!(is_extended(keys::vk(name).unwrap()), "{name}");
         }
-        for name in ["a", "return", "delete", "escape", "f5", "space", "tab"] {
+        for name in [
+            "a",
+            "return",
+            "delete",
+            "escape",
+            "f5",
+            "f13",
+            "space",
+            "tab",
+            "numpad5",
+            "numpadadd",
+            "pause",
+            "scrolllock",
+        ] {
             assert!(!is_extended(keys::vk(name).unwrap()), "{name}");
         }
         assert!(is_extended(VK_LWIN));
@@ -1111,6 +1248,195 @@ mod tests {
         assert!(shell_error(31).contains("nothing is set to open it"));
         // SE_ERR_SHARE (26) is a file in use; SE_ERR_DLLNOTFOUND (32) a missing library.
         assert!(shell_error(26).contains("in use") && shell_error(32).contains("library"));
+    }
+
+    /// What `open_app` takes as an app that's running: its program's name, written any way an
+    /// agent writes it, or a word of its Start menu name; never a longer name it's only part of.
+    #[test]
+    fn a_running_app_is_known_by_its_names() {
+        assert!(runs_as("Notepad", "notepad"));
+        assert!(runs_as("Notepad", "Notepad.exe"));
+        assert!(runs_as("notepad", r"C:\Windows\System32\notepad.exe"));
+        assert!(runs_as("explorer", "File Explorer"));
+        assert!(runs_as("Code", "Visual Studio Code"));
+        assert!(!runs_as("Code", "Visual Studio"), "another app's name");
+        assert!(
+            !runs_as("msedge", "Microsoft Edge"),
+            "launched as before, by its shortcut"
+        );
+        assert!(!runs_as("app", "Some app"), "too short a word to tell");
+        assert!(!runs_as("", "notepad"), "a process Windows won't name");
+    }
+
+    /// The real thing: the keypad's keys type into the window in front, with Num Lock on and off.
+    /// Types into an edit box of its own, puts Num Lock back as it found it and gives the front
+    /// back to the window that had it. Run by hand: `cargo test -p trek-mcp -- --ignored --exact
+    /// desktop::windows::tests::the_keypad_types_into_the_window_in_front --nocapture`.
+    #[test]
+    #[ignore = "takes the keyboard on the real desktop for a moment"]
+    fn the_keypad_types_into_the_window_in_front() {
+        use std::time::Instant;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_NUMLOCK};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE, PeekMessageW,
+            TranslateMessage, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+        let pump = |ms: u64| {
+            let until = Instant::now() + Duration::from_millis(ms);
+            loop {
+                // SAFETY: this thread's own message loop; `msg` is written before it's read.
+                unsafe {
+                    let mut msg: MSG = std::mem::zeroed();
+                    while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+                if Instant::now() >= until {
+                    break;
+                }
+                sleep_ms(10);
+            }
+        };
+        let before = unsafe { GetForegroundWindow() };
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let class = wide("EDIT");
+        // A top-level edit box's title is its text, so it starts with none.
+        let title = wide("");
+        // SAFETY: the system's edit class, a top-level window of this thread's; strings live
+        // past the call.
+        let edit = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                200,
+                200,
+                420,
+                120,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!edit.is_null(), "an edit window");
+        pump(200);
+        bring_forward(edit);
+        unsafe { SetFocus(edit) };
+        pump(300);
+        assert_eq!(
+            unsafe { GetForegroundWindow() },
+            edit,
+            "the test's window is in front"
+        );
+        let text = || {
+            let mut buf = [0u16; 128];
+            let n = unsafe { GetWindowTextW(edit, buf.as_mut_ptr(), buf.len() as i32) }.max(0);
+            String::from_utf16_lossy(&buf[..n as usize])
+        };
+        assert_eq!(text(), "");
+        let press = |names: &[&str]| {
+            for name in names {
+                desktop_key(name);
+                pump(40);
+            }
+        };
+        press(&[
+            "numpad4",
+            "numpad2",
+            "numpaddecimal",
+            "numpad5",
+            "numpadmultiply",
+            "numpadsubtract",
+            "numpaddivide",
+            "numpadadd",
+        ]);
+        assert_eq!(text(), "42.5*-/+");
+        // Num Lock flipped: the keypad still types digits, as the key named.
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if self.0 {
+                    desktop_key("numlock");
+                }
+            }
+        }
+        let numlock = || unsafe { GetKeyState(VK_NUMLOCK as i32) } & 1 != 0;
+        let was = numlock();
+        desktop_key("numlock");
+        let mut restore = Restore(true);
+        pump(150);
+        assert_ne!(numlock(), was, "Num Lock flipped");
+        press(&["numpad7", "numpad0"]);
+        let flipped = text();
+        desktop_key("numlock");
+        restore.0 = false;
+        pump(150);
+        assert_eq!(numlock(), was, "Num Lock as it was");
+        // SAFETY: this thread's window; the front goes back to whatever had it.
+        unsafe { DestroyWindow(edit) };
+        if !before.is_null() {
+            bring_forward(before);
+        }
+        eprintln!("Num Lock was {}", if was { "on" } else { "off" });
+        assert_eq!(flipped, "42.5*-/+70");
+    }
+
+    /// The `key` tool's press, on the real keyboard.
+    fn desktop_key(name: &str) {
+        Win::default()
+            .key(&parse_vk(name).unwrap())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+
+    /// The real thing, on this PC's desktop: a running Notepad is brought forward rather than a
+    /// second one opened. Opens Notepad and closes only the window it opened; skipped when one
+    /// is open already (it's the user's).
+    #[test]
+    #[ignore = "opens Notepad on the real desktop"]
+    fn open_app_brings_a_running_app_forward() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+        let notepads = || {
+            let desktop = Win::default();
+            desktop
+                .windows()
+                .unwrap()
+                .into_iter()
+                .filter(|w| runs_as(&w.owner, "notepad"))
+                .map(|w| w.id)
+                .collect::<Vec<_>>()
+        };
+        if !notepads().is_empty() || running_window("notepad").is_some() {
+            eprintln!("skipped: Notepad is open already");
+            return;
+        }
+        let desktop = Win::default();
+        desktop.open_app("notepad").expect("Notepad starts");
+        let wait = |want: &dyn Fn(&[i64]) -> bool| {
+            for _ in 0..100 {
+                if want(&notepads()) {
+                    return true;
+                }
+                sleep_ms(100);
+            }
+            false
+        };
+        assert!(wait(&|w| w.len() == 1), "a Notepad window");
+        let first = notepads()[0];
+        // Minimized, then asked for again: the same window comes back, and nothing new opens.
+        unsafe {
+            ShowWindow(first as HWND, 6 /* SW_MINIMIZE */)
+        };
+        sleep_ms(300);
+        desktop.open_app("Notepad").expect("brought forward");
+        sleep_ms(1500);
+        let now = notepads();
+        let forward = unsafe { GetForegroundWindow() } as i64 == first;
+        unsafe { PostMessageW(first as HWND, WM_CLOSE, 0, 0) };
+        assert_eq!(now, vec![first], "no second Notepad");
+        assert!(forward, "the running one is in front");
     }
 
     /// Lists the windows on screen and captures the primary display: nothing else, and no input.

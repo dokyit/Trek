@@ -29,7 +29,9 @@ pub mod serve;
 pub fn bin(name: &str) -> PathBuf {
     let dir = profile_dir();
     let file = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    if !file.is_file() {
+    // Built before the fixtures last changed (a binary left by an earlier build, CI's cache's or
+    // another branch's): it wouldn't know a verb added since, so it's built again too.
+    if !file.is_file() || built_before_sources(&file) {
         build(&dir);
     }
     assert!(
@@ -43,6 +45,31 @@ pub fn bin(name: &str) -> PathBuf {
         .unwrap_or(&path)
         .replace('\\', "/");
     PathBuf::from(path)
+}
+
+/// Whether `file` is older than this crate's sources and manifest: a checkout or an edit since it
+/// was built. Once a process has built them (`build`), that build stands.
+fn built_before_sources(file: &Path) -> bool {
+    let Ok(built) = file.metadata().and_then(|m| m.modified()) else {
+        return true;
+    };
+    fn newest(path: &Path) -> Option<std::time::SystemTime> {
+        let meta = path.metadata().ok()?;
+        if !meta.is_dir() {
+            return meta.modified().ok();
+        }
+        std::fs::read_dir(path)
+            .ok()?
+            .flatten()
+            .filter_map(|e| newest(&e.path()))
+            .max()
+    }
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    [crate_dir.join("src"), crate_dir.join("Cargo.toml")]
+        .iter()
+        .filter_map(|p| newest(p))
+        .max()
+        .is_some_and(|changed| changed > built)
 }
 
 /// `target/<profile>/` beside the running test binary (`…/<profile>/deps/<test>`).

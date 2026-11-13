@@ -103,9 +103,20 @@ pub(crate) fn acp_calls(kind: &str, title: &str, detail: &str, tc: &Value) -> Ve
 }
 
 /// `write_file`, `edit_file`, `bash`, `web_fetch` or `mcp` of Direct's on `target`, as a rule
-/// reads it. MCP tools go by the name they have in other agents: `mcp__server__tool`.
+/// reads it. MCP tools go by the name they have in other agents: `mcp__server__tool`. A command
+/// runs in cmd.exe on a PC without Git Bash (direct/executor.rs), and is read as cmd.exe reads it.
 pub(crate) fn direct_call(tool: &str, target: &str) -> Call {
+    direct_call_on(
+        tool,
+        target,
+        cfg!(windows) && !crate::direct::executor::runs_git_bash(),
+    )
+}
+
+/// `direct_call` where commands run in cmd.exe (`in_cmd`) or not.
+pub(crate) fn direct_call_on(tool: &str, target: &str, in_cmd: bool) -> Call {
     match tool {
+        "bash" if in_cmd => Call::command_in_cmd(tool, target),
         "bash" => Call::command(tool, target),
         "web_fetch" => Call::fetch(tool, target),
         "mcp" => {
@@ -198,7 +209,19 @@ mod tests {
             claude_call("NotebookEdit", &json!({ "notebook_path": "n.ipynb" })),
             Call::edit("NotebookEdit", "n.ipynb")
         );
-        assert_eq!(direct_call("bash", "ls"), Call::command("bash", "ls"));
+        assert_eq!(
+            direct_call_on("bash", "ls", false),
+            Call::command("bash", "ls")
+        );
+        // Run by cmd.exe (a PC without Git Bash), it's read as cmd.exe reads it.
+        assert_eq!(
+            direct_call_on("bash", "ls", true),
+            Call::command_in_cmd("bash", "ls")
+        );
+        assert_eq!(
+            direct_call_on("edit_file", "a.rs", true),
+            Call::edit("edit_file", "a.rs")
+        );
         assert_eq!(
             direct_call("edit_file", "a.rs"),
             Call::edit("edit_file", "a.rs")

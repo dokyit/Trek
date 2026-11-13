@@ -102,41 +102,15 @@ impl TlsIdentity {
     }
 }
 
+/// The key, the user's alone from before its bytes go in: mode 0600 on the Mac, an access list of
+/// the user's alone on Windows, where a new file would take its folder's (trek-private).
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
-    // `mode` applies only to a new file. Repair an existing one before new key bytes touch it,
-    // then do it again after the write as an explicit postcondition.
-    private_file_permissions(&file)?;
-    file.set_len(0)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    private_permissions(path)
+    trek_private::write(path, bytes)
 }
 
+/// Make a key that's there the user's alone again, if it got looser.
 fn private_permissions(path: &Path) -> io::Result<()> {
-    private_file_permissions(&std::fs::File::open(path)?)
-}
-
-fn private_file_permissions(file: &std::fs::File) -> io::Result<()> {
-    // Windows: the key file inherits its folder's ACL (the user's profile); narrowing it to the
-    // user alone is left to the phone server work.
-    #[cfg(not(unix))]
-    let _ = file;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mut permissions = file.metadata()?.permissions();
-        if permissions.mode() & 0o777 != 0o600 {
-            permissions.set_mode(0o600);
-            file.set_permissions(permissions)?;
-        }
-    }
-    Ok(())
+    trek_private::restrict(path)
 }
 
 #[cfg(test)]
@@ -199,6 +173,181 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "a replaced key is private too");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `path`'s ACL as Windows writes it down (SDDL), read with calls of its own rather than the
+    /// code under test's.
+    #[cfg(windows)]
+    fn acl_of(path: &Path) -> String {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+            SDDL_REVISION_1, SE_FILE_OBJECT,
+        };
+        use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let (mut dacl, mut descriptor) = (std::ptr::null_mut(), std::ptr::null_mut());
+        let (mut text, mut len) = (std::ptr::null_mut(), 0u32);
+        // SAFETY: a NUL-ended name and places for what's returned; both returned buffers are
+        // freed once.
+        unsafe {
+            let e = GetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            );
+            assert_eq!(e, 0, "reading the ACL of {}", path.display());
+            let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                &mut len,
+            );
+            LocalFree(descriptor);
+            assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+            let sddl = String::from_utf16_lossy(std::slice::from_raw_parts(text, len as usize));
+            LocalFree(text.cast());
+            sddl.trim_end_matches('\0').to_string()
+        }
+    }
+
+    /// Two SIDs as SDDL may write them (an alias such as `LA`, or `S-1-…`) are the same SID.
+    #[cfg(windows)]
+    fn same_sid(a: &str, b: &str) -> bool {
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::EqualSid;
+        let sid = |text: &str| {
+            let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+            let mut sid = std::ptr::null_mut();
+            // SAFETY: a NUL-terminated string, and a place for the SID, freed below.
+            (unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) } != 0).then_some(sid)
+        };
+        let (Some(x), Some(y)) = (sid(a), sid(b)) else {
+            return false;
+        };
+        // SAFETY: two SIDs Windows made above, each freed once after.
+        unsafe {
+            let same = EqualSid(x, y) != 0;
+            LocalFree(x.cast());
+            LocalFree(y.cast());
+            same
+        }
+    }
+
+    /// The user this test runs as, as SDDL names a SID (`S-1-5-21-…`).
+    #[cfg(windows)]
+    fn user_sid_text() -> String {
+        trek_private::user_sid().unwrap()
+    }
+
+    /// Let the Everyone group read `path` too, inheriting the folder's entries as well: a key
+    /// readable by more than its owner.
+    #[cfg(windows)]
+    fn open_to_everyone(path: &Path) {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+            SetNamedSecurityInfoW,
+        };
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+            UNPROTECTED_DACL_SECURITY_INFORMATION,
+        };
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let sddl = wide(&format!("D:(A;;FA;;;{})(A;;FR;;;WD)", user_sid_text()));
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut descriptor = std::ptr::null_mut();
+        // SAFETY: NUL-ended strings, places for what's returned, and the descriptor freed once.
+        unsafe {
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                ),
+                0
+            );
+            let (mut present, mut dacl, mut defaulted) = (0, std::ptr::null_mut(), 0);
+            assert_ne!(
+                GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted),
+                0
+            );
+            let e = SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null(),
+            );
+            LocalFree(descriptor);
+            assert_eq!(e, 0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_key_is_the_users_alone_on_windows_too() {
+        let dir = std::env::temp_dir().join(format!("trek-remote-tls-{}", rand::random::<u64>()));
+        let key = dir.join("identity.key");
+        // One entry, the user's, allowing everything (FA) and not inherited (no ID in it), and
+        // the ACL protected from inheriting (P; Windows adds AI, which only says how it was made).
+        let user = user_sid_text();
+        let alone = |path: &Path| {
+            let sddl = acl_of(path);
+            let (flags, entries) = sddl
+                .strip_prefix("D:")
+                .and_then(|rest| rest.find('(').map(|at| rest.split_at(at)))
+                .unwrap_or_default();
+            // The entry's SID as SDDL writes it: an alias for a well-known one (CI's user is the
+            // built-in Administrator, `LA`), else S-1-…: compared as SIDs, not as text.
+            let sid = entries
+                .strip_prefix("(A;;FA;;;")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .filter(|sid| !sid.contains('('));
+            assert!(
+                flags.contains('P') && sid.is_some_and(|sid| same_sid(sid, &user)),
+                "{} isn't the user's alone: {sddl}",
+                path.display()
+            );
+        };
+        let a = TlsIdentity::load_or_create(&dir, "Tobias's PC").unwrap();
+        alone(&key);
+        // The certificate is public, and keeps its folder's ACL.
+        assert!(!acl_of(&dir.join("identity.der")).starts_with("D:P"));
+
+        // Readable by everyone: loading it narrows it again, and keeps the key.
+        open_to_everyone(&key);
+        let opened = acl_of(&key);
+        assert!(
+            opened.contains(";;;WD)") && !opened.starts_with("D:P"),
+            "{opened}"
+        );
+        let b = TlsIdentity::load_or_create(&dir, "Tobias's PC").unwrap();
+        assert_eq!(a.fingerprint, b.fingerprint, "loaded, not made again");
+        alone(&key);
+
+        // Readable by everyone and replaced (its certificate is gone): the new key is private too.
+        open_to_everyone(&key);
+        std::fs::remove_file(dir.join("identity.der")).unwrap();
+        let c = TlsIdentity::load_or_create(&dir, "Tobias's PC").unwrap();
+        assert_ne!(
+            b.fingerprint, c.fingerprint,
+            "the incomplete identity was replaced"
+        );
+        alone(&key);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

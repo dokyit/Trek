@@ -14,9 +14,25 @@ use std::process::Stdio;
 
 pub(crate) const ECHO: &str = "TREK_TEST_ARGV_ECHO";
 
-/// The stand-in CLI: with `ECHO` set, print argv as a JSON array and exit.
+/// What a test's `npm-prefix.js` starts with: the stand-in, run on it as Node's shims run Node on
+/// npm's, prints the folder after it as npm's global one.
+pub(crate) const PREFIX_SAYS: &str = "// prefix: ";
+
+/// The stand-in CLI: with `ECHO` set, print argv as a JSON array and exit; run on a test's
+/// `npm-prefix.js`, print the prefix it names and exit.
 #[ctor::ctor(unsafe)]
 fn echo_argv() {
+    let prefix = std::env::args_os()
+        .nth(1)
+        .filter(|a| Path::new(a).file_name() == Some(OsStr::new("npm-prefix.js")))
+        .and_then(|js| std::fs::read_to_string(js).ok())
+        .and_then(|t| t.strip_prefix(PREFIX_SAYS).map(|p| p.trim().to_owned()));
+    if let Some(prefix) = prefix {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{prefix}");
+        let _ = out.flush();
+        std::process::exit(0);
+    }
     if std::env::var_os(ECHO).is_none() {
         return;
     }
@@ -413,5 +429,188 @@ async fn an_mcp_check_finds_a_bare_name_as_its_cmd() {
     assert_eq!(
         crate::mcp_check::list_tools(&none).await.unwrap_err(),
         "nothing-here isn't installed, or isn't on your PATH."
+    );
+}
+
+/// What an agent that would need cmd.exe for a batch script (Claude Code, ACP's) is told to run for
+/// `command`, found at `found`.
+fn handed_to_claude(command: &str, args: &[String], found: &Path) -> (String, Vec<String>) {
+    crate::agent_stdio_command(
+        crate::BatchHandOff::CmdWrapper,
+        command,
+        args,
+        true,
+        &|_| Some(found.to_path_buf()),
+    )
+    .expect("handed over, not refused")
+    .expect("not as written: a .cmd")
+}
+
+/// Arguments cmd.exe would refuse or act on.
+fn cmd_unsafe_args() -> Vec<String> {
+    [
+        "-y",
+        "@scope/server",
+        "https://example.com/a?b=1&c=2",
+        "100%",
+        "x|y",
+        "say \"hi\"",
+        "two\nlines",
+        r"C:\Program Files\x",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// The argv the stand-in sees, started as the agent would start `program` with `handed`.
+fn run_as_agent(program: &str, handed: &[String]) -> Vec<String> {
+    let out = std::process::Command::new(program)
+        .args(handed)
+        .env(ECHO, "1")
+        .output()
+        .expect("node starts");
+    serde_json::from_slice(out.stdout.trim_ascii()).expect("its argv")
+}
+
+/// An MCP server started through Node's own `npx.cmd` (npm's, beside node.exe) with arguments
+/// cmd.exe can't be handed, for an agent that would need cmd.exe for it: handed over as Node and
+/// npx's own script instead, so every argument arrives as written, `&`, `%`, `|`, quotes and line
+/// breaks included. A global npm (in the folder `npm-prefix.js` names) runs instead of the one
+/// beside Node, as the shim itself would have it. Run for real: the stand-in `node.exe` echoes
+/// what it was given. Arguments cmd.exe can carry go through it, as before.
+#[test]
+fn an_npx_server_reaches_node_with_its_arguments_as_written() {
+    let shims = Shims::new("npx");
+    let npm = shims.0.join(r"node_modules\npm\bin");
+    std::fs::create_dir_all(&npm).unwrap();
+    let script = npm.join("npx-cli.js");
+    std::fs::write(&script, "// npx").unwrap();
+    // npm's global folder is Node's own, as nvm and a fresh install have it.
+    let prefix_js = npm.join("npm-prefix.js");
+    std::fs::write(&prefix_js, format!("{PREFIX_SAYS}{}", shims.0.display())).unwrap();
+    let npx = shims.0.join("npx.cmd");
+    let text = crate::mcp_hand_off_tests::NODE_NPX_SHIM;
+    std::fs::write(&npx, text.replace("\r\n", "\n").replace('\n', "\r\n")).unwrap();
+
+    let args = cmd_unsafe_args();
+    let (program, handed) = handed_to_claude("npx", &args, &npx);
+    assert_eq!(
+        Path::new(&program),
+        shims.node().as_path(),
+        "the shim's own Node"
+    );
+    assert_eq!(
+        Path::new(&handed[0]),
+        script.as_path(),
+        "npx's script first"
+    );
+    assert_eq!(&handed[1..], args.as_slice());
+    assert_eq!(
+        &run_as_agent(&program, &handed)[2..],
+        args.as_slice(),
+        "every argument as written"
+    );
+
+    // A global npm, in a folder of its own, takes over.
+    let global = shims.0.join("global npm");
+    let newer = global.join(r"node_modules\npm\bin\npx-cli.js");
+    std::fs::create_dir_all(newer.parent().unwrap()).unwrap();
+    std::fs::write(&newer, "// a newer npx").unwrap();
+    std::fs::write(&prefix_js, format!("{PREFIX_SAYS}{}", global.display())).unwrap();
+    let (_, handed) = handed_to_claude("npx", &args, &npx);
+    assert_eq!(
+        Path::new(&handed[0]),
+        newer.as_path(),
+        "the global npm's npx"
+    );
+
+    // Arguments cmd.exe can carry go through it, as before (the shim asks npm-prefix.js itself).
+    let plain = ["-y", "@scope/server", r"C:\data"]
+        .map(String::from)
+        .to_vec();
+    assert_eq!(
+        handed_to_claude("npx", &plain, &npx),
+        (
+            "cmd".to_string(),
+            ["/c", "npx", "-y", "@scope/server", r"C:\data"]
+                .map(String::from)
+                .to_vec()
+        )
+    );
+    // Codex quotes a batch script's arguments itself: it's given the shim, as before.
+    assert_eq!(
+        crate::agent_stdio_command(
+            crate::BatchHandOff::ResolvedPath,
+            "npx",
+            &args[..6],
+            true,
+            &|_| Some(npx.clone())
+        ),
+        Ok(Some((
+            npx.to_string_lossy().into_owned(),
+            args[..6].to_vec()
+        )))
+    );
+}
+
+/// The same for a server installed as a global npm package, whose `.cmd` cmd-shim writes; a batch
+/// script that isn't npm's is still refused such arguments, and says why.
+#[test]
+fn a_global_packages_server_reaches_node_too() {
+    let shims = Shims::new("package");
+    let script = shims.0.join(r"node_modules\@scope\server\dist\index.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "// server").unwrap();
+    let shim = shims.0.join("mcp-server.cmd");
+    let text = NPM_SHIM.replace(
+        r"%dp0%\..\pkg\bin\x.js",
+        r"%dp0%\node_modules\@scope\server\dist\index.js",
+    );
+    std::fs::write(&shim, text.replace("\r\n", "\n").replace('\n', "\r\n")).unwrap();
+
+    let args = cmd_unsafe_args();
+    let (program, handed) = handed_to_claude("mcp-server", &args, &shim);
+    assert_eq!(Path::new(&program), shims.node().as_path());
+    assert_eq!(Path::new(&handed[0]), script.as_path());
+    assert_eq!(&run_as_agent(&program, &handed)[2..], args.as_slice());
+
+    let simple = |args: &[String]| {
+        crate::agent_stdio_command(
+            crate::BatchHandOff::CmdWrapper,
+            "simple",
+            args,
+            true,
+            &|_| Some(shims.simple()),
+        )
+    };
+    let why = simple(&args[..3]).unwrap_err();
+    assert!(why.contains("cmd.exe would act on a character"), "{why}");
+    let (program, _) = simple(&["ok".to_string()]).unwrap().unwrap();
+    assert_eq!(program, "cmd");
+}
+
+/// This PC's own npx (Node's `npx.cmd`), handed to its Node with an argument cmd.exe would act on:
+/// the script it names is there and runs. Run by hand: `cargo test -p trek-agents --lib --
+/// --ignored --exact tests_cmd_args::this_pcs_npx_runs_under_its_node --nocapture`.
+#[test]
+#[ignore = "runs this PC's npx"]
+fn this_pcs_npx_runs_under_its_node() {
+    let resolve = |name: &str| trek_core::detect::which_in(trek_core::detect::login_path(), name);
+    let Some(npx) = resolve("npx") else {
+        eprintln!("skipped: no npx here");
+        return;
+    };
+    let args = ["--version", "a&b", "100%"].map(String::from).to_vec();
+    let (program, handed) = handed_to_claude("npx", &args, &npx);
+    eprintln!("{} → {program} {handed:?}", npx.display());
+    assert!(program.to_lowercase().ends_with("node.exe"), "{program}");
+    let out = std::process::Command::new(&program)
+        .args(&handed)
+        .output()
+        .expect("node starts");
+    let version = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && version.trim().split('.').count() == 3,
+        "{version}"
     );
 }

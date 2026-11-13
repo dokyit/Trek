@@ -31,12 +31,14 @@ use std::time::{Duration, Instant};
 mod agent;
 mod agent_core;
 pub use agent::{AgentCall, AgentCallSlot};
-// What pages ask of the user, and the WebKit delegates wry leaves out (popups, dialogs,
-// permissions, links for other apps, why a load failed).
+// What pages ask of the user, and what wry leaves out of WebKit's delegates and WebView2's events
+// (popups, dialogs, permissions, links for other apps, why a load failed).
 mod asks;
 mod prompts;
 #[cfg(target_os = "macos")]
 mod webkit;
+#[cfg(windows)]
+mod webview2;
 use asks::{Ask, AskKind, Reply};
 
 /// Trek's internal pages (start page, load errors) live on this scheme.
@@ -389,6 +391,24 @@ mod native {
         wv.webview().setAppearance(appearance.as_deref());
     }
 
+    /// End the page's web content process, as a crash would (the capture build's `browser
+    /// crash`), through WebKit's own `_killWebContentProcess`, which its tests use. How many
+    /// processes ended: one.
+    #[cfg(feature = "shots")]
+    pub fn end_page_process(wv: &wry::WebView) -> Result<usize, String> {
+        use objc2::{msg_send, sel};
+        let view = wv.webview();
+        // SAFETY: `respondsToSelector:` is NSObject's; the view is live, on the main thread.
+        let can: bool =
+            unsafe { msg_send![&*view, respondsToSelector: sel!(_killWebContentProcess)] };
+        if !can {
+            return Err("this WebKit can't end a page's process".into());
+        }
+        // SAFETY: as above; the selector takes nothing and returns nothing.
+        let () = unsafe { msg_send![&*view, _killWebContentProcess] };
+        Ok(1)
+    }
+
     /// The page as WebKit draws it, as TIFF bytes.
     #[cfg(feature = "shots")]
     pub fn snapshot(wv: &wry::WebView) -> async_channel::Receiver<Result<Vec<u8>, String>> {
@@ -416,16 +436,14 @@ mod native {
 #[cfg(windows)]
 mod native {
     use super::Msg;
-    use webview2_com::Microsoft::Web::WebView2::Win32::{
-        COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, ICoreWebView2,
-    };
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
     use webview2_com::{
         CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
         ContentLoadingEventHandler, HistoryChangedEventHandler,
     };
     use windows_61::Win32::System::Com::{IStream, STREAM_SEEK_SET};
     use windows_61::Win32::UI::Shell::SHCreateMemStream;
-    use windows_61::core::{BOOL, PWSTR, w};
+    use windows_61::core::{BOOL, w};
     use wry::WebViewExtWindows as _;
 
     pub fn can_go_back(wv: &wry::WebView) -> bool {
@@ -491,31 +509,25 @@ mod native {
         }
     }
 
-    fn source(wv: &ICoreWebView2) -> String {
-        let mut url = PWSTR::null();
-        match unsafe { wv.Source(&mut url) } {
-            Ok(()) => webview2_com::take_pwstr(url),
-            Err(_) => String::new(),
-        }
-    }
-
     /// Report what the page-load handler doesn't: a load that ended on WebView2's own error page
     /// (Trek shows its error page instead, as on macOS), and history moving within a page (a
-    /// fragment, `pushState`), which changes back and forward without a new load.
+    /// fragment, `pushState`), which changes back and forward without a new load. The error page
+    /// is only noted here: the load's `NavigationCompleted` says why it failed, and sends the one
+    /// message for it (`webview2::hook`).
     pub fn watch(wv: &wry::WebView, tab: u64, tx: &async_channel::Sender<Msg>) {
         let webview = wv.webview();
-        let failed = tx.clone();
-        let on_error = ContentLoadingEventHandler::create(Box::new(move |wv, args| {
-            let (Some(wv), Some(args)) = (wv, args) else {
+        let on_error = ContentLoadingEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
                 return Ok(());
             };
             let mut error = BOOL::default();
-            unsafe { args.IsErrorPage(&mut error)? };
+            let mut navigation = 0u64;
+            unsafe {
+                args.IsErrorPage(&mut error)?;
+                args.NavigationId(&mut navigation)?;
+            }
             if error.as_bool() {
-                let _ = failed.try_send(Msg::Failed {
-                    tab,
-                    url: source(&wv),
-                });
+                super::webview2::error_page_shown(navigation);
             }
             Ok(())
         }));
@@ -529,6 +541,59 @@ mod native {
             let _ = webview.add_ContentLoading(&on_error, &mut token);
             let _ = webview.add_HistoryChanged(&on_history, &mut token);
         }
+    }
+
+    /// End the page's own process, as a crash would (the capture build's `browser crash`): each
+    /// renderer WebView2 lists for the tab's environment (another tab's page sharing one ends
+    /// with it). How many ended.
+    #[cfg(feature = "shots")]
+    pub fn end_page_process(wv: &wry::WebView) -> Result<usize, String> {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_PROCESS_KIND, COREWEBVIEW2_PROCESS_KIND_RENDERER, ICoreWebView2_2,
+            ICoreWebView2Environment8,
+        };
+        use windows_61::core::Interface as _;
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        // SAFETY: COM calls on the tab's own WebView2, on the thread that made it; an older
+        // runtime without these interfaces answers with an error.
+        let infos = unsafe {
+            wv.webview()
+                .cast::<ICoreWebView2_2>()
+                .and_then(|w| w.Environment())
+                .and_then(|e| e.cast::<ICoreWebView2Environment8>())
+                .and_then(|e| e.GetProcessInfos())
+        }
+        .map_err(|e| format!("WebView2 won't list its processes: {e}"))?;
+        let mut count = 0u32;
+        // SAFETY: as above.
+        unsafe { infos.Count(&mut count) }.map_err(|e| e.to_string())?;
+        let mut ended = 0;
+        for i in 0..count {
+            let (mut pid, mut kind) = (0i32, COREWEBVIEW2_PROCESS_KIND::default());
+            // SAFETY: as above, on the collection WebView2 just handed over.
+            unsafe {
+                let info = infos.GetValueAtIndex(i).map_err(|e| e.to_string())?;
+                info.ProcessId(&mut pid).map_err(|e| e.to_string())?;
+                info.Kind(&mut kind).map_err(|e| e.to_string())?;
+            }
+            if kind != COREWEBVIEW2_PROCESS_KIND_RENDERER {
+                continue;
+            }
+            // SAFETY: plain calls on a handle that's checked, used once and closed.
+            unsafe {
+                let process = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
+                if !process.is_null() {
+                    if TerminateProcess(process, 1) != 0 {
+                        ended += 1;
+                    }
+                    CloseHandle(process);
+                }
+            }
+        }
+        Ok(ended)
     }
 
     /// The page as the view shows it: PNG bytes at the view's size in device pixels, which is what
@@ -644,11 +709,14 @@ fn next_tab_id() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// WebKit's configuration for a view a page opened (`window.open`): the new view must be made
-/// from it (macOS). Elsewhere a popup opens as a plain tab.
+/// What a view a page opened (`window.open`) must be made from: WebKit's configuration for it
+/// (macOS), or the environment of the view that opened it (Windows). Elsewhere a popup opens as a
+/// plain tab.
 #[cfg(target_os = "macos")]
 type PopupConfig = objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration>;
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+type PopupConfig = webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
+#[cfg(not(any(target_os = "macos", windows)))]
 type PopupConfig = std::convert::Infallible;
 
 #[cfg(target_os = "macos")]
@@ -658,7 +726,7 @@ thread_local! {
 }
 
 /// Events from the native views, bridged onto the GPUI thread.
-// The popup, dialog and failure events come from `webkit.rs`, which is macOS's.
+// The popup, failure and crash events come from `webkit.rs`, which is macOS's.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum Msg {
     Title(u64, String),
@@ -720,15 +788,20 @@ enum Msg {
         tab: u64,
         dark: Option<bool>,
     },
-    /// WebView2 is showing its own error page for `url`: the load failed.
-    #[cfg(windows)]
-    Failed {
-        tab: u64,
-        url: String,
-    },
     /// History moved without a load (a fragment, `pushState`): back and forward may have changed.
     #[cfg(windows)]
     History(u64),
+    /// A page in tab `opener` opens `url` (`window.open`, `target=_blank`; `size`: what it asked
+    /// for), and WebView2 waits on wry's thread for its view (`webview2::new_window`): the panel
+    /// makes it from `from`'s environment and sends it back on `made`, or `None` for no popup.
+    #[cfg(windows)]
+    OpenPopup {
+        opener: u64,
+        url: String,
+        size: Option<(f64, f64)>,
+        from: wry::NewWindowOpener,
+        made: std::sync::mpsc::SyncSender<Option<webview2::NewView>>,
+    },
 }
 
 struct Tab {
@@ -786,6 +859,8 @@ struct Page {
     url: String,
     /// The address that failed to load, while the error page is showing.
     failed: Option<String>,
+    /// The error page’s heading (its tab says it too), when it was given one.
+    failed_heading: Option<String>,
     title: String,
     favicon: Option<Arc<Image>>,
     favicon_url: Option<String>,
@@ -805,6 +880,7 @@ impl Page {
         Self {
             url: url.to_string(),
             failed: None,
+            failed_heading: None,
             title: String::new(),
             favicon: None,
             favicon_url: None,
@@ -858,6 +934,7 @@ impl Page {
         let error_page = format!("{ERROR_URL}{query}#{}", percent_encode(&url));
         self.loading = false;
         self.failed = Some(url);
+        self.failed_heading = why.map(|(heading, _)| heading.to_string());
         self.nav_seq += 1;
         self.ready = true;
         error_page
@@ -887,7 +964,11 @@ impl Page {
             return "New Tab".into();
         }
         if self.failed.is_some() {
-            return "Can’t reach page".into();
+            // The error page’s heading, made short for a tab: “Can’t open page”.
+            return match &self.failed_heading {
+                Some(heading) => heading.replace(" this ", " "),
+                None => "Can’t reach page".into(),
+            };
         }
         if !self.title.trim().is_empty() {
             return self.title.trim().to_string();
@@ -980,11 +1061,14 @@ fn open_in_safari(url: &str) {
         .spawn();
 }
 
-/// Answer WebKit's handler for ask `id` (`webkit.rs`; nothing waits elsewhere).
+/// Answer what waits on ask `id`: WebKit's handler (`webkit.rs`) or WebView2's deferral
+/// (`webview2.rs`); nothing waits elsewhere.
 fn reply_to_page(id: u64, reply: &Reply) {
     #[cfg(target_os = "macos")]
     webkit::answer(id, reply);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    webview2::answer(id, reply);
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = (id, reply);
 }
 
@@ -1018,6 +1102,36 @@ fn percent_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The reason Trek's error page at `url` gives (`failed_to_load`'s `why`), if it's that page.
+#[cfg(any(test, feature = "shots"))]
+fn error_page_why(url: &str) -> Option<String> {
+    let query = url.strip_prefix(ERROR_URL)?.split('#').next()?;
+    let why = query
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("why="))?;
+    let bytes = why.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = bytes
+            .get(at + 1..at + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[at], hex) {
+            (b'%', Some(b)) => {
+                out.push(b);
+                at += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// "3000" → http://localhost:3000, "example.com" → https://example.com, anything else searches Google.
@@ -1506,8 +1620,8 @@ impl BrowserPanel {
     /// nothing of the panel's (`tx` and `vars` are the panel's, cloned): reading the panel would
     /// hold the app too.
     /// `dark`: the scheme pages are asked for, set before the first page loads. `popup`: the
-    /// view is one a page opened, made from WebKit's configuration for it, and WebKit loads its
-    /// page (`open_popup`).
+    /// view is one a page opened, made from WebKit's configuration for it (macOS) or its opener's
+    /// WebView2 environment (Windows), and the web view loads its page itself (`open_popup`).
     fn build_view(
         id: u64,
         url: &str,
@@ -1559,7 +1673,18 @@ impl BrowserPanel {
                 }
                 None => builder,
             };
-            #[cfg(not(target_os = "macos"))]
+            // A popup's view is made on the environment its opener's is (WebView2 hands the page
+            // only a view of that), and loads no page of its own: WebView2 loads the popup's into
+            // it once it's handed over (`SetNewWindow`).
+            #[cfg(windows)]
+            let builder = match popup {
+                Some(environment) => {
+                    use wry::WebViewBuilderExtWindows as _;
+                    builder.with_environment(environment)
+                }
+                None => builder.with_url(to_view(url)),
+            };
+            #[cfg(not(any(target_os = "macos", windows)))]
             let _ = popup;
             // Downloads (a link's `download`, a response the view can't show, a redirect to a
             // file) go to Downloads, as wry would put them, and the panel says so. On Windows,
@@ -1569,6 +1694,15 @@ impl BrowserPanel {
                 let (t5, t6) = (tx.clone(), tx.clone());
                 builder
                     .with_download_started_handler(move |url, path| {
+                        // An isolated run (tests, the capture build) keeps what it downloads in
+                        // its own data folder: the user's Downloads isn't its to write in.
+                        if trek_core::paths::isolated()
+                            && let Some(name) = path.file_name().map(ToOwned::to_owned)
+                        {
+                            let dir = trek_core::paths::data_dir().join("downloads");
+                            let _ = std::fs::create_dir_all(&dir);
+                            *path = dir.join(name);
+                        }
                         let _ = t5.try_send(Msg::Download {
                             tab: id,
                             url,
@@ -1582,9 +1716,9 @@ impl BrowserPanel {
             };
             // WKWebView takes its scheme from its appearance, which is set once it's made: so it
             // loads its first page after that (below), not as it's made.
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", windows)))]
             let builder = builder.with_url(to_view(url));
-            builder
+            let builder = builder
                 .with_visible(false)
                 .with_devtools(true)
                 .with_accept_first_mouse(true)
@@ -1615,23 +1749,31 @@ impl BrowserPanel {
                         finished: matches!(event, wry::PageLoadEvent::Finished),
                         url,
                     });
-                })
-                // On macOS `webkit.rs` answers WebKit's call for a new view itself (with a real
-                // popup), so this is WebView2's: the page opens in a tab of its own, without
-                // `window.opener`. (WebView2 can hand a page a view as its popup too, through
-                // `NewWindowRequested`'s `SetNewWindow`, from a view made on its environment while
-                // the request is deferred; Trek doesn't yet. A sign-in that posts its answer back
-                // to the page that opened it can't finish there.)
-                .with_new_window_req_handler(move |url, _| {
-                    let _ = t4.try_send(Msg::NewWindow(url));
-                    wry::NewWindowResponse::Deny
-                })
+                });
+            // On macOS `webkit.rs` answers WebKit's call for a new view itself (with a real
+            // popup), so this is WebView2's: wry asks for the popup's view on a thread of its own
+            // while WebView2 holds the request, and the panel makes it (`webview2::new_window`), so
+            // the page keeps it as its popup, `window.opener` and all. Elsewhere the page opens in
+            // a tab of its own, without `window.opener`.
+            #[cfg(windows)]
+            let builder = builder.with_new_window_req_handler(move |url, features| {
+                webview2::new_window(id, url, features, &t4)
+            });
+            #[cfg(not(windows))]
+            let builder = builder.with_new_window_req_handler(move |url, _| {
+                let _ = t4.try_send(Msg::NewWindow(url));
+                wry::NewWindowResponse::Deny
+            });
+            builder
                 .build_as_child(handle)
                 .inspect_err(|e| tracing::warn!("browser: no web view: {e}"))
                 .ok()?
         };
         #[cfg(windows)]
-        native::watch(&built, id, &tx);
+        {
+            native::watch(&built, id, &tx);
+            webview2::hook(&built, id, &tx);
+        }
         #[cfg(target_os = "macos")]
         {
             native::set_dark(&built, dark);
@@ -1688,6 +1830,66 @@ impl BrowserPanel {
             size,
         });
         Some(view)
+    }
+
+    /// A page in tab `opener` opened `url` (`window.open`, `target=_blank`), and WebView2 holds
+    /// the request until it has a view for it (`webview2::new_window`): make one on the opener's
+    /// environment (`from`), in a task of its own (see `build_view`), and send it back on `made`
+    /// for WebView2 to load as the page's popup, the opener its `window.opener`. The panel takes
+    /// it as a tab: a sheet over the opener when the page asked for a `size`. An address only
+    /// another app opens gets no view: the bar asks about it, as WebKit's popups do.
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    fn open_popup(
+        &mut self,
+        opener: u64,
+        url: String,
+        size: Option<(f64, f64)>,
+        from: wry::NewWindowOpener,
+        made: std::sync::mpsc::SyncSender<Option<webview2::NewView>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use wry::WebViewExtWindows as _;
+        let url = if url.is_empty() {
+            "about:blank".to_string()
+        } else {
+            url
+        };
+        let dark = self
+            .tabs
+            .iter()
+            .find(|t| t.id == opener)
+            .map(|t| t.dark.unwrap_or_else(|| self.wants_dark(cx)));
+        let (Some(dark), Some(parent)) = (dark, ParentWindow::of(window)) else {
+            let _ = made.send(None);
+            return;
+        };
+        if !webview2::view_loads(&url) {
+            let _ = made.send(None);
+            self.handle(Msg::External { tab: opener, url }, window, cx);
+            return;
+        }
+        let id = next_tab_id();
+        let (tx, vars) = (self.tx.clone(), self.page_vars.clone());
+        let environment = from.environment;
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let built = Self::build_view(id, &url, dark, &parent, tx, vars, Some(environment));
+            let Some(built) = built else {
+                let _ = made.send(None);
+                return;
+            };
+            let handed = made.send(Some(webview2::NewView(built.webview()))).is_ok();
+            // The page stopped waiting (no view in time): the popup is a tab of its own instead.
+            if !handed {
+                let _ = built.load_url(&to_view(&url));
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                let view = cx.new(|cx| WebView::new(built, window, cx));
+                let popup = handed.then_some((opener, size));
+                this.add_tab(id, view, &url, dark, popup, window, cx);
+            });
+        }));
     }
 
     /// Open `url` in a new tab. Its view is made in a task of its own, which runs outside any
@@ -1822,6 +2024,8 @@ impl BrowserPanel {
         self.forget_asks(id);
         #[cfg(target_os = "macos")]
         webkit::unhook(id);
+        #[cfg(windows)]
+        webview2::unhook(id);
         if self.tabs.is_empty() {
             self.new_tab(START_URL, window, cx);
             return;
@@ -2036,19 +2240,19 @@ impl BrowserPanel {
                     site,
                     kind,
                 };
+                let for_agent = self.agent.acting().then(|| ask.for_agent()).flatten();
                 if !self.tabs.iter().any(|t| t.id == tab) {
                     reply_to_page(id, &Reply::No);
-                } else if self.agent.acting() && ask.blocks_page() {
+                } else if let Some((reply, told)) = for_agent {
                     // A page held by a dialog runs nothing (the agent's own scripts included)
                     // until it's answered, and an agent has no way to: Trek answers as a browser
-                    // driver does (OK to an alert, Cancel to the rest) and the agent is told.
-                    let alert = matches!(ask.kind, AskKind::Alert(_));
-                    reply_to_page(id, if alert { &Reply::Yes } else { &Reply::No });
-                    self.agent.dismissed(format!(
-                        "The page showed a dialog (\"{}\"), which Trek {}: agents can't answer page dialogs.",
-                        ask.message().unwrap_or_default(),
-                        if alert { "closed" } else { "cancelled" }
-                    ));
+                    // driver does (`Ask::for_agent`) and the agent is told.
+                    reply_to_page(id, &reply);
+                    self.agent.dismissed(told);
+                } else if let Some(waiting) = self.asks.iter_mut().find(|a| a.id == id) {
+                    // One more request joined to one waiting (WebView2's microphone after its
+                    // camera): the bar asks for both.
+                    *waiting = ask;
                 } else {
                     self.asks.push(ask);
                 }
@@ -2062,7 +2266,9 @@ impl BrowserPanel {
                 let site = host_of(&tab.page.url).unwrap_or_default();
                 #[cfg(target_os = "macos")]
                 let app = webkit::app_for(&url);
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(windows)]
+                let app = webview2::app_for(&url);
+                #[cfg(not(any(target_os = "macos", windows)))]
                 let app = Some(String::from("its app"));
                 let kind = AskKind::OpenApp { url, app };
                 if !self.asks.iter().any(|a| a.tab == id && a.kind == kind) {
@@ -2080,10 +2286,20 @@ impl BrowserPanel {
                 domain,
                 code,
             } => {
+                let Some(tab) = self.tab_mut(id) else { return };
                 let url = from_view(url);
-                if url.starts_with("trek://") || self.tab_mut(id).is_none() {
+                // Trek's own page failing (its error page too) leaves the view's own showing:
+                // another error page of Trek's would fail the same way, again and again.
+                if url.starts_with("trek://") {
+                    tracing::warn!("browser: Trek's page {url} didn't load");
                     return;
                 }
+                // WebView2 may not say which address failed: the tab's own, then.
+                let url = if url.is_empty() {
+                    tab.page.url.clone()
+                } else {
+                    url
+                };
                 if let Some((heading, why)) = asks::load_failure(&domain, code, &url) {
                     tracing::info!("browser: {url} failed: {domain} {code}");
                     self.show_load_failure(id, url, Some((heading, &why)), cx);
@@ -2146,17 +2362,15 @@ impl BrowserPanel {
                 }
             }
             #[cfg(windows)]
-            Msg::Failed { tab: id, url } => {
-                let Some(tab) = self.tab_mut(id) else { return };
-                let url = if url.is_empty() {
-                    tab.page.url.clone()
-                } else {
-                    from_view(url)
-                };
-                self.show_load_error(id, url, cx);
-            }
-            #[cfg(windows)]
             Msg::History(id) => self.refresh_nav(id, cx),
+            #[cfg(windows)]
+            Msg::OpenPopup {
+                opener,
+                url,
+                size,
+                from,
+                made,
+            } => self.open_popup(opener, from_view(url), size, from, made, window, cx),
         }
         cx.notify();
     }
@@ -3594,6 +3808,9 @@ impl BrowserPanel {
             "url": tab.map(|t| t.page.url.clone()),
             "label": tab.map(|t| t.page.label()),
             "failed": tab.and_then(|t| t.page.failed.clone()),
+            // What Trek's error page says went wrong (its address carries it).
+            "why": tab.and_then(|t| error_page_why(&t.page.url)),
+            "crashed": tab.map(|t| t.crashed.is_some()),
             "loading": tab.map(|t| t.page.loading),
             "can_back": tab.map(|t| t.page.can_back),
             "can_forward": tab.map(|t| t.page.can_forward),
@@ -3634,6 +3851,13 @@ impl BrowserPanel {
     ) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
         self.active_tab()
             .map(|t| native::snapshot(t.view.read(cx).raw()))
+    }
+
+    /// End the active tab's page process, as a crash would (`browser crash`): how many ended.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn shots_crash(&self, cx: &App) -> Result<usize, String> {
+        let tab = self.active_tab().ok_or("no page")?;
+        native::end_page_process(tab.view.read(cx).raw())
     }
 
     /// The page as `screenshot` would capture it.
@@ -4094,12 +4318,12 @@ impl Render for BrowserPanel {
 mod tests {
     // Named, not `super::*`: that would bring GPUI's `test` attribute over the standard one.
     #[cfg(windows)]
-    use super::{Captures, Msg, PAGES_SCHEME, native};
+    use super::{Captures, Msg, PAGES_SCHEME, native, webview2};
     use super::{
         DRAWN_DARK_JS, ERROR_URL, FAVICON_MAX_BYTES, Page, SAFARI_FALLBACK, START_URL,
-        decode_favicon, download_favicon, extract_title, favicon_url, force_dark_js, from_view,
-        from_webview2, host_of, normalize, plist_version, safari_user_agent, same_origin,
-        scheme_lags_a_load, snap_frame, to_view, to_webview2,
+        decode_favicon, download_favicon, error_page_why, extract_title, favicon_url,
+        force_dark_js, from_view, from_webview2, host_of, normalize, plist_version,
+        safari_user_agent, same_origin, scheme_lags_a_load, snap_frame, to_view, to_webview2,
     };
     use gpui_kit::ImageFormat;
 
@@ -4252,11 +4476,26 @@ mod tests {
             error_page,
             format!("{ERROR_URL}#http%3A%2F%2Flocalhost%3A9%2Fapp")
         );
-        // WebKit's reason goes along, in Trek's words.
+        // WebKit's reason goes along, in Trek's words, and reads back as it was.
+        let with_why = Page::new(START_URL)
+            .failed_to_load("https://x.dev/".into(), Some(("Can’t", "a & b’s")));
         assert_eq!(
-            Page::new(START_URL).failed_to_load("https://x.dev/".into(), Some(("Can’t", "a & b"))),
-            format!("{ERROR_URL}?h=Can%E2%80%99t&why=a%20%26%20b#https%3A%2F%2Fx.dev%2F")
+            with_why,
+            format!("{ERROR_URL}?h=Can%E2%80%99t&why=a%20%26%20b%E2%80%99s#https%3A%2F%2Fx.dev%2F")
         );
+        assert_eq!(error_page_why(&with_why).as_deref(), Some("a & b’s"));
+        assert_eq!(error_page_why(&error_page), None);
+        assert_eq!(error_page_why("https://x.dev/?why=no"), None);
+        // Its tab says the page's heading, made short.
+        let mut refused = Page::new(START_URL);
+        refused.failed_to_load(
+            "http://127.0.0.1:9/".into(),
+            Some(("Can’t open this page", "Port 9 is kept…")),
+        );
+        assert_eq!(refused.label(), "Can’t open page");
+        let mut crashed = Page::new(START_URL);
+        crashed.failed_to_load("https://x.dev/".into(), Some(super::asks::CRASHED));
+        assert_eq!(crashed.label(), "This page stopped working");
         assert!(!page.loading && page.ready);
         // The error page loading keeps the failure on show.
         page.loaded(false, error_page.clone());
@@ -4369,14 +4608,16 @@ mod tests {
     /// activated, on a data folder of its own.
     #[cfg(windows)]
     mod real {
-        use super::{Msg, PAGES_SCHEME, from_view, native};
+        use super::{Msg, PAGES_SCHEME, from_view, native, webview2};
         use raw_window_handle::{
             HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
         };
         use std::borrow::Cow;
         use std::path::PathBuf;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::time::{Duration, Instant};
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
         pub struct Parent(pub isize);
@@ -4455,7 +4696,8 @@ mod tests {
             }
         }
 
-        /// A view as the Browser tool makes one (Trek's pages under `PAGES_SCHEME`), with what it reports.
+        /// A view as the Browser tool makes one (Trek's pages under `PAGES_SCHEME`; its dialogs,
+        /// permissions, links for apps and popups hooked as the panel's are), with what it reports.
         pub struct View {
             pub wv: wry::WebView,
             pub rx: async_channel::Receiver<Msg>,
@@ -4465,6 +4707,17 @@ mod tests {
 
         impl View {
             pub fn open(parent: isize) -> View {
+                View::build(parent, 1, Some("about:blank"), None)
+            }
+
+            /// Tab `tab`'s view: at `url`, or, a popup's, on its opener's `environment` with no
+            /// page of its own (WebView2 loads it once it's handed over).
+            pub fn build(
+                parent: isize,
+                tab: u64,
+                url: Option<&str>,
+                environment: Option<ICoreWebView2Environment>,
+            ) -> View {
                 static N: AtomicUsize = AtomicUsize::new(0);
                 let data = std::env::temp_dir().join(format!(
                     "trek-webview2-test-{}-{}",
@@ -4473,10 +4726,9 @@ mod tests {
                 ));
                 let mut context = wry::WebContext::new(Some(data.clone()));
                 let (tx, rx) = async_channel::unbounded::<Msg>();
-                let (t1, t2) = (tx.clone(), tx.clone());
-                let wv = wry::WebViewBuilder::new_with_web_context(&mut context)
+                let (t1, t2, t3) = (tx.clone(), tx.clone(), tx.clone());
+                let builder = wry::WebViewBuilder::new_with_web_context(&mut context)
                     .with_focused(false)
-                    .with_url("about:blank")
                     .with_bounds(wry::Rect {
                         position: wry::dpi::LogicalPosition::new(0, 0).into(),
                         size: wry::dpi::LogicalSize::new(400, 300).into(),
@@ -4488,24 +4740,64 @@ mod tests {
                             .unwrap_or_default()
                     })
                     .with_document_title_changed_handler(move |title| {
-                        let _ = t1.try_send(Msg::Title(1, title));
+                        let _ = t1.try_send(Msg::Title(tab, title));
                     })
                     .with_on_page_load_handler(move |event, url| {
                         let _ = t2.try_send(Msg::Load {
-                            tab: 1,
+                            tab,
                             finished: matches!(event, wry::PageLoadEvent::Finished),
                             url,
                         });
                     })
+                    .with_new_window_req_handler(move |url, features| {
+                        webview2::new_window(tab, url, features, &t3)
+                    });
+                let builder = match url {
+                    Some(url) => builder.with_url(url),
+                    None => builder,
+                };
+                let builder = match environment {
+                    Some(environment) => {
+                        use wry::WebViewBuilderExtWindows as _;
+                        builder.with_environment(environment)
+                    }
+                    None => builder,
+                };
+                let wv = builder
                     .build_as_child(&Parent(parent))
                     .expect("a WebView2 (is the runtime installed?)");
-                native::watch(&wv, 1, &tx);
+                native::watch(&wv, tab, &tx);
+                webview2::hook(&wv, tab, &tx);
                 View {
                     wv,
                     rx,
                     context,
                     data,
                 }
+            }
+
+            /// The first message `want` takes, past any before it.
+            pub fn next<T>(&self, what: &str, mut want: impl FnMut(Msg) -> Option<T>) -> T {
+                wait_for(what, || {
+                    while let Ok(msg) = self.rx.try_recv() {
+                        if let Some(v) = want(msg) {
+                            return Some(v);
+                        }
+                    }
+                    None
+                })
+            }
+
+            /// Every message for `wait`, to see what didn't come.
+            pub fn drain(&self, wait: Duration) -> Vec<Msg> {
+                let until = Instant::now() + wait;
+                let mut got = vec![];
+                while Instant::now() < until {
+                    pump();
+                    got.extend(std::iter::from_fn(|| self.rx.try_recv().ok()));
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                got
             }
 
             /// Wait for `want` (in Trek's form) to finish loading.
@@ -4539,6 +4831,90 @@ mod tests {
                 pump();
                 drop(context);
                 let _ = std::fs::remove_dir_all(&data);
+            }
+        }
+
+        /// The page's answer to `js`, as JSON, once it gives one: a page held by a dialog runs no
+        /// script until the dialog is answered.
+        pub fn eval_later(wv: &wry::WebView, js: &str) -> async_channel::Receiver<String> {
+            let (tx, rx) = async_channel::bounded(1);
+            wv.evaluate_script_with_callback(js, move |result| {
+                let _ = tx.try_send(result);
+            })
+            .expect("a script");
+            rx
+        }
+
+        pub fn eval(wv: &wry::WebView, js: &str) -> String {
+            let answer = eval_later(wv, js);
+            wait_for(&format!("the answer to {js}"), || answer.try_recv().ok())
+        }
+
+        /// A web server on loopback with `pages` by path (`redirect:<address>` sends the browser
+        /// there), until dropped. `http://127.0.0.1:<port>` and `http://localhost:<port>` are two
+        /// origins of it, as a site and its sign-in are.
+        pub struct Server {
+            pub port: u16,
+            stop: Arc<AtomicBool>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl Server {
+            pub fn start(pages: Vec<(&'static str, String)>) -> Server {
+                use std::io::{Read, Write};
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+                let port = listener.local_addr().expect("its address").port();
+                listener.set_nonblocking(true).expect("non-blocking");
+                let stop = Arc::new(AtomicBool::new(false));
+                let stopping = stop.clone();
+                let thread = std::thread::spawn(move || {
+                    while !stopping.load(Ordering::Relaxed) {
+                        let Ok((mut stream, _)) = listener.accept() else {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        };
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut request = [0u8; 4096];
+                        let n = stream.read(&mut request).unwrap_or(0);
+                        let head = String::from_utf8_lossy(&request[..n]);
+                        let path = head.split_whitespace().nth(1).unwrap_or("/");
+                        let path = path.split(['?', '#']).next().unwrap_or("/");
+                        let body = pages
+                            .iter()
+                            .find(|(p, _)| *p == path)
+                            .map(|(_, body)| body.as_str())
+                            .unwrap_or("<!doctype html><title>Other</title>");
+                        let answer = match body.strip_prefix("redirect:") {
+                            Some(to) => format!(
+                                "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            ),
+                            None => format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            ),
+                        };
+                        let _ = stream.write_all(answer.as_bytes());
+                    }
+                });
+                Server {
+                    port,
+                    stop,
+                    thread: Some(thread),
+                }
+            }
+
+            pub fn url(&self, host: &str, path: &str) -> String {
+                format!("http://{host}:{}{path}", self.port)
+            }
+        }
+
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Relaxed);
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
             }
         }
     }
@@ -4586,13 +4962,28 @@ mod tests {
         let size = wv.bounds().expect("bounds").size.to_physical::<u32>(1.0);
         assert_eq!((info.width, info.height), (size.width, size.height));
 
-        // A load that fails ends on WebView2's error page, which Trek is told of.
-        wv.load_url("http://127.0.0.1:9/").expect("navigate");
-        let failed = wait_for("the failure", || match rx.try_recv() {
-            Ok(Msg::Failed { url, .. }) => Some(url),
-            _ => None,
-        });
-        assert!(failed.starts_with("http://127.0.0.1:9"), "{failed}");
+        // A load that fails is told to Trek once, with WebView2's reason, which reads in Trek's
+        // words: nothing listens on port 39999, so it's refused.
+        let failure = |url: &str| {
+            wv.load_url(url).expect("navigate");
+            let (failed, domain, code) = wait_for("the failure", || match rx.try_recv() {
+                Ok(Msg::LoadFailed {
+                    url, domain, code, ..
+                }) => Some((url, domain, code)),
+                _ => None,
+            });
+            assert!(failed.starts_with(url.trim_end_matches('/')), "{failed}");
+            let (heading, why) =
+                super::asks::load_failure(&domain, code, &failed).expect("in Trek's words");
+            (heading, why)
+        };
+        let (heading, why) = failure("http://127.0.0.1:39999/");
+        assert_eq!(heading, "Can’t reach this page", "{why}");
+        // Port 9 (discard) is one browsers keep pages off: WebView2 doesn't try it, and Trek says
+        // that rather than a server that isn't running.
+        let (heading, why) = failure("http://127.0.0.1:9/");
+        assert_eq!(heading, "Can’t open this page", "{why}");
+        assert!(why.starts_with("Port 9 is kept"), "{why}");
 
         // The window goes first (a closed Trek window), then the view: no crash.
         unsafe { DestroyWindow(parent as _) };
@@ -4688,6 +5079,393 @@ mod tests {
         view.finish();
         stop.store(true, Ordering::Relaxed);
         server.join().expect("the server");
+    }
+
+    /// What a test page asked (`Msg::Ask`): its id, its site and what.
+    #[cfg(windows)]
+    fn asked(msg: Msg) -> Option<(u64, String, super::AskKind)> {
+        match msg {
+            Msg::Ask { id, site, kind, .. } => Some((id, site, kind)),
+            _ => None,
+        }
+    }
+
+    /// A page's dialogs go to the bar in a real WebView2 (none of WebView2's own), and the page
+    /// waits on the answer: the first page's too, OK, Cancel and a `prompt`'s text.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_holds_a_page_on_its_dialog_until_the_bar_answers() {
+        use super::{AskKind, Reply};
+        use real::{Server, View, eval, eval_later, parent_window, pump, wait_for};
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        let server = Server::start(vec![
+            ("/", "<!doctype html><title>Asks</title><p>asks".into()),
+            (
+                "/first",
+                "<!doctype html><title>First</title><script>window.__first = (alert('first'), 'done')</script>"
+                    .into(),
+            ),
+        ]);
+        let parent = parent_window();
+        // The very first page's dialog is the bar's too: the view's hooked before it loads.
+        let first = server.url("127.0.0.1", "/first");
+        let view = View::build(parent, 1, Some(first.as_str()), None);
+        let (id, site, kind) = view.next("the first page's alert", asked);
+        assert_eq!(kind, AskKind::Alert("first".into()));
+        assert_eq!(
+            site,
+            format!("127.0.0.1:{}", server.port),
+            "the bar names the site"
+        );
+        webview2::answer(id, &Reply::Yes);
+        assert_eq!(eval(&view.wv, "window.__first"), r#""done""#);
+
+        let page = server.url("127.0.0.1", "/");
+        view.wv.load_url(&page).expect("navigate");
+        view.loaded(&page);
+        // Each dialog from a timer, as a click's would be: the script that starts it returns.
+        let dialog = |js: &str, reply: Reply| -> (AskKind, String) {
+            eval(
+                &view.wv,
+                &format!(
+                    "window.__r = null; setTimeout(() => {{ window.__r = {{ v: {js} }} }}, 0); true"
+                ),
+            );
+            let (id, _, kind) = view.next(&format!("the bar for {js}"), asked);
+            // Held: the page runs nothing, so a script asked for now answers only afterwards.
+            let probe = eval_later(&view.wv, "window.__r");
+            let until = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < until {
+                pump();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(probe.try_recv().is_err(), "the page ran on past {js}");
+            webview2::answer(id, &reply);
+            let answer = wait_for("the probe", || probe.try_recv().ok());
+            (kind, answer)
+        };
+        // (An alert's `undefined` leaves `v` out.)
+        assert_eq!(
+            dialog("alert('Hello from the page')", Reply::Yes),
+            (AskKind::Alert("Hello from the page".into()), "{}".into())
+        );
+        assert_eq!(
+            dialog("confirm('Leave this page?')", Reply::Yes),
+            (
+                AskKind::Confirm("Leave this page?".into()),
+                r#"{"v":true}"#.into()
+            )
+        );
+        assert_eq!(dialog("confirm('Sure?')", Reply::No).1, r#"{"v":false}"#);
+        let prompt = AskKind::Prompt {
+            message: "Your name?".into(),
+            default: "Ada".into(),
+        };
+        assert_eq!(
+            dialog("prompt('Your name?', 'Ada')", Reply::Text("Grace".into())),
+            (prompt, r#"{"v":"Grace"}"#.into())
+        );
+        assert_eq!(dialog("prompt('Name?')", Reply::No).1, r#"{"v":null}"#);
+        assert_eq!(dialog("prompt('Name?', 'x')", Reply::Yes).1, r#"{"v":""}"#);
+
+        // A tab that closes answers what it waited on ("no"), and the page goes on.
+        eval(
+            &view.wv,
+            "window.__r = null; setTimeout(() => { window.__r = { v: confirm('Left open') } }, 0); true",
+        );
+        view.next("the last confirm", asked);
+        webview2::unhook(1);
+        assert_eq!(
+            wait_for("the page", || {
+                let r = eval(&view.wv, "window.__r");
+                (r != "null").then_some(r)
+            }),
+            r#"{"v":false}"#
+        );
+
+        unsafe { DestroyWindow(parent as _) };
+        pump();
+        view.finish();
+    }
+
+    /// Camera, microphone and location ask on the bar for each request (nothing kept in the
+    /// profile), camera and microphone as one; notifications are refused without a word.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_asks_for_the_camera_microphone_and_location_each_time() {
+        use super::{AskKind, Reply};
+        use real::{Server, View, eval, parent_window, pump, wait_for};
+        use std::time::Duration;
+        use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        let server = Server::start(vec![("/", "<!doctype html><title>Asks</title>".into())]);
+        let parent = parent_window();
+        let page = server.url("127.0.0.1", "/");
+        let view = View::build(parent, 1, Some(page.as_str()), None);
+        view.loaded(&page);
+        let result = |key: &str| {
+            wait_for(&format!("window.{key}"), || {
+                let r = eval(&view.wv, &format!("window.{key}"));
+                (r != "null").then_some(r)
+            })
+        };
+
+        for _ in 0..2 {
+            eval(
+                &view.wv,
+                "window.__loc = null; navigator.geolocation.getCurrentPosition(() => { window.__loc = 'granted' }, (e) => { window.__loc = 'error ' + e.code }); true",
+            );
+            let (id, site, kind) = view.next("the location ask", asked);
+            assert_eq!(
+                (kind, site),
+                (AskKind::Location, format!("127.0.0.1:{}", server.port))
+            );
+            webview2::answer(id, &Reply::No);
+            assert_eq!(
+                result("__loc"),
+                r#""error 1""#,
+                "Don't Allow reaches the page"
+            );
+        }
+
+        let media = |constraints: &str| {
+            eval(
+                &view.wv,
+                &format!(
+                    "window.__m = null; navigator.mediaDevices.getUserMedia({constraints}).then((s) => {{ s.getTracks().forEach((t) => t.stop()); window.__m = 'granted' }}, (e) => {{ window.__m = e.name }}); true"
+                ),
+            );
+        };
+        media("{ audio: true }");
+        let (id, _, kind) = view.next("the microphone ask", asked);
+        assert_eq!(kind, AskKind::Microphone);
+        webview2::answer(id, &Reply::No);
+        assert_eq!(result("__m"), r#""NotAllowedError""#);
+
+        // Both at once: WebView2 asks for each, the bar for both, by the first's id.
+        media("{ video: true, audio: true }");
+        let (first, _, _) = view.next("the camera ask", asked);
+        let later: Vec<_> = view
+            .drain(Duration::from_millis(1500))
+            .into_iter()
+            .filter_map(asked)
+            .collect();
+        let kinds: Vec<_> = later
+            .iter()
+            .map(|(id, _, kind)| (*id, kind.clone()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![(first, AskKind::CameraAndMicrophone)],
+            "one ask, for both"
+        );
+        webview2::answer(first, &Reply::No);
+        assert_eq!(result("__m"), r#""NotAllowedError""#);
+
+        eval(
+            &view.wv,
+            "window.__n = null; Notification.requestPermission().then((p) => { window.__n = p }); true",
+        );
+        assert_eq!(result("__n"), r#""denied""#);
+        assert!(
+            view.drain(Duration::from_millis(500))
+                .into_iter()
+                .all(|m| asked(m).is_none()),
+            "notifications asked on the bar"
+        );
+
+        unsafe { DestroyWindow(parent as _) };
+        pump();
+        view.finish();
+    }
+
+    /// A link only another app opens asks on the bar (`Msg::External`) in place of WebView2's
+    /// dialog, and the page stays; so do a scheme no app takes (which WebView2 alone would drop
+    /// without a word) and a redirect to one, as a sign-in's back to its app.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_asks_before_a_link_opens_another_app() {
+        use real::{Server, View, eval, parent_window, pump};
+        use std::time::Duration;
+        use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+        let server = Server::start(vec![
+            ("/", "<!doctype html><title>Links</title>".into()),
+            (
+                "/to-app",
+                "redirect:trek-test-app://signed-in?code=1".into(),
+            ),
+        ]);
+        let parent = parent_window();
+        let page = server.url("127.0.0.1", "/");
+        let view = View::build(parent, 1, Some(page.as_str()), None);
+        view.loaded(&page);
+        let go = |to: &str| {
+            eval(
+                &view.wv,
+                &format!("setTimeout(() => {{ location.href = {to:?} }}, 0); true"),
+            );
+            let url = view.next(&format!("the ask for {to}"), |m| match m {
+                Msg::External { tab: 1, url } => Some(url),
+                _ => None,
+            });
+            let failed = view
+                .drain(Duration::from_millis(300))
+                .iter()
+                .any(|m| matches!(m, Msg::LoadFailed { .. }));
+            assert!(!failed, "{to} ended on an error page");
+            assert_eq!(
+                eval(&view.wv, "location.pathname"),
+                r#""/""#,
+                "the page stays"
+            );
+            url
+        };
+        let mail = go("mailto:someone@example.com");
+        assert_eq!(mail, "mailto:someone@example.com");
+        assert!(
+            webview2::app_for(&mail).is_some(),
+            "Windows names mailto:'s app"
+        );
+        assert_eq!(go("trek-test-app://open"), "trek-test-app://open");
+        assert_eq!(webview2::app_for("trek-test-app://open"), None);
+        assert_eq!(
+            go(&server.url("127.0.0.1", "/to-app")),
+            "trek-test-app://signed-in?code=1"
+        );
+        // The browser's own pages aren't another app's.
+        assert!(webview2::view_loads("chrome-extension://abc/options.html"));
+        assert!(webview2::view_loads("http://localhost:3000/"));
+        assert!(!webview2::view_loads("trek-test-app://open"));
+
+        unsafe { DestroyWindow(parent as _) };
+        pump();
+        view.finish();
+    }
+
+    /// A popup gets a view of Trek's (`webview2::new_window`), so it keeps `window.opener` across
+    /// origins, as a sign-in's must; Trek's pages load in it; `window.close()` closes it and the
+    /// opener sees it closed. A popup written into by its opener works too.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real WebView2 window, which needs a desktop session and the WebView2 runtime (CI runs without one)"]
+    fn a_real_webview2_popup_keeps_its_opener_and_closes_into_it() {
+        use real::{Server, View, eval, eval_later, parent_window, pump, wait_for};
+        use std::time::Duration;
+        use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        use wry::WebViewExtWindows as _;
+
+        let server = Server::start(vec![
+            (
+                "/opener",
+                "<!doctype html><title>Opener</title><script>window.__got = null; addEventListener('message', (e) => { window.__got = { data: e.data, origin: e.origin } })</script>"
+                    .into(),
+            ),
+            ("/popup", "<!doctype html><title>Sign in</title><p>popup".into()),
+        ]);
+        let parent = parent_window();
+        let page = server.url("127.0.0.1", "/opener");
+        let opener = View::build(parent, 1, Some(page.as_str()), None);
+        opener.loaded(&page);
+
+        // What the panel does with the request (`open_popup`): a view on the opener's environment.
+        let popup_for = |want_url: &str, tab: u64| -> (View, Option<(f64, f64)>) {
+            let (url, size, from, made) = opener.next("the popup's request", |m| match m {
+                Msg::OpenPopup {
+                    opener: 1,
+                    url,
+                    size,
+                    from,
+                    made,
+                } => Some((url, size, from, made)),
+                _ => None,
+            });
+            let url = if url.is_empty() {
+                "about:blank".into()
+            } else {
+                url
+            };
+            assert_eq!(url, want_url);
+            let popup = View::build(parent, tab, None, Some(from.environment.clone()));
+            made.send(Some(webview2::NewView(popup.wv.webview())))
+                .expect("wry waits for it");
+            (popup, size)
+        };
+
+        let opened = eval_later(
+            &opener.wv,
+            &format!(
+                "window.__w = window.open({:?}, 'signin', 'width=500,height=600'); !!window.__w",
+                server.url("localhost", "/popup")
+            ),
+        );
+        let (popup, size) = popup_for(&server.url("localhost", "/popup"), 2);
+        assert_eq!(
+            size,
+            Some((500., 600.)),
+            "the size the page asked for: a sheet"
+        );
+        assert_eq!(
+            wait_for("window.open's answer", || opened.try_recv().ok()),
+            "true"
+        );
+        popup.loaded(&server.url("localhost", "/popup"));
+        assert_eq!(eval(&popup.wv, "!!window.opener"), "true", "window.opener");
+        eval(
+            &popup.wv,
+            "window.opener.postMessage({ credential: 'test-credential-123' }, '*'); true",
+        );
+        let got = wait_for("the credential", || {
+            let got = eval(&opener.wv, "window.__got");
+            (got != "null").then_some(got)
+        });
+        assert_eq!(
+            got,
+            format!(
+                r#"{{"data":{{"credential":"test-credential-123"}},"origin":"http://localhost:{}"}}"#,
+                server.port
+            )
+        );
+        assert_eq!(eval(&opener.wv, "window.__w.closed"), "false");
+
+        // Trek's own pages load in the popup's view too (its error page, say).
+        popup.wv.load_url(&to_view(START_URL)).expect("navigate");
+        popup.titled("Trek page");
+
+        // `window.close()`: the panel closes the tab, and the opener sees its popup closed.
+        let _ = eval_later(&popup.wv, "window.close()");
+        popup.next("the popup's close", |m| {
+            matches!(m, Msg::Closed(2)).then_some(())
+        });
+        popup.finish();
+        pump();
+        wait_for("popup.closed", || {
+            (eval(&opener.wv, "window.__w.closed") == "true").then_some(())
+        });
+
+        // `window.open()` with no address: a blank popup its opener writes into.
+        let written = eval_later(
+            &opener.wv,
+            "const w = window.open(); w.document.write('<title>Written</title><h1 id=w>Written by its opener</h1>'); w.document.close(); !!w",
+        );
+        let (blank, size) = popup_for("about:blank", 3);
+        assert_eq!(size, None, "no size asked for: a tab");
+        assert_eq!(wait_for("the write", || written.try_recv().ok()), "true");
+        assert_eq!(
+            eval(&blank.wv, "document.getElementById('w').textContent"),
+            r#""Written by its opener""#
+        );
+        blank.finish();
+        let _ = opener.drain(Duration::from_millis(100));
+
+        unsafe { DestroyWindow(parent as _) };
+        pump();
+        opener.finish();
     }
 
     #[test]

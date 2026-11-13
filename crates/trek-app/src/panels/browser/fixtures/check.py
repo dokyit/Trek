@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""The Browser's popup, sign-in and asks check (macOS), against isolated Trek (browser.md,
-"Popups, sign-in and asks"). Run from the checkout after `trek-dev start` and
-`trek-dev open tool:browser`:
+"""The Browser's popup, sign-in and asks check (macOS and Windows), against isolated Trek
+(browser.md, "Popups, sign-in and asks"). Run from the checkout after `trek-dev start` and
+`trek-dev open tool:browser` (on Windows, `trek-dev.ps1`, which this drives there):
 
     python3 crates/trek-app/src/panels/browser/fixtures/check.py [port]
 
@@ -20,7 +20,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = subprocess.run(
     ["git", "-C", HERE, "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
 ).stdout.strip()
-DEV = os.path.join(ROOT, ".agents/skills/verify-trek/scripts/trek-dev")
+WINDOWS = sys.platform == "win32"
+DEV = (
+    ["pwsh", "-NoProfile", "-File", os.path.join(ROOT, ".agents/skills/verify-trek/scripts/trek-dev.ps1")]
+    if WINDOWS
+    else [os.path.join(ROOT, ".agents/skills/verify-trek/scripts/trek-dev")]
+)
+# How the bar names the computer ("…which no app on this Mac opens").
+THIS = "this PC" if WINDOWS else "this Mac"
 PORT = int(sys.argv[1]) if __name__ == "__main__" and len(sys.argv) > 1 else 47615
 SITE = f"http://127.0.0.1:{PORT}"
 IDP = f"http://localhost:{PORT}"
@@ -29,7 +36,7 @@ results = []
 
 
 def dev(*args):
-    out = subprocess.run([DEV, *args], capture_output=True, text=True)
+    out = subprocess.run([*DEV, *args], capture_output=True, text=True)
     if out.returncode != 0:
         raise RuntimeError(f"trek-dev {' '.join(args)}: {out.stdout.strip()} {out.stderr.strip()}")
     return out.stdout
@@ -119,7 +126,9 @@ def run():
     idp = wait("idp", lambda: (lambda v: v if isinstance(v, dict) and v.get("safari") is not None else None)(js("window.__idp")))
     check("the popup has window.opener", isinstance(idp, dict) and idp.get("opener") is True, idp)
     check("navigator.webdriver is false", isinstance(idp, dict) and idp.get("webdriver") is False, idp)
-    check("its user agent is Safari's", isinstance(idp, dict) and idp.get("safari") is True, idp and idp.get("ua"))
+    # WebView2 sends Edge's own user agent, unchanged.
+    if not WINDOWS:
+        check("its user agent is Safari's", isinstance(idp, dict) and idp.get("safari") is True, idp and idp.get("ua"))
     # Google's last step: the form POST to /gsi/transform, which posts to the opener and closes.
     js("setTimeout(() => document.getElementById('f').submit(), 0), true")
     closed = wait("closed", lambda: (lambda s: s if not any(t["id"] == popup["id"] for t in s["all_tabs"]) else None)(state()))
@@ -175,10 +184,15 @@ def run():
 
     clear_asks()
     click("mail")
-    check("mailto: asks to open Mail", expect_ask("wants to open Mail"), "no ask")
+    if WINDOWS:
+        # Whichever app this PC has for mail (Outlook, Mail…).
+        ask = expect_ask("wants to open")
+        check("mailto: asks to open its app", ask and "no app" not in ask["headline"], ask)
+    else:
+        check("mailto: asks to open Mail", expect_ask("wants to open Mail"), "no ask")
     clear_asks()
     click("app")
-    check("a scheme no app opens says so", expect_ask("no app on this Mac"), "no ask")
+    check("a scheme no app opens says so", expect_ask(f"no app on {THIS}"), "no ask")
     clear_asks()
     click("toapp")
     ask = expect_ask("trek-test-app: link")
@@ -236,8 +250,10 @@ def run():
     control("go", "https://nope.invalid/")
     s = wait("error", lambda: (lambda s: s if s["failed"] else None)(state()), timeout=20)
     check("a host that doesn't exist shows Trek's error page", s is not None)
-    why = s and wait("why", lambda: js("document.getElementById('failed-why').textContent"))
-    check("…saying why", isinstance(why, str) and "can’t find the server at nope.invalid" in why, why)
+    # WebView2's failures aren't put in Trek's words yet: its error page is the generic one.
+    if not WINDOWS:
+        why = s and wait("why", lambda: js("document.getElementById('failed-why').textContent"))
+        check("…saying why", isinstance(why, str) and "can’t find the server at nope.invalid" in why, why)
 
 
 if __name__ == "__main__":

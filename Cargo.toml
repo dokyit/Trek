@@ -13,6 +13,7 @@ repository = "https://github.com/dokyit/Trek"
 trek-core = { path = "crates/trek-core" }
 trek-agents = { path = "crates/trek-agents" }
 trek-ipc = { path = "crates/trek-ipc" }
+trek-private = { path = "crates/trek-private" }
 trek-test-fixtures = { path = "crates/test-fixtures" }
 gpui-kit = { version = "=0.7.0", features = ["tree-sitter", "tree-sitter-bash", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-css", "tree-sitter-diff", "tree-sitter-go", "tree-sitter-html", "tree-sitter-java", "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust", "tree-sitter-swift", "tree-sitter-toml", "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml", "tree-sitter-csharp", "tree-sitter-sql", "tree-sitter-php", "tree-sitter-make", "tree-sitter-cmake", "tree-sitter-markdown-inline", "tree-sitter-zig", "tree-sitter-scala", "tree-sitter-elixir", "tree-sitter-svelte", "tree-sitter-astro", "tree-sitter-jsdoc"] }
 anyhow = "1"
@@ -81,3 +82,11 @@ gpui-pre = { path = "vendor/gpui-pre" }
 # child windows Trek lays over its frame show above it instead of under it. See "Trek:" in
 # vendor/gpui-pre-windows/src/directx_renderer.rs.
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# And to whisper-rs-sys (dictation on Windows, through whisper-rs), whose build script compiles
+# whisper.cpp: it adds only the folders the libraries are installed in to the link path (upstream
+# adds every folder of CMake's build tree, which Cargo then puts on PATH for every test and
+# `cargo run` on Windows, past what cmd.exe can search); MSVC builds get the static runtime (/MT),
+# so trek.exe asks for no msvcp140.dll; and ggml is built for the AVX2 baseline, not the machine
+# building it. See "Trek:" in vendor/whisper-rs-sys/build.rs. whisper.cpp's GPU backends are left
+# out of the copy: Trek builds its CPU backend only.
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }

@@ -624,7 +624,7 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("RightPanel");
         let theme = cx.theme().clone();
         let active = self.active;

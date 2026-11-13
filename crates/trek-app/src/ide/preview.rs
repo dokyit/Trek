@@ -455,10 +455,24 @@ impl PreviewView {
         }
     }
 
+    /// What the note says while the file comes from the cloud (`slow`: after `FETCH_LIMIT`).
+    fn fetching_words(&self, slow: bool) -> String {
+        let app = cloud_app(&self.path).unwrap_or("the cloud");
+        if slow {
+            format!(
+                "{app} is still fetching {}. It opens here once it's on this device.",
+                self.name()
+            )
+        } else {
+            format!("Fetching {} from {app}…", self.name())
+        }
+    }
+
     /// What its note says, when it shows one rather than the file.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn note_text(&self) -> Option<String> {
         match (&self.status, self.kind, &self.web) {
+            (Status::Fetching { slow }, ..) => Some(self.fetching_words(*slow)),
             (Status::Unreadable(why), ..) => Some(why.clone()),
             (Status::Ready, Kind::Binary, _)
             | (Status::Ready, Kind::Document | Kind::Media, Web::Unavailable | Web::TooBig) => {
@@ -868,21 +882,10 @@ impl Render for PreviewView {
         let body = match &self.status {
             Status::Loading => div().into_any_element(),
             Status::Fetching { slow } => {
-                let app = cloud_app(&self.path).unwrap_or("the cloud");
-                let (text, retry) = if *slow {
-                    (
-                        format!(
-                            "{app} is still fetching {}. It opens here once it's on this device.",
-                            self.name()
-                        ),
-                        Some(Self::retry_button(cx)),
-                    )
-                } else {
-                    (format!("Fetching {} from {app}…", self.name()), None)
-                };
+                let retry = slow.then(|| Self::retry_button(cx));
                 self.note(
                     Icon::new(Lucide::Cloud),
-                    text,
+                    self.fetching_words(*slow),
                     None,
                     retry.into_iter().collect(),
                     cx,

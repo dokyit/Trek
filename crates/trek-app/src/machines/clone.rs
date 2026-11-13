@@ -163,20 +163,33 @@ pub fn read_uploads(root: &Path, files: &[String]) -> anyhow::Result<Vec<tr::Fil
             let full = root.join(path);
             let meta = std::fs::symlink_metadata(&full)?;
             anyhow::ensure!(meta.is_file(), "{path} isn't a file");
+            let bytes = std::fs::read(&full)?;
             #[cfg(unix)]
             let mode = {
                 use std::os::unix::fs::PermissionsExt as _;
                 meta.permissions().mode() & 0o777
             };
             #[cfg(not(unix))]
-            let mode = 0o644;
+            let mode = mode_from_contents(&bytes);
             Ok(tr::FileUpload {
                 path: path.clone(),
-                bytes: std::fs::read(&full)?,
+                bytes,
                 mode,
             })
         })
         .collect()
+}
+
+/// The permission bits a file from Windows, which has none to read, goes to another machine with:
+/// executable for a script that names its interpreter on its first line (`#!`, as git treats one
+/// on the other side), plain otherwise.
+#[cfg(any(not(unix), test))]
+fn mode_from_contents(bytes: &[u8]) -> u32 {
+    if bytes.starts_with(b"#!") {
+        0o755
+    } else {
+        0o644
+    }
 }
 
 /// "12 KB", "1.4 MB".
@@ -185,5 +198,20 @@ pub fn size_label(bytes: u64) -> String {
         0..1_000 => format!("{bytes} B"),
         1_000..1_000_000 => format!("{} KB", bytes.div_ceil(1_000)),
         _ => format!("{:.1} MB", bytes as f64 / 1_000_000.),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a PC sends: no bits to read, so a script that names its interpreter goes executable
+    /// (it arrives runnable on a Mac), and anything else plain. Checked on both platforms.
+    #[test]
+    fn a_file_from_windows_goes_executable_only_when_it_is_a_script() {
+        assert_eq!(mode_from_contents(b"#!/bin/sh\necho hi\n"), 0o755);
+        assert_eq!(mode_from_contents(b"#!/usr/bin/env node\n"), 0o755);
+        assert_eq!(mode_from_contents(b"KEY=1\n"), 0o644);
+        assert_eq!(mode_from_contents(b""), 0o644);
     }
 }

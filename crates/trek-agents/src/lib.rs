@@ -20,6 +20,9 @@ mod tests_cmd_args;
 mod tests_stop;
 
 pub use acp::{AcpInfo, acp_authenticate, acp_probe};
+/// What a Codex thread on Windows is told when its sandbox needs its one-time setup: the thread
+/// view offers to run codex in Trek's terminal beside it.
+pub use codex::SANDBOX_SETUP_NOTICE as CODEX_SANDBOX_SETUP_NOTICE;
 pub use codex::list_models as codex_models;
 pub use direct::{
     cache_direct_models, cached_direct_models, direct_provider_models, level_would_ask,
@@ -44,7 +47,7 @@ pub use status::{
 };
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use trek_core::{AgentId, Effort, HandHolding, TokenUsage, UsageCost};
 
 #[derive(Debug, Clone)]
@@ -263,50 +266,186 @@ fn agent_stdio_command(
     }) else {
         return Ok(None);
     };
-    if let Some(problem) = trek_core::detect::batch_script_problem(&program, args) {
-        return Err(problem);
+    if let BatchHandOff::ResolvedPath = agent {
+        return match trek_core::detect::batch_script_problem(&program, args) {
+            Some(problem) => Err(problem),
+            None => Ok(Some((
+                program.to_string_lossy().into_owned(),
+                args.to_vec(),
+            ))),
+        };
     }
-    match agent {
-        BatchHandOff::ResolvedPath => Ok(Some((
-            program.to_string_lossy().into_owned(),
-            args.to_vec(),
+    // Found by name, cmd.exe finds it again by that name; a path is written with backslashes (a
+    // `/` begins cmd's switches).
+    let target = if bare {
+        command.to_string()
+    } else {
+        command.replace('/', "\\")
+    };
+    let Some(problem) = cmd_wrapper_problem(&program, &target, args) else {
+        return Ok(Some((
+            "cmd".into(),
+            ["/c".to_string(), target]
+                .into_iter()
+                .chain(args.iter().cloned())
+                .collect(),
+        )));
+    };
+    // npm's shims (`npx.cmd`, a global package's `.cmd`) only run Node on a script: one cmd.exe
+    // can't be handed goes to Node and that script instead, which take every argument as written
+    // (`&`, `%`, a quote, a line break) from a folder of any name.
+    match node_and_script(&program, resolve) {
+        Some((node, script)) => Ok(Some((
+            node,
+            std::iter::once(script)
+                .chain(args.iter().cloned())
+                .collect(),
         ))),
-        BatchHandOff::CmdWrapper => {
-            // Found by name, cmd.exe finds it again by that name; a path is written with backslashes
-            // (a `/` begins cmd's switches).
-            let target = if bare {
-                command.to_string()
-            } else {
-                command.replace('/', "\\")
-            };
-            let name = trek_core::detect::script_name(&program);
-            if let Some(n) = std::iter::once(&target)
-                .chain(args)
-                .position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"']))
-            {
-                let which = if n == 0 {
-                    "its name".to_string()
-                } else {
-                    format!("argument {n}")
-                };
-                return Err(format!(
-                    "{name} is a batch script, which the agent can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."
-                ));
-            }
-            if target.contains(' ') {
-                return Err(format!(
-                    "{name} is a batch script in a folder with a space in its name, which can't be handed through cmd.exe; use its name (it's on your PATH) instead."
-                ));
-            }
-            Ok(Some((
-                "cmd".into(),
-                ["/c".to_string(), target]
-                    .into_iter()
-                    .chain(args.iter().cloned())
-                    .collect(),
-            )))
-        }
+        None => Err(problem),
     }
+}
+
+/// Why `cmd /c <target> <args>` can't carry a batch script's command as written, if it can't.
+fn cmd_wrapper_problem(program: &Path, target: &str, args: &[String]) -> Option<String> {
+    if let Some(problem) = trek_core::detect::batch_script_problem(program, args) {
+        return Some(problem);
+    }
+    let name = trek_core::detect::script_name(program);
+    if let Some(n) = std::iter::once(target)
+        .chain(args.iter().map(String::as_str))
+        .position(|a| a.contains(['&', '|', '<', '>', '^', '%', '"']))
+    {
+        let which = if n == 0 {
+            "its name".to_string()
+        } else {
+            format!("argument {n}")
+        };
+        return Some(format!(
+            "{name} is a batch script, which the agent can only start through cmd.exe, and cmd.exe would act on a character in {which} (one of & | < > ^ % or a quote)."
+        ));
+    }
+    target.contains(' ').then(|| {
+        format!(
+            "{name} is a batch script in a folder with a space in its name, which can't be handed through cmd.exe; use its name (it's on your PATH) instead."
+        )
+    })
+}
+
+/// What an npm shim runs: Node, and the script. Two kinds: cmd-shim's, beside each global
+/// package's binary (`codex.cmd`), and npm's own `npm.cmd` and `npx.cmd`, beside Node. Node is
+/// the one beside the shim when it's there, as both prefer, else the one `resolve` finds by name,
+/// as they would. `None` for a batch script that's neither, or whose script isn't there.
+fn node_and_script(
+    shim: &Path,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(shim)
+        .ok()
+        .filter(|t| t.len() < 8 * 1024)?;
+    // Both run Node: `IF EXIST "%dp0%\node.exe"`, `SET "NODE_EXE=%~dp0\node.exe"`.
+    if !text.contains("node.exe") {
+        return None;
+    }
+    let beside = shim.with_file_name("node.exe");
+    let node = if beside.is_file() {
+        beside
+    } else {
+        resolve("node")?
+    };
+    let script = match trek_core::agent_update::cmd_shim_target(shim, &text) {
+        Some(script) => script,
+        None => {
+            let own = npm_own_shim(shim, &text)?;
+            // As the shim does on every run: a global npm, in the folder npm-prefix.js names,
+            // runs instead of the one beside Node.
+            own.global
+                .and_then(|(prefix_js, within)| {
+                    Some(npm_global_prefix(&node, &prefix_js)?.join(within))
+                })
+                .filter(|s| s.is_file())
+                .unwrap_or(own.script)
+        }
+    };
+    script.is_file().then(|| {
+        (
+            node.to_string_lossy().into_owned(),
+            script.to_string_lossy().into_owned(),
+        )
+    })
+}
+
+/// Node's own `npm.cmd` and `npx.cmd` (npm writes them; they aren't cmd-shim's): the script they
+/// run, and how a global npm takes over.
+#[derive(Debug, PartialEq)]
+struct NpmShim {
+    /// The variable the last line runs, `"%NODE_EXE%" "%NPX_CLI_JS%" %*`, as set beside it:
+    /// `SET "NPX_CLI_JS=%~dp0\node_modules\npm\bin\npx-cli.js"`.
+    script: PathBuf,
+    /// `npm-prefix.js`, which prints npm's global folder, and where in that folder a global npm's
+    /// own script would be: `SET "NPM_PREFIX_NPX_CLI_JS=%%F\node_modules\npm\bin\npx-cli.js"`.
+    global: Option<(PathBuf, PathBuf)>,
+}
+
+fn npm_own_shim(shim: &Path, text: &str) -> Option<NpmShim> {
+    let dir = shim.parent()?;
+    let lines = || text.lines().map(str::trim);
+    let var = lines()
+        .filter_map(|l| l.strip_prefix("\"%NODE_EXE%\" \"%"))
+        .last()?
+        .split_once('%')?
+        .0;
+    let set = |name: &str| {
+        lines().find_map(|l| {
+            l.strip_prefix("SET \"")?
+                .strip_prefix(name)?
+                .strip_prefix('=')?
+                .strip_suffix('"')
+        })
+    };
+    let under = |value: &str, folder: &str| {
+        value
+            .strip_prefix(folder)
+            .map(|rest| PathBuf::from(rest.trim_start_matches(['\\', '/'])))
+    };
+    let script = dir.join(under(set(var)?, "%~dp0")?);
+    let global = set("NPM_PREFIX_JS")
+        .and_then(|v| under(v, "%~dp0"))
+        .map(|js| dir.join(js))
+        .zip(set(&format!("NPM_PREFIX_{var}")).and_then(|v| under(v, "%%F")));
+    Some(NpmShim { script, global })
+}
+
+/// npm's global folder, as `npm-prefix.js` prints it to Node's shims (they ask on every run);
+/// `None` when it says nothing within ten seconds.
+fn npm_global_prefix(node: &Path, prefix_js: &Path) -> Option<PathBuf> {
+    use std::io::Read as _;
+    let mut child = trek_core::procs::command(node)
+        .arg(prefix_js)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        let _ = tx.send(out);
+    });
+    let out = rx.recv_timeout(std::time::Duration::from_secs(10)).ok();
+    if out.is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    // The shim's `FOR /F` keeps the last line it's given.
+    let out = String::from_utf8(out?).ok()?;
+    let prefix = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .last()?;
+    Some(PathBuf::from(prefix))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2777,10 +2916,12 @@ mod mcp_hand_off_tests {
     use super::*;
     use serde_json::json;
 
-    /// `npx` is a `.cmd` in a folder with a space in its name; `uvx` and `node` are `.exe`s.
+    /// `npx` is a `.cmd` in a folder with a space in its name; `uvx` and `node` are `.exe`s. A
+    /// folder no machine has: a CI runner's real `C:\Program Files\nodejs\npx.cmd` would be read
+    /// as npm's shim and handed to its Node (`tests_cmd_args` covers that, with shims of its own).
     fn found(name: &str) -> Option<PathBuf> {
         match name {
-            "npx" => Some(r"C:\Program Files\nodejs\npx.cmd".into()),
+            "npx" => Some(r"C:\Program Files\No Such Node\npx.cmd".into()),
             "uvx" => Some(r"C:\Users\me\.local\bin\uvx.exe".into()),
             _ => None,
         }
@@ -2873,7 +3014,7 @@ mod mcp_hand_off_tests {
         assert_eq!(
             given("npx", &["-y", "a&b", "say \"hi\""]),
             Ok(Some((
-                r"C:\Program Files\nodejs\npx.cmd".into(),
+                r"C:\Program Files\No Such Node\npx.cmd".into(),
                 strings(&["-y", "a&b", "say \"hi\""])
             )))
         );
@@ -2958,6 +3099,68 @@ mod mcp_hand_off_tests {
                 args: strings(&["-y", "srv"]),
                 env: vec![("K".into(), "v".into())]
             }
+        );
+    }
+
+    /// Node's own `npx.cmd`, as npm 10 and 11 write it and Node's installer (or nvm) puts it
+    /// beside node.exe: not cmd-shim's, and it asks `npm-prefix.js` whether a global npm should
+    /// run instead.
+    pub(crate) const NODE_NPX_SHIM: &str = r#":: Created by npm, please don't edit manually.
+@ECHO OFF
+
+SETLOCAL
+
+SET "NODE_EXE=%~dp0\node.exe"
+IF NOT EXIST "%NODE_EXE%" (
+  SET "NODE_EXE=node"
+)
+
+SET "NPM_PREFIX_JS=%~dp0\node_modules\npm\bin\npm-prefix.js"
+SET "NPX_CLI_JS=%~dp0\node_modules\npm\bin\npx-cli.js"
+FOR /F "delims=" %%F IN ('CALL "%NODE_EXE%" "%NPM_PREFIX_JS%"') DO (
+  SET "NPM_PREFIX_NPX_CLI_JS=%%F\node_modules\npm\bin\npx-cli.js"
+)
+IF EXIST "%NPM_PREFIX_NPX_CLI_JS%" (
+  SET "NPX_CLI_JS=%NPM_PREFIX_NPX_CLI_JS%"
+)
+
+"%NODE_EXE%" "%NPX_CLI_JS%" %*
+"#;
+
+    #[test]
+    fn npms_own_shim_is_read_for_its_script_and_a_global_npm() {
+        let dir = Path::new(r"C:\nvm4w\nodejs");
+        assert_eq!(
+            npm_own_shim(&dir.join("npx.cmd"), NODE_NPX_SHIM),
+            Some(NpmShim {
+                script: dir.join(r"node_modules\npm\bin\npx-cli.js"),
+                global: Some((
+                    dir.join(r"node_modules\npm\bin\npm-prefix.js"),
+                    PathBuf::from(r"node_modules\npm\bin\npx-cli.js")
+                )),
+            })
+        );
+        // `npm.cmd` is the same, for npm-cli.js.
+        let npm = NODE_NPX_SHIM
+            .replace("NPX_CLI_JS", "NPM_CLI_JS")
+            .replace("npx-cli.js", "npm-cli.js");
+        assert_eq!(
+            npm_own_shim(&dir.join("npm.cmd"), &npm).map(|s| s.script),
+            Some(dir.join(r"node_modules\npm\bin\npm-cli.js"))
+        );
+        // One that doesn't ask about a global npm runs its own script.
+        let plain = "@ECHO OFF\r\nSET \"NODE_EXE=%~dp0\\node.exe\"\r\nSET \"X_JS=%~dp0\\node_modules\\x\\x.js\"\r\n\"%NODE_EXE%\" \"%X_JS%\" %*\r\n";
+        assert_eq!(
+            npm_own_shim(&dir.join("x.cmd"), plain),
+            Some(NpmShim {
+                script: dir.join(r"node_modules\x\x.js"),
+                global: None
+            })
+        );
+        // A batch script of the user's isn't one.
+        assert_eq!(
+            npm_own_shim(&dir.join("run.cmd"), "@echo off\r\npython serve.py %*\r\n"),
+            None
         );
     }
 }

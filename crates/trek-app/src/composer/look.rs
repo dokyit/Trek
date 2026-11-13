@@ -160,23 +160,19 @@ pub fn row_icon(icon: impl IntoElement) -> AnyElement {
     }
 }
 
-/// A kit button with no chrome of its own, for a chip. Windows sets its hover and pressed fills
-/// to the chips': the kit's ghost hover is a wash of accent that in Night sits darker than a chip's
-/// fill, and all but vanishes on the bare card.
+/// A kit button with no chrome of its own, for a chip, with the chips' hover and pressed fills: the
+/// kit's ghost hover is a wash of accent that in Night sits darker than a chip's fill, and all but
+/// vanishes on the bare card.
 pub fn quiet_button(
     button: gpui_kit::component::button::Button,
     cx: &App,
 ) -> gpui_kit::component::button::Button {
     use gpui_kit::component::button::{ButtonCustomVariant, ButtonVariants as _};
-    if fluent::WINDOWS {
-        button.custom(
-            ButtonCustomVariant::new(cx)
-                .hover(chip_hover(cx))
-                .active(pressed(cx)),
-        )
-    } else {
-        button.ghost()
-    }
+    button.custom(
+        ButtonCustomVariant::new(cx)
+            .hover(chip_hover(cx))
+            .active(pressed(cx)),
+    )
 }
 
 /// A kit button (a menu's trigger) as a toolbar chip: 30 px round pill on the chips' fill,
@@ -226,11 +222,7 @@ pub fn segmented<T: Copy + PartialEq + 'static, L: Into<SharedString>>(
 ) -> AnyElement {
     let theme = cx.theme().clone();
     // Night's card is darker than the track on it, which would sink the thumb Paper raises.
-    let thumb = if fluent::WINDOWS && dark(cx) {
-        pressed(cx)
-    } else {
-        card_fill(cx)
-    };
+    let thumb = if dark(cx) { pressed(cx) } else { card_fill(cx) };
     let ring = theme.foreground.opacity(if dark(cx) { 0.12 } else { 0.07 });
     h_flex()
         .h(px(CONTROL))

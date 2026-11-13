@@ -60,6 +60,22 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
+/// Where Trek keeps what it can download again and has no use on another computer (dictation's
+/// speech model): `%LOCALAPPDATA%\trek\Trek\data` on Windows, which a roaming profile doesn't
+/// copy from PC to PC as it does the data folder (`%APPDATA%`); the data folder itself on a Mac,
+/// where the two are one. The data folder whenever that's been moved (tests, `TREK_DATA_DIR`),
+/// so a trial run keeps it with the rest.
+pub fn local_data_dir() -> PathBuf {
+    let moved = isolated_dir().is_some()
+        || std::env::var_os("TREK_DATA_DIR").is_some_and(|d| !d.is_empty());
+    if moved {
+        return data_dir();
+    }
+    directories::ProjectDirs::from("dev", "trek", "Trek")
+        .map(|p| p.data_local_dir().to_path_buf())
+        .unwrap_or_else(data_dir)
+}
+
 /// The user's home folder. `HOME` wins when it's set, on every platform: the Unix resolver reads it
 /// anyway, and it lets a test or a capture run point Trek at a throwaway home on Windows too, where
 /// the profile folder would otherwise be used whatever the environment says.
@@ -337,6 +353,9 @@ mod tests {
         );
         crate::settings::secrets::delete_api_key(&probe).unwrap();
         assert_eq!(crate::settings::secrets::stored_api_key(&probe), None);
+        // What can be downloaded again stays with the rest of an isolated process's data, not
+        // in the user's local folder.
+        assert_eq!(super::local_data_dir(), dir);
     }
 
     #[test]

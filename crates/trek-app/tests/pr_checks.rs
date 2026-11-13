@@ -1,7 +1,7 @@
 //! A pull request's failing checks going back to the agent, through the real window: what the row
 //! and the bar say, Send to agent, the project setting and its limit, and how little it asks of
-//! GitHub. `gh` is a script of the test's own that says what it's told and notes each call.
-#![cfg(unix)]
+//! GitHub. `gh` is the test fixture copied as `gh` (`gh.exe`), which says what it's told and notes
+//! each call, on both platforms.
 
 mod common;
 
@@ -15,8 +15,9 @@ use trek_core::store::Item;
 
 const URL: &str = "https://github.com/acme/web/pull/128";
 
-/// A made-up `gh`: `pr view` gives `view.json`, `run view` gives `log.txt`, and every call is noted
-/// in `calls`. With `offline` there, it fails as `gh` does with no connection.
+/// A made-up `gh` (test-fixtures' `fake_gh`): `pr view` gives `view.json`, `run view` gives
+/// `log.txt`, and every call is noted in `calls`. With `offline` there, it fails as `gh` does
+/// with no connection.
 struct FakeGh {
     dir: PathBuf,
 }
@@ -24,26 +25,13 @@ struct FakeGh {
 impl FakeGh {
     fn new(name: &str) -> FakeGh {
         let dir = common::new_project(&format!("gh-{name}"));
-        let script = format!(
-            r#"#!/bin/sh
-dir='{dir}'
-echo "$*" >> "$dir/calls"
-if [ -e "$dir/offline" ]; then
-  echo 'error connecting to api.github.com' >&2
-  exit 1
-fi
-case "$1 $2" in
-  'pr view') cat "$dir/view.json" ;;
-  'run view') cat "$dir/log.txt" ;;
-  'api rate_limit') cat "$dir/rate.json" ;;
-esac
-"#,
-            dir = dir.display()
-        );
-        let path = dir.join("gh");
-        std::fs::write(&path, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A program, not a script, so it runs on Windows too, and `--jq`'s `|` reaches it as written
+        // (a .cmd would hand it to cmd.exe).
+        std::fs::copy(
+            trek_test_fixtures::bin("fixture"),
+            dir.join(format!("gh{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
         std::fs::write(
             dir.join("log.txt"),
             "clippy\tRun clippy\t2026-11-05T10:00:41.1234567Z error: this `if` has identical blocks\n",
@@ -60,7 +48,7 @@ esac
     }
 
     fn path(&self) -> PathBuf {
-        self.dir.join("gh")
+        self.dir.join(format!("gh{}", std::env::consts::EXE_SUFFIX))
     }
 
     /// What the next `pr view` says.

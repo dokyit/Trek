@@ -40,6 +40,8 @@ trek-phone = { path = "../trek-phone" }
 trek-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# `trek-mcp win-update`: Trek's own updater, for the Trek beside it while it's closed.
+trek-core.workspace = true
 # Input (SendInput), the window list (EnumWindows, DWM), screenshots (GDI) and app launch (ShellExecuteW).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -53,8 +55,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Elements: a window's UI Automation tree (IUIAutomation) and its patterns (src/desktop/uia/com.rs);
+# windows-sys has no COM interfaces. The version trek-app's other Windows crates are on.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_Accessibility"] }
 # Screenshots out as PNG (macOS has `screencapture` for that); already in the lockfile via trek-app.
 png = "0.18"
 # `trek-mcp phone` and `phone-device`: the iPhone's apps and files over usbmuxd, which is Apple
 # Mobile Device Service on Windows.
 trek-phone = { path = "../trek-phone" }
+# `watch_video`'s transcripts without a whisper install: Whisper on the PC, with the speech model
+# dictation downloaded (the folder Trek names in TREK_DICTATION_DIR).
+trek-dictate = { path = "../trek-dictate" }

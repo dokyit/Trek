@@ -13,7 +13,7 @@
 //!
 //! Commands: `route draft|no-project|basecamp|notes|appearance|settings:<page>|thread:<id>|title:<q>|project:<path>|first`,
 //! `send <prompt>`, `attach <path>[|<path>…]` (into the main composer, as a drop: images as thumbnails, other files as tiles), `note text <markdown>|image <path>…|mode write|split|preview` (Notes; see `run`), `project <folder>` (added, and a draft in it), `diff` (the latest turn's changes in the Git tool),
-//! `pair` (a pairing code, its link written to `pair.txt`), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
+//! `pair` (a pairing code, its link written to `pair.txt`), `pair-phone [name]|leave` (a stand-in iPhone paired over the protocol, connected or gone), `heic-demo` (an iPhone photo made by the system's codec, attached), `open-link <trek:// link>` (as the system hands Trek one), `file <path> [contains <text>]` and `private <path>` (in the data folder unless absolute, `*name` for a name's end: there, holding `text`, and readable by the user alone), `second-launch <arg>` (Windows: Trek started again, handing `arg` over), `keep-working` / `show-main` (the windows closed with an agent at work, and the main one back), `close-main` (Windows: the close button's own path, with Keep Trek in the tray on), `badge <n>[+]` (the count on the app's icon), `count-all <id> <n>[+]` (`count` over every window), `tray off|on|<state>` (the system's tray or menu bar icon), `programs <name> <n>[+]` / `programs-ended` (programs running under Trek, then gone), `console-windows mark|new <n>` (Windows: console windows on screen), `native` (not translated or emulated), `banners mark|new <n>[+]` (Windows: banners in the notification center), `renders mark|<view> <n>+|<n>-|<=<view>…` (how often views drew), `within <id>[*] <id>` (inside another, as drawn), `banner-permission off|restore` and `file-app <ext> on|off` (Windows: Trek's switch in the notification settings; a default app of the check's own), `cloud-file <abs-path> <text>|fetched <n>[+]|away|off` (Windows: a file that lives only in the cloud, from a sync provider of the check's own), `editor has <text>|note <text>` (the file in front shows it; the preview in front says it), `photos open|shown <0|1>|close` (Mac: the system's Photos picker as the + menu opens it, a sheet on the window), `bonjour on|found|off` (the phone server announced through the system's responder, under a name of the check's own, and found as a phone finds it), `programs-stop`, `motion on|system` (animations whatever the system asks, or back to its setting), `signed-out` (`gh`, as Trek starts it, has no login: a capture run never acts as the user), `self-contained` (no runtime from elsewhere loaded), `browser crash` / `browser expect crashed|failed[:<address>]|loaded|why:<word>` (the page's process ended; the tab as the panel has it, and the reason Trek's page gives), `pair-phone upload <name>` (the stand-in sends a file up), `push on|test|alert`, `new` (⌘N), `settled [on|off]`,
 //! `glass on|off`, `tint <0.2–0.95>`, `theme night|paper`, `title <text>` (renames the thread on screen), `dress <Agent>|<Fast model>|<Deep model>` or `dress off` (the mock agent under other names, for marketing frames of a whole window; captioned as examples wherever they're shown), `tools on|off|git|explorer|terminal|browser|sidechat|simulator`,
 //! `range today|week|all` (Basecamp's), `accounts-demo` (accounts for Settings, the picker and the Usage card), `compact-demo` (the thread on screen large and idle past its prompt cache, for the Compact chip), `secret-demo` (a secret's request card), `usage-demo` (plans and limits for the Usage card, no real agent asked), `limits-demo` (the same windows for the mock agent, for the composer's context card), `update-demo ready|wait|later|clear` (an update staged, for the updater's states with work running), `resume-demo resuming|failed|offered|waiting` (the thread on screen's offer after a relaunch), `pace <f>` (the mock agent's speed: 1.0 demo, 0 instant),
 //! `wait <ms>` or `wait idle|permission|question|plan [cap ms]`, `record <name> <ms> [fps]` (frames
@@ -43,7 +43,7 @@
 //! Input without a pointer or a keyboard (events dispatched to the window, never real OS input):
 //! `click|rclick|hover <element id>` (`name#3` for a row's id; `elements` writes the ids on screen
 //! to `elements.txt`), `type <text>` (into the focused field, else the main composer),
-//! `count <element id>[*] <n>` (fails unless n such elements are on screen; `*` ends a prefix),
+//! `count <element id>[*] <n>[+]` (fails unless n such elements are on screen, or n or more with `+`; `*` ends a prefix), `reveal <element id>` (Settings scrolled until it is on screen; `reveal-in <scrolling element id> <element id>` for another),
 //! `key <keystroke>…` (`secondary-k`: ⌘K on a Mac, Ctrl+K on Windows; `escape`, `shift-tab`,
 //! `down down enter`; `cmd`/`win`/`super` modifiers are read as `secondary`, so one manifest is
 //! right on both platforms), `scroll <element id> <px>`
@@ -77,6 +77,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+mod cloud_files;
+#[cfg(any(windows, target_os = "macos"))]
+mod computer_use;
+#[cfg(any(windows, target_os = "macos"))]
+mod dns_sd;
 
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else {
@@ -138,6 +145,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     }),
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
                     "perf" => perf(&workspace, arg, cx).await,
+                    "second-launch" => second_launch(arg, cx).await,
                     #[cfg(target_os = "macos")]
                     "windows" => cx.update(|cx| windows(&workspace, &dir, cx)),
                     "quit" => quit(cx),
@@ -161,6 +169,452 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     .detach();
 }
 
+/// A capture run (`TREK_SHOT_DIR`) never acts as the user anywhere. `gh` (a share's gist, a pull
+/// request's checks) finds the user's GitHub login through its config folder and these variables,
+/// so the process gets an empty folder of its own and none of them: whatever it starts is signed
+/// out. A live check once made a real gist on the user's account through it. First thing in
+/// `main`, before any other thread exists to read the environment.
+pub fn isolate_accounts() {
+    if std::env::var_os("TREK_SHOT_DIR").is_none() {
+        return;
+    }
+    let base = std::env::var_os("TREK_DATA_DIR")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("trek-shots-{}", std::process::id())));
+    let gh = base.join("gh-signed-out");
+    let _ = std::fs::create_dir_all(&gh);
+    // SAFETY: first thing in `main` (`run`), before any other thread is started.
+    unsafe {
+        std::env::set_var("GH_CONFIG_DIR", &gh);
+        for token in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ] {
+            std::env::remove_var(token);
+        }
+    }
+}
+
+/// `second-launch <arg>`: Trek started again with `arg` (a trek:// link, a path), as a shortcut or
+/// the system starts it. On Windows the new process hands `arg` to this Trek (`single_instance`,
+/// within the capture run's own data folder) and exits. It's waited for with the main thread
+/// free, since taking what it hands over is the main thread's, and passes only if it exits handed
+/// over (0) within the time a launch keeps trying for, rather than staying up as a second Trek. A
+/// Mac hands a second launch to the running app itself (`on_open_urls`), as `open-link` does.
+async fn second_launch(arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cfg!(windows),
+        "second-launch: a Mac hands a second launch to the running app itself"
+    );
+    let mut launch = trek_core::procs::command(std::env::current_exe()?)
+        .arg(arg.trim())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(status) = launch.try_wait()? {
+            anyhow::ensure!(
+                status.success(),
+                "second-launch: the second Trek couldn't hand over ({status}; see the log)"
+            );
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = launch.kill();
+            let _ = launch.wait();
+            anyhow::bail!(
+                "second-launch: the second Trek was still running after 20 s, rather than handing over and exiting"
+            );
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(100))
+            .await;
+    }
+}
+
+/// `native`: on Windows the machine's own processor (`IsWow64Process2`, which sees through x64
+/// emulation on Arm) is the one Trek was built for; on a Mac, Trek isn't translated by Rosetta
+/// (`sysctl.proc_translated`).
+fn native_build() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{
+            IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+        let (mut process, mut machine) = (0u16, 0u16);
+        // SAFETY: this process's own pseudo handle, and two answers to fill.
+        let asked = unsafe { IsWow64Process2(GetCurrentProcess(), &mut process, &mut machine) };
+        anyhow::ensure!(asked != 0, "native: {}", std::io::Error::last_os_error());
+        let built = if cfg!(target_arch = "aarch64") {
+            IMAGE_FILE_MACHINE_ARM64
+        } else {
+            IMAGE_FILE_MACHINE_AMD64
+        };
+        anyhow::ensure!(
+            machine == built,
+            "native: this PC's processor is {machine:#06x}, and Trek was built for {built:#06x}"
+        );
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut translated: libc::c_int = 0;
+        let mut size = std::mem::size_of::<libc::c_int>();
+        // SAFETY: a NUL-terminated name, and an int-sized answer of `size` bytes.
+        let known = unsafe {
+            libc::sysctlbyname(
+                c"sysctl.proc_translated".as_ptr(),
+                (&mut translated as *mut libc::c_int).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } == 0;
+        // Unknown on a Mac with no Rosetta at all: nothing translates there.
+        anyhow::ensure!(
+            !(known && translated == 1),
+            "native: Trek runs translated, by Rosetta"
+        );
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    anyhow::bail!("native: Windows and macOS only")
+}
+
+/// `self-contained`; see the verb.
+fn self_contained() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        // What a program built against the redistributable loads as it starts.
+        for dll in [
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+            "msvcp140.dll",
+            "vcomp140.dll",
+        ] {
+            let wide: Vec<u16> = dll.encode_utf16().chain([0]).collect();
+            // SAFETY: a NUL-terminated name; nothing is loaded, or its count changed.
+            let loaded = unsafe { GetModuleHandleW(wide.as_ptr()) };
+            anyhow::ensure!(loaded.is_null(), "self-contained: {dll} is loaded in Trek");
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // dyld's list of what's loaded, from libSystem (the libc crate's copies are deprecated
+        // in favour of another crate, for these two calls alone).
+        unsafe extern "C" {
+            fn _dyld_image_count() -> u32;
+            fn _dyld_get_image_name(image_index: u32) -> *const std::ffi::c_char;
+        }
+        let exe = std::env::current_exe()?;
+        let own = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+        let mut foreign = Vec::new();
+        // SAFETY: dyld's own list, read by index below its count; each name is NUL-terminated.
+        for i in 0..unsafe { _dyld_image_count() } {
+            let name = unsafe { _dyld_get_image_name(i) };
+            if name.is_null() {
+                continue;
+            }
+            let path = unsafe { std::ffi::CStr::from_ptr(name) }
+                .to_string_lossy()
+                .into_owned();
+            let system = ["/usr/lib/", "/System/", "/Library/Apple/"]
+                .iter()
+                .any(|p| path.starts_with(p));
+            if !system && !Path::new(&path).starts_with(&own) {
+                foreign.push(path);
+            }
+        }
+        anyhow::ensure!(
+            foreign.is_empty(),
+            "self-contained: Trek loaded libraries from elsewhere: {}",
+            foreign.join(", ")
+        );
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    anyhow::bail!("self-contained: Windows and macOS only")
+}
+
+/// The banners `banners mark` noted, by tag.
+#[cfg(windows)]
+static BANNERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The tags of the banners in Windows' notification center under Trek's app id.
+#[cfg(windows)]
+fn banner_tags() -> anyhow::Result<Vec<String>> {
+    use windows::UI::Notifications::ToastNotificationManager;
+    let id = windows::core::HSTRING::from(crate::winsys::APP_ID);
+    let list = ToastNotificationManager::History()?.GetHistoryWithId(&id)?;
+    let mut tags = Vec::new();
+    for banner in list {
+        tags.push(banner.Tag()?.to_string());
+    }
+    Ok(tags)
+}
+
+/// What `banner-permission off` found, for `restore`: the switch's value then (None: none).
+#[cfg(windows)]
+static BANNER_SWITCH: Mutex<Option<Option<u32>>> = Mutex::new(None);
+
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
+}
+
+/// A DWORD under HKEY_CURRENT_USER; None when it isn't there.
+#[cfg(windows)]
+fn read_dword(key: &str, value: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let (key, value) = (wide(key), wide(value));
+    let (mut data, mut size) = (0u32, 4u32);
+    // SAFETY: NUL-terminated names, and a DWORD's four bytes to fill.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (status == 0).then_some(data)
+}
+
+/// Set a DWORD under HKEY_CURRENT_USER (the key made if need be), or with None remove it.
+#[cfg(windows)]
+fn write_dword(key: &str, value: &str, data: Option<u32>) -> anyhow::Result<()> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, REG_DWORD, RegDeleteKeyValueW, RegSetKeyValueW,
+    };
+    let (k, v) = (wide(key), wide(value));
+    // SAFETY: NUL-terminated names, and a DWORD's four bytes.
+    let status = unsafe {
+        match data {
+            Some(d) => RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                k.as_ptr(),
+                v.as_ptr(),
+                REG_DWORD,
+                (&d as *const u32).cast(),
+                4,
+            ),
+            None => RegDeleteKeyValueW(HKEY_CURRENT_USER, k.as_ptr(), v.as_ptr()),
+        }
+    };
+    // A value that's already gone is as asked (ERROR_FILE_NOT_FOUND).
+    anyhow::ensure!(
+        status == 0 || data.is_none() && status == 2,
+        "registry {key}\\{value}: error {status}"
+    );
+    Ok(())
+}
+
+/// Set a key's default string under HKEY_CURRENT_USER, the key made if need be.
+#[cfg(windows)]
+fn write_string(key: &str, text: &str) -> anyhow::Result<()> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
+    let (k, data) = (wide(key), wide(text));
+    // SAFETY: a NUL-terminated key, the default value (null name), and the string's bytes with
+    // its NUL.
+    let status = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            k.as_ptr(),
+            std::ptr::null(),
+            REG_SZ,
+            data.as_ptr().cast(),
+            (data.len() * 2) as u32,
+        )
+    };
+    anyhow::ensure!(status == 0, "registry {key}: error {status}");
+    Ok(())
+}
+
+/// Remove a key and everything under it from HKEY_CURRENT_USER, if it's there.
+#[cfg(windows)]
+fn delete_tree(key: &str) {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteTreeW};
+    let k = wide(key);
+    // SAFETY: a NUL-terminated key name.
+    unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, k.as_ptr()) };
+}
+
+/// Tell Explorer the file associations changed, so the next open reads them again.
+#[cfg(windows)]
+fn associations_changed() {
+    use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+    // SAFETY: a plain notice with no items.
+    unsafe {
+        SHChangeNotify(
+            SHCNE_ASSOCCHANGED as i32,
+            SHCNF_IDLIST,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+}
+
+/// End process `pid`.
+fn end_process(pid: u32) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        // SAFETY: plain calls on a handle that's checked, used once and closed.
+        unsafe {
+            let process = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !process.is_null() {
+                TerminateProcess(process, 1);
+                CloseHandle(process);
+            }
+        }
+    }
+    #[cfg(unix)]
+    // SAFETY: a signal to a process id; nothing else is touched.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+}
+
+/// What `programs` found last, for `programs-ended`: process ids and their programs.
+static PROGRAMS: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+
+/// The windows `console-windows mark` noted.
+#[cfg(windows)]
+static CONSOLES: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+/// Every process under Trek's own, however deep, with the program each runs.
+fn trek_programs() -> Vec<(u32, String)> {
+    let mut found: Vec<(u32, String)> = Vec::new();
+    let mut next = vec![std::process::id()];
+    while let Some(pid) = next.pop() {
+        for child in trek_core::procs::children(pid) {
+            if child == std::process::id() || found.iter().any(|(p, _)| *p == child) {
+                continue;
+            }
+            if let Some(program) = running_program(child) {
+                found.push((child, program));
+                next.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// `program` (a file name, as the system gives it) is `name`, `.exe` and case aside.
+fn is_program(program: &str, name: &str) -> bool {
+    let program = program.to_lowercase();
+    let program = program.strip_suffix(".exe").unwrap_or(&program);
+    program == name.to_lowercase().trim_end_matches(".exe")
+}
+
+/// The program process `pid` runs (its file name), while it runs.
+fn running_program(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        };
+        // SAFETY: plain calls; the handle is checked, used only here and closed.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let mut code = 0u32;
+            let running =
+                GetExitCodeProcess(process, &mut code) != 0 && code == STILL_ACTIVE as u32;
+            let mut path = [0u16; 1024];
+            let mut len = path.len() as u32;
+            let named = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                path.as_mut_ptr(),
+                &mut len,
+            ) != 0;
+            CloseHandle(process);
+            if !(running && named) {
+                return None;
+            }
+            let path = String::from_utf16_lossy(&path[..len as usize]);
+            Some(path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let out = trek_core::procs::command("/bin/ps")
+            .args(["-o", "stat=,comm=", "-p", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let (stat, program) = line.split_once(char::is_whitespace)?;
+        // A zombie has ended; only its parent hasn't asked yet.
+        if stat.starts_with('Z') {
+            return None;
+        }
+        let program = program.trim();
+        Some(program.rsplit('/').next().unwrap_or(program).to_string())
+    }
+}
+
+/// The visible top-level windows that are consoles (the classic console's, Windows Terminal's)
+/// or belong to one of `under` (programs under Trek), each with what it is.
+#[cfg(windows)]
+fn console_windows(under: &[u32]) -> Vec<(isize, String)> {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+    struct Seen<'a> {
+        under: &'a [u32],
+        found: Vec<(isize, String)>,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, seen: LPARAM) -> i32 {
+        // SAFETY: `seen` is the `Seen` passed to `EnumWindows` below, alive for its whole call.
+        let seen = unsafe { &mut *(seen as *mut Seen) };
+        // SAFETY: plain calls on a window handle the system just gave.
+        unsafe {
+            if IsWindowVisible(hwnd) == 0 {
+                return 1;
+            }
+            let mut class = [0u16; 256];
+            let n = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+            let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            let console = matches!(
+                class.as_str(),
+                "ConsoleWindowClass" | "CASCADIA_HOSTING_WINDOW_CLASS"
+            );
+            if console || seen.under.contains(&pid) {
+                seen.found
+                    .push((hwnd as isize, format!("{class} of process {pid}")));
+            }
+        }
+        1
+    }
+    let mut seen = Seen {
+        under,
+        found: Vec::new(),
+    };
+    // SAFETY: the callback reads `seen` only during this call.
+    unsafe { EnumWindows(Some(each), &mut seen as *mut Seen as LPARAM) };
+    seen.found
+}
+
 /// A frame capture running beside the command loop: `record` starts one, `record stop` asks it to
 /// finish early and `record wait` joins it (the ffconcat list is written when it ends either way).
 struct Recording {
@@ -173,7 +627,9 @@ struct Recording {
 async fn wait(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
     let mut it = arg.split_whitespace();
     let Some(kind) = it.next() else {
-        anyhow::bail!("wait needs <ms> or idle|permission|question|plan [cap ms]")
+        anyhow::bail!(
+            "wait needs <ms>, idle|permission|question|plan [cap ms] or shown <id> [cap ms]"
+        )
     };
     if let Ok(ms) = kind.parse::<u64>() {
         cx.background_executor()
@@ -181,9 +637,38 @@ async fn wait(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             .await;
         return Ok(());
     }
+    // `wait shown <element id>[*] [cap ms]`: until it's on screen in the main window, for what
+    // comes in its own time (a list the system answers for).
+    if kind == "shown" {
+        let id = it
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("wait shown <element id>[*] [cap ms]"))?
+            .to_string();
+        let cap = match it.next() {
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("wait shown: bad cap {v:?}"))?,
+            None => 30_000,
+        };
+        let main = cx
+            .update(|cx| ws.read(cx).main_window)
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        let deadline = Instant::now() + Duration::from_millis(cap);
+        loop {
+            if main.update(cx, |_, window, cx| shown(window, cx, &id))? > 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("wait shown {id}: not on screen after {cap} ms");
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+        }
+    }
     if !matches!(kind, "idle" | "permission" | "question" | "plan") {
         anyhow::bail!(
-            "wait: unknown condition {kind:?} (idle|permission|question|plan or milliseconds)"
+            "wait: unknown condition {kind:?} (idle|permission|question|plan|shown or milliseconds)"
         );
     }
     let cap = match it.next() {
@@ -743,6 +1228,52 @@ async fn browser(
                 .await
                 .map_err(|_| anyhow::anyhow!("browser eval: the page closed"))?;
             std::fs::write(dir.join("browser-eval.json"), json)?;
+            Ok(())
+        }
+        // `browser crash`: end the page's own process, as a crash would (WebView2's renderer,
+        // WebKit's web content process).
+        #[cfg(any(windows, target_os = "macos"))]
+        "crash" => {
+            let ended = cx
+                .update(|cx| panel.read(cx).shots_crash(cx))
+                .map_err(|e| anyhow::anyhow!("browser crash: {e}"))?;
+            anyhow::ensure!(ended > 0, "browser crash: no page process to end");
+            Ok(())
+        }
+        // `browser expect <crashed|failed[:<part of its address>]|loaded|why:<word>>…`: the active
+        // tab as the panel has it: it heard its page's process end (`crashed`); it shows Trek's
+        // page saying why a load failed (`failed`, of an address with that in it; `why`, with that
+        // word in its reason); or it shows the page itself, neither failed nor loading (`loaded`).
+        "expect" => {
+            let state = main.update(cx, |_, window, cx| panel.read(cx).shots_state(window, cx))?;
+            let url = state["url"].as_str().unwrap_or_default().to_string();
+            for want in rest.split_whitespace() {
+                match want.split_once(':').unwrap_or((want, "")) {
+                    ("crashed", _) => anyhow::ensure!(
+                        state["crashed"] == true,
+                        "browser expect: no crash heard of ({url})"
+                    ),
+                    ("failed", part) => anyhow::ensure!(
+                        state["failed"]
+                            .as_str()
+                            .is_some_and(|failed| failed.contains(part)),
+                        "browser expect: no failure of {part:?} shown ({url}: failed {})",
+                        state["failed"]
+                    ),
+                    ("loaded", _) => anyhow::ensure!(
+                        state["failed"].is_null() && state["loading"] == false,
+                        "browser expect: not loaded ({url}: failed {}, loading {})",
+                        state["failed"],
+                        state["loading"]
+                    ),
+                    ("why", part) => anyhow::ensure!(
+                        state["why"].as_str().is_some_and(|why| why.contains(part)),
+                        "browser expect: Trek's page doesn't say {part:?} ({url}: why {})",
+                        state["why"]
+                    ),
+                    _ => anyhow::bail!("browser expect: {want}? (crashed, failed, loaded, why)"),
+                }
+            }
             Ok(())
         }
         #[cfg(target_os = "macos")]
@@ -1393,10 +1924,95 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     if verb == "checks-demo" {
         return checks_demo(ws, arg, cx);
     }
+    // `update-task registered|gone` (Windows): the scheduled task that updates Trek while it's
+    // closed, as Task Scheduler has it (the capture build's own name: never the installed Trek's).
+    if verb == "update-task" {
+        anyhow::ensure!(cfg!(windows), "update-task: Windows' alone");
+        #[cfg(windows)]
+        {
+            let there =
+                trek_core::update::closed::task::registered(crate::workspace::update_task_name());
+            match arg.trim() {
+                "registered" => anyhow::ensure!(there, "update-task: no task in Task Scheduler"),
+                "gone" => anyhow::ensure!(!there, "update-task: the task is still there"),
+                other => anyhow::bail!("update-task {other}? (registered|gone)"),
+            }
+        }
+        return Ok(());
+    }
+    // `opencode-history <n>`: OpenCode 1.x's and 2's sessions read as one history, as Trek reads
+    // OpenCode's folder: a database both wrote (sessions in 1.x's tables, 2's, and both:
+    // trek-core's fixture), in a folder of the check's own, holds `n` threads, each once.
+    if verb == "opencode-history" {
+        let n: usize = arg.trim().parse()?;
+        let dir = trek_core::paths::data_dir().join("opencode-demo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let db = rusqlite::Connection::open(dir.join("opencode.db"))?;
+        db.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        db.execute_batch(include_str!(
+            "../../trek-core/fixtures/opencode-v1-and-v2.sql"
+        ))?;
+        drop(db);
+        let threads =
+            trek_core::import::opencode::scan_dir(&dir, 0, &std::collections::HashSet::new());
+        let mut ids: Vec<&str> = threads.iter().map(|t| t.native_id.as_str()).collect();
+        ids.sort_unstable();
+        let all = ids.len();
+        ids.dedup();
+        anyhow::ensure!(
+            all == n && ids.len() == all,
+            "opencode-history: {all} threads ({ids:?}), not {n} once each"
+        );
+        return Ok(());
+    }
+    // `toasts <n>`: how many toasts are up in the main window (ones on their way out included);
+    // `toasts clear`: all of them taken down, so none sits over the next check.
+    if verb == "toasts" {
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        match arg.trim() {
+            "clear" => main.update(cx, |_, window, cx| {
+                for key in crate::toast::keys(window, cx) {
+                    crate::toast::dismiss(window, &key, cx);
+                }
+            })?,
+            n => {
+                let n: usize = n.parse().map_err(|_| anyhow::anyhow!("toasts <n>|clear"))?;
+                let up = main.update(cx, |_, window, cx| crate::toast::count(window, cx))?;
+                anyhow::ensure!(up == n, "toasts: {up} up, not {n}");
+            }
+        }
+        return Ok(());
+    }
     if verb == "toast" {
-        anyhow::ensure!(!arg.is_empty(), "toast [undo|error] <message>");
+        anyhow::ensure!(!arg.is_empty(), "toast [undo|error|guarded] <message>");
         let (kind, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         match kind {
+            // The offer Trek makes at launch from a folder Windows' ransomware protection guards
+            // (`relocate::guarded_offer`), as from `rest`: its words, and Move Trek. Where the
+            // running Trek is can't change mid-run; finding the guard is update.rs's tests'.
+            "guarded" => {
+                use trek_core::update::{Blocker, KnownFolder};
+                let folder = match rest.trim() {
+                    "Documents" => KnownFolder::Documents,
+                    "Desktop" => KnownFolder::Desktop,
+                    other => anyhow::bail!("toast guarded {other}? (Documents|Desktop)"),
+                };
+                let (message, undo) = crate::workspace::relocate::guarded_offer(
+                    Some(Blocker::GuardedFolder(folder)),
+                    true,
+                )
+                .ok_or_else(|| anyhow::anyhow!("toast guarded: no offer"))?;
+                ws.update(cx, |_, cx| {
+                    cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                        message,
+                        undo: Some(undo),
+                    })
+                });
+            }
             "undo" => ws.update(cx, |_, cx| {
                 cx.emit(crate::workspace::WorkspaceEvent::Toast {
                     message: rest.into(),
@@ -1444,6 +2060,86 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             }
         })?;
         cx.refresh_windows();
+        return Ok(());
+    }
+    // A stand-in iPhone pairs with this Trek as the iPhone app does: Trek's own client, pinned to
+    // the phone server's certificate, says `pair` with the code Settings shows and `ios` as its
+    // platform, and stays connected. An isolated run starts no phone server, so one starts on the
+    // loopback alone (`Workspace::start_loopback_remote`). `pair-phone [name]`; `pair-phone leave`
+    // disconnects it (the sidebar then says when it was last seen).
+    if verb == "pair-phone" {
+        static STAND_IN: std::sync::Mutex<Option<Arc<trek_remote::client::Client>>> =
+            std::sync::Mutex::new(None);
+        let mut held = STAND_IN.lock().unwrap_or_else(|e| e.into_inner());
+        if arg == "leave" {
+            if let Some(phone) = held.take() {
+                phone.close();
+            }
+            return Ok(());
+        }
+        // `pair-phone upload <name>`: the stand-in sends a small file up as the iPhone app does
+        // (`upload_part`, the whole file in one piece), and this Trek keeps it in the data
+        // folder's `uploads/` once its free space was checked (`file uploads/*<name>`). The
+        // answer comes on this thread later, so the piece goes and isn't waited for here.
+        if let Some(name) = arg.strip_prefix("upload ") {
+            let phone = held
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("pair-phone upload: pair a stand-in first"))?
+                .clone();
+            let bytes = format!("Sent up by a stand-in iPhone: {name}\n").into_bytes();
+            let part = trek_remote::UploadPart {
+                upload_id: uuid::Uuid::new_v4().to_string(),
+                name: name.trim().to_string(),
+                total: bytes.len() as u64,
+                offset: 0,
+                data: {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                },
+            };
+            trek_core::runtime().spawn(async move {
+                let answer = phone
+                    .request(trek_remote::ClientMessage::UploadPart(part))
+                    .await;
+                tracing::info!("pair-phone upload: {answer:?}");
+            });
+            return Ok(());
+        }
+        let link = ws.update(cx, |ws, cx| -> anyhow::Result<crate::machines::PairLink> {
+            ws.start_loopback_remote(cx)?;
+            ws.offer_pairing(cx);
+            let offer = ws
+                .remote
+                .as_ref()
+                .and_then(|r| r.offer.clone())
+                .ok_or_else(|| anyhow::anyhow!("pair-phone: no pairing code"))?;
+            crate::machines::PairLink::parse(&offer.url).map_err(anyhow::Error::msg)
+        })?;
+        let _runtime = trek_core::runtime().enter();
+        let phone = trek_remote::client::Client::connect_with(
+            link.routes,
+            &link.fingerprint,
+            trek_remote::client::Auth::Pair {
+                code: link.code,
+                device_id: "stand-in-iphone".into(),
+                device_name: if arg.is_empty() {
+                    "Stand-in iPhone"
+                } else {
+                    arg
+                }
+                .into(),
+            },
+            trek_remote::client::ClientOptions {
+                platform: Some("ios".into()),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("pair-phone: {e:?}"))?;
+        // What the machine sends it (snapshots, rows) is read and let go.
+        if let Some(mut events) = phone.events() {
+            trek_core::runtime().spawn(async move { while events.recv().await.is_some() {} });
+        }
+        *held = Some(Arc::new(phone));
         return Ok(());
     }
     // The iPhone tool with a made-up phone (an isolated run never touches the real one): opens the
@@ -1826,6 +2522,18 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     let transcript = ide.read(cx).ai.read(cx).transcript.clone();
                     transcript.update(cx, |t, cx| t.confirm_last_undo(cx));
                 }
+                // `editor has <text>`: the file in front shows `text`; `editor note <text>`: the
+                // preview in front says it (a file being fetched, or why one can't be shown).
+                ("has", text) => {
+                    let editor = ide.read(cx).active_editor().ok_or_else(|| anyhow::anyhow!("editor has: no file in front"))?;
+                    let shown = editor.read(cx).text_state().read(cx).text().to_string();
+                    anyhow::ensure!(shown.contains(text), "editor has: {text:?} isn't in the file in front ({} bytes)", shown.len());
+                }
+                ("note", text) => {
+                    let preview = ide.read(cx).active_preview().ok_or_else(|| anyhow::anyhow!("editor note: no preview in front"))?;
+                    let note = preview.read(cx).note_text().unwrap_or_default();
+                    anyhow::ensure!(note.contains(text), "editor note: the preview says {note:?}, not {text:?}");
+                }
                 ("chat", "new") => ws.update(cx, |ws, cx| ws.ide_new_chat(cx)),
                 ("chat", r) if r.starts_with("send ") => ws.update(cx, |ws, cx| ws.send_in(&crate::workspace::Scope::Ide, r["send ".len()..].to_string(), vec![], cx)),
                 ("chat", n) => {
@@ -1850,7 +2558,18 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     if matches!(
         verb,
-        "click" | "rclick" | "hover" | "scroll" | "type" | "key" | "resize" | "elements" | "count"
+        "click"
+            | "rclick"
+            | "hover"
+            | "scroll"
+            | "reveal"
+            | "reveal-in"
+            | "type"
+            | "key"
+            | "resize"
+            | "elements"
+            | "count"
+            | "within"
     ) {
         let main = ws
             .read(cx)
@@ -1898,23 +2617,119 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     );
                     Ok(())
                 }
-                "count" => {
+                // `reveal <element id>`: Settings scrolled from its top, a wheel's turn at a time, until
+                // the element is on screen (`count` counts only what is); `reveal-in <scrolling
+                // element id> <element id>` scrolls another.
+                "reveal" | "reveal-in" => {
                     use gpui_kit::test::TestWindowExt as _;
+                    let (within, id) = if verb == "reveal-in" {
+                        arg.split_once(' ').ok_or_else(|| {
+                            anyhow::anyhow!("reveal-in <scrolling element id> <element id>")
+                        })?
+                    } else {
+                        ("settings-content", arg)
+                    };
+                    let id = id.trim();
+                    anyhow::ensure!(!id.is_empty(), "{verb} needs an element id");
+                    // As `count` reads one: `name*` is any id that starts so.
+                    let on_screen = |window: &mut Window, cx: &mut App| {
+                        window.render_frame(cx);
+                        gpui_kit::base::test_support::snapshots(window)
+                            .into_iter()
+                            .filter(|s| s.visible())
+                            .any(|s| match (id.strip_suffix('*'), s.path().last()) {
+                                (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+                                (None, last) => last == Some(&element_id(id)),
+                                _ => false,
+                            })
+                    };
+                    pointer(window, "hover", within, cx)?;
+                    let wheel = |window: &mut Window, cx: &mut App, dy: f32| {
+                        window.scroll(
+                            element_id(within),
+                            ScrollDelta::Pixels(point(px(0.), px(dy))),
+                            cx,
+                        )
+                    };
+                    wheel(window, cx, 100_000.);
+                    for _ in 0..40 {
+                        if on_screen(window, cx) {
+                            return Ok(());
+                        }
+                        wheel(window, cx, -250.);
+                    }
+                    anyhow::ensure!(
+                        on_screen(window, cx),
+                        "{verb}: {id} isn't on screen anywhere in {within}"
+                    );
+                    Ok(())
+                }
+                "count" => {
                     let (id, n) = arg
                         .rsplit_once(' ')
-                        .ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>"))?;
-                    let n: usize = n.trim().parse()?;
+                        .ok_or_else(|| anyhow::anyhow!("count <element id>[*] <n>[+]"))?;
+                    // `3+`: three or more.
+                    let (n, more) = match n.trim().strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n.trim(), false),
+                    };
+                    let n: usize = n.parse()?;
+                    let found = shown(window, cx, id);
+                    anyhow::ensure!(
+                        found == n || more && found > n,
+                        "count {id}: {found} on screen, not {n}{}",
+                        if more { " or more" } else { "" }
+                    );
+                    Ok(())
+                }
+                // `within <element id>[*] <element id>`: each element the first names (one at
+                // least) lies inside the second, as drawn (half a pixel's leeway).
+                "within" => {
+                    use gpui_kit::test::TestWindowExt as _;
+                    let (inner, outer) = arg
+                        .trim()
+                        .split_once(' ')
+                        .ok_or_else(|| anyhow::anyhow!("within <element id>[*] <element id>"))?;
                     window.render_frame(cx);
-                    let found = gpui_kit::base::test_support::snapshots(window)
+                    let snapshots: Vec<_> = gpui_kit::base::test_support::snapshots(window)
                         .into_iter()
                         .filter(|s| s.visible())
-                        .filter(|s| match (id.strip_suffix('*'), s.path().last()) {
+                        .collect();
+                    let outer_id = element_id(outer.trim());
+                    let outer_bounds = snapshots
+                        .iter()
+                        .find(|s| s.path().last() == Some(&outer_id))
+                        .map(|s| s.bounds())
+                        .ok_or_else(|| anyhow::anyhow!("within: no {outer} on screen"))?;
+                    let inside: Vec<_> = snapshots
+                        .iter()
+                        .filter(|s| match (inner.strip_suffix('*'), s.path().last()) {
                             (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
-                            (None, last) => last == Some(&element_id(id)),
+                            (None, last) => last == Some(&element_id(inner)),
                             _ => false,
                         })
-                        .count();
-                    anyhow::ensure!(found == n, "count {id}: {found} on screen, not {n}");
+                        .collect();
+                    anyhow::ensure!(!inside.is_empty(), "within: no {inner} on screen");
+                    let slack = px(0.5);
+                    let out: Vec<String> = inside
+                        .iter()
+                        .filter(|s| {
+                            let b = s.bounds();
+                            b.left() < outer_bounds.left() - slack
+                                || b.right() > outer_bounds.right() + slack
+                                || b.top() < outer_bounds.top() - slack
+                                || b.bottom() > outer_bounds.bottom() + slack
+                        })
+                        .map(|s| {
+                            let id = s.path().last().map(id_text).unwrap_or_default();
+                            format!("{id} at {:?}", s.bounds())
+                        })
+                        .collect();
+                    anyhow::ensure!(
+                        out.is_empty(),
+                        "within: outside {outer} ({outer_bounds:?}): {}",
+                        out.join(", ")
+                    );
                     Ok(())
                 }
                 "resize" => {
@@ -1934,6 +2749,734 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     }
     // Files in the composer, as a drop puts them there: images as thumbnails, the rest (videos,
     // PDFs, folders) as tiles. Paths are separated by `|` (they may have spaces).
+    // `open-link <trek:// link>`: the link as the system hands it to Trek (a browser button, an
+    // editor extension, a banner clicked), through `deep_link::open`.
+    if verb == "open-link" {
+        anyhow::ensure!(
+            arg.starts_with("trek://"),
+            "open-link takes a trek:// link, not {arg:?}"
+        );
+        crate::deep_link::open(arg, cx);
+        cx.refresh_windows();
+        return Ok(());
+    }
+    // `file <path> [contains <text>]` and `private <path>`, `path` in the data folder unless it's
+    // absolute, and `*name` as its last part any file there whose name ends with `name`: it's
+    // there (holding `text`); and the user alone can read it (`trek_private::is_private`), as
+    // written by the app.
+    if verb == "file" || verb == "private" {
+        let (path, text) = match arg.split_once(" contains ") {
+            Some((path, text)) => (path.trim(), Some(text)),
+            None => (arg.trim(), None),
+        };
+        let given = PathBuf::from(path);
+        let path = if given.is_absolute() {
+            given
+        } else {
+            trek_core::paths::data_dir().join(given)
+        };
+        let ending = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix('*'))
+            .map(str::to_string);
+        let path = match ending {
+            Some(end) => {
+                let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+                std::fs::read_dir(&dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path())
+                    .find(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.ends_with(&end))
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("{verb}: nothing in {} ends with {end:?}", dir.display())
+                    })?
+            }
+            None => path,
+        };
+        anyhow::ensure!(path.exists(), "{verb}: {} isn't there", path.display());
+        if let Some(text) = text {
+            let held = std::fs::read_to_string(&path)?;
+            anyhow::ensure!(
+                held.contains(text),
+                "file: {} doesn't hold {text:?}",
+                path.display()
+            );
+        }
+        if verb == "private" {
+            anyhow::ensure!(
+                trek_private::is_private(&path)?,
+                "private: others can read {}",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+    // `keep-working`: the main window's close button with an agent at work, answered Keep Working
+    // (`root::keep_working`): every window goes, and Trek carries on until the work is done;
+    // `show-main` brings the main window back, as the tray or the Dock does.
+    if verb == "keep-working" {
+        crate::root::keep_working(Duration::from_secs(120), cx);
+        return Ok(());
+    }
+    if verb == "show-main" {
+        crate::root::show_main(ws.clone(), cx);
+        return Ok(());
+    }
+    // `close-main`: the main window's close button by its own path (`root::close_main`), where
+    // the app ends with that window (Windows): with Keep Trek in the tray and the tray icon on, the
+    // windows close and Trek stays. Refused otherwise, as it would quit the run.
+    if verb == "close-main" {
+        let stays = {
+            let settings = &ws.read(cx).settings;
+            settings.general.stay_in_tray && settings.notifications.menu_bar_icon
+        };
+        anyhow::ensure!(
+            stays,
+            "close-main: only with Keep Trek in the tray and the tray icon on (else it would quit the run)"
+        );
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        main.update(cx, |_, window, cx| crate::root::close_main(window, cx))?;
+        return Ok(());
+    }
+    // `badge <n>[+]`: the count on the app's icon as last put up, the system having taken it
+    // (`system::SHOWN_BADGE`): n, or n or more.
+    if verb == "badge" {
+        let (n, more) = match arg.trim().strip_suffix('+') {
+            Some(n) => (n, true),
+            None => (arg.trim(), false),
+        };
+        let n: usize = n.parse()?;
+        let shown = crate::system::SHOWN_BADGE.load(Ordering::Relaxed);
+        anyhow::ensure!(
+            shown == n || more && shown > n,
+            "badge: {shown} on the app's icon, not {n}{}",
+            if more { " or more" } else { "" }
+        );
+        return Ok(());
+    }
+    // `tray off|on|idle|working|attention`: the icon in the system's tray (the menu bar on a
+    // Mac): none; or one the system has on screen, showing any state or the one named.
+    if verb == "tray" {
+        let want = arg.trim();
+        match (want, crate::tray::shown(cx)) {
+            ("off", None) => {}
+            ("off", Some((glyph, _, _))) => anyhow::bail!("tray: the icon is up ({glyph})"),
+            (_, None) => anyhow::bail!("tray: no icon"),
+            (want, Some((glyph, on_screen, status))) => {
+                anyhow::ensure!(
+                    on_screen,
+                    "tray: the system has no icon on screen ({glyph}: {status})"
+                );
+                anyhow::ensure!(
+                    want == "on" || want == glyph,
+                    "tray: {glyph} ({status}), not {want}"
+                );
+            }
+        }
+        return Ok(());
+    }
+    // `native`: Trek runs as this processor's own code, not translated or emulated.
+    if verb == "native" {
+        return native_build();
+    }
+    // `self-contained`: Trek runs with nothing installed beside it: none of the Visual C++
+    // redistributable's libraries is loaded in it on Windows, and on a Mac each library loaded
+    // is the system's or Trek's own.
+    if verb == "self-contained" {
+        return self_contained();
+    }
+    // `banners mark` | `banners new <n>[+]`: the banners in Windows' notification center under
+    // Trek's app id, as the system lists them (`ToastNotificationHistory`). `mark` notes those
+    // there now (an installed Trek's share the id); `new` counts the others, and takes them away
+    // again, so a check leaves none behind. A Mac's banners need the installed app.
+    if verb == "banners" {
+        anyhow::ensure!(
+            cfg!(windows),
+            "banners: Windows' alone (a Mac's banners need the installed app)"
+        );
+        #[cfg(windows)]
+        {
+            let now = banner_tags()?;
+            let mut marked = BANNERS.lock().unwrap_or_else(|e| e.into_inner());
+            match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
+                ("mark", _) => *marked = now,
+                ("new", n) => {
+                    let (n, more) = match n.trim().strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n.trim(), false),
+                    };
+                    let n: usize = n.parse()?;
+                    let new: Vec<String> =
+                        now.into_iter().filter(|t| !marked.contains(t)).collect();
+                    // Taken away by the Trek that posted them, as GPUI takes its own banners
+                    // away: Windows won't take one with no group away by its tag.
+                    let ids: Vec<String> =
+                        ws.read(cx).threads.iter().map(|t| t.id.clone()).collect();
+                    for id in &ids {
+                        cx.dismiss_system_notification(&crate::root::attention_tag(id));
+                    }
+                    let left = banner_tags()?.iter().filter(|t| new.contains(t)).count();
+                    anyhow::ensure!(
+                        left == 0,
+                        "banners: {left} of the check's still in the notification center"
+                    );
+                    anyhow::ensure!(
+                        new.len() == n || more && new.len() > n,
+                        "banners: {} new in the notification center, not {n}{}",
+                        new.len(),
+                        if more { " or more" } else { "" }
+                    );
+                }
+                _ => anyhow::bail!("banners mark | new <n>[+]"),
+            }
+        }
+        return Ok(());
+    }
+    // `motion on|system`: animations go whatever the system asks (as the render tests turn them
+    // on; a CI runner's system has them off), or follow the system's own setting again.
+    if verb == "motion" {
+        let forced = match arg.trim() {
+            "on" => true,
+            "system" => false,
+            other => anyhow::bail!("motion {other}? (on|system)"),
+        };
+        crate::system::MOTION_FORCED.store(forced, Ordering::Relaxed);
+        crate::system::apply_reduce_motion(ws, cx);
+        return Ok(());
+    }
+    // `signed-out`: the capture run is signed out of the user's GitHub account: `gh`, started as
+    // Trek starts it, has no login (`isolate_accounts`). Passes where there's no `gh` at all.
+    if verb == "signed-out" {
+        let Some(gh) = trek_core::detect::which("gh") else {
+            return Ok(());
+        };
+        let status = trek_core::procs::command(gh)
+            .args(["auth", "status"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        anyhow::ensure!(
+            !status.success(),
+            "signed-out: gh is signed in to an account from inside the capture run"
+        );
+        return Ok(());
+    }
+    // `renders mark` | `renders <view> <bound>…`: how often each view drew since `mark`, counted
+    // as the render tests count them (`test_support::rendered`): at least n (`n+`), at most n
+    // (`n-`), or no more often than another view (`<=<view>`).
+    if verb == "renders" {
+        let arg = arg.trim();
+        if arg == "mark" {
+            crate::test_support::take_renders();
+            return Ok(());
+        }
+        let counts = crate::test_support::take_renders();
+        let words: Vec<&str> = arg.split_whitespace().collect();
+        anyhow::ensure!(
+            !words.is_empty() && words.len() % 2 == 0,
+            "renders mark | <view> <n>+|<n>-|<=<view>…"
+        );
+        let mut wrong = Vec::new();
+        for pair in words.chunks(2) {
+            let (view, bound) = (pair[0], pair[1]);
+            let drew = counts.get(view).copied().unwrap_or(0);
+            let ok = if let Some(other) = bound.strip_prefix("<=") {
+                drew <= counts.get(other).copied().unwrap_or(0)
+            } else {
+                match (bound.strip_suffix('+'), bound.strip_suffix('-')) {
+                    (Some(n), _) => drew >= n.parse::<usize>()?,
+                    (_, Some(n)) => drew <= n.parse::<usize>()?,
+                    _ => anyhow::bail!("renders: {bound}? (n+, n- or <=view)"),
+                }
+            };
+            if !ok {
+                wrong.push(format!("{view} drew {drew} times, not {bound}"));
+            }
+        }
+        anyhow::ensure!(
+            wrong.is_empty(),
+            "renders: {} (all: {counts:?})",
+            wrong.join("; ")
+        );
+        return Ok(());
+    }
+    // `banner-permission off|restore` (Windows): Trek's switch in Windows' notification settings,
+    // where Settings › System › Notifications keeps it, as the user flips it: off, then back to
+    // exactly what was there (the installed Trek shares the app id).
+    if verb == "banner-permission" {
+        anyhow::ensure!(cfg!(windows), "banner-permission: Windows' alone");
+        #[cfg(windows)]
+        {
+            let key = format!(
+                r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\{}",
+                crate::winsys::APP_ID
+            );
+            let mut saved = BANNER_SWITCH.lock().unwrap_or_else(|e| e.into_inner());
+            match arg.trim() {
+                "off" => {
+                    if saved.is_none() {
+                        *saved = Some(read_dword(&key, "Enabled"));
+                    }
+                    write_dword(&key, "Enabled", Some(0))?;
+                }
+                "restore" => {
+                    let before = saved.take().ok_or_else(|| {
+                        anyhow::anyhow!("banner-permission restore: it wasn't turned off")
+                    })?;
+                    write_dword(&key, "Enabled", before)?;
+                }
+                _ => anyhow::bail!("banner-permission off|restore"),
+            }
+        }
+        return Ok(());
+    }
+    // `file-app <ext> on|off` (Windows): a program of the check's own as Windows' default for
+    // `.<ext>`, in the user's classes and gone again with `off`. Opening such a file copies it to
+    // `opened.<ext>` in the data folder (a console with no window, `conhost --headless`), so
+    // `file opened.<ext>` sees what Trek handed to the file's app.
+    if verb == "file-app" {
+        anyhow::ensure!(cfg!(windows), "file-app: Windows' alone");
+        #[cfg(windows)]
+        {
+            let (ext, on) = arg
+                .trim()
+                .split_once(' ')
+                .ok_or_else(|| anyhow::anyhow!("file-app <ext> on|off"))?;
+            anyhow::ensure!(
+                !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()),
+                "file-app: {ext:?} isn't an extension"
+            );
+            let class = format!("TrekLiveCheck.{ext}");
+            match on.trim() {
+                "on" => {
+                    let copy = trek_core::paths::data_dir().join(format!("opened.{ext}"));
+                    let _ = std::fs::remove_file(&copy);
+                    let system =
+                        std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+                    let command = format!(
+                        r#""{system}\System32\conhost.exe" --headless "{system}\System32\cmd.exe" /d /s /c "copy /y "%1" "{}"""#,
+                        copy.display()
+                    );
+                    write_string(&format!(r"Software\Classes\.{ext}"), &class)?;
+                    write_string(
+                        &format!(r"Software\Classes\{class}\shell\open\command"),
+                        &command,
+                    )?;
+                }
+                "off" => {
+                    delete_tree(&format!(r"Software\Classes\.{ext}"));
+                    delete_tree(&format!(r"Software\Classes\{class}"));
+                }
+                other => anyhow::bail!("file-app {ext} {other}? (on|off)"),
+            }
+            associations_changed();
+        }
+        return Ok(());
+    }
+    // `bonjour on|found|off`: the stand-in phone server announced on the local network as Trek
+    // announces its own on Wi-Fi (`remote::bonjour::Advert`, through the system's own responder),
+    // under a name of the check's own and never this computer's (the user's own Trek may be
+    // announcing that), with this Trek's lasting id; found as a phone finds it (`shots/dns_sd.rs`:
+    // resolved through the system's DNS-SD, its port the server's and its TXT record this Trek's
+    // id and that name); and taken off the network again.
+    #[cfg(any(windows, target_os = "macos"))]
+    if verb == "bonjour" {
+        static ADVERT: Mutex<Option<(crate::remote::bonjour::Advert, u16)>> = Mutex::new(None);
+        const NAME: &str = "Trek live check";
+        let mut advert = ADVERT.lock().unwrap_or_else(|e| e.into_inner());
+        match arg.trim() {
+            "on" => {
+                let port = ws.update(cx, |ws, cx| -> anyhow::Result<u16> {
+                    ws.start_loopback_remote(cx)?;
+                    Ok(ws.settings.mobile.port)
+                })?;
+                let id = crate::remote::host_info().id;
+                let made =
+                    crate::remote::bonjour::Advert::new(NAME, &id, port).ok_or_else(|| {
+                        anyhow::anyhow!("bonjour on: the system's responder took no record")
+                    })?;
+                *advert = Some((made, port));
+            }
+            "found" => {
+                let port = advert.as_ref().map(|(_, port)| *port).ok_or_else(|| {
+                    anyhow::anyhow!("bonjour found: nothing announced (`bonjour on`)")
+                })?;
+                let found = dns_sd::resolve(NAME, Duration::from_secs(10))?;
+                let id = format!("id={}", crate::remote::host_info().id);
+                anyhow::ensure!(
+                    found.port == port,
+                    "bonjour found: port {}, not the server's {port}",
+                    found.port
+                );
+                anyhow::ensure!(
+                    found.entries.contains(&id) && found.entries.contains(&format!("name={NAME}")),
+                    "bonjour found: its record says {:?}, not this Trek's {id}",
+                    found.entries
+                );
+            }
+            "off" => *advert = None,
+            other => anyhow::bail!("bonjour {other}? (on|found|off)"),
+        }
+        return Ok(());
+    }
+    // `phone-server reach`: the phone server (turned on in Settings, listening on the network as
+    // it does for phones) reached at this computer's address on its network, as a phone on the
+    // Wi-Fi dials it: a connection to its port there (what's said over it is the server's tests').
+    // CI's machines alone (the ledger's `live_ci`): on someone's own, Windows Firewall would ask.
+    if verb == "phone-server" {
+        match arg.trim() {
+            "network" => {
+                ws.update(cx, |ws, cx| ws.network_remote(true, cx));
+                return Ok(());
+            }
+            "off" => {
+                ws.update(cx, |ws, cx| ws.network_remote(false, cx));
+                return Ok(());
+            }
+            "reach" => {}
+            other => anyhow::bail!("phone-server {other}? (network|reach|off)"),
+        }
+        // The server comes up in the background: the steps wait for it first.
+        let w = ws.read(cx);
+        let lan = w
+            .remote
+            .as_ref()
+            .and_then(|r| r.addresses.lan)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "phone-server reach: the phone server isn't on a network (on: {})",
+                    w.remote.is_some()
+                )
+            })?;
+        let port = w.settings.mobile.port;
+        let at = std::net::SocketAddr::from((lan, port));
+        std::net::TcpStream::connect_timeout(&at, Duration::from_secs(5))
+            .map_err(|e| anyhow::anyhow!("phone-server reach: {at}: {e}"))?;
+        return Ok(());
+    }
+    // `window front` (Windows): Trek's window in front of the others for real, with the keyboard,
+    // as a click on it puts it (Windows lets a program come forward only right after input: a
+    // press of Alt is that input). `share asked <n>[+]`: how often Windows asked Trek for a share's
+    // data, which it does only when its share window opens. `share close`: Escape, as the user
+    // presses it, to the share window in front. CI's machines alone (the ledger's `live_ci`).
+    if verb == "window" || verb == "share" {
+        anyhow::ensure!(cfg!(windows), "{verb}: Windows' alone");
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_ESCAPE,
+                VK_MENU,
+            };
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+                SetForegroundWindow,
+            };
+            let press = |key: u16| {
+                let input = |flags| INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: key,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                };
+                let both = [input(0), input(KEYEVENTF_KEYUP)];
+                // SAFETY: two keyboard inputs, of the size given.
+                unsafe { SendInput(2, both.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+            };
+            match (verb, arg.trim()) {
+                ("window", "front") => {
+                    let main = ws
+                        .read(cx)
+                        .main_window
+                        .ok_or_else(|| anyhow::anyhow!("window front: no main window"))?;
+                    let hwnd = main
+                        .update(cx, |_, window, _| crate::winsys::hwnd_of(window))?
+                        .ok_or_else(|| anyhow::anyhow!("window front: no window handle"))?;
+                    press(VK_MENU);
+                    // SAFETY: this process's own top-level window, from its own (UI) thread; the
+                    // front window's input is shared only while it's brought forward, as Windows
+                    // lets a program come forward when it shares the input of the one in front.
+                    let front = unsafe {
+                        let ours = GetCurrentThreadId();
+                        let theirs =
+                            GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+                        let shared = theirs != 0
+                            && theirs != ours
+                            && AttachThreadInput(ours, theirs, 1) != 0;
+                        SetForegroundWindow(hwnd as _);
+                        BringWindowToTop(hwnd as _);
+                        if shared {
+                            AttachThreadInput(ours, theirs, 0);
+                        }
+                        GetForegroundWindow() as isize == hwnd
+                    };
+                    anyhow::ensure!(front, "window front: Windows kept another window in front");
+                }
+                ("share", "close") => press(VK_ESCAPE),
+                ("share", n) if n.starts_with("asked ") => {
+                    let n = n.trim_start_matches("asked ").trim();
+                    let (n, more) = match n.strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n, false),
+                    };
+                    let n: usize = n.parse()?;
+                    let asked = crate::share::SHARE_ASKED.load(Ordering::Relaxed);
+                    anyhow::ensure!(
+                        asked == n || more && asked > n,
+                        "share asked: Windows asked {asked} times, not {n}{}",
+                        if more { " or more" } else { "" }
+                    );
+                }
+                (verb, other) => anyhow::bail!(
+                    "{verb} {other}? (window front | share asked <n>[+] | share close)"
+                ),
+            }
+        }
+        return Ok(());
+    }
+    // `computer open <program>`, `computer elements <window> expect <text>`, `computer close`:
+    // computer use by element, live (`shots/computer_use.rs`): another app opened for the check,
+    // read through Trek's own computer tools as an agent reads it (its outline must hold `text`),
+    // and closed. On CI's machines alone (the ledger's `live_ci`).
+    #[cfg(any(windows, target_os = "macos"))]
+    if verb == "computer" {
+        match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
+            ("open", app) => computer_use::open(app.trim())?,
+            ("close", "") => computer_use::close(),
+            ("elements", rest) => {
+                let (window, want) = rest
+                    .split_once(" expect ")
+                    .ok_or_else(|| anyhow::anyhow!("computer elements <window> expect <text>"))?;
+                let outline = computer_use::elements(window.trim())?;
+                anyhow::ensure!(
+                    outline.contains(want.trim()),
+                    "computer elements: {window}'s outline holds no {want:?}:\n{outline}"
+                );
+            }
+            (other, _) => anyhow::bail!("computer {other}? (open|elements|close)"),
+        }
+        return Ok(());
+    }
+    // `cloud-file <abs-path> <text…>` (Windows): a file that lives only in the cloud, as OneDrive's
+    // online-only files do: a placeholder whose data, `text`, comes from a sync provider of the
+    // check's own (`shots/cloud_files.rs`), its folder the provider's sync root. Windows asks the
+    // provider for the data when something reads the file, and it answers after a moment.
+    // `cloud-file fetched <n>[+]`: how often it was asked; `cloud-file away`: it stops answering,
+    // as OneDrive not running does; `cloud-file off`: the folder an ordinary one again.
+    if verb == "cloud-file" {
+        anyhow::ensure!(cfg!(windows), "cloud-file: Windows' alone");
+        #[cfg(windows)]
+        {
+            match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
+                ("away", "") => cloud_files::away()?,
+                ("off", "") => cloud_files::off()?,
+                ("fetched", n) => {
+                    let (n, more) = match n.trim().strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n.trim(), false),
+                    };
+                    let n: usize = n.parse()?;
+                    let fetched = cloud_files::fetched();
+                    anyhow::ensure!(
+                        fetched == n || more && fetched > n,
+                        "cloud-file fetched: asked {fetched} times, not {n}{}",
+                        if more { " or more" } else { "" }
+                    );
+                }
+                (path, text) => cloud_files::file(Path::new(path), text.trim())?,
+            }
+        }
+        return Ok(());
+    }
+    // `programs-stop`: end the programs `programs` found that still run (a preview window a check
+    // opened, say).
+    if verb == "programs-stop" {
+        let found = PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for (pid, program) in &found {
+            if running_program(*pid).is_some_and(|now| now == *program) {
+                end_process(*pid);
+            }
+        }
+        return Ok(());
+    }
+    // `programs <name> <n>[+]`: running processes of program `name` (`ping`, `sleep`; `.exe` and
+    // case aside) anywhere under Trek's own, as the system lists them; remembered for
+    // `programs-ended`, which passes once every one of them has ended.
+    if verb == "programs" {
+        let (name, n) = arg
+            .trim()
+            .rsplit_once(' ')
+            .ok_or_else(|| anyhow::anyhow!("programs <name> <n>[+]"))?;
+        let (n, more) = match n.strip_suffix('+') {
+            Some(n) => (n, true),
+            None => (n, false),
+        };
+        let n: usize = n.parse()?;
+        let found: Vec<(u32, String)> = trek_programs()
+            .into_iter()
+            .filter(|(_, program)| is_program(program, name.trim()))
+            .collect();
+        anyhow::ensure!(
+            found.len() == n || more && found.len() > n,
+            "programs: {} {name} under Trek, not {n}{}",
+            found.len(),
+            if more { " or more" } else { "" }
+        );
+        *PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()) = found;
+        return Ok(());
+    }
+    if verb == "programs-ended" {
+        let found = std::mem::take(&mut *PROGRAMS.lock().unwrap_or_else(|e| e.into_inner()));
+        anyhow::ensure!(
+            !found.is_empty(),
+            "programs-ended: no programs to watch (`programs` finds them)"
+        );
+        let left: Vec<String> = found
+            .iter()
+            .filter(|(pid, program)| running_program(*pid).is_some_and(|now| now == *program))
+            .map(|(pid, program)| format!("{program} ({pid})"))
+            .collect();
+        anyhow::ensure!(
+            left.is_empty(),
+            "programs-ended: still running: {}",
+            left.join(", ")
+        );
+        return Ok(());
+    }
+    // `console-windows mark` | `console-windows new <n>`: console windows on screen (the classic
+    // console's, and Windows Terminal's, which Windows opens for a console program started without
+    // `CREATE_NO_WINDOW`), and any window of a program under Trek: `mark` notes those there now,
+    // `new` counts the others.
+    if verb == "console-windows" {
+        anyhow::ensure!(cfg!(windows), "console-windows: Windows' alone");
+        #[cfg(windows)]
+        {
+            let under: Vec<u32> = trek_programs().into_iter().map(|(pid, _)| pid).collect();
+            let now = console_windows(&under);
+            let mut marked = CONSOLES.lock().unwrap_or_else(|e| e.into_inner());
+            match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
+                ("mark", _) => *marked = now.iter().map(|(hwnd, _)| *hwnd).collect(),
+                ("new", n) => {
+                    let n: usize = n.trim().parse()?;
+                    let new: Vec<&String> = now
+                        .iter()
+                        .filter(|(hwnd, _)| !marked.contains(hwnd))
+                        .map(|(_, what)| what)
+                        .collect();
+                    anyhow::ensure!(
+                        new.len() == n,
+                        "console-windows: {} new, not {n}: {new:?}",
+                        new.len()
+                    );
+                }
+                _ => anyhow::bail!("console-windows mark | new <n>"),
+            }
+        }
+        return Ok(());
+    }
+    // `count-all <element id>[*] <n>[+]`: `count` over every one of Trek's windows (a thread's own,
+    // the background use picture), not the main window alone.
+    if verb == "count-all" {
+        let (id, n) = arg
+            .rsplit_once(' ')
+            .ok_or_else(|| anyhow::anyhow!("count-all <element id>[*] <n>[+]"))?;
+        let (n, more) = match n.trim().strip_suffix('+') {
+            Some(n) => (n, true),
+            None => (n.trim(), false),
+        };
+        let n: usize = n.parse()?;
+        let mut found = 0;
+        for window in cx.windows() {
+            found += window
+                .update(cx, |_, window, cx| shown(window, cx, id))
+                .unwrap_or(0);
+        }
+        anyhow::ensure!(
+            found == n || more && found > n,
+            "count-all {id}: {found} on screen, not {n}{}",
+            if more { " or more" } else { "" }
+        );
+        return Ok(());
+    }
+    // `heic-demo`: a photo as an iPhone writes one (HEIC), made by the system's own codec in the
+    // data folder (`attachments::heic_photo`), then attached as `attach` does, going in as a
+    // picture agents can read.
+    if verb == "heic-demo" {
+        let photo = trek_core::paths::data_dir()
+            .join("heic-demo")
+            .join("IMG_0001.HEIC");
+        crate::attachments::heic_photo(&photo)?;
+        return run(ws, "attach", &photo.to_string_lossy(), cx);
+    }
+    // `photos open|shown <0|1>|close` (Mac): the system's Photos picker, as the + menu's Photos
+    // Library opens it (`Composer::attach_photos`), a sheet on Trek's window; whether that sheet
+    // is up, as AppKit has it; and closed as its Cancel does. No open panel in its stead, as the
+    // menu has where there's no picker: one left up would hold the rest of the run.
+    #[cfg(target_os = "macos")]
+    if verb == "photos" {
+        use crate::photos::picker::{self, Opened};
+        match arg.trim() {
+            "open" => {
+                let main = ws
+                    .read(cx)
+                    .main_window
+                    .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+                main.update(cx, |root, window, cx| -> anyhow::Result<()> {
+                    let trek = root
+                        .downcast::<gpui_kit::component::Root>()
+                        .ok()
+                        .and_then(|r| {
+                            r.read(cx)
+                                .view()
+                                .clone()
+                                .downcast::<crate::root::TrekWindow>()
+                                .ok()
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("photos: no Trek window"))?;
+                    let composer = trek.read(cx).composer.clone();
+                    match picker::open(window, crate::photos::dir()) {
+                        Opened::Showing(picked) => {
+                            composer.update(cx, |c, cx| c.take_photos(picked, window, cx))
+                        }
+                        Opened::AlreadyShowing => {}
+                        Opened::Unavailable => anyhow::bail!("photos open: no Photos picker here"),
+                    }
+                    Ok(())
+                })??;
+            }
+            "close" => picker::cancel(),
+            other => {
+                let want = match other.strip_prefix("shown").map(str::trim) {
+                    Some("1") => true,
+                    Some("0") => false,
+                    _ => anyhow::bail!("photos open|shown <0|1>|close"),
+                };
+                let up = picker::showing();
+                anyhow::ensure!(
+                    up == want,
+                    "photos shown: the picker's sheet {} up",
+                    if up { "is" } else { "isn't" }
+                );
+            }
+        }
+        return Ok(());
+    }
     if verb == "attach" && !arg.is_empty() {
         let main = ws
             .read(cx)
@@ -2370,6 +3913,22 @@ fn unescape(text: &str) -> String {
     out
 }
 
+/// How many elements `id` names are on screen in `window` as of a fresh frame (`name*`: any
+/// whose id starts with `name`).
+fn shown(window: &mut Window, cx: &mut App, id: &str) -> usize {
+    use gpui_kit::test::TestWindowExt as _;
+    window.render_frame(cx);
+    gpui_kit::base::test_support::snapshots(window)
+        .into_iter()
+        .filter(|s| s.visible())
+        .filter(|s| match (id.strip_suffix('*'), s.path().last()) {
+            (Some(prefix), Some(last)) => id_text(last).starts_with(prefix),
+            (None, last) => last == Some(&element_id(id)),
+            _ => false,
+        })
+        .count()
+}
+
 fn element_id(id: &str) -> ElementId {
     match id
         .rsplit_once('#')
@@ -2674,15 +4233,8 @@ fn import_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
         acme.display(),
         api.display(),
     );
-    let made = trek_core::procs::command("sqlite3")
-        .arg(&db)
-        .arg(sql)
-        .output()?;
-    anyhow::ensure!(
-        made.status.success(),
-        "sqlite3: {}",
-        String::from_utf8_lossy(&made.stderr)
-    );
+    // With the SQLite Trek links, not the sqlite3 program: a Mac has one, Windows doesn't.
+    rusqlite::Connection::open(&db)?.execute_batch(&sql)?;
     let t3 = repo("notes-app")?;
     worktree(
         &t3,
@@ -2707,7 +4259,9 @@ fn import_demo(ws: &Entity<Workspace>, cx: &mut App) -> anyhow::Result<()> {
 fn checks_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Result<()> {
     let dir = trek_core::paths::data_dir().join("checks-demo");
     std::fs::create_dir_all(&dir)?;
-    let gh = dir.join("gh");
+    // A batch file on Windows, which starts no `#!` script: Rust runs a `.cmd` through cmd.exe,
+    // its arguments quoted for it.
+    let gh = dir.join(if cfg!(windows) { "gh.cmd" } else { "gh" });
     let arg = arg.trim();
     // A new commit each time `again` is asked for: each is a failure of its own.
     let fresh = format!("{:07x}", crate::pr_card::now_ms() % 0x0fff_ffff);
@@ -2771,12 +4325,21 @@ fn checks_demo(ws: &Entity<Workspace>, arg: &str, cx: &mut App) -> anyhow::Resul
         "clippy\tRun clippy\t2026-11-05T10:00:00.1234567Z ##[group]Run cargo clippy -- -D warnings\n         clippy\tRun clippy\t2026-11-05T10:00:41.1234567Z error: this `if` has identical blocks\n         clippy\tRun clippy\t2026-11-05T10:00:41.2234567Z   --> crates/auth/src/session.rs:88:5\n         clippy\tRun clippy\t2026-11-05T10:00:41.3234567Z error: could not compile `auth` (lib)\n         clippy\tRun clippy\t2026-11-05T10:00:41.4234567Z ##[error]Process completed with exit code 101.\n",
     )?;
     std::fs::write(
-        &gh,
-        format!(
-            "#!/bin/sh\ndir='{}'\nif [ -e \"$dir/offline\" ]; then echo 'error connecting to api.github.com' >&2; exit 1; fi\ncase \"$1 $2\" in\n  'pr view') cat \"$dir/view.json\" ;;\n  'run view') cat \"$dir/log.txt\" ;;\n  'api rate_limit') echo '{{\"resources\":{{\"graphql\":{{\"limit\":5000,\"remaining\":4900,\"reset\":9999999999}},\"core\":{{\"limit\":5000,\"remaining\":4900,\"reset\":9999999999}}}}}}' ;;\nesac\n",
-            dir.display()
-        ),
+        dir.join("rate_limit.json"),
+        r#"{"resources":{"graphql":{"limit":5000,"remaining":4900,"reset":9999999999},"core":{"limit":5000,"remaining":4900,"reset":9999999999}}}"#,
     )?;
+    let script = if cfg!(windows) {
+        format!(
+            "@echo off\r\nset \"dir={}\"\r\nif exist \"%dir%\\offline\" (\r\n  echo error connecting to api.github.com 1>&2\r\n  exit /b 1\r\n)\r\nif \"%~1 %~2\"==\"pr view\" type \"%dir%\\view.json\"\r\nif \"%~1 %~2\"==\"run view\" type \"%dir%\\log.txt\"\r\nif \"%~1 %~2\"==\"api rate_limit\" type \"%dir%\\rate_limit.json\"\r\n",
+            dir.display()
+        )
+    } else {
+        format!(
+            "#!/bin/sh\ndir='{}'\nif [ -e \"$dir/offline\" ]; then echo 'error connecting to api.github.com' >&2; exit 1; fi\ncase \"$1 $2\" in\n  'pr view') cat \"$dir/view.json\" ;;\n  'run view') cat \"$dir/log.txt\" ;;\n  'api rate_limit') cat \"$dir/rate_limit.json\" ;;\nesac\n",
+            dir.display()
+        )
+    };
+    std::fs::write(&gh, script)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

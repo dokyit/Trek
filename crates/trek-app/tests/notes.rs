@@ -315,10 +315,8 @@ fn a_phones_changes_that_arrive_mid_typing_are_read_without_losing_the_typing() 
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn a_note_that_could_not_be_saved_stays_unsaved_and_is_tried_again() {
-    use std::os::unix::fs::PermissionsExt;
     run(async |cx| {
         let trek = open(cx);
         trek.click(cx, "open-notes");
@@ -329,18 +327,40 @@ fn a_note_that_could_not_be_saved_stays_unsaved_and_is_tried_again() {
             notes.update(cx, |n, cx| n.set_text("first".into(), window, cx))
         });
         saved(cx);
-        // The folder turns read-only (a sync conflict, a full disk): the next save fails.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        if std::fs::write(dir.join("probe"), "").is_ok() {
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-            return; // permissions don't bind this user
+        // The next save fails. On the Mac the folder turns read-only (a sync conflict, a full
+        // disk); on Windows something holds the note open without sharing it (a sync client, a
+        // backup), so it can't be replaced.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            if std::fs::write(dir.join("probe"), "").is_ok() {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+                return; // permissions don't bind this user
+            }
         }
+        #[cfg(windows)]
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            let note = trek_core::notes::list_in(&dir)[0].path.clone();
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&note)
+                .unwrap()
+        };
         trek.window(cx, |window, cx| {
             notes.update(cx, |n, cx| n.set_text("second".into(), window, cx))
         });
         saved(cx);
         assert!(cx.read(|cx| notes.read(cx).listed().1), "still unsaved");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        drop(held);
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(6));
         cx.run_until_parked();

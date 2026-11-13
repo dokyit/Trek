@@ -3366,15 +3366,43 @@ impl ThreadView {
                 // An interrupted turn can be taken back or tried again from here.
                 let turn = ends_turn
                     && live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+                let setup = notice_fix(text.as_str()).map(|(label, command)| {
+                    let v = view.clone();
+                    Button::new(("notice-fix", ix))
+                        .small()
+                        .outline()
+                        .label(label)
+                        .on_click(move |_, _, cx| {
+                            let _ = v.update(cx, |this, cx| {
+                                this.workspace.update(cx, |_, cx| {
+                                    cx.emit(WorkspaceEvent::RunInTerminal {
+                                        command: command.into(),
+                                        cwd: None,
+                                    })
+                                })
+                            });
+                        })
+                });
                 column(
                     h_flex()
                         .group("turn-end")
+                        .flex_wrap()
                         .justify_center()
                         .gap(px(6.))
                         .py_1()
                         .text_size(to_rems(text::META))
                         .text_color(theme.muted_foreground)
-                        .child(text.replace("**", "").replace('`', ""))
+                        // A long notice wraps, centred, with its button under it, rather than
+                        // running off both sides of the transcript (its button out of reach).
+                        .child(
+                            div()
+                                .id(("notice", ix))
+                                .min_w_0()
+                                .max_w_full()
+                                .text_center()
+                                .child(text.replace("**", "").replace('`', "")),
+                        )
+                        .when_some(setup, |el, button| el.child(button))
                         .when(turn, |el| el.child(turn_actions(ix))),
                 )
                 .into_any_element()
@@ -4788,6 +4816,12 @@ fn toggle_row(
     }
 }
 
+/// A notice the user can act on from its row: the button's label and what it runs in Trek's
+/// terminal. Codex's Windows sandbox is set up by Codex itself, which asks once when it's run.
+fn notice_fix(text: &str) -> Option<(&'static str, &'static str)> {
+    (text == trek_agents::CODEX_SANDBOX_SETUP_NOTICE).then_some(("Set up in Terminal", "codex"))
+}
+
 /// How the group of `tools` stands right now: a turn ending changes that with no change to its row.
 fn group_state(tools: &[Row], running: bool, at: &RowContext, cx: &App) -> timeline::GroupState {
     let after = at
@@ -5063,7 +5097,7 @@ struct RowContext {
 
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered(if self.scope == Scope::Beside {
             "ThreadView:beside"
         } else {
@@ -5530,9 +5564,21 @@ impl ThreadView {
 #[cfg(test)]
 mod tests {
     use super::{
-        PART_MIN, Row, SPLIT_FROM, Slot, answer_parts, handoff_name, layout, part_of, row_of,
-        split_long_answers,
+        PART_MIN, Row, SPLIT_FROM, Slot, answer_parts, handoff_name, layout, notice_fix, part_of,
+        row_of, split_long_answers,
     };
+
+    /// Codex's notice that its Windows sandbox needs setting up carries the way to do it: run
+    /// codex in Trek's terminal, where it asks. Other notices carry nothing.
+    #[test]
+    fn the_sandbox_notice_offers_to_run_codex() {
+        assert_eq!(
+            notice_fix(trek_agents::CODEX_SANDBOX_SETUP_NOTICE),
+            Some(("Set up in Terminal", "codex"))
+        );
+        assert!(trek_agents::CODEX_SANDBOX_SETUP_NOTICE.contains("Set up in Terminal"));
+        assert_eq!(notice_fix("Interrupted."), None);
+    }
     use trek_core::AgentId;
     use trek_core::store::{Item, ToolStatus};
 

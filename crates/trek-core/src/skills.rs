@@ -467,7 +467,19 @@ fn move_absolute_link(from: &Path, to: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-#[cfg(not(unix))]
+/// Windows: the same, the new link made as `keep_link` makes one.
+#[cfg(windows)]
+fn move_absolute_link(from: &Path, to: &Path) -> anyhow::Result<bool> {
+    let relative = std::fs::read_link(from).is_ok_and(|t| t.is_relative());
+    let Some(target) = relative.then(|| std::fs::canonicalize(from).ok()).flatten() else {
+        return Ok(false);
+    };
+    link_folder(&target, to, true)?;
+    remove_link(from)?;
+    Ok(true)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn move_absolute_link(_from: &Path, _to: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
@@ -476,28 +488,46 @@ fn move_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         // Different volume: copy, then remove.
-        Err(_) => {
-            // A symlinked skill moves as the link, as a rename would have moved it.
-            #[cfg(unix)]
-            if let Ok(target) = std::fs::read_link(from) {
-                std::os::unix::fs::symlink(target, to)?;
-                std::fs::remove_file(from)?;
-                return Ok(());
-            }
-            copy_dir(from, to)
-                .map_err(|e| e.context(format!("Couldn't move {}", from.display())))?;
-            std::fs::remove_dir_all(from)?;
-            Ok(())
-        }
+        Err(_) => move_by_copy(from, to),
     }
+}
+
+/// `move_dir` where a rename can't do it (another volume).
+fn move_by_copy(from: &Path, to: &Path) -> anyhow::Result<()> {
+    // A symlinked skill moves as the link, as a rename would have moved it.
+    #[cfg(unix)]
+    if let Ok(target) = std::fs::read_link(from) {
+        std::os::unix::fs::symlink(target, to)?;
+        std::fs::remove_file(from)?;
+        return Ok(());
+    }
+    #[cfg(windows)]
+    if std::fs::read_link(from).is_ok() {
+        keep_link(from, to, true)
+            .map_err(|e| anyhow::anyhow!("Couldn't move {}: it {e:#}", from.display()))?;
+        remove_link(from)?;
+        return Ok(());
+    }
+    copy_dir(from, to).map_err(|e| anyhow::anyhow!("Couldn't move {}: {e:#}", from.display()))?;
+    std::fs::remove_dir_all(from)?;
+    Ok(())
 }
 
 /// Copy the folder `from` to the new path `to`, files and folders alike, like `cp -R`. A file keeps
 /// its permissions (so a skill's scripts stay executable). A symlink inside the folder is never
-/// followed, so nothing outside `from` is read: on Unix it is recreated as the same link, and
-/// where links can't be made without a privilege (Windows) it is left out. A failed copy leaves
-/// no half-copied `to`.
+/// followed by the walk, so nothing outside `from` is copied through it: on Unix it is recreated
+/// as the same link; on Windows as `keep_link` keeps it (the same link where Windows lets Trek make
+/// one, else a junction to a linked folder or a copy of a linked file), and one that can't be kept
+/// fails the copy, saying which. A failed copy leaves no half-copied `to`.
 fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
+    copy_tree(from, to, true)
+}
+
+/// `copy_dir`, with `symlinks` false to take Windows' way for when it lets no link be made (the
+/// tests' way to that, on a machine where it does).
+fn copy_tree(from: &Path, to: &Path, symlinks: bool) -> anyhow::Result<()> {
+    #[cfg(not(windows))]
+    let _ = symlinks;
     anyhow::ensure!(
         std::fs::symlink_metadata(to).is_err(),
         "{} already exists",
@@ -519,6 +549,11 @@ fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
             } else if kind.is_symlink() {
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &dest)?;
+                // A junction is a link here too.
+                #[cfg(windows)]
+                keep_link(entry.path(), &dest, symlinks).map_err(|e| {
+                    anyhow::anyhow!("{} {e:#}", rel.display().to_string().replace('\\', "/"))
+                })?;
             }
         }
         anyhow::Ok(())
@@ -527,6 +562,188 @@ fn copy_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
         let _ = std::fs::remove_dir_all(to);
     }
     copied
+}
+
+/// Keep the link `link` (a symbolic link or a junction) at `at`, as Windows lets it be kept: the
+/// same link where Trek may make one (Developer Mode, or Trek run as an administrator) and
+/// `symlinks` says to try; else a junction for a linked folder, which needs no privilege, or a copy
+/// of a linked file. A relative link's junction leads where the link would from `at`, as the same
+/// link would. The error, when it can't be kept, says why: it follows the link's own name.
+#[cfg(windows)]
+fn keep_link(link: &Path, at: &Path, symlinks: bool) -> anyhow::Result<()> {
+    use std::os::windows::fs::FileTypeExt as _;
+    let unreadable = |e: std::io::Error| anyhow::anyhow!("is a link that can't be read: {e}");
+    let target = std::fs::read_link(link).map_err(unreadable)?;
+    let kind = std::fs::symlink_metadata(link).map_err(unreadable)?;
+    if kind.file_type().is_symlink_dir() {
+        let resolved = if target.is_relative() {
+            lexical(&at.parent().unwrap_or(at).join(&target))
+        } else {
+            target.clone()
+        };
+        if symlinks && std::os::windows::fs::symlink_dir(&target, at).is_ok() {
+            return Ok(());
+        }
+        return link_folder(&resolved, at, false).map_err(|e| {
+            anyhow::anyhow!(
+                "is a link to the folder {}, which can't be kept: {e:#}",
+                target.display()
+            )
+        });
+    }
+    if symlinks && std::os::windows::fs::symlink_file(&target, at).is_ok() {
+        return Ok(());
+    }
+    // What the link reads as now: the file it leads to, from where it is.
+    std::fs::copy(link, at).map(|_| ()).map_err(|e| {
+        anyhow::anyhow!(
+            "is a link to the file {}, which can't be kept: it can't be copied in its place ({e}), and Windows makes links only in Developer Mode",
+            target.display()
+        )
+    })
+}
+
+/// A link at `at` to the folder `target` (an absolute path): a symbolic link where `symlinks` says
+/// to try and Windows lets Trek make one, else a junction, as long as Windows will go through it.
+#[cfg(windows)]
+fn link_folder(target: &Path, at: &Path, symlinks: bool) -> anyhow::Result<()> {
+    /// What Windows says going through a junction it doesn't trust.
+    const ERROR_UNTRUSTED_MOUNT_POINT: i32 = 448;
+    if symlinks && std::os::windows::fs::symlink_dir(target, at).is_ok() {
+        return Ok(());
+    }
+    junction(target, at)?;
+    // With Redirection Guard on (some Windows 11 builds have it for every process), no one goes
+    // through a junction made without an administrator: one that can't be gone through keeps
+    // nothing. (One whose folder isn't there is kept, as a link to nothing is elsewhere.)
+    let untrusted =
+        std::fs::metadata(at).is_err_and(|e| e.raw_os_error() == Some(ERROR_UNTRUSTED_MOUNT_POINT));
+    if untrusted {
+        let _ = std::fs::remove_dir(at);
+        anyhow::bail!(
+            "this Windows goes through no junction made without an administrator (Redirection Guard), and makes links only in Developer Mode"
+        );
+    }
+    Ok(())
+}
+
+/// Remove the link `path` itself, whether it stands for a folder or a file.
+#[cfg(windows)]
+fn remove_link(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::FileTypeExt as _;
+    if std::fs::symlink_metadata(path)?
+        .file_type()
+        .is_symlink_dir()
+    {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+/// `path` with its `.` and `..` worked out from the path alone (a junction's target is used as
+/// written, and Windows reads no `..` in it).
+#[cfg(windows)]
+fn lexical(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// A junction at `at`, a path with nothing there yet, to the folder `target`: an absolute path on
+/// a drive of this PC (`C:\…`, or `\\?\C:\…`), which a junction must be; it may not be there yet.
+/// What `mklink /J` makes, made without starting cmd.exe, whose parsing a name with `%` in it
+/// wouldn't survive.
+#[cfg(windows)]
+fn junction(target: &Path, at: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    // From windows-sys modules Trek doesn't otherwise need (Ioctl, SystemServices).
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    // With Windows' own separators, and no `.` or `..`: the target is used as written.
+    let wide: Vec<u16> = lexical(target).as_os_str().encode_wide().collect();
+    let verbatim: Vec<u16> = r"\\?\".encode_utf16().collect();
+    let plain = wide.strip_prefix(verbatim.as_slice()).unwrap_or(&wide);
+    let on_a_drive = plain.len() >= 3
+        && char::from_u32(plain[0].into()).is_some_and(|c| c.is_ascii_alphabetic())
+        && plain[1] == u16::from(b':')
+        && plain[2] == u16::from(b'\\');
+    if !on_a_drive {
+        return Err(std::io::Error::other(format!(
+            "a junction leads only to a folder on a drive of this PC, and {} isn't one",
+            target.display()
+        )));
+    }
+    // A REPARSE_DATA_BUFFER for a mount point: its tag, the length of what follows the first
+    // eight bytes, then the two names' offsets and lengths in bytes, then the names, each ended by
+    // a NUL: the one Windows follows (`\??\C:\…`), and the one it shows (`C:\…`).
+    let substitute: Vec<u16> = r"\??\"
+        .encode_utf16()
+        .chain(plain.iter().copied())
+        .collect();
+    let bytes = |units: usize| u16::try_from(units * 2).ok();
+    let (Some(sub_len), Some(print_len), Some(print_at), Some(data_len)) = (
+        bytes(substitute.len()),
+        bytes(plain.len()),
+        bytes(substitute.len() + 1),
+        bytes(4 + substitute.len() + 1 + plain.len() + 1),
+    ) else {
+        return Err(std::io::Error::other(
+            "the folder's path is too long for a junction",
+        ));
+    };
+    let mut buffer: Vec<u8> = Vec::with_capacity(8 + usize::from(data_len));
+    buffer.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    for half in [data_len, 0, 0, sub_len, print_at, print_len] {
+        buffer.extend(half.to_le_bytes());
+    }
+    for unit in substitute.iter().chain(&[0]).chain(plain).chain(&[0]) {
+        buffer.extend(unit.to_le_bytes());
+    }
+    std::fs::create_dir(at)?;
+    let made = (|| {
+        let folder = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(at)?;
+        let mut returned = 0u32;
+        // SAFETY: a handle this owns, and `buffer` as long as said; no output, no overlapped I/O.
+        let ok = unsafe {
+            DeviceIoControl(
+                folder.as_raw_handle(),
+                FSCTL_SET_REPARSE_POINT,
+                buffer.as_ptr().cast(),
+                buffer.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    })();
+    if made.is_err() {
+        let _ = std::fs::remove_dir(at);
+    }
+    made
 }
 
 /// Move a skill folder to the Trash.
@@ -546,6 +763,11 @@ pub fn trash(skill: &Skill) -> anyhow::Result<()> {
 
 /// Copy a skill folder (one containing SKILL.md) into `home`.
 pub fn install_from(folder: &Path, home: SkillHome) -> anyhow::Result<PathBuf> {
+    install_with(folder, home, true)
+}
+
+/// `install_from`, its copy made as `copy_tree` makes it with `symlinks`.
+fn install_with(folder: &Path, home: SkillHome, symlinks: bool) -> anyhow::Result<PathBuf> {
     anyhow::ensure!(
         folder.join("SKILL.md").exists(),
         "That folder has no SKILL.md"
@@ -561,7 +783,10 @@ pub fn install_from(folder: &Path, home: SkillHome) -> anyhow::Result<PathBuf> {
         "A skill named {} is already there",
         name.to_string_lossy()
     );
-    copy_dir(folder, &dest).map_err(|e| e.context("Couldn't copy the skill"))?;
+    // The reason in the message itself: the error is shown as one line (a link that couldn't be
+    // kept, say which).
+    copy_tree(folder, &dest, symlinks)
+        .map_err(|e| anyhow::anyhow!("Couldn't copy the skill: {e:#}"))?;
     Ok(dest)
 }
 
@@ -1097,6 +1322,393 @@ mod tests {
         copy_dir(&linked, &from_link).unwrap();
         assert!(from_link.join("scripts/run.sh").is_file() && !from_link.is_symlink());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A junction `link` to `target`, made as a user would (`mklink /J`). cmd.exe takes a `/` in
+    /// a path for a switch, so the paths go with backslashes only.
+    #[cfg(windows)]
+    fn mklink_j(link: &Path, target: &Path) {
+        let windows = |p: &Path| p.to_string_lossy().replace('/', "\\");
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(windows(link))
+            .arg(windows(target))
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&made.stdout),
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+
+    /// Whether this process may make symbolic links (Developer Mode, or run as an administrator,
+    /// as CI is), which the tests that start from one need. `dir`, a test's new folder, is made
+    /// for the probe, and gone again when they can't.
+    #[cfg(windows)]
+    fn symlinks_here(dir: &Path) -> bool {
+        std::fs::create_dir_all(dir).unwrap();
+        let probe = dir.join("probe-link");
+        let made = std::os::windows::fs::symlink_file("nothing", &probe).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        if !made {
+            let _ = std::fs::remove_dir_all(dir);
+            eprintln!("symbolic links need Developer Mode or an administrator here; skipped");
+        }
+        made
+    }
+
+    /// Whether this Windows goes through a junction a user made: with Redirection Guard on (some
+    /// Windows 11 builds have it for every process) nothing does, Trek included.
+    #[cfg(windows)]
+    fn junctions_followed_here(dir: &Path) -> bool {
+        let (real, link) = (dir.join("probe-real"), dir.join("probe-junction"));
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("probe.txt"), "1").unwrap();
+        mklink_j(&link, &real);
+        let followed = std::fs::read(link.join("probe.txt")).is_ok();
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&real).unwrap();
+        if !followed {
+            eprintln!("this Windows goes through no junction a user made (Redirection Guard)");
+        }
+        followed
+    }
+
+    #[cfg(windows)]
+    fn is_link(path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+    }
+
+    #[cfg(windows)]
+    fn leads_to(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_linked_folder_inside_a_skill_is_kept_on_windows() {
+        let dir = std::env::temp_dir().join(format!("trek-skill-junction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill = sample_skill(&dir);
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "not part of the skill").unwrap();
+        mklink_j(&skill.join("out"), &outside);
+        if !junctions_followed_here(&dir) {
+            // A junction Windows won't go through keeps nothing: the copy says which link, and
+            // why, and leaves nothing half done.
+            let copy = dir.join("copy");
+            let e = format!("{:#}", copy_tree(&skill, &copy, false).unwrap_err());
+            assert!(
+                e.starts_with("out is a link to the folder") && e.contains("Redirection Guard"),
+                "{e}"
+            );
+            assert!(std::fs::symlink_metadata(&copy).is_err(), "no half copy");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // Without links (a junction, then), and with them where this machine allows.
+        for (name, symlinks) in [("copy", false), ("copy-allowed", true)] {
+            let copy = dir.join(name);
+            copy_tree(&skill, &copy, symlinks).unwrap();
+            assert!(is_link(&copy.join("out")), "{name}: out is a link");
+            assert_eq!(leads_to(&copy.join("out")), leads_to(&outside), "{name}");
+            // The walk didn't go through it: the same entries, `out` a link with nothing under it.
+            assert_eq!(listing(&copy), listing(&skill), "{name}");
+        }
+        // Removing a copy removes its link, not what the link leads to.
+        std::fs::remove_dir_all(dir.join("copy")).unwrap();
+        assert!(outside.join("secret.txt").is_file());
+        // Moved as `move_dir` does to another drive: the junction comes along, and the folder it
+        // left is removed without reaching through it.
+        let moved = dir.join("moved");
+        move_by_copy(&skill, &moved).unwrap();
+        assert!(!skill.exists());
+        assert!(is_link(&moved.join("out")) && moved.join("out/secret.txt").is_file());
+        assert!(outside.join("secret.txt").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Under Redirection Guard, which some Windows 11 builds give every process and a process can
+    /// take on by itself: a junction made without an administrator is gone through by no one, so
+    /// one in its place keeps nothing, and the copy says so. In a process of its own (this test
+    /// binary again), as the guard can't be lifted once on.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_windows_wont_go_through_keeps_nothing_and_says_so() {
+        let ran = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "skills::tests::under_redirection_guard"])
+            .args(["--ignored", "--nocapture", "--test-threads=1"])
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&ran.stdout);
+        assert!(
+            ran.status.success() && out.contains("1 passed"),
+            "{out}{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "run in a process of its own by a_junction_windows_wont_go_through_keeps_nothing_and_says_so"]
+    fn under_redirection_guard() {
+        use windows_sys::Win32::System::Threading::{
+            ProcessRedirectionTrustPolicy, SetProcessMitigationPolicy,
+        };
+        // PROCESS_MITIGATION_REDIRECTION_TRUST_POLICY's EnforceRedirectionTrust.
+        let enforce: u32 = 1;
+        // SAFETY: the policy's structure, a u32 of flags, and its size.
+        let on = unsafe {
+            SetProcessMitigationPolicy(
+                ProcessRedirectionTrustPolicy,
+                (&raw const enforce).cast(),
+                std::mem::size_of::<u32>(),
+            )
+        } != 0;
+        if !on {
+            eprintln!("this Windows has no Redirection Guard; skipped");
+            return;
+        }
+        // The guard trusts the junctions an administrator makes, and CI runs as one: there's no
+        // junction here it would refuse.
+        // SAFETY: a plain call.
+        if unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } != 0 {
+            eprintln!("an administrator's junctions are trusted by the guard; skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("trek-skill-guarded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill = sample_skill(&dir);
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        mklink_j(&skill.join("out"), &outside);
+        assert!(!junctions_followed_here(&dir), "the guard is on");
+        for symlinks in [false, true] {
+            let copy = dir.join("copy");
+            match copy_tree(&skill, &copy, symlinks) {
+                // Where Trek may make links (an administrator, as CI is): the same link, which
+                // the guard doesn't touch.
+                Ok(()) if symlinks => {
+                    assert!(is_link(&copy.join("out")));
+                    assert!(std::fs::read_dir(copy.join("out")).is_ok());
+                    std::fs::remove_dir_all(&copy).unwrap();
+                }
+                Ok(()) => panic!("a junction no one goes through was kept"),
+                Err(e) => {
+                    let e = format!("{e:#}");
+                    assert!(
+                        e.starts_with("out is a link to the folder")
+                            && e.contains("Redirection Guard"),
+                        "{e}"
+                    );
+                    assert!(std::fs::symlink_metadata(&copy).is_err(), "no half copy");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn links_made_where_windows_allows_them_are_kept_too() {
+        let dir = std::env::temp_dir().join(format!("trek-skill-symlinks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        if !symlinks_here(&dir) {
+            return;
+        }
+        let skill = sample_skill(&dir);
+        std::os::windows::fs::symlink_dir("scripts", skill.join("inner")).unwrap();
+        std::os::windows::fs::symlink_file("SKILL.md", skill.join("alias.md")).unwrap();
+        // Where Trek may make links: the same links, relative as they were.
+        let same = dir.join("same");
+        copy_tree(&skill, &same, true).unwrap();
+        assert_eq!(
+            std::fs::read_link(same.join("inner")).unwrap(),
+            Path::new("scripts")
+        );
+        assert_eq!(
+            std::fs::read_link(same.join("alias.md")).unwrap(),
+            Path::new("SKILL.md")
+        );
+        assert!(same.join("inner/run.sh").is_file());
+        // Where it may not: a junction to the copy's own `scripts`, as the link would lead from
+        // there, and the file the other link leads to, copied in its place.
+        let kept = dir.join("kept");
+        if junctions_followed_here(&dir) {
+            copy_tree(&skill, &kept, false).unwrap();
+            assert!(is_link(&kept.join("inner")));
+            assert_eq!(
+                leads_to(&kept.join("inner")),
+                leads_to(&kept.join("scripts"))
+            );
+        } else {
+            let e = format!("{:#}", copy_tree(&skill, &kept, false).unwrap_err());
+            assert!(
+                e.starts_with("inner is a link to the folder scripts"),
+                "{e}"
+            );
+            std::fs::remove_dir(skill.join("inner")).unwrap();
+            copy_tree(&skill, &kept, false).unwrap();
+        }
+        assert!(!is_link(&kept.join("alias.md")));
+        assert_eq!(
+            std::fs::read(kept.join("alias.md")).unwrap(),
+            std::fs::read(skill.join("SKILL.md")).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_link_that_cant_be_kept_says_which_and_leaves_no_copy() {
+        let data = std::env::temp_dir().join(format!("trek-skill-unkept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        if !symlinks_here(&data) {
+            return;
+        }
+        crate::paths::isolate_thread(data.clone());
+        let skill = sample_skill(&data.join("source"));
+        // A link to a file that isn't there: no copy can stand in for it without links.
+        std::os::windows::fs::symlink_file("missing.txt", skill.join("scripts/gone.txt")).unwrap();
+        let copy = data.join("copy");
+        let e = format!("{:#}", copy_tree(&skill, &copy, false).unwrap_err());
+        assert!(
+            e.contains("scripts/gone.txt is a link to the file missing.txt, which can't be kept"),
+            "{e}"
+        );
+        assert!(std::fs::symlink_metadata(&copy).is_err(), "no half copy");
+        // Installing it says so in the one line the user is shown.
+        let e = install_with(&skill, SkillHome::ClaudeCode, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.starts_with("Couldn't copy the skill: scripts/gone.txt is a link"),
+            "{e}"
+        );
+        assert!(!SkillHome::ClaudeCode.dir().join("sample").exists());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_leads_only_to_a_drive_of_this_pc() {
+        let dir = std::env::temp_dir().join(format!("trek-junction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = junction(Path::new(r"\\server\share\skills"), &dir.join("remote")).unwrap_err();
+        assert!(e.to_string().contains("drive of this PC"), "{e}");
+        assert!(std::fs::symlink_metadata(dir.join("remote")).is_err());
+        // To a folder that isn't there yet, and to it by a verbatim path once it is: each reads
+        // back as the one `mklink /J` makes.
+        let later = dir.join("later");
+        junction(&later, &dir.join("early")).unwrap();
+        std::fs::create_dir(&later).unwrap();
+        std::fs::write(later.join("x.txt"), "1").unwrap();
+        junction(&leads_to(&later), &dir.join("verbatim")).unwrap();
+        mklink_j(&dir.join("theirs"), &later);
+        let theirs = std::fs::read_link(dir.join("theirs")).unwrap();
+        assert_eq!(theirs, later);
+        // Written with either slash: a junction's target has only Windows' own.
+        let forward = PathBuf::from(later.to_string_lossy().replace('\\', "/"));
+        junction(&forward, &dir.join("forward")).unwrap();
+        let followed = junctions_followed_here(&dir);
+        // The same folder however it's spelled: CI's TEMP is an 8.3 name (`RUNNER~1`), which
+        // `mklink` keeps as given and Trek writes out in full.
+        let same = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+        for link in ["early", "verbatim", "forward"] {
+            assert!(is_link(&dir.join(link)), "{link}");
+            assert_eq!(
+                same(std::fs::read_link(dir.join(link)).unwrap()),
+                same(theirs.clone()),
+                "{link}"
+            );
+            if followed {
+                assert_eq!(std::fs::read(dir.join(link).join("x.txt")).unwrap(), b"1");
+            }
+        }
+        // Where something is already: refused, and left as it was.
+        assert!(junction(&later, &dir.join("later")).is_err());
+        assert!(later.join("x.txt").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_skill_linked_by_a_junction_can_be_turned_off_and_on() {
+        let data = std::env::temp_dir().join(format!("trek-junction-skill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        if !junctions_followed_here(&data) {
+            let _ = std::fs::remove_dir_all(&data);
+            return;
+        }
+        crate::paths::isolate_thread(data.clone());
+        let home = SkillHome::ClaudeCode.dir();
+        std::fs::create_dir_all(&home).unwrap();
+        let real = home.parent().unwrap().join("shared-skills").join("linked");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: linked\n---\n").unwrap();
+        let link = home.join("linked");
+        mklink_j(&link, &real);
+        let found = discover(None)
+            .into_iter()
+            .find(|s| s.name == "linked")
+            .expect("listed");
+        let off = set_enabled(&found, false).unwrap();
+        assert!(
+            is_link(&off) && off.join("SKILL.md").is_file(),
+            "moved as the link"
+        );
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        let off = discover(None)
+            .into_iter()
+            .find(|s| s.name == "linked")
+            .expect("listed off");
+        assert_eq!(set_enabled(&off, true).unwrap(), link);
+        assert!(link.join("SKILL.md").is_file());
+        assert!(!real.join(ORIGIN_FILE).exists());
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_skill_linked_by_a_relative_path_can_be_turned_off_and_on_on_windows() {
+        let data = std::env::temp_dir().join(format!("trek-relative-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        if !symlinks_here(&data) {
+            return;
+        }
+        crate::paths::isolate_thread(data.clone());
+        let home = SkillHome::ClaudeCode.dir();
+        std::fs::create_dir_all(&home).unwrap();
+        let real = home.parent().unwrap().join("shared-skills").join("linked");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "---\nname: linked\n---\n").unwrap();
+        let link = home.join("linked");
+        std::os::windows::fs::symlink_dir(r"..\shared-skills\linked", &link).unwrap();
+        let found = discover(None)
+            .into_iter()
+            .find(|s| s.name == "linked")
+            .expect("listed");
+        let off = set_enabled(&found, false).unwrap();
+        assert!(
+            off.join("SKILL.md").is_file(),
+            "the moved link still resolves"
+        );
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        let off = discover(None)
+            .into_iter()
+            .find(|s| s.name == "linked")
+            .expect("listed off");
+        assert_eq!(set_enabled(&off, true).unwrap(), link);
+        assert!(link.join("SKILL.md").is_file());
+        assert!(!real.join(ORIGIN_FILE).exists());
+        let _ = std::fs::remove_dir_all(data);
     }
 
     #[test]

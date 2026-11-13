@@ -23,8 +23,11 @@ pub const VK_MENU: u16 = 0x12; // Alt
 pub const VK_LWIN: u16 = 0x5B;
 const VK_OEM_PLUS: u16 = 0xBB; // the =/+ key
 
+/// The code of a key one platform's keyboards don't have: naming it there says so.
+const NONE: u16 = u16::MAX;
+
 /// Every key name the `key` tool accepts (lowercase), with its macOS keycode and Windows
-/// virtual-key code.
+/// virtual-key code ([`NONE`] where that platform has no such key).
 const KEYS: &[(&str, u16, u16)] = &[
     // letters (Windows: 'A'..'Z')
     ("a", 0, 0x41),
@@ -137,6 +140,57 @@ const KEYS: &[(&str, u16, u16)] = &[
     ("f10", 109, 0x79),
     ("f11", 103, 0x7A),
     ("f12", 111, 0x7B),
+    // F13 and up (Windows: VK_F13..VK_F24; the Mac's keyboards stop at F20)
+    ("f13", 105, 0x7C),
+    ("f14", 107, 0x7D),
+    ("f15", 113, 0x7E),
+    ("f16", 106, 0x7F),
+    ("f17", 64, 0x80),
+    ("f18", 79, 0x81),
+    ("f19", 80, 0x82),
+    ("f20", 90, 0x83),
+    ("f21", NONE, 0x84),
+    ("f22", NONE, 0x85),
+    ("f23", NONE, 0x86),
+    ("f24", NONE, 0x87),
+    // the numeric keypad (Windows: VK_NUMPAD0..VK_NUMPAD9 and its operators, which type their
+    // characters whether Num Lock is on or not)
+    ("numpad0", 82, 0x60),
+    ("numpad1", 83, 0x61),
+    ("numpad2", 84, 0x62),
+    ("numpad3", 85, 0x63),
+    ("numpad4", 86, 0x64),
+    ("numpad5", 87, 0x65),
+    ("numpad6", 88, 0x66),
+    ("numpad7", 89, 0x67),
+    ("numpad8", 91, 0x68),
+    ("numpad9", 92, 0x69),
+    ("numpadmultiply", 67, 0x6A),
+    ("numpadadd", 69, 0x6B),
+    ("numpadplus", 69, 0x6B),
+    ("numpadsubtract", 78, 0x6D),
+    ("numpadminus", 78, 0x6D),
+    ("numpaddecimal", 65, 0x6E),
+    ("numpaddivide", 75, 0x6F),
+    // Windows tells the keypad's Enter from Return only by a flag apps rarely read: Return there.
+    ("numpadenter", 76, VK_RETURN),
+    ("numpadequals", 81, NONE),
+    // A PC keyboard's Insert is the Mac's Help key, in the same place.
+    ("insert", 114, 0x2D),
+    ("ins", 114, 0x2D),
+    // keys only a PC has
+    ("printscreen", NONE, 0x2C),
+    ("prtsc", NONE, 0x2C),
+    ("prtscn", NONE, 0x2C),
+    ("pause", NONE, 0x13),
+    ("scrolllock", NONE, 0x91),
+    ("numlock", NONE, 0x90),
+    // the menu key, beside the right Ctrl (VK_APPS; VK_MENU is Alt)
+    ("apps", NONE, 0x5D),
+    ("contextmenu", NONE, 0x5D),
+    // The Windows key pressed alone (the Start menu); as a modifier it's `win+…`.
+    ("win", NONE, VK_LWIN),
+    ("windows", NONE, VK_LWIN),
 ];
 
 /// A modifier as written in a combo. `Cmd` and `Super` are one key on the Mac; on Windows `cmd`
@@ -178,14 +232,20 @@ impl Chord {
     }
 }
 
-/// macOS virtual keycode for a (lowercased) key name, ANSI layout.
+/// macOS virtual keycode for a (lowercased) key name, ANSI layout; `None` for a key a Mac lacks.
 pub fn keycode(name: &str) -> Option<u16> {
-    KEYS.iter().find(|k| k.0 == name).map(|k| k.1)
+    KEYS.iter()
+        .find(|k| k.0 == name)
+        .map(|k| k.1)
+        .filter(|&c| c != NONE)
 }
 
-/// Windows virtual-key code for a (lowercased) key name, US layout.
+/// Windows virtual-key code for a (lowercased) key name, US layout; `None` for a key a PC lacks.
 pub fn vk(name: &str) -> Option<u16> {
-    KEYS.iter().find(|k| k.0 == name).map(|k| k.2)
+    KEYS.iter()
+        .find(|k| k.0 == name)
+        .map(|k| k.2)
+        .filter(|&c| c != NONE)
 }
 
 /// Parse "cmd+shift+t", "Return", "ctrl+alt+delete", "cmd+plus", "cmd++".
@@ -245,7 +305,12 @@ pub fn parse_chord(combo: &str) -> Result<Chord, String> {
             }
             None => {
                 return Err(format!(
-                    "Unknown key {k:?} in {combo:?}. Use a letter/digit/punctuation or one of: return, tab, space, delete, forwarddelete, escape, up, down, left, right, home, end, pageup, pagedown, f1-f12"
+                    "Unknown key {k:?} in {combo:?}. Use a letter/digit/punctuation or one of: return, tab, space, delete, forwarddelete, escape, up, down, left, right, home, end, pageup, pagedown, insert, {}",
+                    if cfg!(windows) {
+                        "f1-f24, numpad0-numpad9, numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, printscreen, pause, scrolllock, numlock, apps, win"
+                    } else {
+                        "f1-f20, numpad0-numpad9, numpadadd, numpadsubtract, numpadmultiply, numpaddivide, numpaddecimal, numpadequals"
+                    }
                 ));
             }
         },
@@ -262,6 +327,9 @@ pub struct KeyCombo {
 /// A combo as macOS posts it: a keycode with CGEventFlags.
 pub fn parse_combo(combo: &str) -> Result<KeyCombo, String> {
     let chord = parse_chord(combo)?;
+    if chord.key.1 == NONE {
+        return Err(format!("{combo:?}: a Mac has no {} key", chord.key.0));
+    }
     let flags = chord
         .mods
         .iter()
@@ -292,6 +360,9 @@ pub fn parse_vk(combo: &str) -> Result<VkCombo, String> {
         return Err(format!(
             "{combo:?} needs fn, which only the keyboard itself can press on Windows. Name the key fn would give instead (e.g. f5, delete, pageup)."
         ));
+    }
+    if chord.key.2 == NONE {
+        return Err(format!("{combo:?}: a PC has no {} key", chord.key.0));
     }
     // Ctrl, Alt, Shift, then Win: the order a person presses them, and Ctrl once even when
     // both cmd and ctrl are named.
@@ -450,23 +521,35 @@ mod tests {
     }
 
     #[test]
-    fn every_key_name_has_a_windows_virtual_key() {
-        // One table holds both codes, so a name the Mac accepts can't be missing on Windows;
-        // check the table itself: names unique and lowercase, every code a real key.
+    fn every_key_name_is_a_real_key_or_says_which_keyboard_lacks_it() {
+        // One table holds both codes, so a name one platform accepts can't be unknown on the
+        // other; check the table itself: names unique and lowercase, every code a real key, and
+        // a key one keyboard lacks refused there by name.
         let mut names = std::collections::HashSet::new();
-        for (name, _, code) in KEYS {
+        for (name, mac, code) in KEYS {
             assert!(names.insert(*name), "{name} is listed twice");
             assert_eq!(name.to_lowercase(), *name, "names are matched lowercased");
-            assert!(
-                (0x08..=0xFE).contains(code),
-                "{name}: {code:#x} isn't a virtual-key code"
-            );
-            assert_eq!(parse_vk(name).unwrap().vk, *code, "{name}");
-            assert_eq!(
-                parse_combo(name).unwrap().keycode,
-                keycode(name).unwrap(),
-                "{name}"
-            );
+            assert!(*mac != NONE || *code != NONE, "{name} is on some keyboard");
+            if *code == NONE {
+                let why = parse_vk(name).unwrap_err();
+                assert!(why.contains(&format!("a PC has no {name} key")), "{why}");
+                assert_eq!(vk(name), None, "{name}");
+            } else {
+                assert!(
+                    (0x08..=0xFE).contains(code),
+                    "{name}: {code:#x} isn't a virtual-key code"
+                );
+                assert_eq!(parse_vk(name).unwrap().vk, *code, "{name}");
+            }
+            if *mac == NONE {
+                let why = parse_combo(name).unwrap_err();
+                assert!(why.contains(&format!("a Mac has no {name} key")), "{why}");
+                assert_eq!(keycode(name), None, "{name}");
+            } else {
+                assert!(*mac < 128, "{name}: {mac} isn't a Mac keycode");
+                assert_eq!(parse_combo(name).unwrap().keycode, *mac, "{name}");
+                assert_eq!(keycode(name), Some(*mac), "{name}");
+            }
         }
         // Aliases agree on both platforms: a name and its alias are one key everywhere.
         for (a, b) in [
@@ -484,6 +567,111 @@ mod tests {
         assert_eq!(vk("forwarddelete"), Some(0x2E));
         assert_eq!(vk("f12"), Some(0x7B));
         assert_eq!(vk("up"), Some(0x26));
+    }
+
+    #[test]
+    fn pc_keys_and_the_keypad() {
+        // Windows' virtual-key codes (WinUser.h), each pressed alone.
+        for (name, code) in [
+            ("insert", 0x2D),
+            ("ins", 0x2D),
+            ("printscreen", 0x2C),
+            ("prtsc", 0x2C),
+            ("pause", 0x13),
+            ("scrolllock", 0x91),
+            ("numlock", 0x90),
+            ("apps", 0x5D),
+            ("contextmenu", 0x5D),
+            ("win", VK_LWIN),
+            ("windows", VK_LWIN),
+            ("numpad0", 0x60),
+            ("numpad9", 0x69),
+            ("numpadmultiply", 0x6A),
+            ("numpadadd", 0x6B),
+            ("numpadplus", 0x6B),
+            ("numpadsubtract", 0x6D),
+            ("numpaddecimal", 0x6E),
+            ("numpaddivide", 0x6F),
+            ("numpadenter", VK_RETURN),
+        ] {
+            assert_eq!(
+                parse_vk(name).unwrap(),
+                VkCombo {
+                    held: vec![],
+                    vk: code
+                },
+                "{name}"
+            );
+        }
+        // F1 to F24 are one run on Windows.
+        for n in 1..=24u16 {
+            assert_eq!(vk(&format!("f{n}")), Some(0x6F + n), "f{n}");
+        }
+        // The Mac's (Carbon's kVK_* codes): the keypad, F13 to F20, and Insert as Help.
+        for (name, code) in [
+            ("numpad0", 82),
+            ("numpad7", 89),
+            ("numpad8", 91),
+            ("numpad9", 92),
+            ("numpadenter", 76),
+            ("numpadequals", 81),
+            ("numpaddecimal", 65),
+            ("f13", 105),
+            ("f16", 106),
+            ("f17", 64),
+            ("f20", 90),
+            ("insert", 114),
+        ] {
+            assert_eq!(parse_combo(name).unwrap().keycode, code, "{name}");
+        }
+        // A key one keyboard lacks is refused there by name, not as unknown.
+        for name in [
+            "printscreen",
+            "pause",
+            "scrolllock",
+            "numlock",
+            "apps",
+            "f21",
+            "f24",
+            "win",
+        ] {
+            let why = parse_combo(name).unwrap_err();
+            assert!(why.contains(&format!("a Mac has no {name} key")), "{why}");
+        }
+        assert!(
+            parse_vk("numpadequals")
+                .unwrap_err()
+                .contains("a PC has no numpadequals key")
+        );
+        // The keypad's digits are keys of their own, not the top row's.
+        assert_ne!(vk("numpad1"), vk("1"));
+        assert_ne!(keycode("numpad1"), keycode("1"));
+        // The Windows key alone, with a modifier held, and still a modifier before a key (cmd on
+        // a Mac).
+        assert_eq!(
+            parse_vk("ctrl+win").unwrap(),
+            VkCombo {
+                held: vec![VK_CONTROL],
+                vk: VK_LWIN
+            }
+        );
+        assert_eq!(parse_vk("win+r").unwrap().held, vec![VK_LWIN]);
+        assert_eq!(parse_combo("win+q").unwrap().flags, FLAG_COMMAND);
+        assert!(parse_vk("ctrl+printscreen").is_ok());
+        // An unknown key's message lists them.
+        let why = parse_vk("ctrl+banana").unwrap_err();
+        assert!(why.contains("insert"), "{why}");
+        if cfg!(windows) {
+            assert!(
+                why.contains("f1-f24") && why.contains("printscreen"),
+                "{why}"
+            );
+        } else {
+            assert!(
+                why.contains("f1-f20") && why.contains("numpadequals"),
+                "{why}"
+            );
+        }
     }
 
     #[test]

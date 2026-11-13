@@ -393,6 +393,9 @@ impl Client {
             return;
         }
         lock(&self.outbox).clear();
+        // Watchers hear the end (their channels close): an editor stops showing the server as
+        // running, whether it exited or never started properly.
+        lock(&self.diag_senders).clear();
         let writer = lock(&self.writer).take();
         let child = lock(&self.child).take();
         let shutdown = self.ready.load(Ordering::SeqCst).then(|| {
@@ -423,7 +426,12 @@ impl Client {
         &self,
     ) -> async_channel::Receiver<(String, Vec<lsp_types::Diagnostic>)> {
         let (tx, rx) = async_channel::unbounded();
-        lock(&self.diag_senders).push(tx);
+        let mut senders = lock(&self.diag_senders);
+        // A stopped server says nothing more: closed from the start. Asked under the lock `stop`
+        // clears the senders under, so a watcher added as it stops is let go too.
+        if !self.stopped() {
+            senders.push(tx);
+        }
         rx
     }
 
@@ -1167,6 +1175,21 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "send blocked for {:?}",
             started.elapsed()
+        );
+    }
+
+    /// A server that stops (it exited, or never answered `initialize`, as rustup's
+    /// `rust-analyzer` does without its component) closes its watchers' channels: the editor
+    /// stops showing it as running.
+    #[test]
+    fn lsp_watchers_hear_the_server_stop() {
+        let (client, _server, _from_client) = fake();
+        let rx = client.watch_diagnostics();
+        client.stop();
+        assert!(rx.recv_blocking().is_err(), "the watcher's channel closed");
+        assert!(
+            client.watch_diagnostics().recv_blocking().is_err(),
+            "and one asked for after is closed from the start"
         );
     }
 

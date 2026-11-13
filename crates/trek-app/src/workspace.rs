@@ -1660,6 +1660,10 @@ pub struct Workspace {
     /// Composer defaults as last copied into `draft_prefs` (agent, model, effort, hand-holding),
     /// so `save_settings` can tell when the user changed them.
     applied_defaults: (String, Option<String>, Effort, HandHolding),
+    /// Windows: whether the scheduled task that updates Trek while it's closed was last set up
+    /// (`Some(true)`) or taken away, as Settings › Updates had it; `None` before it was.
+    #[cfg(windows)]
+    update_task: Option<bool>,
     tasks: Vec<Task<()>>,
     /// A restart the user asked for while agents worked, counting down now that they're done.
     restart_countdown: Option<Task<()>>,
@@ -2116,6 +2120,8 @@ impl Workspace {
             basecamp_back: None,
             editor_back: None,
             applied_defaults,
+            #[cfg(windows)]
+            update_task: None,
             tasks: vec![],
             restart_countdown: None,
             restart_wanted: false,
@@ -2539,6 +2545,8 @@ impl Workspace {
         if let Err(e) = self.settings.save() {
             tracing::warn!("save settings: {e}");
         }
+        #[cfg(windows)]
+        self.sync_update_task(cx);
         trek_core::permission_rules::set_current(&self.settings.permissions.rules);
         if default_prefs_key(&self.settings) != self.applied_defaults {
             self.apply_default_prefs(cx);
@@ -2554,6 +2562,52 @@ impl Workspace {
         }
         self.sync_remote(cx);
         cx.notify();
+    }
+
+    /// Windows: the scheduled task that updates Trek while it's closed, as Settings › Updates has
+    /// it (`update::closed::task`): set up for the trek-mcp beside Trek, or taken away. Only when
+    /// that changed; never in the tests.
+    #[cfg(windows)]
+    fn sync_update_task(&mut self, cx: &mut Context<Self>) {
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        let want = self.settings.updates.while_closed;
+        if self.update_task == Some(want) {
+            return;
+        }
+        self.update_task = Some(want);
+        let mcp = std::env::var_os("TREK_MCP_BIN")
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(trek_mcp_binary);
+        let task = cx.background_executor().spawn(async move {
+            use trek_core::update::closed::task;
+            let name = update_task_name();
+            if want {
+                let mcp = mcp.ok_or_else(|| anyhow::anyhow!("trek-mcp isn't beside Trek"))?;
+                task::register(name, &mcp)
+            } else {
+                task::unregister(name)
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = task.await {
+                tracing::warn!("update while closed: {e:#}");
+                let _ = this.update(cx, |ws, cx| {
+                    ws.update_task = None;
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: format!(
+                            "Couldn't {} the update while Trek is closed: {e}",
+                            if want { "set up" } else { "stop" }
+                        )
+                        .into(),
+                        undo: None,
+                    })
+                });
+            }
+        })
+        .detach();
     }
 
     /// Copy the default agent, model, effort and hand-holding from settings into the draft
@@ -10817,6 +10871,17 @@ pub fn fmt_tokens(n: u64) -> String {
     format!("{}{unit}", s.strip_suffix(".0").unwrap_or(&s))
 }
 
+/// Windows: the scheduled task's name for this build. A capture build has one of its own, so
+/// running one never touches the installed Trek's.
+#[cfg(windows)]
+pub fn update_task_name() -> &'static str {
+    if cfg!(feature = "shots") {
+        r"Trek\Update while closed (live check)"
+    } else {
+        trek_core::update::closed::task::NAME
+    }
+}
+
 /// The bundled `trek-mcp` server: next to the app binary, else a dev build.
 pub fn trek_mcp_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -10876,10 +10941,17 @@ pub(crate) fn agent_notes(
 /// may take minutes (a download, a transcript), past what agents give a tool by default.
 fn video_server(bin: &str) -> McpServer {
     let dir = trek_core::media::video_cache_dir();
-    let env = vec![(
+    let mut env = vec![(
         trek_core::media::ENV_VIDEO_DIR.to_string(),
         dir.display().to_string(),
     )];
+    // Where dictation keeps a speech model of its own (Windows), the watcher transcribes with it.
+    if let Some(models) = crate::dictate::model_dir_in(&trek_core::paths::local_data_dir()) {
+        env.push((
+            trek_core::media::ENV_DICTATION_DIR.to_string(),
+            models.display().to_string(),
+        ));
+    }
     McpServer {
         tool_timeout_secs: Some(VIDEO_TIMEOUT_SECS),
         ..McpServer::stdio(
@@ -11067,6 +11139,17 @@ mod tests {
                     std::path::Path::new(&env[0].1).ends_with("videos"),
                     "{env:?}"
                 );
+                // Dictation's speech model, where it has one (Windows): transcripts without
+                // whisper are made with it. Nothing on a Mac, whose Speech framework has its own.
+                let models = env
+                    .iter()
+                    .find(|(k, _)| k == "TREK_DICTATION_DIR")
+                    .map(|(_, v)| std::path::PathBuf::from(v));
+                assert_eq!(
+                    models,
+                    crate::dictate::model_dir_in(&trek_core::paths::local_data_dir())
+                );
+                assert!(models.is_none_or(|m| m.ends_with("dictation")), "{env:?}");
             }
             other => panic!("{other:?}"),
         }
