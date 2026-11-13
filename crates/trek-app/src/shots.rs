@@ -72,7 +72,7 @@
 //! For ADEMark's tests (ademark.dev): `perf probe <label> [n]` (its echo timer: the probe string typed
 //! every 50 ms ±20 % into whatever has the keyboard, waiting for the window if it isn't open yet,
 //! until the frame showing the n-th character taken is painted) and `perf firstword <label>` (Enter
-//! in the focused composer, until the frame showing the answer's first text).
+//! in the focused composer, until the frame showing the answer's first text). `perf sessions <label>` names the threads whose agent session is alive.
 //! Lines starting with `#` are comments.
 
 use crate::workspace::{PanelTool, Route, SettingsPage, Workspace};
@@ -1635,6 +1635,27 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                 thread.map_or("-".into(), ms)
             );
         }
+        // Which threads have an agent session alive (`reap_idle_sessions` ends the idle ones),
+        // by title, as `|`-separated words with spaces made `_`.
+        Some("sessions") => {
+            let label = args.get(1).unwrap_or(&"sessions");
+            let alive = cx.update(|cx| {
+                let ws = ws.read(cx);
+                let mut titles: Vec<String> = ws
+                    .live
+                    .iter()
+                    .filter(|(_, l)| l.commands.is_some())
+                    .filter_map(|(id, _)| ws.thread(id).map(|t| t.title.replace(' ', "_")))
+                    .collect();
+                titles.sort();
+                titles
+            });
+            tracing::info!(
+                "perf: sessions label={label} alive={} titles={}",
+                alive.len(),
+                alive.join("|")
+            );
+        }
         // What Trek itself holds: transcripts in memory, and the main window's parsed answers.
         Some("mem") => {
             let label = args.get(1).unwrap_or(&"mem");
@@ -1875,7 +1896,7 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             tracing::info!("perf: front visible={visible}");
         }
         _ => anyhow::bail!(
-            "perf frames <ms> <label> | scroll <element id>|@center <px> <steps> <label> | type <count> <label> | open <title> | front | mark <label> | mem <label> | probe <label> [n] | firstword <label>"
+            "perf frames <ms> <label> | scroll <element id>|@center <px> <steps> <label> | type <count> <label> | open <title> | front | mark <label> | mem <label> | probe <label> [n] | firstword <label> | sessions <label>"
         ),
     }
     Ok(())
