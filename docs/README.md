@@ -15,6 +15,9 @@ Start with the [README](../README.md) for what Trek is and how to install it.
 | Doc | What's in it |
 | --- | --- |
 | [Decisions](DECISIONS.md) | Why Trek is built the way it is: stack, agents, permissions, import, updater, search, limits, sub-agents |
+| [Cross-platform](CROSS_PLATFORM.md) | How the Mac and Windows builds stay one app: the architecture, the parity ledger and its checks, and what to do when changing Trek |
+| [Parity](PARITY.md) | Every feature's status on each platform, generated from [`parity/ledger.toml`](parity/ledger.toml) |
+| [The Windows sweep](parity/windows-sweep.md) | What the November 2026 sweep of the Windows build found, what was done about each finding, and what holds it |
 | [Mobile](MOBILE.md) | The iPhone companion: architecture, pairing, TLS pinning, security model, wire protocol |
 | [iPhone Mirroring](IPHONE-MIRRORING.md) | How macOS's iPhone Mirroring works end to end, what it needs, how Trek drives it, and how to read why it fails |
 | [Other machines](MULTI-MACHINE.md) | Starting and following a thread on another computer |
