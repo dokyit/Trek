@@ -2,7 +2,7 @@
 
 ## What it does
 
-Provides Night and Paper themes, text sizing, background/glass/tint and motion preferences. Notifications can use banners, Dock badge, and menu-bar state when work finishes or needs a decision. Snapshots capture a window, area, or screen into the next message with configurable format and retention.
+Provides Trek themes (a whole look in one TOML file: Trek, Console, Journal, Alpenglow, and any in the data folder's `themes/`), Night and Paper, text sizing, background/glass/tint and motion preferences. Notifications can use banners, Dock badge, and menu-bar state when work finishes or needs a decision. Snapshots capture a window, area, or screen into the next message with configurable format and retention.
 
 ## Reach it as a user
 
@@ -13,6 +13,9 @@ Open **Settings → Appearance**, **Notifications**, or **App Snapshots**. The c
 ```sh
 ./.agents/skills/verify-trek/scripts/trek-dev open settings:appearance
 ./.agents/skills/verify-trek/scripts/trek-dev control theme paper
+./.agents/skills/verify-trek/scripts/trek-dev control look console      # switch Trek theme, as the palette's "Use Console theme"
+./.agents/skills/verify-trek/scripts/trek-dev control look is console   # check: on screen and in the settings, switch over
+./.agents/skills/verify-trek/scripts/trek-dev control look reread       # read the data folder's themes/ now
 ./.agents/skills/verify-trek/scripts/trek-dev control glass on
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot appearance-paper
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot glass --real             # real glass, on the test display
@@ -27,9 +30,9 @@ Glass and vibrancy are the window server's work, so the offscreen render only st
 
 ## Code
 
-`crates/trek-app/src/settings_view/pages.rs`, `palette.rs`, `composer.rs`, `integrations.rs`, `tray.rs`; settings in `crates/trek-core/src/settings.rs`.
+`crates/trek-app/src/themes.rs` and `crates/trek-core/src/themes.rs` (Trek themes; built-ins in `crates/trek-core/themes`, the agent skill in `crates/trek-core/skills/trek-theme`), `crates/trek-app/src/settings_view/pages.rs`, `palette.rs`, `composer.rs`, `integrations.rs`, `tray.rs`; settings in `crates/trek-core/src/settings.rs`.
 
 ## Verify
 
-Themes remain legible, tint/glass changes render, text scales without clipping, reduced motion is respected, notification policy maps to the right event, and snapshot output/retention match settings.
+Each Trek theme looks right on the new-thread screen, a busy thread, the sidebar and Settings; a theme file written to `<data_dir>/themes/` shows in the gallery within two seconds and a bad one is named there and in `themes/problems.txt`; `TREK_SLOW_MOTION=10` on `start` slows a switch enough to screenshot the cross-fade. Themes remain legible, tint/glass changes render, text scales without clipping, reduced motion is respected, notification policy maps to the right event, and snapshot output/retention match settings.
 

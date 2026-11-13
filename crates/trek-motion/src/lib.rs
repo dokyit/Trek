@@ -40,7 +40,11 @@ static PACE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x
 /// Set the motion scale every spring runs at from now on (see [`PACE`]): kept from 0 to 3, and
 /// what isn't a number is 1.
 pub fn set_pace(scale: f32) {
-    let scale = if scale.is_finite() { scale.clamp(0., 3.) } else { 1. };
+    let scale = if scale.is_finite() {
+        scale.clamp(0., 3.)
+    } else {
+        1.
+    };
     PACE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 

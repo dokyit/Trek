@@ -23,6 +23,9 @@ The notes, in order (each goes in only when its setting is on, every one is on b
 2. `trek_core::artifact::AGENT_INSTRUCTIONS`: `trek-html` artifacts (General › Interactive artifacts).
 3. `trek_core::media::AGENT_INSTRUCTIONS`: the video watcher (Tools › Video, and only when trek-mcp is in the build).
 4. `trek_core::verification::instructions`: the project's verification skill, when it has one.
+   Beside the notes above, every session gets `trek_core::session_log::AGENT_NOTE` (its thread's
+   transcript to search) and `trek_core::themes::AGENT_NOTE`, one sentence naming the built-in
+   `trek-theme` skill for "make Trek look like…" (about 30 o200k tokens; added 2026-11-13).
 5. `trek_core::changes::RECAP`: the Done / Still to do / Found recap (General › Ask for a recap), not for advising sub-agents or side chats.
 6. Codex only: one line naming the Trek servers the session was handed, since Codex shows the model
    neither their tool names nor their instructions (see "Codex, live"): "Trek's tools (the browser,

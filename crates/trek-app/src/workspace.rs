@@ -10924,8 +10924,13 @@ pub(crate) fn agent_notes(
         .then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
     let video = (settings.tools.video && tool_server)
         .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
-    // Every session has its thread's transcript to search (`transcript_log`).
-    let transcript = trek_core::session_log::AGENT_NOTE.to_string();
+    // Every session has its thread's transcript to search (`transcript_log`), and is told where
+    // to look when asked to restyle Trek (`themes`).
+    let transcript = format!(
+        "{} {}",
+        trek_core::session_log::AGENT_NOTE,
+        trek_core::themes::AGENT_NOTE
+    );
     let notes: Vec<String> =
         std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string())
             .chain(artifacts)

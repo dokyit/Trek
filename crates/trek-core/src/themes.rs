@@ -54,7 +54,10 @@
 //! border = "#222A26"
 //! ```
 
-use crate::settings::{Appearance, BackgroundPlacement, DEFAULT_TRANSCRIPT_FONT_SIZE, DEFAULT_UI_FONT_SIZE, ThemeChoice};
+use crate::settings::{
+    Appearance, BackgroundPlacement, DEFAULT_TRANSCRIPT_FONT_SIZE, DEFAULT_UI_FONT_SIZE,
+    ThemeChoice,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -505,7 +508,12 @@ pub fn parse(id: &str, text: &str, origin: Origin) -> Result<Theme, String> {
     }
     let density = file.shape.density.unwrap_or(Density::Regular);
     let (ui, conversation) = density.sizes();
-    let ui_size = in_range("[fonts] ui_size", file.fonts.ui_size.unwrap_or(ui), 11., 18.)?;
+    let ui_size = in_range(
+        "[fonts] ui_size",
+        file.fonts.ui_size.unwrap_or(ui),
+        11.,
+        18.,
+    )?;
     let conversation_size = in_range(
         "[fonts] conversation_size",
         file.fonts.conversation_size.unwrap_or(conversation),
@@ -617,7 +625,10 @@ pub fn scan(dir: &Path) -> Scan {
             entries
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("toml")))
+                .filter(|p| {
+                    p.extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("toml"))
+                })
                 .filter(|p| p.is_file())
                 .collect()
         })
@@ -879,8 +890,16 @@ mod tests {
             for (p, base) in [(&t.dark, NIGHT), (&t.light, PAPER)] {
                 assert!(p.accent.is_some() && p.window.is_some(), "{}", t.id);
                 let window = p.window.unwrap().rgb();
-                assert!(contrast(p.text.map_or(base.text, Colour::rgb), window) >= 7., "{}", t.id);
-                assert!(contrast(p.muted.unwrap().rgb(), window) >= 3.5, "{} muted", t.id);
+                assert!(
+                    contrast(p.text.map_or(base.text, Colour::rgb), window) >= 7.,
+                    "{}",
+                    t.id
+                );
+                assert!(
+                    contrast(p.muted.unwrap().rgb(), window) >= 3.5,
+                    "{} muted",
+                    t.id
+                );
             }
         }
     }
@@ -913,7 +932,10 @@ mod tests {
         let bad = |text: &str| parse("bad", text, Origin::BuiltIn).unwrap_err();
         assert!(bad("").contains("name"), "{}", bad(""));
         let e = bad("name = \"X\"\n[fonts]\nui = \"comic\"\n");
-        assert!(e.contains("line 3") && e.contains("comic") && e.contains("mono"), "{e}");
+        assert!(
+            e.contains("line 3") && e.contains("comic") && e.contains("mono"),
+            "{e}"
+        );
         let e = bad("name = \"X\"\ncolour = \"red\"\n");
         assert!(e.contains("colour"), "{e}");
         let e = bad("name = \"X\"\n[dark]\naccent = \"green\"\n");
@@ -946,7 +968,11 @@ mod tests {
             "name = \"Ninety\"\nmode = \"dark\"\n[fonts]\nui = \"mono\"\n",
         )
         .unwrap();
-        std::fs::write(dir.join("broken.toml"), "name = \"B\"\n[shape]\ndensity = \"tight\"\n").unwrap();
+        std::fs::write(
+            dir.join("broken.toml"),
+            "name = \"B\"\n[shape]\ndensity = \"tight\"\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("console.toml"), "name = \"Mine\"\n").unwrap();
         std::fs::write(dir.join("notes.txt"), "not a theme").unwrap();
         let s = scan(&dir);
@@ -1043,7 +1069,12 @@ mod tests {
 
     #[test]
     fn a_theme_edited_on_disk_changes_only_what_the_file_changed() {
-        let was = parse("t", "name = \"T\"\n[background]\ndim = 0.2\n", Origin::BuiltIn).unwrap();
+        let was = parse(
+            "t",
+            "name = \"T\"\n[background]\ndim = 0.2\n",
+            Origin::BuiltIn,
+        )
+        .unwrap();
         let now = parse(
             "t",
             "name = \"T\"\n[background]\ndim = 0.6\n",
@@ -1060,7 +1091,8 @@ mod tests {
 
     #[test]
     fn a_settings_file_from_before_themes_is_on_trek_and_round_trips() {
-        let old = "[appearance]\ntheme = \"paper\"\nui_font_size = 15.0\nbackground = \"builtin:dawn\"\n";
+        let old =
+            "[appearance]\ntheme = \"paper\"\nui_font_size = 15.0\nbackground = \"builtin:dawn\"\n";
         let (s, problem) = Settings::parse(old);
         assert!(problem.is_none());
         assert_eq!(s.appearance.trek_theme, DEFAULT);
@@ -1097,10 +1129,21 @@ mod tests {
         let docs: String = include_str!("themes.rs")
             .lines()
             .take_while(|l| l.starts_with("//!"))
-            .map(|l| l.trim_start_matches("//!").strip_prefix(' ').unwrap_or("").to_string() + "\n")
+            .map(|l| {
+                l.trim_start_matches("//!")
+                    .strip_prefix(' ')
+                    .unwrap_or("")
+                    .to_string()
+                    + "\n"
+            })
             .collect();
         let block = docs.split("```toml\n").nth(1).unwrap();
-        parse("docs", &block[..block.find("```").unwrap()], Origin::BuiltIn).unwrap();
+        parse(
+            "docs",
+            &block[..block.find("```").unwrap()],
+            Origin::BuiltIn,
+        )
+        .unwrap();
         // Every agent is pointed at the skill.
         assert!(AGENT_NOTE.contains(SKILL));
     }

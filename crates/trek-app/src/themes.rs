@@ -5,14 +5,18 @@
 //! A theme's colours become the kit's theme for Night and Paper (the base file's with the theme's
 //! nine colours and what follows from them), its accent Trek's own accents (`palette`), its fonts
 //! the interface's and the conversation's, and its corners every corner GPUI paints
-//! (`set_corner_scale`). The switch cross-fades: the colours and corners move from one theme to
-//! the other, and what changes the layout (fonts, sizes, art) changes at the middle, under a veil
-//! of the window's colour. Reduce motion, or a motion scale of 0, switches at once.
+//! (`set_corner_scale`). The switch cross-fades. Between two darks or two lights with the same
+//! layout the colours and corners move from one theme's to the other's. Otherwise (light for
+//! dark, fonts, sizes, art) it dissolves through the new theme's window colour: the old look
+//! washes into it, the change happens at the middle under it, and the new look comes up out of
+//! it, rather than every colour passing through grey. Reduce motion, or a motion scale of 0,
+//! switches at once.
 
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme as KitTheme, ThemeConfig, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme as KitTheme, ThemeConfig,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -66,8 +70,11 @@ struct Switch {
     to_corners: f32,
     from_accents: ThemeAccents,
     to_accents: ThemeAccents,
-    /// It changes fonts, text sizes or art: the veil comes up over the middle.
-    reflows: bool,
+    /// The new theme's window colour, when the switch dissolves through it: it changes light for
+    /// dark, fonts, text sizes or art, so the old look washes into it and the new one comes up
+    /// from it, with the change itself at the middle, under it. `None`: the colours move from one
+    /// theme's to the other's, as two darks or two lights with the same layout do.
+    veil: Option<Hsla>,
     /// The settings and fonts have been put on (past the middle).
     swapped: bool,
     _ticker: Task<()>,
@@ -240,7 +247,10 @@ fn colours(palette: &Palette, dark: bool) -> Map<String, Value> {
         }
         set!("secondary.active.background", pressed);
         set!("list.active.background", pressed);
-        set!("switch.background", mix(surface, text, if dark { 0.13 } else { 0.16 }));
+        set!(
+            "switch.background",
+            mix(surface, text, if dark { 0.13 } else { 0.16 })
+        );
         set!("scrollbar.thumb.background", mix(surface, text, 0.1));
         set!("scrollbar.thumb.hover.background", mix(surface, text, 0.18));
     }
@@ -252,7 +262,12 @@ fn colours(palette: &Palette, dark: bool) -> Map<String, Value> {
 }
 
 /// The kit's theme config for `theme` in dark or light, with `font` for the interface.
-fn config(colours: &Map<String, Value>, dark: bool, font: &str, name: &str) -> Option<Rc<ThemeConfig>> {
+fn config(
+    colours: &Map<String, Value>,
+    dark: bool,
+    font: &str,
+    name: &str,
+) -> Option<Rc<ThemeConfig>> {
     let mut theme = base(dark);
     theme.insert("name".into(), Value::String(name.to_string()));
     theme.insert("font.family".into(), Value::String(font.to_string()));
@@ -358,6 +373,19 @@ pub fn list(cx: &App) -> Vec<Theme> {
         .unwrap_or_else(core::built_in)
 }
 
+/// The theme files Trek couldn't use, and why (Settings lists them under the tiles).
+pub fn problems(cx: &App) -> Vec<core::Problem> {
+    cx.try_global::<Themes>()
+        .map(|t| t.problems.clone())
+        .unwrap_or_default()
+}
+
+/// Whether a switch is under way (the capture build's `look is` waits it out).
+pub fn switching(cx: &App) -> bool {
+    cx.try_global::<Themes>()
+        .is_some_and(|t| t.switch.is_some())
+}
+
 /// The id of the theme on screen.
 pub fn shown_id(cx: &App) -> String {
     cx.try_global::<Themes>()
@@ -395,8 +423,7 @@ fn watch(ws: WeakEntity<Workspace>, cx: &mut App) {
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(WATCH_EVERY).await;
-            let Some(dir) = cx.update(|cx| cx.try_global::<Themes>().map(|t| t.dir.clone()))
-            else {
+            let Some(dir) = cx.update(|cx| cx.try_global::<Themes>().map(|t| t.dir.clone())) else {
                 break;
             };
             let now = cx
@@ -406,7 +433,10 @@ fn watch(ws: WeakEntity<Workspace>, cx: &mut App) {
                 let Some(ws) = ws.upgrade() else {
                     return true;
                 };
-                if cx.try_global::<Themes>().is_some_and(|t| t.fingerprint != now) {
+                if cx
+                    .try_global::<Themes>()
+                    .is_some_and(|t| t.fingerprint != now)
+                {
                     reread(&ws, cx);
                 }
                 false
@@ -430,7 +460,10 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
     let request = core::take_apply_request(&dir);
     let mut problems = scan.problems;
     if let Some(id) = request.as_deref()
-        && !core::built_in().iter().chain(&scan.themes).any(|t| t.id == id)
+        && !core::built_in()
+            .iter()
+            .chain(&scan.themes)
+            .any(|t| t.id == id)
     {
         problems.push(core::Problem {
             file: dir.join(core::APPLY_FILE),
@@ -452,7 +485,10 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
         Some(shown.clone())
     } else if let Some(t) = list.iter().find(|t| t.id == shown.id) {
         Some(t.clone())
-    } else if problems.iter().any(|p| core::slug(&stem(&p.file)) == shown.id) {
+    } else if problems
+        .iter()
+        .any(|p| core::slug(&stem(&p.file)) == shown.id)
+    {
         Some(shown.clone())
     } else {
         None
@@ -548,7 +584,8 @@ pub fn switch_to(id: &str, ws: &Entity<Workspace>, cx: &mut App) {
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ),
     };
-    let reflows = from.ui_font != to.ui_font
+    let reflows = from_dark != to_dark
+        || from.ui_font != to.ui_font
         || from.conversation_font != to.conversation_font
         || appearance.ui_font_size() != after.ui_font_size()
         || appearance.transcript_font_size() != after.transcript_font_size()
@@ -570,9 +607,17 @@ pub fn switch_to(id: &str, ws: &Entity<Workspace>, cx: &mut App) {
             }
         }
     });
+    let to_colours = colours(to.palette(to_dark), to_dark);
+    let veil = reflows.then(|| {
+        let window = to_colours
+            .get("background")
+            .and_then(rgba)
+            .unwrap_or(0x000000FF);
+        Hsla::from(rgb(window >> 8))
+    });
     let switch = Switch {
         from_colours: colours(from.palette(from_dark), from_dark),
-        to_colours: colours(to.palette(to_dark), to_dark),
+        to_colours,
         from_dark,
         to_dark,
         from_font: from.ui_font.family().into(),
@@ -581,7 +626,7 @@ pub fn switch_to(id: &str, ws: &Entity<Workspace>, cx: &mut App) {
         to_corners: to.corners,
         from_accents: accents(&from),
         to_accents: accents(&to),
-        reflows,
+        veil,
         swapped: false,
         start: crate::motion::now(cx),
         duration: SWITCH.mul_f32(pace),
@@ -614,7 +659,10 @@ fn lerp_colours(a: &Map<String, Value>, b: &Map<String, Value>, t: f32) -> Map<S
     let mut out = b.clone();
     for (key, to) in b {
         if let (Some(from), Some(to)) = (a.get(key).and_then(rgba), rgba(to)) {
-            out.insert(key.clone(), Value::String(format!("#{:08X}", mix(from, to, t))));
+            out.insert(
+                key.clone(),
+                Value::String(format!("#{:08X}", mix(from, to, t))),
+            );
         }
     }
     out
@@ -665,7 +713,12 @@ fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
     let past = t >= 0.5;
     let dark = if past { s.to_dark } else { s.from_dark };
     let font = if past { &s.to_font } else { &s.from_font };
-    let colours = lerp_colours(&s.from_colours, &s.to_colours, e);
+    // Dissolving, each end's colours stand until the middle, under the veil; else they move.
+    let colours = match (s.veil, past) {
+        (Some(_), false) => s.from_colours.clone(),
+        (Some(_), true) => s.to_colours.clone(),
+        (None, _) => lerp_colours(&s.from_colours, &s.to_colours, e),
+    };
     let accents = ThemeAccents {
         dark: lerp_accent(s.from_accents.dark, s.to_accents.dark, e, past),
         light: lerp_accent(s.from_accents.light, s.to_accents.light, e, past),
@@ -702,13 +755,11 @@ fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
     false
 }
 
-/// What covers the window at the middle of a switch that changes the layout: the window's own
+/// What covers the window over the middle of a switch that dissolves: the new theme's window
 /// colour, coming up and going again.
 pub fn veil(cx: &App) -> Option<AnyElement> {
     let s = cx.try_global::<Themes>()?.switch.as_ref()?;
-    if !s.reflows {
-        return None;
-    }
+    let colour = s.veil?;
     let t = (crate::motion::now(cx)
         .saturating_duration_since(s.start)
         .as_secs_f32()
@@ -722,15 +773,9 @@ pub fn veil(cx: &App) -> Option<AnyElement> {
             .top_0()
             .left_0()
             .size_full()
-            .bg(cx.theme().background.opacity(alpha))
+            .bg(colour.opacity(alpha))
             .into_any_element(),
     )
-}
-
-/// Whether a switch is under way (the capture build's checks wait it out).
-pub fn switching(cx: &App) -> bool {
-    cx.try_global::<Themes>()
-        .is_some_and(|t| t.switch.is_some())
 }
 
 // ---------- Settings › Appearance ----------
@@ -881,13 +926,7 @@ fn miniature(theme: &Theme, dark: bool, corner_scale_now: f32) -> Div {
                                 .border_color(s.border)
                                 .bg(s.surface)
                                 .child(line(54., s.muted.opacity(0.5)))
-                                .child(
-                                    div()
-                                        .ml_auto()
-                                        .size(px(12.))
-                                        .rounded_full()
-                                        .bg(s.accent),
-                                ),
+                                .child(div().ml_auto().size(px(12.)).rounded_full().bg(s.accent)),
                         ),
                 ),
         )
@@ -1051,10 +1090,18 @@ pub fn gallery(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
         .unwrap_or_else(core::dir);
     v_flex()
         .gap(px(14.))
-        .child(h_flex().items_start().flex_wrap().gap(px(16.)).children(tiles))
-        .children((!cx.try_global::<Themes>().is_none_or(|t| t.problems.is_empty())).then(
-            || crate::ui::group(problem_rows.collect(), cx),
-        ))
+        .child(
+            h_flex()
+                .items_start()
+                .flex_wrap()
+                .gap(px(16.))
+                .children(tiles),
+        )
+        .children(
+            (!cx.try_global::<Themes>()
+                .is_none_or(|t| t.problems.is_empty()))
+            .then(|| crate::ui::group(problem_rows.collect(), cx)),
+        )
         .child(
             h_flex()
                 .gap(px(6.))
@@ -1068,7 +1115,11 @@ pub fn gallery(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
                         .cursor_pointer()
                         .text_color(theme.foreground.opacity(0.85))
                         .hover(|el| el.text_color(theme.foreground))
-                        .child(SharedString::from(format!("{}{}", core::DIR_NAME, std::path::MAIN_SEPARATOR)))
+                        .child(SharedString::from(format!(
+                            "{}{}",
+                            core::DIR_NAME,
+                            std::path::MAIN_SEPARATOR
+                        )))
                         .on_click(move |_, _, cx| {
                             let _ = std::fs::create_dir_all(&dir);
                             cx.open_with_system(&dir);
@@ -1080,7 +1131,8 @@ pub fn gallery(ws: &Entity<Workspace>, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: the gpui glob import brings its own `test` attribute.
+    use super::{Theme, base, colours, config_for, core, ease, mix, rgba};
 
     #[test]
     fn a_theme_s_colours_make_a_theme_the_kit_reads_with_its_fonts() {
@@ -1109,7 +1161,10 @@ mod tests {
             );
         }
         // A theme's nine colours reach the keys they stand for.
-        let console = core::built_in().into_iter().find(|t| t.id == "console").unwrap();
+        let console = core::built_in()
+            .into_iter()
+            .find(|t| t.id == "console")
+            .unwrap();
         let c = colours(&console.dark, true);
         assert_eq!(c["background"], "#0B0D0CFF");
         assert_eq!(c["primary.background"], "#6BDB9AFF");
@@ -1126,7 +1181,11 @@ mod tests {
             let c = base(dark)["colors"].as_object().unwrap().clone();
             let rgb = |k: &str| rgba(&c[k]).unwrap() >> 8;
             assert_eq!(
-                (rgb("background"), rgb("foreground"), rgb("muted.foreground")),
+                (
+                    rgb("background"),
+                    rgb("foreground"),
+                    rgb("muted.foreground")
+                ),
                 (b.window, b.text, b.muted)
             );
         }

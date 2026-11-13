@@ -3599,6 +3599,14 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     if verb == "look" {
         if arg == "reread" {
             crate::themes::reread(&ws, cx);
+        } else if let Some(want) = arg.strip_prefix("is ") {
+            // A check: that theme on screen and in the settings, its switch over.
+            let shown = crate::themes::shown_id(cx);
+            let set = ws.read(cx).settings.appearance.trek_theme.clone();
+            anyhow::ensure!(
+                shown == want.trim() && set == want.trim() && !crate::themes::switching(cx),
+                "look is {want}: {shown} is on screen, the settings name {set}"
+            );
         } else {
             anyhow::ensure!(
                 crate::themes::find(arg, cx).is_some(),

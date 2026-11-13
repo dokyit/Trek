@@ -90,6 +90,17 @@ code = ["crates/trek-app/src/system.rs", "crates/trek-core/src/settings.rs", "cr
 tests = ["crates/trek-app/tests/screens.rs", "crates/trek-app/tests/scaling.rs"]
 
 [[feature]]
+id = "themes"
+area = "App"
+what = "Trek themes: a whole look in one file (colours, fonts, corners, density, art, glass, motion), switched with a cross-fade; user and agent-made themes from the themes folder"
+macos = "yes"
+windows = "yes"
+live = ["route settings:appearance", "wait 300", "count trek-theme-console 1", "count trek-theme-journal 1", "count trek-theme-alpenglow 1", "click trek-theme-console", "wait 1500", "look is console", "route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "look journal", "wait 1500", "look is journal", "look alpenglow", "wait 1500", "look is alpenglow", "look trek", "wait 1500", "look is trek"]
+how = { macos = "Shared code: the format and applying one in trek_core::themes, the look in trek-app's themes (the kit's theme, Trek's accents, GPUI's corner scale), fonts Trek bundles (Inter, JetBrains Mono, Spectral).", windows = "The same code. Windows keeps its own radii under a theme's corner scale, and its glass and art follow the settings a theme sets as they do when set by hand." }
+code = ["crates/trek-core/src/themes.rs", "crates/trek-app/src/themes.rs", "vendor/gpui-pre/src/corner_scale.rs", "crates/trek-assets/src/fonts.rs"]
+tests = ["crates/trek-app/tests/themes.rs"]
+
+[[feature]]
 id = "open-in"
 area = "App"
 what = "Open a project in another app"
