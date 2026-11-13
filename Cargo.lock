@@ -9270,7 +9270,7 @@ dependencies = [
 
 [[package]]
 name = "trek-agents"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9302,7 +9302,7 @@ dependencies = [
 
 [[package]]
 name = "trek-app"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9400,7 +9400,7 @@ dependencies = [
 
 [[package]]
 name = "trek-assets"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
  "rust-embed",
@@ -9411,7 +9411,7 @@ dependencies = [
 
 [[package]]
 name = "trek-bench"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9424,14 +9424,14 @@ dependencies = [
 
 [[package]]
 name = "trek-brand"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-core"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9468,7 +9468,7 @@ dependencies = [
 
 [[package]]
 name = "trek-dictate"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "async-channel",
  "block2 0.6.2",
@@ -9486,7 +9486,7 @@ dependencies = [
 
 [[package]]
 name = "trek-format"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "tokio",
  "tracing",
@@ -9497,7 +9497,7 @@ dependencies = [
 
 [[package]]
 name = "trek-integrations"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "serde_json",
  "trek-core",
@@ -9505,7 +9505,7 @@ dependencies = [
 
 [[package]]
 name = "trek-ipc"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -9517,7 +9517,7 @@ dependencies = [
 
 [[package]]
 name = "trek-ipc-ui"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "async-channel",
  "libc",
@@ -9529,7 +9529,7 @@ dependencies = [
 
 [[package]]
 name = "trek-job"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "tokio",
  "tracing",
@@ -9538,7 +9538,7 @@ dependencies = [
 
 [[package]]
 name = "trek-languages"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
  "ropey",
@@ -9552,7 +9552,7 @@ dependencies = [
 
 [[package]]
 name = "trek-line-breakdown"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
  "trek-core",
@@ -9561,7 +9561,7 @@ dependencies = [
 
 [[package]]
 name = "trek-logging"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9578,21 +9578,21 @@ dependencies = [
 
 [[package]]
 name = "trek-mascot"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-math"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-mcp"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
@@ -9617,7 +9617,7 @@ dependencies = [
 
 [[package]]
 name = "trek-mentions"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "chrono",
  "trek-core",
@@ -9625,14 +9625,14 @@ dependencies = [
 
 [[package]]
 name = "trek-motion"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
 ]
 
 [[package]]
 name = "trek-palette"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
  "serde_json",
@@ -9641,7 +9641,7 @@ dependencies = [
 
 [[package]]
 name = "trek-parity"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "serde",
  "toml 0.9.12+spec-1.1.0",
@@ -9650,7 +9650,7 @@ dependencies = [
 
 [[package]]
 name = "trek-perf"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "async-channel",
  "chrono",
@@ -9660,7 +9660,7 @@ dependencies = [
 
 [[package]]
 name = "trek-phone"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "async-channel",
  "futures",
@@ -9675,14 +9675,14 @@ dependencies = [
 
 [[package]]
 name = "trek-private"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "trek-remote"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -9706,7 +9706,7 @@ dependencies = [
 
 [[package]]
 name = "trek-screenclip"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -9716,7 +9716,7 @@ dependencies = [
 
 [[package]]
 name = "trek-script"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "async-trait",
  "rquickjs",
@@ -9726,7 +9726,7 @@ dependencies = [
 
 [[package]]
 name = "trek-shortcuts"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "tracing",
  "trek-core",
@@ -9735,7 +9735,7 @@ dependencies = [
 
 [[package]]
 name = "trek-telemetry"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -9755,7 +9755,7 @@ dependencies = [
 
 [[package]]
 name = "trek-test-fixtures"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "base64 0.22.1",
  "minisign-verify",
@@ -9765,7 +9765,7 @@ dependencies = [
 
 [[package]]
 name = "trek-time"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "chrono",
  "trek-core",
@@ -9773,7 +9773,7 @@ dependencies = [
 
 [[package]]
 name = "trek-update"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "trek-test-fixtures",
  "windows-sys 0.61.2",
@@ -9781,7 +9781,7 @@ dependencies = [
 
 [[package]]
 name = "trek-updater"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "semver",
  "tracing",
@@ -9792,7 +9792,7 @@ dependencies = [
 
 [[package]]
 name = "trek-window-place"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
  "serde",
@@ -9803,7 +9803,7 @@ dependencies = [
 
 [[package]]
 name = "trek-winlook"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "gpui-kit",
  "raw-window-handle",
@@ -9812,7 +9812,7 @@ dependencies = [
 
 [[package]]
 name = "trek-words"
-version = "0.4.50"
+version = "0.4.51"
 dependencies = [
  "tracing",
 ]
