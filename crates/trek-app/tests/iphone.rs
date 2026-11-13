@@ -9,6 +9,7 @@
 mod common;
 
 use common::{Trek, open, run};
+use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{Entity, TestAppContext};
 use serde_json::{Value, json};
 use trek_app::ipc::Reply;
@@ -250,6 +251,49 @@ fn the_screen_shows_and_a_click_on_it_taps() {
         trek.render(cx);
         assert_eq!(made_up.taps(), ["tap 0.50 0.50"]);
 
+        // A drag on it is a swipe, from where it was pressed to where it was let go.
+        let b = trek
+            .bounds(cx, "phone-screen")
+            .expect("the screen's picture");
+        let at = |fx: f32, fy: f32| {
+            gpui_kit::point(
+                b.origin.x + b.size.width * fx,
+                b.origin.y + b.size.height * fy,
+            )
+        };
+        trek.window(cx, |window, cx| window.drag(at(0.5, 0.7), at(0.5, 0.3), cx));
+        trek.render(cx);
+        let swipe = made_up
+            .done
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|d| d.starts_with("swipe "))
+            .cloned()
+            .expect("a swipe");
+        let n: Vec<f32> = swipe
+            .split(' ')
+            .skip(1)
+            .take(4)
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert!(
+            (n[0] - 0.5).abs() < 0.02 && (n[2] - 0.5).abs() < 0.02,
+            "{swipe}"
+        );
+        assert!(n[1] > n[3] + 0.2, "up the screen: {swipe}");
+
+        // What's typed in the box goes to the iPhone with Enter; Home is Home.
+        trek.click(cx, "phone-type");
+        trek.window(cx, |window, cx| window.input("12+30=", cx));
+        trek.press(cx, "enter");
+        trek.render(cx);
+        trek.click(cx, "phone-home");
+        trek.render(cx);
+        let done = made_up.done.lock().unwrap().clone();
+        assert!(done.iter().any(|d| d == "type \"12+30=\""), "{done:?}");
+        assert!(done.iter().any(|d| d == "home"), "{done:?}");
+
         // Picture after picture: the tool holds the one on show and the one before it, no more.
         for _ in 0..5 {
             cx.update(|cx| tool.update(cx, |p, cx| p.shoot_again(cx)));
@@ -327,7 +371,7 @@ fn agents_get_the_screen_taps_apps_and_files() {
             "{status}"
         );
         assert!(
-            status.contains("Screen and taps: ready (phone_screenshot, phone_tap)"),
+            status.contains("Screen and taps: ready (phone_screenshot, phone_tap, phone_swipe"),
             "{status}"
         );
         assert!(status.ends_with("Held by: Probe."), "{status}");
@@ -366,6 +410,52 @@ fn agents_get_the_screen_taps_apps_and_files() {
         assert_eq!(made_up.taps(), ["tap 0.50 0.25"]);
         let err = call(&trek, cx, "phone_tap", json!({"x": 900, "y": 20})).unwrap_err();
         assert!(err.contains("off the screen"), "{err}");
+        // Swipes, typing, keys, Home and opening an app, as a person would (x/y in the same
+        // 195×422 picture).
+        let swiped = call(
+            &trek,
+            cx,
+            "phone_swipe",
+            json!({"x1": 97.5, "y1": 400, "x2": 97.5, "y2": 100}),
+        )
+        .unwrap();
+        assert!(swiped.starts_with("Swiped from (97.5, 400)"), "{swiped}");
+        let err = call(
+            &trek,
+            cx,
+            "phone_swipe",
+            json!({"x1": 10, "y1": 10, "x2": 900, "y2": 10}),
+        )
+        .unwrap_err();
+        assert!(err.contains("off the screen"), "{err}");
+        let typed = call(
+            &trek,
+            cx,
+            "phone_type",
+            json!({"text": "hi", "submit": true}),
+        )
+        .unwrap();
+        assert_eq!(typed, "Typed it and pressed Return.");
+        let err = call(&trek, cx, "phone_type", json!({"text": "café"})).unwrap_err();
+        assert!(err.contains("US keyboard"), "{err}");
+        call(&trek, cx, "phone_key", json!({"key": "cmd+space"})).unwrap();
+        let err = call(&trek, cx, "phone_key", json!({"key": "hyper+a"})).unwrap_err();
+        assert!(err.contains("isn't a key"), "{err}");
+        call(&trek, cx, "phone_home", json!({})).unwrap();
+        let opened = call(&trek, cx, "phone_open_app", json!({"name": "calc"})).unwrap();
+        assert_eq!(opened, "Opened Calculator. Take a screenshot to see it.");
+        let err = call(&trek, cx, "phone_open_app", json!({"name": "Maps"})).unwrap_err();
+        assert!(err.contains("No app named"), "{err}");
+        let done = made_up.done.lock().unwrap().clone();
+        for want in [
+            "swipe 0.50 0.95 0.50 0.24 300",
+            "type \"hi\\n\"",
+            "key [227] 0x2c",
+            "home",
+            "open Calculator",
+        ] {
+            assert!(done.iter().any(|d| d == want), "{want}: {done:?}");
+        }
         // Reading it as elements is still the Mac's.
         let err = call(&trek, cx, "phone_elements", json!({})).unwrap_err();
         assert!(err.contains("needs Trek on a Mac for now"), "{err}");

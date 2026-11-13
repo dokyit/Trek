@@ -24,6 +24,7 @@ use crate::scale::{radius, text, to_rems};
 use crate::workspace::Workspace;
 use crate::workspace::phone_use::PhoneCall;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
@@ -40,7 +41,7 @@ use std::time::{Duration, Instant};
 use trek_agents::Decision;
 use trek_core::HandHolding;
 use trek_ipc::phone::{self as tools, Sensitive};
-use trek_phone::coredevice::{self, Shot};
+use trek_phone::coredevice::{self, Gesture, Shot};
 use trek_phone::device::{self, App as PhoneApp, Phone, Seen};
 use trek_phone::files::{self, Entry};
 use trek_phone::lease::{Lease, TOOK_OVER};
@@ -94,8 +95,14 @@ pub trait Source: Send + Sync {
     fn mount_disk_image(&self, udid: &str, folder: &Path) -> Result<(), String>;
     /// The phone's screen as it is now.
     fn screenshot(&self, udid: &str) -> Result<Shot, String>;
+    /// A touch on the phone: a tap, a swipe, typing, or the Home Screen.
+    fn touch(&self, udid: &str, gesture: Gesture) -> Result<(), String>;
     /// A tap on the screen at (`x`, `y`), fractions of its width and height.
-    fn tap(&self, udid: &str, x: f32, y: f32) -> Result<(), String>;
+    fn tap(&self, udid: &str, x: f32, y: f32) -> Result<(), String> {
+        self.touch(udid, Gesture::Tap(x, y))
+    }
+    /// Open the app named `name` (as on the Home Screen, any case); its name as installed.
+    fn open_app(&self, udid: &str, name: &str) -> Result<String, String>;
 }
 
 /// The phone's own services over usbmuxd: Apple Mobile Device Service.
@@ -150,8 +157,11 @@ impl Source for Services {
     fn screenshot(&self, udid: &str) -> Result<Shot, String> {
         coredevice::screenshot(udid)
     }
-    fn tap(&self, udid: &str, x: f32, y: f32) -> Result<(), String> {
-        coredevice::tap(udid, x, y)
+    fn touch(&self, udid: &str, gesture: Gesture) -> Result<(), String> {
+        coredevice::touch_now(udid, gesture)
+    }
+    fn open_app(&self, udid: &str, name: &str) -> Result<String, String> {
+        coredevice::open_app(udid, name)
     }
 }
 
@@ -349,12 +359,38 @@ impl Source for MadeUp {
         let (width, height) = coredevice::png_size(&png).ok_or("No picture.")?;
         Ok(Shot { png, width, height })
     }
-    fn tap(&self, _: &str, x: f32, y: f32) -> Result<(), String> {
+    fn touch(&self, _: &str, gesture: Gesture) -> Result<(), String> {
         if !*self.disk_image.lock().unwrap() {
             return Err("Its developer disk image isn't mounted.".into());
         }
-        self.note(format!("tap {x:.2} {y:.2}"));
+        let done = match gesture {
+            Gesture::Tap(x, y) => format!("tap {x:.2} {y:.2}"),
+            Gesture::Swipe { from, to, ms } => format!(
+                "swipe {:.2} {:.2} {:.2} {:.2} {ms}",
+                from.0, from.1, to.0, to.1
+            ),
+            Gesture::Type(text) => {
+                coredevice::keys_for(&text)?;
+                format!("type {text:?}")
+            }
+            Gesture::Home => "home".into(),
+            Gesture::Key { held, key } => format!("key {held:?} {key:#04x}"),
+        };
+        self.note(done);
         Ok(())
+    }
+    fn open_app(&self, _: &str, name: &str) -> Result<String, String> {
+        if !*self.disk_image.lock().unwrap() {
+            return Err("Its developer disk image isn't mounted.".into());
+        }
+        let apps = [
+            ("Settings", "com.apple.Preferences"),
+            ("Calculator", "com.apple.calculator"),
+            ("Notes", "com.apple.mobilenotes"),
+        ];
+        let (found, _) = coredevice::pick_app(&apps, name)?;
+        self.note(format!("open {found}"));
+        Ok(found.to_string())
     }
 }
 
@@ -550,6 +586,12 @@ pub struct PhonePanel {
     /// Pictures of the screen replaced since the last one came, let go of when the next does (a
     /// window may draw one until then).
     stale: Vec<Arc<RenderImage>>,
+    /// Where a press on the screen's picture started (fractions of it), and when: let go, it's a
+    /// tap or a swipe.
+    pressed: Option<((f32, f32), Instant)>,
+    /// What the user types to the iPhone: Enter sends it (Shift+Enter presses Return after).
+    typing: Entity<InputState>,
+    _typed: Subscription,
     /// The size of the last picture an agent was given, which its x/y are read in.
     agent_shot: Option<(u32, u32)>,
     /// Agents' pictures written so far (each its own file, which trek-mcp reads and removes).
@@ -561,7 +603,23 @@ pub struct PhonePanel {
 }
 
 impl PhonePanel {
-    pub fn new(workspace: Entity<Workspace>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let typing = cx.new(|cx| InputState::new(window, cx).placeholder(pc::SCREEN_TYPE));
+        let typed = cx.subscribe_in(
+            &typing,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { shift, .. } = event {
+                    let text = input.read(cx).value().to_string();
+                    if text.is_empty() && !*shift {
+                        return;
+                    }
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                    let text = if *shift { format!("{text}\n") } else { text };
+                    this.touch_screen(Gesture::Type(text), cx);
+                }
+            },
+        );
         let tick = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(TICK).await;
@@ -600,6 +658,9 @@ impl PhonePanel {
             shooting: false,
             shot_at: None,
             stale: Vec::new(),
+            pressed: None,
+            typing,
+            _typed: typed,
             agent_shot: None,
             shots: 0,
             #[cfg(feature = "shots")]
@@ -907,20 +968,38 @@ impl PhonePanel {
         );
     }
 
-    /// A click on the picture: a tap there, then a fresh picture.
-    fn tap_screen(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+    /// The button let go over the screen (or off it): a tap where it was pressed if it barely
+    /// moved, else a swipe from there to here, as long as it was held.
+    fn let_go(
+        &mut self,
+        area: Bounds<Pixels>,
+        size: (f32, f32),
+        point: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((from, at)) = self.pressed.take() else {
+            return;
+        };
+        let ms = (at.elapsed().as_millis() as u32).clamp(120, 1200);
+        if let Some(gesture) = gesture_for(area, size, from, point, ms) {
+            self.touch_screen(gesture, cx);
+        }
+    }
+
+    /// A touch from the Screen tab: a tap, a swipe, typing or Home, then a fresh picture.
+    fn touch_screen(&mut self, gesture: Gesture, cx: &mut Context<Self>) {
         let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
             return;
         };
         let (source, generation) = (self.source.clone(), self.generation);
         self.background(
             cx,
-            move || source.tap(&udid, x, y),
-            move |this, tapped, cx| {
+            move || source.touch(&udid, gesture),
+            move |this, touched, cx| {
                 if this.generation != generation {
                     return;
                 }
-                match tapped {
+                match touched {
                     Ok(()) => this.shot_at = None,
                     Err(why) => this.notice = Some(why.into()),
                 }
@@ -1758,6 +1837,7 @@ impl PhonePanel {
                 // Where the area was drawn this frame (its canvas measures it before a click lands).
                 let area = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
                 let measured = area.clone();
+                let (over, out) = (area.clone(), area.clone());
                 v_flex()
                     .flex_1()
                     .min_h_0()
@@ -1791,13 +1871,41 @@ impl PhonePanel {
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                    if let Some((x, y)) =
-                                        on_picture(area.get(), (pw, ph), e.position)
-                                    {
-                                        this.tap_screen(x, y, cx);
-                                    }
+                                cx.listener(move |this, e: &MouseDownEvent, _, _| {
+                                    this.pressed = on_picture(area.get(), (pw, ph), e.position)
+                                        .map(|at| (at, Instant::now()));
                                 }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseUpEvent, _, cx| {
+                                    this.let_go(over.get(), (pw, ph), e.position, cx);
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseUpEvent, _, cx| {
+                                    this.let_go(out.get(), (pw, ph), e.position, cx);
+                                }),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("phone-home")
+                                    .small()
+                                    .outline()
+                                    .label(pc::SCREEN_HOME)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.touch_screen(Gesture::Home, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&self.typing).id("phone-type").small()),
                             ),
                     )
                     .child(
@@ -2330,6 +2438,13 @@ fn shown_name(path: &Path) -> String {
 /// tools a PC serves.)
 fn starting(method: &str) -> &'static str {
     match method {
+        "phone_screenshot" => "Looking at the screen…",
+        "phone_tap" => "Tapping…",
+        "phone_swipe" => "Swiping…",
+        "phone_type" => "Typing…",
+        "phone_key" => "Pressing a key…",
+        "phone_home" => "Going home…",
+        "phone_open_app" => "Opening an app…",
         "phone_install" => "Installing an app…",
         "phone_push_file" | "phone_pull_file" => "Copying a file…",
         "phone_remove_file" => "Removing a file…",
@@ -2388,9 +2503,8 @@ fn text(t: impl Into<String>) -> Result<Value, String> {
     Ok(json!({ "text": t.into() }))
 }
 
-/// Where `point` falls on a picture of `size` drawn fitted and centred in `area`, as fractions of
-/// its width and height; `None` off the picture (in the bars beside it).
-fn on_picture(area: Bounds<Pixels>, size: (f32, f32), point: Point<Pixels>) -> Option<(f32, f32)> {
+/// A picture of `size` drawn fitted and centred in `area`: its left, top, width and height.
+fn fitted(area: Bounds<Pixels>, size: (f32, f32)) -> Option<(f32, f32, f32, f32)> {
     let (aw, ah) = (f32::from(area.size.width), f32::from(area.size.height));
     if aw <= 0. || ah <= 0. || size.0 <= 0. || size.1 <= 0. {
         return None;
@@ -2399,11 +2513,44 @@ fn on_picture(area: Bounds<Pixels>, size: (f32, f32), point: Point<Pixels>) -> O
     let (w, h) = (size.0 * scale, size.1 * scale);
     let left = f32::from(area.origin.x) + (aw - w) / 2.;
     let top = f32::from(area.origin.y) + (ah - h) / 2.;
+    Some((left, top, w, h))
+}
+
+/// Where `point` falls on a picture of `size` drawn fitted and centred in `area`, as fractions of
+/// its width and height; `None` off the picture (in the bars beside it).
+fn on_picture(area: Bounds<Pixels>, size: (f32, f32), point: Point<Pixels>) -> Option<(f32, f32)> {
+    let (left, top, w, h) = fitted(area, size)?;
     let (x, y) = (
         (f32::from(point.x) - left) / w,
         (f32::from(point.y) - top) / h,
     );
     ((0. ..=1.).contains(&x) && (0. ..=1.).contains(&y)).then_some((x, y))
+}
+
+/// How far a press may move on the drawn picture and still be a tap.
+const DRAG_PX: f32 = 8.;
+
+/// A press at `from` (fractions of the picture) let go at `point`: a tap there when it moved less
+/// than `DRAG_PX` on the drawn picture, else a swipe to where it was let go (held to the
+/// picture's edges), over `ms`.
+fn gesture_for(
+    area: Bounds<Pixels>,
+    size: (f32, f32),
+    from: (f32, f32),
+    point: Point<Pixels>,
+    ms: u32,
+) -> Option<Gesture> {
+    let (left, top, w, h) = fitted(area, size)?;
+    let to = (
+        ((f32::from(point.x) - left) / w).clamp(0., 1.),
+        ((f32::from(point.y) - top) / h).clamp(0., 1.),
+    );
+    let moved = ((to.0 - from.0) * w).hypot((to.1 - from.1) * h);
+    Some(if moved < DRAG_PX {
+        Gesture::Tap(from.0, from.1)
+    } else {
+        Gesture::Swipe { from, to, ms }
+    })
 }
 
 /// What an agent hears when the screen can't be had yet.
@@ -2602,6 +2749,89 @@ impl Run<'_> {
                     "Tapped ({x}, {y}). Take a screenshot to see what it did."
                 ))
             }
+            "phone_swipe" => {
+                let udid = self.ready().await?;
+                let at = |k: &str| p[k].as_f64();
+                let (Some(x1), Some(y1), Some(x2), Some(y2)) =
+                    (at("x1"), at("y1"), at("x2"), at("y2"))
+                else {
+                    return Err(
+                        "phone_swipe takes x1, y1, x2 and y2, pixels in the latest phone_screenshot."
+                            .into(),
+                    );
+                };
+                let (width, height) = self
+                    .this
+                    .update(self.cx, |p, _| p.agent_shot)
+                    .map_err(gone)?
+                    .ok_or("Take a phone_screenshot first: x and y are pixels in it.")?;
+                let fraction = |x: f64, y: f64| (x as f32 / width as f32, y as f32 / height as f32);
+                let (from, to) = (fraction(x1, y1), fraction(x2, y2));
+                if [from.0, from.1, to.0, to.1]
+                    .iter()
+                    .any(|v| !(0. ..=1.).contains(v))
+                {
+                    return Err(format!(
+                        "The swipe goes off the screen: the latest phone_screenshot is {width}×{height}."
+                    ));
+                }
+                let ms = p["duration_ms"].as_u64().unwrap_or(300).clamp(50, 5000) as u32;
+                let source = self.source()?;
+                self.blocking(move || source.touch(&udid, Gesture::Swipe { from, to, ms }))
+                    .await?;
+                text(format!(
+                    "Swiped from ({x1}, {y1}) to ({x2}, {y2}). Take a screenshot to see what it did."
+                ))
+            }
+            "phone_type" => {
+                let udid = self.ready().await?;
+                let Some(typed) = p["text"].as_str() else {
+                    return Err("phone_type takes text.".into());
+                };
+                let submit = p["submit"].as_bool().unwrap_or(false);
+                let keys = if submit {
+                    format!("{typed}\n")
+                } else {
+                    typed.to_string()
+                };
+                let source = self.source()?;
+                self.blocking(move || source.touch(&udid, Gesture::Type(keys)))
+                    .await?;
+                text(if submit {
+                    "Typed it and pressed Return."
+                } else {
+                    "Typed it."
+                })
+            }
+            "phone_key" => {
+                let udid = self.ready().await?;
+                let Some(combo) = p["key"].as_str() else {
+                    return Err("phone_key takes key, e.g. enter or cmd+space.".into());
+                };
+                let (held, key) = coredevice::key_combo(combo)?;
+                let source = self.source()?;
+                self.blocking(move || source.touch(&udid, Gesture::Key { held, key }))
+                    .await?;
+                text(format!("Pressed {combo}."))
+            }
+            "phone_home" => {
+                let udid = self.ready().await?;
+                let source = self.source()?;
+                self.blocking(move || source.touch(&udid, Gesture::Home))
+                    .await?;
+                text("Went to the Home Screen.")
+            }
+            "phone_open_app" => {
+                let udid = self.ready().await?;
+                let Some(name) = p["name"].as_str().map(str::to_string) else {
+                    return Err(
+                        "phone_open_app takes name, the app's name as on the Home Screen.".into(),
+                    );
+                };
+                let source = self.source()?;
+                let opened = self.blocking(move || source.open_app(&udid, &name)).await?;
+                text(format!("Opened {opened}. Take a screenshot to see it."))
+            }
             "phone_release" => {
                 let thread = self.call.thread.clone();
                 self.this
@@ -2765,8 +2995,8 @@ impl Run<'_> {
 mod tests {
     // Not `super::*`: gpui's own `test` attribute would come with it.
     use super::{
-        HandHolding, SCREEN_DRAWN, Sensitive, ask_text, local_path, needs_asking, on_picture,
-        screen_picture, starting, tools,
+        Gesture, HandHolding, SCREEN_DRAWN, Sensitive, ask_text, gesture_for, local_path,
+        needs_asking, on_picture, screen_picture, starting, tools,
     };
     use gpui_kit::{Bounds, point, px, size};
     use serde_json::json;
@@ -2839,6 +3069,39 @@ mod tests {
         let err = local_path(&json!({"local": "a.txt"}), "local").unwrap_err();
         assert!(err.contains("full path on this PC"), "{err}");
         assert!(local_path(&json!({}), "local").is_err());
+    }
+
+    /// Let go where it was pressed (within a few pixels), a press is a tap there; dragged, a
+    /// swipe to where it was let go, held to the picture's edges.
+    #[test]
+    fn a_press_let_go_is_a_tap_or_a_swipe() {
+        let area = Bounds::new(point(px(10.), px(20.)), size(px(300.), px(400.)));
+        // 100×200 fits as 200×400: 60 to 260 across, 20 to 420 down.
+        let at = |x: f32, y: f32| point(px(x), px(y));
+        assert_eq!(
+            gesture_for(area, (100., 200.), (0.5, 0.5), at(163., 222.), 150),
+            Some(Gesture::Tap(0.5, 0.5))
+        );
+        assert_eq!(
+            gesture_for(area, (100., 200.), (0.5, 0.75), at(160., 120.), 300),
+            Some(Gesture::Swipe {
+                from: (0.5, 0.75),
+                to: (0.5, 0.25),
+                ms: 300
+            })
+        );
+        assert_eq!(
+            gesture_for(area, (100., 200.), (0.5, 0.5), at(500., 220.), 300),
+            Some(Gesture::Swipe {
+                from: (0.5, 0.5),
+                to: (1., 0.5),
+                ms: 300
+            })
+        );
+        assert_eq!(
+            gesture_for(Bounds::default(), (100., 200.), (0.5, 0.5), at(0., 0.), 300),
+            None
+        );
     }
 
     /// A click on the Screen tab is a tap where it falls on the picture, drawn fitted and centred:

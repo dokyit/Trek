@@ -792,8 +792,9 @@ mod tests {
         }
     }
 
-    /// On a PC the family is the phone's screen, taps, apps and files, in its own words; the rest
-    /// of the tools say they need Trek on a Mac for now, without asking Trek.
+    /// On a PC the family is the phone's screen (worked as a person would), apps and files, in its
+    /// own words; reading the screen as elements says it needs Trek on a Mac for now, without
+    /// asking Trek.
     #[test]
     fn a_pc_serves_the_apps_and_files_and_says_where_the_rest_are() {
         let trek = Trek::default();
@@ -805,9 +806,6 @@ mod tests {
         for (tool, args) in [
             ("phone_elements", json!({})),
             ("phone_wait", json!({"text": "Done"})),
-            ("phone_swipe", json!({"x1": 1, "y1": 2, "x2": 3, "y2": 4})),
-            ("phone_type", json!({"text": "hi"})),
-            ("phone_open_app", json!({"name": "Settings"})),
         ] {
             let err = tools.call(tool, &args).unwrap_err();
             assert!(err.contains("needs Trek on a Mac for now"), "{tool}: {err}");
@@ -827,9 +825,23 @@ mod tests {
         tools
             .call("phone_tap", &json!({"x": 100, "y": 200}))
             .unwrap();
+        tools
+            .call("phone_swipe", &json!({"x1": 1, "y1": 2, "x2": 3, "y2": 4}))
+            .unwrap();
+        tools.call("phone_type", &json!({"text": "hi"})).unwrap();
+        tools
+            .call("phone_open_app", &json!({"name": "Settings"}))
+            .unwrap();
         assert_eq!(
             trek.asked(),
-            ["phone_apps", "phone_screenshot", "phone_tap"]
+            [
+                "phone_apps",
+                "phone_screenshot",
+                "phone_tap",
+                "phone_swipe",
+                "phone_type",
+                "phone_open_app"
+            ]
         );
         // Without Trek, those say why.
         let mut alone = Phone::with(None);

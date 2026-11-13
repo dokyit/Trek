@@ -207,13 +207,19 @@ pub const TOOL_NAMES: [&str; 17] = [
 ];
 
 /// The tools a PC serves (Windows reaches the phone through Apple Mobile Device Service): its
-/// screen and taps (CoreDevice's services, once its developer disk image is mounted), its apps and
-/// files, how it's connected, and letting go. Reading the screen as elements, swiping and typing
-/// need the Mac for now ([`on_a_mac`]).
-pub const PC_TOOL_NAMES: [&str; 10] = [
+/// screen, worked as a person would (CoreDevice's services, once its developer disk image is
+/// mounted: taps, swipes, typing, keys, Home, opening an app), its apps and files, how it's
+/// connected, and letting go. Reading the screen as elements needs the Mac for now
+/// ([`on_a_mac`]).
+pub const PC_TOOL_NAMES: [&str; 15] = [
     "phone_status",
     "phone_screenshot",
     "phone_tap",
+    "phone_swipe",
+    "phone_type",
+    "phone_key",
+    "phone_home",
+    "phone_open_app",
     "phone_apps",
     "phone_install",
     "phone_files",
@@ -224,7 +230,7 @@ pub const PC_TOOL_NAMES: [&str; 10] = [
 ];
 
 /// What the agent is told about the tools on a PC.
-pub const PC_INSTRUCTIONS: &str = "The user's real iPhone, plugged into this PC. Here Trek sees its screen (phone_screenshot) and taps it (phone_tap: x/y are pixels in the latest screenshot; take a fresh one after acting) once its developer disk image is mounted, which the user does once in Trek's iPhone tool; and reaches its apps and files over the cable (or Wi-Fi): phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file. Reading the screen as elements, swiping and typing need Trek on a Mac for now. Start with phone_status: it says whether the iPhone is ready, or the one thing the user must do first; ask them rather than retrying. The user watches in Trek's iPhone tool. One agent uses the phone at a time: call phone_release when you're done with it. This is the user's own phone: never delete or overwrite its files unless the user asked for exactly that. If a tool says the user took over the iPhone, stop using it and wait for them.";
+pub const PC_INSTRUCTIONS: &str = "The user's real iPhone, plugged into this PC. Here Trek sees its screen (phone_screenshot) and works it as a person would (phone_tap and phone_swipe: x/y are pixels in the latest screenshot; phone_type, phone_key, phone_home, phone_open_app; take a fresh screenshot after acting) once its developer disk image is mounted, which the user does once in Trek's iPhone tool; and reaches its apps and files over the cable (or Wi-Fi): phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file. Reading the screen as elements needs Trek on a Mac for now. Start with phone_status: it says whether the iPhone is ready, or the one thing the user must do first; ask them rather than retrying. The user watches in Trek's iPhone tool. One agent uses the phone at a time: call phone_release when you're done with it. This is the user's own phone: never delete or overwrite its files unless the user asked for exactly that. If a tool says the user took over the iPhone, stop using it and wait for them.";
 
 /// The tools a PC serves, as `(name, description, input schema)`, in its words.
 pub fn pc_tools() -> Vec<(&'static str, &'static str, Value)> {
@@ -258,6 +264,19 @@ pub fn pc_tools() -> Vec<(&'static str, &'static str, Value)> {
                 }),
                 &[],
             ),
+        ),
+        same("phone_swipe"),
+        (
+            "phone_type",
+            "Type text into whatever has focus on the iPhone (tap a field first), as a US keyboard types it: ASCII only on a PC for now. submit presses Return afterwards.",
+            same("phone_type").2,
+        ),
+        same("phone_key"),
+        same("phone_home"),
+        (
+            "phone_open_app",
+            "Open an app by its name as on the Home Screen (any case; part of it when only one app's name holds it), over the cable. Take a screenshot to see it.",
+            same("phone_open_app").2,
         ),
         same("phone_apps"),
         (
@@ -302,23 +321,21 @@ pub fn pc_tools() -> Vec<(&'static str, &'static str, Value)> {
     ]
 }
 
-/// Whether a PC serves `method` (its screen, taps, apps and files; not elements, swipes or typing).
+/// Whether a PC serves `method` (its screen, worked as a person would, its apps and files; not
+/// reading the screen as elements).
 pub fn pc_serves(method: &str) -> bool {
     PC_TOOL_NAMES.contains(&method)
 }
 
-/// What a PC answers for a phone tool it doesn't serve: reading the iPhone's screen as elements,
-/// swiping and typing need Trek on a Mac for now, and what there is here instead.
+/// What a PC answers for a phone tool it doesn't serve: reading the iPhone's screen as elements
+/// needs Trek on a Mac for now, and what there is here instead.
 pub fn on_a_mac(method: &str) -> String {
     let what = match method {
-        "phone_elements" | "phone_wait" => "Reading the iPhone's screen as elements",
-        "phone_open_app" => "Opening an app on the iPhone by name",
-        "phone_swipe" => "Swiping on the iPhone",
-        "phone_home" => "Pressing the iPhone's Home",
-        _ => "Typing on the iPhone",
+        "phone_wait" => "Waiting for something on the iPhone's screen",
+        _ => "Reading the iPhone's screen as elements",
     };
     format!(
-        "{what} needs Trek on a Mac for now. On this PC Trek sees the iPhone's screen and taps it (phone_screenshot, phone_tap) and reaches its apps and files (phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file); phone_status says how it's connected."
+        "{what} needs Trek on a Mac for now. On this PC Trek sees the iPhone's screen and works it (phone_screenshot, phone_tap, phone_swipe, phone_type, phone_key, phone_home, phone_open_app) and reaches its apps and files (phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file); phone_status says how it's connected."
     )
 }
 
@@ -470,7 +487,9 @@ mod tests {
             "developer disk image",
             "phone_release",
             "took over",
-            "need Trek on a Mac for now",
+            "needs Trek on a Mac for now",
+            "phone_swipe",
+            "phone_type",
         ] {
             assert!(PC_INSTRUCTIONS.contains(word), "{word}");
         }
@@ -491,7 +510,9 @@ mod tests {
         }
         assert!(pc_serves("phone_screenshot") && pc_serves("phone_tap"));
         assert!(on_a_mac("phone_elements").starts_with("Reading the iPhone's screen as elements"));
-        assert!(on_a_mac("phone_type").starts_with("Typing on the iPhone"));
+        assert!(on_a_mac("phone_wait").starts_with("Waiting for something"));
+        assert!(pc_serves("phone_swipe") && pc_serves("phone_type") && pc_serves("phone_open_app"));
+        assert!(!pc_serves("phone_elements") && !pc_serves("phone_wait"));
     }
 
     #[test]

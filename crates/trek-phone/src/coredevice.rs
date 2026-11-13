@@ -18,9 +18,10 @@
 use crate::{device, pc};
 use idevice::amfi::AmfiClient;
 use idevice::core_device::{
-    CallInfoBlob, DisplayServiceClient, ImageFormat, ScreenCaptureServiceClient,
-    UniversalHidServiceClient, build_screen_audio_offer, build_screen_video_offer,
-    build_start_audio_parameters, build_start_video_parameters,
+    AppServiceClient, ButtonState, CallInfoBlob, DisplayServiceClient, ImageFormat,
+    IndigoHidClient, ScreenCaptureServiceClient, UniversalHidServiceClient,
+    build_screen_audio_offer, build_screen_video_offer, build_start_audio_parameters,
+    build_start_video_parameters,
 };
 use idevice::core_device_proxy::CoreDeviceProxy;
 use idevice::cryptexd::{self, Cryptex1Assets, CryptexdClient, FEATURE_CRYPTEX_INSTALL};
@@ -48,6 +49,116 @@ const CLIENT_SUPPORTED_FEATURES: u64 = 140;
 
 /// How long the media stream stays after a touch's events are sent, for the phone to take them.
 const TOUCH_LANDS: Duration = Duration::from_millis(700);
+
+/// The HID keyboard's Left Shift, held for capitals and the shifted symbols.
+const LEFT_SHIFT: u64 = 0xE1;
+
+/// The Home Screen's button: the Consumer page's Menu, as a keyboard's Home key sends it.
+const HOME_BUTTON: (u64, u64) = (0x0C, 0x40);
+
+/// What a touch does on the phone, positions in fractions of the screen's width and height.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Gesture {
+    /// A tap at (x, y).
+    Tap(f32, f32),
+    /// A drag from one point to another over `ms` milliseconds: a scroll, a page, a swipe.
+    Swipe {
+        from: (f32, f32),
+        to: (f32, f32),
+        ms: u32,
+    },
+    /// Text typed into what has focus, as a US keyboard types it (`\n` is Return).
+    Type(String),
+    /// The Home Screen.
+    Home,
+    /// A key with modifiers held (HID usages): `key_combo`'s.
+    Key { held: Vec<u8>, key: u8 },
+}
+
+/// A key or combination as `phone_key` names it (`enter`, `escape`, `backspace`, `tab`, `space`,
+/// the arrows, a letter or digit, `cmd+space`, `shift+tab`): the modifiers held and the key, as
+/// HID usages.
+pub fn key_combo(combo: &str) -> Result<(Vec<u8>, u8), String> {
+    let parts: Vec<String> = combo.split('+').map(|p| p.trim().to_lowercase()).collect();
+    let unknown = || {
+        format!(
+            "{combo:?} isn't a key phone_key knows: enter, escape, backspace, tab, space, up, down, left, right, a letter or digit, or a combination like cmd+space."
+        )
+    };
+    let (key, modifiers) = parts.split_last().ok_or_else(unknown)?;
+    let held = modifiers
+        .iter()
+        .map(|m| match m.as_str() {
+            "cmd" | "command" | "super" => Some(0xE3),
+            "shift" => Some(0xE1),
+            "ctrl" | "control" => Some(0xE0),
+            "alt" | "option" | "opt" => Some(0xE2),
+            _ => None,
+        })
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(unknown)?;
+    let key = match key.as_str() {
+        "enter" | "return" => 0x28,
+        "escape" | "esc" => 0x29,
+        "backspace" | "delete" => 0x2A,
+        "tab" => 0x2B,
+        "space" => 0x2C,
+        "right" => 0x4F,
+        "left" => 0x50,
+        "down" => 0x51,
+        "up" => 0x52,
+        one if one.chars().count() == 1 => {
+            let c = one.chars().next().ok_or_else(unknown)?;
+            match key_for(c) {
+                Some((usage, false)) => usage,
+                _ => return Err(unknown()),
+            }
+        }
+        _ => return Err(unknown()),
+    };
+    Ok((held, key))
+}
+
+/// The keys that type `text` on a US keyboard: each one's HID usage, and whether Shift is held.
+/// Text a US keyboard can't type is said so, with the first such character.
+pub fn keys_for(text: &str) -> Result<Vec<(u8, bool)>, String> {
+    text.chars()
+        .map(|c| {
+            key_for(c).ok_or_else(|| {
+                format!(
+                    "Typing on this PC is a US keyboard's for now: {c:?} isn't on one. Type the rest, or paste it on the iPhone."
+                )
+            })
+        })
+        .collect()
+}
+
+/// One character's key on a US keyboard (HID Keyboard page usages), and whether it's shifted.
+fn key_for(c: char) -> Option<(u8, bool)> {
+    const SHIFTED_DIGITS: &str = "!@#$%^&*()";
+    Some(match c {
+        'a'..='z' => (0x04 + (c as u8 - b'a'), false),
+        'A'..='Z' => (0x04 + (c as u8 - b'A'), true),
+        '1'..='9' => (0x1E + (c as u8 - b'1'), false),
+        '0' => (0x27, false),
+        '\n' => (0x28, false),
+        '\t' => (0x2B, false),
+        ' ' => (0x2C, false),
+        _ if SHIFTED_DIGITS.contains(c) => (0x1E + SHIFTED_DIGITS.find(c)? as u8, true),
+        _ => {
+            const PLAIN: &str = "-=[]\\;'`,./";
+            const SHIFT: &str = "_+{}|:\"~<>?";
+            const USAGES: [u8; 11] = [
+                0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+            ];
+            if let Some(i) = PLAIN.find(c) {
+                (USAGES[i], false)
+            } else {
+                (USAGES[SHIFT.find(c)?], true)
+            }
+        }
+    })
+}
 
 /// The longest a call waits for its answer (a mount uploads the image and asks Apple's server).
 const ANSWER_WITHIN: Duration = Duration::from_secs(180);
@@ -234,7 +345,22 @@ pub fn screenshot(udid: &str) -> Result<Shot, String> {
 
 /// A tap on phone `udid`'s screen at (`x`, `y`), as fractions of its width and height.
 pub fn tap(udid: &str, x: f32, y: f32) -> Result<(), String> {
-    ask(udid, |reply| Ask::Tap(x, y, reply))
+    touch_now(udid, Gesture::Tap(x, y))
+}
+
+/// A touch on phone `udid`: a tap, a swipe, typing, or the Home Screen.
+pub fn touch_now(udid: &str, gesture: Gesture) -> Result<(), String> {
+    if let Gesture::Type(text) = &gesture {
+        keys_for(text)?;
+    }
+    ask(udid, |reply| Ask::Touch(gesture, reply))
+}
+
+/// Open the app on phone `udid` whose name (as on the Home Screen) is `name`, any case; its
+/// name as installed. One not there is said so, with what is, near it.
+pub fn open_app(udid: &str, name: &str) -> Result<String, String> {
+    let name = name.to_string();
+    ask(udid, |reply| Ask::Open(name, reply))
 }
 
 /// The touchscreen's own scale for a fraction of the screen: 0 at the top or left, 65535 at the
@@ -264,7 +390,9 @@ enum Ask {
     Mount(DiskImage, Reply<()>),
     Unmount(Reply<()>),
     Shot(Reply<Shot>),
-    Tap(f32, f32, Reply<()>),
+    Touch(Gesture, Reply<()>),
+    Open(String, Reply<String>),
+    Apps(Reply<Vec<(String, String)>>),
 }
 
 /// Each phone's worker, by its udid.
@@ -351,12 +479,29 @@ async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
             }
             let _ = reply.send(shot);
         }
-        Ask::Tap(x, y, reply) => {
-            let done = touch(udid, session, x, y).await;
+        Ask::Touch(gesture, reply) => {
+            let done = touch(udid, session, &gesture).await;
             if done.is_err() {
                 *session = None;
             }
             let _ = reply.send(done);
+        }
+        Ask::Apps(reply) => {
+            let listed = match open(udid, session).await {
+                Ok(s) => list_apps_now(s).await,
+                Err(e) => Err(e),
+            };
+            if listed.is_err() {
+                *session = None;
+            }
+            let _ = reply.send(listed);
+        }
+        Ask::Open(name, reply) => {
+            let opened = launch(udid, session, &name).await;
+            if opened.is_err() {
+                *session = None;
+            }
+            let _ = reply.send(opened);
         }
     }
 }
@@ -545,30 +690,257 @@ async fn shoot(udid: &str, session: &mut Option<Session>) -> Result<Shot, String
     Ok(Shot { png, width, height })
 }
 
-/// A tap, sent while the display service's media stream runs: the phone takes synthetic touches
-/// only then (its video is dropped unread).
-async fn touch(udid: &str, session: &mut Option<Session>, x: f32, y: f32) -> Result<(), String> {
+/// A touch, sent while the display service's media stream runs: the phone takes synthetic input
+/// (touches, keys, buttons) only then (its video is dropped unread).
+async fn touch(udid: &str, session: &mut Option<Session>, gesture: &Gesture) -> Result<(), String> {
     let s = open(udid, session).await?;
     let (mut display, _audio, _video) = start_media_stream(&mut s.adapter, &mut s.rsd).await?;
-    // The touch surface needs a moment to take the stream as its authority.
+    // The input surfaces need a moment to take the stream as their authority.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let mut hid = match UniversalHidServiceClient::connect_rsd(&mut s.adapter, &mut s.rsd).await {
-        Ok(hid) => hid,
-        Err(e) => {
-            let _ = display.stop_media_stream().await;
-            return Err(service_missing("touch service", e));
-        }
-    };
-    let tapped = hid
-        .tap(touch_point(x), touch_point(y))
-        .await
-        .map_err(|e| format!("The tap didn't go: {e:?}"));
-    // The touch's events go without an answer: the stream, which lets them in, and the connection
-    // they came on stay until the phone has taken them (stopped at once, the lift was lost).
+    let (done, held) = send_touch(s, gesture).await;
+    // The events go without an answer: the stream, which lets them in, and the connection they
+    // came on stay until the phone has taken them (stopped at once, a tap's lift was lost).
     tokio::time::sleep(TOUCH_LANDS).await;
     let _ = display.stop_media_stream().await;
-    drop(hid);
-    tapped
+    drop(held);
+    done
+}
+
+/// The connection a touch's events went on, kept (never read) until they've landed.
+#[derive(Default)]
+struct Held {
+    _touch: Option<Box<UniversalHidServiceClient<Box<dyn ReadWrite>>>>,
+    _keys: Option<Box<IndigoHidClient<Box<dyn ReadWrite>>>>,
+}
+
+/// The gesture's events: touches on the touchscreen's surface, keys and buttons as Indigo events.
+async fn send_touch(s: &mut Session, gesture: &Gesture) -> (Result<(), String>, Held) {
+    match gesture {
+        Gesture::Tap(..) | Gesture::Swipe { .. } => {
+            let mut hid =
+                match UniversalHidServiceClient::connect_rsd(&mut s.adapter, &mut s.rsd).await {
+                    Ok(hid) => hid,
+                    Err(e) => return (Err(service_missing("touch service", e)), Held::default()),
+                };
+            let done = match *gesture {
+                Gesture::Tap(x, y) => hid.tap(touch_point(x), touch_point(y)).await,
+                Gesture::Swipe { from, to, ms } => {
+                    // A sample every frame or so, for the gesture recognizers to see a velocity.
+                    let steps = (ms / 16).clamp(4, 120);
+                    hid.drag(
+                        touch_point(from.0),
+                        touch_point(from.1),
+                        touch_point(to.0),
+                        touch_point(to.1),
+                        steps,
+                        u64::from(ms / steps),
+                    )
+                    .await
+                }
+                _ => Ok(()),
+            }
+            .map_err(|e| format!("The touch didn't go: {e:?}"));
+            (
+                done,
+                Held {
+                    _touch: Some(Box::new(hid)),
+                    ..Held::default()
+                },
+            )
+        }
+        Gesture::Type(_) | Gesture::Home | Gesture::Key { .. } => {
+            let mut keys: IndigoHidClient<Box<dyn ReadWrite>> =
+                match IndigoHidClient::connect_rsd(&mut s.adapter, &mut s.rsd).await {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        return (Err(service_missing("keyboard service", e)), Held::default());
+                    }
+                };
+            let done = match gesture {
+                Gesture::Type(text) => type_keys(&mut keys, text).await,
+                Gesture::Key { held, key } => press_key(&mut keys, held, *key).await,
+                _ => press_home(&mut keys).await,
+            };
+            (
+                done,
+                Held {
+                    _keys: Some(Box::new(keys)),
+                    ..Held::default()
+                },
+            )
+        }
+    }
+}
+
+/// The gap between a key's press and its release, and between keys.
+const KEY_GAP: Duration = Duration::from_millis(15);
+
+async fn type_keys(
+    keys: &mut IndigoHidClient<Box<dyn ReadWrite>>,
+    text: &str,
+) -> Result<(), String> {
+    let failed = |e: idevice::IdeviceError| format!("The typing didn't go: {e:?}");
+    for (usage, shift) in keys_for(text)? {
+        let usage = u64::from(usage);
+        if shift {
+            keys.send_keyboard(LEFT_SHIFT, ButtonState::Down)
+                .await
+                .map_err(failed)?;
+        }
+        keys.send_keyboard(usage, ButtonState::Down)
+            .await
+            .map_err(failed)?;
+        tokio::time::sleep(KEY_GAP).await;
+        keys.send_keyboard(usage, ButtonState::Up)
+            .await
+            .map_err(failed)?;
+        if shift {
+            keys.send_keyboard(LEFT_SHIFT, ButtonState::Up)
+                .await
+                .map_err(failed)?;
+        }
+        tokio::time::sleep(KEY_GAP).await;
+    }
+    Ok(())
+}
+
+/// A key with modifiers held: the modifiers down, the key down and up, the modifiers up.
+async fn press_key(
+    keys: &mut IndigoHidClient<Box<dyn ReadWrite>>,
+    held: &[u8],
+    key: u8,
+) -> Result<(), String> {
+    let failed = |e: idevice::IdeviceError| format!("The key didn't go: {e:?}");
+    for m in held {
+        keys.send_keyboard(u64::from(*m), ButtonState::Down)
+            .await
+            .map_err(failed)?;
+    }
+    keys.send_keyboard(u64::from(key), ButtonState::Down)
+        .await
+        .map_err(failed)?;
+    tokio::time::sleep(KEY_GAP).await;
+    keys.send_keyboard(u64::from(key), ButtonState::Up)
+        .await
+        .map_err(failed)?;
+    for m in held.iter().rev() {
+        keys.send_keyboard(u64::from(*m), ButtonState::Up)
+            .await
+            .map_err(failed)?;
+    }
+    Ok(())
+}
+
+async fn press_home(keys: &mut IndigoHidClient<Box<dyn ReadWrite>>) -> Result<(), String> {
+    let failed = |e: idevice::IdeviceError| format!("Home didn't go: {e:?}");
+    let (page, usage) = HOME_BUTTON;
+    keys.send_button(page, usage, ButtonState::Down)
+        .await
+        .map_err(failed)?;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    keys.send_button(page, usage, ButtonState::Up)
+        .await
+        .map_err(failed)
+}
+
+/// The app named `name` among `apps` (name, bundle id): the one named so, any case, else the one
+/// whose name holds it. Several or none: said, with what's near.
+pub fn pick_app<'a>(apps: &[(&'a str, &'a str)], name: &str) -> Result<(&'a str, &'a str), String> {
+    let want = name.trim().to_lowercase();
+    if let Some(app) = apps.iter().find(|(n, _)| n.to_lowercase() == want) {
+        return Ok(*app);
+    }
+    let near: Vec<&(&str, &str)> = apps
+        .iter()
+        .filter(|(n, _)| !want.is_empty() && n.to_lowercase().contains(&want))
+        .collect();
+    if let [app] = near[..] {
+        return Ok(*app);
+    }
+    let mut names: Vec<&str> = near.iter().map(|(n, _)| *n).collect();
+    names.sort_unstable();
+    names.truncate(8);
+    Err(if names.is_empty() {
+        format!(
+            "No app named {name:?} on the iPhone (phone_apps lists the ones the user installed)."
+        )
+    } else {
+        format!(
+            "More than one app's name holds {name:?}: {}. Say which.",
+            names.join(", ")
+        )
+    })
+}
+
+/// The app service's way of listing apps that newer iOS answers: streamed over a side channel.
+const STREAM_APP_LIST: &str = "com.apple.coredevice.feature.streamapplist";
+
+/// The longest the app service has to list the apps or open one.
+const APPS_WITHIN: Duration = Duration::from_secs(30);
+
+/// The apps on phone `udid`'s Home Screen, Apple's included: (name, bundle id), by name.
+pub fn home_screen_apps(udid: &str) -> Result<Vec<(String, String)>, String> {
+    ask(udid, Ask::Apps)
+}
+
+/// The apps on the Home Screen, as the app service lists them: streamed where it says it can
+/// (newer iOS, which leaves the older call unanswered), else in one answer.
+async fn list_apps_now(s: &mut Session) -> Result<Vec<(String, String)>, String> {
+    use futures::StreamExt as _;
+    let streams = s
+        .rsd
+        .services
+        .get("com.apple.coredevice.appservice")
+        .and_then(|svc| svc.features.as_ref())
+        .is_some_and(|f| f.iter().any(|f| f == STREAM_APP_LIST));
+    let mut apps: AppServiceClient<Box<dyn ReadWrite>> =
+        AppServiceClient::connect_rsd(&mut s.adapter, &mut s.rsd)
+            .await
+            .map_err(|e| service_missing("app service", e))?;
+    let listed = async {
+        if streams {
+            let mut found = Vec::new();
+            let mut stream = std::pin::pin!(apps.stream_apps(false, true, false, false, true));
+            while let Some(app) = stream.next().await {
+                found.push(app?);
+            }
+            Ok(found)
+        } else {
+            apps.list_apps(false, true, false, false, true).await
+        }
+    };
+    let list = tokio::time::timeout(APPS_WITHIN, listed)
+        .await
+        .map_err(|_| "The iPhone didn't list its apps in time.".to_string())?
+        .map_err(|e| format!("Couldn't list the iPhone's apps: {e:?}"))?;
+    let mut named: Vec<(String, String)> = list
+        .into_iter()
+        .map(|a| (a.name, a.bundle_identifier))
+        .collect();
+    named.sort();
+    Ok(named)
+}
+
+/// Open the app named `name`, over the cable: CoreDevice's app service lists the apps on the
+/// Home Screen (Apple's included) and launches the one asked for. Its name as installed.
+async fn launch(udid: &str, session: &mut Option<Session>, name: &str) -> Result<String, String> {
+    let s = open(udid, session).await?;
+    let list = list_apps_now(s).await?;
+    let named: Vec<(&str, &str)> = list.iter().map(|(n, b)| (n.as_str(), b.as_str())).collect();
+    let (found, bundle) = pick_app(&named, name)?;
+    // A connection of its own: the list's stream had this service's last one.
+    let mut apps: AppServiceClient<Box<dyn ReadWrite>> =
+        AppServiceClient::connect_rsd(&mut s.adapter, &mut s.rsd)
+            .await
+            .map_err(|e| service_missing("app service", e))?;
+    tokio::time::timeout(
+        APPS_WITHIN,
+        apps.launch_application(bundle, &[], false, false, None, None, None),
+    )
+    .await
+    .map_err(|_| format!("The iPhone didn't open {found} in time."))?
+    .map_err(|e| format!("Couldn't open {found}: {e:?}"))?;
+    Ok(found.to_string())
 }
 
 /// The display service's screen-sharing session as Device Hub starts it: audio first, then video
@@ -646,6 +1018,74 @@ async fn start_media_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_is_typed_with_a_us_keyboard_s_keys() {
+        assert_eq!(
+            keys_for("Hi!").unwrap(),
+            [(0x0B, true), (0x0C, false), (0x1E, true)]
+        );
+        assert_eq!(
+            keys_for("az09 \n").unwrap(),
+            [
+                (0x04, false),
+                (0x1D, false),
+                (0x27, false),
+                (0x26, false),
+                (0x2C, false),
+                (0x28, false)
+            ]
+        );
+        assert_eq!(
+            keys_for("-_/?:\"").unwrap(),
+            [
+                (0x2D, false),
+                (0x2D, true),
+                (0x38, false),
+                (0x38, true),
+                (0x33, true),
+                (0x34, true)
+            ]
+        );
+        assert_eq!(keys_for(")").unwrap(), [(0x27, true)]);
+        let err = keys_for("café").unwrap_err();
+        assert!(err.contains("'é'"), "{err}");
+    }
+
+    #[test]
+    fn a_key_or_combination_is_its_modifiers_and_key() {
+        assert_eq!(key_combo("enter").unwrap(), (vec![], 0x28));
+        assert_eq!(key_combo("cmd+space").unwrap(), (vec![0xE3], 0x2C));
+        assert_eq!(key_combo("Shift+Tab").unwrap(), (vec![0xE1], 0x2B));
+        assert_eq!(key_combo("cmd+a").unwrap(), (vec![0xE3], 0x04));
+        assert_eq!(key_combo("ctrl+alt+up").unwrap(), (vec![0xE0, 0xE2], 0x52));
+        for bad in ["", "hyper+a", "f13", "cmd+"] {
+            assert!(key_combo(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_app_is_found_by_its_name_any_case_or_part_of_it() {
+        let apps = [
+            ("Settings", "com.apple.Preferences"),
+            ("Calculator", "com.apple.calculator"),
+            ("Calendar", "com.apple.mobilecal"),
+            ("Notes", "com.apple.mobilenotes"),
+        ];
+        assert_eq!(
+            pick_app(&apps, "settings").unwrap().1,
+            "com.apple.Preferences"
+        );
+        assert_eq!(
+            pick_app(&apps, " Notes ").unwrap().1,
+            "com.apple.mobilenotes"
+        );
+        assert_eq!(pick_app(&apps, "calc").unwrap().1, "com.apple.calculator");
+        let err = pick_app(&apps, "cal").unwrap_err();
+        assert!(err.contains("Calculator, Calendar"), "{err}");
+        let err = pick_app(&apps, "Maps").unwrap_err();
+        assert!(err.contains("No app named \"Maps\""), "{err}");
+    }
 
     #[test]
     fn a_fraction_of_the_screen_is_a_point_on_the_touchscreen_s_scale() {

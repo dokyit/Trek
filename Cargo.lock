@@ -9663,6 +9663,7 @@ name = "trek-phone"
 version = "0.4.50"
 dependencies = [
  "async-channel",
+ "futures",
  "idevice",
  "plist",
  "serde_json",

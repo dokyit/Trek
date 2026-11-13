@@ -29,11 +29,15 @@ pub const SCREEN_ADVICE: &str = "The iPhone's developer disk image isn't mounted
 /// switch in Settings first, as Xcode does when a phone is plugged in).
 pub const DEVELOPER_MODE_OFF: &str = "Developer Mode is off on the iPhone, and its screen needs it here: turn it on in Settings › Privacy & Security › Developer Mode (the iPhone restarts and asks you to confirm), then try again.";
 /// Under the screen: what a click does.
-pub const SCREEN_HINT: &str = "Click to tap. Swiping and typing need Trek on a Mac for now.";
+pub const SCREEN_HINT: &str = "Click to tap, drag to swipe. Type in the box and press Enter to type on the iPhone (Shift+Enter presses Return after).";
+/// The Screen tab's Home Screen button.
+pub const SCREEN_HOME: &str = "Home";
+/// The box under the screen whose text is typed on the iPhone.
+pub const SCREEN_TYPE: &str = "Type on the iPhone…";
 
 /// Settings › Tools › iPhone on a PC: what the switch gives agents, and what the tool shows when
 /// the agent of the thread in view starts using the phone.
-pub const SETTINGS_TOOLS: &str = "Agents use your real iPhone on the cable: its screen (screenshots and taps, once its developer disk image is mounted in the iPhone tool), its apps (installing one signed for it) and its files, through the Apple Mobile Device Service that Apple Devices installs. One agent at a time; installing and changing files follow the thread's access level. Applies to new sessions.";
+pub const SETTINGS_TOOLS: &str = "Agents use your real iPhone on the cable: its screen (screenshots, and taps, swipes, typing, keys and Home, once its developer disk image is mounted in the iPhone tool), its apps (opening one, and installing one signed for it) and its files, through the Apple Mobile Device Service that Apple Devices installs. One agent at a time; installing and changing files follow the thread's access level. Applies to new sessions.";
 pub const SETTINGS_FOLLOW_LABEL: &str = "Show the iPhone tool";
 pub const SETTINGS_FOLLOW: &str = "When the agent of the thread you're on starts using the iPhone, the iPhone tool opens beside the chat with what it's doing and a Stop button to take the phone back.";
 
@@ -203,7 +207,7 @@ pub fn status(
         format!("{name} · {detail}."),
         format!("Apps and files: ready over {link} ({SERVED})."),
         match screen {
-            Some(true) => "Screen and taps: ready (phone_screenshot, phone_tap); reading the screen as elements, swiping and typing need Trek on a Mac for now.".to_string(),
+            Some(true) => "Screen and taps: ready (phone_screenshot, phone_tap, phone_swipe, phone_type, phone_key, phone_home, phone_open_app); reading the screen as elements needs Trek on a Mac for now.".to_string(),
             _ => "Screen and taps: need the iPhone's developer disk image, mounted once in Trek's iPhone tool: ask the user to choose its folder there (from a Mac with Xcode). Then phone_screenshot and phone_tap work.".to_string(),
         },
         format!(
@@ -355,11 +359,11 @@ mod tests {
         // Mounted: the screen and taps are ready, and what still needs a Mac is said.
         let ready = status(&Seen::Ready(phone()), Some(true), Some(true), None);
         assert!(
-            ready.contains("Screen and taps: ready (phone_screenshot, phone_tap)"),
+            ready.contains("Screen and taps: ready (phone_screenshot, phone_tap, phone_swipe"),
             "{ready}"
         );
         assert!(
-            ready.contains("swiping and typing need Trek on a Mac for now"),
+            ready.contains("reading the screen as elements needs Trek on a Mac for now"),
             "{ready}"
         );
         // Before the phone can be used: the one thing to do, for the agent to pass on.

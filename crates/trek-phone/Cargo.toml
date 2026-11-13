@@ -20,6 +20,8 @@ tokio = { workspace = true }
 trek-words = { path = "../trek-words" }
 # The screen-sharing session ids CoreDevice's display service wants (`coredevice`).
 uuid = { workspace = true, optional = true }
+# The app list newer iOS streams (`coredevice`).
+futures = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 async-channel.workspace = true
@@ -46,6 +48,7 @@ coredevice = [
     "idevice/amfi",
     "idevice/cryptexd",
     "dep:uuid",
+    "dep:futures",
 ]
 
 [[example]]

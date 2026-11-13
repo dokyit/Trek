@@ -300,10 +300,11 @@ In order of how much each removes the problem, smallest first where that's close
    updating while Trek is closed, and the iPhone app's own build, which needs a Mac. The iPhone's
    screen and taps on a PC no longer need one: CoreDevice's own services (the ones Xcode's Device
    Hub uses) reach the phone over its tunnel with no driver to sign (`trek_phone::coredevice`),
-   behind the iPhone tool's Screen tab and agents' `phone_screenshot` and `phone_tap`, tested with
-   a made-up phone, checked live, and run on a real one (an iPhone 16 Pro Max with iOS 27.2, its
-   disk image installed from Xcode's folder as a cryptex, its screen in the tool, and taps landing
-   on it).
+   behind the iPhone tool's Screen tab and agents' screen tools (screenshots, taps, swipes,
+   typing, keys, Home, opening apps), tested with a made-up phone, checked live, and run on a real
+   one (an iPhone 16 Pro Max with iOS 27.2: its disk image installed from Xcode's folder as a
+   cryptex, its screen in the tool, taps, swipes, typing and Home landing on it). Only reading the
+   screen as elements still needs a Mac.
 
 ## For someone changing Trek
 
