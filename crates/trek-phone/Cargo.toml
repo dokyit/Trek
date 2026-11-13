@@ -30,10 +30,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 
 [features]
 # The iPhone's screen and taps through CoreDevice's own services, over the phone's RemoteXPC
-# tunnel: the developer disk image mounted (personalized by Apple's signing server), then the
-# screenshot service, the display service's media stream and the HID back channel that Xcode's
+# tunnel: the developer disk image installed (signed by Apple's server; a cryptex through
+# cryptexd on newer iOS, else the image mounter's, and AMFI to show Developer Mode's switch), then
+# the screenshot service, the display service's media stream and the HID back channel that Xcode's
 # Device Hub uses. No Trek Driver, so no Mac to build or sign one: the iPhone tool on Windows, and
-# the `pc_screen` example. Nothing of it has run against a phone from a PC yet.
+# the `pc_screen` example. Run from Windows on an iPhone 16 Pro Max with iOS 27.2.
 coredevice = [
     "idevice/core_device_proxy",
     "idevice/tunnel_tcp_stack",
@@ -42,6 +43,8 @@ coredevice = [
     "idevice/display_stream",
     "idevice/mobile_image_mounter",
     "idevice/tss",
+    "idevice/amfi",
+    "idevice/cryptexd",
     "dep:uuid",
 ]
 

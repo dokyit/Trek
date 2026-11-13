@@ -203,7 +203,7 @@ fn a_ready_phone_shows_its_apps_files_and_assistivetouch() {
 
 /// The screen in the picture area, once the developer disk image is mounted: a click on it is a
 /// tap there, as fractions of the screen. Before, it asks for the image's folder, and a folder
-/// without Xcode's three files is said so.
+/// without a developer disk image is said so. A picture each second, the one before let go of.
 #[test]
 fn the_screen_shows_and_a_click_on_it_taps() {
     run(async |cx| {
@@ -249,6 +249,14 @@ fn the_screen_shows_and_a_click_on_it_taps() {
         trek.click(cx, "phone-screen");
         trek.render(cx);
         assert_eq!(made_up.taps(), ["tap 0.50 0.50"]);
+
+        // Picture after picture: the tool holds the one on show and the one before it, no more.
+        for _ in 0..5 {
+            cx.update(|cx| tool.update(cx, |p, cx| p.shoot_again(cx)));
+            trek.render(cx);
+        }
+        assert!(trek.visible(cx, "phone-screen"));
+        assert_eq!(cx.read(|cx| tool.read(cx).screen_pictures()), 2);
     });
 }
 

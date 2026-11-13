@@ -25,6 +25,9 @@ pub const SCREEN_MOUNTING: &str =
 pub const SCREEN_LOOKING: &str = "Looking for the iPhone's screen…";
 /// What an agent hears when it asks for the screen before the disk image is mounted.
 pub const SCREEN_ADVICE: &str = "The iPhone's developer disk image isn't mounted, which its screen and taps need: ask the user to choose its folder in Trek's iPhone tool, copied from a Mac with Xcode (/Library/Developer/DeveloperDiskImages/iOS_DDI). It stays mounted until the iPhone restarts.";
+/// What mounting the disk image says when the iPhone's Developer Mode is off (Trek shows its
+/// switch in Settings first, as Xcode does when a phone is plugged in).
+pub const DEVELOPER_MODE_OFF: &str = "Developer Mode is off on the iPhone, and its screen needs it here: turn it on in Settings › Privacy & Security › Developer Mode (the iPhone restarts and asks you to confirm), then try again.";
 /// Under the screen: what a click does.
 pub const SCREEN_HINT: &str = "Click to tap. Swiping and typing need Trek on a Mac for now.";
 

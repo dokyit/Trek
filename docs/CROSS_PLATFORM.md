@@ -301,7 +301,9 @@ In order of how much each removes the problem, smallest first where that's close
    screen and taps on a PC no longer need one: CoreDevice's own services (the ones Xcode's Device
    Hub uses) reach the phone over its tunnel with no driver to sign (`trek_phone::coredevice`),
    behind the iPhone tool's Screen tab and agents' `phone_screenshot` and `phone_tap`, tested with
-   a made-up phone and checked live; what's left is a run against a real phone.
+   a made-up phone, checked live, and run on a real one (an iPhone 16 Pro Max with iOS 27.2, its
+   disk image installed from Xcode's folder as a cryptex, its screen in the tool). What's left is
+   seeing a tap's effect on a real phone.
 
 ## For someone changing Trek
 

@@ -4,12 +4,13 @@
 //!
 //! ```sh
 //! cargo run -p trek-phone --features coredevice --example pc_screen -- \
-//!     [--ddi <folder>] [--out phone.png] [--tap <x> <y>]
+//!     [--ddi <folder>] [--out phone.png] [--tap <x> <y>] [--unmount]
 //! ```
 //!
-//! `--ddi`: a folder holding Xcode's `Image.dmg`, `BuildManifest.plist` and
-//! `Image.dmg.trustcache` (a Mac with Xcode has them in `/Library/Developer/DeveloperDiskImages/
-//! iOS_DDI/`). `--tap`: pixels in the screenshot it saves.
+//! `--ddi`: Xcode's iOS_DDI folder, copied from a Mac with Xcode
+//! (`/Library/Developer/DeveloperDiskImages/iOS_DDI`), or a folder holding it.
+//! `--tap`: pixels in the screenshot it saves. `--unmount`: the disk image taken off the phone
+//! (until it's mounted again), to try mounting it from the start.
 
 #[cfg(any(target_os = "macos", windows))]
 fn run() -> Result<(), String> {
@@ -17,12 +18,14 @@ fn run() -> Result<(), String> {
     use trek_phone::{coredevice, device};
 
     let (mut ddi, mut out, mut tap) = (None, PathBuf::from("phone.png"), None);
+    let mut unmount = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
         match arg.as_str() {
             "--ddi" => ddi = Some(PathBuf::from(value("a folder")?)),
             "--out" => out = PathBuf::from(value("a path")?),
+            "--unmount" => unmount = true,
             "--tap" => {
                 let x: f32 = value("x")?.parse().map_err(|_| "--tap x isn't a number")?;
                 let y: f32 = value("y")?.parse().map_err(|_| "--tap y isn't a number")?;
@@ -30,7 +33,7 @@ fn run() -> Result<(), String> {
             }
             other => {
                 return Err(format!(
-                    "{other}? (--ddi <folder>, --out <png>, --tap <x> <y>)"
+                    "{other}? (--ddi <folder>, --out <png>, --tap <x> <y>, --unmount)"
                 ));
             }
         }
@@ -42,11 +45,20 @@ fn run() -> Result<(), String> {
         .ok_or("No iPhone on USB (plugged in, unlocked, and trusting this computer?)")?;
     println!("phone: {} (iOS {}, {})", phone.name, phone.ios, phone.udid);
 
+    if unmount {
+        coredevice::unmount(&phone.udid)?;
+        println!(
+            "developer disk image: taken off (mounted now: {})",
+            coredevice::mounted(&phone.udid)?
+        );
+        return Ok(());
+    }
+
     if coredevice::mounted(&phone.udid)? {
         println!("developer disk image: mounted already");
     } else {
         let folder = ddi.ok_or(
-            "The developer disk image isn't mounted: pass --ddi <folder> with Xcode's Image.dmg, BuildManifest.plist and Image.dmg.trustcache.",
+            "The developer disk image isn't mounted: pass --ddi <folder>, the iOS_DDI folder copied from a Mac with Xcode.",
         )?;
         println!("developer disk image: mounting, signed for this phone by Apple…");
         coredevice::mount(&phone.udid, &folder)?;

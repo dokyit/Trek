@@ -120,7 +120,7 @@ Known, of version 3: the stream and the elements ran only in the iOS 27 simulato
 
 ## On a PC
 
-The PC's iPhone tool (`panels/phone/windows.rs`) reaches the phone through Apple Mobile Device Service: its details, apps, files and AssistiveTouch, and its screen in the Screen tab through CoreDevice's services (`trek_phone::coredevice`) once its developer disk image is mounted, from a folder copied from a Mac with Xcode (`/Library/Developer/DeveloperDiskImages/iOS_DDI`). A still comes about every second while the tab is open; a click on it is a tap there. Agents get `phone_screenshot` and `phone_tap` too. Made-up phones for it (an isolated run never touches the real one unless started with `TREK_SHOT_PHONE=real`):
+The PC's iPhone tool (`panels/phone/windows.rs`) reaches the phone through Apple Mobile Device Service: its details, apps, files and AssistiveTouch, and its screen in the Screen tab through CoreDevice's services (`trek_phone::coredevice`) once its developer disk image is installed, from Xcode's iOS_DDI folder copied from a Mac (`/Library/Developer/DeveloperDiskImages/iOS_DDI`, or the folder a zip of it unpacks to). Newer iOS takes it as a cryptex, through cryptexd; older, through the image mounter, the image the folder's manifest names for the phone's chip. A still comes about every second while the tab is open; a click on it is a tap there. Agents get `phone_screenshot` and `phone_tap` too. Made-up phones for it (an isolated run never touches the real one unless started with `TREK_SHOT_PHONE=real`):
 
 ```powershell
 ./.agents/skills/verify-trek/scripts/trek-dev.ps1 control phone ready        # its apps; its disk image mounted
@@ -129,4 +129,6 @@ The PC's iPhone tool (`panels/phone/windows.rs`) reaches the phone through Apple
 ./.agents/skills/verify-trek/scripts/trek-dev.ps1 control phone "tapped 1"   # a check: the made-up phone took one tap
 ```
 
-With a real phone on the cable, `cargo run -p trek-phone --features coredevice --example pc_screen -- --ddi <folder> --tap <x> <y>` mounts the image, saves a screenshot and taps, without the app.
+With a real phone on the cable, `cargo run -p trek-phone --features coredevice --example pc_screen -- --ddi <folder> --tap <x> <y>` mounts the image, saves a screenshot and taps, without the app; `--unmount` takes the image off, to try installing it from the start. In the app, start the isolated run with `TREK_SHOT_PHONE=real` set, then `control phone real` and `click phone-tab#2`.
+
+Run on a real phone (an iPhone 16 Pro Max with iOS 27.2, from Windows): the image installs as a cryptex in about 4 seconds, and pictures are 1320×2868. A tap goes without an error, but what it did on screen isn't seen yet. The phone is someone's own: take two screenshots a few seconds apart before tapping, and if the screen changed they're using it, so don't tap. Keep taps seconds apart, since a quick second tap is a double tap (a like, in a video feed). Their screenshots stay out of commits and PRs.

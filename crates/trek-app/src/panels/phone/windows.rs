@@ -408,6 +408,27 @@ fn source() -> Arc<dyn Source> {
 const SCREEN_EVERY: Duration = Duration::from_millis(900);
 /// An agent's picture's long side, unless it asks for another (`max_edge`), as on a Mac.
 const SHOT_EDGE: u32 = 1200;
+/// The screen's picture is drawn from a copy no bigger than this on its long side: the tab shows
+/// it whole, and the phone's own picture (2868 pixels tall on a Pro Max) is 15 MB decoded.
+const SCREEN_DRAWN: u32 = 1600;
+
+/// The screen's picture as GPUI draws it (BGRA), scaled down to `SCREEN_DRAWN`. Decoded here,
+/// off the UI thread, and let go of when the next comes: GPUI's own `img` of the PNG would
+/// decode it on the way to the screen and keep every one for the run, a new one each second.
+fn screen_picture(png: &[u8]) -> Result<Arc<RenderImage>, String> {
+    let picture = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| format!("The screen's picture didn't read: {e}"))?;
+    let picture = if picture.width().max(picture.height()) > SCREEN_DRAWN {
+        picture.thumbnail(SCREEN_DRAWN, SCREEN_DRAWN)
+    } else {
+        picture
+    };
+    let mut pixels = picture.into_rgba8();
+    for px in pixels.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Ok(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
+}
 
 /// The phone's screen in the picture area (CoreDevice's: `trek_phone::coredevice`).
 #[derive(Clone)]
@@ -420,8 +441,9 @@ enum Screen {
     NeedsImage,
     /// Mounting it.
     Mounting,
-    /// On show: the latest picture, and its size in pixels.
-    Showing(Arc<Image>, (u32, u32)),
+    /// On show: the latest picture (a copy no bigger than it's drawn), and the screen's size in
+    /// pixels.
+    Showing(Arc<RenderImage>, (u32, u32)),
     /// It couldn't be shown: why.
     Failed(SharedString),
 }
@@ -513,6 +535,9 @@ pub struct PhonePanel {
     /// A picture on its way (one at a time), and when the last one came.
     shooting: bool,
     shot_at: Option<Instant>,
+    /// Pictures of the screen replaced since the last one came, let go of when the next does (a
+    /// window may draw one until then).
+    stale: Vec<Arc<RenderImage>>,
     /// The size of the last picture an agent was given, which its x/y are read in.
     agent_shot: Option<(u32, u32)>,
     /// Agents' pictures written so far (each its own file, which trek-mcp reads and removes).
@@ -562,6 +587,7 @@ impl PhonePanel {
             screen_of: None,
             shooting: false,
             shot_at: None,
+            stale: Vec::new(),
             agent_shot: None,
             shots: 0,
             #[cfg(feature = "shots")]
@@ -708,12 +734,12 @@ impl PhonePanel {
             self.apps = None;
             self.entries = None;
             self.removing = None;
-            self.screen = Screen::Unknown;
+            self.set_screen(Screen::Unknown);
             self.screen_of = None;
             return;
         }
         if self.screen_of != udid {
-            self.screen = Screen::Unknown;
+            self.set_screen(Screen::Unknown);
             self.screen_of = udid.clone();
             self.agent_shot = None;
         }
@@ -738,13 +764,20 @@ impl PhonePanel {
 
     // MARK: screen
 
+    /// Put the screen in `state`. A picture it showed waits in `stale` to be let go of.
+    fn set_screen(&mut self, state: Screen) {
+        if let Screen::Showing(picture, _) = std::mem::replace(&mut self.screen, state) {
+            self.stale.push(picture);
+        }
+    }
+
     /// Whether the phone's developer disk image is mounted: then its picture, else its folder
     /// asked for.
     fn ask_screen(&mut self, cx: &mut Context<Self>) {
         let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
             return;
         };
-        self.screen = Screen::Looking;
+        self.set_screen(Screen::Looking);
         cx.notify();
         let (source, generation) = (self.source.clone(), self.generation);
         self.background(
@@ -756,8 +789,8 @@ impl PhonePanel {
                 }
                 match mounted {
                     Ok(true) => this.shoot(cx),
-                    Ok(false) => this.screen = Screen::NeedsImage,
-                    Err(why) => this.screen = Screen::Failed(why.into()),
+                    Ok(false) => this.set_screen(Screen::NeedsImage),
+                    Err(why) => this.set_screen(Screen::Failed(why.into())),
                 }
                 cx.notify();
             },
@@ -776,7 +809,10 @@ impl PhonePanel {
         let (source, generation) = (self.source.clone(), self.generation);
         self.background(
             cx,
-            move || source.screenshot(&udid),
+            move || {
+                let shot = source.screenshot(&udid)?;
+                Ok::<_, String>((screen_picture(&shot.png)?, (shot.width, shot.height)))
+            },
             move |this, shot, cx| {
                 if this.generation != generation {
                     return;
@@ -784,17 +820,18 @@ impl PhonePanel {
                 this.shooting = false;
                 this.shot_at = Some(Instant::now());
                 match shot {
-                    Ok(shot) => {
-                        this.screen = Screen::Showing(
-                            Arc::new(Image::from_bytes(ImageFormat::Png, shot.png)),
-                            (shot.width, shot.height),
-                        )
+                    Ok((picture, size)) => {
+                        // The ones replaced before the last: no window draws them any more.
+                        for old in this.stale.drain(..) {
+                            cx.drop_image(old, None);
+                        }
+                        this.set_screen(Screen::Showing(picture, size));
                     }
                     // A picture on show stays, with why the next didn't come.
                     Err(why) if matches!(this.screen, Screen::Showing(..)) => {
                         this.notice = Some(why.into())
                     }
-                    Err(why) => this.screen = Screen::Failed(why.into()),
+                    Err(why) => this.set_screen(Screen::Failed(why.into())),
                 }
                 cx.notify();
             },
@@ -826,7 +863,7 @@ impl PhonePanel {
         let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
             return;
         };
-        self.screen = Screen::Mounting;
+        self.set_screen(Screen::Mounting);
         cx.notify();
         let (source, generation) = (self.source.clone(), self.generation);
         self.background(
@@ -838,10 +875,10 @@ impl PhonePanel {
                 }
                 match mounted {
                     Ok(()) => {
-                        this.screen = Screen::Looking;
+                        this.set_screen(Screen::Looking);
                         this.shoot(cx);
                     }
-                    Err(why) => this.screen = Screen::Failed(why.into()),
+                    Err(why) => this.set_screen(Screen::Failed(why.into())),
                 }
                 cx.notify();
             },
@@ -884,6 +921,19 @@ impl PhonePanel {
             Screen::Showing(_, size) => Some(*size),
             _ => None,
         }
+    }
+
+    /// The screen's picture again, as the tab takes one each second (the tests').
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn shoot_again(&mut self, cx: &mut Context<Self>) {
+        self.shoot(cx);
+    }
+
+    /// The pictures of the screen the tool holds: the one on show, and the one before it until
+    /// the next comes (the tests').
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn screen_pictures(&self) -> usize {
+        self.stale.len() + usize::from(matches!(self.screen, Screen::Showing(..)))
     }
 
     fn load_apps(&mut self, cx: &mut Context<Self>) {
@@ -1320,7 +1370,7 @@ impl PhonePanel {
         if let Some(made_up) = made_up {
             self.source = made_up;
         }
-        self.screen = Screen::Unknown;
+        self.set_screen(Screen::Unknown);
         self.screen_of = None;
         self.shooting = false;
         self.shot_at = None;
@@ -2693,10 +2743,36 @@ impl Run<'_> {
 mod tests {
     // Not `super::*`: gpui's own `test` attribute would come with it.
     use super::{
-        HandHolding, Sensitive, ask_text, local_path, needs_asking, on_picture, starting, tools,
+        HandHolding, SCREEN_DRAWN, Sensitive, ask_text, local_path, needs_asking, on_picture,
+        screen_picture, starting, tools,
     };
     use gpui_kit::{Bounds, point, px, size};
     use serde_json::json;
+
+    /// A Pro Max's screen (1320×2868) is drawn from a copy no taller than the tab needs, in
+    /// GPUI's colour order (blue first).
+    #[test]
+    fn the_screen_is_drawn_from_a_copy_no_bigger_than_it_needs() {
+        let picture = image::RgbaImage::from_pixel(1320, 2868, image::Rgba([10, 20, 30, 255]));
+        let mut png = Vec::new();
+        picture
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let drawn = screen_picture(&png).unwrap();
+        let size = drawn.size(0);
+        assert_eq!(size.height.0, SCREEN_DRAWN as i32);
+        assert!((735..=737).contains(&size.width.0), "{size:?}");
+        assert_eq!(&drawn.as_bytes(0).unwrap()[..4], &[30, 20, 10, 255]);
+        // A small one stays its size.
+        let small = image::RgbaImage::from_pixel(390, 844, image::Rgba([0, 0, 0, 255]));
+        let mut png = Vec::new();
+        small
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let size = screen_picture(&png).unwrap().size(0);
+        assert_eq!((size.width.0, size.height.0), (390, 844));
+        assert!(screen_picture(b"not a picture").is_err());
+    }
 
     /// The same rules as the Mac's iPhone tool (`panels/phone.rs`).
     #[test]
