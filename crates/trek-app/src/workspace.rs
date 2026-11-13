@@ -571,6 +571,14 @@ pub enum ForkAt {
 /// most such checkpoints (docs/PERFORMANCE.md).
 pub const CHECKPOINT_WAIT: Duration = Duration::from_millis(100);
 
+/// How many idle agent sessions, the ones used last, are kept for `RECENT_IDLE_MINUTES`; the
+/// rest go after `OTHER_IDLE_MINUTES` (`Workspace::reap_idle_sessions`). Each is a process of
+/// 120 to 250 MB with its MCP servers, and a thread whose session went resumes it on its next
+/// message (about a quarter of a second to start it again).
+pub const RECENT_IDLE_SESSIONS: usize = 3;
+pub const RECENT_IDLE_MINUTES: u64 = 15;
+pub const OTHER_IDLE_MINUTES: u64 = 5;
+
 /// Said under calls an earlier run left going in the background when Trek quit.
 pub const ORPHANS_ENDED: &str = "Work left running in the background stopped when Trek closed";
 
@@ -8864,9 +8872,11 @@ impl Workspace {
         .detach();
     }
 
-    /// Shut down agent processes idle for 15 minutes (150–250 MB each) that nothing waits on,
-    /// and the pre-warmed draft session after 10. A thread's next message starts its session
-    /// again, resuming the agent's conversation. `now` is the executor's clock (a test's own).
+    /// Shut down agent processes (120–250 MB each) that nothing waits on: the
+    /// `RECENT_IDLE_SESSIONS` used last after `RECENT_IDLE_MINUTES` idle, the others after
+    /// `OTHER_IDLE_MINUTES`, and the pre-warmed draft session after 10. A thread on screen keeps
+    /// its own. A thread's next message starts its session again, resuming the agent's
+    /// conversation. `now` is the executor's clock (a test's own).
     pub fn reap_idle_sessions(&mut self, now: Instant) {
         let idle_for = |at: Option<Instant>, limit: u64| {
             at.is_none_or(|t| now.saturating_duration_since(t) > Duration::from_secs(limit * 60))
@@ -8877,19 +8887,32 @@ impl Workspace {
             .filter(|id| self.on_screen(id))
             .cloned()
             .collect();
-        for (id, live) in self.live.iter_mut() {
-            // Not while it runs anything in the background: the session takes that with it.
-            let quiet = live.turn_started.is_none()
+        // Not while it runs anything in the background: the session takes that with it.
+        let quiet = |live: &LiveThread| {
+            live.commands.is_some()
+                && live.turn_started.is_none()
                 && live.background.is_empty()
-                && live.permissions.is_empty();
-            if quiet
-                && live.commands.is_some()
-                && idle_for(live.last_active, 15)
-                && !shown.contains(id)
-            {
-                if let Some(tx) = live.commands.take() {
-                    let _ = tx.try_send(Command::Shutdown);
-                }
+                && live.permissions.is_empty()
+        };
+        let mut idle: Vec<(Option<Instant>, String)> = self
+            .live
+            .iter()
+            .filter(|(_, live)| quiet(live))
+            .map(|(id, live)| (live.last_active, id.clone()))
+            .collect();
+        // Used last first (a session never used counts as the oldest).
+        idle.sort_by(|a, b| b.0.cmp(&a.0));
+        for (rank, (at, id)) in idle.into_iter().enumerate() {
+            let limit = if rank < RECENT_IDLE_SESSIONS {
+                RECENT_IDLE_MINUTES
+            } else {
+                OTHER_IDLE_MINUTES
+            };
+            if !idle_for(at, limit) || shown.contains(&id) {
+                continue;
+            }
+            if let Some(tx) = self.live.get_mut(&id).and_then(|l| l.commands.take()) {
+                let _ = tx.try_send(Command::Shutdown);
             }
         }
         if self
