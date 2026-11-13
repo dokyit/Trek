@@ -46,6 +46,9 @@ const MANIFEST: &str = "BuildManifest.plist";
 /// phone's own, larger mask makes it negotiate a video it can't send).
 const CLIENT_SUPPORTED_FEATURES: u64 = 140;
 
+/// How long the media stream stays after a touch's events are sent, for the phone to take them.
+const TOUCH_LANDS: Duration = Duration::from_millis(700);
+
 /// The longest a call waits for its answer (a mount uploads the image and asks Apple's server).
 const ANSWER_WITHIN: Duration = Duration::from_secs(180);
 
@@ -549,16 +552,22 @@ async fn touch(udid: &str, session: &mut Option<Session>, x: f32, y: f32) -> Res
     let (mut display, _audio, _video) = start_media_stream(&mut s.adapter, &mut s.rsd).await?;
     // The touch surface needs a moment to take the stream as its authority.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let tapped = async {
-        let mut hid = UniversalHidServiceClient::connect_rsd(&mut s.adapter, &mut s.rsd)
-            .await
-            .map_err(|e| service_missing("touch service", e))?;
-        hid.tap(touch_point(x), touch_point(y))
-            .await
-            .map_err(|e| format!("The tap didn't go: {e:?}"))
-    }
-    .await;
+    let mut hid = match UniversalHidServiceClient::connect_rsd(&mut s.adapter, &mut s.rsd).await {
+        Ok(hid) => hid,
+        Err(e) => {
+            let _ = display.stop_media_stream().await;
+            return Err(service_missing("touch service", e));
+        }
+    };
+    let tapped = hid
+        .tap(touch_point(x), touch_point(y))
+        .await
+        .map_err(|e| format!("The tap didn't go: {e:?}"));
+    // The touch's events go without an answer: the stream, which lets them in, and the connection
+    // they came on stay until the phone has taken them (stopped at once, the lift was lost).
+    tokio::time::sleep(TOUCH_LANDS).await;
     let _ = display.stop_media_stream().await;
+    drop(hid);
     tapped
 }
 
