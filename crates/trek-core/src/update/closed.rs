@@ -64,6 +64,168 @@ fn running_in(ps: &str, exe: &Path) -> bool {
 /// Check for a newer Trek than the one at `app` and, with `apply` and Trek closed, install it.
 /// Returns what happened, in a line for the log ("Installed Trek 0.4.27 (was 0.4.26)"); an error
 /// is a line too.
+/// Windows: the installed Trek updated while it's closed, by `trek-mcp win-update` beside it
+/// (its scheduled task, `task`): the same check, download and staging as Trek's own updater, then
+/// the swap `trek-update` makes once this process has exited (`install` and `swap_on_exit`, as
+/// when Trek quits with an update ready). Never while Trek is open.
+#[cfg(windows)]
+pub async fn update_windows(apply: bool) -> Result<String> {
+    let root = super::install_root().context("Trek can't tell which folder it's in")?;
+    let exe = root.join("trek.exe");
+    let installed = super::exe_version(&exe)
+        .with_context(|| format!("there's no Trek at {}", root.display()))?;
+    if let Some(blocker) = super::blocker() {
+        return Ok(format!(
+            "Trek {installed} can't update itself: {}",
+            blocker.message()
+        ));
+    }
+    let settings = crate::settings::Settings::load().updates;
+    if !settings.auto_check {
+        return Ok(format!(
+            "Trek {installed}: automatic updates are off in its settings"
+        ));
+    }
+    let open = || !crate::procs::running_from(std::slice::from_ref(&exe)).is_empty();
+    let found = check_against(&manifest_urls(&settings), settings.channel, &installed)
+        .await
+        .context("couldn't check for updates")?;
+    let update = match plan(found, open()) {
+        Plan::UpToDate => return Ok(format!("Trek {installed} is up to date")),
+        Plan::Coming(v) => {
+            return Ok(format!(
+                "Trek {v} is out; this PC's build is on its way (Trek {installed} here)"
+            ));
+        }
+        Plan::LeaveToTrek(v) => {
+            return Ok(format!(
+                "Trek {v} is out and Trek {installed} is open: it installs the update itself"
+            ));
+        }
+        Plan::Install(u) if !apply => {
+            return Ok(format!(
+                "would install Trek {} (Trek {installed} is closed)",
+                u.version
+            ));
+        }
+        Plan::Install(u) => u,
+    };
+    let version = update.version.clone();
+    let cancel = AtomicBool::new(false);
+    let archive = download(&update, &cancel, |_| {})
+        .await
+        .with_context(|| format!("couldn't download Trek {version}"))?;
+    let staged = stage_for(&archive, &version, Some(root.clone()), &installed, &cancel)
+        .with_context(|| format!("Trek {version} didn't check out"))?;
+    if open() {
+        super::discard(&staged);
+        return Ok(format!(
+            "Trek {installed} opened while Trek {version} downloaded: it installs the update itself"
+        ));
+    }
+    let ready = super::install(&staged)
+        .with_context(|| format!("couldn't get Trek {version} ready to install"))?;
+    super::swap_on_exit(&ready).with_context(|| format!("couldn't install Trek {version}"))?;
+    Ok(format!(
+        "Installing Trek {version} (was {installed}): trek-update swaps it in as this ends"
+    ))
+}
+
+/// Windows: the scheduled task that runs `trek-mcp win-update` every half hour while the user is
+/// signed in (Settings › Updates › Update while Trek is closed). The user's own task, under
+/// Task Scheduler's Trek folder; nothing runs as an administrator.
+#[cfg(windows)]
+pub mod task {
+    use anyhow::{Result, bail};
+    use std::path::Path;
+
+    /// Its name in Task Scheduler (a capture build uses another: it mustn't touch the installed
+    /// Trek's).
+    pub const NAME: &str = r"Trek\Update while closed";
+
+    /// `schtasks` arguments that make the task run `trek_mcp` every half hour, replacing one
+    /// there before.
+    pub fn create_args(name: &str, trek_mcp: &Path) -> Vec<String> {
+        [
+            "/Create",
+            "/TN",
+            name,
+            "/TR",
+            &format!("\"{}\" win-update", trek_mcp.display()),
+            "/SC",
+            "MINUTE",
+            "/MO",
+            "30",
+            "/F",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    fn schtasks(args: &[String]) -> Result<std::process::Output> {
+        Ok(crate::procs::command("schtasks.exe").args(args).output()?)
+    }
+
+    /// The task `name`, running `trek_mcp`.
+    pub fn register(name: &str, trek_mcp: &Path) -> Result<()> {
+        let out = schtasks(&create_args(name, trek_mcp))?;
+        if !out.status.success() {
+            bail!(
+                "Task Scheduler said no: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// The task `name` gone (nothing to do when there's none).
+    pub fn unregister(name: &str) -> Result<()> {
+        if registered(name) {
+            let out = schtasks(&["/Delete", "/TN", name, "/F"].map(String::from))?;
+            if !out.status.success() {
+                bail!(
+                    "Task Scheduler said no: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the task `name` is there.
+    pub fn registered(name: &str) -> bool {
+        schtasks(&["/Query", "/TN", name].map(String::from)).is_ok_and(|out| out.status.success())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_task_runs_trek_mcp_from_its_folder_every_half_hour() {
+            let args = create_args(
+                NAME,
+                Path::new(r"C:\Users\me\AppData\Local\Programs\Trek\trek-mcp.exe"),
+            );
+            assert_eq!(
+                args,
+                [
+                    "/Create",
+                    "/TN",
+                    r"Trek\Update while closed",
+                    "/TR",
+                    r#""C:\Users\me\AppData\Local\Programs\Trek\trek-mcp.exe" win-update"#,
+                    "/SC",
+                    "MINUTE",
+                    "/MO",
+                    "30",
+                    "/F"
+                ]
+            );
+        }
+    }
+}
+
 pub async fn update(app: &Path, apply: bool) -> Result<String> {
     let installed =
         bundle_version(app).with_context(|| format!("there's no Trek at {}", app.display()))?;

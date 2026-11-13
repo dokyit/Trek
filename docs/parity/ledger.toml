@@ -656,12 +656,15 @@ tests = ["crates/trek-update/tests/swap.rs"]
 [[feature]]
 id = "update-while-closed"
 area = "Install"
-what = "Trek updated while it's closed, from the phone"
+what = "Trek updated while it's closed"
 macos = "yes"
-windows = "no"
-live_skip = "Needs a paired iPhone running its updater against a Mac (phone_update.rs); its tests cover the helper."
-note = "The phone's updater reaches a Mac only. On Windows an update installs at Trek's next launch."
-code = ["crates/trek-core/src/update/closed.rs"]
+windows = "yes"
+live_windows = ["route settings:updates", "wait 300", "reveal update-while-closed", "click update-while-closed", "wait 3000", "update-task registered", "click update-while-closed", "wait 3000", "update-task gone"]
+live_ci = "It sets up a task in Task Scheduler (the capture build's own, never the installed Trek's) and takes it away again: on someone's own PC that's a change to their Task Scheduler."
+live_skip = "On a Mac it's the phone updater's LaunchAgent that runs `trek-mcp mac-update` (ios/scripts/phone-update.sh), set up with the iPhone app from a Mac: its tests cover the update."
+how = { macos = "The phone updater's LaunchAgent runs `trek-mcp mac-update` every half hour: with Trek closed and a newer release out, it's checked, downloaded and installed over the app.", windows = "Settings › Updates › Update while Trek is closed: a task in Task Scheduler (Trek › Update while closed) runs `trek-mcp win-update` beside Trek every half hour while the user is signed in. With Trek closed and a newer release out, it's checked, downloaded and staged as Trek's own updater does, and trek-update swaps it in as that run ends; never while Trek is open." }
+note = "Windows' is Trek's own setting, off until it's turned on: a PC has no phone updater to set it up."
+code = ["crates/trek-core/src/update/closed.rs", "crates/trek-mcp/src/main.rs"]
 
 [[feature]]
 id = "win-h-in-trek"

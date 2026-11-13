@@ -1924,6 +1924,22 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     if verb == "checks-demo" {
         return checks_demo(ws, arg, cx);
     }
+    // `update-task registered|gone` (Windows): the scheduled task that updates Trek while it's
+    // closed, as Task Scheduler has it (the capture build's own name: never the installed Trek's).
+    if verb == "update-task" {
+        anyhow::ensure!(cfg!(windows), "update-task: Windows' alone");
+        #[cfg(windows)]
+        {
+            let there =
+                trek_core::update::closed::task::registered(crate::workspace::update_task_name());
+            match arg.trim() {
+                "registered" => anyhow::ensure!(there, "update-task: no task in Task Scheduler"),
+                "gone" => anyhow::ensure!(!there, "update-task: the task is still there"),
+                other => anyhow::bail!("update-task {other}? (registered|gone)"),
+            }
+        }
+        return Ok(());
+    }
     // `opencode-history <n>`: OpenCode 1.x's and 2's sessions read as one history, as Trek reads
     // OpenCode's folder: a database both wrote (sessions in 1.x's tables, 2's, and both:
     // trek-core's fixture), in a folder of the check's own, holds `n` threads, each once.

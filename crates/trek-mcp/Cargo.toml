@@ -40,6 +40,8 @@ trek-phone = { path = "../trek-phone" }
 trek-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# `trek-mcp win-update`: Trek's own updater, for the Trek beside it while it's closed.
+trek-core.workspace = true
 # Input (SendInput), the window list (EnumWindows, DWM), screenshots (GDI) and app launch (ShellExecuteW).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

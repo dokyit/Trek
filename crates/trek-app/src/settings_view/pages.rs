@@ -1618,7 +1618,19 @@ impl SettingsView {
                     self.switch("auto-dl", s.updates.auto_download, |s, v| s.updates.auto_download = v),
                     cx,
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(cfg!(windows).then(|| {
+                Self::row(
+                    "Update while Trek is closed",
+                    "Every half hour while you're signed in to Windows, a closed Trek is updated to the newest release on its channel (a task in Task Scheduler, under Trek).",
+                    self.switch("update-while-closed", s.updates.while_closed, |s, v| {
+                        s.updates.while_closed = v
+                    }),
+                    cx,
+                )
+            }))
+            .collect(),
             cx,
         ));
         if !history.is_empty() {

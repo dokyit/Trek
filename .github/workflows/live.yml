@@ -254,13 +254,14 @@ jobs:
           if (-not (Select-String -Path start.json -Pattern '"running": true' -Quiet)) { exit 1 }
 
       # The runner's Windows has no HEIF or HEVC codec (Microsoft's HEIF and HEVC Video
-      # Extensions): no HEIC photo can be made there to attach.
+      # Extensions): no HEIC photo can be made there to attach. And it's Windows Server, which has
+      # no share window: Windows asks an app for nothing to share there.
       - name: Live checks
         run: |
           $status = pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 status | ConvertFrom-Json
           "RUNTIME=$($status.runtime_dir)" >> $env:GITHUB_ENV
           cargo build -p trek-parity --bin parity-live --locked
-          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$($status.runtime_dir)\shot" --report live-windows.md --ci --skip "heic-photos=the runner's Windows has no HEIF or HEVC codec"
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$($status.runtime_dir)\shot" --report live-windows.md --ci --skip "heic-photos=the runner's Windows has no HEIF or HEVC codec" --skip "share-sheet=the runner's Windows Server has no share window (its steps pass on Windows 11: the ledger's note)"
           exit $LASTEXITCODE
 
       - name: Report

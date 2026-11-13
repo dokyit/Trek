@@ -44,6 +44,8 @@ USAGE:
     trek-mcp phone-device the iPhone's apps and files over USB, no Xcode (run alone for help)
     trek-mcp mac-update [--status] [--app PATH]
                           update the installed Trek while it's closed (macOS)
+    trek-mcp win-update [--status]
+                          update the Trek beside it while it's closed (Windows; its scheduled task)
     trek-mcp --version
 ";
 
@@ -108,6 +110,26 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         "mac-update" => {
             eprintln!("trek-mcp: the {arg} tools run only on macOS");
+            std::process::exit(2);
+        }
+        #[cfg(windows)]
+        "win-update" => {
+            let status = std::env::args().skip(2).any(|a| a == "--status");
+            let run = trek_core::update::closed::update_windows(!status);
+            std::process::exit(match trek_core::runtime().block_on(run) {
+                Ok(line) => {
+                    println!("{line}");
+                    0
+                }
+                Err(e) => {
+                    println!("{e:#}");
+                    1
+                }
+            });
+        }
+        #[cfg(not(windows))]
+        "win-update" => {
+            eprintln!("trek-mcp: the {arg} tools run only on Windows");
             std::process::exit(2);
         }
         "orchestrate" => {

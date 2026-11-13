@@ -1124,6 +1124,9 @@ pub struct Updates {
     pub seen_notes: String,
     /// Look for new versions of the agent CLIs (`agent_update`) at launch and every 12 hours.
     pub check_agents: bool,
+    /// Windows: update the installed Trek while it's closed, every half hour while the user is
+    /// signed in (a scheduled task runs `trek-mcp win-update`: `update::closed::task`).
+    pub while_closed: bool,
 }
 
 impl Default for Updates {
@@ -1135,6 +1138,7 @@ impl Default for Updates {
             feed_url: crate::update::OFFICIAL_FEED.into(),
             seen_notes: String::new(),
             check_agents: true,
+            while_closed: false,
         }
     }
 }

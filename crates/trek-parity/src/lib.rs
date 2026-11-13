@@ -414,6 +414,7 @@ pub fn checks(step: &str) -> bool {
         "phone-server" => words.next() == Some("reach"),
         "toasts" => words.next().is_some_and(|w| w != "clear"),
         "opencode-history" => true,
+        "update-task" => true,
         _ => false,
     }
 }
