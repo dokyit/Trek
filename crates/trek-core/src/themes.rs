@@ -867,6 +867,24 @@ mod tests {
         dir
     }
 
+    /// `0xRRGGBB`'s hue, in degrees.
+    fn hue(c: u32) -> f64 {
+        let [r, g, b] = [16, 8, 0].map(|s| ((c >> s) & 0xFF) as f64 / 255.);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let d = max - min;
+        if d == 0. {
+            return 0.;
+        }
+        let h = if max == r {
+            ((g - b) / d).rem_euclid(6.)
+        } else if max == g {
+            (b - r) / d + 2.
+        } else {
+            (r - g) / d + 4.
+        };
+        h * 60.
+    }
+
     #[test]
     fn the_built_in_themes_read_and_trek_comes_first() {
         let all = built_in();
@@ -898,6 +916,17 @@ mod tests {
                 assert!(
                     contrast(p.muted.unwrap().rgb(), window) >= 3.5,
                     "{} muted",
+                    t.id
+                );
+                // An accent button's label reads as body text does, and the accent can't be
+                // taken for the danger red (Night's and Paper's `danger.background`): Allow
+                // and Stop sit side by side.
+                let (accent, on) = (p.accent.unwrap().rgb(), p.on_accent.unwrap().rgb());
+                assert!(contrast(on, accent) >= 4.5, "{} label on accent", t.id);
+                let apart = (hue(accent) - hue(0xD93A3F)).rem_euclid(360.);
+                assert!(
+                    apart.min(360. - apart) >= 15.,
+                    "{} accent hue too near danger",
                     t.id
                 );
             }

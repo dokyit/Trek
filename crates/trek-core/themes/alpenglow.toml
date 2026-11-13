@@ -32,7 +32,7 @@ muted = "#9799B3"
 border = "#272D48"
 
 [light]
-accent = "#C9551F"
+accent = "#B24A17"
 on_accent = "#FFFFFF"
 window = "#FBF6F0"
 sidebar = "#F5EEE6"

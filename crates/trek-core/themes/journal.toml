@@ -1,7 +1,7 @@
 # Journal: Trek as a well-set page. Warm paper, the conversation in a reading serif at a roomy
-# size, red-ink accents, softer corners and unhurried motion.
+# size, terracotta accents, softer corners and unhurried motion.
 name = "Journal"
-description = "Warm paper, the conversation set in a serif, red-ink accents."
+description = "Warm paper, the conversation set in a serif, terracotta accents."
 mode = "light"
 
 [fonts]
@@ -17,7 +17,7 @@ density = "roomy"
 style = "calm"
 
 [light]
-accent = "#B93A27"
+accent = "#B0552C"
 on_accent = "#FFFFFF"
 window = "#FBF8F2"
 sidebar = "#F3EEE5"
@@ -28,7 +28,7 @@ muted = "#776C61"
 border = "#E4DACC"
 
 [dark]
-accent = "#EE7A5E"
+accent = "#E0895A"
 on_accent = "#1C0904"
 window = "#14110E"
 sidebar = "#191612"
