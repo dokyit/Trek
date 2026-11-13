@@ -721,10 +721,10 @@ id = "agent-tool-families"
 area = "Agent tools"
 what = "Agents' Simulator, iPhone and Trek-update tools"
 macos = "yes"
-windows = "partial"
+windows = "yes"
 live_macos = ["route project:{project}", "tools simulator", "wait shown sim-devices 180000", "count sim-devices 1"]
 live_windows = ["phone agent", "wait 600", "count phone-agent-strip 1", "count phone-agent-stop 1"]
-note = "On Windows agents get the iPhone's apps and files tools (iphone-tool). The Simulator's need Xcode, and Trek's update helper for agents is the Mac's own."
+how = { macos = "`trek-mcp simulator` (simctl and AXe), `trek-mcp phone` through Trek's iPhone tool, and `trek-mcp mac-update`, which the phone updater runs to update Trek while it's closed.", windows = "`trek-mcp phone` through the PC's iPhone tool, with every phone tool a Mac has (iphone-tool), and `trek-mcp win-update`, which its scheduled task runs to update Trek while it's closed (update-while-closed). There's no `trek-mcp simulator`: the iOS Simulator needs Xcode (simulator, the Mac's alone)." }
 code = ["crates/trek-mcp/src/main.rs", "crates/trek-mcp/src/rpc.rs"]
 
 [[feature]]

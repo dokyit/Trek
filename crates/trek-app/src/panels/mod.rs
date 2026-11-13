@@ -10,7 +10,8 @@ pub mod git;
 pub mod ide_search;
 #[cfg(target_os = "macos")]
 pub mod phone;
-// A PC's iPhone tool: the phone's apps and files (its screen and taps are the Mac's for now).
+// A PC's iPhone tool: its screen through CoreDevice's services, its apps and files through Apple
+// Mobile Device Service.
 #[cfg(windows)]
 #[path = "phone/windows.rs"]
 pub mod phone;
