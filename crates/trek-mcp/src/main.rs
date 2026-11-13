@@ -39,8 +39,7 @@ USAGE:
     trek-mcp video        watch_video: a video's frames and transcript (needs ffmpeg)
     trek-mcp orchestrate  sub-agents: delegate work to other agents and models in Trek
     trek-mcp browser      browser use in Trek's Browser tool (run by the Trek that started the agent)
-    trek-mcp phone        the user's real iPhone through Trek's iPhone tool (its apps and
-                          files on Windows)
+    trek-mcp phone        the user's real iPhone through Trek's iPhone tool
     trek-mcp phone-device the iPhone's apps and files over USB, no Xcode (run alone for help)
     trek-mcp mac-update [--status] [--app PATH]
                           update the installed Trek while it's closed (macOS)
@@ -89,7 +88,8 @@ fn main() {
             eprintln!("trek-mcp: the browser tools run only on macOS and Windows");
             std::process::exit(2);
         }
-        // On Windows: the phone's apps and files, through Apple Mobile Device Service.
+        // On Windows: its screen through CoreDevice's services, its apps and files through Apple
+        // Mobile Device Service.
         #[cfg(any(target_os = "macos", windows))]
         "phone" => serve(Box::new(phone::Phone::from_env())),
         #[cfg(any(target_os = "macos", windows))]

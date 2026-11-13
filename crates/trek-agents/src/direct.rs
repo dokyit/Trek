@@ -7577,8 +7577,10 @@ mod tests {
                 log.lock()
                     .unwrap()
                     .push(String::from_utf8_lossy(&data[head_end..]).into_owned());
+                // `Connection: close`: each reply's connection is shut after it, so the client
+                // mustn't pool it for the next request (a retry sent down it failed on CI's Mac).
                 let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 socket.write_all(response.as_bytes()).await.unwrap();

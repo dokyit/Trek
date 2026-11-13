@@ -1,8 +1,9 @@
-//! Updating the installed Trek while it's closed (macOS): `trek-mcp mac-update`, run by the phone
-//! updater's LaunchAgent (`ios/scripts/phone-update.sh`) every half hour. Trek updates itself only
-//! while it runs (it downloads, and installs on quit or "Restart to update"), so a Mac where Trek
-//! stayed closed kept an old version all day while a new one was out, and the iPhone, built at the
-//! Mac's version, with it.
+//! Updating the installed Trek while it's closed. On macOS it's `trek-mcp mac-update`, run by the
+//! phone updater's LaunchAgent (`ios/scripts/phone-update.sh`) every half hour; on Windows,
+//! `trek-mcp win-update`, run by the task Settings › Updates sets up (`update_windows`, `task`).
+//! Trek updates itself only while it runs (it downloads, and installs on quit or "Restart to
+//! update"), so a Mac where Trek stayed closed kept an old version all day while a new one was
+//! out, and the iPhone, built at the Mac's version, with it.
 //!
 //! The same path as Trek's own updater, for the app at a given place rather than the one running:
 //! the channel and feed from Trek's settings (`check_against`), the download checked against the

@@ -1067,8 +1067,8 @@ impl PanelTool {
     ];
 
     /// The tools this platform has, in `ALL`'s order: the iOS Simulator needs Xcode's tools, so
-    /// Windows has no Simulator tab. Its iPhone tab is the phone's apps and files (its screen and
-    /// taps need the Mac's capture and Bluetooth for now).
+    /// Windows has no Simulator tab. Its iPhone tab reaches the phone another way (CoreDevice's
+    /// services and Apple Mobile Device Service), with the same tools.
     pub fn offered() -> Vec<PanelTool> {
         Self::offered_on(crate::words::is_windows())
     }

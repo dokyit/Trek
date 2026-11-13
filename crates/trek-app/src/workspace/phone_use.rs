@@ -1,5 +1,5 @@
 //! iPhone use, the workspace's part: the `trek-phone` server every session gets on macOS and
-//! Windows (there, the phone's apps and files), its calls (over Trek's local channel, as the
+//! Windows (the same tools, in the PC's words there), its calls (over Trek's local channel, as the
 //! browser tools' are) handed to the main window's iPhone tool (`panels::phone::PhoneCall`). What
 //! needs the user's approval goes to the thread's card through the same plumbing as the Browser's
 //! (`Workspace::browser_ask`).
@@ -82,8 +82,7 @@ pub(super) fn server(bin: String, env: Vec<(String, String)>) -> McpServer {
 }
 
 impl Workspace {
-    /// Whether sessions get Trek's iPhone tools: on in settings, on a Mac or a PC (where they're
-    /// the phone's apps and files).
+    /// Whether sessions get Trek's iPhone tools: on in settings, on a Mac or a PC.
     pub(super) fn phone_tools(&self) -> bool {
         self.settings.tools.phone && cfg!(any(target_os = "macos", windows))
     }

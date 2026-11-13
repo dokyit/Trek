@@ -2147,8 +2147,8 @@ impl SettingsView {
         ));
         #[cfg(any(target_os = "macos", windows))]
         {
-            // On Windows the tools are the phone's apps and files: its screen and taps are the
-            // Mac's for now, and its words say so (`trek_phone::pc`).
+            // On Windows the words are the PC's (`trek_phone::pc`): the same tools, reached through
+            // CoreDevice's services and Apple Mobile Device Service, not Bluetooth or Trek Driver.
             let pc = crate::words::is_windows();
             out.push(Self::heading("iPhone", cx));
             out.push(ui::group(
