@@ -68,7 +68,11 @@
 //! each timed to its paint), `perf open <title>` (the thread with this in its title opens: until its
 //! history is loaded, and the frame that shows it), `perf mem <label>` (what Trek holds: the
 //! transcripts in memory and the main window's parsed answers, pictures and page snapshots) and
-//! `perf mark <label>`. `perf scroll @center …` turns the wheel over the middle of the window.
+//! `perf mark <label>` (with the wall clock, `at`). `perf scroll @center …` turns the wheel over the middle of the window.
+//! For ADEMark's tests (ademark.dev): `perf probe <label> [n]` (its echo timer: the probe string typed
+//! every 50 ms ±20 % into whatever has the keyboard, waiting for the window if it isn't open yet,
+//! until the frame showing the n-th character taken is painted) and `perf firstword <label>` (Enter
+//! in the focused composer, until the frame showing the answer's first text).
 //! Lines starting with `#` are comments.
 
 use crate::workspace::{PanelTool, Route, SettingsPage, Workspace};
@@ -1527,6 +1531,10 @@ const TYPED: &str =
 async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
     use crate::perf::{BUDGET, ms, summarize};
     anyhow::ensure!(crate::perf::on(), "perf: launch with TREK_PERF=1");
+    // Before the main window is looked for: a probe written before launch waits for it.
+    if arg.split_whitespace().next() == Some("probe") {
+        return perf_probe(ws, arg, cx).await;
+    }
     let main = cx
         .update(|cx| ws.read(cx).main_window)
         .ok_or_else(|| anyhow::anyhow!("no main window"))?;
@@ -1542,7 +1550,77 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
         format!("frames={} {}", s.n, s.pairs("frame_"))
     };
     match args.first().copied() {
-        Some("mark") => tracing::info!("perf: mark label={}", args.get(1).unwrap_or(&"-")),
+        Some("mark") => tracing::info!(
+            "perf: mark label={} at={}",
+            args.get(1).unwrap_or(&"-"),
+            chrono::Utc::now().timestamp_millis()
+        ),
+        // Enter in the focused composer, then the first frame painted with an answer's text in
+        // the thread on screen (ADEMark's First Word, with the mock in place of its replay
+        // server): `turn` is when the turn began, as the request would go out.
+        Some("firstword") => {
+            let label = args.get(1).unwrap_or(&"firstword");
+            let assistant = |cx: &mut AsyncApp| {
+                cx.update(|cx| {
+                    let ws = ws.read(cx);
+                    let Route::Thread(id) = &ws.route else {
+                        return (None, false, 0);
+                    };
+                    let Some(live) = ws.live.get(id) else {
+                        return (Some(id.clone()), false, 0);
+                    };
+                    let answers = live
+                        .items
+                        .iter()
+                        .filter(|i| {
+                            matches!(i, trek_core::store::Item::Assistant { text } if !text.trim().is_empty())
+                        })
+                        .count();
+                    (Some(id.clone()), live.turn_started.is_some(), answers)
+                })
+            };
+            let (before_id, _, before) = assistant(cx);
+            let began = Instant::now();
+            let typed = main.update(cx, |_, window, cx| {
+                window.focused(cx).is_some()
+                    && window
+                        .dispatch_keystroke(Keystroke::parse("enter").expect("enter parses"), cx)
+            })?;
+            anyhow::ensure!(typed, "perf firstword: nothing has the keyboard");
+            let mut turn = None;
+            loop {
+                let (id, running, answers) = assistant(cx);
+                if running && turn.is_none() {
+                    turn = Some(began.elapsed());
+                }
+                let base = if id.is_some() && id == before_id {
+                    before
+                } else {
+                    0
+                };
+                if answers > base {
+                    break;
+                }
+                anyhow::ensure!(
+                    began.elapsed() < Duration::from_secs(30),
+                    "perf firstword: no answer within 30 s"
+                );
+                cx.background_executor()
+                    .timer(Duration::from_millis(1))
+                    .await;
+            }
+            let answered = began.elapsed();
+            let (tx, rx) = crate::perf::next_frame();
+            let frame = painted_within(tx, rx, Duration::from_secs(2), cx).await;
+            tracing::info!(
+                "perf: firstword label={label} ms={} turn={} answered={}",
+                ms(frame.map_or(began.elapsed(), |f| f
+                    .painted
+                    .saturating_duration_since(began))),
+                turn.map_or("-".into(), ms),
+                ms(answered)
+            );
+        }
         // What Trek itself holds: transcripts in memory, and the main window's parsed answers.
         Some("mem") => {
             let label = args.get(1).unwrap_or(&"mem");
@@ -1783,9 +1861,85 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             tracing::info!("perf: front visible={visible}");
         }
         _ => anyhow::bail!(
-            "perf frames <ms> <label> | scroll <element id>|@center <px> <steps> <label> | type <count> <label> | open <title> | front | mark <label> | mem <label>"
+            "perf frames <ms> <label> | scroll <element id>|@center <px> <steps> <label> | type <count> <label> | open <title> | front | mark <label> | mem <label> | probe <label> [n] | firstword <label>"
         ),
     }
+    Ok(())
+}
+
+/// The probe string of ADEMark's echo timer (ademark.dev, TESTS.md §1.3).
+const PROBE: &str = "ademarkqz";
+
+/// `perf probe <label> [n]`: ADEMark's echo timer, in the process. Its probe string goes in one
+/// character every 50 ms ±20 % into whatever has the keyboard (one sent while nothing has it is
+/// lost, as a real key is), from the moment the command runs, waiting for the main window if
+/// there is none yet; `ready` is the paint of the frame that shows the `n`-th character taken
+/// (default 2: ADEMark's Ready is the first frame where OCR reads two). The field is cleared
+/// after. Logs wall-clock `started_at` and `ready_at` (unix ms) for a driver timing a launch.
+async fn perf_probe(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::Result<()> {
+    use crate::perf::ms;
+    let args: Vec<&str> = arg.split_whitespace().collect();
+    let label = args.get(1).copied().unwrap_or("probe");
+    let want: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(2).max(1);
+    let began = Instant::now();
+    let began_at = chrono::Utc::now().timestamp_millis();
+    let (mut taken, mut sent) = (0usize, 0usize);
+    let mut seed = began_at as u64 | 1;
+    let ready = loop {
+        anyhow::ensure!(
+            began.elapsed() < Duration::from_secs(60),
+            "perf probe: {taken} of {want} characters taken in 60 s"
+        );
+        let slot = Instant::now();
+        let main = cx.update(|cx| ws.read(cx).main_window);
+        let c = PROBE.chars().nth(sent % PROBE.len()).expect("probe char");
+        sent += 1;
+        let (tx, rx) = crate::perf::next_frame();
+        let typed = main.is_some_and(|main| {
+            main.update(cx, |_, window, cx| {
+                window.focused(cx).is_some()
+                    && window.dispatch_keystroke(
+                        Keystroke {
+                            modifiers: Modifiers::default(),
+                            key: String::new(),
+                            key_char: Some(c.to_string()),
+                        },
+                        cx,
+                    )
+            })
+            .unwrap_or(false)
+        });
+        if typed {
+            taken += 1;
+            if taken >= want {
+                break painted_within(tx, rx, Duration::from_secs(2), cx).await;
+            }
+        }
+        // 50 ms ±20 %, uniform (xorshift), so the cadence can't lock to the display's.
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let wait = Duration::from_micros(40_000 + seed % 20_001);
+        let spent = slot.elapsed();
+        if spent < wait {
+            cx.background_executor().timer(wait - spent).await;
+        }
+    };
+    let ready = ready.map_or(began.elapsed(), |f| {
+        f.painted.saturating_duration_since(began)
+    });
+    if let Some(main) = cx.update(|cx| ws.read(cx).main_window) {
+        let _ = main.update(cx, |_, window, cx| {
+            for k in ["secondary-a", "backspace"] {
+                window.dispatch_keystroke(Keystroke::parse(k).expect("parses"), cx);
+            }
+        });
+    }
+    tracing::info!(
+        "perf: probe label={label} ready={} started_at={began_at} ready_at={} taken={taken} sent={sent}",
+        ms(ready),
+        began_at + ready.as_millis() as i64
+    );
     Ok(())
 }
 
