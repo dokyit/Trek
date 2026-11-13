@@ -1,6 +1,7 @@
 //! The fonts Trek ships, so macOS and Windows set the same type: Inter for the interface and
 //! JetBrains Mono (the no-ligature "NL" cut, as Menlo has none) for code, tool rows, paths and the
-//! transcript's inline code. They're embedded in the binary and registered with the text system at
+//! transcript's inline code, and Spectral, a serif made for reading on screens, for Trek themes
+//! that set their text in one (`trek_core::themes`). They're embedded in the binary and registered with the text system at
 //! startup, then named by family in the theme (`assets/themes/trek.json`), which every view reads
 //! (`theme.font_family`, `theme.mono_font_family`). The KaTeX fonts set the math in answers
 //! (`crate::math`). All are under the SIL Open Font License; the licences sit beside the files in
@@ -36,6 +37,12 @@ pub fn files() -> Vec<Cow<'static, [u8]>> {
         font!("JetBrainsMonoNL-Medium.ttf"),
         font!("JetBrainsMonoNL-SemiBold.ttf"),
         font!("JetBrainsMonoNL-Bold.ttf"),
+        // The serif a Trek theme may set its text in (`trek_core::themes::Font::Serif`).
+        font!("Spectral-Regular.ttf"),
+        font!("Spectral-Italic.ttf"),
+        font!("Spectral-Medium.ttf"),
+        font!("Spectral-SemiBold.ttf"),
+        font!("Spectral-Bold.ttf"),
         // Math in answers (`crate::math`): the KaTeX fonts, Computer Modern's look. GPUI won't
         // load a font without an `m`, so the faces that have none are given one and renamed
         // TrekMath, as their licence asks (`script/math-fonts.py`).

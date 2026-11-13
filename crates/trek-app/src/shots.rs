@@ -3594,6 +3594,26 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // A Trek theme, as the palette's "Use … theme" switches to it (`look <id>`), and the themes
+    // folder read again now rather than on its next look (`look reread`).
+    if verb == "look" {
+        if arg == "reread" {
+            crate::themes::reread(&ws, cx);
+        } else {
+            anyhow::ensure!(
+                crate::themes::find(arg, cx).is_some(),
+                "look: no theme {arg:?} (one of {})",
+                crate::themes::list(cx)
+                    .iter()
+                    .map(|t| t.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            crate::themes::switch_to(arg, &ws, cx);
+        }
+        cx.refresh_windows();
+        return Ok(());
+    }
     ws.update(cx, |ws, cx| -> anyhow::Result<()> {
         match (verb, arg) {
             ("ide", _) => ws.toggle_ide(cx),

@@ -1,0 +1,38 @@
+# Console: Trek as a terminal. Every word in monospace, near-square corners, a phosphor-green
+# accent on soft black, and quick motion.
+name = "Console"
+description = "Every word in monospace, square corners, phosphor green on soft black."
+mode = "dark"
+
+[fonts]
+ui = "mono"
+conversation = "mono"
+
+[shape]
+corners = 0.25
+density = "compact"
+
+[motion]
+style = "brisk"
+
+[dark]
+accent = "#6BDB9A"
+on_accent = "#06140C"
+window = "#0B0D0C"
+sidebar = "#0E1110"
+surface = "#151A18"
+raised = "#121615"
+text = "#D4DDD7"
+muted = "#7C8A82"
+border = "#222A26"
+
+[light]
+accent = "#17804A"
+on_accent = "#FFFFFF"
+window = "#F6F6F1"
+sidebar = "#EEEEE7"
+surface = "#E9EAE2"
+raised = "#FBFBF7"
+text = "#1A1E1B"
+muted = "#646B65"
+border = "#DADBD1"

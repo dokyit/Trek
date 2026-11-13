@@ -41,6 +41,7 @@ pub mod settings;
 pub mod skills;
 pub mod store;
 pub mod study;
+pub mod themes;
 pub mod transcript;
 pub mod types;
 pub mod update;

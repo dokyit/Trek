@@ -1,0 +1,43 @@
+# Alpenglow: Trek over the mountains at first light. The dawn art fills the whole window under
+# see-through chrome, with dusk-blue surfaces, a warm peach accent and soft corners.
+name = "Alpenglow"
+description = "The dawn ridge behind the whole window, dusk-blue chrome, a peach accent."
+mode = "dark"
+
+[fonts]
+ui = "sans"
+conversation = "sans"
+
+[shape]
+corners = 1.5
+density = "regular"
+
+[background]
+art = "builtin:dawn"
+placement = "everywhere"
+dim = 0.35
+
+[motion]
+style = "calm"
+
+[dark]
+accent = "#FF9E6B"
+on_accent = "#1E0C03"
+window = "#0C0F1C"
+sidebar = "#0F1324"
+surface = "#191E34"
+raised = "#151A2D"
+text = "#ECEAF3"
+muted = "#9799B3"
+border = "#272D48"
+
+[light]
+accent = "#C9551F"
+on_accent = "#FFFFFF"
+window = "#FBF6F0"
+sidebar = "#F5EEE6"
+surface = "#EFE6DB"
+raised = "#FFFBF6"
+text = "#2A2320"
+muted = "#7A6D63"
+border = "#E3D7C8"

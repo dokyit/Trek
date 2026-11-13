@@ -52,6 +52,8 @@ enum Action {
     ToggleTools,
     OpenTool(PanelTool),
     Theme(ThemeChoice),
+    /// Switch to a Trek theme, by its id.
+    TrekTheme(String),
     HandHolding(HandHolding),
     Settle(String),
     Fork(String),
@@ -1282,6 +1284,24 @@ impl CommandPalette {
                 "appearance dark light system mode colors",
             );
         }
+        // Trek themes: a whole look each (`themes`).
+        let shown = crate::themes::shown_id(cx);
+        for t in crate::themes::list(cx) {
+            let checked = t.id == shown;
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(crate::assets::Lucide::Palette)),
+                    format!("Use {} theme", t.name),
+                    Action::TrekTheme(t.id),
+                )
+                .checked(checked),
+                &format!(
+                    "theme themes look style template appearance skin {}",
+                    t.description.to_lowercase()
+                ),
+            );
+        }
         for page in crate::settings_view::pages() {
             let mut e = Entry::new(
                 c,
@@ -1535,6 +1555,7 @@ impl CommandPalette {
                 });
                 crate::set_theme(choice, window, cx);
             }
+            Action::TrekTheme(id) => crate::themes::switch_to(&id, &ws, cx),
             Action::HandHolding(level) => ws.update(cx, |ws, cx| {
                 let id = ws.focused_thread().map(str::to_string);
                 if let Err(message) = ws.set_hand_holding(id.as_deref(), level, cx) {

@@ -959,6 +959,12 @@ pub struct Appearance {
     pub windows_opaque_applied: bool,
     /// The Dock icon: the mountain on Night's charcoal, or one of its alternatives.
     pub app_icon: AppIcon,
+    /// The Trek theme in use (`themes`): a built-in's id or a theme file's name; `trek`, Trek's
+    /// own look, by default and in files from before themes.
+    pub trek_theme: String,
+    /// What the user had set before they first left Trek's own theme, put back when they return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_look: Option<crate::themes::OwnLook>,
 }
 
 /// The app icons Trek can show in the Dock (`assets/brand/trek_icon.py`).
@@ -1039,6 +1045,8 @@ impl Default for Appearance {
             glass_tint: 0.6,
             windows_opaque_applied: cfg!(windows),
             app_icon: AppIcon::Night,
+            trek_theme: crate::themes::DEFAULT.into(),
+            own_look: None,
         }
     }
 }

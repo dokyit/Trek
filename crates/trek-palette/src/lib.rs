@@ -2,7 +2,7 @@
 //! "Color only for act now / in motion / broken" — everything else uses muted theme tokens.
 
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{App, Hsla, rgb};
+use gpui_kit::{App, Global, Hsla, rgb};
 
 pub mod scale;
 
@@ -30,7 +30,44 @@ const TOKEN: (u32, u32) = (0x86ABF5, 0x3E6DC2);
 /// Links in agent answers: ember, a shade darker on Paper so it reads as body-size text.
 pub const LINK: (u32, u32) = (0xFF7A3D, 0xC2410C);
 
+/// A Trek theme's accent and the ink drawn on it (`trek_core::themes`), which Trek's own accents
+/// take while the theme is in use: the working beacon, links in answers, and the send button.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Accent {
+    pub accent: Hsla,
+    pub on_accent: Hsla,
+}
+
+/// The theme's accents for dark and light; `None` is Trek's own.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ThemeAccents {
+    pub dark: Option<Accent>,
+    pub light: Option<Accent>,
+}
+
+impl Global for ThemeAccents {}
+
+/// Use `accents` from the next frame on (a theme applied, or a step of the switch to one).
+pub fn set_theme_accents(accents: ThemeAccents, cx: &mut App) {
+    if cx.try_global::<ThemeAccents>() != Some(&accents) {
+        cx.set_global(accents);
+    }
+}
+
+/// The theme's accent for the mode on screen, if it has one.
+pub fn theme_accent(cx: &App) -> Option<Accent> {
+    let accents = cx.try_global::<ThemeAccents>()?;
+    if cx.theme().mode.is_dark() {
+        accents.dark
+    } else {
+        accents.light
+    }
+}
+
 pub fn ember(cx: &App) -> Hsla {
+    if let Some(a) = theme_accent(cx) {
+        return a.accent;
+    }
     pick(cx, EMBER)
 }
 pub fn amber(cx: &App) -> Hsla {
@@ -49,12 +86,22 @@ pub fn sky(cx: &App) -> Hsla {
     pick(cx, SKY)
 }
 pub fn send(cx: &App) -> Hsla {
+    if let Some(a) = theme_accent(cx) {
+        return a.accent;
+    }
     pick(cx, SEND)
+}
+/// The glyph on a [`send`] fill: white, or the theme's ink for its accent.
+pub fn on_send(cx: &App) -> Hsla {
+    theme_accent(cx).map_or(gpui_kit::white(), |a| a.on_accent)
 }
 pub fn token(cx: &App) -> Hsla {
     pick(cx, TOKEN)
 }
 pub fn link(cx: &App) -> Hsla {
+    if let Some(a) = theme_accent(cx) {
+        return a.accent;
+    }
     pick(cx, LINK)
 }
 

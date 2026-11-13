@@ -680,6 +680,9 @@ impl SettingsView {
             == trek_core::settings::BackgroundPlacement::Everywhere
             && s.appearance.background.is_some();
         let mut page = vec![
+            // Trek themes: a whole look each (`themes`); then the light or dark it's shown in.
+            crate::themes::gallery(&self.workspace, cx),
+            Self::heading("Light or dark", cx),
             self.theme_tiles(s.appearance.theme, cx),
             Self::heading("App icon", cx),
             Self::note(crate::words::words().app_icon_note, cx),
@@ -3409,9 +3412,14 @@ pub(crate) fn theme_tiles(
         .children(options.into_iter().map(|(choice, label)| {
             let selected = choice == current;
             let set = set.clone();
+            // A Trek theme's own Night and Paper while one is on screen (`themes`).
+            let night = crate::themes::mode_tile(true, cx)
+                .unwrap_or((0x0A0A0B, 0x111113, 0x2A2A2F, 0xFF7A3D));
+            let paper = crate::themes::mode_tile(false, cx)
+                .unwrap_or((0xFBFAF8, 0xF2F0EC, 0xD9D5CE, 0xE85D1F));
             let preview = match choice {
-                ThemeChoice::Night => mock(0x0A0A0B, 0x111113, 0x2A2A2F, 0xFF7A3D),
-                ThemeChoice::Paper => mock(0xFBFAF8, 0xF2F0EC, 0xD9D5CE, 0xE85D1F),
+                ThemeChoice::Night => mock(night.0, night.1, night.2, night.3),
+                ThemeChoice::Paper => mock(paper.0, paper.1, paper.2, paper.3),
                 ThemeChoice::System => h_flex()
                     .size_full()
                     .child(
@@ -3419,14 +3427,14 @@ pub(crate) fn theme_tiles(
                             .w(relative(0.5))
                             .h_full()
                             .overflow_hidden()
-                            .child(mock(0xFBFAF8, 0xF2F0EC, 0xD9D5CE, 0xE85D1F)),
+                            .child(mock(paper.0, paper.1, paper.2, paper.3)),
                     )
                     .child(
                         div()
                             .w(relative(0.5))
                             .h_full()
                             .overflow_hidden()
-                            .child(mock(0x0A0A0B, 0x111113, 0x2A2A2F, 0xFF7A3D)),
+                            .child(mock(night.0, night.1, night.2, night.3)),
                     )
                     .into_any_element(),
             };

@@ -2472,6 +2472,8 @@ impl Render for TrekWindow {
                 ),
             )
             .child(body)
+            // A theme switch's veil, over the window while its layout changes (`themes`).
+            .children(crate::themes::veil(cx))
             // ⌘K, drawn over everything else in the window.
             .child(self.palette.clone())
             .child(self.preview.clone())

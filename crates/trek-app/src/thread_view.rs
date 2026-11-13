@@ -2386,6 +2386,10 @@ impl ThreadView {
                                         })
                                         .text_size(text_size)
                                         .line_height(relative(1.5))
+                                        // A Trek theme's conversation font, as the answers have.
+                                        .when_some(crate::themes::conversation_font(cx), |el, f| {
+                                            el.font_family(f)
+                                        })
                                         .map(|el| match &intro {
                                             Some(intro) => {
                                                 el.child(crate::study::intro_bubble(intro, cx))

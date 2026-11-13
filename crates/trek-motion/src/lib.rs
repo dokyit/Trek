@@ -32,6 +32,29 @@ pub const UNIT: f32 = 0.004;
 /// The same for values in pixels.
 pub const PIXEL: f32 = 0.4;
 
+/// How long every spring takes against its designed time (Settings' motion scale, which a Trek
+/// theme sets): 1 as designed, 1.35 calmer, 0.75 brisker, 0 not at all. The app's, set in
+/// `set_pace`; f32 bits.
+static PACE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+
+/// Set the motion scale every spring runs at from now on (see [`PACE`]): kept from 0 to 3, and
+/// what isn't a number is 1.
+pub fn set_pace(scale: f32) {
+    let scale = if scale.is_finite() { scale.clamp(0., 3.) } else { 1. };
+    PACE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The motion scale springs run at.
+pub fn pace() -> f32 {
+    f32::from_bits(PACE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The spring's own time for `secs` of real time at motion scale `pace`; `None` at 0, where
+/// everything is where it's going at once.
+fn paced(pace: f32, secs: f32) -> Option<f32> {
+    (pace > 0.).then(|| secs / pace)
+}
+
 /// A value on a spring. See the module's notes.
 #[derive(Clone, Copy, Debug)]
 pub struct Spring {
@@ -66,11 +89,11 @@ impl Spring {
         if self.from == rest {
             return rest;
         }
-        let s = self.config.step(
-            self.from,
-            self.target,
-            now.saturating_duration_since(self.at).as_secs_f32(),
-        );
+        let Some(elapsed) = paced(pace(), now.saturating_duration_since(self.at).as_secs_f32())
+        else {
+            return rest;
+        };
+        let s = self.config.step(self.from, self.target, elapsed);
         if self.config.is_settled(s, self.target, self.epsilon) {
             rest
         } else {
@@ -980,6 +1003,14 @@ pub fn leaving_sheet(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_motion_scale_stretches_a_springs_time_and_zero_stills_it() {
+        assert_eq!(super::paced(1., 0.3), Some(0.3));
+        assert_eq!(super::paced(2., 0.3), Some(0.15));
+        assert_eq!(super::paced(0.5, 0.3), Some(0.6));
+        assert_eq!(super::paced(0., 0.3), None);
+    }
+
     use super::{Presence, SURFACE, Spring, UNIT};
     use std::time::{Duration, Instant};
 

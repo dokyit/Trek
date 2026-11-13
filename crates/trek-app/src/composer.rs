@@ -4390,7 +4390,7 @@ impl Render for Composer {
         // Round 30 px buttons: stop / send, the mic, and voice mode's ✕ and ✓.
         let square = |id: &'static str| look::circle(id);
         let blue = palette::send(cx);
-        let on_blue = gpui_kit::white();
+        let on_blue = palette::on_send(cx);
         // What the keys do, on the button: sending, a new line, and steer or queue mid-turn.
         let reply = self
             .workspace

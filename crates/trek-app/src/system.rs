@@ -119,6 +119,11 @@ pub static SHOWN_BADGE: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 fn sync(workspace: &Entity<Workspace>, applied: &mut Applied, cx: &mut App) {
     apply_reduce_motion(workspace, cx);
     let ws = workspace.read(cx);
+    // Settings' motion scale (a Trek theme sets it): how long Trek's springs take.
+    let pace = ws.settings.appearance.motion_scale;
+    if crate::motion::pace() != pace {
+        crate::motion::set_pace(pace);
+    }
     let awake = ws.settings.general.prevent_sleep_while_running && ws.any_turn_running();
     let badge = if ws.settings.notifications.dock_badge {
         ws.needs_you_count()

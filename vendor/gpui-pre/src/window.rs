@@ -4443,6 +4443,8 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
+        // Trek: the theme's corner scale (`corner_scale`), as the element's own shape has it.
+        let corner_radii = crate::corner_scale::scaled_corners(corner_radii, bounds.size);
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
         let opacity = self.element_opacity();
@@ -4479,6 +4481,8 @@ impl Window {
     ) {
         self.invalidator.debug_assert_paint();
 
+        // Trek: the theme's corner scale (`corner_scale`), as the element's own shape has it.
+        let corner_radii = crate::corner_scale::scaled_corners(corner_radii, bounds.size);
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
         let opacity = self.element_opacity();
@@ -4573,7 +4577,9 @@ impl Window {
             content_mask: self.snapped_content_mask(),
             background: quad.background.opacity(opacity),
             border_color: quad.border_color.opacity(opacity),
-            corner_radii: quad.corner_radii.scale(self.scale_factor()),
+            // Trek: the theme's corner scale (`corner_scale`).
+            corner_radii: crate::corner_scale::scaled_corners(quad.corner_radii, quad.bounds.size)
+                .scale(self.scale_factor()),
             border_widths: snapped_border_widths,
             border_style: quad.border_style,
         };
@@ -5010,9 +5016,12 @@ impl Window {
         };
 
         let content_mask = self.snapped_content_mask();
-        let corner_radii = corner_radii
-            .clamp_radii_for_quad_size(visible_bounds.size)
-            .scale(self.scale_factor());
+        // Trek: the theme's corner scale (`corner_scale`).
+        let corner_radii = crate::corner_scale::scaled_corners(
+            corner_radii.clamp_radii_for_quad_size(visible_bounds.size),
+            visible_bounds.size,
+        )
+        .scale(self.scale_factor());
         let opacity = self.element_opacity();
 
         self.next_frame.scene.insert_primitive(PolychromeSprite {

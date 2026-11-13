@@ -11,7 +11,8 @@ Third-party materials bundled in this repository:
   (The JetBrains Mono Project Authors), both under the SIL Open Font License 1.1
   (OFL-Inter.txt and OFL-JetBrainsMono.txt in that folder), and the KaTeX fonts
   (Design Science, Inc. and Khan Academy), seven of them modified and renamed TrekMath,
-  SIL Open Font License 1.1 (OFL-KaTeX.txt).
+  SIL Open Font License 1.1 (OFL-KaTeX.txt), and Spectral (The Spectral Project Authors),
+  SIL Open Font License 1.1 (OFL-Spectral.txt), the serif Trek themes may set text in.
 * crates/trek-app/src/math/tables.rs — glyph metrics and the math symbol table from
   KaTeX (Khan Academy and other contributors), MIT; the layout rules in
   crates/trek-app/src/math/layout.rs follow KaTeX's implementation of TeX's

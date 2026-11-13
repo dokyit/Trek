@@ -72,6 +72,7 @@ pub mod system;
 pub mod tabs;
 pub mod terminal_dock;
 pub mod test_display;
+pub mod themes;
 pub mod thinking_timeline;
 pub mod thread_menu;
 pub mod thread_view;
@@ -150,9 +151,17 @@ actions!(
 );
 
 pub fn apply_theme(choice: ThemeChoice, window: Option<&mut Window>, cx: &mut App) {
-    let registry = ThemeRegistry::global(cx);
-    let night = registry.themes().get("Trek Night").cloned();
-    let paper = registry.themes().get("Trek Paper").cloned();
+    // A Trek theme's own Night and Paper (`themes`), or the shipped ones.
+    let (night, paper) = match themes::configs(cx) {
+        Some((night, paper)) => (Some(night), Some(paper)),
+        None => {
+            let registry = ThemeRegistry::global(cx);
+            (
+                registry.themes().get("Trek Night").cloned(),
+                registry.themes().get("Trek Paper").cloned(),
+            )
+        }
+    };
     Theme::update(cx, |theme| {
         if let Some(n) = night {
             theme.dark_theme = n;
@@ -389,6 +398,8 @@ pub fn run() {
         perf::phase("workspace");
         ws.update(cx, |ws, cx| ws.hear_deep_links(links_rx, cx));
         tray::init(ws.clone(), cx);
+        // The Trek theme the settings name, before the kit's theme goes up from it.
+        themes::init(&ws, cx);
         let theme = ws.read(cx).settings.appearance.theme;
         apply_theme(theme, None, cx);
         system::init(ws.clone(), cx);

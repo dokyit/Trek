@@ -53,6 +53,7 @@ pub mod queue;
 mod scene;
 mod shared_uri;
 mod spring;
+mod corner_scale;
 mod style;
 mod styled;
 mod subscription;
@@ -100,6 +101,7 @@ pub(crate) use arena::*;
 pub use asset_cache::*;
 pub use assets::*;
 pub use color::*;
+pub use corner_scale::{MAX_CORNER_SCALE, corner_scale, set_corner_scale};
 pub use ctor::ctor;
 #[cfg(feature = "profiler")]
 pub use debug_overlay::*;

@@ -355,7 +355,11 @@ fn dress(
         .selectable(true)
         .style(style(size, tone, cx))
         .text_size(size)
-        .line_height(relative(LINE_HEIGHT));
+        .line_height(relative(LINE_HEIGHT))
+        // A Trek theme may set the conversation in another family than the interface.
+        .when_some(crate::themes::conversation_font(cx), |view, family| {
+            view.font_family(family)
+        });
     let view = match note_images {
         Some(images) => view
             .plugin(crate::note_images::NoteVideos {
