@@ -2,7 +2,7 @@
 //! touched): each state says the one thing to do (Apple Devices from the Microsoft Store, plug it
 //! in, tap Trust, unlock it), a ready phone shows its screen (a click on it a tap, once its
 //! developer disk image is mounted), apps, files and AssistiveTouch, and an agent's calls get the
-//! screen, taps, apps and files, and are told what still needs a Mac. And Settings says what the
+//! screen (as a picture and as elements), taps, apps and files. And Settings says what the
 //! iPhone tools do here, in the PC's words (a Mac's when pretending).
 #![cfg(windows)]
 
@@ -541,8 +541,8 @@ fn said(trek: &Trek, cx: &mut TestAppContext, page: SettingsPage) -> Vec<String>
 }
 
 /// Settings › Tools › iPhone, and the Phone page's word on Trek's iPhone app: a PC's say what
-/// works here (its apps and files) and that the screen and taps need a Mac, never the Mac's
-/// Bluetooth keyboard or iPhone Mirroring; a Mac's read as they always have.
+/// works here (the screen once its disk image is mounted, and the apps and files), never the
+/// Mac's Bluetooth keyboard or iPhone Mirroring; a Mac's read as they always have.
 #[test]
 fn settings_say_what_the_iphone_tools_do_here() {
     run(async |cx| {
