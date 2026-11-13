@@ -3766,6 +3766,7 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                         .ok_or_else(|| anyhow::anyhow!("background: no piece {id:?}"))?;
                     if let Some(place) = piece.collection.placement() {
                         a.background_placement = place;
+                        a.background_dim = 0.0;
                     }
                     a.background = Some(piece.spec());
                 }

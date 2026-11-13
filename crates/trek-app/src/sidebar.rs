@@ -3651,6 +3651,10 @@ impl Render for Sidebar {
         }
 
         self.flip.borrow_mut().end();
+        let backing = crate::backgrounds::sidebar_list_backing(
+            &self.workspace.read(cx).settings.appearance,
+            cx,
+        );
         v_flex()
             .id("sidebar")
             .test_support()
@@ -3670,8 +3674,21 @@ impl Render for Sidebar {
                     .overflow_y_scroll()
                     .child(crate::motion::flip_scope(
                         &flip,
-                        v_flex().w_full().child(list).child(history),
-                    )),
+                        v_flex()
+                            .w_full()
+                            .child(list)
+                            .child(history)
+                            // Over ASCII art: a backing under the rows so their grey text keeps
+                            // 3:1, fading out below them, where the art shows clear.
+                            .when_some(backing, |el, a| el.bg(theme.sidebar.opacity(a))),
+                    ))
+                    .when_some(backing, |el, a| {
+                        el.child(div().w_full().h(px(56.)).bg(linear_gradient(
+                            180.,
+                            linear_color_stop(theme.sidebar.opacity(a), 0.),
+                            linear_color_stop(theme.sidebar.opacity(0.), 1.),
+                        )))
+                    }),
             )
             .child(self.footer(cx))
     }

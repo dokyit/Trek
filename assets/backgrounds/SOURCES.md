@@ -8,12 +8,13 @@ is made by the two scripts here. Settings › Appearance › Background shows it
 |---|---|---|
 | Classic (Dawn, Night, Paper) | where the user puts it | `make_backgrounds.py`, procedural |
 | Paintings | across the whole chat | `make_collections.py`, from the paintings below |
-| ASCII (Ramp, Braille, Halftone, Blocks, LED) | the sidebar only | `make_collections.py`, procedural scenes |
+| ASCII (Ramp, Braille, Halftone, Dense, LED) | the sidebar only | `make_collections.py`, procedural scenes |
 | Light (Streaks, Aurora, Window, Switchbacks) | across the whole chat | `make_collections.py`, procedural |
 
 Nothing in ASCII or Light is copied or ported from another piece of art: they are drawn by
 `make_collections.py` from scenes it makes itself (ridges, a lake, pines, a switchback trail,
-light streaks, an aurora, a window's light). The glyphs are JetBrains Mono, which Trek already
+light streaks, an aurora, a window's light). Light's Paper versions draw the same light as ember
+ink with a warm-grey wash, as a print of it. The glyphs are JetBrains Mono, which Trek already
 ships (`crates/trek-assets/assets/fonts/OFL-JetBrainsMono.txt`).
 
 ## The paintings
@@ -31,6 +32,10 @@ files in Trek are dithered renderings in Trek's palette, not the museums' images
 | Green River | Thomas Moran | Green River Cliffs, Wyoming | 1881 | National Gallery of Art (object 82648) | https://commons.wikimedia.org/wiki/File:Thomas_Moran,_Green_River_Cliffs,_Wyoming,_1881,_NGA_82648.jpg | CC0 (NGA Open Access) |
 | Moonlight | J. M. W. Turner | Keelmen Heaving in Coals by Moonlight | 1835 | National Gallery of Art (object 1225) | https://commons.wikimedia.org/wiki/File:Joseph_Mallord_William_Turner,_Keelmen_Heaving_in_Coals_by_Moonlight,_1835,_NGA_1225.jpg | CC0 (NGA Open Access) |
 | Aosta | J. M. W. Turner | Valley of Aosta: Snowstorm, Avalanche, and Thunderstorm | 1836–37 | Art Institute of Chicago, 1947.513 (artwork 109938) | https://commons.wikimedia.org/wiki/File:Joseph_Mallord_William_Turner_-_Valley_of_Aosta,_Snowstorm,_Avalanche,_and_Thunderstorm_-_1947.513_-_Art_Institute_of_Chicago.jpg | Public domain (AIC: CC0) |
+
+Kauterskill's hazy sun is pale (its gold is barely saturated), so the script counts it as
+warm at a lower saturation than the others (`PAINTINGS`' `(gain, low, high)`), which keeps its
+golden sky.
 
 The Met's images are the "original" files its Open Access API lists for each object
 (`https://collectionapi.metmuseum.org/public/collection/v1/objects/<id>`, `primaryImage`); the

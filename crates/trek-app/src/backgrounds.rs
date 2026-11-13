@@ -181,7 +181,7 @@ pub const PIECES: &[Piece] = &[
     piece("ramp", "Ramp", Collection::Ascii),
     piece("braille", "Braille", Collection::Ascii),
     piece("halftone", "Halftone", Collection::Ascii),
-    piece("blocks", "Blocks", Collection::Ascii),
+    piece("dense", "Dense", Collection::Ascii),
     piece("led", "LED", Collection::Ascii),
     piece("streaks", "Streaks", Collection::Light),
     piece("aurora", "Aurora", Collection::Light),
@@ -314,10 +314,11 @@ pub fn chat_layer(
 ) -> gpui_kit::Div {
     use gpui_kit::{ObjectFit, Styled as _, StyledImage as _, div, img};
     use gpui_kit::{ParentElement as _, prelude::FluentBuilder as _};
-    let alpha = texts
+    let need = texts
         .iter()
         .map(|&(text, ratio)| scrim_for(spec, ground, text, ratio, dark))
-        .fold(dim.clamp(0.0, 0.9), f32::max);
+        .fold(0.0, f32::max);
+    let alpha = with_dim(need, dim);
     div()
         .absolute()
         .top_0()
@@ -342,6 +343,59 @@ pub fn chat_layer(
                     .bg(ground.opacity(alpha)),
             )
         })
+}
+
+/// The scrim `need`ed, with the user's Dim on top of it: Dim darkens the art further, it never
+/// takes away what the text needs.
+pub fn with_dim(need: f32, dim: f32) -> f32 {
+    1.0 - (1.0 - need.clamp(0.0, 1.0)) * (1.0 - dim.clamp(0.0, 0.9))
+}
+
+/// The scrims for art in the sidebar's column (ASCII): over the whole column, what holds the
+/// sidebar's own text (titles, headings, Basecamp and the rest) at 4.5:1, Dim on top; and the
+/// backing the list of threads lays under its rows besides, so their grey text (times, counts)
+/// keeps 3:1. Below the list, the art shows under the first alone.
+pub fn sidebar_scrims(
+    spec: &str,
+    dim: f32,
+    side: Hsla,
+    text: Hsla,
+    muted: Hsla,
+    dark: bool,
+) -> (f32, f32) {
+    let column = with_dim(scrim_for(spec, side, text, TEXT_RATIO, dark), dim);
+    let muted = scrim_for(spec, side, muted, 3.0, dark);
+    (column, list_backing(column, muted))
+}
+
+/// The alpha a layer over `column` needs for the two together to cover `total`.
+pub fn list_backing(column: f32, total: f32) -> f32 {
+    if total <= column || column >= 1.0 {
+        return 0.0;
+    }
+    1.0 - (1.0 - total) / (1.0 - column)
+}
+
+/// The list backing for the sidebar in front of `ws`'s art, when ASCII art is drawn behind it.
+pub fn sidebar_list_backing(a: &Appearance, cx: &gpui_kit::App) -> Option<f32> {
+    use gpui_kit::component::ActiveTheme as _;
+    if placement(a) != BackgroundPlacement::Everywhere {
+        return None;
+    }
+    let spec = a.background.as_deref()?;
+    if !collection_of(spec).in_sidebar_column() {
+        return None;
+    }
+    let t = cx.theme();
+    let (_, backing) = sidebar_scrims(
+        spec,
+        a.background_dim,
+        t.sidebar,
+        t.sidebar_foreground,
+        t.muted_foreground,
+        t.mode.is_dark(),
+    );
+    (backing > 0.0).then_some(backing)
 }
 
 /// How much of `ground` must lie over the art `spec` names for `text` to keep `ratio` against
@@ -511,8 +565,9 @@ mod tests {
     }
 
     /// Every pixel of every file, under the scrim its collection's extreme asks for, keeps the
-    /// ratio: transcript text (4.5:1) and muted text (3:1) across the chat, the sidebar's text
-    /// (4.5:1) beside ASCII art.
+    /// ratio: across the chat, transcript text 4.5:1 and muted text 3:1 under one scrim; in the
+    /// sidebar, its own text 4.5:1 under the column's scrim, and its grey text 3:1 where the
+    /// list's backing lies over that as well.
     #[test]
     fn text_keeps_its_contrast_over_every_pixel_of_the_art() {
         for p in PIECES
@@ -522,21 +577,23 @@ mod tests {
             for dark in [true, false] {
                 let path = p.path(dark, false);
                 let img = load(&path);
-                let checks: Vec<([f32; 3], [f32; 3], f32)> = if p.collection.in_sidebar_column() {
-                    let (g, t) = if dark { NIGHT_SIDE } else { PAPER_SIDE };
-                    vec![(g, t, TEXT_RATIO)]
-                } else {
-                    let (g, t, m) = if dark { NIGHT } else { PAPER };
-                    vec![(g, t, TEXT_RATIO), (g, m, 3.0)]
-                };
                 let extreme = p.collection.extreme(dark);
-                // The scrim drawn is the strongest any of the texts asks for.
-                let alpha = checks
-                    .iter()
-                    .map(|&(g, t, r)| scrim(extreme, g, t, r))
-                    .fold(0.0, f32::max);
+                // (ground, text, ratio, the alpha of ground over the art where that text sits)
+                let checks: Vec<([f32; 3], [f32; 3], f32, f32)> =
+                    if p.collection.in_sidebar_column() {
+                        let (g, t) = if dark { NIGHT_SIDE } else { PAPER_SIDE };
+                        let m = if dark { NIGHT.2 } else { PAPER.2 };
+                        let column = scrim(extreme, g, t, TEXT_RATIO);
+                        let backing = list_backing(column, scrim(extreme, g, m, 3.0));
+                        let list = 1.0 - (1.0 - column) * (1.0 - backing);
+                        vec![(g, t, TEXT_RATIO, column), (g, m, 3.0, list)]
+                    } else {
+                        let (g, t, m) = if dark { NIGHT } else { PAPER };
+                        let alpha = scrim(extreme, g, t, TEXT_RATIO).max(scrim(extreme, g, m, 3.0));
+                        vec![(g, t, TEXT_RATIO, alpha), (g, m, 3.0, alpha)]
+                    };
                 let colours = colours(&img);
-                for (ground, text, ratio) in checks {
+                for (ground, text, ratio, alpha) in checks {
                     for &c in &colours {
                         let px = c.map(|v| v as f32 / 255.0);
                         let got = contrast(text, mix(px, ground, alpha));
@@ -554,6 +611,17 @@ mod tests {
     }
 
     #[test]
+    fn dim_only_adds_to_what_the_text_needs() {
+        assert!((with_dim(0.4, 0.0) - 0.4).abs() < 1e-6);
+        assert!((with_dim(0.4, 0.5) - 0.7).abs() < 1e-6);
+        assert!((with_dim(0.0, 0.2) - 0.2).abs() < 1e-6);
+        // The list's backing over the column makes up what the grey text needs, no more.
+        let b = list_backing(0.4, 0.7);
+        assert!((1.0 - (1.0 - 0.4) * (1.0 - b) - 0.7).abs() < 1e-6);
+        assert_eq!(list_backing(0.7, 0.4), 0.0);
+    }
+
+    #[test]
     fn the_scrims_leave_the_art_showing() {
         // What the extremes ask for in the themes as shipped: a scrim that hides most of the
         // art would make a collection pointless.
@@ -563,7 +631,10 @@ mod tests {
                 assert!(a <= 0.7, "{c:?} dark={dark}: {a}");
             }
         }
-        let (g, t) = NIGHT_SIDE;
-        assert!(scrim(Collection::Ascii.extreme(true), g, t, TEXT_RATIO) <= 0.7);
+        // The sidebar's column holds only its own text, so ASCII art shows strongly below the list.
+        for (dark, (g, t)) in [(true, NIGHT_SIDE), (false, PAPER_SIDE)] {
+            let a = scrim(Collection::Ascii.extreme(dark), g, t, TEXT_RATIO);
+            assert!(a <= 0.45, "ASCII dark={dark}: {a}");
+        }
     }
 }

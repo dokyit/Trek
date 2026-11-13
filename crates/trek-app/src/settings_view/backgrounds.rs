@@ -247,13 +247,22 @@ impl SettingsView {
                 let spec = spec.clone();
                 ws.update(cx, |ws, cx| {
                     let a = &mut ws.settings.appearance;
+                    let before = a.background.as_deref().map(backgrounds::collection_of);
+                    let after = spec.as_deref().map(backgrounds::collection_of);
                     // A collection that has a place of its own takes it: Paintings and Light the
                     // whole chat, ASCII the sidebar. Classic stays where the user put it.
-                    if let Some(place) = spec
-                        .as_deref()
-                        .and_then(|s| backgrounds::collection_of(s).placement())
-                    {
+                    if let Some(place) = after.and_then(|c| c.placement()) {
                         a.background_placement = place;
+                    }
+                    // Coming from another collection, Dim starts where that art is meant to be
+                    // seen: none over the scrim the new collections bring, Classic's own default.
+                    if after.is_some() && after != before {
+                        a.background_dim = match after {
+                            Some(backgrounds::Collection::Classic) => {
+                                trek_core::settings::Appearance::default().background_dim
+                            }
+                            _ => 0.0,
+                        };
                     }
                     a.background = spec;
                     ws.save_settings(cx);

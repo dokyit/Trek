@@ -106,12 +106,12 @@ PAPER = {
 }
 
 
-def dither_painting(im, size, cell, pal, warm_gain=1.0, **tone_args):
+def dither_painting(im, size, cell, pal, warm_gain=1.0, warm_range=(0.16, 0.55), **tone_args):
     gw, gh = size[0] // cell, size[1] // cell
     small = im.convert("RGB").resize((gw, gh), Image.LANCZOS)
     rgb = np.asarray(small, dtype=np.float64) / 255.0
     L = tone(rgb, **tone_args)
-    W = warmth(small, gain=warm_gain)
+    W = warmth(small, gain=warm_gain, lo=warm_range[0], hi=warm_range[1])
     ys, xs = np.mgrid[0:gh, 0:gw]
     t_tone = B8[ys % 8, xs % 8]
     t_warm = B8[(ys + 3) % 8, (xs + 5) % 8]
@@ -128,7 +128,7 @@ def dither_painting(im, size, cell, pal, warm_gain=1.0, **tone_args):
 PAINTINGS = {
     # name: (source file, crop, tone, warmth gain)
     "matterhorn": ("matterhorn.jpg", dict(fx=0.5, fy=0.30, inset=0.012), dict(gamma=1.05), 0.8),
-    "kauterskill": ("kauterskill.jpg", dict(fx=0.5, fy=0.36, inset=0.012), dict(gamma=1.25, contrast=0.5), 1.1),
+    "kauterskill": ("kauterskill.jpg", dict(fx=0.5, fy=0.36, inset=0.012), dict(gamma=1.1, contrast=0.45), (0.9, 0.14, 0.46)),
     "oxbow": ("oxbow.jpg", dict(fx=0.5, fy=0.5, inset=0.015), dict(gamma=1.1), 1.2),
     "notch": ("notch.jpg", dict(fx=0.5, fy=0.5, inset=0.01), dict(gamma=1.1), 1.0),
     "green-river": ("green-river.jpg", dict(fx=0.62, fy=0.5, inset=0.01), dict(gamma=1.15), 1.1),
@@ -145,7 +145,9 @@ def paintings(src, only):
             continue
         im = crop_to(Image.open(os.path.join(src, file)).convert("RGB"), WIDE[0] / WIDE[1], **crop)
         for variant, pal in (("night", NIGHT), ("paper", PAPER)):
-            img = dither_painting(im, WIDE, 5, pal, warm_gain=gain, **tone_args)
+            # A gain, or (gain, low, high) for a painting whose warm light is pale (a hazy sun).
+            g, rng = (gain, (0.16, 0.55)) if isinstance(gain, float) else (gain[0], gain[1:])
+            img = dither_painting(im, WIDE, 5, pal, warm_gain=g, warm_range=rng, **tone_args)
             save(img, "paintings", name, variant, png=True)
 
 
@@ -162,7 +164,7 @@ def mix(a, b, t):
 # The sidebar column: the threads are listed from its top, so each piece rises from the bottom
 # and leaves the top to the ground. A piece is a `density` field (0..1, how much is drawn where)
 # with `warm` (which marks are ember) — on Night density is light, on Paper it's ink.
-ASCII_NIGHT = {"ground": "#111113", "ink": ["#29282B", "#3D3B40", "#57555A", "#77747A", "#9A9693"], "ember": ["#4A200E", "#7E3415", "#B84A1D", "#E8642B", "#FF7A3D"]}
+ASCII_NIGHT = {"ground": "#111113", "ink": ["#34333A", "#4D4B52", "#6A676C", "#8A8682", "#A39F9A"], "ember": ["#4A200E", "#7E3415", "#B84A1D", "#E8642B", "#FF7A3D"]}
 ASCII_PAPER = {"ground": "#F6F5F3", "ink": ["#E2DDD6", "#CCC4BA", "#B0A69A", "#918679", "#74695E"], "ember": ["#F2C9AE", "#EEA27A", "#E9814C", "#E85D1F", "#B9461A"]}
 
 
@@ -454,11 +456,29 @@ def scene(kind, w, h, seed=1):
         warm = np.maximum(warm, t)
     clear = smooth(0.30, 0.52, ys)  # the top stays clear for the thread list
     night = np.clip(np.maximum(glow, haze) + stars, 0, 1) * clear
-    paper = np.clip(mass * 0.75 + haze * 0.35 - glow * 0.25 + (glow > 0.6) * warm * 0.7, 0, 1) * clear
+    paper = np.clip(mass * 0.68 + haze * 0.35 - glow * 0.25 + (glow > 0.6) * warm * 0.7, 0, 1) * clear
     return (night, warm * clear), (paper, warm * clear * (paper > 0.05))
 
 
-def ascii_pieces(only):
+DENSE = " .'`^\",:;Il!i~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"
+
+
+def painting_rising(src, file, size, crop, share=0.62, gamma=1.0, gain=1.3):
+    """A painting in the bottom `share` of a tall field, fading out upward into the ground.
+    Returns (night, paper) pairs of (density, warm), as `scene` does."""
+    w, h = size
+    ph = int(h * share)
+    im = crop_to(Image.open(os.path.join(src, file)).convert("RGB"), w / ph, **crop).resize((w, ph), Image.LANCZOS)
+    L = np.zeros((h, w))
+    W = np.zeros((h, w))
+    L[h - ph:] = tone(np.asarray(im, dtype=np.float64) / 255.0, gamma=gamma, contrast=0.45)
+    W[h - ph:] = warmth(im, gain=gain) * smooth(0.25, 0.6, L[h - ph:])
+    ys = np.arange(h)[:, None] / h * np.ones((1, w))
+    clear = smooth(1 - share, 1 - share + 0.16, ys)
+    return (L * clear, W * clear), (np.clip(1 - L, 0, 1) ** 1.2 * clear, W * clear)
+
+
+def ascii_pieces(src, only):
     os.makedirs(os.path.join(OUT, "ascii"), exist_ok=True)
     w, h = TALL
     hw, hh = w // 2, h // 2
@@ -466,22 +486,20 @@ def ascii_pieces(only):
         "ramp": ("peak", lambda *a: draw_ramp(*a, cut=0.52), 3),
         "braille": ("ranges", draw_braille, 5),
         "halftone": ("lake", draw_halftone, 7),
-        "blocks": ("forest", draw_blocks, 9),
+        # Dense ASCII: pines under a peak at sunset, in a ramp of seventy characters.
+        "dense": ("forest", lambda *a: draw_ramp(*a, chars=DENSE, px=12, lift=0.75, cut=0.12), 9),
         "led": ("trail", draw_led, 4),
     }
     for name, (kind, draw, seed) in pieces.items():
         if only and name not in only:
             continue
-        if kind:
+        if kind == "matterhorn":
+            night, paper = painting_rising(src, "matterhorn.jpg", (hw, hh), dict(fx=0.5, fy=0.36, inset=0.012))
+        else:
             night, paper = scene(kind, hw, hh, seed)
         for variant, pal in (("night", ASCII_NIGHT), ("paper", ASCII_PAPER)):
-            if kind is None:
-                Z, trail, P = topo(hw, hh, seed)
-                img = draw_contours(P, trail, TALL, pal, Z=Z)
-            else:
-                D, W = night if variant == "night" else paper
-                img = draw(D, W, TALL, pal)
-            save(img, "ascii", name, variant, png=True)
+            D, W = night if variant == "night" else paper
+            save(draw(D, W, TALL, pal), "ascii", name, variant, png=True)
 
 
 # ---------------------------------------------------------------- Light (chat area)
@@ -533,15 +551,17 @@ def tonemap_night(out, cap):
 
 
 def tonemap_paper(out):
-    """The same light as ink on cream: where it shines, the paper takes ember and grey."""
+    """The same light as ink on cream: its glyphs and hot cores in ember, its glow a soft
+    warm-grey wash around them."""
     v = 1 - np.exp(-out * 1.15)
     cream = hexc("#F3EEE6") / 255
-    ember = hexc("#E85D1F") / 255
-    ink = hexc("#7A6E63") / 255
+    ember = hexc("#D9561C") / 255
+    ink = hexc("#8A7D70") / 255
     lum = luma(v)[..., None]
-    sat = np.clip((v.max(axis=-1) - v.min(axis=-1))[..., None] * 1.6, 0, 1)
-    tint = ink + (ember - ink) * sat
-    res = cream + (tint - cream) * np.clip(lum * 1.6, 0, 0.9)
+    halo = np.clip(lum * 2.2, 0, 1) * 0.55
+    core = np.clip((lum - 0.18) / 0.45, 0, 1) ** 0.9
+    res = cream + (ink - cream) * halo
+    res = res + (ember - res) * core * 0.92
     return Image.fromarray(np.clip(res * 255, 0, 255).astype(np.uint8))
 
 
@@ -703,6 +723,6 @@ if __name__ == "__main__":
     if not which or "paintings" in which:
         paintings(src, names)
     if not which or "ascii" in which:
-        ascii_pieces(names)
+        ascii_pieces(src, names)
     if not which or "light" in which:
         light_pieces(names)

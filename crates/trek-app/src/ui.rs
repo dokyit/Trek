@@ -1348,7 +1348,7 @@ pub fn background_source(spec: &str, cx: &App) -> ImageSource {
 
 /// The art behind a window's chrome ("Sidebar" in Settings): Classic and the user's own fill the
 /// window under the scrim they always had; ASCII art fills the sidebar's column alone (and so
-/// isn't drawn in a window `without_sidebar`), under a scrim that keeps the sidebar's text at
+/// isn't drawn in a window `without_sidebar`), under a scrim that keeps the sidebar's own text at
 /// 4.5:1. Laid over the window's background, before its content.
 pub fn window_backdrop(spec: &str, dim: f32, with_sidebar: bool, cx: &App) -> Vec<AnyElement> {
     let theme = cx.theme();
@@ -1360,13 +1360,16 @@ pub fn window_backdrop(spec: &str, dim: f32, with_sidebar: bool, cx: &App) -> Ve
         if !with_sidebar {
             return Vec::new();
         }
-        let alpha = [
-            (theme.sidebar_foreground, crate::backgrounds::TEXT_RATIO),
-            (theme.muted_foreground, 3.0),
-        ]
-        .iter()
-        .map(|&(text, ratio)| crate::backgrounds::scrim_for(spec, side, text, ratio, dark))
-        .fold(dim.clamp(0.0, 0.9), f32::max);
+        // The column holds the sidebar's own text; the list lays a backing of its own under
+        // its rows for their grey text (`backgrounds::sidebar_scrims`).
+        let (alpha, _) = crate::backgrounds::sidebar_scrims(
+            spec,
+            dim,
+            side,
+            theme.sidebar_foreground,
+            theme.muted_foreground,
+            dark,
+        );
         let width = px(crate::root::SIDEBAR_WIDTH);
         return vec![
             layer()
