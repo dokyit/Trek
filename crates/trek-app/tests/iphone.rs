@@ -260,6 +260,59 @@ fn the_screen_shows_and_a_click_on_it_taps() {
     });
 }
 
+/// The phone loses its developer disk image when it restarts: plugged in again, the tool
+/// installs it from the folder it last came from, without asking.
+#[test]
+fn a_restarted_phone_gets_its_disk_image_again_from_the_same_folder() {
+    run(async |cx| {
+        let made_up = MadeUp::without_disk_image();
+        let _pretend = phone::pretend(made_up.clone());
+        let trek = open(cx);
+        let tool = tool(&trek, cx);
+        trek.click(cx, ("phone-tab", 2usize));
+        trek.render(cx);
+        assert!(trek.visible(cx, "phone-screen-choose"));
+        let dir = std::env::temp_dir().join(format!("trek-ddi-again-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in DISK_IMAGE_FILES {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+        cx.update(|cx| tool.update(cx, |p, cx| p.mount_folder(dir.clone(), cx)));
+        trek.render(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "phone-screen"));
+
+        // Unplugged, restarted (its image gone) and plugged in again.
+        *made_up.seen.lock().unwrap() = Some(Seen::NoPhone);
+        look_again(&trek, cx);
+        assert!(!trek.visible(cx, "phone-screen"));
+        *made_up.disk_image.lock().unwrap() = false;
+        *made_up.seen.lock().unwrap() = Some(Seen::Ready(MadeUp::phone()));
+        look_again(&trek, cx);
+        trek.render(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "phone-screen"));
+        let mounts = made_up
+            .done
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.starts_with("mount "))
+            .count();
+        assert_eq!(mounts, 2, "installed again from the same folder");
+
+        // The folder gone: the tool asks for it again.
+        let _ = std::fs::remove_dir_all(&dir);
+        *made_up.seen.lock().unwrap() = Some(Seen::NoPhone);
+        look_again(&trek, cx);
+        *made_up.disk_image.lock().unwrap() = false;
+        *made_up.seen.lock().unwrap() = Some(Seen::Ready(MadeUp::phone()));
+        look_again(&trek, cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "phone-screen-choose"));
+    });
+}
+
 #[test]
 fn agents_get_the_screen_taps_apps_and_files() {
     run(async |cx| {

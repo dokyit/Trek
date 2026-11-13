@@ -430,6 +430,18 @@ fn screen_picture(png: &[u8]) -> Result<Arc<RenderImage>, String> {
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
 }
 
+/// Where the tool notes the folder it last installed the developer disk image from: the phone
+/// loses the image when it restarts, and the tool installs it from there again.
+fn disk_image_note() -> PathBuf {
+    trek_core::paths::data_dir().join("phone-disk-image")
+}
+
+/// The folder the developer disk image was last installed from, while it still holds one.
+fn remembered_disk_image() -> Option<PathBuf> {
+    let folder = PathBuf::from(std::fs::read_to_string(disk_image_note()).ok()?.trim());
+    coredevice::disk_image_in(&folder).is_ok().then_some(folder)
+}
+
 /// The phone's screen in the picture area (CoreDevice's: `trek_phone::coredevice`).
 #[derive(Clone)]
 enum Screen {
@@ -771,8 +783,9 @@ impl PhonePanel {
         }
     }
 
-    /// Whether the phone's developer disk image is mounted: then its picture, else its folder
-    /// asked for.
+    /// Whether the phone's developer disk image is mounted: then its picture. Else it's installed
+    /// again from the folder it last came from (the phone loses it when it restarts), or its
+    /// folder is asked for.
     fn ask_screen(&mut self, cx: &mut Context<Self>) {
         let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
             return;
@@ -782,14 +795,18 @@ impl PhonePanel {
         let (source, generation) = (self.source.clone(), self.generation);
         self.background(
             cx,
-            move || source.disk_image(&udid),
+            move || {
+                let mounted = source.disk_image(&udid)?;
+                Ok::<_, String>((mounted, (!mounted).then(remembered_disk_image).flatten()))
+            },
             move |this, mounted, cx| {
                 if this.generation != generation {
                     return;
                 }
                 match mounted {
-                    Ok(true) => this.shoot(cx),
-                    Ok(false) => this.set_screen(Screen::NeedsImage),
+                    Ok((true, _)) => this.shoot(cx),
+                    Ok((false, Some(folder))) => this.mount_disk_image(folder, cx),
+                    Ok((false, None)) => this.set_screen(Screen::NeedsImage),
                     Err(why) => this.set_screen(Screen::Failed(why.into())),
                 }
                 cx.notify();
@@ -858,7 +875,8 @@ impl PhonePanel {
         .detach();
     }
 
-    /// Mount the developer disk image in `folder`, then show the screen.
+    /// Mount the developer disk image in `folder`, then show the screen; the folder is noted,
+    /// for when the phone loses the image.
     fn mount_disk_image(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
         let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
             return;
@@ -868,7 +886,11 @@ impl PhonePanel {
         let (source, generation) = (self.source.clone(), self.generation);
         self.background(
             cx,
-            move || source.mount_disk_image(&udid, &folder),
+            move || {
+                source.mount_disk_image(&udid, &folder)?;
+                let _ = std::fs::write(disk_image_note(), folder.to_string_lossy().as_bytes());
+                Ok::<_, String>(())
+            },
             move |this, mounted, cx| {
                 if this.generation != generation {
                     return;
