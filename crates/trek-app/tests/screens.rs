@@ -939,12 +939,29 @@ fn an_update_shows_every_release_it_brings_and_the_history_before_it() {
         for choice in [ThemeChoice::Paper, ThemeChoice::Night] {
             theme(cx, choice);
             trek.render(cx);
+            let scroll = |cx: &mut TestAppContext, by: f32| {
+                trek.window(cx, |window, cx| {
+                    window.scroll(
+                        "settings-content",
+                        gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                            gpui_kit::px(0.),
+                            gpui_kit::px(by),
+                        )),
+                        cx,
+                    )
+                });
+                trek.render(cx);
+            };
+            // The page's top: what the update brings.
+            scroll(cx, 5000.);
             assert!(trek.visible(cx, "update-notes"), "what the update brings");
+            assert!(trek.visible(cx, "compare-link"));
+            // Under the settings (a PC's have one more row): the installed release before it.
+            scroll(cx, -5000.);
             assert!(
                 trek.visible(cx, "release-history"),
                 "and the installed release before it"
             );
-            assert!(trek.visible(cx, "compare-link"));
             // The sidebar's update card, back in the inbox.
             trek.update(cx, |ws, cx| {
                 ws.navigate(
