@@ -943,8 +943,9 @@ pub struct Appearance {
     pub reduce_motion: bool,
     /// Scales every animation duration (0 = instant, 1 = designed timing).
     pub motion_scale: f32,
-    /// `builtin:<name>` or an absolute path to a copied image; `None` = no image (the default:
-    /// art is opt-in, in Settings › Appearance).
+    /// `builtin:<name>` (`builtin:dawn`, or `builtin:<collection>/<piece>` for the collections in
+    /// trek-app's `backgrounds`) or an absolute path to a copied image; `None` = no image (the
+    /// default: art is opt-in, in Settings › Appearance).
     pub background: Option<String>,
     pub background_placement: BackgroundPlacement,
     /// How strongly the image is darkened/lightened under content, 0.0–0.9.
@@ -982,8 +983,12 @@ pub enum AppIcon {
 pub enum BackgroundPlacement {
     /// Behind the new-thread composer (Capy style).
     NewThread,
-    /// Behind the whole window chrome.
+    /// Behind the window's chrome: the sidebar and the title bar, the chat pane staying plain
+    /// ("Sidebar" in Settings, the classic look). ASCII art always shows here.
     Everywhere,
+    /// Across the whole chat pane: the new-thread screen, and behind the transcript and the
+    /// composer, under a scrim that keeps the text readable.
+    Chat,
 }
 
 /// The sizes Trek is designed at: the theme's 14 pt rem and 14.5 pt transcript text.
@@ -1979,6 +1984,31 @@ mod tests {
         let back: Settings =
             toml::from_str(&toml::to_string_pretty(&Settings::default()).unwrap()).unwrap();
         assert_eq!(back.appearance.background, None);
+    }
+
+    #[test]
+    fn background_files_from_before_the_collections_read_as_they_were() {
+        // The classic art and both of its old placements, as earlier versions saved them.
+        for (place, want) in [
+            ("new-thread", BackgroundPlacement::NewThread),
+            ("everywhere", BackgroundPlacement::Everywhere),
+        ] {
+            let text = format!(
+                "[appearance]\nbackground = \"builtin:dawn\"\nbackground_placement = \"{place}\"\nbackground_dim = 0.2\n"
+            );
+            let s: Settings = toml::from_str(&text).unwrap();
+            assert_eq!(s.appearance.background.as_deref(), Some("builtin:dawn"));
+            assert_eq!(s.appearance.background_placement, want);
+            assert_eq!(s.appearance.background_dim, 0.2);
+        }
+        // A piece from a collection, across the chat, survives a save and a load.
+        let mut s = Settings::default();
+        s.appearance.background = Some("builtin:paintings/oxbow".into());
+        s.appearance.background_placement = BackgroundPlacement::Chat;
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(text.contains("background_placement = \"chat\""), "{text}");
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.appearance, s.appearance);
     }
 
     #[test]

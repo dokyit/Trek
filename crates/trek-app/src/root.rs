@@ -2441,24 +2441,8 @@ impl Render for TrekWindow {
             }))
             .bg(crate::ui::chrome_bg(glass, cx))
             .when_some(backdrop.clone(), |el, (spec, dim)| {
-                let side = cx.theme().sidebar;
                 el.relative()
-                    .child(
-                        img(crate::ui::background_source(&spec))
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .object_fit(ObjectFit::Cover),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .bg(side.opacity((0.5 + dim * 0.6).min(0.92))),
-                    )
+                    .children(crate::ui::window_backdrop(&spec, dim, true, cx))
             })
             .child(self.focus_anchor())
             // Interactive artifacts' web views: numbered here, placed by `layer_end` below.
@@ -2549,6 +2533,16 @@ impl TrekWindow {
             .read(cx)
             .is_open(cx)
             .then(|| self.terminal_dock.clone());
+        // Art across the chat (a new thread, or behind a thread's transcript and composer), under
+        // the scrim its text needs; the new-thread screen shows it stronger.
+        let chat_art = match &route {
+            Route::Draft { .. } | Route::Thread(_) => crate::backgrounds::chat_pane_art(
+                &self.workspace.read(cx).settings.appearance,
+                matches!(route, Route::Draft { .. }),
+                cx,
+            ),
+            _ => None,
+        };
         let content = {
             match route {
                 Route::Settings(_) => self.settings.clone().into_any_element(),
@@ -2766,6 +2760,7 @@ impl TrekWindow {
                             .bg(crate::ui::panel_bg(glass, cx))
                             .overflow_hidden()
                             .relative()
+                            .children(chat_art)
                             .children(crate::ui::glass_sheen(glass, cx))
                             .child(content)
                             .children(drop_zones),

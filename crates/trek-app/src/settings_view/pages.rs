@@ -676,7 +676,7 @@ impl SettingsView {
             _ => 3,
         };
         let glass = s.appearance.glass;
-        let covered = s.appearance.background_placement
+        let covered = crate::backgrounds::placement(&s.appearance)
             == trek_core::settings::BackgroundPlacement::Everywhere
             && s.appearance.background.is_some();
         let mut page = vec![
@@ -765,62 +765,9 @@ impl SettingsView {
                 )],
                 cx,
             ),
-            Self::heading("Background", cx),
-            Self::note(
-                "Off by default. Pick art to show behind the composer on a new thread, or tinted behind the whole window.",
-                cx,
-            ),
-            self.background_gallery(s, cx),
-            div().h(px(16.)).into_any_element(),
-            // Where the art shows and how dim it is only mean something once there's art.
-            if s.appearance.background.is_none() {
-                div().into_any_element()
-            } else {
-                let mut rows = Vec::new();
-
-                    rows.push(Self::row(
-                        "Show on",
-                        "",
-                        ui::segmented(
-                            "bg-place",
-                            vec![
-                                (
-                                    trek_core::settings::BackgroundPlacement::NewThread,
-                                    "New thread",
-                                ),
-                                (
-                                    trek_core::settings::BackgroundPlacement::Everywhere,
-                                    "Everywhere",
-                                ),
-                            ],
-                            s.appearance.background_placement,
-                            self.setter(|s, v| s.appearance.background_placement = v),
-                            cx,
-                        ),
-                        cx,
-                    ));
-
-                rows.push(Self::row(
-                    "Dim",
-                    "Darkens the art so text stays readable.",
-                    ui::segmented(
-                        "bg-dim",
-                        vec![(0u8, "None"), (1, "Light"), (2, "Medium"), (3, "Strong")],
-                        match s.appearance.background_dim {
-                            d if d < 0.1 => 0u8,
-                            d if d < 0.3 => 1,
-                            d if d < 0.5 => 2,
-                            _ => 3,
-                        },
-                        self.setter(|s, v: u8| {
-                            s.appearance.background_dim = [0.0, 0.2, 0.4, 0.6][v as usize]
-                        }),
-                        cx,
-                    ),
-                    cx,
-                ));
-                ui::group(rows, cx)
-            },
+        ]);
+        page.extend(self.background_section(s, cx));
+        page.extend([
             Self::heading("Motion", cx),
             ui::group(
                 vec![Self::row(

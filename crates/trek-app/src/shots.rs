@@ -3752,6 +3752,40 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 ws.save_settings(cx);
             }
             ("glass", other) => anyhow::bail!("glass: unknown argument {other:?} (on|off)"),
+            // `background <id|none> [new-thread|chat|sidebar] [dim]`: art as the gallery picks it
+            // (`dawn`, `paintings/oxbow`, `ascii/braille`…), then where it shows and its Dim.
+            ("background", args) => {
+                let mut words = args.split_whitespace();
+                let id = words.next().unwrap_or("none");
+                let a = &mut ws.settings.appearance;
+                if id == "none" {
+                    a.background = None;
+                } else {
+                    let spec = format!("builtin:{id}");
+                    let piece = crate::backgrounds::piece_for(&spec)
+                        .ok_or_else(|| anyhow::anyhow!("background: no piece {id:?}"))?;
+                    if let Some(place) = piece.collection.placement() {
+                        a.background_placement = place;
+                    }
+                    a.background = Some(piece.spec());
+                }
+                if let Some(place) = words.next() {
+                    a.background_placement = match place {
+                        "new-thread" => trek_core::settings::BackgroundPlacement::NewThread,
+                        "chat" => trek_core::settings::BackgroundPlacement::Chat,
+                        "sidebar" => trek_core::settings::BackgroundPlacement::Everywhere,
+                        other => anyhow::bail!(
+                            "background: unknown placement {other:?} (new-thread|chat|sidebar)"
+                        ),
+                    };
+                }
+                if let Some(dim) = words.next() {
+                    a.background_dim = dim
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("background: bad dim {dim:?} (0–0.9)"))?;
+                }
+                ws.save_settings(cx);
+            }
             ("tint", t) => {
                 ws.settings.appearance.glass_tint = t
                     .parse()

@@ -1340,14 +1340,60 @@ pub fn lead_to_match(
     )
 }
 
-/// Resolve the configured background (`builtin:<name>` or a file path) into an image source.
-pub fn background_source(spec: &str) -> ImageSource {
-    match spec.strip_prefix("builtin:") {
-        Some(name) => ImageSource::from(SharedString::from(format!("backgrounds/{name}.png"))),
-        None => ImageSource::from(std::sync::Arc::<std::path::Path>::from(
-            std::path::Path::new(spec),
-        )),
+/// Resolve the configured background (`builtin:<name>` or a file path) into an image source, in
+/// the theme's variant (`crate::backgrounds`).
+pub fn background_source(spec: &str, cx: &App) -> ImageSource {
+    crate::backgrounds::source(spec, cx.theme().mode.is_dark())
+}
+
+/// The art behind a window's chrome ("Sidebar" in Settings): Classic and the user's own fill the
+/// window under the scrim they always had; ASCII art fills the sidebar's column alone (and so
+/// isn't drawn in a window `without_sidebar`), under a scrim that keeps the sidebar's text at
+/// 4.5:1. Laid over the window's background, before its content.
+pub fn window_backdrop(spec: &str, dim: f32, with_sidebar: bool, cx: &App) -> Vec<AnyElement> {
+    let theme = cx.theme();
+    let side = theme.sidebar;
+    let dark = theme.mode.is_dark();
+    let collection = crate::backgrounds::collection_of(spec);
+    let layer = || div().absolute().top_0().left_0().h_full();
+    if collection.in_sidebar_column() {
+        if !with_sidebar {
+            return Vec::new();
+        }
+        let alpha = [
+            (theme.sidebar_foreground, crate::backgrounds::TEXT_RATIO),
+            (theme.muted_foreground, 3.0),
+        ]
+        .iter()
+        .map(|&(text, ratio)| crate::backgrounds::scrim_for(spec, side, text, ratio, dark))
+        .fold(dim.clamp(0.0, 0.9), f32::max);
+        let width = px(crate::root::SIDEBAR_WIDTH);
+        return vec![
+            layer()
+                .w(width)
+                .child(
+                    img(background_source(spec, cx))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+                .into_any_element(),
+            layer().w(width).bg(side.opacity(alpha)).into_any_element(),
+        ];
     }
+    vec![
+        layer()
+            .size_full()
+            .child(
+                img(background_source(spec, cx))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+            .into_any_element(),
+        layer()
+            .size_full()
+            .bg(side.opacity((0.5 + dim * 0.6).min(0.92)))
+            .into_any_element(),
+    ]
 }
 
 /// Full-bleed background art that fades into the surface below (Capy-style hero).
@@ -1362,7 +1408,7 @@ pub fn hero_background(spec: Option<&str>, dim: f32, cx: &App) -> Div {
     if let Some(spec) = spec {
         el = el
             .child(
-                img(background_source(spec))
+                img(background_source(spec, cx))
                     .absolute()
                     .top_0()
                     .left_0()

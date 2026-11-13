@@ -8,6 +8,7 @@ pub use trek_assets::assets;
 pub mod attachments;
 pub mod background_strip;
 pub mod background_use;
+pub mod backgrounds;
 pub mod basecamp;
 pub use trek_brand as brand;
 pub mod budget;
