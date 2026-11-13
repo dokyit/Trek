@@ -106,7 +106,7 @@ area = "App"
 what = "Background art: Classic, Paintings and Light across the chat, ASCII in the sidebar"
 macos = "yes"
 windows = "yes"
-live = ["route settings:appearance", "wait 300", "reveal bg-oxbow", "count bg-oxbow 1", "click bg-oxbow", "route project:{project}", "new", "wait 800", "count chat-art 1"]
+live = ["route settings:appearance", "wait 300", "reveal bg-oxbow", "count bg-oxbow 1", "click bg-oxbow", "route project:{project}", "new", "wait shown chat-art 10000", "count chat-art 1"]
 how = { macos = "Shared UI code: the art is embedded images drawn by GPUI, with a scrim worked out from each collection's extreme pixel.", windows = "The same code. \"Sidebar\" draws behind the chrome as on the Mac; the window stays opaque, as Windows' once-only clean-up (`keep_windows_opaque`) already allows." }
 code = ["crates/trek-app/src/backgrounds.rs", "crates/trek-app/src/settings_view/backgrounds.rs", "crates/trek-core/src/settings.rs"]
 tests = ["crates/trek-app/src/backgrounds.rs", "crates/trek-core/src/settings.rs"]
@@ -616,7 +616,7 @@ area = "App"
 what = "Choose Trek's app icon"
 macos = "yes"
 windows = "yes"
-live = ["route settings:appearance", "wait 300", "count app-icon-* 3+"]
+live = ["route settings:appearance", "wait 300", "reveal app-icon-Night", "count app-icon-* 3+"]
 how = { macos = "The Dock tile while Trek runs; Finder and the Dock keep Night when it's closed.", windows = "The windows' icons (taskbar, Alt+Tab) while Trek runs; Trek's file and its shortcuts keep Night." }
 code = ["crates/trek-app/src/system.rs", "crates/trek-app/build.rs"]
 
