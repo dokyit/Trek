@@ -1564,10 +1564,10 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                 cx.update(|cx| {
                     let ws = ws.read(cx);
                     let Route::Thread(id) = &ws.route else {
-                        return (None, false, 0);
+                        return (None, false, 0, false);
                     };
                     let Some(live) = ws.live.get(id) else {
-                        return (Some(id.clone()), false, 0);
+                        return (Some(id.clone()), false, 0, false);
                     };
                     let answers = live
                         .items
@@ -1576,10 +1576,15 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                             matches!(i, trek_core::store::Item::Assistant { text } if !text.trim().is_empty())
                         })
                         .count();
-                    (Some(id.clone()), live.turn_started.is_some(), answers)
+                    (
+                        Some(id.clone()),
+                        live.turn_started.is_some(),
+                        answers,
+                        !live.queued.is_empty(),
+                    )
                 })
             };
-            let (before_id, _, before) = assistant(cx);
+            let (before_id, _, before, _) = assistant(cx);
             let began = Instant::now();
             let typed = main.update(cx, |_, window, cx| {
                 window.focused(cx).is_some()
@@ -1587,9 +1592,16 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
                         .dispatch_keystroke(Keystroke::parse("enter").expect("enter parses"), cx)
             })?;
             anyhow::ensure!(typed, "perf firstword: nothing has the keyboard");
-            let mut turn = None;
+            // How long the key's own handling took, and when the thread and its turn were there
+            // (a message held, as one is while its history loads, shows as `held`).
+            let dispatched = began.elapsed();
+            let (mut turn, mut thread, mut held) = (None, None, false);
             loop {
-                let (id, running, answers) = assistant(cx);
+                let (id, running, answers, queued) = assistant(cx);
+                if id != before_id && thread.is_none() {
+                    thread = Some(began.elapsed());
+                }
+                held |= queued;
                 if running && turn.is_none() {
                     turn = Some(began.elapsed());
                 }
@@ -1613,12 +1625,14 @@ async fn perf(ws: &Entity<Workspace>, arg: &str, cx: &mut AsyncApp) -> anyhow::R
             let (tx, rx) = crate::perf::next_frame();
             let frame = painted_within(tx, rx, Duration::from_secs(2), cx).await;
             tracing::info!(
-                "perf: firstword label={label} ms={} turn={} answered={}",
+                "perf: firstword label={label} ms={} turn={} answered={} dispatched={} thread={} held={held}",
                 ms(frame.map_or(began.elapsed(), |f| f
                     .painted
                     .saturating_duration_since(began))),
                 turn.map_or("-".into(), ms),
-                ms(answered)
+                ms(answered),
+                ms(dispatched),
+                thread.map_or("-".into(), ms)
             );
         }
         // What Trek itself holds: transcripts in memory, and the main window's parsed answers.
