@@ -452,24 +452,8 @@ impl Render for ThreadWindow {
                 })
             }))
             .when_some(backdrop, |el, (spec, dim)| {
-                let side = theme.sidebar;
                 el.relative()
-                    .child(
-                        img(crate::ui::background_source(&spec))
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .object_fit(ObjectFit::Cover),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .bg(side.opacity((0.5 + dim * 0.6).min(0.92))),
-                    )
+                    .children(crate::ui::window_backdrop(&spec, dim, false, cx))
             })
             .child(crate::artifact::layer_start())
             .child(self.title_bar(window.viewport_size().width < px(640.), cx))
@@ -483,6 +467,11 @@ impl Render for ThreadWindow {
                         .bg(crate::ui::panel_bg(glass, cx))
                         .overflow_hidden()
                         .relative()
+                        .children(crate::backgrounds::chat_pane_art(
+                            &self.workspace.read(cx).settings.appearance,
+                            false,
+                            cx,
+                        ))
                         .children(crate::ui::glass_sheen(glass, cx))
                         // Cached as in the main window: the working bar's frames redraw only the bar.
                         .child(

@@ -31,8 +31,8 @@
 //! density = "compact"                  # "compact", "regular" or "roomy"
 //!
 //! [background]
-//! art = "builtin:night"                # "none", "builtin:<name>", or an image path
-//! placement = "everywhere"             # "new-thread" or "everywhere"
+//! art = "builtin:paintings/matterhorn"  # "none", built-in art, or an image path
+//! placement = "chat"                   # "chat", "sidebar" or "new-thread"
 //! dim = 0.4                            # 0 to 0.9
 //!
 //! [glass]
@@ -357,8 +357,31 @@ struct ShapeFile {
 #[serde(deny_unknown_fields)]
 struct BackgroundFile {
     art: Option<String>,
-    placement: Option<BackgroundPlacement>,
+    placement: Option<Place>,
     dim: Option<f32>,
+}
+
+/// Where a theme's art shows, by Settings' names for the places.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum Place {
+    /// Across the whole chat pane, under a scrim that keeps its text readable.
+    Chat,
+    /// Behind the sidebar and title bar (the setting's `everywhere`, which a theme may write).
+    #[serde(alias = "everywhere")]
+    Sidebar,
+    /// Behind the new-thread composer.
+    NewThread,
+}
+
+impl Place {
+    fn setting(self) -> BackgroundPlacement {
+        match self {
+            Place::Chat => BackgroundPlacement::Chat,
+            Place::Sidebar => BackgroundPlacement::Everywhere,
+            Place::NewThread => BackgroundPlacement::NewThread,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -527,14 +550,21 @@ pub fn parse(id: &str, text: &str, origin: Origin) -> Result<Theme, String> {
         art = match bg.art.as_deref().map(str::trim) {
             None | Some("") | Some("none") => None,
             Some(builtin) if builtin.starts_with("builtin:") => {
+                // `builtin:<piece>` (Classic's) or `builtin:<collection>/<piece>`: whether Trek
+                // has it is trek-app's to say (`backgrounds`).
                 let name = &builtin["builtin:".len()..];
-                if name.is_empty()
-                    || !name
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-                {
+                let part = |p: &str| {
+                    !p.is_empty()
+                        && p.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                };
+                let named = match name.split_once('/') {
+                    Some((collection, piece)) => part(collection) && part(piece),
+                    None => part(name),
+                };
+                if !named {
                     return Err(format!(
-                        "[background] art = \"{builtin}\": a built-in's name is lower case letters, digits and dashes"
+                        "[background] art = \"{builtin}\": built-in art is \"builtin:<name>\" or \"builtin:<collection>/<name>\", in lower case letters, digits and dashes"
                     ));
                 }
                 Some(builtin.to_string())
@@ -559,7 +589,7 @@ pub fn parse(id: &str, text: &str, origin: Origin) -> Result<Theme, String> {
                 Some(path.display().to_string())
             }
         };
-        placement = bg.placement.unwrap_or(placement);
+        placement = bg.placement.map_or(placement, Place::setting);
         dim = in_range("[background] dim", bg.dim.unwrap_or(dim), 0., 0.9)?;
     }
     let (mut glass, mut glass_tint) = (false, trek.glass_tint);
@@ -901,8 +931,11 @@ mod tests {
         assert_eq!(journal.conversation_font, Font::Serif);
         assert_eq!(journal.conversation_size, 16.);
         let alpenglow = &all[3];
-        assert_eq!(alpenglow.art.as_deref(), Some("builtin:dawn"));
-        assert_eq!(alpenglow.placement, BackgroundPlacement::Everywhere);
+        assert_eq!(
+            alpenglow.art.as_deref(),
+            Some("builtin:paintings/matterhorn")
+        );
+        assert_eq!(alpenglow.placement, BackgroundPlacement::Chat);
         // Every built-in has its own colours for both light and dark, readable on its window.
         for t in &all[1..] {
             for (p, base) in [(&t.dark, NIGHT), (&t.light, PAPER)] {
@@ -977,6 +1010,26 @@ mod tests {
         assert!(e.contains("format = 2"), "{e}");
         let e = bad("name = \"X\"\n[background]\nart = \"builtin:Dawn!\"\n");
         assert!(e.contains("builtin:Dawn!"), "{e}");
+        let e = bad("name = \"X\"\n[background]\nart = \"builtin:paintings/\"\n");
+        assert!(e.contains("<collection>"), "{e}");
+        let e = bad("name = \"X\"\n[background]\nplacement = \"behind\"\n");
+        assert!(e.contains("chat") && e.contains("sidebar"), "{e}");
+        // Settings' names for the places, and the setting's own for the sidebar.
+        for (place, want) in [
+            ("chat", BackgroundPlacement::Chat),
+            ("sidebar", BackgroundPlacement::Everywhere),
+            ("everywhere", BackgroundPlacement::Everywhere),
+            ("new-thread", BackgroundPlacement::NewThread),
+        ] {
+            let text = format!(
+                "name = \"X\"\n[background]\nart = \"builtin:light/aurora\"\nplacement = \"{place}\"\n"
+            );
+            let t = parse("x", &text, Origin::BuiltIn).unwrap();
+            assert_eq!(
+                (t.placement, t.art.as_deref()),
+                (want, Some("builtin:light/aurora"))
+            );
+        }
     }
 
     #[test]
@@ -1082,8 +1135,11 @@ mod tests {
         // Another theme from there: what the user had before Console is still what's kept.
         let alpenglow = all.iter().find(|t| t.id == "alpenglow").unwrap();
         apply(alpenglow, a);
-        assert_eq!(a.background.as_deref(), Some("builtin:dawn"));
-        assert_eq!(a.background_placement, BackgroundPlacement::Everywhere);
+        assert_eq!(
+            a.background.as_deref(),
+            Some("builtin:paintings/matterhorn")
+        );
+        assert_eq!(a.background_placement, BackgroundPlacement::Chat);
         // Back to Trek: as it was.
         apply(&all[0], a);
         assert_eq!(a.trek_theme, DEFAULT);

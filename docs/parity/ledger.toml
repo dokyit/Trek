@@ -101,6 +101,17 @@ code = ["crates/trek-core/src/themes.rs", "crates/trek-app/src/themes.rs", "vend
 tests = ["crates/trek-app/tests/themes.rs"]
 
 [[feature]]
+id = "backgrounds"
+area = "App"
+what = "Background art: Classic, Paintings and Light across the chat, ASCII in the sidebar"
+macos = "yes"
+windows = "yes"
+live = ["route settings:appearance", "wait 300", "reveal bg-oxbow", "count bg-oxbow 1", "click bg-oxbow", "route project:{project}", "new", "wait 800", "count chat-art 1"]
+how = { macos = "Shared UI code: the art is embedded images drawn by GPUI, with a scrim worked out from each collection's extreme pixel.", windows = "The same code. \"Sidebar\" draws behind the chrome as on the Mac; the window stays opaque, as Windows' once-only clean-up (`keep_windows_opaque`) already allows." }
+code = ["crates/trek-app/src/backgrounds.rs", "crates/trek-app/src/settings_view/backgrounds.rs", "crates/trek-core/src/settings.rs"]
+tests = ["crates/trek-app/src/backgrounds.rs", "crates/trek-core/src/settings.rs"]
+
+[[feature]]
 id = "open-in"
 area = "App"
 what = "Open a project in another app"

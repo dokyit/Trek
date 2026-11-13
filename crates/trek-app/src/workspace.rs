@@ -4077,10 +4077,11 @@ impl Workspace {
         catalog::default_models(agent)
     }
 
-    /// The window-wide backdrop image, when the user chose "Everywhere".
+    /// The art behind the window's chrome, when it goes there ("Sidebar" in Settings, and
+    /// always for ASCII art: `backgrounds::placement`).
     pub fn backdrop(&self) -> Option<(String, f32)> {
         let a = &self.settings.appearance;
-        (a.background_placement == trek_core::settings::BackgroundPlacement::Everywhere)
+        (crate::backgrounds::placement(a) == trek_core::settings::BackgroundPlacement::Everywhere)
             .then(|| a.background.clone().map(|b| (b, a.background_dim)))
             .flatten()
     }

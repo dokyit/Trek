@@ -1,7 +1,8 @@
-# Alpenglow: Trek over the mountains at first light. The dawn art fills the whole window under
-# see-through chrome, with dusk-blue surfaces, a warm peach accent and soft corners.
+# Alpenglow: Trek over the mountains at first light. Bierstadt's Sunrise on the Matterhorn lies
+# across the whole chat under a scrim that keeps the text readable, with dusk-blue chrome, a warm
+# peach accent and soft corners.
 name = "Alpenglow"
-description = "The dawn ridge behind the whole window, dusk-blue chrome, a peach accent."
+description = "Sunrise on the Matterhorn behind the chat, dusk-blue chrome, a peach accent."
 mode = "dark"
 
 [fonts]
@@ -13,9 +14,9 @@ corners = 1.5
 density = "regular"
 
 [background]
-art = "builtin:dawn"
-placement = "everywhere"
-dim = 0.35
+art = "builtin:paintings/matterhorn"
+placement = "chat"
+dim = 0
 
 [motion]
 style = "calm"

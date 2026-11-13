@@ -349,6 +349,34 @@ fn show(theme: &Theme, cx: &mut App) {
 
 // ---------- the list and the folder ----------
 
+/// The themes among `scan` whose built-in art Trek has; the rest become problems.
+fn known_art(scan: core::Scan) -> core::Scan {
+    let mut out = core::Scan {
+        themes: Vec::new(),
+        problems: scan.problems,
+    };
+    for t in scan.themes {
+        match t.art.as_deref() {
+            Some(art)
+                if art.starts_with("builtin:") && crate::backgrounds::piece_for(art).is_none() =>
+            {
+                let file = match &t.origin {
+                    core::Origin::File(file) => file.clone(),
+                    core::Origin::BuiltIn => PathBuf::from(&t.id),
+                };
+                out.problems.push(core::Problem {
+                    file,
+                    message: format!(
+                        "[background] art = \"{art}\" isn't one of Trek's pieces (the trek-theme skill lists them)"
+                    ),
+                });
+            }
+            _ => out.themes.push(t),
+        }
+    }
+    out
+}
+
 fn full_list(found: Vec<Theme>) -> Vec<Theme> {
     let mut list = core::built_in();
     let mut found = found;
@@ -398,7 +426,7 @@ pub fn shown_id(cx: &App) -> String {
 pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
     let dir = core::dir();
     let fingerprint = core::fingerprint(&dir);
-    let scan = core::scan(&dir);
+    let scan = known_art(core::scan(&dir));
     core::write_problems(&dir, &scan.problems);
     let list = full_list(scan.themes);
     let id = ws.read(cx).settings.appearance.trek_theme.clone();
@@ -456,7 +484,7 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
         return;
     };
     let fingerprint = core::fingerprint(&dir);
-    let scan = core::scan(&dir);
+    let scan = known_art(core::scan(&dir));
     let request = core::take_apply_request(&dir);
     let mut problems = scan.problems;
     if let Some(id) = request.as_deref()
@@ -831,7 +859,21 @@ fn miniature(theme: &Theme, dark: bool, corner_scale_now: f32) -> Div {
             r * theme.corners
         }
     };
-    let art = (theme.placement == trek_core::settings::BackgroundPlacement::Everywhere)
+    // Its art where it puts it: behind the sidebar (and ASCII art always there), or across the
+    // chat under the scrim the chat itself would lay (`backgrounds::chat_layer`). Art for the
+    // new-thread screen alone isn't in the miniature.
+    use trek_core::settings::BackgroundPlacement as Place;
+    let place = theme.art.as_deref().map(|art| {
+        if crate::backgrounds::collection_of(art).sidebar_only() {
+            Place::Everywhere
+        } else {
+            theme.placement
+        }
+    });
+    let art = (place == Some(Place::Everywhere))
+        .then(|| theme.art.clone())
+        .flatten();
+    let chat_art = (place == Some(Place::Chat))
         .then(|| theme.art.clone())
         .flatten();
     let line = |w: f32, c: Hsla| div().h(px(4.)).w(px(w)).rounded_full().bg(c);
@@ -844,7 +886,7 @@ fn miniature(theme: &Theme, dark: bool, corner_scale_now: f32) -> Div {
         .overflow_hidden()
         .when_some(art.clone(), |el, art| {
             el.child(
-                img(crate::ui::background_source(&art))
+                img(crate::backgrounds::thumbnail(&art, dark))
                     .absolute()
                     .top_0()
                     .left_0()
@@ -887,7 +929,17 @@ fn miniature(theme: &Theme, dark: bool, corner_scale_now: f32) -> Div {
                     v_flex()
                         .flex_1()
                         .h_full()
+                        .relative()
                         .bg(s.window)
+                        .when_some(chat_art, |el, art| {
+                            el.child(crate::backgrounds::chat_layer(
+                                &art,
+                                theme.dim,
+                                s.window,
+                                &[(s.text, crate::backgrounds::TEXT_RATIO)],
+                                dark,
+                            ))
+                        })
                         .pt(px(14.))
                         .px(px(16.))
                         .pb(px(12.))
@@ -1189,6 +1241,57 @@ mod tests {
                 (b.window, b.text, b.muted)
             );
         }
+    }
+
+    #[test]
+    fn the_skill_names_every_piece_of_art_trek_has_and_built_ins_use_real_ones() {
+        let (_, skill) = trek_core::skills::SHIPPED
+            .iter()
+            .find(|(n, _)| *n == core::SKILL)
+            .unwrap();
+        let named: Vec<&str> = skill
+            .match_indices("`builtin:")
+            .map(|(at, _)| {
+                let rest = &skill[at + 1..];
+                &rest[..rest.find('`').unwrap()]
+            })
+            .collect();
+        for spec in &named {
+            assert!(
+                crate::backgrounds::piece_for(spec).is_some(),
+                "the skill names {spec}, which Trek doesn't have"
+            );
+        }
+        for piece in crate::backgrounds::PIECES {
+            assert!(
+                named.contains(&piece.spec().as_str()),
+                "the skill leaves out {}",
+                piece.spec()
+            );
+        }
+        for t in core::built_in() {
+            if let Some(art) = &t.art {
+                assert!(
+                    crate::backgrounds::piece_for(art).is_some(),
+                    "{}: {art}",
+                    t.id
+                );
+            }
+        }
+        let bad = core::Scan {
+            themes: vec![
+                core::parse(
+                    "x",
+                    "name = \"X\"\n[background]\nart = \"builtin:paintings/nowhere\"\n",
+                    core::Origin::BuiltIn,
+                )
+                .unwrap(),
+            ],
+            problems: vec![],
+        };
+        let checked = super::known_art(bad);
+        assert!(checked.themes.is_empty());
+        assert!(checked.problems[0].message.contains("nowhere"));
     }
 
     #[test]

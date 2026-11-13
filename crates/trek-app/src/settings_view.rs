@@ -2,6 +2,7 @@
 //! hairline-separated rows: a label and one-line explanation on the left, the control on the right.
 
 mod accounts;
+mod backgrounds;
 mod coming_from;
 mod connections;
 mod mobile;
@@ -1186,107 +1187,6 @@ impl SettingsView {
             .text_size(px(text::BODY))
             .child(div().size(px(6.)).rounded_full().bg(color))
             .child(label)
-            .into_any_element()
-    }
-
-    /// Thumbnails: None, the built-in art, the user's own image, and "Choose image…".
-    fn background_gallery(&self, s: &Settings, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let current = s.appearance.background.clone();
-        let mut options: Vec<(Option<String>, &'static str)> = vec![
-            (None, "None"),
-            (Some("builtin:dawn".into()), "Dawn"),
-            (Some("builtin:night".into()), "Night"),
-            (Some("builtin:paper".into()), "Paper"),
-        ];
-        if let Some(c) = current.clone().filter(|c| !c.starts_with("builtin:")) {
-            options.push((Some(c), "Yours"));
-        }
-        let tile = |id: SharedString, selected: bool| {
-            v_flex().id(id).gap(px(6.)).cursor_pointer().child(
-                div()
-                    .w(px(100.))
-                    .h(px(66.))
-                    .rounded(px(fluent::control(radius::BUTTON)))
-                    .overflow_hidden()
-                    .border_2()
-                    .border_color(if selected {
-                        theme.foreground
-                    } else {
-                        theme.border
-                    })
-                    .border_dashed()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(Icon::new(IconName::Plus).text_color(theme.muted_foreground)),
-            )
-        };
-        h_flex()
-            .flex_wrap()
-            .gap(px(12.))
-            .px(px(4.))
-            .children(options.into_iter().map(|(spec, label)| {
-                let selected = spec == current;
-                let preview = spec.clone();
-                let ws = self.workspace.clone();
-                v_flex()
-                    .id(SharedString::from(format!("bg-{label}")))
-                    .gap(px(6.))
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .relative()
-                            .w(px(100.))
-                            .h(px(66.))
-                            .rounded(px(fluent::control(radius::BUTTON)))
-                            .overflow_hidden()
-                            .border_2()
-                            .border_color(if selected {
-                                theme.foreground
-                            } else {
-                                theme.border
-                            })
-                            .bg(theme.background)
-                            .when_some(preview, |el, spec| {
-                                el.child(
-                                    img(ui::background_source(&spec))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .text_size(to_rems(text::META))
-                            .text_color(if selected {
-                                theme.foreground
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(label),
-                    )
-                    .on_click(move |_, _, cx| {
-                        let spec = spec.clone();
-                        ws.update(cx, |ws, cx| {
-                            ws.settings.appearance.background = spec;
-                            ws.save_settings(cx);
-                        })
-                    })
-            }))
-            .child(
-                tile("bg-choose".into(), false)
-                    .child(
-                        div()
-                            .text_size(to_rems(text::META))
-                            .text_color(theme.muted_foreground)
-                            .child("Choose image…"),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace
-                            .update(cx, |ws, cx| ws.pick_background_image(cx))
-                    })),
-            )
             .into_any_element()
     }
 

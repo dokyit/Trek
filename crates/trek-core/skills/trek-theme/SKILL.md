@@ -59,13 +59,13 @@ corners = 0.25                         # every corner against Trek's: 0 square, 
 density = "compact"                    # "compact", "regular" or "roomy": the text sizes not given
 
 [background]                           # leave the table out for no art
-art = "builtin:night"                  # "none", "builtin:dawn" / "builtin:night" / "builtin:paper",
-                                       # or an image path (relative to this file, or absolute)
-placement = "everywhere"               # "new-thread" (behind the new-thread composer) or "everywhere"
-dim = 0.45                             # 0-0.9: how much the art is dimmed under the window
+art = "builtin:paintings/matterhorn"   # "none", one of Trek's pieces (below), or an image path
+                                       # (relative to this file, or absolute)
+placement = "chat"                     # "chat", "sidebar" or "new-thread" (below)
+dim = 0.2                              # 0-0.9: darkens the art further, on top of what text needs
 
 [glass]                                # leave the table out for an opaque window
-on = true                              # the desktop shows through, blurred (hidden under art everywhere)
+on = true                              # the desktop shows through, blurred (hidden under sidebar art)
 tint = 0.6                             # 0.2 clear to 0.95 frosted
 
 [motion]
@@ -86,6 +86,27 @@ border = "#222A26"
 Colours are `"#RRGGBB"` or `"#RRGGBBAA"`. Give both `[dark]` and `[light]` when you can: the user
 can still flip between light and dark in Settings, and the other table is what they'll see.
 
+### Trek's art
+
+Every piece but Classic's has a Night and a Paper version; Trek shows the one for the light or
+dark on screen.
+
+- Classic, anywhere: `builtin:dawn`, `builtin:night`, `builtin:paper` (dithered ridges).
+- Paintings, public-domain landscapes in Trek's colours, for `chat`: `builtin:paintings/matterhorn`,
+  `builtin:paintings/kauterskill`, `builtin:paintings/oxbow`, `builtin:paintings/notch`,
+  `builtin:paintings/green-river`, `builtin:paintings/aosta`, `builtin:paintings/keelmen`
+  (moonlight), `builtin:paintings/merced`.
+- Light, long-exposure light made of glyphs, for `chat`: `builtin:light/streaks`,
+  `builtin:light/aurora`, `builtin:light/window`, `builtin:light/switchbacks`.
+- ASCII, mountains drawn in text, shown in the sidebar whatever `placement` says:
+  `builtin:ascii/ramp`, `builtin:ascii/braille`, `builtin:ascii/halftone`, `builtin:ascii/dense`,
+  `builtin:ascii/led`.
+
+Placements: `chat` lays the art across the whole chat pane (the new-thread screen, the transcript
+and the composer) under a scrim Trek works out from your `window` and `text` colours so the text
+keeps 4.5:1; `sidebar` puts it behind the sidebar and title bar with the chat plain;
+`new-thread` behind the new-thread composer only.
+
 ## Rules
 
 Trek refuses a file that breaks these, and says why in `problems.txt` and in Settings:
@@ -95,7 +116,7 @@ Trek refuses a file that breaks these, and says why in `problems.txt` and in Set
   least 3:1 against `accent`, and `accent` at least 3:1 against `window` (links and the working
   beacon are drawn in it).
 - Numbers in their ranges; `format`, if you write it, is `1`.
-- Art at a path must exist.
+- Art at a path must exist, and built-in art must be one of the pieces above.
 
 And for a theme that looks made, not generated:
 
@@ -106,7 +127,9 @@ And for a theme that looks made, not generated:
 - Monospace for the interface reads as a terminal; a serif for the conversation reads as a page.
   Pair a serif conversation with a roomy density or `conversation_size` 16.
 - Corners: 0-0.3 for terminals and print, 1 for Trek's own, 1.3-1.6 for soft and glassy.
-- Art everywhere wants a dark theme and a `dim` of 0.35-0.55 so text stays readable.
+- Art across the chat looks best at a `dim` of 0-0.2 (Trek already keeps the text readable);
+  art in the sidebar wants a dark theme and a `dim` of 0.35-0.55. Pick a painting whose light
+  suits your accent: Matterhorn and Kauterskill are warm, Notch and Keelmen cool.
 
 ## Example: "make Trek look like a 90s terminal"
 

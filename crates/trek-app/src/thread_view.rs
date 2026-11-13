@@ -4774,7 +4774,8 @@ impl ThreadView {
                 .into_any_element();
         }
         let a = &ws.settings.appearance;
-        let show = a.background_placement == trek_core::settings::BackgroundPlacement::NewThread
+        let show = crate::backgrounds::placement(a)
+            == trek_core::settings::BackgroundPlacement::NewThread
             && ws.is_draft_in(&self.scope);
         let spec = if show { a.background.clone() } else { None };
         div()
