@@ -245,23 +245,23 @@ components:
 
 # Design System: trekdesktop.com
 
-This file records what is built. It was read from `index.html`, `assets/site.css`, `assets/site.js`, `privacy/index.html`, `404.html`, `script/site/make_hero.py` and `script/site/make_icons.py` on 12 November 2026. A size given as measured was read from the page in headless Chrome on that day. Where the build and its direction differ, the build is what is written here, and the difference is listed at the end.
+This file records what is built. It was read from `index.html`, `assets/site.css`, `assets/site.js`, `privacy/index.html`, `404.html`, `script/site/make_hero.py`, `script/site/make_hero_layers.py` and `script/site/make_icons.py` on 12 November 2026, and again for the first screen and its hand-off into the story on 13 November 2026. A size given as measured was read from the page in headless Chrome on that day. Where the build and its direction differ, the build is what is written here, and the difference is listed at the end.
 
 ## Overview
 
 **Creative North Star: "The Trailhead"**
 
-The site is where a visitor meets Trek before installing it. The first screen is one photograph of a trail going up a dry hill. A headline, two short sentences, one button and one fine line sit in its sky. Below the photograph the page takes the app's own ground: Paper by day, Night when the system is dark.
+The site is where a visitor meets Trek before installing it. The first screen is one photograph of a trail going up a dry hill. A headline, two short sentences, one button and one fine line sit in its sky. Below the photograph the page takes the app's own ground: Paper by day, Night when the system is dark. The photograph does not end at an edge. Scrolling holds it and walks up the trail while the dusk closes on its horizon, and the story's dotted trail begins on that last line of light.
 
 Under the first screen the page shows the app three times. First a small stage is pinned while the visitor scrolls, and an example Inbox acts on it: three threads start, one stops to ask, the phone offers the same question, the thread goes back to work, finished work waits. Then the real window is shown at its real size, twice. A list of builds and a one-line footer end the page.
 
 Type is two grotesques, upright throughout. Surfaces are flat, with hairlines and small steps in tone. The page draws two soft shadows, both on the stage. Decorative art is a photograph or it is absent. There is no drawn scenery, and the mark is never used as scenery. The home page does not use a dark page by default, a shrunken window under the headline, a row of agent logos or a wall of copy.
 
-Motion has one grammar. Things arrive by opacity and a short rise, most with a blur that clears. Scrolling plays the stage forwards and backwards. The hiker walks on a clock. Without the script, with Reduce Motion on, or in a window under 560 px tall, the story is a still layout that says the same things.
+Motion has one grammar. Things arrive by opacity and a short rise, most with a blur that clears. Scrolling plays the first screen and the stage forwards and backwards, as one continuous scene. Where there is a mouse, the photograph's two planes move a little apart as it moves. The hiker walks on a clock. Without the script, with Reduce Motion on, or in a window under 560 px tall, the story is a still layout that says the same things.
 
 **Key Characteristics:**
 - Paper by default and Night when the system is dark. There is no switch on the page.
-- One photograph on the first screen: the day picture on Paper, a dusk grade of the same frame at Night.
+- One photograph on the first screen, in two planes (sky and land): the day picture on Paper, a dusk grade of the same frame at Night. It is held while the page scrolls one more screen, and hands off to the story's trail.
 - One accent, ember, for the action and for a thread at work. Amber and emerald mark the other two states.
 - Bricolage Grotesque at 600 for display, Hanken Grotesk at 400 and 500 for text, JetBrains Mono for commands.
 - A pinned story 430vh tall, with one caption on screen at a time.
@@ -353,7 +353,7 @@ Times in the rows use tabular figures.
 The home page is one column of full-width parts: the first screen, the story, two capture bands, the builds band and the footer. Content sits in a centred measure of 1180 px with 24 px gutters (`--wide: min(1180px, 100% - 48px)`). Three measures are narrower because of what they hold: 820 px for the first screen's words, 1040 px for the "This is Trek." band because that window is 1040 points wide, and 760 px for the reading column on the privacy and not-found pages.
 
 - **The bar.** 68 px tall, laid over the top of the page and not fixed to the screen.
-- **The first screen.** As tall as the screen and never under 720 px (`max(100svh, 720px)`). The photograph covers it, anchored 40% across and 70% down, so the horizon holds at 70% of the height at any size. The words are centred and start between 104 and 260 px from the top (`30svh - 110px`), which is 160 px in a 900 px window.
+- **The first screen.** As tall as the screen and never under 720 px (`max(100svh, 720px)`, called H here). With the script the section is 1.85 H tall and the scene inside it is pinned for the extra 0.85 H, while the words scroll away over it; the story is drawn up under its end by 0.29 H plus the depth of the story's trail (441 px at 1440 by 900), so the trail's dots reach 71% of H just as the scene closes. Without the script, with Reduce Motion on or in a window under 560 px tall, it is at least H tall and not held, and grows if its words need more room (the scene and the words share one grid cell). The photograph covers it, anchored 40% across and 70% down, so the horizon holds at 70% of the height at any size. The words are centred and start between 104 and 260 px from the top (`30svh - 110px`), which is 160 px in a 900 px window.
 - **The story.** With the script it is 430vh tall. Its stage is pinned for that length, 100vh tall and never under 560 px. The block of trail, rows and question card is 440 px wide and centred. The caption sits 13vh above the foot of the stage. A line that says the example is staged sits 22 px above the same foot. The phone stands 44 px to the right of the block.
 - **Bands.** 120 px above and 132 px below. The two capture bands have 40 px above. The builds band opens with a hairline.
 - **"This is Trek."** The headline, one sentence 16 px under it, the window 56 px under that, and a note 28 px under the window.
@@ -384,7 +384,7 @@ Height changes:
 
 ## Elevation & Depth
 
-The system is flat. A surface is set apart by a hairline (`line`, as a 1 px border or a 1 px inset ring) or by one step in tone (`raised` on `ground`). The first screen's depth is the photograph's own. The bar has no ground of its own, so on the home page it sits on the photograph.
+The system is flat. A surface is set apart by a hairline (`line`, as a 1 px border or a 1 px inset ring) or by one step in tone (`raised` on `ground`). The first screen's depth is the photograph's own, in two planes that move a little apart. The bar has no ground of its own, so on the home page it sits on the photograph.
 
 The page draws two soft shadows, and both belong to things that stand on the story's stage: the Inbox panel and the phone. Their colour is `shade`, a warm brown on Paper and black at Night.
 
@@ -439,11 +439,15 @@ A faceted mountain with a lit face and a shaded face, a dotted trail of nine dot
 
 ### The first screen
 One photograph and a few words in its sky.
-- **The photograph:** it fills the screen with `object-fit: cover`. It ships 1600 and 2880 px wide, chosen by `sizes="max(100vw, 160vh)"`, with a Night source for dark mode. It is decoration and has an empty `alt`.
+- **The photograph:** two planes cut from it along the ridge, the sky (with the far hills) and the land (the near hill and its trail, with a transparent sky). They lie exactly over each other, each filling the screen with `object-fit: cover` at 40% across and 70% down, and are scaled 1.03 so a small shift never shows an edge. Each ships 1600 and 2880 px wide, chosen by `sizes="max(100vw, 160vh)"`, with a Night source for dark mode. They are decoration and have an empty `alt`.
+- **The pointer:** where there is a mouse (`hover: hover` and `pointer: fine`), the land moves up to 14 px across and 7 px down against the pointer and the sky up to 5 and 3 px, as a near hill moves against the sky. The view follows the mouse over about a second (an exponential ease of 0.45 s) and settles back when the mouse leaves the page. Touch does nothing.
+- **The walk up the trail:** over the held 0.85 H of scroll the land scales from 1.03 to 1.30 and the sky to 1.08, both around the point where the trail meets the ridge (41% across, 71% down), so the camera draws nearer the crest. The scale eases out (`1 - (1 - q)²` of the scroll), so the hill is seen to come nearer from the first pixel of scroll, before the dusk reaches it.
+- **The dusk:** the page's ground comes up from below and down from above, each led by a soft edge that clears along a smoothstep (eleven stops of `color-mix` with transparent). At rest the lower one is the foot of the picture, its edge 14% of H tall, and that is also the whole of the still state. Scrolling moves both in step with the scroll: the lower to 70.4% of H and the upper to 71.6%, so they overlap and the scene is all ground when it closes. Their soft edges are widest half way (about a quarter of H) and sharpen to 1% of H as they close, so the photograph keeps its colour until the edges reach it and a thin line of horizon stays lit to the end: afterglow at Night, pale pink haze by day. Over the last quarter of the walk two more blocks of ground close in from the sides, each with an 80 px soft edge, until the lit line is only as wide as the story's trail. All of it is `transform` (a translate on each block and a `scaleY` on each soft edge).
+- **The hand-off:** the story's dots fade in over the last eighth of the walk, rising into the short closing line and reaching it as it goes; the Inbox panel follows from 97% of the walk to just past its end; the hiker steps on only once the scene has closed, over the next 0.085 H of scroll. Scrolling back plays it in reverse.
 - **The words:** the `h1`, the lede 22 px under it, one big filled button 30 px under that, and a fine line 14 px under the button at 14 px in second ink.
 - **The button:** the script names the visitor's system on it ("Download for macOS" or "Download for Windows") and adds the version, the chip and the file's size to the fine line. On a phone or on Linux the button says "See the downloads" and goes to the builds list, and the fine line says why. Without the script the button says "Download for macOS", leads to the latest release, and the fine line says "Free and open source."
 - **Entrance:** on load the four pieces rise once. Each goes from clear to solid, comes up 14 px and loses an 8 px blur over 700 ms on `--out`. They start 0, 90, 180 and 260 ms in. This is CSS, so it runs without the script. It is off with Reduce Motion.
-- **Nothing else:** no hiker, no capture, no label above the headline.
+- **Nothing else:** no hiker, no capture, no label above the headline, and nothing drawn: the dusk is the page's own ground colour.
 
 ### The story
 One stage, pinned while the page scrolls past it. Scrolling plays it, forwards and backwards. It is built in HTML from the app's own parts and is not a capture. A visible line says so, and its list is named "An example Inbox" for assistive technology.
@@ -465,7 +469,7 @@ The played position follows the scroll position with easing: each frame it moves
 - **Row:** 12 px of padding and 10 px corners. First line: the state's dot, the thread's title (500, 16 px) and a time at the right (13 px, muted, tabular). Second line (14 px, muted): the state in words at 500 in the state's ink, then the project. A row names its state in weight 500 because the app's row does. That is a picture of the app's row, not a bold lead-in.
 - **States:** at work is a 9 px ember ring with a gap that turns once every 1.1 s. Waiting is an amber dot and an 11% amber wash over the row. Finished is an emerald dot. A wash or a dot changes colour over 200 ms.
 - **Order:** what waits comes first, then what has finished, then what is at work. A row that changes place glides there over 420 ms on `--out`. Nothing jumps.
-- **Arrival:** the rows gather as the stage comes up the screen. Each comes in by opacity, a 26 px rise and a 7 px blur that clears, starting after the row above it.
+- **Arrival:** the panel waits for the trail's dots (above), then the rows gather as the stage comes up the screen. Each comes in by opacity, a 26 px rise and a 7 px blur that clears, starting after the row above it.
 
 **Question card.** What the waiting thread asks.
 - **Shape:** 12 px under the panel, in a space kept for it so nothing below moves. 18 px corners, 16 px of padding, a 9% amber wash over `raised`, and a 55% amber ring.
@@ -489,7 +493,7 @@ The played position follows the scroll position with easing: each frame it moves
 - **In the still layout:** under the captions, 72 px below them.
 
 **The hiker and his trail.** The app's working animation. On the site he walks only here.
-- **Trail:** a strip 54 px tall at the top of the block, 14 px in from each side of the panel, with a row of dots along its foot in ink at 40%. The trail's foot is the panel's top edge.
+- **Trail:** a strip 54 px tall at the top of the block, 14 px in from each side of the panel, with a row of dots along its foot in ink at 40%. The trail's foot is the panel's top edge. The dots and the hiker fade separately, so the dots can arrive on the first screen's last line of light before he steps on.
 - **Drawing:** a 12 by 16 cell sprite on a canvas, five poses and eight colours, in the Paper or Night set to match the theme. At full size a cell is 3 CSS px, so he stands 36 by 48 px, with his feet 5 px above the foot of the trail.
 - **Walk:** a 16-frames-a-second clock moves him 16 cells a second. He takes 0.35 s to gather and to lose speed, takes a pose for every 4 cells of ground, and rests 1.2 s at each end, where he turns. Time moves him. Scroll never sets his place. It only starts and stops the clock, which runs while the trail is on screen and the tab is in front.
 - **Pressing him:** a click, Enter or Space stops him, and the next one sends him on. He is a button to assistive technology, named "Stop the hiker" or "Let the hiker walk on".
@@ -525,7 +529,9 @@ The privacy and not-found pages share the bar and the type. Their column is 760 
 - **Not found:** the headline, one sentence and one filled button, left-aligned, in the middle of at least 72% of the screen's height.
 
 ### Named Rules
-**The Story Only Rule.** The hiker walks on the story's dotted trail and nowhere else. He is never in the first screen.
+**The Story Only Rule.** The hiker walks on the story's dotted trail and nowhere else. He is never in the first screen, and steps on only after its photograph has closed.
+
+**The Last Light Rule.** The photograph never ends at an edge. It ends as a line of light on its own horizon, made of the page's ground closing over it, and the story's trail begins on that line. Anything that moves in the hand-off moves by transform or opacity.
 
 **The Clock Not Scroll Rule.** Time moves the hiker. Scroll starts and stops his clock and never sets his place.
 
@@ -597,8 +603,8 @@ Everything on the site is the project's own or under an open licence. No picture
 
 | File | What it is | Origin |
 |---|---|---|
-| `assets/img/hero-day-2880.webp`, `hero-day-1600.webp` | The first screen's photograph by day. 2880 by 1800 px and 1600 by 1000 px. | The photograph above, scaled to 2880 px wide. 250 rows of sky are added above it from its own top row, the wisps of cloud behind the headline are softened, the colour is lifted slightly, and the foot is cropped so the horizon sits near 70% of the height. |
-| `assets/img/hero-night-2880.webp`, `hero-night-1600.webp` | The first screen's picture at Night, in the same two sizes. | A dusk grade of the day picture. Every pixel is the photograph's, multiplied by a colour that changes with height. It is not a photograph taken at dusk. |
+| `assets/img/hero-sky-day-2880.webp`, `hero-sky-day-1600.webp`, `hero-land-day-2880.webp`, `hero-land-day-1600.webp` | The first screen's photograph by day, as two planes. 2880 by 1800 px and 1600 by 1000 px; the land has alpha. | The photograph above, scaled to 2880 px wide. 250 rows of sky are added above it from its own top row, the wisps of cloud behind the headline are softened, the colour is lifted slightly, and the foot is cropped so the horizon sits near 70% of the height (`make_hero.py`). `make_hero_layers.py` then cuts it along the ridge by the warmth of the grass: the land keeps the photograph's pixels with the sky made transparent, and the sky's strip behind the ridge is filled from the sky just above it. Nothing is painted in. |
+| `assets/img/hero-sky-night-*.webp`, `hero-land-night-*.webp` | The first screen's picture at Night, as the same two planes in the same two sizes. | A dusk grade of the day picture, cut along the same ridge. Every pixel is the photograph's, multiplied by a colour that changes with height. It is not a photograph taken at dusk. |
 | `assets/img/window-paper.webp`, `window-night.webp` | The window under "This is Trek." 2172 by 1492 px, shown at 1086 by 746. | A real capture of the isolated test app in its demo dress: believable names and staged threads. |
 | `assets/img/simulator-paper.webp`, `simulator-night.webp` | The window with the Simulator tool open. 2452 by 1612 px, shown at 1226 by 806. | The same app and scene, with a staged thread whose agent checks Trek's own iPhone app in the iOS Simulator. |
 | `assets/img/iphone-paper.webp`, `iphone-night.webp` | Trek for iPhone with an approval waiting. 1170 by 2532 px, the phone's own 3x. Shown reduced in the story. | A real capture of the iPhone app in its demo mode, in the iOS Simulator, in light and dark. |
@@ -620,7 +626,8 @@ Each PNG and the JPEG carries its origin inside the file, and each WebP has it i
 
 ## Where the build departs from its direction
 
-The direction for the home page is in `.impeccable/surfaces/index-html.md`. The build differs from it in two places. Neither is a rule for new work.
+The direction for the home page is in `.impeccable/surfaces/index-html.md`. The build differs from it in three places. None is a rule for new work.
 
 - **States have three colours.** The direction gives ember to the action and the states. The build follows the app and uses amber for waiting and emerald for finished.
 - **A little more moves than the direction lists.** Its list of what moves does not name the question card or the pressed Allow. The build brings the card in and out and presses Allow, and buttons and links answer a hover or a press.
+- **The first screen moves.** The direction has the photograph still. At the owner's request (13 November 2026, after he compared the cut from the photograph to the story with sites whose scroll flows) its two planes move with the mouse, it is held while the dusk closes on its horizon, and the story's trail begins on that line. The direction's motion grammar was brought up to date in the same change.

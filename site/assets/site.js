@@ -368,5 +368,92 @@
     addEventListener("resize", () => { fit(); read(); });
     fit();
     read();
+
+    /* ---------- 4. The first screen, into the story ----------
+       The photograph is two planes, the sky and the land. Where there is a mouse, the land shifts a
+       little more than the sky as it moves, as a near hill does against the sky. Scrolling holds the
+       scene and walks up the trail: the land draws nearer around the point where the trail meets
+       the ridge, and the dusk comes up from below and down from above, and at the last in from the
+       sides, until only a short line of horizon is lit, as wide as the story's trail. The trail is
+       placed so that its dots arrive on that line as it closes; then the panel comes, and the
+       hiker steps on once the photograph has gone. All of it is transforms and opacity, and it runs backwards as readily. */
+    const hero = document.querySelector("[data-hero]");
+    if (hero) {
+      const scene = hero.querySelector(".scene");
+      const sky = scene.querySelector(".sky"), land = scene.querySelector(".land");
+      const low = scene.querySelector(".dusk-low"), high = scene.querySelector(".dusk-high");
+      const left = scene.querySelector(".dusk-left"), right = scene.querySelector(".dusk-right");
+      const trail = story.querySelector("[data-trail]");
+      const mouse = matchMedia("(hover: hover) and (pointer: fine)");
+      const MEET = 0.71; // where the trail meets the ridge, as a share of the scene's height
+      const aim = { x: 0, y: 0 }, look = { x: 0, y: 0 };
+      let tall = 0, wide = 0, walk = 1, from = 0, to = 0, raf = 0, last = 0, painted = "", gone = false;
+
+      function measure() {
+        tall = scene.offsetHeight;
+        wide = scene.offsetWidth;
+        // The trail's two ends across the screen: where the sides of the dusk stop.
+        const ends = trail.getBoundingClientRect();
+        from = ends.left; to = ends.right;
+        walk = Math.max(1, hero.offsetHeight - tall);
+        // How far below the top of the story its trail's dots are (the stage is the story's first
+        // child, so this holds whether or not it is pinned). The story is drawn up under the held
+        // scene by enough to bring the dots to the horizon just as the scene has closed.
+        const dots = trail.getBoundingClientRect().bottom - stage.getBoundingClientRect().top - 1.5 * small;
+        story.style.marginTop = `${-Math.round(tall * (1 - MEET) + dots)}px`;
+      }
+
+      function paint(now) {
+        raf = 0;
+        const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+        last = now;
+        const k = 1 - Math.exp(-dt / 0.45); // the view follows the mouse in about a second
+        look.x += (aim.x - look.x) * k;
+        look.y += (aim.y - look.y) * k;
+        const settled = Math.abs(aim.x - look.x) + Math.abs(aim.y - look.y) < 0.002;
+        if (settled) { look.x = aim.x; look.y = aim.y; last = 0; }
+
+        const box = hero.getBoundingClientRect();
+        const past = -box.top / walk, q = clamp(past);
+        gone = box.bottom <= 0;
+        // The panel follows the dots, and the hiker steps on only once the photograph has gone.
+        const panel = ease(0.97, 1.05, past), walker = ease(1, 1.1, past);
+        const key = `${q.toFixed(4)} ${walker.toFixed(3)} ${panel.toFixed(3)} ${look.x.toFixed(4)} ${look.y.toFixed(4)} ${tall}`;
+        if (key !== painted) {
+          painted = key;
+          // The dusk moves with the scroll itself, so the last line of light lasts until the dots
+          // reach it; its soft edges are widest half way and sharpen as it closes, and over the last
+          // quarter the sides close in to the trail's two ends.
+          const a = q, b = clamp((q - 0.08) / 0.92), lift = 1 - (1 - q) ** 2, side = ease(0.72, 1, q);
+          const soft = (v) => Math.sin(Math.PI * v) ** 2;
+          sky.style.transform = `translate3d(${(-look.x * 5).toFixed(2)}px, ${(-look.y * 3).toFixed(2)}px, 0) scale(${(1.03 + 0.05 * lift).toFixed(4)})`;
+          land.style.transform = `translate3d(${(-look.x * 14).toFixed(2)}px, ${(-look.y * 7).toFixed(2)}px, 0) scale(${(1.03 + 0.27 * lift).toFixed(4)})`;
+          low.style.setProperty("--low", `${(-(1 - MEET + 0.006) * tall * a).toFixed(1)}px`);
+          low.style.setProperty("--low-edge", (0.14 + (0.01 - 0.14) * a + 0.12 * soft(a)).toFixed(4));
+          high.style.setProperty("--high", `${((MEET + 0.006) * tall * b).toFixed(1)}px`);
+          high.style.setProperty("--high-edge", (0.01 * b + 0.12 * soft(b)).toFixed(4));
+          left.style.transform = `translate3d(${((from + 40) * side).toFixed(1)}px, 0, 0)`;
+          right.style.transform = `translate3d(${(-(wide - to + 40) * side).toFixed(1)}px, 0, 0)`;
+          stage.style.setProperty("--dots", ease(0.88, 1, q).toFixed(3));
+          stage.style.setProperty("--panel", panel.toFixed(3));
+          stage.style.setProperty("--walker", walker.toFixed(3));
+        }
+        if (!settled) raf = requestAnimationFrame(paint);
+      }
+
+      const go = () => { if (!raf) raf = requestAnimationFrame(paint); };
+      addEventListener("pointermove", (e) => {
+        if (e.pointerType !== "mouse" || !mouse.matches || gone) return;
+        aim.x = (e.clientX / innerWidth) * 2 - 1;
+        aim.y = (e.clientY / innerHeight) * 2 - 1;
+        go();
+      }, { passive: true });
+      document.documentElement.addEventListener("pointerleave", () => { aim.x = 0; aim.y = 0; go(); });
+      addEventListener("scroll", go, { passive: true });
+      addEventListener("resize", () => { measure(); painted = ""; go(); });
+      hero.classList.add("is-live");
+      measure();
+      go();
+    }
   }
 })();

@@ -39,7 +39,8 @@ Three views are worth a look before a change goes out:
 
 - **Paper and Night.** The page follows the system's light or dark setting and has no switch of
   its own. Change the system setting, or the browser's emulation of it, to see the other theme.
-- **Without the script, and with Reduce Motion on.** The story is a still: the asking moment, the
+- **Without the script, and with Reduce Motion on.** The first screen is one still picture whose
+  foot fades into the page, and it is not held. The story is a still: the asking moment, the
   phone under it and all five lines. The hiker stands at the start of his trail, and every
   download link leads to the latest release. The page must say the same things in both. A window
   under 560 px tall gets the same still.
@@ -113,7 +114,7 @@ staged in a line beside each picture.
 
 | File in `assets/img/` | What it is | How it is shown |
 |---|---|---|
-| `hero-day-1600.webp`, `hero-day-2880.webp`, `hero-night-1600.webp`, `hero-night-2880.webp` | The first screen's photograph, 1600 by 1000 px and 2880 by 1800 px, by day and in its dusk grade | Filling the first screen, with the horizon at 70% of its height |
+| `hero-sky-{day,night}-{1600,2880}.webp`, `hero-land-{day,night}-{1600,2880}.webp` | The first screen's photograph in two planes, cut along the ridge: the sky (with the far hills) and the land (the near hill and its trail, with a transparent sky). 1600 by 1000 px and 2880 by 1800 px, by day and in its dusk grade | Laid exactly over each other, filling the first screen with the horizon at 70% of its height. With the script they move a little apart: the land more than the sky with the mouse, and the land drawn nearer as the page scrolls |
 | `window-paper.webp`, `window-night.webp` | The app's window, 1040 by 700 points, with its shadow: 2172 by 1492 px | At real size, 1086 by 746, under "This is Trek." |
 | `simulator-paper.webp`, `simulator-night.webp` | The window at 1180 by 760 points with the Simulator tool open on Trek's own iPhone app: 2452 by 1612 px | At real size, 1226 by 806. Under 860 px, cropped to the Simulator panel |
 | `iphone-paper.webp`, `iphone-night.webp` | Trek for iPhone in its demo mode in the iOS Simulator: 1170 by 2532 px, the phone's own 3x | Reduced, inside a drawn phone body in the story: the screen is 169 px wide on the pinned stage and 194 px wide in the still |
@@ -121,11 +122,14 @@ staged in a line beside each picture.
 | `og.jpg` | The share image, 1200 by 630 px: the day photograph with the page's headline and the mark | In link previews |
 | `trek-mark.svg`, `trek-mark-paper.svg`, the icons, `favicon.*`, `apple-touch-icon.png` | The mark, a faceted mountain with a dotted trail and a summit flag, written by `script/site/make_icons.py` | The bar, the footer, the browser and the web manifest |
 
-**The first screen's photograph.** `hero-day-*.webp` is "Dried grass field under blue sky during
+**The first screen's photograph.** The day picture is "Dried grass field under blue sky during
 daytime" by Chris Mongeau, from Unsplash under the Unsplash License
 (https://unsplash.com/photos/ZRdSZeVKBaE), which allows free use without credit. `script/site/make_hero.py`
-composes it (more sky above, the horizon near 70% of the height) and makes `hero-night-*.webp`, a
-dusk grade of the same frame. The dusk picture is a grade, not a photograph taken at dusk.
+composes it (more sky above, the horizon near 70% of the height) and makes a dusk grade of the same
+frame for Night; the dusk picture is a grade, not a photograph taken at dusk.
+`script/site/make_hero_layers.py` then cuts each into the two planes the page moves, along the
+ridge: every pixel of the land is the photograph's, and the strip of sky behind the ridge is filled
+from the sky just above it, so the land can shift without showing a hole. Nothing is painted in.
 
 **Retaking a capture.** The captures are regenerated from the app, not edited by hand. One script,
 `masters.sh`, stages the scene in the test app with the verify-trek driver (the `dress`, `title`
