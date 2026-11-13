@@ -442,6 +442,10 @@ fn source() -> Arc<dyn Source> {
 /// How often the screen's picture is taken again while it's on show (it's a still each time:
 /// CoreDevice's screenshot service, over the cable).
 const SCREEN_EVERY: Duration = Duration::from_millis(900);
+/// How often while the screen stays still (`STILL_AFTER` pictures the same in a row): the phone
+/// spends about a second on each picture, and a still one needs no looking at so often.
+const SCREEN_STILL: Duration = Duration::from_secs(3);
+const STILL_AFTER: u32 = 3;
 /// An agent's picture's long side, unless it asks for another (`max_edge`), as on a Mac.
 const SHOT_EDGE: u32 = 1200;
 /// The screen's picture is drawn from a copy no bigger than this on its long side: the tab shows
@@ -583,6 +587,10 @@ pub struct PhonePanel {
     /// A picture on its way (one at a time), and when the last one came.
     shooting: bool,
     shot_at: Option<Instant>,
+    /// The last picture's fingerprint (one the same isn't decoded again), and how many in a row
+    /// came the same.
+    last_frame: Option<u64>,
+    still: u32,
     /// Pictures of the screen replaced since the last one came, let go of when the next does (a
     /// window may draw one until then).
     stale: Vec<Arc<RenderImage>>,
@@ -657,6 +665,8 @@ impl PhonePanel {
             screen_of: None,
             shooting: false,
             shot_at: None,
+            last_frame: None,
+            still: 0,
             stale: Vec::new(),
             pressed: None,
             typing,
@@ -732,7 +742,14 @@ impl PhonePanel {
         if self.visible
             && self.tab == Tab::Screen
             && matches!(self.screen, Screen::Showing(..))
-            && self.shot_at.is_none_or(|t| t.elapsed() >= SCREEN_EVERY)
+            && self.shot_at.is_none_or(|t| {
+                t.elapsed()
+                    >= if self.still >= STILL_AFTER {
+                        SCREEN_STILL
+                    } else {
+                        SCREEN_EVERY
+                    }
+            })
         {
             self.shoot(cx);
         }
@@ -842,6 +859,10 @@ impl PhonePanel {
         if let Screen::Showing(picture, _) = std::mem::replace(&mut self.screen, state) {
             self.stale.push(picture);
         }
+        // The next picture is decoded, whatever the last was.
+        if !matches!(self.screen, Screen::Showing(..)) {
+            self.last_frame = None;
+        }
     }
 
     /// Whether the phone's developer disk image is mounted: then its picture. Else it's installed
@@ -884,12 +905,20 @@ impl PhonePanel {
             return;
         }
         self.shooting = true;
-        let (source, generation) = (self.source.clone(), self.generation);
+        let (source, generation, last) = (self.source.clone(), self.generation, self.last_frame);
         self.background(
             cx,
             move || {
                 let shot = source.screenshot(&udid)?;
-                Ok::<_, String>((screen_picture(&shot.png)?, (shot.width, shot.height)))
+                let print = fingerprint(&shot.png);
+                // The same as the one on show: nothing to decode.
+                if last == Some(print) {
+                    return Ok::<_, String>((print, None));
+                }
+                Ok((
+                    print,
+                    Some((screen_picture(&shot.png)?, (shot.width, shot.height))),
+                ))
             },
             move |this, shot, cx| {
                 if this.generation != generation {
@@ -898,12 +927,15 @@ impl PhonePanel {
                 this.shooting = false;
                 this.shot_at = Some(Instant::now());
                 match shot {
-                    Ok((picture, size)) => {
+                    Ok((_, None)) => this.still += 1,
+                    Ok((print, Some((picture, size)))) => {
                         // The ones replaced before the last: no window draws them any more.
                         for old in this.stale.drain(..) {
                             cx.drop_image(old, None);
                         }
                         this.set_screen(Screen::Showing(picture, size));
+                        this.last_frame = Some(print);
+                        this.still = 0;
                     }
                     // A picture on show stays, with why the next didn't come.
                     Err(why) if matches!(this.screen, Screen::Showing(..)) => {
@@ -1000,7 +1032,11 @@ impl PhonePanel {
                     return;
                 }
                 match touched {
-                    Ok(()) => this.shot_at = None,
+                    // A fresh picture at once, and quickly after: the screen's moving.
+                    Ok(()) => {
+                        this.shot_at = None;
+                        this.still = 0;
+                    }
                     Err(why) => this.notice = Some(why.into()),
                 }
                 cx.notify();
@@ -1028,6 +1064,12 @@ impl PhonePanel {
     #[cfg(any(test, feature = "test-support"))]
     pub fn shoot_again(&mut self, cx: &mut Context<Self>) {
         self.shoot(cx);
+    }
+
+    /// How many pictures in a row came the same as the one on show (the tests').
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn screen_still(&self) -> u32 {
+        self.still
     }
 
     /// The pictures of the screen the tool holds: the one on show, and the one before it until
@@ -2525,6 +2567,14 @@ fn on_picture(area: Bounds<Pixels>, size: (f32, f32), point: Point<Pixels>) -> O
         (f32::from(point.y) - top) / h,
     );
     ((0. ..=1.).contains(&x) && (0. ..=1.).contains(&y)).then_some((x, y))
+}
+
+/// A picture's fingerprint: one the same as the last isn't decoded again.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// How far a press may move on the drawn picture and still be a tap.

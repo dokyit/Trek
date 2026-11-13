@@ -300,7 +300,9 @@ fn the_screen_shows_and_a_click_on_it_taps() {
             trek.render(cx);
         }
         assert!(trek.visible(cx, "phone-screen"));
-        assert_eq!(cx.read(|cx| tool.read(cx).screen_pictures()), 2);
+        // The made-up phone's screen stays the same: decoded once, the rest counted as still.
+        assert!(cx.read(|cx| tool.read(cx).screen_still()) >= 3);
+        assert!(cx.read(|cx| tool.read(cx).screen_pictures()) <= 2);
     });
 }
 
