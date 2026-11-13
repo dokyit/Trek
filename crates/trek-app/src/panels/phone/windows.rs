@@ -95,6 +95,9 @@ pub trait Source: Send + Sync {
     fn mount_disk_image(&self, udid: &str, folder: &Path) -> Result<(), String>;
     /// The phone's screen as it is now.
     fn screenshot(&self, udid: &str) -> Result<Shot, String>;
+    /// What's on the screen, as the phone's accessibility reads it (Xcode's Accessibility
+    /// Inspector's way: `trek_phone::ax`).
+    fn elements(&self, udid: &str) -> Result<trek_phone::ax::Screen, String>;
     /// A touch on the phone: a tap, a swipe, typing, or the Home Screen.
     fn touch(&self, udid: &str, gesture: Gesture) -> Result<(), String>;
     /// A tap on the screen at (`x`, `y`), fractions of its width and height.
@@ -156,6 +159,9 @@ impl Source for Services {
     }
     fn screenshot(&self, udid: &str) -> Result<Shot, String> {
         coredevice::screenshot(udid)
+    }
+    fn elements(&self, udid: &str) -> Result<trek_phone::ax::Screen, String> {
+        coredevice::elements(udid)
     }
     fn touch(&self, udid: &str, gesture: Gesture) -> Result<(), String> {
         coredevice::touch_now(udid, gesture)
@@ -378,6 +384,30 @@ impl Source for MadeUp {
         };
         self.note(done);
         Ok(())
+    }
+    /// A Settings screen: the app, a row to tap and a switch, in a phone's points.
+    fn elements(&self, _: &str) -> Result<trek_phone::ax::Screen, String> {
+        use trek_phone::ax::{Element, Frame, Screen};
+        let at = |role: &str, label: &str, depth: usize, (x, y, w, h)| Element {
+            role: role.into(),
+            label: label.into(),
+            enabled: true,
+            depth,
+            frame: Some(Frame { x, y, w, h }),
+            ..Element::default()
+        };
+        self.note("elements".into());
+        Ok(Screen {
+            size: Some((390., 844.)),
+            elements: vec![
+                at("application", "Settings", 0, (0., 0., 390., 844.)),
+                at("button", "General", 1, (16., 200., 358., 44.)),
+                Element {
+                    value: Some("0".into()),
+                    ..at("switch", "Airplane Mode", 1, (16., 260., 358., 44.))
+                },
+            ],
+        })
     }
     fn open_app(&self, _: &str, name: &str) -> Result<String, String> {
         if !*self.disk_image.lock().unwrap() {
@@ -2481,6 +2511,7 @@ fn shown_name(path: &Path) -> String {
 fn starting(method: &str) -> &'static str {
     match method {
         "phone_screenshot" => "Looking at the screen…",
+        "phone_elements" => "Reading the screen…",
         "phone_tap" => "Tapping…",
         "phone_swipe" => "Swiping…",
         "phone_type" => "Typing…",
@@ -2567,6 +2598,25 @@ fn on_picture(area: Bounds<Pixels>, size: (f32, f32), point: Point<Pixels>) -> O
         (f32::from(point.y) - top) / h,
     );
     ((0. ..=1.).contains(&x) && (0. ..=1.).contains(&y)).then_some((x, y))
+}
+
+/// An element's role as the driver names its type on a Mac (`Button`, `StaticText`), which
+/// trek-mcp reads back into the same words (`outline::role_words`).
+fn driver_type(role: &str, secure: bool) -> String {
+    match role {
+        "text" => "StaticText".into(),
+        "text field" if secure => "SecureTextField".into(),
+        _ => role
+            .split(' ')
+            .map(|word| {
+                let mut chars = word.chars();
+                chars
+                    .next()
+                    .map(|c| c.to_uppercase().chain(chars).collect::<String>())
+                    .unwrap_or_default()
+            })
+            .collect(),
+    }
 }
 
 /// A picture's fingerprint: one the same as the last isn't decoded again.
@@ -2799,6 +2849,54 @@ impl Run<'_> {
                     "Tapped ({x}, {y}). Take a screenshot to see what it did."
                 ))
             }
+            // The screen as the driver lists it on a Mac (trek-mcp makes the outline, its refs and
+            // phone_wait from this): read through the phone's accessibility, its frames in points,
+            // and the picture taps are read in: the agent's latest screenshot, else the points.
+            "phone_elements" => {
+                let udid = self.ready().await?;
+                let source = self.source()?;
+                let screen = self.blocking(move || source.elements(&udid)).await?;
+                let (w, h) = screen.size.ok_or(
+                    "The iPhone didn't say its screen's size, so its elements can't be placed: use phone_screenshot and tap by x/y.",
+                )?;
+                let picture = self
+                    .this
+                    .update(self.cx, |p, _| {
+                        *p.agent_shot
+                            .get_or_insert((w.round() as u32, h.round() as u32))
+                    })
+                    .map_err(gone)?;
+                let elements: Vec<Value> = screen
+                    .elements
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "type": driver_type(&e.role, e.secure),
+                            "label": e.label,
+                            "identifier": e.identifier,
+                            "value": e.value,
+                            "depth": e.depth,
+                            "enabled": e.enabled,
+                            "focused": e.focused,
+                            "selected": e.selected,
+                            "secure": e.secure,
+                            "frame": e.frame.map(|f| json!([f.x, f.y, f.w, f.h])),
+                        })
+                    })
+                    .collect();
+                let count = elements.len();
+                Ok(json!({
+                    "elements": elements,
+                    "width": w,
+                    "height": h,
+                    "picture": { "width": picture.0, "height": picture.1 },
+                    "text": format!("Read the screen: {count} element{}.", if count == 1 { "" } else { "s" }),
+                }))
+            }
+            // trek-mcp's own: it asks for phone_elements until what's waited for shows.
+            "phone_wait" => Err(
+                "phone_wait is answered by trek-mcp, from phone_elements: call that here.".into(),
+            ),
             "phone_swipe" => {
                 let udid = self.ready().await?;
                 let at = |k: &str| p[k].as_f64();
@@ -3045,11 +3143,23 @@ impl Run<'_> {
 mod tests {
     // Not `super::*`: gpui's own `test` attribute would come with it.
     use super::{
-        Gesture, HandHolding, SCREEN_DRAWN, Sensitive, ask_text, gesture_for, local_path,
-        needs_asking, on_picture, screen_picture, starting, tools,
+        Gesture, HandHolding, SCREEN_DRAWN, Sensitive, ask_text, driver_type, gesture_for,
+        local_path, needs_asking, on_picture, screen_picture, starting, tools,
     };
     use gpui_kit::{Bounds, point, px, size};
     use serde_json::json;
+
+    /// The roles read from the phone's accessibility, named as the driver names its types on a
+    /// Mac, so trek-mcp reads them back into the same words.
+    #[test]
+    fn roles_are_named_as_the_driver_names_them() {
+        assert_eq!(driver_type("button", false), "Button");
+        assert_eq!(driver_type("text", false), "StaticText");
+        assert_eq!(driver_type("text field", false), "TextField");
+        assert_eq!(driver_type("text field", true), "SecureTextField");
+        assert_eq!(driver_type("tab bar", false), "TabBar");
+        assert_eq!(driver_type("application", false), "Application");
+    }
 
     /// A Pro Max's screen (1320×2868) is drawn from a copy no taller than the tab needs, in
     /// GPUI's colour order (blue first).

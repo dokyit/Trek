@@ -1924,6 +1924,32 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     if verb == "checks-demo" {
         return checks_demo(ws, arg, cx);
     }
+    // `opencode-history <n>`: OpenCode 1.x's and 2's sessions read as one history, as Trek reads
+    // OpenCode's folder: a database both wrote (sessions in 1.x's tables, 2's, and both:
+    // trek-core's fixture), in a folder of the check's own, holds `n` threads, each once.
+    if verb == "opencode-history" {
+        let n: usize = arg.trim().parse()?;
+        let dir = trek_core::paths::data_dir().join("opencode-demo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let db = rusqlite::Connection::open(dir.join("opencode.db"))?;
+        db.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        db.execute_batch(include_str!(
+            "../../trek-core/fixtures/opencode-v1-and-v2.sql"
+        ))?;
+        drop(db);
+        let threads =
+            trek_core::import::opencode::scan_dir(&dir, 0, &std::collections::HashSet::new());
+        let mut ids: Vec<&str> = threads.iter().map(|t| t.native_id.as_str()).collect();
+        ids.sort_unstable();
+        let all = ids.len();
+        ids.dedup();
+        anyhow::ensure!(
+            all == n && ids.len() == all,
+            "opencode-history: {all} threads ({ids:?}), not {n} once each"
+        );
+        return Ok(());
+    }
     // `toasts <n>`: how many toasts are up in the main window (ones on their way out included);
     // `toasts clear`: all of them taken down, so none sits over the next check.
     if verb == "toasts" {
@@ -3092,7 +3118,18 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     // Wi-Fi dials it: a connection to its port there (what's said over it is the server's tests').
     // CI's machines alone (the ledger's `live_ci`): on someone's own, Windows Firewall would ask.
     if verb == "phone-server" {
-        anyhow::ensure!(arg.trim() == "reach", "phone-server {arg}? (reach)");
+        match arg.trim() {
+            "network" => {
+                ws.update(cx, |ws, cx| ws.network_remote(true, cx));
+                return Ok(());
+            }
+            "off" => {
+                ws.update(cx, |ws, cx| ws.network_remote(false, cx));
+                return Ok(());
+            }
+            "reach" => {}
+            other => anyhow::bail!("phone-server {other}? (network|reach|off)"),
+        }
         // The server comes up in the background: the steps wait for it first.
         let w = ws.read(cx);
         let lan = w
@@ -3120,12 +3157,14 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         anyhow::ensure!(cfg!(windows), "{verb}: Windows' alone");
         #[cfg(windows)]
         {
+            use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
             use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
                 INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_ESCAPE,
                 VK_MENU,
             };
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                GetForegroundWindow, SetForegroundWindow,
+                BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+                SetForegroundWindow,
             };
             let press = |key: u16| {
                 let input = |flags| INPUT {
@@ -3154,9 +3193,21 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                         .update(cx, |_, window, _| crate::winsys::hwnd_of(window))?
                         .ok_or_else(|| anyhow::anyhow!("window front: no window handle"))?;
                     press(VK_MENU);
-                    // SAFETY: this process's own top-level window.
+                    // SAFETY: this process's own top-level window, from its own (UI) thread; the
+                    // front window's input is shared only while it's brought forward, as Windows
+                    // lets a program come forward when it shares the input of the one in front.
                     let front = unsafe {
+                        let ours = GetCurrentThreadId();
+                        let theirs =
+                            GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+                        let shared = theirs != 0
+                            && theirs != ours
+                            && AttachThreadInput(ours, theirs, 1) != 0;
                         SetForegroundWindow(hwnd as _);
+                        BringWindowToTop(hwnd as _);
+                        if shared {
+                            AttachThreadInput(ours, theirs, 0);
+                        }
                         GetForegroundWindow() as isize == hwnd
                     };
                     anyhow::ensure!(front, "window front: Windows kept another window in front");

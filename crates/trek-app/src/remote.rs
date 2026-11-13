@@ -923,6 +923,17 @@ impl Workspace {
         self.remote = Some(remote);
     }
 
+    /// The phone server on the network, as Settings starts it for phones, in place of the capture
+    /// harness's loopback one (`phone-server network`, on CI's machines alone); `on` false stops it.
+    #[cfg(feature = "shots")]
+    pub fn network_remote(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.stop_remote(cx);
+        self.settings.mobile.enabled = on;
+        if on {
+            self.start_remote(cx);
+        }
+    }
+
     /// The phone server for the capture harness's stand-in iPhone (`pair-phone`), as
     /// `start_remote` sets it up (TLS, the paired devices in the data folder, the same tasks), but
     /// on the loopback alone: an isolated run lets nothing outside reach it, and Windows'

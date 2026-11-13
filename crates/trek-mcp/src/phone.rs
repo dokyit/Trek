@@ -263,9 +263,6 @@ impl ToolSet for Phone {
         }
         let given = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
         // A PC has no elements to tap by ref: its taps are at x/y in its screenshot.
-        if self.pc && name == "phone_tap" && !(given("x") && given("y")) {
-            return Err("phone_tap on this PC takes x and y, pixels in the latest phone_screenshot (refs come from phone_elements, which needs Trek on a Mac for now).".into());
-        }
         let text = match name {
             "phone_elements" => self.elements(args)?,
             "phone_wait" => self.wait(args)?,
@@ -792,9 +789,8 @@ mod tests {
         }
     }
 
-    /// On a PC the family is the phone's screen (worked as a person would), apps and files, in its
-    /// own words; reading the screen as elements says it needs Trek on a Mac for now, without
-    /// asking Trek.
+    /// On a PC the family is the whole of the phone's, in its own words, and goes to Trek as on a
+    /// Mac.
     #[test]
     fn a_pc_serves_the_apps_and_files_and_says_where_the_rest_are() {
         let trek = Trek::default();
@@ -803,21 +799,9 @@ mod tests {
         let names: Vec<&str> = tools.tools().iter().map(|t| t.name).collect();
         assert_eq!(names, trek_ipc::phone::PC_TOOL_NAMES);
         assert_eq!(tools.instructions(), trek_ipc::phone::PC_INSTRUCTIONS);
-        for (tool, args) in [
-            ("phone_elements", json!({})),
-            ("phone_wait", json!({"text": "Done"})),
-        ] {
-            let err = tools.call(tool, &args).unwrap_err();
-            assert!(err.contains("needs Trek on a Mac for now"), "{tool}: {err}");
-        }
-        // A tap by ref has no elements to come from here.
-        let err = tools.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
-        assert!(err.contains("takes x and y"), "{err}");
-        assert!(
-            trek.asked().is_empty(),
-            "never asked Trek: {:?}",
-            trek.asked()
-        );
+        // Every tool goes to Trek as on a Mac now, the elements too (a PC reads them through the
+        // phone's accessibility): nothing is said to need a Mac.
+        assert!(trek.asked().is_empty());
         // What it serves goes to Trek as on a Mac: the screen and a tap at x/y too.
         let said = text_of(tools.call("phone_apps", &json!({})));
         assert_eq!(said, "phone_apps done");

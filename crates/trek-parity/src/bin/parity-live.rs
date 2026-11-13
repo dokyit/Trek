@@ -125,6 +125,8 @@ enum Outcome {
     Failed(Vec<String>),
     /// No live steps here, and why.
     Skipped(String),
+    /// No live steps here: a person checked it live (who, when and how).
+    Person(String),
     /// The feature isn't on this platform.
     NotHere(Support),
 }
@@ -233,6 +235,9 @@ fn run() -> i32 {
             Support::Yes | Support::Partial if !f.live_on(platform).is_empty() => {
                 send(&shot_dir, &project, f, platform, timeout)
             }
+            Support::Yes | Support::Partial if let Some(who) = &f.live_person => {
+                Outcome::Person(who.clone())
+            }
             Support::Yes | Support::Partial => {
                 Outcome::Skipped(f.live_skip.clone().unwrap_or_default())
             }
@@ -242,6 +247,7 @@ fn run() -> i32 {
             Outcome::Passed => "ok".to_string(),
             Outcome::Failed(why) => format!("FAILED: {}", why.join("; ")),
             Outcome::Skipped(_) => "skipped".to_string(),
+            Outcome::Person(_) => "checked by a person".to_string(),
             Outcome::NotHere(_) => format!("not on {}", platform.name()),
         };
         println!("{:<28} {said}", f.id);
@@ -255,9 +261,13 @@ fn run() -> i32 {
         .iter()
         .filter(|(_, o)| matches!(o, Outcome::Passed))
         .count();
+    let person = results
+        .iter()
+        .filter(|(_, o)| matches!(o, Outcome::Person(_)))
+        .count();
     println!(
-        "{passed} shown working, {failed} failed, {} without live steps here, in {:.0} s",
-        results.len() - passed - failed,
+        "{passed} shown working, {person} checked by a person, {failed} failed, {} without live steps here, in {:.0} s",
+        results.len() - passed - failed - person,
         started.elapsed().as_secs_f32()
     );
     if let Some(path) = report {
@@ -364,10 +374,11 @@ fn render(results: &[(&Feature, Outcome)], platform: Platform, root: &Path) -> S
          feature's `live` steps in `docs/parity/ledger.toml`, run in an isolated Trek, then a screenshot \
          (`live-<id>.png` in its command folder). Run it again after a change; the steps are the same on \
          every platform unless the ledger says otherwise.\n\n\
-         **{} shown working, {} failed, {} with no live steps here, {} not on {}.**\n\n\
+         **{} shown working, {} checked by a person, {} failed, {} with no live steps here, {} not on {}.**\n\n\
          | Area | Feature | Live | Steps or reason |\n|---|---|---|---|\n",
         platform.name(),
         count(|o| matches!(o, Outcome::Passed)),
+        count(|o| matches!(o, Outcome::Person(_))),
         count(|o| matches!(o, Outcome::Failed(_))),
         count(|o| matches!(o, Outcome::Skipped(_))),
         count(|o| matches!(o, Outcome::NotHere(_))),
@@ -389,6 +400,7 @@ fn render(results: &[(&Feature, Outcome)], platform: Platform, root: &Path) -> S
                 format!("{} — {}", steps(), why.join("; ")),
             ),
             Outcome::Skipped(why) => ("no live steps".to_string(), why.clone()),
+            Outcome::Person(who) => ("checked by a person".to_string(), who.clone()),
             Outcome::NotHere(Support::NotApplicable) => {
                 (format!("n/a on {}", platform.name()), String::new())
             }

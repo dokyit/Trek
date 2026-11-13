@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(45);
 
 /// Open `app` (a program: `notepad.exe`) for the check, kept to close after.
 pub fn open(app: &str) -> Result<()> {
-    let child = Command::new(app)
+    let child = trek_core::procs::command(app)
         .spawn()
         .with_context(|| format!("computer open {app}"))?;
     *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
@@ -49,7 +49,7 @@ fn trek_mcp() -> Result<PathBuf> {
 /// (with the menu bar): looked for in `list_windows` for up to `ANSWER_WITHIN`, as the app may
 /// still be opening.
 pub fn elements(window: &str) -> Result<String> {
-    let mut server = Command::new(trek_mcp()?)
+    let mut server = trek_core::procs::command(trek_mcp()?)
         .arg("computer")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -63,11 +63,13 @@ pub fn elements(window: &str) -> Result<String> {
     std::thread::spawn(move || {
         if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = ended.recv_timeout(ANSWER_WITHIN) {
             #[cfg(windows)]
-            let _ = Command::new("taskkill")
+            let _ = trek_core::procs::command("taskkill")
                 .args(["/F", "/PID", &pid.to_string()])
                 .output();
             #[cfg(not(windows))]
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+            let _ = trek_core::procs::command("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
         }
     });
     let result = talk(&mut server, window);

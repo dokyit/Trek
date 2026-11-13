@@ -125,12 +125,8 @@ pub fn scan(min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
     scan_all(&dbs(), min_updated, held)
 }
 
-/// [`scan`], of the OpenCode folder at `dir`.
-pub(crate) fn scan_dir(
-    dir: &Path,
-    min_updated: i64,
-    held: &HashSet<String>,
-) -> Vec<ImportedThread> {
+/// [`scan`], of the OpenCode folder at `dir` (and the capture build's `opencode-history`).
+pub fn scan_dir(dir: &Path, min_updated: i64, held: &HashSet<String>) -> Vec<ImportedThread> {
     scan_all(&dbs_in(dir), min_updated, held)
 }
 

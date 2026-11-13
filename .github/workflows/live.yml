@@ -78,6 +78,22 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/shots
         run: cargo build --locked -p trek-app --features shots
 
+      # Computer use by element reads another app through Trek's own computer tools (`trek-mcp
+      # computer`), as an agent does: built here and named to the app. It reads the Accessibility
+      # tree, which only a process the user allowed may read: allowed here, on CI's own Mac, for
+      # trek-mcp and for the capture build that starts it (the one macOS holds responsible).
+      - name: Computer use's trek-mcp, allowed Accessibility
+        continue-on-error: true
+        run: |
+          cargo build --locked -p trek-mcp
+          echo "TREK_MCP_BIN=$PWD/target/debug/trek-mcp" >> "$GITHUB_ENV"
+          runtime=$(./.agents/skills/verify-trek/scripts/trek-dev status | python3 -c 'import json, sys; print(json.load(sys.stdin)["runtime_dir"])')
+          for client in "$PWD/target/debug/trek-mcp" "$runtime/bin/trek"; do
+            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('kTCCServiceAccessibility', '$client', 1, 2, 4, 1, 0, CAST(strftime('%s','now') AS INTEGER));" \
+              && echo "Accessibility allowed: $client"
+          done
+
       # Its output to a file: the app it starts would hold the step's own open otherwise. The mic
       # and Study's Talk show as in the installed app: an unbundled build hides them unless told
       # (`TREK_DICTATE=1`; a tap then says it's the installed app's to ask for the microphone).

@@ -367,6 +367,10 @@ pub struct Feature {
     /// the front, which on someone's own computer would be in their way.
     #[serde(default)]
     pub live_ci: Option<String>,
+    /// Who checked it live, when and how, where only a person can (a voice into the system's
+    /// own dictation): what the platforms without live steps were checked by instead.
+    #[serde(default)]
+    pub live_person: Option<String>,
 }
 
 impl Feature {
@@ -409,6 +413,7 @@ pub fn checks(step: &str) -> bool {
         "share" => words.next() == Some("asked"),
         "phone-server" => words.next() == Some("reach"),
         "toasts" => words.next().is_some_and(|w| w != "clear"),
+        "opencode-history" => true,
         _ => false,
     }
 }
@@ -418,7 +423,9 @@ pub fn checks(step: &str) -> bool {
 fn live_problems(f: &Feature) -> Vec<String> {
     let id = &f.id;
     let mut problems = vec![];
-    let skip = f.live_skip.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let skip = [&f.live_skip, &f.live_person]
+        .iter()
+        .any(|s| s.as_deref().is_some_and(|s| !s.trim().is_empty()));
     let mut without = 0;
     for platform in [Platform::Macos, Platform::Windows] {
         if !matches!(f.support(platform), Support::Yes | Support::Partial) {
@@ -429,7 +436,7 @@ fn live_problems(f: &Feature) -> Vec<String> {
             without += 1;
             if !skip {
                 problems.push(format!(
-                    "{id}: no live steps on {}, and no word in `live_skip` on why",
+                    "{id}: no live steps on {}, and no word in `live_skip` on why (or `live_person` on who checked it)",
                     platform.name()
                 ));
             }

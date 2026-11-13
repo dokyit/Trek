@@ -373,7 +373,7 @@ fn agents_get_the_screen_taps_apps_and_files() {
             "{status}"
         );
         assert!(
-            status.contains("Screen and taps: ready (phone_screenshot, phone_tap, phone_swipe"),
+            status.contains("Screen and taps: ready (phone_screenshot, phone_elements, phone_tap"),
             "{status}"
         );
         assert!(status.ends_with("Held by: Probe."), "{status}");
@@ -458,9 +458,24 @@ fn agents_get_the_screen_taps_apps_and_files() {
         ] {
             assert!(done.iter().any(|d| d == want), "{want}: {done:?}");
         }
-        // Reading it as elements is still the Mac's.
-        let err = call(&trek, cx, "phone_elements", json!({})).unwrap_err();
-        assert!(err.contains("needs Trek on a Mac for now"), "{err}");
+        // Read as elements, in the driver's shape trek-mcp makes the outline and refs from: the
+        // types as the driver names them, frames in points, and the picture taps are read in.
+        let read = call_value(&trek, cx, "phone_elements", json!({}));
+        assert_eq!(read["text"], "Read the screen: 3 elements.");
+        assert_eq!(
+            (read["width"].as_f64(), read["height"].as_f64()),
+            (Some(390.), Some(844.))
+        );
+        assert_eq!(read["picture"]["width"], 195, "the latest screenshot's");
+        let types: Vec<&str> = read["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["type"].as_str())
+            .collect();
+        assert_eq!(types, ["Application", "Button", "Switch"]);
+        assert_eq!(read["elements"][1]["frame"], json!([16., 200., 358., 44.]));
+        assert_eq!(read["elements"][2]["value"], "0");
         // No disk image: the user mounts it in the tool.
         *made_up.disk_image.lock().unwrap() = false;
         let err = call(&trek, cx, "phone_screenshot", json!({})).unwrap_err();
