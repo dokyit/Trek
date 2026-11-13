@@ -242,7 +242,8 @@ The rest are gaps. Each has a note in the ledger on what would close it.
   - `quick-look`: a file opens in its default app.
   - `ad-blocker`: there's no per-site allow, and it stops when Edge drops Manifest V2.
   - `browser-extensions`: WebView2 runs only their content scripts.
-  - `machine-target`: it's untested with a PC as the other computer's target.
+  - `machine-target`: a PC as the target is tested on both CIs, but no run between two real
+    computers has had a PC as the target yet.
   - `capture-build`: it has no `browser press` and no whole-window capture.
 - **Not on Windows:**
   - `signed-builds`: there's no Authenticode certificate yet.
