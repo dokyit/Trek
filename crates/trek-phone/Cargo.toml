@@ -35,8 +35,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 # tunnel: the developer disk image installed (signed by Apple's server; a cryptex through
 # cryptexd on newer iOS, else the image mounter's, and AMFI to show Developer Mode's switch), then
 # the screenshot service, the display service's media stream and the HID back channel that Xcode's
-# Device Hub uses. No Trek Driver, so no Mac to build or sign one: the iPhone tool on Windows, and
-# the `pc_screen` example. Run from Windows on an iPhone 16 Pro Max with iOS 27.2.
+# Device Hub uses, and the accessibility audit daemon's elements (DTX, `dvt`). No Trek Driver, so
+# no Mac to build or sign one: the iPhone tool on Windows, and the `pc_screen` example. Run from
+# Windows on an iPhone 16 Pro Max with iOS 27.2.
 coredevice = [
     "idevice/core_device_proxy",
     "idevice/tunnel_tcp_stack",
@@ -47,6 +48,7 @@ coredevice = [
     "idevice/tss",
     "idevice/amfi",
     "idevice/cryptexd",
+    "idevice/dvt",
     "dep:uuid",
     "dep:futures",
 ]
