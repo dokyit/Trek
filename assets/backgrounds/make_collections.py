@@ -180,7 +180,7 @@ def cells(a, cols, rows):
     return np.asarray(Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8)).resize((cols, rows), Image.BOX), dtype=np.float64) / 255
 
 
-def draw_ramp(D, W, size, pal, chars=" .'`:-=+*%#@", px=18, lift=0.5):
+def draw_ramp(D, W, size, pal, chars=" .'`:-=+*%#@", px=18, lift=0.5, cut=0.0):
     """Classic ASCII: one character per cell, sparser to denser."""
     f = font(px)
     cw, ch = int(f.getlength("M")), int(px * 1.25)
@@ -193,7 +193,7 @@ def draw_ramp(D, W, size, pal, chars=" .'`:-=+*%#@", px=18, lift=0.5):
         for c in range(cols):
             v = d[r, c]
             k = int(v * (len(chars) - 1) + 0.5)
-            if k == 0:
+            if k == 0 or v < cut:
                 continue
             dr.text((ox + c * cw, r * ch), chars[k], font=f, fill=ascii_colour(pal, 0.3 + v * 0.8, w[r, c] > 0.5))
     return img
@@ -203,7 +203,7 @@ def draw_braille(D, W, size, pal, pitch=7, gap=6):
     """Braille: characters of 2×4 dots, each dot on where the dithered light is."""
     cell_w, cell_h = 2 * pitch + gap, 4 * pitch + gap
     cols, rows = size[0] // cell_w, size[1] // cell_h
-    dots = cells(D, cols * 2, rows * 4) ** 0.7
+    dots = cells(D, cols * 2, rows * 4)
     w = cells(W, cols, rows)
     img = Image.new("RGB", (size[0] * 2, size[1] * 2), rgb(pal["ground"]))
     dr = ImageDraw.Draw(img)
@@ -211,7 +211,7 @@ def draw_braille(D, W, size, pal, pitch=7, gap=6):
     for y in range(rows * 4):
         for x in range(cols * 2):
             v = dots[y, x]
-            if v <= B8[y % 8, x % 8] * 0.9 + 0.06:
+            if v <= B8[y % 8, x % 8] * 0.8 + 0.16:
                 continue
             gx = ox + (x // 2) * cell_w + (x % 2) * pitch + pitch / 2
             gy = (y // 4) * cell_h + (y % 4) * pitch + pitch / 2
@@ -368,7 +368,7 @@ def scene(kind, w, h, seed=1):
             (ridge_line(w, seed + 1, 0.74, 0.05), 0.55, False),
             (ridge_line(w, seed + 2, 0.86, 0.04), 0.9, False),
         ]
-        sun = (0.24, 0.47, 0.035)
+        sun = (0.22, 0.36, 0.022)
     elif kind == "ranges":
         layers = [(ridge_line(w, seed + k, 0.56 + k * 0.075, 0.07 - k * 0.006, peaks=[(rnd.uniform(0.2, 0.8), 0.05, 0.3)]), k / 5, False) for k in range(6)]
         sun = (0.62, 0.55, 0.06)
@@ -463,7 +463,7 @@ def ascii_pieces(only):
     w, h = TALL
     hw, hh = w // 2, h // 2
     pieces = {
-        "ramp": ("peak", draw_ramp, 3),
+        "ramp": ("peak", lambda *a: draw_ramp(*a, cut=0.52), 3),
         "braille": ("ranges", draw_braille, 5),
         "halftone": ("lake", draw_halftone, 7),
         "blocks": ("forest", draw_blocks, 9),
