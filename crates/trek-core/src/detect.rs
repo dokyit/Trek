@@ -347,6 +347,26 @@ fn path_now() -> Option<String> {
     None
 }
 
+/// Whether this machine has the iOS Simulator's `simctl`: Xcode itself, not just its command line
+/// tools. Trek's simulator tools (`trek-mcp simulator`) do nothing without it, so a session isn't
+/// handed them there. Read from the files, without starting `xcrun`: the folder `DEVELOPER_DIR`
+/// names, else the one `xcode-select` chose, else Xcode's usual place. Never on Windows.
+pub fn has_simulator() -> bool {
+    let chosen = std::env::var_os("DEVELOPER_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::fs::read_link("/var/db/xcode_select_link").ok());
+    simctl_in(chosen.as_deref())
+}
+
+/// `has_simulator`'s reading: `simctl` in the developer folder `chosen`, or, with none chosen, in
+/// `/Applications/Xcode.app`'s.
+fn simctl_in(chosen: Option<&Path>) -> bool {
+    let developer = chosen
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/Applications/Xcode.app/Contents/Developer"));
+    developer.join("usr/bin/simctl").is_file()
+}
+
 /// `which`, on another PATH (`path`, in the platform's own format).
 pub fn which_in(path: &str, binary: &str) -> Option<PathBuf> {
     find_in(path, binary, &std::env::var("PATHEXT").unwrap_or_default())
@@ -765,6 +785,20 @@ mod tests_paths {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Xcode's developer folder has `simctl`; the command line tools' doesn't.
+    #[test]
+    fn the_simulator_is_there_only_with_xcode() {
+        let xcode = TempDir::new();
+        std::fs::create_dir_all(xcode.path().join("usr/bin")).unwrap();
+        std::fs::write(xcode.path().join("usr/bin/simctl"), "").unwrap();
+        assert!(simctl_in(Some(xcode.path())));
+        let tools = TempDir::new();
+        std::fs::create_dir_all(tools.path().join("usr/bin")).unwrap();
+        std::fs::write(tools.path().join("usr/bin/git"), "").unwrap();
+        assert!(!simctl_in(Some(tools.path())));
+        assert!(!simctl_in(Some(&tools.path().join("gone"))));
     }
 
     fn join(dirs: &[&Path]) -> String {

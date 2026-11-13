@@ -110,8 +110,13 @@ pub const CARD_RECIPES: [&str; 3] = [MAP_CARD, PULL_REQUEST_CARD, MIGRATION_CARD
 /// The guide a Study session follows (`crate::study`).
 pub const STUDY: &str = "study";
 
+/// How to write a `trek-html` page: its size, what it may load, Trek's theme variables and the
+/// page's calls back to Trek. Every session's notes name it (`artifact::AGENT_INSTRUCTIONS`), so
+/// the rules go out only to an agent about to write a page, not with every request.
+pub const TREK_HTML: &str = "trek-html";
+
 /// Skills Trek ships: (folder name, SKILL.md).
-pub const SHIPPED: [(&str, &str); 7] = [
+pub const SHIPPED: [(&str, &str); 8] = [
     (
         CREATE_VERIFICATION,
         include_str!("../skills/create-verification-skill/SKILL.md"),
@@ -130,6 +135,7 @@ pub const SHIPPED: [(&str, &str); 7] = [
         include_str!("../skills/database-migration-card/SKILL.md"),
     ),
     (STUDY, include_str!("../skills/study/SKILL.md")),
+    (TREK_HTML, include_str!("../skills/trek-html/SKILL.md")),
     (
         crate::themes::SKILL,
         include_str!("../skills/trek-theme/SKILL.md"),
@@ -964,6 +970,7 @@ mod tests {
                 MAP_CARD,
                 PULL_REQUEST_CARD,
                 STUDY,
+                TREK_HTML,
                 crate::themes::SKILL
             ]
         );

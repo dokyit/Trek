@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// What Trek asks agents (Settings › General › Ask agents for a recap): answers that end work
 /// start with what's done, what's left and what turned up, so the outcome isn't buried. A rule
 /// above it marks where the answer starts, after however much work came before.
-pub const RECAP: &str = "When you finish a turn in which you changed files or ran work, start your final message with a horizontal rule (`---`) on a line of its own and under it a short recap in three bold-labelled parts: **Done** (what's finished), **Still to do** (what's missing or left; \"Nothing\" if nothing is) and **Found** (bugs, risks or surprises the user should know of; leave this part out if there are none). One to three short lines each, then any detail. Answers that only explain or discuss need no recap.";
+pub const RECAP: &str = "After a turn in which you changed files or ran work, start your final message with a horizontal rule (`---`) on its own line, then a short recap in three bold-labelled parts: **Done** (what's finished), **Still to do** (what's left; \"Nothing\" if nothing is) and **Found** (bugs, risks or surprises the user should know of; left out if none). One to three short lines each, then any detail. Answers that only explain or discuss need no recap.";
 
 /// What a turn changed, file by file (sorted by path).
 #[derive(Debug, Clone, PartialEq, Eq)]

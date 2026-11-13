@@ -334,9 +334,9 @@ what = "The iOS Simulator tool"
 macos = "yes"
 windows = "n/a"
 live_macos = ["route project:{project}", "tools simulator", "wait shown sim-devices 180000", "count sim-devices 1"]
-how = { macos = "simctl and AXe.", windows = "The Simulator comes with Xcode, which is Mac-only: Settings says so. An Android emulator tool would be the Windows counterpart." }
+how = { macos = "simctl and AXe. Agents are handed its tools (trek-mcp simulator) only where Xcode's simctl is there (detect::has_simulator): with just the command line tools they'd be names in every request that do nothing.", windows = "The Simulator comes with Xcode, which is Mac-only: Settings says so. An Android emulator tool would be the Windows counterpart." }
 code = ["crates/trek-app/src/workspace.rs", "crates/trek-app/src/panels/simulator.rs"]
-tests = ["crates/trek-app/tests/words.rs"]
+tests = ["crates/trek-app/tests/words.rs", "crates/trek-core/src/detect.rs"]
 
 [[feature]]
 id = "browser-popups"

@@ -15,14 +15,12 @@ use crate::util::{self, MAX_IMAGE_SIDE, TempFile, fmt_num};
 
 pub const AXE_MISSING: &str = "Touch input needs AXe. Turn on 'Simulator touch input' in Trek ▸ Settings ▸ Tools to install it.";
 
-const INSTRUCTIONS: &str = "iOS Simulator control. Use `sim_list` to find devices and `sim_boot` to start one. Read \
-the screen with `sim_elements` first: an outline whose tappable elements carry refs (e12) for `sim_tap` (a ref lasts \
-while its element stays; read again after the screen changes); `sim_wait` waits for text or an element. Take a \
-`sim_screenshot` when looks matter: it's sized in device points (downscaled further only if very large) and reports \
-the mapping; x/y for sim_tap and sim_swipe are pixel coordinates in that screenshot, as frames are. Every tool takes \
-an optional `udid` (default: the booted simulator). Run XCTest or Swift Testing suites with `sim_test` rather than \
-`xcodebuild test` in a shell: the user watches each test pass or fail live in Trek's Simulator tool, and you get a \
-short report of the failures.";
+const INSTRUCTIONS: &str = "iOS Simulator control. sim_list finds devices and sim_boot starts one. Read the screen with \
+sim_elements first: tappable elements carry refs (e12) for sim_tap while they stay; read again after the screen \
+changes, or sim_wait. Take a sim_screenshot when looks matter; x/y for sim_tap and sim_swipe are pixels in it. Every \
+tool takes an optional udid (default: the booted simulator). Run XCTest or Swift Testing suites with sim_test, not \
+`xcodebuild test` in a shell: the user watches each test live in Trek's Simulator tool, and you get a short report \
+of the failures.";
 
 const SIMCTL_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest a `sim_test` run may take before it's stopped.

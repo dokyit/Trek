@@ -12,16 +12,25 @@ use std::path::Path;
 use trek_core::AgentId;
 use trek_core::settings::{Settings, Verification};
 
-/// The notes with Trek's default settings, in a project without a verification skill. Raised by
-/// 250 on 2026-10-31 for the transcript note (`session_log::AGENT_NOTE`, about 45 o200k tokens).
-const DEFAULT_NOTES_CHARS: usize = 4_100;
+/// The notes with Trek's default settings, in a project without a verification skill. Cut on
+/// 2026-11-13 from 4,100 (3,716 measured): the `trek-html` rules went into a skill the note
+/// names (`skills::TREK_HTML`), and the `trek-viz`, video and recap notes said the same in fewer
+/// words (2,917 measured, the skills folder's path included).
+const DEFAULT_NOTES_CHARS: usize = 3_250;
 /// With a verification skill too: the most any session is told (every note is on by default).
-const ALL_NOTES_CHARS: usize = 4_600;
+const ALL_NOTES_CHARS: usize = 3_700;
 /// The line Codex gets naming Trek's tools (`trek_agents::tool_search_note`), with every tool on:
 /// about 50 o200k tokens.
 const TOOL_SEARCH_LINE_CHARS: usize = 220;
 /// Codex's first-message notes with every tool on and a verification skill: the most it's told.
-const CODEX_NOTES_CHARS: usize = 4_900;
+const CODEX_NOTES_CHARS: usize = 4_000;
+
+/// Where Trek keeps its skills on a Mac, as the notes name it.
+fn skills() -> Option<&'static Path> {
+    Some(Path::new(
+        "/Users/me/Library/Application Support/dev.trek.Trek/skills",
+    ))
+}
 
 /// The project notes for this repo's own verification skill, as Trek words them.
 fn project_notes() -> String {
@@ -64,13 +73,13 @@ fn servers(computer: bool) -> Vec<trek_agents::McpServer> {
 /// first message (`trek_agents::instructions_prompt`).
 fn variants() -> Vec<(&'static str, String)> {
     let settings = Settings::default();
-    let none = agent_notes(&settings, true, None, true).expect("notes");
-    let all = agent_notes(&settings, true, Some(project_notes()), true).expect("notes");
+    let none = agent_notes(&settings, true, None, true, skills()).expect("notes");
+    let all = agent_notes(&settings, true, Some(project_notes()), true, skills()).expect("notes");
     let mut off = Settings::default();
     off.general.ask_recap = false;
     off.general.interactive_artifacts = false;
     off.tools.video = false;
-    let least = agent_notes(&off, true, None, true).expect("notes");
+    let least = agent_notes(&off, true, None, true, skills()).expect("notes");
     vec![
         ("default", none.clone()),
         ("all", all.clone()),
@@ -153,7 +162,14 @@ fn prompt_budget_notes_stay_within_budget() {
 /// every request twice.
 #[test]
 fn prompt_budget_notes_hold_each_piece_once() {
-    let all = agent_notes(&Settings::default(), true, Some(project_notes()), true).unwrap();
+    let all = agent_notes(
+        &Settings::default(),
+        true,
+        Some(project_notes()),
+        true,
+        skills(),
+    )
+    .unwrap();
     for piece in [
         trek_core::visualization::AGENT_INSTRUCTIONS,
         trek_core::artifact::AGENT_INSTRUCTIONS,
@@ -163,6 +179,6 @@ fn prompt_budget_notes_hold_each_piece_once() {
         assert_eq!(all.matches(piece).count(), 1, "{piece}");
     }
     // Without the tool server there's no watcher, so no word of it.
-    let bare = agent_notes(&Settings::default(), false, None, true).unwrap();
+    let bare = agent_notes(&Settings::default(), false, None, true, skills()).unwrap();
     assert!(!bare.contains(trek_core::media::AGENT_INSTRUCTIONS));
 }

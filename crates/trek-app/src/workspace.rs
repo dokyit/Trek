@@ -571,6 +571,14 @@ pub enum ForkAt {
 /// most such checkpoints (docs/PERFORMANCE.md).
 pub const CHECKPOINT_WAIT: Duration = Duration::from_millis(100);
 
+/// How many idle agent sessions, the ones used last, are kept for `RECENT_IDLE_MINUTES`; the
+/// rest go after `OTHER_IDLE_MINUTES` (`Workspace::reap_idle_sessions`). Each is a process of
+/// 120 to 250 MB with its MCP servers, and a thread whose session went resumes it on its next
+/// message (about a quarter of a second to start it again).
+pub const RECENT_IDLE_SESSIONS: usize = 3;
+pub const RECENT_IDLE_MINUTES: u64 = 15;
+pub const OTHER_IDLE_MINUTES: u64 = 5;
+
 /// Said under calls an earlier run left going in the background when Trek quit.
 pub const ORPHANS_ENDED: &str = "Work left running in the background stopped when Trek closed";
 
@@ -1762,6 +1770,12 @@ impl Workspace {
             }
         };
         let alone = hold_data_folder();
+        // The PATH agents get comes from the user's login shell, asked once a launch: 100 to 300
+        // ms of `zsh -ilc` (its rc files). Asked now, on a thread of its own, so the first message
+        // doesn't wait for it on the UI thread, as it did when its session started.
+        std::thread::spawn(|| {
+            trek_core::detect::login_path();
+        });
         // Agents and language servers a crashed run left behind go first.
         cx.background_executor()
             .spawn(async { trek_core::procs::reap_stale() })
@@ -5208,6 +5222,7 @@ impl Workspace {
             trek_mcp_binary().is_some(),
             self.project_notes(project, cwd),
             recaps,
+            Some(&trek_core::skills::shipped_root()),
         )
     }
 
@@ -8865,9 +8880,11 @@ impl Workspace {
         .detach();
     }
 
-    /// Shut down agent processes idle for 15 minutes (150–250 MB each) that nothing waits on,
-    /// and the pre-warmed draft session after 10. A thread's next message starts its session
-    /// again, resuming the agent's conversation. `now` is the executor's clock (a test's own).
+    /// Shut down agent processes (120–250 MB each) that nothing waits on: the
+    /// `RECENT_IDLE_SESSIONS` used last after `RECENT_IDLE_MINUTES` idle, the others after
+    /// `OTHER_IDLE_MINUTES`, and the pre-warmed draft session after 10. A thread on screen keeps
+    /// its own. A thread's next message starts its session again, resuming the agent's
+    /// conversation. `now` is the executor's clock (a test's own).
     pub fn reap_idle_sessions(&mut self, now: Instant) {
         let idle_for = |at: Option<Instant>, limit: u64| {
             at.is_none_or(|t| now.saturating_duration_since(t) > Duration::from_secs(limit * 60))
@@ -8878,19 +8895,32 @@ impl Workspace {
             .filter(|id| self.on_screen(id))
             .cloned()
             .collect();
-        for (id, live) in self.live.iter_mut() {
-            // Not while it runs anything in the background: the session takes that with it.
-            let quiet = live.turn_started.is_none()
+        // Not while it runs anything in the background: the session takes that with it.
+        let quiet = |live: &LiveThread| {
+            live.commands.is_some()
+                && live.turn_started.is_none()
                 && live.background.is_empty()
-                && live.permissions.is_empty();
-            if quiet
-                && live.commands.is_some()
-                && idle_for(live.last_active, 15)
-                && !shown.contains(id)
-            {
-                if let Some(tx) = live.commands.take() {
-                    let _ = tx.try_send(Command::Shutdown);
-                }
+                && live.permissions.is_empty()
+        };
+        let mut idle: Vec<(Option<Instant>, String)> = self
+            .live
+            .iter()
+            .filter(|(_, live)| quiet(live))
+            .map(|(id, live)| (live.last_active, id.clone()))
+            .collect();
+        // Used last first (a session never used counts as the oldest).
+        idle.sort_by(|a, b| b.0.cmp(&a.0));
+        for (rank, (at, id)) in idle.into_iter().enumerate() {
+            let limit = if rank < RECENT_IDLE_SESSIONS {
+                RECENT_IDLE_MINUTES
+            } else {
+                OTHER_IDLE_MINUTES
+            };
+            if !idle_for(at, limit) || shown.contains(&id) {
+                continue;
+            }
+            if let Some(tx) = self.live.get_mut(&id).and_then(|l| l.commands.take()) {
+                let _ = tx.try_send(Command::Shutdown);
             }
         }
         if self
@@ -9563,7 +9593,10 @@ impl Workspace {
         if let Some(bin) = trek_mcp_binary() {
             let bin = bin.display().to_string();
             let windows = crate::words::is_windows();
-            for family in trek_mcp_families(tools.computer_use, tools.simulator, windows) {
+            // The simulator's tools only where there's a simulator to drive (Xcode, not just its
+            // command line tools): elsewhere they're tool names and words in every request.
+            let sim_tools = tools.simulator && trek_core::detect::has_simulator();
+            for family in trek_mcp_families(tools.computer_use, sim_tools, windows) {
                 let mut env = trek_mcp_env(family, tools.computer_background, windows);
                 // The simulator's `sim_test` writes its run where the Simulator tool reads it,
                 // and a test run takes minutes.
@@ -10909,20 +10942,30 @@ fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<
 
 /// `Workspace::session_notes` from its parts: the settings, whether Trek has its tool server
 /// (`trek_mcp_binary`: the video notes go only where the watcher is handed over), the project's
-/// notes (`project_notes`) and whether the session `recaps`. Every agent hears these on every
-/// request (see docs/PROMPT_BUDGET.md), so they stay short.
+/// notes (`project_notes`), whether the session `recaps`, and where Trek's own skills are (the
+/// artifact note names some: an agent not handed the folder, as Claude Code is with `--add-dir`,
+/// learns where it is). Every agent hears these on every request (see docs/PROMPT_BUDGET.md), so
+/// they stay short; what's long and rarely needed is in a skill.
 pub(crate) fn agent_notes(
     settings: &Settings,
     tool_server: bool,
     project: Option<String>,
     recaps: bool,
+    skills: Option<&std::path::Path>,
 ) -> Option<String> {
     let recap =
         (recaps && settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
     let artifacts = settings
         .general
         .interactive_artifacts
-        .then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
+        .then(|| match skills {
+            Some(dir) => format!(
+                "{} Trek's skills are in {}, a folder each with its SKILL.md.",
+                trek_core::artifact::AGENT_INSTRUCTIONS,
+                dir.display()
+            ),
+            None => trek_core::artifact::AGENT_INSTRUCTIONS.to_string(),
+        });
     let video = (settings.tools.video && tool_server)
         .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
     // Every session has its thread's transcript to search (`transcript_log`), and is told where

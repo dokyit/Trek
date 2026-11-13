@@ -75,7 +75,8 @@ pub const PROBLEMS_FILE: &str = "problems.txt";
 /// The built-in skill that tells an agent how to make one (`skills::SHIPPED`).
 pub const SKILL: &str = "trek-theme";
 /// What every agent is told, so "make Trek look like…" finds the skill.
-pub const AGENT_NOTE: &str = "To change how Trek itself looks (a Trek theme: colours, fonts, corners, art), follow Trek's built-in skill trek-theme.";
+pub const AGENT_NOTE: &str =
+    "To restyle Trek itself (a Trek theme), follow Trek's built-in skill trek-theme.";
 
 /// The built-in themes' files, after Trek: (id, TOML).
 pub const BUILT_IN: [(&str, &str); 3] = [

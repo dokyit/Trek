@@ -238,18 +238,17 @@ mod prompt_budget {
     const BUDGETS: &[(&str, usize, usize)] = &[
         ("computer", 885, 6_450),
         ("computer-background", 1_365, 7_775),
-        ("simulator", 890, 6_670),
-        ("video", 240, 1_250),
-        ("orchestrate", 1_050, 11_000),
-        ("browser", 950, 7_300),
-        // Raised for phone_elements and phone_wait, phone_tap's ref, and the instructions'
-        // "elements first" (1,178 and 6,033 before; 1,504 and 7,502 measured with them, in the
-        // shared outline's words and with its interactive_only and max).
-        ("phone", 1_620, 8_150),
+        // Instructions cut on 2026-11-13 (docs/PROMPT_BUDGET.md, "2026-11-13"): each says once what
+        // the tool descriptions and Trek's notes don't (567, 143, 836, 630 and 1,037 chars).
+        ("simulator", 625, 6_670),
+        ("video", 160, 1_250),
+        ("orchestrate", 920, 11_000),
+        ("browser", 700, 7_300),
+        ("phone", 1_100, 8_150),
     ];
     /// Everything on (computer use in the background and every default family) together
-    /// (44,883 measured with elements on the computer, the Simulator and the iPhone).
-    const ALL_CHARS: usize = 46_200;
+    /// (43,800 measured after the cut of 2026-11-13; 44,883 before).
+    const ALL_CHARS: usize = 45_000;
 
     fn families() -> Vec<(&'static str, Box<dyn ToolSet>)> {
         vec![

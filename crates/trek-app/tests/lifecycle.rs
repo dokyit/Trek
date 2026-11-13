@@ -557,6 +557,85 @@ fn idle_sessions_are_shut_down_and_resume_on_the_next_message() {
 }
 
 #[test]
+fn only_the_three_sessions_used_last_stay_fifteen_minutes() {
+    run(async |cx| {
+        let trek = open(cx);
+        let mut ids = vec![];
+        for n in 0..5 {
+            trek.update(cx, |ws, cx| {
+                ws.navigate(
+                    Route::Draft {
+                        project: Some(trek.project.clone()),
+                    },
+                    cx,
+                )
+            });
+            let id = trek.send(cx, &format!("hello {n}"));
+            trek.wait_done(cx, &id, RunState::Idle).await;
+            // Apart on the executor's clock, so each was used after the one before.
+            cx.executor().advance_clock(Duration::from_secs(1));
+            ids.push(id);
+        }
+        // None of them on screen.
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(trek.project.clone()),
+                },
+                cx,
+            )
+        });
+        let alive = |trek: &Trek, cx: &TestAppContext| -> Vec<bool> {
+            trek.read(cx, |ws, _| {
+                ids.iter()
+                    .map(|id| ws.live.get(id).is_some_and(|l| l.commands.is_some()))
+                    .collect()
+            })
+        };
+        let reap = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.update(cx, |ws, cx| {
+                ws.reap_idle_sessions(cx.background_executor().now())
+            })
+        };
+        cx.executor().advance_clock(Duration::from_secs(4 * 60));
+        reap(&trek, cx);
+        assert_eq!(alive(&trek, cx), [true; 5], "4 minutes: all kept");
+        cx.executor().advance_clock(Duration::from_secs(2 * 60));
+        reap(&trek, cx);
+        assert_eq!(
+            alive(&trek, cx),
+            [false, false, true, true, true],
+            "6 minutes: the two used first are shut down, the three used last kept"
+        );
+        cx.executor().advance_clock(Duration::from_secs(10 * 60));
+        reap(&trek, cx);
+        assert_eq!(alive(&trek, cx), [false; 5], "16 minutes: all shut down");
+
+        // One shut down at five minutes resumes its conversation on the next message.
+        let first = ids[0].clone();
+        let native = trek.read(cx, |ws, _| {
+            ws.thread(&first).and_then(|t| t.native_id.clone())
+        });
+        assert!(native.is_some());
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(first.clone()), cx));
+        trek.send(cx, "mock:recall");
+        trek.wait_done(cx, &first, RunState::Idle).await;
+        assert!(
+            trek.answers(cx, &first).contains("hello 0"),
+            "it remembers: {}",
+            trek.answers(cx, &first)
+        );
+        assert_eq!(
+            trek.read(cx, |ws, _| ws
+                .thread(&first)
+                .and_then(|t| t.native_id.clone())),
+            native,
+            "the same agent session"
+        );
+    });
+}
+
+#[test]
 fn the_warm_draft_session_is_dropped_after_ten_minutes() {
     run(async |cx| {
         let trek = open(cx);
