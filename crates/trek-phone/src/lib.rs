@@ -28,6 +28,8 @@ pub mod files;
 pub mod hid;
 pub mod lease;
 
+#[cfg(all(feature = "coredevice", any(target_os = "macos", windows)))]
+pub mod coredevice;
 #[cfg(any(target_os = "macos", windows))]
 pub mod device;
 #[cfg(target_os = "macos")]

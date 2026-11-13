@@ -298,9 +298,10 @@ In order of how much each removes the problem, smallest first where that's close
    dictation on the PC and video transcripts without whisper have closed. The biggest left for Windows users are computer use in the
    background, window snapshots through Windows.Graphics.Capture, signed builds, an ARM64 build,
    updating while Trek is closed, and the iPhone app's own build, which needs a Mac. The iPhone's
-   screen and taps from a PC no longer need one: CoreDevice's own services (the ones Xcode's Device
-   Hub uses) reach the phone over its tunnel with no driver to sign (`trek-phone`'s `pc_screen`
-   example), and are left to run against a phone, then to put in the panel.
+   screen and taps on a PC no longer need one: CoreDevice's own services (the ones Xcode's Device
+   Hub uses) reach the phone over its tunnel with no driver to sign (`trek_phone::coredevice`),
+   behind the iPhone tool's Screen tab and agents' `phone_screenshot` and `phone_tap`, tested with
+   a made-up phone and checked live; what's left is a run against a real phone.
 
 ## For someone changing Trek
 

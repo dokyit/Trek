@@ -1,8 +1,9 @@
 //! The iPhone tool on a PC, headless, over a made-up phone (`panels::phone::MadeUp`, nothing real
 //! touched): each state says the one thing to do (Apple Devices from the Microsoft Store, plug it
-//! in, tap Trust, unlock it), a ready phone shows its apps, files and AssistiveTouch, and an
-//! agent's calls get the apps and files and are told the screen and taps need a Mac for now. And
-//! Settings says what the iPhone tools do here, in the PC's words (a Mac's when pretending).
+//! in, tap Trust, unlock it), a ready phone shows its screen (a click on it a tap, once its
+//! developer disk image is mounted), apps, files and AssistiveTouch, and an agent's calls get the
+//! screen, taps, apps and files, and are told what still needs a Mac. And Settings says what the
+//! iPhone tools do here, in the PC's words (a Mac's when pretending).
 #![cfg(windows)]
 
 mod common;
@@ -16,6 +17,7 @@ use trek_app::settings_view::shown;
 use trek_app::words::pretend;
 use trek_app::workspace::phone_use::PhoneCall;
 use trek_app::workspace::{PanelTool, Route, SettingsPage};
+use trek_phone::coredevice::DISK_IMAGE_FILES;
 use trek_phone::device::Seen;
 use trek_phone::pc::{self, Service};
 
@@ -53,6 +55,20 @@ fn call(
         Ok(Reply::Done(Ok(v))) => Ok(v["text"].as_str().unwrap_or_default().to_string()),
         Ok(Reply::Done(Err(e))) => Err(e),
         other => panic!("{method}: no answer ({other:?})"),
+    }
+}
+
+/// An agent's call, and all Trek answered (its text and the picture's file).
+fn call_value(trek: &Trek, cx: &mut TestAppContext, method: &str, params: Value) -> Value {
+    let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+    let (call, rx) = PhoneCall::probe(method, params);
+    trek.window(cx, |window, cx| {
+        panel.update(cx, |p, cx| p.phone_call(call, window, cx))
+    });
+    trek.render(cx);
+    match rx.try_recv() {
+        Ok(Reply::Done(Ok(v))) => v,
+        other => panic!("{method}: {other:?}"),
     }
 }
 
@@ -103,16 +119,11 @@ fn each_state_says_the_one_thing_to_do() {
             assert!(!trek.visible(cx, "phone-device"), "{title}");
         }
 
-        // Plugged in and trusted: the phone, where its screen is, and its apps.
+        // Plugged in and trusted: the phone, its apps, and its screen a tab away.
         *made_up.seen.lock().unwrap() = Some(Seen::Ready(MadeUp::phone()));
         look_again(&trek, cx);
         assert!(!trek.visible(cx, "phone-state"));
-        for id in [
-            "phone-device",
-            "phone-screen-note",
-            "phone-assistive",
-            "phone-apps",
-        ] {
+        for id in ["phone-device", "phone-assistive", "phone-apps"] {
             assert!(trek.visible(cx, id), "{id}");
         }
     });
@@ -190,8 +201,59 @@ fn a_ready_phone_shows_its_apps_files_and_assistivetouch() {
     });
 }
 
+/// The screen in the picture area, once the developer disk image is mounted: a click on it is a
+/// tap there, as fractions of the screen. Before, it asks for the image's folder, and a folder
+/// without Xcode's three files is said so.
 #[test]
-fn agents_get_the_apps_and_files_and_hear_the_screen_needs_a_mac() {
+fn the_screen_shows_and_a_click_on_it_taps() {
+    run(async |cx| {
+        let made_up = MadeUp::without_disk_image();
+        let _pretend = phone::pretend(made_up.clone());
+        let trek = open(cx);
+        let tool = tool(&trek, cx);
+        trek.click(cx, ("phone-tab", 2usize));
+        trek.render(cx);
+        assert!(trek.visible(cx, "phone-screen-image"));
+        assert!(trek.visible(cx, "phone-screen-choose"));
+        assert!(!trek.visible(cx, "phone-screen"));
+
+        // A folder that isn't the image's: said, nothing mounted.
+        let dir = std::env::temp_dir().join(format!("trek-ddi-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        cx.update(|cx| tool.update(cx, |p, cx| p.mount_folder(dir.clone(), cx)));
+        trek.render(cx);
+        assert!(trek.visible(cx, "phone-screen-failed"));
+        assert!(!*made_up.disk_image.lock().unwrap());
+
+        // Xcode's three files: mounted, and the screen shows.
+        for file in DISK_IMAGE_FILES {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+        cx.update(|cx| tool.update(cx, |p, cx| p.mount_folder(dir.clone(), cx)));
+        trek.render(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "phone-screen"));
+        assert_eq!(cx.read(|cx| tool.read(cx).screen_shown()), Some((390, 844)));
+        assert!(
+            made_up
+                .done
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|d| d.starts_with("mount ")),
+            "mounted"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A click in its middle: a tap in the screen's middle.
+        trek.click(cx, "phone-screen");
+        trek.render(cx);
+        assert_eq!(made_up.taps(), ["tap 0.50 0.50"]);
+    });
+}
+
+#[test]
+fn agents_get_the_screen_taps_apps_and_files() {
     run(async |cx| {
         let made_up = MadeUp::ready();
         let _pretend = phone::pretend(made_up.clone());
@@ -203,7 +265,10 @@ fn agents_get_the_apps_and_files_and_hear_the_screen_needs_a_mac() {
             status.starts_with("Toby's iPhone · iOS 27.2 · USB · iPhone 16 Pro Max."),
             "{status}"
         );
-        assert!(status.contains("need Trek on a Mac for now"), "{status}");
+        assert!(
+            status.contains("Screen and taps: ready (phone_screenshot, phone_tap)"),
+            "{status}"
+        );
         assert!(status.ends_with("Held by: Probe."), "{status}");
         for word in ["Bluetooth", "Mirroring", "this Mac"] {
             assert!(!status.contains(word), "{word}: {status}");
@@ -213,15 +278,41 @@ fn agents_get_the_apps_and_files_and_hear_the_screen_needs_a_mac() {
             "who has it, with Stop"
         );
 
-        // The screen and taps are the Mac's for now: said so, nothing done.
-        for (tool, params) in [
-            ("phone_tap", json!({"x": 10, "y": 20})),
-            ("phone_screenshot", json!({})),
-            ("phone_elements", json!({})),
-        ] {
-            let err = call(&trek, cx, tool, params).unwrap_err();
-            assert!(err.contains("needs Trek on a Mac for now"), "{tool}: {err}");
-        }
+        // A tap needs a picture to be read in first.
+        let err = call(&trek, cx, "phone_tap", json!({"x": 10, "y": 20})).unwrap_err();
+        assert!(err.contains("Take a phone_screenshot first"), "{err}");
+        // The screen: a picture in a file of its own, and its size, which x/y are read in.
+        let shot = call_value(&trek, cx, "phone_screenshot", json!({}));
+        assert_eq!(
+            shot["text"],
+            "The iPhone's screen, 390×844. x/y for phone_tap are pixels in this picture."
+        );
+        let picture = std::path::PathBuf::from(shot["image"].as_str().unwrap());
+        assert_eq!(
+            trek_phone::coredevice::png_size(&std::fs::read(&picture).unwrap()),
+            Some((390, 844))
+        );
+        let _ = std::fs::remove_file(picture);
+        // Asked for a smaller one: that size, and taps are read in it.
+        let small = call_value(&trek, cx, "phone_screenshot", json!({"max_edge": 422}));
+        assert!(
+            small["text"].as_str().unwrap().contains("195×422"),
+            "{small}"
+        );
+        let _ = std::fs::remove_file(small["image"].as_str().unwrap());
+        let tapped = call(&trek, cx, "phone_tap", json!({"x": 97.5, "y": 105.5})).unwrap();
+        assert!(tapped.starts_with("Tapped (97.5, 105.5)."), "{tapped}");
+        assert_eq!(made_up.taps(), ["tap 0.50 0.25"]);
+        let err = call(&trek, cx, "phone_tap", json!({"x": 900, "y": 20})).unwrap_err();
+        assert!(err.contains("off the screen"), "{err}");
+        // Reading it as elements is still the Mac's.
+        let err = call(&trek, cx, "phone_elements", json!({})).unwrap_err();
+        assert!(err.contains("needs Trek on a Mac for now"), "{err}");
+        // No disk image: the user mounts it in the tool.
+        *made_up.disk_image.lock().unwrap() = false;
+        let err = call(&trek, cx, "phone_screenshot", json!({})).unwrap_err();
+        assert_eq!(err, pc::SCREEN_ADVICE);
+        *made_up.disk_image.lock().unwrap() = true;
 
         let apps = call(&trek, cx, "phone_apps", json!({})).unwrap();
         assert!(apps.starts_with("3 apps:"), "{apps}");

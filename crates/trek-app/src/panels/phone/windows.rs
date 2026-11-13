@@ -1,8 +1,9 @@
-//! iPhone on a PC: the user's real iPhone beside the chat, its apps and files, for them and for
-//! agents. Windows reaches the phone's own services through Apple Mobile Device Service, as Apple
-//! Devices does (`trek_phone::device`); seeing its screen and tapping it need Trek on a Mac for
-//! now, so the picture area says so. Every state's words are `trek_phone::pc`'s, which
-//! `phone_status` answers with too.
+//! iPhone on a PC: the user's real iPhone beside the chat, its screen, apps and files, for them
+//! and for agents. Windows reaches the phone's own services through Apple Mobile Device Service,
+//! as Apple Devices does (`trek_phone::device`), and its screen and taps through CoreDevice's
+//! services once its developer disk image is mounted (`trek_phone::coredevice`): the picture area
+//! asks for the image's folder the first time, then shows the screen, a click on it a tap. Every
+//! state's words are `trek_phone::pc`'s, which `phone_status` answers with too.
 //!
 //! While it's on screen, or an agent holds the phone, the tool looks for the phone every few
 //! seconds (`device::probe`) and says the one thing to do until it's ready: install Apple Devices
@@ -39,6 +40,7 @@ use std::time::{Duration, Instant};
 use trek_agents::Decision;
 use trek_core::HandHolding;
 use trek_ipc::phone::{self as tools, Sensitive};
+use trek_phone::coredevice::{self, Shot};
 use trek_phone::device::{self, App as PhoneApp, Phone, Seen};
 use trek_phone::files::{self, Entry};
 use trek_phone::lease::{Lease, TOOK_OVER};
@@ -86,6 +88,14 @@ pub trait Source: Send + Sync {
         app: Option<&str>,
     ) -> Result<u64, String>;
     fn remove(&self, udid: &str, path: &str, app: Option<&str>) -> Result<(), String>;
+    /// Whether the phone's developer disk image is mounted: its screen and taps need it.
+    fn disk_image(&self, udid: &str) -> Result<bool, String>;
+    /// Mount the developer disk image in `folder` (Xcode's, signed for the phone by Apple).
+    fn mount_disk_image(&self, udid: &str, folder: &Path) -> Result<(), String>;
+    /// The phone's screen as it is now.
+    fn screenshot(&self, udid: &str) -> Result<Shot, String>;
+    /// A tap on the screen at (`x`, `y`), fractions of its width and height.
+    fn tap(&self, udid: &str, x: f32, y: f32) -> Result<(), String>;
 }
 
 /// The phone's own services over usbmuxd: Apple Mobile Device Service.
@@ -131,6 +141,18 @@ impl Source for Services {
     fn remove(&self, udid: &str, path: &str, app: Option<&str>) -> Result<(), String> {
         device::remove(Some(udid), path, app)
     }
+    fn disk_image(&self, udid: &str) -> Result<bool, String> {
+        coredevice::mounted(udid)
+    }
+    fn mount_disk_image(&self, udid: &str, folder: &Path) -> Result<(), String> {
+        coredevice::mount(udid, folder)
+    }
+    fn screenshot(&self, udid: &str) -> Result<Shot, String> {
+        coredevice::screenshot(udid)
+    }
+    fn tap(&self, udid: &str, x: f32, y: f32) -> Result<(), String> {
+        coredevice::tap(udid, x, y)
+    }
 }
 
 /// A made-up phone, all in memory: what usbmuxd shows, its apps, its files and its
@@ -144,6 +166,8 @@ pub struct MadeUp {
     pub files: std::sync::Mutex<Vec<(String, String, Option<u64>)>>,
     pub assistive: std::sync::Mutex<bool>,
     pub done: std::sync::Mutex<Vec<String>>,
+    /// Its developer disk image is mounted: its screen shows, and takes taps.
+    pub disk_image: std::sync::Mutex<bool>,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "shots"))]
@@ -185,7 +209,43 @@ impl MadeUp {
             place("com.example.notes", "/Documents", None),
             place("com.example.notes", "/Documents/todo.txt", Some(320)),
         ];
+        *made.disk_image.lock().unwrap() = true;
         Arc::new(made)
+    }
+
+    /// Ready, but its developer disk image not mounted yet: the screen asks for its folder.
+    pub fn without_disk_image() -> Arc<MadeUp> {
+        let made = Self::ready();
+        *made.disk_image.lock().unwrap() = false;
+        made
+    }
+
+    /// The taps it took, as fractions of its screen ("tap 0.50 0.25"), in order.
+    pub fn taps(&self) -> Vec<String> {
+        let done = self.done.lock().unwrap();
+        done.iter()
+            .filter(|d| d.starts_with("tap "))
+            .cloned()
+            .collect()
+    }
+
+    /// Its screen: a home screen of a few tiles, drawn here, as a PNG the size of a phone's in
+    /// points.
+    fn screen_png() -> Vec<u8> {
+        let (w, h) = (390u32, 844u32);
+        let picture = image::RgbaImage::from_fn(w, h, |x, y| {
+            let tile = (x % 90 >= 22 && x % 90 < 82) && (y % 96 >= 70 && y % 96 < 130) && y < 560;
+            if tile {
+                let hue = ((x / 90) * 60 + (y / 96) * 40) as u8;
+                image::Rgba([hue, 140, 255 - hue, 255])
+            } else {
+                let shade = 20 + (y * 40 / h) as u8;
+                image::Rgba([shade, shade, shade + 30, 255])
+            }
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        let _ = picture.write_to(&mut png, image::ImageFormat::Png);
+        png.into_inner()
     }
 
     /// In `seen`'s state instead (no phone, Trust, …).
@@ -272,6 +332,30 @@ impl Source for MadeUp {
         self.note(format!("remove {path}"));
         Ok(())
     }
+    fn disk_image(&self, _: &str) -> Result<bool, String> {
+        Ok(*self.disk_image.lock().unwrap())
+    }
+    fn mount_disk_image(&self, _: &str, folder: &Path) -> Result<(), String> {
+        coredevice::disk_image_in(folder)?;
+        *self.disk_image.lock().unwrap() = true;
+        self.note(format!("mount {}", folder.display()));
+        Ok(())
+    }
+    fn screenshot(&self, _: &str) -> Result<Shot, String> {
+        if !*self.disk_image.lock().unwrap() {
+            return Err("Its developer disk image isn't mounted.".into());
+        }
+        let png = Self::screen_png();
+        let (width, height) = coredevice::png_size(&png).ok_or("No picture.")?;
+        Ok(Shot { png, width, height })
+    }
+    fn tap(&self, _: &str, x: f32, y: f32) -> Result<(), String> {
+        if !*self.disk_image.lock().unwrap() {
+            return Err("Its developer disk image isn't mounted.".into());
+        }
+        self.note(format!("tap {x:.2} {y:.2}"));
+        Ok(())
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -319,6 +403,29 @@ fn source() -> Arc<dyn Source> {
     Arc::new(Services)
 }
 
+/// How often the screen's picture is taken again while it's on show (it's a still each time:
+/// CoreDevice's screenshot service, over the cable).
+const SCREEN_EVERY: Duration = Duration::from_millis(900);
+/// An agent's picture's long side, unless it asks for another (`max_edge`), as on a Mac.
+const SHOT_EDGE: u32 = 1200;
+
+/// The phone's screen in the picture area (CoreDevice's: `trek_phone::coredevice`).
+#[derive(Clone)]
+enum Screen {
+    /// Not asked about yet (a phone newly ready).
+    Unknown,
+    /// Asked whether its developer disk image is mounted, or for the first picture.
+    Looking,
+    /// Its developer disk image isn't mounted: the user chooses its folder.
+    NeedsImage,
+    /// Mounting it.
+    Mounting,
+    /// On show: the latest picture, and its size in pixels.
+    Showing(Arc<Image>, (u32, u32)),
+    /// It couldn't be shown: why.
+    Failed(SharedString),
+}
+
 /// What the strip shows: who's at it and what they did last.
 struct Activity {
     title: String,
@@ -331,6 +438,8 @@ struct Activity {
 enum Tab {
     Apps,
     Files,
+    /// The phone's screen (`Screen`), a click on it a tap.
+    Screen,
 }
 
 /// A folder the Files list shows: in the media folder, or in an app's Documents.
@@ -398,6 +507,19 @@ pub struct PhonePanel {
     stops: u64,
     last: Option<Activity>,
     allowed: HashSet<(String, Sensitive)>,
+    /// The phone's screen in the picture area, and the phone it's of.
+    screen: Screen,
+    screen_of: Option<String>,
+    /// A picture on its way (one at a time), and when the last one came.
+    shooting: bool,
+    shot_at: Option<Instant>,
+    /// The size of the last picture an agent was given, which its x/y are read in.
+    agent_shot: Option<(u32, u32)>,
+    /// Agents' pictures written so far (each its own file, which trek-mcp reads and removes).
+    shots: u64,
+    /// The made-up phone design review put in (`demo`), to read what it was asked.
+    #[cfg(feature = "shots")]
+    demo_phone: Option<Arc<MadeUp>>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -436,6 +558,14 @@ impl PhonePanel {
             stops: 0,
             last: None,
             allowed: HashSet::new(),
+            screen: Screen::Unknown,
+            screen_of: None,
+            shooting: false,
+            shot_at: None,
+            agent_shot: None,
+            shots: 0,
+            #[cfg(feature = "shots")]
+            demo_phone: None,
             _tasks: vec![tick],
         }
     }
@@ -498,6 +628,14 @@ impl PhonePanel {
     fn tick(&mut self, cx: &mut Context<Self>) {
         if self.wanted() && self.looked.is_none_or(|t| t.elapsed() >= LOOK_AGAIN) {
             self.look(cx);
+        }
+        // The screen's picture, again, while it's on show.
+        if self.visible
+            && self.tab == Tab::Screen
+            && matches!(self.screen, Screen::Showing(..))
+            && self.shot_at.is_none_or(|t| t.elapsed() >= SCREEN_EVERY)
+        {
+            self.shoot(cx);
         }
         // The strip goes a while after the last call.
         if self.last.as_ref().is_some_and(|a| {
@@ -570,7 +708,17 @@ impl PhonePanel {
             self.apps = None;
             self.entries = None;
             self.removing = None;
+            self.screen = Screen::Unknown;
+            self.screen_of = None;
             return;
+        }
+        if self.screen_of != udid {
+            self.screen = Screen::Unknown;
+            self.screen_of = udid.clone();
+            self.agent_shot = None;
+        }
+        if matches!(self.screen, Screen::Unknown) {
+            self.ask_screen(cx);
         }
         if changed || self.apps.as_ref().map(|(u, _)| u) != udid.as_ref() {
             self.place = Place::media();
@@ -586,6 +734,156 @@ impl PhonePanel {
     fn look_now(&mut self, cx: &mut Context<Self>) {
         self.notice = None;
         self.look(cx);
+    }
+
+    // MARK: screen
+
+    /// Whether the phone's developer disk image is mounted: then its picture, else its folder
+    /// asked for.
+    fn ask_screen(&mut self, cx: &mut Context<Self>) {
+        let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
+            return;
+        };
+        self.screen = Screen::Looking;
+        cx.notify();
+        let (source, generation) = (self.source.clone(), self.generation);
+        self.background(
+            cx,
+            move || source.disk_image(&udid),
+            move |this, mounted, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                match mounted {
+                    Ok(true) => this.shoot(cx),
+                    Ok(false) => this.screen = Screen::NeedsImage,
+                    Err(why) => this.screen = Screen::Failed(why.into()),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Take the screen's picture (one at a time).
+    fn shoot(&mut self, cx: &mut Context<Self>) {
+        let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
+            return;
+        };
+        if self.shooting {
+            return;
+        }
+        self.shooting = true;
+        let (source, generation) = (self.source.clone(), self.generation);
+        self.background(
+            cx,
+            move || source.screenshot(&udid),
+            move |this, shot, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                this.shooting = false;
+                this.shot_at = Some(Instant::now());
+                match shot {
+                    Ok(shot) => {
+                        this.screen = Screen::Showing(
+                            Arc::new(Image::from_bytes(ImageFormat::Png, shot.png)),
+                            (shot.width, shot.height),
+                        )
+                    }
+                    // A picture on show stays, with why the next didn't come.
+                    Err(why) if matches!(this.screen, Screen::Showing(..)) => {
+                        this.notice = Some(why.into())
+                    }
+                    Err(why) => this.screen = Screen::Failed(why.into()),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Ask for the developer disk image's folder, then mount it.
+    fn choose_disk_image(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(folder) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.mount_disk_image(folder, cx));
+        })
+        .detach();
+    }
+
+    /// Mount the developer disk image in `folder`, then show the screen.
+    fn mount_disk_image(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
+            return;
+        };
+        self.screen = Screen::Mounting;
+        cx.notify();
+        let (source, generation) = (self.source.clone(), self.generation);
+        self.background(
+            cx,
+            move || source.mount_disk_image(&udid, &folder),
+            move |this, mounted, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                match mounted {
+                    Ok(()) => {
+                        this.screen = Screen::Looking;
+                        this.shoot(cx);
+                    }
+                    Err(why) => this.screen = Screen::Failed(why.into()),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// A click on the picture: a tap there, then a fresh picture.
+    fn tap_screen(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let Some(udid) = self.phone().map(|p| p.udid.clone()) else {
+            return;
+        };
+        let (source, generation) = (self.source.clone(), self.generation);
+        self.background(
+            cx,
+            move || source.tap(&udid, x, y),
+            move |this, tapped, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                match tapped {
+                    Ok(()) => this.shot_at = None,
+                    Err(why) => this.notice = Some(why.into()),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Mount the developer disk image in `folder`, as choosing it in the dialog does (the tests',
+    /// which can't answer the dialog).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mount_folder(&mut self, folder: PathBuf, cx: &mut Context<Self>) {
+        self.mount_disk_image(folder, cx);
+    }
+
+    /// Whether the screen is on show, and its picture's size (the tests').
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
+    pub fn screen_shown(&self) -> Option<(u32, u32)> {
+        match &self.screen {
+            Screen::Showing(_, size) => Some(*size),
+            _ => None,
+        }
     }
 
     fn load_apps(&mut self, cx: &mut Context<Self>) {
@@ -638,6 +936,10 @@ impl PhonePanel {
 
     fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
+        // A fresh picture as the screen comes into view.
+        if tab == Tab::Screen && matches!(self.screen, Screen::Showing(..)) {
+            self.shoot(cx);
+        }
         if tab == Tab::Files && self.entries.as_ref().is_none_or(|(p, _)| *p != self.place) {
             self.load_entries(cx);
         }
@@ -979,12 +1281,26 @@ impl PhonePanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        // `tapped <n>`: the made-up phone took n taps (a click on its screen is one).
+        if let Some(n) = state.strip_prefix("tapped ") {
+            let n: usize = n.trim().parse()?;
+            let taps = self
+                .demo_phone
+                .as_ref()
+                .map(|p| p.taps())
+                .unwrap_or_default();
+            anyhow::ensure!(taps.len() == n, "phone tapped: {taps:?}, not {n}");
+            return Ok(());
+        }
         let made_up = match state {
             "real" => {
                 self.source = Arc::new(Services);
                 None
             }
-            "ready" | "apps" | "files" | "documents" | "working" | "agent" => Some(MadeUp::ready()),
+            "ready" | "screen" | "apps" | "files" | "documents" | "working" | "agent" => {
+                Some(MadeUp::ready())
+            }
+            "disk-image" => Some(MadeUp::without_disk_image()),
             "service" => Some(MadeUp::showing(Seen::NoService(pc::Service::Missing))),
             "stopped" => Some(MadeUp::showing(Seen::NoService(pc::Service::Stopped))),
             "none" => Some(MadeUp::showing(Seen::NoPhone)),
@@ -997,12 +1313,18 @@ impl PhonePanel {
                 "Couldn't open lockdown: device socket io failed".into(),
             ))),
             other => anyhow::bail!(
-                "phone: unknown state {other:?} (ready|apps|files|documents|working|agent|service|stopped|none|trust|locked|failed|real)"
+                "phone: unknown state {other:?} (ready|screen|disk-image|apps|files|documents|working|agent|service|stopped|none|trust|locked|failed|real, or tapped <n>)"
             ),
         };
+        self.demo_phone = made_up.clone();
         if let Some(made_up) = made_up {
             self.source = made_up;
         }
+        self.screen = Screen::Unknown;
+        self.screen_of = None;
+        self.shooting = false;
+        self.shot_at = None;
+        self.agent_shot = None;
         // What was on its way from the phone before is the old phone's.
         self.generation += 1;
         self.looking = false;
@@ -1338,24 +1660,148 @@ impl PhonePanel {
                             ),
                     ),
             )
-            .child(
-                h_flex()
-                    .id("phone-screen-note")
-                    .test_support()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .rounded(px(fluent::control(radius::CONTROL)))
-                    .bg(theme.foreground.opacity(0.04))
-                    .text_size(to_rems(text::META))
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(Lucide::Monitor).xsmall().flex_shrink_0())
-                    .child(div().flex_1().min_w_0().child(pc::SCREEN)),
-            )
             .into_any_element()
     }
 
-    /// Apps and Files, and what each can do.
+    /// The Screen tab: the phone's screen, a click on it a tap; or what it needs first.
+    fn screen_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let note = |id: &'static str, icon: Icon, words: SharedString| {
+            h_flex()
+                .id(id)
+                .test_support()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded(px(fluent::control(radius::CONTROL)))
+                .bg(theme.foreground.opacity(0.04))
+                .text_size(to_rems(text::META))
+                .text_color(theme.muted_foreground)
+                .child(icon.xsmall().flex_shrink_0())
+                .child(div().flex_1().min_w_0().child(words))
+        };
+        match &self.screen {
+            Screen::Showing(image, (width, height)) => {
+                let (pw, ph) = ((*width).max(1) as f32, (*height).max(1) as f32);
+                // Where the area was drawn this frame (its canvas measures it before a click lands).
+                let area = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
+                let measured = area.clone();
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .p_3()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("phone-screen")
+                            .test_support()
+                            .relative()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .overflow_hidden()
+                            .cursor_pointer()
+                            // Laid over the area (a definite box), so the picture fits inside it.
+                            .child(
+                                img(image.clone())
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full()
+                                    .object_fit(ObjectFit::Contain),
+                            )
+                            .child(
+                                canvas(move |b, _, _| measured.set(b), |_, _, _, _| {})
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                    if let Some((x, y)) =
+                                        on_picture(area.get(), (pw, ph), e.position)
+                                    {
+                                        this.tap_screen(x, y, cx);
+                                    }
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_center()
+                            .text_size(to_rems(text::META))
+                            .text_color(theme.muted_foreground)
+                            .child(pc::SCREEN_HINT),
+                    )
+                    .into_any_element()
+            }
+            Screen::NeedsImage => v_flex()
+                .p_3()
+                .gap_2()
+                .child(note(
+                    "phone-screen-image",
+                    Icon::new(Lucide::Monitor),
+                    pc::SCREEN_NEEDS_IMAGE.into(),
+                ))
+                .child(
+                    h_flex().child(
+                        Button::new("phone-screen-choose")
+                            .small()
+                            .outline()
+                            .label(pc::SCREEN_CHOOSE)
+                            .on_click(cx.listener(|this, _, _, cx| this.choose_disk_image(cx))),
+                    ),
+                )
+                .into_any_element(),
+            Screen::Failed(why) => v_flex()
+                .p_3()
+                .gap_2()
+                .child(note(
+                    "phone-screen-failed",
+                    Icon::new(IconName::TriangleAlert),
+                    why.clone(),
+                ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("phone-screen-again")
+                                .small()
+                                .outline()
+                                .label("Try again")
+                                .on_click(cx.listener(|this, _, _, cx| this.ask_screen(cx))),
+                        )
+                        .child(
+                            Button::new("phone-screen-choose")
+                                .small()
+                                .ghost()
+                                .label(pc::SCREEN_CHOOSE)
+                                .on_click(cx.listener(|this, _, _, cx| this.choose_disk_image(cx))),
+                        ),
+                )
+                .into_any_element(),
+            Screen::Mounting => div()
+                .p_3()
+                .child(note(
+                    "phone-screen-mounting",
+                    Icon::new(Lucide::Monitor),
+                    pc::SCREEN_MOUNTING.into(),
+                ))
+                .into_any_element(),
+            Screen::Looking | Screen::Unknown => div()
+                .p_3()
+                .child(note(
+                    "phone-screen-looking",
+                    Icon::new(Lucide::Monitor),
+                    pc::SCREEN_LOOKING.into(),
+                ))
+                .into_any_element(),
+        }
+    }
+
+    /// Apps, Files and the Screen, and what each can do.
     fn tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let count = match &self.apps {
@@ -1373,13 +1819,15 @@ impl PhonePanel {
             || (self.place.path != "/"
                 && files::check_remote(&files::join(&self.place.path, "x"), false).is_ok());
         let action = match self.tab {
+            Tab::Screen => div().into_any_element(),
             Tab::Apps => Button::new("phone-install")
                 .small()
                 .outline()
                 .icon(Lucide::PackagePlus)
                 .label("Install an app…")
                 .disabled(busy)
-                .on_click(cx.listener(|this, _, _, cx| this.install_app(cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.install_app(cx)))
+                .into_any_element(),
             Tab::Files => Button::new("phone-add-file")
                 .small()
                 .outline()
@@ -1391,7 +1839,8 @@ impl PhonePanel {
                 } else {
                     "Open a folder to copy into first (Downloads, say; not the Camera Roll)"
                 })
-                .on_click(cx.listener(|this, _, _, cx| this.add_file(cx))),
+                .on_click(cx.listener(|this, _, _, cx| this.add_file(cx)))
+                .into_any_element(),
         };
         h_flex()
             .px_3()
@@ -1401,7 +1850,11 @@ impl PhonePanel {
             .border_color(theme.border)
             .child(crate::ui::segmented(
                 "phone-tab",
-                vec![(Tab::Apps, count), (Tab::Files, "Files".to_string())],
+                vec![
+                    (Tab::Apps, count),
+                    (Tab::Files, "Files".to_string()),
+                    (Tab::Screen, "Screen".to_string()),
+                ],
                 self.tab,
                 pick,
                 cx,
@@ -1745,6 +2198,7 @@ impl Render for PhonePanel {
                 .child(match self.tab {
                     Tab::Apps => self.apps_list(cx),
                     Tab::Files => self.files_list(cx),
+                    Tab::Screen => self.screen_view(cx),
                 })
                 .into_any_element(),
             Some(seen) => match pc::say(&seen) {
@@ -1862,6 +2316,46 @@ fn text(t: impl Into<String>) -> Result<Value, String> {
     Ok(json!({ "text": t.into() }))
 }
 
+/// Where `point` falls on a picture of `size` drawn fitted and centred in `area`, as fractions of
+/// its width and height; `None` off the picture (in the bars beside it).
+fn on_picture(area: Bounds<Pixels>, size: (f32, f32), point: Point<Pixels>) -> Option<(f32, f32)> {
+    let (aw, ah) = (f32::from(area.size.width), f32::from(area.size.height));
+    if aw <= 0. || ah <= 0. || size.0 <= 0. || size.1 <= 0. {
+        return None;
+    }
+    let scale = (aw / size.0).min(ah / size.1);
+    let (w, h) = (size.0 * scale, size.1 * scale);
+    let left = f32::from(area.origin.x) + (aw - w) / 2.;
+    let top = f32::from(area.origin.y) + (ah - h) / 2.;
+    let (x, y) = (
+        (f32::from(point.x) - left) / w,
+        (f32::from(point.y) - top) / h,
+    );
+    ((0. ..=1.).contains(&x) && (0. ..=1.).contains(&y)).then_some((x, y))
+}
+
+/// What an agent hears when the screen can't be had yet.
+const NO_DISK_IMAGE: &str = pc::SCREEN_ADVICE;
+
+/// `shot` as a PNG whose long side is at most `edge` pixels (an agent's picture), and its size.
+fn shrink(shot: Shot, edge: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let long = shot.width.max(shot.height);
+    if long <= edge {
+        return Ok((shot.png, shot.width, shot.height));
+    }
+    let picture = image::load_from_memory_with_format(&shot.png, image::ImageFormat::Png)
+        .map_err(|e| format!("The screenshot didn't read: {e}"))?;
+    let scale = edge as f32 / long as f32;
+    let width = ((shot.width as f32 * scale).round() as u32).max(1);
+    let height = ((shot.height as f32 * scale).round() as u32).max(1);
+    let small = picture.resize_exact(width, height, image::imageops::FilterType::Triangle);
+    let mut png = std::io::Cursor::new(Vec::new());
+    small
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| format!("The screenshot didn't write: {e}"))?;
+    Ok((png.into_inner(), width, height))
+}
+
 /// A path on this PC an agent gave: a whole one (a relative one would land in Trek's own folder,
 /// not the agent's).
 fn local_path(p: &Value, key: &str) -> Result<PathBuf, String> {
@@ -1876,6 +2370,21 @@ fn local_path(p: &Value, key: &str) -> Result<PathBuf, String> {
 }
 
 impl Run<'_> {
+    /// A file of its own for an agent's picture, in the data folder (trek-mcp reads it, then
+    /// removes it).
+    fn shot_path(&mut self) -> Result<PathBuf, String> {
+        let n = self
+            .this
+            .update(self.cx, |p, _| {
+                p.shots += 1;
+                p.shots
+            })
+            .map_err(gone)?;
+        let dir = trek_core::paths::data_dir().join("phone-shots");
+        let _ = std::fs::create_dir_all(&dir);
+        Ok(dir.join(format!("{}-{n}.png", std::process::id())))
+    }
+
     async fn sleep(&mut self, d: Duration) {
         self.cx.background_executor().timer(d).await;
     }
@@ -1951,13 +2460,75 @@ impl Run<'_> {
         match method.as_str() {
             "phone_status" => {
                 let (seen, assistive) = self.look().await?;
+                let screen = match &seen {
+                    Seen::Ready(phone) => {
+                        let (source, udid) = (self.source()?, phone.udid.clone());
+                        self.blocking(move || source.disk_image(&udid).ok()).await
+                    }
+                    _ => None,
+                };
                 let holder = self
                     .this
                     .update(self.cx, |p, _| {
                         p.lease.holder(Instant::now()).map(|h| h.title.clone())
                     })
                     .map_err(gone)?;
-                text(pc::status(&seen, assistive, holder.as_deref()))
+                text(pc::status(&seen, screen, assistive, holder.as_deref()))
+            }
+            "phone_screenshot" => {
+                let udid = self.ready().await?;
+                let source = self.source()?;
+                let mounted = {
+                    let (source, udid) = (source.clone(), udid.clone());
+                    self.blocking(move || source.disk_image(&udid)).await?
+                };
+                if !mounted {
+                    return Err(NO_DISK_IMAGE.into());
+                }
+                let edge = p["max_edge"]
+                    .as_u64()
+                    .map(|e| (e as u32).clamp(200, 2000))
+                    .unwrap_or(SHOT_EDGE);
+                let path = self.shot_path()?;
+                let file = path.clone();
+                let (width, height) = self
+                    .blocking(move || -> Result<(u32, u32), String> {
+                        let (png, width, height) = shrink(source.screenshot(&udid)?, edge)?;
+                        std::fs::write(&file, png).map_err(|e| e.to_string())?;
+                        Ok((width, height))
+                    })
+                    .await?;
+                self.this
+                    .update(self.cx, |p, _| p.agent_shot = Some((width, height)))
+                    .map_err(gone)?;
+                Ok(json!({
+                    "text": format!("The iPhone's screen, {width}×{height}. x/y for phone_tap are pixels in this picture."),
+                    "image": path.display().to_string(),
+                }))
+            }
+            "phone_tap" => {
+                let udid = self.ready().await?;
+                let (Some(x), Some(y)) = (p["x"].as_f64(), p["y"].as_f64()) else {
+                    return Err(
+                        "phone_tap takes x and y, pixels in the latest phone_screenshot.".into(),
+                    );
+                };
+                let (width, height) = self
+                    .this
+                    .update(self.cx, |p, _| p.agent_shot)
+                    .map_err(gone)?
+                    .ok_or("Take a phone_screenshot first: x and y are pixels in it.")?;
+                let (fx, fy) = (x as f32 / width as f32, y as f32 / height as f32);
+                if !(0. ..=1.).contains(&fx) || !(0. ..=1.).contains(&fy) {
+                    return Err(format!(
+                        "({x}, {y}) is off the screen: the latest phone_screenshot is {width}×{height}."
+                    ));
+                }
+                let source = self.source()?;
+                self.blocking(move || source.tap(&udid, fx, fy)).await?;
+                text(format!(
+                    "Tapped ({x}, {y}). Take a screenshot to see what it did."
+                ))
             }
             "phone_release" => {
                 let thread = self.call.thread.clone();
@@ -2121,7 +2692,10 @@ impl Run<'_> {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's own `test` attribute would come with it.
-    use super::{HandHolding, Sensitive, ask_text, local_path, needs_asking, starting, tools};
+    use super::{
+        HandHolding, Sensitive, ask_text, local_path, needs_asking, on_picture, starting, tools,
+    };
+    use gpui_kit::{Bounds, point, px, size};
     use serde_json::json;
 
     /// The same rules as the Mac's iPhone tool (`panels/phone.rs`).
@@ -2167,5 +2741,29 @@ mod tests {
         let err = local_path(&json!({"local": "a.txt"}), "local").unwrap_err();
         assert!(err.contains("full path on this PC"), "{err}");
         assert!(local_path(&json!({}), "local").is_err());
+    }
+
+    /// A click on the Screen tab is a tap where it falls on the picture, drawn fitted and centred:
+    /// in the bars beside it, it's none.
+    #[test]
+    fn a_click_is_a_place_on_the_fitted_picture() {
+        let area = Bounds::new(point(px(10.), px(20.)), size(px(300.), px(400.)));
+        // 100×200 fits as 200×400, 50 in from the left.
+        assert_eq!(
+            on_picture(area, (100., 200.), point(px(160.), px(220.))),
+            Some((0.5, 0.5))
+        );
+        assert_eq!(
+            on_picture(area, (100., 200.), point(px(60.), px(20.))),
+            Some((0., 0.))
+        );
+        assert_eq!(
+            on_picture(area, (100., 200.), point(px(30.), px(220.))),
+            None
+        );
+        assert_eq!(
+            on_picture(Bounds::default(), (100., 200.), point(px(0.), px(0.))),
+            None
+        );
     }
 }

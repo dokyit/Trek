@@ -262,6 +262,10 @@ impl ToolSet for Phone {
             return Err(trek_ipc::phone::on_a_mac(name));
         }
         let given = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
+        // A PC has no elements to tap by ref: its taps are at x/y in its screenshot.
+        if self.pc && name == "phone_tap" && !(given("x") && given("y")) {
+            return Err("phone_tap on this PC takes x and y, pixels in the latest phone_screenshot (refs come from phone_elements, which needs Trek on a Mac for now).".into());
+        }
         let text = match name {
             "phone_elements" => self.elements(args)?,
             "phone_wait" => self.wait(args)?,
@@ -788,8 +792,8 @@ mod tests {
         }
     }
 
-    /// On a PC the family is the phone's apps and files, in its own words; the rest of the
-    /// tools say they need Trek on a Mac for now, without asking Trek.
+    /// On a PC the family is the phone's screen, taps, apps and files, in its own words; the rest
+    /// of the tools say they need Trek on a Mac for now, without asking Trek.
     #[test]
     fn a_pc_serves_the_apps_and_files_and_says_where_the_rest_are() {
         let trek = Trek::default();
@@ -799,25 +803,34 @@ mod tests {
         assert_eq!(names, trek_ipc::phone::PC_TOOL_NAMES);
         assert_eq!(tools.instructions(), trek_ipc::phone::PC_INSTRUCTIONS);
         for (tool, args) in [
-            ("phone_tap", json!({"x": 1, "y": 2})),
-            ("phone_tap", json!({"ref": "e1"})),
             ("phone_elements", json!({})),
             ("phone_wait", json!({"text": "Done"})),
-            ("phone_screenshot", json!({})),
+            ("phone_swipe", json!({"x1": 1, "y1": 2, "x2": 3, "y2": 4})),
+            ("phone_type", json!({"text": "hi"})),
             ("phone_open_app", json!({"name": "Settings"})),
         ] {
             let err = tools.call(tool, &args).unwrap_err();
             assert!(err.contains("needs Trek on a Mac for now"), "{tool}: {err}");
         }
+        // A tap by ref has no elements to come from here.
+        let err = tools.call("phone_tap", &json!({"ref": "e1"})).unwrap_err();
+        assert!(err.contains("takes x and y"), "{err}");
         assert!(
             trek.asked().is_empty(),
             "never asked Trek: {:?}",
             trek.asked()
         );
-        // What it serves goes to Trek as on a Mac.
+        // What it serves goes to Trek as on a Mac: the screen and a tap at x/y too.
         let said = text_of(tools.call("phone_apps", &json!({})));
         assert_eq!(said, "phone_apps done");
-        assert_eq!(trek.asked(), ["phone_apps"]);
+        tools.call("phone_screenshot", &json!({})).unwrap();
+        tools
+            .call("phone_tap", &json!({"x": 100, "y": 200}))
+            .unwrap();
+        assert_eq!(
+            trek.asked(),
+            ["phone_apps", "phone_screenshot", "phone_tap"]
+        );
         // Without Trek, those say why.
         let mut alone = Phone::with(None);
         alone.pc = true;

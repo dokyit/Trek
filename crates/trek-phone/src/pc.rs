@@ -1,9 +1,9 @@
 //! The iPhone tool on a PC. Windows reaches the phone's own services through Apple Mobile Device
-//! Service, as Apple Devices does, so its apps and files work there (`device`); its screen and
-//! taps don't yet: they come from the Mac's capture, its Bluetooth keyboard and mouse, iPhone
-//! Mirroring, or Trek Driver, which Xcode starts. What the tool shows in each state, and what
-//! `phone_status` says, are decided here from what usbmuxd shows (`device::probe`): the same
-//! words in both places, as `route` has them for the Mac.
+//! Service, as Apple Devices does: its apps and files (`device`), and its screen and taps through
+//! CoreDevice's services once its developer disk image is mounted (`coredevice`), where a Mac has
+//! its capture, Bluetooth keyboard and mouse, iPhone Mirroring and Trek Driver. What the tool shows
+//! in each state, and what `phone_status` says, are decided here from what usbmuxd shows
+//! (`device::probe`): the same words in both places, as `route` has them for the Mac.
 //!
 //! Nothing here pairs with the phone: one that hasn't trusted this PC asks when the user taps
 //! Trust on it (Apple Devices puts the question to it when it's open with the phone plugged in).
@@ -16,12 +16,21 @@ pub const STORE_URL: &str = "ms-windows-store://pdp/?productid=9NP83LWLPZ9K";
 /// The service's name in Windows' Services.
 pub const SERVICE: &str = "Apple Mobile Device Service";
 
-/// What the picture area says on a PC, where the Mac shows the screen live.
-pub const SCREEN: &str = "Seeing the iPhone's screen and tapping it need Trek on a Mac for now. Here, Trek reaches its apps and files over the cable.";
+/// What the picture area says before the phone's screen can show: its developer disk image isn't
+/// mounted, and where it comes from (CoreDevice serves the screen and taps from it).
+pub const SCREEN_NEEDS_IMAGE: &str = "To show the iPhone's screen here and tap it, Trek mounts its developer disk image. Copy the iOS_DDI folder from a Mac with Xcode (/Library/Developer/DeveloperDiskImages/iOS_DDI) to this PC and choose it. It stays mounted until the iPhone restarts.";
+pub const SCREEN_CHOOSE: &str = "Choose the folder…";
+pub const SCREEN_MOUNTING: &str =
+    "Mounting the developer disk image, signed for this iPhone by Apple…";
+pub const SCREEN_LOOKING: &str = "Looking for the iPhone's screen…";
+/// What an agent hears when it asks for the screen before the disk image is mounted.
+pub const SCREEN_ADVICE: &str = "The iPhone's developer disk image isn't mounted, which its screen and taps need: ask the user to choose its folder in Trek's iPhone tool, copied from a Mac with Xcode (/Library/Developer/DeveloperDiskImages/iOS_DDI). It stays mounted until the iPhone restarts.";
+/// Under the screen: what a click does.
+pub const SCREEN_HINT: &str = "Click to tap. Swiping and typing need Trek on a Mac for now.";
 
 /// Settings › Tools › iPhone on a PC: what the switch gives agents, and what the tool shows when
 /// the agent of the thread in view starts using the phone.
-pub const SETTINGS_TOOLS: &str = "Agents use your real iPhone on the cable: its apps (installing one signed for it) and its files, through the Apple Mobile Device Service that Apple Devices installs. Seeing its screen and tapping it need Trek on a Mac for now. One agent at a time; installing and changing files follow the thread's access level. Applies to new sessions.";
+pub const SETTINGS_TOOLS: &str = "Agents use your real iPhone on the cable: its screen (screenshots and taps, once its developer disk image is mounted in the iPhone tool), its apps (installing one signed for it) and its files, through the Apple Mobile Device Service that Apple Devices installs. One agent at a time; installing and changing files follow the thread's access level. Applies to new sessions.";
 pub const SETTINGS_FOLLOW_LABEL: &str = "Show the iPhone tool";
 pub const SETTINGS_FOLLOW: &str = "When the agent of the thread you're on starts using the iPhone, the iPhone tool opens beside the chat with what it's doing and a Stop button to take the phone back.";
 
@@ -168,12 +177,18 @@ pub fn describe(phone: &Phone) -> (String, String) {
     (name, detail.join(" · "))
 }
 
-/// The phone tools a PC answers (the others need the Mac for now), as `phone_status` lists them.
+/// The phone tools a PC answers for apps and files, as `phone_status` lists them.
 const SERVED: &str = "phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file and phone_remove_file";
 
-/// `phone_status` on a PC: the phone and what works here, AssistiveTouch, and who holds it; or,
-/// before the phone can be used, what to do first.
-pub fn status(seen: &Seen, assistive: Option<bool>, holder: Option<&str>) -> String {
+/// `phone_status` on a PC: the phone and what works here (its screen once its developer disk image
+/// is mounted: `screen`, when known), AssistiveTouch, and who holds it; or, before the phone can be
+/// used, what to do first.
+pub fn status(
+    seen: &Seen,
+    screen: Option<bool>,
+    assistive: Option<bool>,
+    holder: Option<&str>,
+) -> String {
     let held = format!("Held by: {}.", holder.unwrap_or("nobody"));
     let Seen::Ready(phone) = seen else {
         let say = say(seen).map(|s| s.advice).unwrap_or_default();
@@ -184,7 +199,10 @@ pub fn status(seen: &Seen, assistive: Option<bool>, holder: Option<&str>) -> Str
     [
         format!("{name} · {detail}."),
         format!("Apps and files: ready over {link} ({SERVED})."),
-        "Screen and taps: not on Windows yet, they need Trek on a Mac for now (so no phone_screenshot, phone_elements or phone_tap here).".to_string(),
+        match screen {
+            Some(true) => "Screen and taps: ready (phone_screenshot, phone_tap); reading the screen as elements, swiping and typing need Trek on a Mac for now.".to_string(),
+            _ => "Screen and taps: need the iPhone's developer disk image, mounted once in Trek's iPhone tool: ask the user to choose its folder there (from a Mac with Xcode). Then phone_screenshot and phone_tap work.".to_string(),
+        },
         format!(
             "AssistiveTouch: {}.",
             match assistive {
@@ -261,22 +279,34 @@ mod tests {
     }
 
     /// The PC's words name nothing it hasn't got: no Bluetooth keyboard, iPhone Mirroring, Mac
-    /// settings or Finder, and no "this Mac". (That the screen and taps need a Mac is said.)
+    /// settings or Finder, and no "this Mac". Xcode only as where the developer disk image comes
+    /// from.
     #[test]
     fn a_pc_is_never_told_of_the_macs_routes() {
         let mut said = vec![
-            SCREEN.to_string(),
+            SCREEN_NEEDS_IMAGE.to_string(),
+            SCREEN_CHOOSE.to_string(),
+            SCREEN_MOUNTING.to_string(),
+            SCREEN_LOOKING.to_string(),
+            SCREEN_HINT.to_string(),
+            SCREEN_ADVICE.to_string(),
             SETTINGS_TOOLS.to_string(),
             SETTINGS_FOLLOW_LABEL.to_string(),
             SETTINGS_FOLLOW.to_string(),
             no_service(Service::Missing).to_string(),
             no_service(Service::Stopped).to_string(),
-            status(&Seen::Ready(phone()), Some(false), Some("Fix login")),
+            status(
+                &Seen::Ready(phone()),
+                Some(true),
+                Some(false),
+                Some("Fix login"),
+            ),
+            status(&Seen::Ready(phone()), Some(false), Some(false), None),
         ];
         for s in states() {
             let say = say(&s).unwrap();
             said.extend([say.title.to_string(), say.detail, say.advice]);
-            said.push(status(&s, None, None));
+            said.push(status(&s, None, None, None));
         }
         for text in &said {
             for word in [
@@ -286,18 +316,28 @@ mod tests {
                 "the Mac's",
                 "Finder",
                 "System Settings",
-                "Xcode",
                 "Lock the iPhone",
             ] {
                 assert!(!text.contains(word), "{word}: {text}");
             }
+            assert!(
+                !text.contains("Xcode")
+                    || text.contains("developer disk image")
+                    || text.contains("iOS_DDI"),
+                "{text}"
+            );
         }
-        assert!(SCREEN.contains("need Trek on a Mac for now"));
+        assert!(SCREEN_NEEDS_IMAGE.contains("/Library/Developer/DeveloperDiskImages/iOS_DDI"));
     }
 
     #[test]
     fn status_says_what_works_here_and_who_holds_it() {
-        let s = status(&Seen::Ready(phone()), Some(true), Some("Fix login"));
+        let s = status(
+            &Seen::Ready(phone()),
+            Some(false),
+            Some(true),
+            Some("Fix login"),
+        );
         assert!(
             s.starts_with("Toby's iPhone · iOS 27.2 · USB · iPhone 16 Pro Max."),
             "{s}"
@@ -306,17 +346,27 @@ mod tests {
             s.contains("Apps and files: ready over the cable (phone_apps,"),
             "{s}"
         );
-        assert!(s.contains("need Trek on a Mac for now"), "{s}");
+        assert!(s.contains("need the iPhone's developer disk image"), "{s}");
         assert!(s.contains("AssistiveTouch: on."), "{s}");
         assert!(s.ends_with("Held by: Fix login."), "{s}");
+        // Mounted: the screen and taps are ready, and what still needs a Mac is said.
+        let ready = status(&Seen::Ready(phone()), Some(true), Some(true), None);
+        assert!(
+            ready.contains("Screen and taps: ready (phone_screenshot, phone_tap)"),
+            "{ready}"
+        );
+        assert!(
+            ready.contains("swiping and typing need Trek on a Mac for now"),
+            "{ready}"
+        );
         // Before the phone can be used: the one thing to do, for the agent to pass on.
-        let s = status(&Seen::NoPhone, None, None);
+        let s = status(&Seen::NoPhone, None, None, None);
         assert!(
             s.contains("To do: No iPhone is connected: ask the user"),
             "{s}"
         );
         assert!(s.ends_with("Held by: nobody."), "{s}");
-        let s = status(&Seen::NoService(Service::Missing), None, None);
+        let s = status(&Seen::NoService(Service::Missing), None, None, None);
         assert!(
             s.contains("install Apple Devices from the Microsoft Store"),
             "{s}"

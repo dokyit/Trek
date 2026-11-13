@@ -18,6 +18,8 @@ plist = "1"
 tokio = { workspace = true }
 # "this Mac" or "this PC" in what the device services say went wrong.
 trek-words = { path = "../trek-words" }
+# The screen-sharing session ids CoreDevice's display service wants (`coredevice`).
+uuid = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 async-channel.workspace = true
@@ -26,16 +28,12 @@ async-channel.workspace = true
 # Whether Apple Mobile Device Service is installed and running, when usbmuxd doesn't answer.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Services"] }
 
-[target.'cfg(any(target_os = "macos", windows))'.dev-dependencies]
-# The `pc_screen` example's media-stream session ids.
-uuid.workspace = true
-
 [features]
 # The iPhone's screen and taps through CoreDevice's own services, over the phone's RemoteXPC
 # tunnel: the developer disk image mounted (personalized by Apple's signing server), then the
 # screenshot service, the display service's media stream and the HID back channel that Xcode's
-# Device Hub uses. No Trek Driver, so no Mac to build or sign one. The `pc_screen` example only,
-# for now: nothing of it has run against a phone from a PC yet.
+# Device Hub uses. No Trek Driver, so no Mac to build or sign one: the iPhone tool on Windows, and
+# the `pc_screen` example. Nothing of it has run against a phone from a PC yet.
 coredevice = [
     "idevice/core_device_proxy",
     "idevice/tunnel_tcp_stack",
@@ -44,6 +42,7 @@ coredevice = [
     "idevice/display_stream",
     "idevice/mobile_image_mounter",
     "idevice/tss",
+    "dep:uuid",
 ]
 
 [[example]]

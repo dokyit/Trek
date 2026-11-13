@@ -117,3 +117,16 @@ The strip names one route and never shows the Bluetooth pairing step when iPhone
 Known: XCTest's synthesized touches (the driver's `/path` and XCTest's own press-then-drag alike) open an icon's long-press menu but don't pick the icon up on the iOS 27 simulator's Home Screen (the drag pulls down Search instead, and once SpringBoard stayed that way through later taps until the simulator restarted); scrolling and paging follow the path. Not tried on a phone with the version 2 driver yet.
 
 Known, of version 3: the stream and the elements ran only in the iOS 27 simulator; on a real iPhone the direct JPEG (and its fall-back), the frame rate over the cable and over Wi-Fi, and the stream through usbmuxd are untried. Element frames inside a Home Screen widget come from XCTest relative to the widget, so their boxes are off; a notification banner over an app isn't listed (SpringBoard isn't active then); an app held in landscape reports frames in its own orientation, while taps go in portrait points. The scroll indicators are recognised by their English labels.
+
+## On a PC
+
+The PC's iPhone tool (`panels/phone/windows.rs`) reaches the phone through Apple Mobile Device Service: its details, apps, files and AssistiveTouch, and its screen in the Screen tab through CoreDevice's services (`trek_phone::coredevice`) once its developer disk image is mounted, from a folder copied from a Mac with Xcode (`/Library/Developer/DeveloperDiskImages/iOS_DDI`). A still comes about every second while the tab is open; a click on it is a tap there. Agents get `phone_screenshot` and `phone_tap` too. Made-up phones for it (an isolated run never touches the real one unless started with `TREK_SHOT_PHONE=real`):
+
+```powershell
+./.agents/skills/verify-trek/scripts/trek-dev.ps1 control phone ready        # its apps; its disk image mounted
+./.agents/skills/verify-trek/scripts/trek-dev.ps1 control phone screen       # the same: click phone-tab#2 for the Screen tab, then phone-screen taps
+./.agents/skills/verify-trek/scripts/trek-dev.ps1 control phone disk-image   # the Screen tab asks for the developer disk image's folder
+./.agents/skills/verify-trek/scripts/trek-dev.ps1 control phone "tapped 1"   # a check: the made-up phone took one tap
+```
+
+With a real phone on the cable, `cargo run -p trek-phone --features coredevice --example pc_screen -- --ddi <folder> --tap <x> <y>` mounts the image, saves a screenshot and taps, without the app.

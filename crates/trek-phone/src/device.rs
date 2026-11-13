@@ -179,7 +179,7 @@ pub fn list() -> Result<Vec<Phone>, String> {
 }
 
 /// The phone `udid` (the first, cable first, when `None`), to connect to its services.
-async fn provider(udid: Option<&str>) -> Result<UsbmuxdProvider, String> {
+pub(crate) async fn provider(udid: Option<&str>) -> Result<UsbmuxdProvider, String> {
     let mut mux = usbmuxd().await?;
     let mut devices = mux.get_devices().await.map_err(err("usbmuxd"))?;
     devices.sort_by_key(|d| d.connection_type != Connection::Usb);
@@ -192,7 +192,7 @@ async fn provider(udid: Option<&str>) -> Result<UsbmuxdProvider, String> {
 }
 
 /// A lockdown session (needed for the accessibility domain).
-async fn lockdown(provider: &UsbmuxdProvider) -> Result<LockdownClient, String> {
+pub(crate) async fn lockdown(provider: &UsbmuxdProvider) -> Result<LockdownClient, String> {
     let mut lockdown = LockdownClient::connect(provider)
         .await
         .map_err(err("Couldn't open lockdown"))?;
