@@ -582,7 +582,7 @@ macos = "yes"
 windows = "partial"
 live = ["route settings:phone", "wait 300", "reveal machine-add", "count machine-add 1"]
 how = { macos = "An ignored file copied to the other machine keeps its permission bits.", windows = "Windows has none to read: an ignored file copied to the other machine goes as 0644, one that starts with #! (a script) as 0755." }
-note = "Untested with a Windows PC as the target (docs/MULTI-MACHINE.md): needs a run on real hardware."
+note = "A PC as the target answers the other computer as a Mac does, tested on both CIs (tests/remote.rs: machine_info, a clone registered as a project, put_files never through a link). No run between two real computers has had a PC as the target yet (docs/MULTI-MACHINE.md)."
 code = ["crates/trek-app/src/machines.rs", "crates/trek-app/src/machines/clone.rs"]
 tests = ["crates/trek-app/tests/remote.rs", "crates/trek-app/src/machines/clone.rs"]
 
