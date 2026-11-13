@@ -45,8 +45,9 @@ pub const GESTURE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5
 pub const OPEN_ON_PHONE: &str = "Open this on my iPhone";
 
 /// Told to every session while interactive artifacts are on, after the `trek-viz` note. Terse:
-/// every session carries it (`instructions_stay_compact`).
-pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block holding a complete, self-contained HTML document with a <title>, then state its takeaway in prose; prefer `trek-viz` for simple charts. Trek runs it inline in a sandboxed web view, as wide as the answer and as tall as its content (160-720 px; it scrolls past that). Inline your CSS and JS; scripts, styles, images and fonts may load over https from CDNs such as cdn.jsdelivr.net or unpkg.com, never over http or from local files; links open in the user's browser. Style it with Trek's CSS variables --trek-bg, --trek-fg, --trek-muted, --trek-accent, --trek-border, --trek-surface, --trek-font, --trek-mono and --trek-radius, on a transparent page background (Trek has light and dark themes). Keep it under 200 KB. A button may call trek.send(text), sent as the user's next message here, or trek.copy(text). For a map, pull request or database migration card, follow Trek's built-in skill map-card, pull-request-card or database-migration-card.";
+/// every session carries it (`instructions_stay_compact`), and the page's rules are in the skill it
+/// names (`skills::TREK_HTML`), read only by an agent about to write a page.
+pub const AGENT_INSTRUCTIONS: &str = "When an interactive or rich visual genuinely helps (a 3D model, a simulation, an explorable diagram, a tabbed report), add one fenced `trek-html` block, a self-contained HTML page Trek runs inline, then state its takeaway in prose; prefer `trek-viz` for simple charts. Read Trek's built-in skill trek-html before writing one, and for a map, pull request or database migration card follow the skill map-card, pull-request-card or database-migration-card.";
 
 /// The Content-Security-Policy the document is served with. Scripts, styles, images, fonts,
 /// media and `fetch` over https only (CDNs); inline code and `eval` (it's the agent's own
@@ -1334,34 +1335,54 @@ process.stdout.write(JSON.stringify({ sent, out: out === undefined ? null : out 
     #[test]
     fn instructions_stay_compact() {
         assert!(
-            AGENT_INSTRUCTIONS.chars().count() < 1_150,
+            AGENT_INSTRUCTIONS.chars().count() < 500,
             "{} chars",
             AGENT_INSTRUCTIONS.chars().count()
         );
-        // What a page can do, and the card recipes Trek ships (`skills::CARD_RECIPES`).
+        // When to write one, the skill with its rules, and the card recipes Trek ships.
         assert!(
-            AGENT_INSTRUCTIONS.contains("trek.send(text)")
-                && AGENT_INSTRUCTIONS.contains("trek.copy(text)")
+            AGENT_INSTRUCTIONS.contains("`trek-html`")
+                && AGENT_INSTRUCTIONS.contains("trek-viz")
+                && AGENT_INSTRUCTIONS.contains(crate::skills::TREK_HTML)
         );
         for recipe in crate::skills::CARD_RECIPES {
             assert!(AGENT_INSTRUCTIONS.contains(recipe), "{recipe}");
         }
-        assert!(
-            AGENT_INSTRUCTIONS.contains("`trek-html`")
-                && AGENT_INSTRUCTIONS.contains("trek-viz")
-                && AGENT_INSTRUCTIONS.contains("200 KB")
-        );
         // The mock agent finds a verification CLI by "(`": the note mustn't look like one.
         assert!(!AGENT_INSTRUCTIONS.contains("(`"));
-        for var in [
+    }
+
+    /// The page's rules left the note for the skill: everything the note used to say is there.
+    #[test]
+    fn the_trek_html_skill_has_the_rules_the_note_named() {
+        let (_, md) = crate::skills::SHIPPED
+            .iter()
+            .find(|(n, _)| *n == crate::skills::TREK_HTML)
+            .expect("shipped");
+        assert!(md.starts_with("---\nname: trek-html\ndescription: "));
+        for rule in [
+            "<title>",
+            "160 to 720 px",
+            "200 KB",
+            "over https",
+            "never from local files",
+            "transparent page background",
+            "trek.send(text)",
+            "trek.copy(text)",
             "--trek-bg",
             "--trek-fg",
             "--trek-muted",
             "--trek-accent",
             "--trek-border",
+            "--trek-surface",
             "--trek-font",
+            "--trek-mono",
+            "--trek-radius",
         ] {
-            assert!(AGENT_INSTRUCTIONS.contains(var), "{var}");
+            assert!(md.contains(rule), "{rule}");
+        }
+        for recipe in crate::skills::CARD_RECIPES {
+            assert!(md.contains(recipe), "{recipe}");
         }
     }
 }

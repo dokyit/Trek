@@ -30,10 +30,7 @@ pub const WATCH_TOOL: &str = "watch_video";
 pub const VIDEO_SERVER: &str = "trek-video";
 
 /// What a session given the video watcher is told (the server's own instructions say how to call it).
-pub const AGENT_INSTRUCTIONS: &str = "Video: you can't watch video yourself; for any question about one (a file or an \
-https link), call Trek's `watch_video` tool (the trek-video server) for its frames and transcript. A video file or an \
-https link to one, written as a Markdown link on a line of its own (`[clip](path/to/clip.mp4)`), plays inline for the \
-user.";
+pub const AGENT_INSTRUCTIONS: &str = "Video: you can't watch it yourself; for any question about a video file or https link, call Trek's `watch_video` tool for its frames and transcript. A Markdown link to a video on a line of its own plays inline for the user.";
 
 /// The folder `watch_video` keeps its scratch folders in: the platform's cache folder for Trek
 /// (`~/Library/Caches/dev.trek.Trek/videos` on a Mac), or the data folder's when Trek's data is

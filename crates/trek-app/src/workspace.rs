@@ -5215,6 +5215,7 @@ impl Workspace {
             trek_mcp_binary().is_some(),
             self.project_notes(project, cwd),
             recaps,
+            Some(&trek_core::skills::shipped_root()),
         )
     }
 
@@ -9585,7 +9586,10 @@ impl Workspace {
         if let Some(bin) = trek_mcp_binary() {
             let bin = bin.display().to_string();
             let windows = crate::words::is_windows();
-            for family in trek_mcp_families(tools.computer_use, tools.simulator, windows) {
+            // The simulator's tools only where there's a simulator to drive (Xcode, not just its
+            // command line tools): elsewhere they're tool names and words in every request.
+            let sim_tools = tools.simulator && trek_core::detect::has_simulator();
+            for family in trek_mcp_families(tools.computer_use, sim_tools, windows) {
                 let mut env = trek_mcp_env(family, tools.computer_background, windows);
                 // The simulator's `sim_test` writes its run where the Simulator tool reads it,
                 // and a test run takes minutes.
@@ -10931,20 +10935,30 @@ fn trek_mcp_families(computer_use: bool, simulator: bool, windows: bool) -> Vec<
 
 /// `Workspace::session_notes` from its parts: the settings, whether Trek has its tool server
 /// (`trek_mcp_binary`: the video notes go only where the watcher is handed over), the project's
-/// notes (`project_notes`) and whether the session `recaps`. Every agent hears these on every
-/// request (see docs/PROMPT_BUDGET.md), so they stay short.
+/// notes (`project_notes`), whether the session `recaps`, and where Trek's own skills are (the
+/// artifact note names some: an agent not handed the folder, as Claude Code is with `--add-dir`,
+/// learns where it is). Every agent hears these on every request (see docs/PROMPT_BUDGET.md), so
+/// they stay short; what's long and rarely needed is in a skill.
 pub(crate) fn agent_notes(
     settings: &Settings,
     tool_server: bool,
     project: Option<String>,
     recaps: bool,
+    skills: Option<&std::path::Path>,
 ) -> Option<String> {
     let recap =
         (recaps && settings.general.ask_recap).then(|| trek_core::changes::RECAP.to_string());
     let artifacts = settings
         .general
         .interactive_artifacts
-        .then(|| trek_core::artifact::AGENT_INSTRUCTIONS.to_string());
+        .then(|| match skills {
+            Some(dir) => format!(
+                "{} Trek's skills are in {}, a folder each with its SKILL.md.",
+                trek_core::artifact::AGENT_INSTRUCTIONS,
+                dir.display()
+            ),
+            None => trek_core::artifact::AGENT_INSTRUCTIONS.to_string(),
+        });
     let video = (settings.tools.video && tool_server)
         .then(|| trek_core::media::AGENT_INSTRUCTIONS.to_string());
     // Every session has its thread's transcript to search (`transcript_log`).

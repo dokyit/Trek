@@ -20,7 +20,9 @@ Measured 2026-10-31 on Trek 0.4.28 with Claude Code 2.1.316 (Opus 5.5) and Codex
 The notes, in order (each goes in only when its setting is on, every one is on by default):
 
 1. `trek_core::visualization::AGENT_INSTRUCTIONS`: the `trek-viz` spec and TeX math. Always.
-2. `trek_core::artifact::AGENT_INSTRUCTIONS`: `trek-html` artifacts (General › Interactive artifacts).
+2. `trek_core::artifact::AGENT_INSTRUCTIONS`: `trek-html` artifacts (General › Interactive artifacts):
+   when to write one, and the built-in skills with the rules (`trek-html`) and the card recipes,
+   then where Trek's skills folder is.
 3. `trek_core::media::AGENT_INSTRUCTIONS`: the video watcher (Tools › Video, and only when trek-mcp is in the build).
 4. `trek_core::verification::instructions`: the project's verification skill, when it has one.
 5. `trek_core::changes::RECAP`: the Done / Still to do / Found recap (General › Ask for a recap), not for advising sub-agents or side chats.
@@ -29,8 +31,8 @@ The notes, in order (each goes in only when its setting is on, every one is on b
    the user's iPhone, the iOS Simulator, watching video, sub-agents and threads) are MCP servers you
    reach with a tool search: look there before saying you can't."
 
-MCP servers by default: trek-simulator, trek-video, trek-browser, trek-phone, trek-orchestrate (57
-tools). Everything on adds trek-computer (Tools › Computer use, background mode by default): 67
+MCP servers by default: trek-simulator (only where Xcode's `simctl` is, `detect::has_simulator`),
+trek-video, trek-browser, trek-phone, trek-orchestrate (64 tools; 50 without the simulator). Everything on adds trek-computer (Tools › Computer use, background mode by default): 67
 tools. Figma's desktop server (off by default) and the user's own MCP servers are theirs and aren't
 counted here. Trek writes no CLAUDE.md, AGENTS.md or skill listing for the agent: the skills folder
 it passes with `--add-dir` isn't a `.claude/skills` folder, so Claude Code only notes the folder.
@@ -231,18 +233,67 @@ few words. Windows has no elements, so its tool list and schemas are as they wer
 890 / 6,670; all families together 46,200 (44,883 today, with the iPhone's elements: its
 family is 1,504 / 7,502 against a budget of 1,620 / 8,150).
 
+## 2026-11-13: the cut after ADEMark
+
+ADEMark (ademark.dev) counts every token an app sends for "hi" and for a real prompt. Trek sends
+Claude Code's own request plus about 4.3K tokens of its own on every request, which put it 9th of
+14 for "hi" and 12th of 14 for the first request. Cut without taking a capability away:
+
+- **`trek-html`'s rules are a skill** (`crates/trek-core/skills/trek-html/SKILL.md`, shipped with the
+  card recipes): its size and height, what it may load, the theme variables and `trek.send` /
+  `trek.copy`. The note keeps when to write one and names the skill, and says where Trek's skills
+  folder is (Claude Code also has it through `--add-dir`; Codex and the others only from the note).
+  275 → 134 o200k.
+- **`trek-viz`** stays inline, every type and field as before, with fewer backticks and words.
+  481 → 424. **Video** 80 → 51, **recap** 116 → 105.
+- **Server instructions** say once what the tool descriptions and the notes don't: phone 345 → 236
+  (the routes are `phone_status`'s to say), simulator 193 → 133, browser 183 → 138, orchestrate
+  218 → 177 (the transcript tools are the notes' to explain), video 54 → 38. Default families
+  together 993 → 722; the tool names (692) are as they were.
+- **The simulator's server only with Xcode** (`detect::has_simulator`: `simctl` in the developer
+  folder `xcode-select` chose). Without it, its 14 tools did nothing but cost 290 tokens a request.
+- **Kept: the iPhone's server on every Mac and PC**, phone or not. Trek keeps no record of a phone
+  ever connected to the iPhone tool, and `phone_status` is how an agent tells the user what to do
+  to connect one (unlock it, plug it in, pair it as a keyboard): without the server it can't help
+  them start.
+- **Not done: one `trek-mcp` per session.** A session starts one process per family (five, 2.2 MB
+  each). One server holding every family would also rename every tool (`mcp__trek__phone_tap` for
+  `mcp__trek-phone__phone_tap`), which the transcript's tool rows, the permission rules users have
+  saved, the Simulator's activity reading, the mock and 60-odd tests key on; it would save four
+  instruction preambles and about 2 tokens a name (some 150 o200k) and four processes a session.
+
+Measured as in "Method": Claude Code 2.1.323 against a local stand-in for the API (the request
+bodies captured, nothing sent to Anthropic), "hi" with `claude -p` and Trek's flags, counted in
+o200k without the request's parameters; Anthropic tokens estimated with the live ratios above
+(notes ×1.43, MCP ×1.56).
+
+| Request | System | Messages | Trek's additions (o200k) | Anthropic estimate |
+| --- | ---: | ---: | ---: | ---: |
+| `claude -p` with Trek's flags, nothing added | 1,346 | 2,999 | | |
+| Trek's default, before | 2,392 | 4,789 | +2,836 | +4.29K |
+| Trek's default, after | 2,154 | 4,518 | **+2,327** | **+3.53K** |
+| …on a Mac without Xcode | 2,154 | 4,222 | **+2,031** | **+3.06K** |
+
+18% less on a Mac with Xcode, 28% without. ADEMark's ranks don't move on that alone ("hi" ≈ 42.3K
+against Cloudroom's 41.5K for 8th): what's left is mostly the 64 tool names and the `trek-viz`
+spec, and Claude Code's own 17K of tools.
+
+Also: Trek's title side call (`trek-agents/src/title.rs`) went with a thinking budget of 31,999
+tokens; it now goes with thinking off (`alwaysThinkingEnabled: false`, `MAX_THINKING_TOKENS=0`).
+
 ## The budget tests
 
 - `crates/trek-app/src/workspace/prompt_budget.rs` builds the notes with `agent_notes`, the function
   `session_notes` uses, for default settings and with a verification skill, and asserts their size
-  (3,850 and 4,350 chars, about 10% over today's), that the wrapper stays small, and that each piece
-  goes in once. It also builds Codex's first-message notes with `trek_agents::message_notes`: the
-  tool-search line is held to 220 chars and Codex's notes with everything on to 4,650.
+  (3,250 and 3,700 chars since 2026-11-13, about 10% over today's), that the wrapper stays small,
+  and that each piece goes in once. It also builds Codex's first-message notes with
+  `trek_agents::message_notes`: the tool-search line is held to 220 chars and Codex's notes with
+  everything on to 4,000.
 - `crates/trek-mcp/src/main.rs`, `prompt_budget`: each family's server instructions and tool schemas,
   as `initialize` and `tools/list` return them, against a per-family budget, and all of them
-  together (46,200 chars since elements, below; 40,500 before).
-- `trek_core::visualization`'s and `trek_core::artifact`'s own compactness tests now stop at 1,750
-  and 1,150 chars.
+  together (45,000 chars since 2026-11-13; 46,200 since elements; 40,500 before).
+- `trek_core::visualization`'s and `trek_core::artifact`'s own compactness tests now stop at 1,600
+  and 500 chars; `artifact`'s checks the skill keeps every rule the note used to carry.
 
 To raise a budget on purpose: re-measure as above, update the tables here, and set the constant to
 the new size plus about 10%. Every character goes out with every request of every thread, so look

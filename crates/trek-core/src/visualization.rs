@@ -42,21 +42,21 @@ pub const TYPES: &[&str] = &[
 /// Instructions suitable for including verbatim in an agent capability prompt: native
 /// visualizations, and that TeX math in an answer is typeset. Every session carries them, so they
 /// stay terse (`instructions_stay_compact`).
-pub const AGENT_INSTRUCTIONS: &str = "Only when a picture clarifies the answer, add a native visualization: strict JSON in a fenced `trek-viz` block, then state its takeaway in prose. Every object: `version`:1, `title`, `summary`, `type`, plus its fields: \
-bar `bars`[{label,value}], `x_label`?, `y_label`?; \
-line `x_labels`, `series`[{label,values}] (≤6, one value per x label), `area`?:bool, `y_label`?, `unit`?; \
-donut `parts`[{label,value>0}], `unit`?; \
-stats `tiles`[{label,value:string,delta?:string,trend?:[numbers]}]; \
-table `columns`, `rows` of [string|number] or {cells,tone}; \
-heatmap `x_labels`, `y_labels`, `values` (one row per y label); \
-treemap `items`[{label,weight>0}]; \
-timeline `events`[{label,start,end?,lane?}]: numeric positions + `unit`?:string, OR string positions naming `ticks`?[axis labels]; \
-flow `nodes`[{id,label,detail?,group?}], `edges`[{from,to,label?}]; \
-layers `layers`[{label,detail?,items?:[string]}], top first; \
-mockup `nodes` tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame with `device` phone|browser|window|tablet; leaves with `text`: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar; image (value wide|square|tall), progress (value 0-100), divider. \
-Marks may set `tone`: neutral, accent, positive, warning, negative, info. Never put HTML, CSS, URLs, paths or scripts in it. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
-A unit goes in `unit`, never in `ticks`. \
-TeX math renders typeset: `$…$` or `\\(…\\)` inline, `$$…$$` or `\\[…\\]` on its own line.";
+pub const AGENT_INSTRUCTIONS: &str = "When a picture clarifies the answer, add a fenced `trek-viz` block of strict JSON, then its takeaway in prose. Each has version:1, title, summary, type, and its fields (? optional): \
+bar bars[{label,value}], x_label?, y_label?; \
+line x_labels, series[{label,values}] (≤6, a value per x label), area?:bool, y_label?, unit?; \
+donut parts[{label,value>0}], unit?; \
+stats tiles[{label,value:string,delta?:string,trend?:[numbers]}]; \
+table columns, rows of [string|number] or {cells,tone}; \
+heatmap x_labels, y_labels, values (a row per y label); \
+treemap items[{label,weight>0}]; \
+timeline events[{label,start,end?,lane?}]: numbers and unit?:string, or strings naming ticks?[axis labels]; \
+flow nodes[{id,label,detail?,group?}], edges[{from,to,label?}]; \
+layers layers[{label,detail?,items?:[string]}], top first; \
+mockup nodes, a tree of {kind,text?,value?,children?}: containers row, column, card, list, nav, tabs (text children; value = active), frame (device phone|browser|window|tablet); leaves with text: text, button, badge, metric (+value), input (value?), toggle (value on|off), avatar, image (value wide|square|tall), progress (value 0-100), divider. \
+Any mark may set tone: neutral, accent, positive, warning, negative, info. No HTML, CSS, URLs, paths or scripts in it. Limits: 32 KiB, text 256 chars (ids, units, stat values 48), 128 marks, mockup depth 6. \
+A unit goes in unit, never in ticks. \
+TeX math is typeset: `$…$` or `\\(…\\)` inline, `$$…$$` or `\\[…\\]` on a line of its own.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Visualization {
@@ -3105,7 +3105,7 @@ mod tests {
     #[test]
     fn instructions_stay_compact_and_cover_every_type() {
         assert!(
-            AGENT_INSTRUCTIONS.chars().count() < 1_750,
+            AGENT_INSTRUCTIONS.chars().count() < 1_600,
             "{} chars",
             AGENT_INSTRUCTIONS.chars().count()
         );
