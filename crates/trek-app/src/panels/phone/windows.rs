@@ -15,8 +15,8 @@
 //! Mac: one thread holds the phone at a time (`trek_phone::lease`), a strip says who with Stop to
 //! take it back, and installing and changing files ask first by the thread's access level on its
 //! approval card (`Workspace::browser_ask`). The Mac's iPhone tool (`panels/phone.rs`) has the
-//! same rules and words for those; the tests here pin them. The tools a PC doesn't serve (the
-//! screen and taps) are answered with where they are (`trek_ipc::phone::on_a_mac`).
+//! same rules and words for those; the tests here pin them. A tool a PC doesn't serve (none
+//! today) is answered with where it is (`trek_ipc::phone::on_a_mac`).
 
 use crate::assets::Lucide;
 use crate::fluent;
@@ -2766,7 +2766,7 @@ impl Run<'_> {
     async fn go(mut self) -> Result<Value, String> {
         let method = self.call.method.clone();
         let p = self.call.params.clone();
-        // The screen and taps are the Mac's for now.
+        // A tool only a Mac has (none today), or no phone tool at all.
         if !tools::pc_serves(&method) {
             return Err(tools::on_a_mac(&method));
         }

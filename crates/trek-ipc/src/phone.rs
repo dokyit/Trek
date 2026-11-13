@@ -334,21 +334,21 @@ pub fn pc_tools() -> Vec<(&'static str, &'static str, Value)> {
     ]
 }
 
-/// Whether a PC serves `method` (its screen, worked as a person would, its apps and files; not
-/// reading the screen as elements).
+/// Whether a PC serves `method`: today, every phone tool a Mac has.
 pub fn pc_serves(method: &str) -> bool {
     PC_TOOL_NAMES.contains(&method)
 }
 
-/// What a PC answers for a phone tool it doesn't serve: reading the iPhone's screen as elements
-/// needs Trek on a Mac for now, and what there is here instead.
+/// What a PC answers for a phone tool it doesn't serve: one a Mac has that a PC doesn't yet (none
+/// today), or a name that's no phone tool at all; and what there is here instead.
 pub fn on_a_mac(method: &str) -> String {
-    let what = match method {
-        "phone_wait" => "Waiting for something on the iPhone's screen",
-        _ => "Reading the iPhone's screen as elements",
+    let what = if TOOL_NAMES.contains(&method) {
+        format!("{method} needs Trek on a Mac for now.")
+    } else {
+        format!("Trek has no iPhone tool called {method}.")
     };
     format!(
-        "{what} needs Trek on a Mac for now. On this PC Trek sees the iPhone's screen and works it (phone_screenshot, phone_tap, phone_swipe, phone_type, phone_key, phone_home, phone_open_app) and reaches its apps and files (phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file); phone_status says how it's connected."
+        "{what} On this PC Trek reads the iPhone's screen (phone_screenshot, phone_elements, phone_wait), works it (phone_tap, phone_swipe, phone_type, phone_key, phone_home, phone_open_app) and reaches its apps and files (phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file); phone_status says how it's connected, and phone_release lets it go."
     )
 }
 
@@ -507,25 +507,21 @@ mod tests {
             assert!(PC_INSTRUCTIONS.contains(word), "{word}");
         }
         assert!(PC_INSTRUCTIONS.len() < INSTRUCTIONS.len());
-        // What it doesn't serve says where it is, and what there is here instead.
-        for tool in TOOL_NAMES.iter().filter(|t| !pc_serves(t)) {
-            let said = on_a_mac(tool);
-            assert!(
-                said.contains("needs Trek on a Mac for now"),
-                "{tool}: {said}"
-            );
-            assert!(said.contains("phone_apps"), "{tool}: {said}");
-            assert!(
-                said.contains("phone_screenshot, phone_tap"),
-                "{tool}: {said}"
-            );
-            assert!(!said.contains("only on macOS"), "{tool}: {said}");
+        // A PC serves every phone tool a Mac has.
+        for tool in TOOL_NAMES {
+            assert!(pc_serves(tool), "{tool}");
         }
-        assert!(pc_serves("phone_screenshot") && pc_serves("phone_tap"));
-        assert!(on_a_mac("phone_elements").starts_with("Reading the iPhone's screen as elements"));
-        assert!(on_a_mac("phone_wait").starts_with("Waiting for something"));
-        assert!(pc_serves("phone_swipe") && pc_serves("phone_type") && pc_serves("phone_open_app"));
-        assert!(pc_serves("phone_elements") && pc_serves("phone_wait"));
+        // A name that's no phone tool says so, and names every tool there is here.
+        let said = on_a_mac("phone_scroll");
+        assert!(
+            said.starts_with("Trek has no iPhone tool called phone_scroll."),
+            "{said}"
+        );
+        for tool in PC_TOOL_NAMES {
+            assert!(said.contains(tool), "{tool}: {said}");
+        }
+        assert!(!said.contains("needs Trek on a Mac"), "{said}");
+        assert!(!said.contains("only on macOS"), "{said}");
     }
 
     #[test]

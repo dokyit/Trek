@@ -16,9 +16,9 @@
 //! `trek-mcp phone-device …` is the same phone's apps and files from a shell, without Trek or
 //! Xcode (the phone updater installs with it).
 //!
-//! On Windows (a PC) the family is the phone's apps and files, how it's connected and letting go
-//! (`trek_ipc::phone::pc_tools`): its screen and taps need the Mac for now, and a call to one of
-//! those tools is answered so here, without asking Trek.
+//! On Windows (a PC) the family is the same tools in the PC's words (`trek_ipc::phone::pc_tools`):
+//! the screen through CoreDevice's services, the apps and files through Apple Mobile Device
+//! Service. A tool only a Mac has (none today) is answered so here, without asking Trek.
 
 use crate::outline::{self, Checked, Frame, Ids, Node, Refs, View};
 use crate::rpc::{self, ToolDef, ToolSet, opt_f64, opt_str};
@@ -41,7 +41,7 @@ impl Ask for trek_ipc::Client {
 
 pub struct Phone {
     trek: Option<Box<dyn Ask>>,
-    /// Serving a PC's family (`PC`): its apps and files.
+    /// Serving a PC's family (`trek_ipc::phone::pc_tools`), in the PC's words.
     pc: bool,
     /// The refs `phone_elements` has given out.
     refs: Refs,
@@ -262,7 +262,7 @@ impl ToolSet for Phone {
             return Err(trek_ipc::phone::on_a_mac(name));
         }
         let given = |key: &str| args.get(key).is_some_and(|v| !v.is_null());
-        // A PC has no elements to tap by ref: its taps are at x/y in its screenshot.
+        // A tap goes by ref (from phone_elements) or at x/y in the latest screenshot, on both.
         let text = match name {
             "phone_elements" => self.elements(args)?,
             "phone_wait" => self.wait(args)?,
