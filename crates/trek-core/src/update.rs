@@ -2041,7 +2041,7 @@ fn after_launch_in(updates: &Path) -> Option<String> {
             .file_name()
             .to_str()
             .and_then(download_owner)
-            .is_some_and(|pid| !process_alive(pid))
+            .is_some_and(|pid| !still_owned(pid, &entry.path()))
         {
             let _ = std::fs::remove_dir_all(entry.path());
         }
@@ -2051,6 +2051,32 @@ fn after_launch_in(updates: &Path) -> Option<String> {
     let _ = std::fs::remove_file(&marker);
     let from = from.trim().to_string();
     (from != crate::VERSION).then_some(from)
+}
+
+/// Whether the download folder `dir`, named for process `pid`, is still that process's: it runs,
+/// and it isn't another process given the same id since. Windows hands a dead process's id to the
+/// next one soon (a download from October stayed for weeks under a system service's id). A
+/// process that started after the folder was made can't have made it; one whose start Trek can't
+/// read (another user's) is taken for the owner.
+fn still_owned(pid: u32, dir: &Path) -> bool {
+    if !process_alive(pid) {
+        return false;
+    }
+    let made = std::fs::metadata(dir)
+        .and_then(|m| m.created())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok());
+    match (crate::procs::started_at(pid), made) {
+        (Some(started), Some(made)) => !started_after(started, made),
+        _ => true,
+    }
+}
+
+/// A process that started at `started` came after something made at `made` (unix seconds, each
+/// read to the second, so a second's slack).
+fn started_after(started: i64, made: i64) -> bool {
+    started > made + 1
 }
 
 #[cfg(target_os = "macos")]
@@ -2716,6 +2742,43 @@ mod tests {
         assert_eq!(download_owner("download-123-4.noindex"), Some(123));
         assert_eq!(download_owner("previous.noindex"), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Windows hands a dead process's id to the next one soon: a download folder named for an id
+    /// isn't the process's that has it now when that process started after the folder was made.
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn after_launch_clears_a_download_whose_id_is_another_process_s_now() {
+        let dir = scratch("reused-id");
+        let made = dir.join("download-made-0.noindex");
+        std::fs::create_dir_all(made.join("stage")).unwrap();
+        // Start times are read to the second, with a second's slack.
+        std::thread::sleep(std::time::Duration::from_millis(2200));
+        let mut later = std::process::Command::new(trek_test_fixtures::bin("fixture"))
+            .args(["sleep", "30"])
+            .spawn()
+            .unwrap();
+        // Renamed for the later process: a folder keeps the time it was made.
+        let reused = dir.join(format!("download-{}-0.noindex", later.id()));
+        std::fs::rename(&made, &reused).unwrap();
+        let mine = new_download_dir(&dir).unwrap();
+
+        after_launch_in(&dir);
+        let _ = later.kill();
+        let _ = later.wait();
+        assert!(
+            !reused.exists(),
+            "older than the process with its id: not its"
+        );
+        assert!(mine.exists(), "this process's own download stays");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_process_that_started_after_a_folder_was_made_did_not_make_it() {
+        assert!(started_after(1_000, 990));
+        assert!(!started_after(990, 1_000), "started first: it may have");
+        assert!(!started_after(1_001, 1_000), "a second's slack");
     }
 
     #[cfg(unix)]

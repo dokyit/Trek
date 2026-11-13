@@ -498,6 +498,12 @@ fn alive_since(pid: i32, started: i64) -> bool {
     start_time(pid).is_some_and(|s| started == 0 || s == started)
 }
 
+/// When process `pid` started (unix seconds), if it runs and Trek can read it: what tells it from
+/// another process given the same id since.
+pub fn started_at(pid: u32) -> Option<i64> {
+    i32::try_from(pid).ok().and_then(start_time)
+}
+
 /// The processes in `group`.
 #[cfg(target_os = "macos")]
 fn members(group: i32) -> Vec<i32> {

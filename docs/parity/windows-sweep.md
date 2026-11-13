@@ -172,6 +172,10 @@ this page is how it got there. What's still different is at the end.
   - a port browsers keep pages off blamed a server that isn't running.
 - A video's poster was missing for any path written with `/`.
 - The status bar said LF for every file.
+- An old update download was kept forever once Windows had given its Trek's process id to
+  another process. On the PC this was written on, one from October had sat for weeks under a
+  system service's id: 128 MB, on a nearly full disk. Now a process that started after the folder
+  was made isn't taken for its owner, on both platforms (`self-update`).
 - **Smaller ones:**
   - a background task's output always opened in Notepad;
   - an ffmpeg installed while Trek ran wasn't found;
