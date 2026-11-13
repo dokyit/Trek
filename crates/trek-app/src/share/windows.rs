@@ -21,6 +21,10 @@ thread_local! {
     static FILLING: RefCell<Option<(DataTransferManager, i64)>> = const { RefCell::new(None) };
 }
 
+/// How often Windows asked for a share's data (the capture build's `share asked`).
+#[cfg(feature = "shots")]
+pub static ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Open Windows' share window over `window`, offering `text` (the thread as Markdown) titled
 /// `title`. An error when the window has no handle to share from or Windows won't share.
 pub fn share_text(window: &Window, title: &str, text: &str) -> Result<()> {
@@ -33,6 +37,8 @@ pub fn share_text(window: &Window, title: &str, text: &str) -> Result<()> {
     let (title, text) = (HSTRING::from(title), HSTRING::from(text));
     let handler = TypedEventHandler::new(
         move |_: Ref<DataTransferManager>, asked: Ref<DataRequestedEventArgs>| {
+            #[cfg(feature = "shots")]
+            ASKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             fill(&asked.ok()?.Request()?.Data()?, &title, &text)
         },
     );

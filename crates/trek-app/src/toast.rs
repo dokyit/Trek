@@ -156,9 +156,21 @@ pub fn place(window: &Window, bottom: Pixels, cx: &mut App) {
 }
 
 /// The toasts mounted in `window`, ones on their way out included.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
 pub fn count(window: &Window, cx: &App) -> usize {
     layer(window, cx).map_or(0, |l| l.read(cx).items.len())
+}
+
+/// The keys of `window`'s toasts, oldest first (the capture build's `toasts clear`).
+#[cfg(feature = "shots")]
+pub fn keys(window: &Window, cx: &App) -> Vec<SharedString> {
+    layer(window, cx).map_or(vec![], |l| {
+        l.read(cx)
+            .items
+            .iter()
+            .map(|i| i.toast.key.clone())
+            .collect()
+    })
 }
 
 /// Motion, by Trek's settings and the system's.

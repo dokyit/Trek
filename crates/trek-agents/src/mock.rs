@@ -38,6 +38,8 @@
 //! |                              | and an answer with markdown, code and a table: five items a   |
 //! |                              | round (for long transcripts: `mock:history 500` is 2500)      |
 //! | `error`                      | a turn that fails                                             |
+//! | `mock:sandbox`               | a command Codex's Windows sandbox stops before its one-time   |
+//! |                              | setup, and Codex's notice on how to set it up                 |
 //! | `mock:limit` [dur]           | a usage limit that resets `dur` from now (default 5s)        |
 //! | `mock:write [file]`          | adds a line to `NOTES.md` (or `file`) in its folder (for real) |
 //! | `mock:watch-run` id          | runs `gh run watch id` (for real) as a command call           |
@@ -298,6 +300,8 @@ enum Script {
     /// `n` rounds of work at once, for a long transcript.
     History(u32),
     Error,
+    /// A command stopped by Codex's Windows sandbox before its one-time setup, and the notice.
+    Sandbox,
     /// Add a note to a file in the session's folder: `NOTES.md`, or the file named after it.
     Write(Option<String>),
     /// `gh run watch <id>` run for real, as an agent's command call (Trek's run card).
@@ -529,6 +533,7 @@ impl Script {
                 "design" if w.starts_with("mock:") => Script::Design,
                 "judge" if w.starts_with("mock:") => Script::Judge,
                 "error" => Script::Error,
+                "sandbox" if w.starts_with("mock:") => Script::Sandbox,
                 "permission" => Script::Permission,
                 "question" | "questions" => Script::Questions,
                 "plan" => Script::Plan,
@@ -627,6 +632,7 @@ pub fn title(request: &str) -> String {
         Script::Explore(_) => "Animate the title as it appears",
         Script::History(_) => "Harden the request parser",
         Script::Error => "Fix the failing build",
+        Script::Sandbox => "Run the tests",
         Script::Write(_) => "Add a note",
         Script::WatchRun(_) => "Watch the CI run",
         Script::InlineEdit { .. } => "Edit the selection",
@@ -1459,6 +1465,23 @@ impl Session {
             Script::SetupVerification => self.setup_verification().await?,
             Script::MaintainVerification => self.maintain_verification().await?,
             Script::Verify { broken } => self.verify(broken).await?,
+            // As Codex on Windows before its sandbox's one-time setup: the command fails before
+            // it starts, and the notice says how to set it up (`codex::SANDBOX_SETUP_NOTICE`).
+            Script::Sandbox => {
+                let id = self.id("tool");
+                self.tool_start(&id, "Run command", "cargo test").await?;
+                self.pause(paced(300)).await?;
+                self.emit(AgentEvent::ToolFinished {
+                    id,
+                    output: "windows sandbox: setup refresh failed".into(),
+                    ok: false,
+                })
+                .await?;
+                self.emit(AgentEvent::Notice(
+                    crate::codex::SANDBOX_SETUP_NOTICE.into(),
+                ))
+                .await?;
+            }
             Script::Error => {
                 self.think("Let me check the build first.").await?;
                 let id = self.id("tool");

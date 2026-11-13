@@ -3386,12 +3386,22 @@ impl ThreadView {
                 column(
                     h_flex()
                         .group("turn-end")
+                        .flex_wrap()
                         .justify_center()
                         .gap(px(6.))
                         .py_1()
                         .text_size(to_rems(text::META))
                         .text_color(theme.muted_foreground)
-                        .child(text.replace("**", "").replace('`', ""))
+                        // A long notice wraps, centred, with its button under it, rather than
+                        // running off both sides of the transcript (its button out of reach).
+                        .child(
+                            div()
+                                .id(("notice", ix))
+                                .min_w_0()
+                                .max_w_full()
+                                .text_center()
+                                .child(text.replace("**", "").replace('`', "")),
+                        )
                         .when_some(setup, |el, button| el.child(button))
                         .when(turn, |el| el.child(turn_actions(ix))),
                 )

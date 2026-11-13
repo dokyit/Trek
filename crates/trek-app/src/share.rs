@@ -13,6 +13,9 @@ mod system;
 #[cfg(windows)]
 #[path = "share/windows.rs"]
 mod system;
+/// How often Windows asked for a share's data (the capture build's `share asked`).
+#[cfg(all(windows, feature = "shots"))]
+pub use system::ASKED as SHARE_ASKED;
 
 use crate::composer::look;
 use crate::fluent;

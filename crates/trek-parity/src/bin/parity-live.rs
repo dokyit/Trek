@@ -11,8 +11,11 @@
 //! ```sh
 //! ./.agents/skills/verify-trek/scripts/trek-dev start            # pwsh trek-dev.ps1 on Windows
 //! cargo run -p trek-parity --bin parity-live -- --shot-dir <runtime folder>/shot \
-//!     [--feature <id>]... [--skip <id>=<why>]... [--report docs/parity/live-<platform>.md] [--timeout <seconds>]
+//!     [--feature <id>]... [--skip <id>=<why>]... [--report docs/parity/live-<platform>.md] [--timeout <seconds>] [--ci]
 //! ```
+//!
+//! `--ci`: this computer is CI's, made for the run, so the features whose steps run only there
+//! (`live_ci`: they open another app, listen on the network, bring a window to the front) run too.
 //!
 //! It exits 1 when a feature's steps failed, 2 when it couldn't run.
 
@@ -138,6 +141,7 @@ fn run() -> i32 {
     let mut not_here: Vec<(String, String)> = vec![];
     let mut report: Option<PathBuf> = None;
     let mut timeout = Duration::from_secs(90);
+    let mut ci = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--shot-dir" => shot_dir = args.next().map(PathBuf::from),
@@ -153,6 +157,7 @@ fn run() -> i32 {
                 not_here.push((id, why));
             }
             "--report" => report = args.next().map(PathBuf::from),
+            "--ci" => ci = true,
             "--timeout" => {
                 let Some(secs) = args.next().and_then(|s| s.parse().ok()) else {
                     eprintln!("parity-live: --timeout takes seconds");
@@ -217,6 +222,13 @@ fn run() -> i32 {
                 if let Some((_, why)) = not_here.iter().find(|(id, _)| *id == f.id) =>
             {
                 Outcome::Skipped(format!("Not run on this computer: {why}"))
+            }
+            Support::Yes | Support::Partial
+                if !ci
+                    && !f.live_on(platform).is_empty()
+                    && let Some(why) = &f.live_ci =>
+            {
+                Outcome::Skipped(format!("On CI only: {why}"))
             }
             Support::Yes | Support::Partial if !f.live_on(platform).is_empty() => {
                 send(&shot_dir, &project, f, platform, timeout)

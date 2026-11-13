@@ -244,7 +244,9 @@ area = "Threads"
 what = "Share a thread through the system (AirDrop, Messages, Mail)"
 macos = "yes"
 windows = "yes"
-live_skip = "The system's share window, outside Trek's, which Windows shows only over the window in front: a capture run stays behind the user's windows, and asked from there, Windows showed nothing and asked Trek for nothing (seen live). The share tests check what a share offers."
+live_windows = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "window front", "click thread-menu", "wait 300", "click thread-share", "wait 3000", "share asked 1+", "share close"]
+live_ci = "Windows shows its share window only over the window in front, so the check brings Trek there (with a press of Alt, the input Windows wants first) and closes the share window with Escape: on someone's own computer, both would land in their way."
+live_skip = "On a Mac the share sheet is the system's picker, a menu of AppKit's own that says nothing to the app until a service is chosen: the share tests check what a share offers."
 how = { macos = "The system share sheet (AirDrop, Messages, Mail).", windows = "Windows' share window (Nearby Sharing, Outlook, Teams and the apps that take a share), opened over Trek's window with the thread as text under its title." }
 code = ["crates/trek-app/src/share.rs", "crates/trek-app/src/share/windows.rs"]
 tests = ["crates/trek-app/tests/share.rs"]
@@ -419,10 +421,12 @@ area = "Agent tools"
 what = "Computer use by element (an outline with refs; click, type and wait by ref)"
 macos = "yes"
 windows = "yes"
-live_skip = "The outline comes from the accessibility tree of the user's own apps, which an isolated run doesn't drive: trek-mcp's tests (computer.rs, desktop/) and its live tests on a PC."
+live_windows = ["computer open notepad.exe", "wait 1500", "computer elements Notepad expect File", "computer close"]
+live_ci = "It opens Notepad, which on someone's own computer opens as a tab of theirs."
+live_skip = "On a Mac the outline is the Accessibility tree, which only a process the user has allowed (System Settings › Privacy & Security › Accessibility) can read, and CI's Mac allows none: trek-mcp's tests (computer.rs, desktop/)."
 how = { macos = "The Accessibility tree.", windows = "UI Automation: the same outline and refs, press (Invoke, Toggle, SelectionItem, ExpandCollapse), click and type by ref, wait for an element; classic menu bars read whole. Apps running as administrator can't be read, and menus an app draws itself have no words." }
 code = ["crates/trek-mcp/src/desktop.rs", "crates/trek-mcp/src/desktop/uia.rs", "crates/trek-mcp/src/outline.rs"]
-tests = ["crates/trek-mcp/src/desktop/uia.rs"]
+tests = ["crates/trek-mcp/src/desktop/uia.rs", "crates/trek-app/src/shots/computer_use.rs"]
 
 [[feature]]
 id = "computer-use-background"
@@ -530,7 +534,8 @@ area = "iPhone"
 what = "The phone server is reachable on the local network"
 macos = "yes"
 windows = "yes"
-live_skip = "Needs a phone on the network, and a server listening on it: the isolated run's is on the loopback alone, which the firewall asks nothing about. tests/remote.rs, and remote/firewall.rs's tests, which read the real Windows Firewall on Windows' CI."
+live = ["route settings:mobile", "wait 400", "click mobile-on", "wait 3000", "phone-server reach", "route settings:mobile", "wait 400", "click mobile-on"]
+live_ci = "It turns the phone server on, listening on the network as it does for phones: on someone's own computer, Windows Firewall would ask about it (and the answer would last)."
 how = { macos = "macOS asks for Local Network access.", windows = "Windows Firewall asks the first time Trek listens, and writes rules for the kinds of network ticked then, so on a network of another kind (a Wi-Fi marked public, Tailscale's private one) phones stay out and nothing asks again. Settings says so before the server runs, and while it runs reads the firewall's rules for Trek on each network this PC is on: where they keep phones out it names the network and the way in (Allow Trek on that kind of network, or make a public one private), with the firewall's settings a click away." }
 note = "Found on the PC this was written on: Trek allowed on its public Wi-Fi and kept out on Tailscale, a private network, which nothing had said."
 code = ["crates/trek-app/src/settings_view/mobile.rs", "crates/trek-remote/src/server.rs", "crates/trek-app/src/remote/firewall.rs"]
@@ -641,7 +646,8 @@ area = "Install"
 what = "Trek moves out of a folder it can't update in, and fixes its shortcuts"
 macos = "n/a"
 windows = "yes"
-live_skip = "About where the installed Trek lives: tests/hardening.rs and the installer's tests."
+live_windows = ["toasts clear", "wait 300", "toast guarded Documents", "wait 500", "toasts 1", "toasts clear"]
+note = "The live check shows the launch's offer as Trek makes it from a guarded Documents folder (its words and Move Trek); where the running Trek is can't change mid-run, so finding the guard (Controlled folder access on, Trek in a folder it guards) is update.rs's and tests/hardening.rs's."
 how = { macos = "Nothing guards a Mac's folders that way.", windows = "Controlled folder access and Defender can block an update in Documents or Desktop: Trek says so and can move itself." }
 code = ["crates/trek-core/src/update/relocate.rs", "crates/trek-shortcuts/src/lib.rs"]
 tests = ["crates/trek-update/tests/swap.rs"]
@@ -792,7 +798,8 @@ area = "Agents"
 what = "Codex runs a thread's commands in its own sandbox under Supervised and Auto"
 macos = "yes"
 windows = "yes"
-live_skip = "Codex's sandbox is the real Codex CLI's, which an isolated run never starts: trek-agents' codex tests, rules_live.rs against the real CLI, and the thread view's sandbox notice test."
+live_windows = ["route project:{project}", "pace 0", "send mock:sandbox", "wait idle 30000", "count notice-fix* 1"]
+live_skip = "On a Mac, Seatbelt needs nothing set up and says nothing: Codex's sandbox is the real Codex CLI's, which an isolated run never starts (trek-agents' codex tests, and rules_live.rs against the real CLI)."
 how = { macos = "Seatbelt, with nothing to set up.", windows = "Codex's Windows sandbox, which needs a one-time setup: until it's done, commands in a Supervised or Auto thread fail before they start, with one notice whose Set up in Terminal runs `codex` in Trek's terminal to do it (or the thread can be set to Full access)." }
 code = ["crates/trek-agents/src/codex.rs", "crates/trek-app/src/thread_view.rs"]
 tests = ["crates/trek-agents/src/codex.rs", "crates/trek-app/src/thread_view.rs"]

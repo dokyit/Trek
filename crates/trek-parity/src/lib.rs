@@ -362,6 +362,11 @@ pub struct Feature {
     /// phone, a release, another app), and what checks it instead.
     #[serde(default)]
     pub live_skip: Option<String>,
+    /// Why its live steps run only on CI's machines, made for the run and thrown away after
+    /// (`parity-live --ci`): they open another app, listen on the network, or bring a window to
+    /// the front, which on someone's own computer would be in their way.
+    #[serde(default)]
+    pub live_ci: Option<String>,
 }
 
 impl Feature {
@@ -400,6 +405,10 @@ pub fn checks(step: &str) -> bool {
         "cloud-file" => words.next() == Some("fetched"),
         "photos" => words.next() == Some("shown"),
         "bonjour" => words.next() == Some("found"),
+        "computer" => words.next() == Some("elements"),
+        "share" => words.next() == Some("asked"),
+        "phone-server" => words.next() == Some("reach"),
+        "toasts" => words.next().is_some_and(|w| w != "clear"),
         _ => false,
     }
 }
@@ -430,6 +439,11 @@ fn live_problems(f: &Feature) -> Vec<String> {
                 platform.name()
             ));
         }
+    }
+    if f.live_ci.is_some() && without == 2 {
+        problems.push(format!(
+            "{id}: `live_ci` says why its live steps run on CI only, but it has none"
+        ));
     }
     if skip && without == 0 {
         problems.push(format!(

@@ -93,7 +93,7 @@ jobs:
           runtime=$(./.agents/skills/verify-trek/scripts/trek-dev status | python3 -c 'import json, sys; print(json.load(sys.stdin)["runtime_dir"])')
           echo "RUNTIME=$runtime" >> "$GITHUB_ENV"
           cargo build -p trek-parity --bin parity-live --locked
-          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$runtime/shot" --report live-macos.md
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$runtime/shot" --report live-macos.md --ci
 
       - name: Report
         if: always()
@@ -221,6 +221,13 @@ jobs:
           Add-Type -AssemblyName System.Windows.Forms
           "The screen: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds)"
 
+      # Computer use by element reads another app through Trek's own computer tools (`trek-mcp
+      # computer`), as an agent does: built here, and named to the app.
+      - name: Build trek-mcp
+        run: |
+          cargo build --locked -p trek-mcp
+          "TREK_MCP_BIN=$((Get-Location).Path)\target\debug\trek-mcp.exe" >> $env:GITHUB_ENV
+
       # The driver starts the app through the shell, handing it none of the step's handles, so the
       # step ends once the app answers (an app holding the step's output pipe kept it waiting
       # until the job ran out of time). Its JSON goes to a file, kept with the artifacts.
@@ -237,7 +244,7 @@ jobs:
           $status = pwsh -NoProfile -File .agents/skills/verify-trek/scripts/trek-dev.ps1 status | ConvertFrom-Json
           "RUNTIME=$($status.runtime_dir)" >> $env:GITHUB_ENV
           cargo build -p trek-parity --bin parity-live --locked
-          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$($status.runtime_dir)\shot" --report live-windows.md --skip "heic-photos=the runner's Windows has no HEIF or HEVC codec"
+          cargo run -q -p trek-parity --bin parity-live --locked -- --shot-dir "$($status.runtime_dir)\shot" --report live-windows.md --ci --skip "heic-photos=the runner's Windows has no HEIF or HEVC codec"
           exit $LASTEXITCODE
 
       - name: Report

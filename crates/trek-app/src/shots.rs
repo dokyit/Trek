@@ -81,6 +81,8 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 mod cloud_files;
 #[cfg(any(windows, target_os = "macos"))]
+mod computer_use;
+#[cfg(any(windows, target_os = "macos"))]
 mod dns_sd;
 
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
@@ -1922,10 +1924,53 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
     if verb == "checks-demo" {
         return checks_demo(ws, arg, cx);
     }
+    // `toasts <n>`: how many toasts are up in the main window (ones on their way out included);
+    // `toasts clear`: all of them taken down, so none sits over the next check.
+    if verb == "toasts" {
+        let main = ws
+            .read(cx)
+            .main_window
+            .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+        match arg.trim() {
+            "clear" => main.update(cx, |_, window, cx| {
+                for key in crate::toast::keys(window, cx) {
+                    crate::toast::dismiss(window, &key, cx);
+                }
+            })?,
+            n => {
+                let n: usize = n.parse().map_err(|_| anyhow::anyhow!("toasts <n>|clear"))?;
+                let up = main.update(cx, |_, window, cx| crate::toast::count(window, cx))?;
+                anyhow::ensure!(up == n, "toasts: {up} up, not {n}");
+            }
+        }
+        return Ok(());
+    }
     if verb == "toast" {
-        anyhow::ensure!(!arg.is_empty(), "toast [undo|error] <message>");
+        anyhow::ensure!(!arg.is_empty(), "toast [undo|error|guarded] <message>");
         let (kind, rest) = arg.split_once(' ').unwrap_or((arg, ""));
         match kind {
+            // The offer Trek makes at launch from a folder Windows' ransomware protection guards
+            // (`relocate::guarded_offer`), as from `rest`: its words, and Move Trek. Where the
+            // running Trek is can't change mid-run; finding the guard is update.rs's tests'.
+            "guarded" => {
+                use trek_core::update::{Blocker, KnownFolder};
+                let folder = match rest.trim() {
+                    "Documents" => KnownFolder::Documents,
+                    "Desktop" => KnownFolder::Desktop,
+                    other => anyhow::bail!("toast guarded {other}? (Documents|Desktop)"),
+                };
+                let (message, undo) = crate::workspace::relocate::guarded_offer(
+                    Some(Blocker::GuardedFolder(folder)),
+                    true,
+                )
+                .ok_or_else(|| anyhow::anyhow!("toast guarded: no offer"))?;
+                ws.update(cx, |_, cx| {
+                    cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                        message,
+                        undo: Some(undo),
+                    })
+                });
+            }
             "undo" => ws.update(cx, |_, cx| {
                 cx.emit(crate::workspace::WorkspaceEvent::Toast {
                     message: rest.into(),
@@ -3039,6 +3084,125 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
             }
             "off" => *advert = None,
             other => anyhow::bail!("bonjour {other}? (on|found|off)"),
+        }
+        return Ok(());
+    }
+    // `phone-server reach`: the phone server (turned on in Settings, listening on the network as
+    // it does for phones) reached at this computer's address on its network, as a phone on the
+    // Wi-Fi dials it: a connection to its port there (what's said over it is the server's tests').
+    // CI's machines alone (the ledger's `live_ci`): on someone's own, Windows Firewall would ask.
+    if verb == "phone-server" {
+        anyhow::ensure!(arg.trim() == "reach", "phone-server {arg}? (reach)");
+        // The server comes up in the background: the steps wait for it first.
+        let w = ws.read(cx);
+        let lan = w
+            .remote
+            .as_ref()
+            .and_then(|r| r.addresses.lan)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "phone-server reach: the phone server isn't on a network (on: {})",
+                    w.remote.is_some()
+                )
+            })?;
+        let port = w.settings.mobile.port;
+        let at = std::net::SocketAddr::from((lan, port));
+        std::net::TcpStream::connect_timeout(&at, Duration::from_secs(5))
+            .map_err(|e| anyhow::anyhow!("phone-server reach: {at}: {e}"))?;
+        return Ok(());
+    }
+    // `window front` (Windows): Trek's window in front of the others for real, with the keyboard,
+    // as a click on it puts it (Windows lets a program come forward only right after input: a
+    // press of Alt is that input). `share asked <n>[+]`: how often Windows asked Trek for a share's
+    // data, which it does only when its share window opens. `share close`: Escape, as the user
+    // presses it, to the share window in front. CI's machines alone (the ledger's `live_ci`).
+    if verb == "window" || verb == "share" {
+        anyhow::ensure!(cfg!(windows), "{verb}: Windows' alone");
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+                INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_ESCAPE,
+                VK_MENU,
+            };
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                GetForegroundWindow, SetForegroundWindow,
+            };
+            let press = |key: u16| {
+                let input = |flags| INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: key,
+                            wScan: 0,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                };
+                let both = [input(0), input(KEYEVENTF_KEYUP)];
+                // SAFETY: two keyboard inputs, of the size given.
+                unsafe { SendInput(2, both.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+            };
+            match (verb, arg.trim()) {
+                ("window", "front") => {
+                    let main = ws
+                        .read(cx)
+                        .main_window
+                        .ok_or_else(|| anyhow::anyhow!("window front: no main window"))?;
+                    let hwnd = main
+                        .update(cx, |_, window, _| crate::winsys::hwnd_of(window))?
+                        .ok_or_else(|| anyhow::anyhow!("window front: no window handle"))?;
+                    press(VK_MENU);
+                    // SAFETY: this process's own top-level window.
+                    let front = unsafe {
+                        SetForegroundWindow(hwnd as _);
+                        GetForegroundWindow() as isize == hwnd
+                    };
+                    anyhow::ensure!(front, "window front: Windows kept another window in front");
+                }
+                ("share", "close") => press(VK_ESCAPE),
+                ("share", n) if n.starts_with("asked ") => {
+                    let n = n.trim_start_matches("asked ").trim();
+                    let (n, more) = match n.strip_suffix('+') {
+                        Some(n) => (n, true),
+                        None => (n, false),
+                    };
+                    let n: usize = n.parse()?;
+                    let asked = crate::share::SHARE_ASKED.load(Ordering::Relaxed);
+                    anyhow::ensure!(
+                        asked == n || more && asked > n,
+                        "share asked: Windows asked {asked} times, not {n}{}",
+                        if more { " or more" } else { "" }
+                    );
+                }
+                (verb, other) => anyhow::bail!(
+                    "{verb} {other}? (window front | share asked <n>[+] | share close)"
+                ),
+            }
+        }
+        return Ok(());
+    }
+    // `computer open <program>`, `computer elements <window> expect <text>`, `computer close`:
+    // computer use by element, live (`shots/computer_use.rs`): another app opened for the check,
+    // read through Trek's own computer tools as an agent reads it (its outline must hold `text`),
+    // and closed. On CI's machines alone (the ledger's `live_ci`).
+    #[cfg(any(windows, target_os = "macos"))]
+    if verb == "computer" {
+        match arg.trim().split_once(' ').unwrap_or((arg.trim(), "")) {
+            ("open", app) => computer_use::open(app.trim())?,
+            ("close", "") => computer_use::close(),
+            ("elements", rest) => {
+                let (window, want) = rest
+                    .split_once(" expect ")
+                    .ok_or_else(|| anyhow::anyhow!("computer elements <window> expect <text>"))?;
+                let outline = computer_use::elements(window.trim())?;
+                anyhow::ensure!(
+                    outline.contains(want.trim()),
+                    "computer elements: {window}'s outline holds no {want:?}:\n{outline}"
+                );
+            }
+            (other, _) => anyhow::bail!("computer {other}? (open|elements|close)"),
         }
         return Ok(());
     }
