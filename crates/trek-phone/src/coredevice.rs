@@ -13,9 +13,10 @@
 //!
 //! Each phone gets a worker thread that keeps the tunnel and the screenshot service open between
 //! calls (opening them is a round trip each) and opens them again after a failure (the phone
-//! unplugged and back). Every call blocks until the worker answers.
+//! unplugged and back). Every call blocks until the worker answers. The screen's elements come
+//! over the same tunnel, from the accessibility audit daemon (`ax`).
 
-use crate::{device, pc};
+use crate::{ax, device, pc};
 use idevice::amfi::AmfiClient;
 use idevice::core_device::{
     AppServiceClient, ButtonState, CallInfoBlob, DisplayServiceClient, ImageFormat,
@@ -343,6 +344,17 @@ pub fn screenshot(udid: &str) -> Result<Shot, String> {
     ask(udid, Ask::Shot)
 }
 
+/// The longest a reading of the screen's elements takes, the tunnel opened if it isn't.
+const ELEMENTS_WITHIN: Duration = Duration::from_secs(30);
+
+/// What's on phone `udid`'s screen, as its accessibility reads it: each element's role, label,
+/// value, identifier, traits, state and frame (in points), in tree order (`ax::Screen::outline`
+/// writes them out). Read only, nothing on the screen changes. It takes a second or two: the
+/// phone answers once its screen has been still for a moment, and must be unlocked.
+pub fn elements(udid: &str) -> Result<ax::Screen, String> {
+    ask(udid, Ask::Elements)
+}
+
 /// A tap on phone `udid`'s screen at (`x`, `y`), as fractions of its width and height.
 pub fn tap(udid: &str, x: f32, y: f32) -> Result<(), String> {
     touch_now(udid, Gesture::Tap(x, y))
@@ -390,6 +402,7 @@ enum Ask {
     Mount(DiskImage, Reply<()>),
     Unmount(Reply<()>),
     Shot(Reply<Shot>),
+    Elements(Reply<ax::Screen>),
     Touch(Gesture, Reply<()>),
     Open(String, Reply<String>),
     Apps(Reply<Vec<(String, String)>>),
@@ -478,6 +491,21 @@ async fn answer(udid: &str, session: &mut Option<Session>, ask: Ask) {
                 *session = None;
             }
             let _ = reply.send(shot);
+        }
+        Ask::Elements(reply) => {
+            let read = async {
+                let s = open(udid, session).await?;
+                ax::read(&mut s.adapter, &s.rsd).await
+            };
+            let read = tokio::time::timeout(ELEMENTS_WITHIN, read)
+                .await
+                .unwrap_or_else(|_| {
+                    Err("The iPhone didn't send its screen's elements in time.".into())
+                });
+            if read.is_err() {
+                *session = None;
+            }
+            let _ = reply.send(read);
         }
         Ask::Touch(gesture, reply) => {
             let done = touch(udid, session, &gesture).await;

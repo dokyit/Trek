@@ -12,6 +12,10 @@
 //! - **Or input over USB through Trek Driver**: while the phone is unlocked on the cable, a small
 //!   XCUITest inside Trek's own iPhone app (built by `ios/scripts/install-device.sh`) takes taps,
 //!   swipes and keys over HTTP through usbmuxd (`driver`).
+//! - **Or through CoreDevice's own services**, with the developer disk image mounted (feature
+//!   `coredevice`): the screen, taps and keys as Xcode's Device Hub sends them (`coredevice`),
+//!   and the screen as elements from the accessibility audit daemon (`ax`). This is how a PC
+//!   works the phone.
 //! - **The user's own mouse and keys** on the tool's picture, as touches held and dragged as
 //!   long as the button was, swipes for scrolling, and typing (`gesture`), for each route.
 //! - **Apps and files**: the phone's own services over usbmuxd, as Finder uses them (`device`):
@@ -28,6 +32,8 @@ pub mod files;
 pub mod hid;
 pub mod lease;
 
+#[cfg(all(feature = "coredevice", any(target_os = "macos", windows)))]
+pub mod ax;
 #[cfg(all(feature = "coredevice", any(target_os = "macos", windows)))]
 pub mod coredevice;
 #[cfg(any(target_os = "macos", windows))]

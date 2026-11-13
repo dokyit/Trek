@@ -1,19 +1,20 @@
 //! `pc_screen`: the iPhone's screen and touch without Xcode or Trek Driver, from Windows as from a
 //! Mac, through CoreDevice's own services (`trek_phone::coredevice`, which the iPhone tool on
 //! Windows uses): the developer disk image mounted when it isn't, a screenshot saved, then a tap,
-//! a swipe, typing, the Home Screen or an app opened.
+//! a swipe, typing, the Home Screen or an app opened, and the screen's elements read.
 //!
 //! ```sh
 //! cargo run -p trek-phone --features coredevice --example pc_screen -- \
 //!     [--ddi <folder>] [--out phone.png] [--tap <x> <y>] [--swipe <x1> <y1> <x2> <y2>] \
-//!     [--type <text>] [--home] [--apps] [--open <app name>] [--unmount]
+//!     [--type <text>] [--home] [--apps] [--open <app name>] [--elements] [--unmount]
 //! ```
 //!
 //! `--ddi`: Xcode's iOS_DDI folder, copied from a Mac with Xcode
 //! (`/Library/Developer/DeveloperDiskImages/iOS_DDI`), or a folder holding it.
 //! `--tap` and `--swipe`: pixels in the screenshot it saves. `--type`: as a US keyboard types it
-//! (`\n` for Return). `--unmount`: the disk image taken off the phone (until it's mounted
-//! again), to try mounting it from the start.
+//! (`\n` for Return). `--elements`: the screen as an outline of its elements (read only, after
+//! anything else), frames in the screenshot's pixels. `--unmount`: the disk image taken off the
+//! phone (until it's mounted again), to try mounting it from the start.
 
 #[cfg(any(target_os = "macos", windows))]
 fn run() -> Result<(), String> {
@@ -23,7 +24,7 @@ fn run() -> Result<(), String> {
 
     let (mut ddi, mut out) = (None, PathBuf::from("phone.png"));
     let (mut tap, mut swipe, mut typed, mut open) = (None, None, None, None);
-    let (mut home, mut unmount, mut list) = (false, false, false);
+    let (mut home, mut unmount, mut list, mut elements) = (false, false, false, false);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
@@ -38,6 +39,7 @@ fn run() -> Result<(), String> {
             "--unmount" => unmount = true,
             "--home" => home = true,
             "--apps" => list = true,
+            "--elements" => elements = true,
             "--tap" => tap = Some((number("x")?, number("y")?)),
             "--swipe" => {
                 swipe = Some((
@@ -49,7 +51,7 @@ fn run() -> Result<(), String> {
             "--open" => open = Some(value("an app's name")?),
             other => {
                 return Err(format!(
-                    "{other}? (--ddi <folder>, --out <png>, --tap <x> <y>, --swipe <x1> <y1> <x2> <y2>, --type <text>, --home, --apps, --open <app>, --unmount)"
+                    "{other}? (--ddi <folder>, --out <png>, --tap <x> <y>, --swipe <x1> <y1> <x2> <y2>, --type <text>, --home, --apps, --open <app>, --elements, --unmount)"
                 ));
             }
         }
@@ -123,6 +125,19 @@ fn run() -> Result<(), String> {
     if let Some(name) = open {
         let opened = coredevice::open_app(&phone.udid, &name)?;
         println!("opened {opened}");
+    }
+    if elements {
+        let started = std::time::Instant::now();
+        let screen = coredevice::elements(&phone.udid)?;
+        let size = screen
+            .size
+            .map_or("unknown".into(), |(w, h)| format!("{w}×{h} points"));
+        println!(
+            "elements: {} in {:.1} s (screen {size})\n",
+            screen.elements.len(),
+            started.elapsed().as_secs_f32()
+        );
+        print!("{}", screen.outline((shot.width, shot.height)));
     }
     Ok(())
 }
