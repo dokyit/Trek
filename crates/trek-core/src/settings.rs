@@ -147,6 +147,9 @@ pub struct Mobile {
     /// The phone may write permission rules (add or remove one, or "Always allow…" from an
     /// approval card). A rule outlasts the request it came from, so off, only this Mac can.
     pub phone_rules: bool,
+    /// The web remote too (`trek_remote::web`): a phone without the iPhone app, an Android one,
+    /// pairs and connects from its browser, over UDP at the same port. On with the phone server.
+    pub web: bool,
 }
 
 impl Default for Mobile {
@@ -162,6 +165,7 @@ impl Default for Mobile {
             push_names: false,
             session_approvals: false,
             phone_rules: false,
+            web: true,
         }
     }
 }

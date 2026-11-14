@@ -6,7 +6,7 @@ Pairs Trek with another computer running Trek ("machine B") the way a phone pair
 
 ## Reach it as a user
 
-Settings → **Phone & Machines**. On B: turn on "Let your iPhone connect", choose **Show pairing code**, copy the link under **Pair another machine**. On A: **Machines → Add a machine…**, paste the link (or type address, code and the whole fingerprint), **Pair**. Then in a project's new thread, **On this Mac ▾** → B (or **Add to another machine…**), type, send.
+Settings → **Phone & Machines**. On B: turn on "Let your phone connect", choose **Show pairing code**, copy the link under **Pair another machine**. On A: **Machines → Add a machine…**, paste the link (or type address, code and the whole fingerprint), **Pair**. Then in a project's new thread, **On this Mac ▾** → B (or **Add to another machine…**), type, send.
 
 ## Reach it with the CLI (the isolated app as its own machine B)
 

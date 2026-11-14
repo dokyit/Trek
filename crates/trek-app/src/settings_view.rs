@@ -342,6 +342,9 @@ pub struct SettingsView {
     /// iPhone page, on Windows: what the firewall does to a phone dialing in on each network this
     /// PC is on (`remote::firewall`; `None` inside when it couldn't be read).
     pub(super) firewall: Probe<Option<crate::remote::firewall::Firewall>>,
+    /// Phone page: the pairing code shown for a phone's browser (the web remote) rather than for
+    /// Trek on iPhone. First on Windows, where the iPhone app can't be built.
+    pub(super) pair_in_browser: bool,
     icon_file: Probe<(String, bool)>,
     /// Trek's data folder, found once (finding it makes sure it exists).
     pub(super) data_dir: std::path::PathBuf,
@@ -728,6 +731,7 @@ impl SettingsView {
             snapshots: Probe::default(),
             icon_file: Probe::default(),
             firewall: Probe::default(),
+            pair_in_browser: crate::words::is_windows(),
             data_dir: trek_core::paths::data_dir(),
             installing_agents: Started::default(),
             signing_in_agents: Started::default(),

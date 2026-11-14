@@ -27,12 +27,25 @@ fn phones_then_machines(
 ) -> (Vec<trek_remote::DeviceInfo>, Vec<trek_remote::DeviceInfo>) {
     devices
         .into_iter()
-        .partition(|d| d.platform.as_deref().is_none_or(|p| p == "ios"))
+        .partition(trek_remote::DeviceInfo::is_phone)
 }
 
 /// A QR code as dark squares on white, each `module` points, with the standard quiet zone.
 pub(crate) fn qr(url: &str, module: f32) -> AnyElement {
-    let Ok(code) = qrcode::QrCode::new(url.as_bytes()) else {
+    qr_code(qrcode::QrCode::new(url.as_bytes()), module)
+}
+
+/// A longer link's (the web remote's) at the lowest error correction: a screen has no scratches
+/// to read past, and fewer squares, each larger, scan sooner.
+pub(crate) fn qr_low(url: &str, module: f32) -> AnyElement {
+    qr_code(
+        qrcode::QrCode::with_error_correction_level(url.as_bytes(), qrcode::EcLevel::L),
+        module,
+    )
+}
+
+fn qr_code(code: Result<qrcode::QrCode, qrcode::types::QrError>, module: f32) -> AnyElement {
+    let Ok(code) = code else {
         return div()
             .child("The pairing link is too long for a QR code.")
             .into_any_element();
@@ -190,12 +203,18 @@ impl SettingsView {
             s.mobile.phone_rules = v
         });
         let mut rows = vec![Self::row(
-            "Let your iPhone connect",
-            "Trek listens for phones you've paired, on your network or tailnet. Off, nothing listens.",
+            "Let your phone connect",
+            "Trek listens for phones you've paired, on your network or tailnet: Trek on iPhone, or any phone's browser. Off, nothing listens.",
             self.switch("mobile-on", enabled, |s, v| s.mobile.enabled = v),
             cx,
         )];
         if enabled {
+            rows.push(Self::row(
+                "Let a phone's browser connect",
+                format!("An Android phone, or any phone without Trek's app, pairs with its camera and uses Trek's web remote in its browser. It connects straight to {this}, over UDP on the same port. Off, only Trek on iPhone can."),
+                self.switch("mobile-web", s.mobile.web, |s, v| s.mobile.web = v),
+                cx,
+            ));
             rows.push(Self::row(
                 "Let it allow for a whole session",
                 format!("Off, the phone can allow or deny what an agent asks, one request at a time. On, it can also allow that kind of request for the rest of the session. Only {this} changes this: Trek can't check from here who is holding the phone."),
@@ -348,13 +367,83 @@ impl SettingsView {
         }
 
         // Pairing.
-        out.push(Self::heading("Pair an iPhone", cx));
+        out.push(Self::heading("Pair a phone", cx));
         let ws_entity = self.workspace.clone();
         match offer {
+            // For a phone's browser: the web remote's link, which its camera opens.
+            Some(offer) if self.pair_in_browser && offer.web_url.is_some() => {
+                let web_url = offer.web_url.clone().unwrap_or_default();
+                let left = ((offer.expires_at - trek_core::store::now_ms()) / 60_000).max(0) + 1;
+                let cancel = ws_entity.clone();
+                let again = ws_entity.clone();
+                out.push(self.pair_for(true, cx));
+                out.push(
+                    h_flex()
+                        .id("mobile-pairing-web")
+                        .test_support()
+                        .gap(px(28.))
+                        .p(px(20.))
+                        .rounded(px(fluent::surface(radius::CARD)))
+                        .border_1()
+                        .border_color(theme.border)
+                        .items_start()
+                        .child(qr_low(&web_url, 3.))
+                        .child(
+                            v_flex()
+                                .gap(px(12.))
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_size(px(text::TITLE)).font_semibold().child("Scan this with your phone's camera"))
+                                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child(format!("It opens Trek's web remote in the phone's browser, which pairs with {this} and connects straight to it. When the browser asks to look for devices on your network, allow it. Then add the page to the home screen to open it like an app.")))
+                                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
+                                .child({
+                                    let url = web_url.clone();
+                                    v_flex()
+                                        .gap(px(4.))
+                                        .pt(px(4.))
+                                        .child(div().text_size(px(text::BODY)).font_medium().child("No camera?"))
+                                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("Open this link on the phone (it holds the code, so send it only to yourself):"))
+                                        .child(
+                                            h_flex()
+                                                .gap(px(8.))
+                                                .child(
+                                                    div()
+                                                        .id("pair-web-link")
+                                                        .test_support()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .px(px(8.))
+                                                        .py(px(5.))
+                                                        .rounded(px(fluent::control(radius::CONTROL)))
+                                                        .bg(theme.foreground.opacity(0.06))
+                                                        .font_family(theme.mono_font_family.clone())
+                                                        .text_size(px(text::META))
+                                                        .truncate()
+                                                        .child(web_url.clone()),
+                                                )
+                                                .child(Button::new("pair-web-link-copy").small().ghost().label("Copy link").on_click(move |_, window, cx| {
+                                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                                                    crate::toast::push(window, "Copied", cx);
+                                                })),
+                                        )
+                                })
+                                .child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .child(Button::new("mobile-new-code").small().outline().label("New code").on_click(move |_, _, cx| again.update(cx, |ws, cx| ws.offer_pairing(cx))))
+                                        .child(Button::new("mobile-cancel-code").small().ghost().label("Cancel").on_click(move |_, _, cx| cancel.update(cx, |ws, cx| ws.cancel_pairing(cx)))),
+                                ),
+                        )
+                        .into_any_element(),
+                );
+            }
             Some(offer) => {
                 let left = ((offer.expires_at - trek_core::store::now_ms()) / 60_000).max(0) + 1;
                 let cancel = ws_entity.clone();
                 let again = ws_entity.clone();
+                if offer.web_url.is_some() {
+                    out.push(self.pair_for(false, cx));
+                }
                 out.push(
                     h_flex()
                         .id("mobile-pairing")
@@ -503,6 +592,27 @@ impl SettingsView {
         ));
         out.extend(self.machines_section(cx));
         out
+    }
+
+    /// Which phone the pairing code is for: Trek on iPhone, or a phone's browser (the web
+    /// remote, whose code is a link its camera opens).
+    fn pair_for(&self, browser: bool, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity().downgrade();
+        h_flex()
+            .pb(px(10.))
+            .child(ui::segmented(
+                "mobile-pair-for",
+                vec![(false, "Trek on iPhone"), (true, "A phone's browser")],
+                browser,
+                move |v, _, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.pair_in_browser = v;
+                        cx.notify();
+                    });
+                },
+                cx,
+            ))
+            .into_any_element()
     }
 
     /// Trek on the iPhone: its version, how the last update went (or the one going now), and
@@ -676,6 +786,7 @@ mod tests {
         };
         let (phones, machines) = phones_then_machines(vec![
             device("iphone", Some("ios")),
+            device("pixel", Some("web")),
             device("macbook", Some("macos")),
             device("old-iphone", None),
             device("desktop", Some("windows")),
@@ -683,7 +794,7 @@ mod tests {
         let ids = |v: &[trek_remote::DeviceInfo]| {
             v.iter().map(|d| d.device_id.clone()).collect::<Vec<_>>()
         };
-        assert_eq!(ids(&phones), ["iphone", "old-iphone"]);
+        assert_eq!(ids(&phones), ["iphone", "pixel", "old-iphone"]);
         assert_eq!(ids(&machines), ["macbook", "desktop"]);
     }
 }

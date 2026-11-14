@@ -3383,7 +3383,7 @@ impl Render for Sidebar {
                 .map(|r| {
                     r.devices
                         .iter()
-                        .filter(|d| d.platform.as_deref().is_none_or(|p| p == "ios"))
+                        .filter(|d| d.is_phone())
                         .map(|d| {
                             let on = r.connected.contains(&d.device_id);
                             (

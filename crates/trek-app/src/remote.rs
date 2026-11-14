@@ -85,6 +85,9 @@ pub struct Remote {
     pub routes: Vec<String>,
     /// The port and reach it started with: a change restarts it.
     started_with: (u16, trek_core::settings::Reach),
+    /// Whether it serves the web remote (`settings.mobile.web` when it started): a change
+    /// restarts it.
+    pub web: bool,
     /// Paired devices and which are connected, refreshed from the server's notices.
     pub devices: Vec<tr::DeviceInfo>,
     pub connected: HashSet<String>,
@@ -138,6 +141,7 @@ impl Remote {
             advertise,
             routes,
             started_with,
+            web: false,
             devices,
             connected,
             sent: HashMap::new(),
@@ -698,6 +702,18 @@ fn mobile_dir() -> PathBuf {
     trek_core::paths::data_dir().join("mobile")
 }
 
+/// The web remote's side of the phone server: its certificates beside the server's own, and the
+/// page at trekdesktop.com/remote, or the copy `TREK_WEB_REMOTE_PAGE` names
+/// (`http://localhost:8080/remote/`, one served on this machine while it's worked on or checked),
+/// whose origin is then the one let in.
+fn web_config() -> tr::web::WebConfig {
+    let config = tr::web::WebConfig::new(Some(mobile_dir().join("web-certs.json")));
+    match std::env::var("TREK_WEB_REMOTE_PAGE").ok().filter(|p| !p.trim().is_empty()) {
+        Some(page) => config.serving_from(page.trim()),
+        None => config,
+    }
+}
+
 /// The Mac as phones see it: a lasting id, its name, Trek's version.
 pub fn host_info() -> tr::HostInfo {
     let id_file = mobile_dir().join("host-id");
@@ -773,7 +789,7 @@ impl Workspace {
             (None, true) if !self.remote_starting => self.start_remote(cx),
             (Some(_), false) => self.stop_remote(cx),
             // Another port or address: start again with it (paired phones stay paired).
-            (Some(r), true) if r.started_with != wanted_with => {
+            (Some(r), true) if r.started_with != wanted_with || r.web != self.settings.mobile.web => {
                 self.stop_remote(cx);
                 self.start_remote(cx);
             }
@@ -789,6 +805,7 @@ impl Workspace {
         self.remote_retry = None;
         let port = self.settings.mobile.port;
         let reach = self.settings.mobile.reach;
+        let web = self.settings.mobile.web;
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
@@ -820,6 +837,7 @@ impl Workspace {
                     uploads::sweep_stale(&uploads::uploads_dir(), uploads::STALE);
                     config.tls = Some(identity);
                     config.features = server_features();
+                    config.web = web.then(web_config);
                     #[cfg(target_os = "macos")]
                     phone_update::refresh_agent_copy();
                     let (host, requests) = tr::ChannelHost::new();
@@ -868,6 +886,7 @@ impl Workspace {
                         let mut remote = Remote::new(handle, addresses, advertise, routes, (port, reach), advert, tasks);
                         remote.announce = Some((name, id));
                         remote.policy = policy;
+                        remote.web = web;
                         ws.remote = Some(remote);
                         // A port or address changed while it started (`sync_remote` waits for a start
                         // to finish): start again with the new one.
@@ -959,6 +978,8 @@ impl Workspace {
         config.devices_path = Some(mobile_dir().join("devices.json"));
         config.tls = Some(identity);
         config.features = server_features();
+        let web = self.settings.mobile.web;
+        config.web = web.then(web_config);
         let routes = config.routes.clone();
         let (host, requests) = tr::ChannelHost::new();
         let handle =
@@ -969,7 +990,7 @@ impl Workspace {
             push_changes(cx.weak_entity(), cx),
             hear_notices(cx.weak_entity(), handle.notices(), cx),
         ];
-        self.remote = Some(Remote::new(
+        let mut remote = Remote::new(
             handle,
             Addresses::default(),
             address,
@@ -977,7 +998,9 @@ impl Workspace {
             (port, reach),
             None,
             tasks,
-        ));
+        );
+        remote.web = web;
+        self.remote = Some(remote);
         // On, as its switch would be, so `sync_remote` keeps it rather than stopping it.
         self.settings.mobile.enabled = true;
         cx.notify();

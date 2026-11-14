@@ -1428,7 +1428,7 @@ impl Onboarding {
         let mut rows = vec![
             row(
                 Some(Icon::new(crate::assets::Lucide::Smartphone).size(px(16.)).text_color(theme.muted_foreground).into_any_element()),
-                "Let your iPhone connect",
+                "Let your phone connect",
                 "Follow every thread, answer approvals and questions, and start work from your phone. Off, nothing listens.",
                 phone_on,
                 cx,

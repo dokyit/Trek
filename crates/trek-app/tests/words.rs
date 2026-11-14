@@ -421,7 +421,7 @@ fn the_phone_page_explains_the_firewall_question_on_windows_only() {
             "{mobile:?}"
         );
         assert!(
-            has(&mobile, "Let your iPhone connect"),
+            has(&mobile, "Let your phone connect"),
             "the page itself is there: {mobile:?}"
         );
     });

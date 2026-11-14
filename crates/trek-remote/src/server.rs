@@ -1,5 +1,6 @@
 //! The WebSocket server: accepts phones, authenticates them, serves requests through a
-//! [`RemoteHost`] and fans [`HostEvent`]s out to them.
+//! [`RemoteHost`] and fans [`HostEvent`]s out to them. Beside it, over WebTransport, the web remote
+//! ([`crate::web`]), whose one stream is read as a WebSocket by the same code.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -21,7 +22,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{StatusCode, header};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
 
 use crate::host::{CloneProgress, HostError, HostEvent, HostResult, RemoteHost};
 use crate::pairing::{
@@ -33,6 +34,7 @@ use crate::protocol::{
     PROTOCOL_VERSION, ServerEnvelope, ServerMessage, Snapshot, ThreadAction, ThreadActionRequest,
     Transcript,
 };
+use crate::web::{self, WebCerts, WebConfig};
 
 /// How the server listens and behaves.
 #[derive(Debug, Clone)]
@@ -72,6 +74,9 @@ pub struct ServerConfig {
     /// The optional requests the host serves, for `welcome` and `paired` (see
     /// [`crate::protocol::feature`]). None by default.
     pub features: Vec<String>,
+    /// Serve the web remote too, over WebTransport at the same addresses and port over UDP
+    /// ([`crate::web`]). `None` by default.
+    pub web: Option<WebConfig>,
 }
 
 /// The default port.
@@ -197,6 +202,7 @@ impl ServerConfig {
             ping_interval: Duration::from_secs(20),
             tls: None,
             features: Vec::new(),
+            web: None,
         }
     }
 }
@@ -245,6 +251,25 @@ impl RemoteServer {
             None => DeviceRegistry::in_memory(),
         };
         let tls = config.tls.as_ref().map(|t| t.acceptor()).transpose()?;
+        // The web remote's certificates; without them the phone server runs without it.
+        let web = config.web.clone().and_then(|config| {
+            let now = now_ms();
+            let certs = match &config.certs_path {
+                Some(path) => WebCerts::load_or_create(path.clone(), now),
+                None => WebCerts::in_memory(now),
+            };
+            match certs {
+                Ok(certs) => Some(WebState {
+                    config,
+                    certs: Mutex::new(certs),
+                    bound: Mutex::new(Vec::new()),
+                }),
+                Err(err) => {
+                    tracing::warn!(%err, "the web remote's certificates couldn't be made; serving phones without it");
+                    None
+                }
+            }
+        });
         let listener = bind(config.bind)?;
         let local_addr = listener.local_addr()?;
         let mut more = Vec::new();
@@ -264,6 +289,7 @@ impl RemoteServer {
         };
         let inner = Arc::new(Inner {
             tls,
+            web,
             local_addr,
             also,
             events,
@@ -290,6 +316,7 @@ impl RemoteServer {
             tracing::info!(local_addr = %addr, "trek-remote listening there too");
             tokio::spawn(accept_loop(l, inner.clone(), host.clone()));
         }
+        start_web(&inner, &host);
         tokio::spawn(accept_loop(listener, inner.clone(), host));
         Ok(RemoteHandle { inner })
     }
@@ -355,6 +382,16 @@ impl RemoteHandle {
         } else {
             routes
         };
+        let web_url = self.inner.web.as_ref().map(|w| {
+            web::pairing_link(
+                &w.config.page,
+                &code,
+                &config.host.name,
+                &config.host.id,
+                &routes,
+                &w.certs().link_hashes(now_ms()),
+            )
+        });
         PairingOffer {
             url: pairing_url_with_routes(
                 &routes,
@@ -363,6 +400,7 @@ impl RemoteHandle {
                 &config.host.id,
                 config.tls.as_ref().map(|t| t.fingerprint.as_str()),
             ),
+            web_url,
             expires_at: now_ms() + ttl.as_millis() as i64,
             fingerprint: config.tls.as_ref().map(|t| t.short_fingerprint()),
             code,
@@ -376,6 +414,24 @@ impl RemoteHandle {
         let mut state = self.inner.lock();
         state.advertise = advertise;
         state.routes = routes;
+    }
+
+    /// Where the web remote listens (UDP), when it does.
+    pub fn web_listening(&self) -> Vec<SocketAddr> {
+        self.inner
+            .web
+            .as_ref()
+            .map(|w| w.bound.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default()
+    }
+
+    /// The web remote's certificates: each one's hash, and when it's valid.
+    pub fn web_certs(&self) -> Vec<crate::protocol::WebCertHash> {
+        self.inner
+            .web
+            .as_ref()
+            .map(|w| w.certs().hashes())
+            .unwrap_or_default()
     }
 
     /// What phones are told to dial, as `welcome` gives it now.
@@ -437,6 +493,8 @@ struct Inner {
     config: ServerConfig,
     /// Made from `config.tls`.
     tls: Option<tokio_rustls::TlsAcceptor>,
+    /// Made from `config.web`.
+    web: Option<WebState>,
     local_addr: SocketAddr,
     /// The `also_bind` addresses it listens on too.
     also: Vec<SocketAddr>,
@@ -706,6 +764,244 @@ async fn accept_loop<H: RemoteHost>(listener: TcpListener, inner: Arc<Inner>, ho
     tracing::info!("trek-remote stopped listening");
 }
 
+// ---------------------------------------------------------------------------------------------
+// The web remote, over WebTransport (crate::web)
+// ---------------------------------------------------------------------------------------------
+
+/// The web remote's side of the server: its certificates and where it listens.
+struct WebState {
+    config: WebConfig,
+    certs: Mutex<WebCerts>,
+    /// The addresses it listens on (UDP).
+    bound: Mutex<Vec<SocketAddr>>,
+}
+
+impl WebState {
+    fn certs(&self) -> MutexGuard<'_, WebCerts> {
+        self.certs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+type WebEndpoint = Arc<wtransport::Endpoint<wtransport::endpoint::endpoint_side::Server>>;
+
+/// How often the certificate served is looked at again (a new one starts every 12 days).
+const WEB_CERT_CHECK: Duration = Duration::from_secs(30 * 60);
+
+/// Listen for the web remote at each address the phone server listens on, at the same port over
+/// UDP. One that can't be bound is left out, with a warning: the phone server runs either way.
+fn start_web<H: RemoteHost>(inner: &Arc<Inner>, host: &Arc<H>) {
+    let Some(web) = &inner.web else {
+        return;
+    };
+    let Some(cert) = web.certs().current(now_ms()).cloned() else {
+        tracing::warn!("the web remote has no certificate valid now; not serving it");
+        return;
+    };
+    let mut endpoints = Vec::new();
+    for addr in std::iter::once(inner.local_addr).chain(inner.also.iter().copied()) {
+        match web::server_config(addr, &cert).and_then(wtransport::Endpoint::server) {
+            Ok(endpoint) => {
+                let bound = endpoint.local_addr().map(canonical).unwrap_or(addr);
+                tracing::info!(local_addr = %bound, "the web remote listening");
+                web.bound
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(bound);
+                let endpoint: WebEndpoint = Arc::new(endpoint);
+                tokio::spawn(web_accept_loop(
+                    endpoint.clone(),
+                    bound,
+                    inner.clone(),
+                    host.clone(),
+                ));
+                endpoints.push((endpoint, addr));
+            }
+            Err(err) => tracing::warn!(%addr, %err, "the web remote couldn't listen there"),
+        }
+    }
+    if !endpoints.is_empty() {
+        tokio::spawn(web_certificates(inner.clone(), endpoints, cert.hash()));
+    }
+}
+
+/// Keep the series reaching six months ahead, and serve each certificate in its turn
+/// ([`WebCerts::current`]).
+async fn web_certificates(
+    inner: Arc<Inner>,
+    endpoints: Vec<(WebEndpoint, SocketAddr)>,
+    mut serving: String,
+) {
+    let mut shutdown = inner.shutdown.subscribe();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(WEB_CERT_CHECK) => {}
+            _ = stopped(&mut shutdown) => break,
+        }
+        let Some(web) = &inner.web else {
+            break;
+        };
+        let now = now_ms();
+        let cert = {
+            let mut certs = web.certs();
+            if let Err(err) = certs.extend(now) {
+                tracing::warn!(%err, "the web remote's certificates couldn't be extended");
+            }
+            certs.current(now).cloned()
+        };
+        let Some(cert) = cert.filter(|c| c.hash() != serving) else {
+            continue;
+        };
+        for (endpoint, addr) in &endpoints {
+            match web::server_config(*addr, &cert).and_then(|c| endpoint.reload_config(c, false)) {
+                Ok(()) => {
+                    tracing::info!(local_addr = %addr, "the web remote serves its next certificate")
+                }
+                Err(err) => {
+                    tracing::warn!(local_addr = %addr, %err, "the web remote couldn't change its certificate")
+                }
+            }
+        }
+        serving = cert.hash();
+    }
+}
+
+async fn web_accept_loop<H: RemoteHost>(
+    endpoint: WebEndpoint,
+    bound: SocketAddr,
+    inner: Arc<Inner>,
+    host: Arc<H>,
+) {
+    let mut shutdown = inner.shutdown.subscribe();
+    loop {
+        let incoming = tokio::select! {
+            incoming = endpoint.accept() => incoming,
+            _ = stopped(&mut shutdown) => break,
+        };
+        let peer = canonical(incoming.remote_address());
+        let Some(slot) = inner.pre_auth.take(peer.ip()) else {
+            tracing::info!(%peer, "web remote refused: too many unauthenticated connections");
+            incoming.refuse();
+            continue;
+        };
+        tokio::spawn(serve_web(
+            incoming,
+            peer,
+            bound,
+            inner.clone(),
+            host.clone(),
+            slot,
+        ));
+    }
+    endpoint.close(wtransport::VarInt::from_u32(0), b"Trek is shutting down");
+    tracing::info!(local_addr = %bound, "the web remote stopped listening");
+}
+
+/// A page's session: its request checked (the path, the page's origin), then the connection
+/// admitted as a phone's TCP one is, then its one stream read as a WebSocket, by the code the
+/// iPhone's goes through.
+async fn serve_web<H: RemoteHost>(
+    incoming: wtransport::endpoint::IncomingSession,
+    peer: SocketAddr,
+    bound: SocketAddr,
+    inner: Arc<Inner>,
+    host: Arc<H>,
+    unauthenticated: PreAuth,
+) {
+    let Some(web) = &inner.web else {
+        return;
+    };
+    // The QUIC handshake, the session and the first message share one deadline.
+    let deadline = tokio::time::Instant::now() + inner.config.auth_timeout;
+    let request = match tokio::time::timeout_at(deadline, incoming).await {
+        Ok(Ok(request)) => request,
+        Ok(Err(err)) => {
+            tracing::info!(%peer, %err, "web remote: the connection failed");
+            return;
+        }
+        Err(_) => {
+            tracing::info!(%peer, "web remote: no session in time");
+            return;
+        }
+    };
+    if request.path() != web::PATH {
+        tracing::info!(%peer, path = request.path(), "web remote refused: another path");
+        request.not_found().await;
+        return;
+    }
+    if !web.config.admits_origin(request.origin()) {
+        tracing::info!(%peer, origin = ?request.origin(), "web remote refused: not Trek's page");
+        request.forbidden().await;
+        return;
+    }
+    let connection = match tokio::time::timeout_at(deadline, request.accept()).await {
+        Ok(Ok(connection)) => connection,
+        Ok(Err(err)) => {
+            tracing::info!(%peer, %err, "web remote: the session failed");
+            return;
+        }
+        Err(_) => {
+            tracing::info!(%peer, "web remote: the session timed out");
+            return;
+        }
+    };
+    // Which of this machine's addresses it reached, where the system says (it does on macOS and
+    // Windows); else the address listened on.
+    let local = connection
+        .quic_connection()
+        .local_ip()
+        .map(|ip| canonical(SocketAddr::new(ip, bound.port())))
+        .unwrap_or(bound);
+    let via = inner
+        .config
+        .admit
+        .as_ref()
+        .and_then(|admit| admit.describe(peer, local))
+        .unwrap_or_else(|| network_of(peer.ip()).to_string());
+    if inner
+        .config
+        .admit
+        .as_ref()
+        .is_some_and(|admit| !admit.admits(peer, local))
+    {
+        tracing::info!(%peer, %local, via, "web remote refused: not from a network this machine serves");
+        connection.close(
+            wtransport::VarInt::from_u32(0),
+            b"Not served on this network",
+        );
+        return;
+    }
+    tracing::info!(%peer, %local, via, "web remote connection");
+    let (send, recv) = match tokio::time::timeout_at(deadline, connection.accept_bi()).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
+            tracing::info!(%peer, via, %err, "web remote: no stream opened");
+            return;
+        }
+        Err(_) => {
+            tracing::info!(%peer, via, "web remote: no stream opened in time");
+            return;
+        }
+    };
+    let allowance = Allowance::new(MAX_PRE_AUTH);
+    let stream: Box<dyn Io> = Box::new(tokio::io::join(recv, send));
+    let stream: Box<dyn Io> = Box::new(Capped {
+        inner: stream,
+        allowance: allowance.clone(),
+    });
+    // No upgrade to read: the page speaks the WebSocket protocol from its first byte.
+    let ws = WebSocketStream::from_raw_socket(stream, Role::Server, Some(ws_config(&inner))).await;
+    let link = Link {
+        peer,
+        local,
+        via: format!("{via}, the web remote"),
+        deadline,
+        allowance,
+        web: true,
+    };
+    connected(ws, link, inner.clone(), host, unauthenticated).await;
+    connection.close(wtransport::VarInt::from_u32(0), b"");
+}
+
 /// A phone's connection under the WebSocket: TLS, or plain TCP for tests and demos.
 trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
@@ -738,9 +1034,7 @@ async fn serve<H: RemoteHost>(
     host: Arc<H>,
     unauthenticated: PreAuth,
 ) {
-    let ws_config = WebSocketConfig::default()
-        .max_message_size(Some(inner.config.max_message))
-        .max_frame_size(Some(inner.config.max_message));
+    let ws_config = ws_config(&inner);
     // The handshake and the first message share one deadline.
     let deadline = tokio::time::Instant::now() + inner.config.auth_timeout;
     let stream: Box<dyn Io> = match &inner.tls {
@@ -764,7 +1058,7 @@ async fn serve<H: RemoteHost>(
     });
     let handshake =
         tokio_tungstenite::accept_hdr_async_with_config(stream, refuse_browsers, Some(ws_config));
-    let mut ws = match tokio::time::timeout_at(deadline, handshake).await {
+    let ws = match tokio::time::timeout_at(deadline, handshake).await {
         Ok(Ok(ws)) => ws,
         Ok(Err(err)) => {
             tracing::info!(%peer, via, %err, "websocket handshake refused or failed");
@@ -775,8 +1069,55 @@ async fn serve<H: RemoteHost>(
             return;
         }
     };
+    let link = Link {
+        peer,
+        local,
+        via,
+        deadline,
+        allowance,
+        web: false,
+    };
+    connected(ws, link, inner, host, unauthenticated).await;
+}
+
+/// The WebSocket's settings: the largest message an authenticated phone may send.
+fn ws_config(inner: &Inner) -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(inner.config.max_message))
+        .max_frame_size(Some(inner.config.max_message))
+}
+
+/// A connection whose WebSocket is up: where it comes from, and what it has left before it must
+/// have authenticated.
+struct Link {
+    peer: SocketAddr,
+    local: SocketAddr,
+    via: String,
+    deadline: tokio::time::Instant,
+    allowance: Allowance,
+    /// The web remote's (over WebTransport), whose `paired` and `welcome` carry the certificates.
+    web: bool,
+}
+
+/// The rest of a connection once its WebSocket is up, a phone's (TLS) or the web remote's
+/// (WebTransport): authenticating, the session, and the bookkeeping after.
+async fn connected<H: RemoteHost>(
+    mut ws: Ws,
+    link: Link,
+    inner: Arc<Inner>,
+    host: Arc<H>,
+    unauthenticated: PreAuth,
+) {
+    let Link {
+        peer,
+        local,
+        via,
+        deadline,
+        allowance,
+        web,
+    } = link;
     allowance.set(MAX_PRE_AUTH);
-    let Some(auth) = authenticate(&mut ws, peer, &via, &inner, deadline).await else {
+    let Some(auth) = authenticate(&mut ws, peer, &via, &inner, deadline, web).await else {
         return;
     };
     allowance.set(usize::MAX);
@@ -841,6 +1182,7 @@ async fn authenticate(
     via: &str,
     inner: &Inner,
     deadline: tokio::time::Instant,
+    web: bool,
 ) -> Option<Authenticated> {
     let mut shutdown = inner.shutdown.subscribe();
     loop {
@@ -933,6 +1275,11 @@ async fn authenticate(
             inner.config.features.clone(),
             inner.lock().routes.clone(),
         );
+        // The web remote is told every certificate of the series, to pin the ones it will meet.
+        let web_certs = match (&inner.web, web) {
+            (Some(w), true) => w.certs().hashes(),
+            _ => Vec::new(),
+        };
         return match msg {
             ClientMessage::Pair {
                 code, device_name, ..
@@ -976,6 +1323,7 @@ async fn authenticate(
                             host,
                             features,
                             routes,
+                            web_certs,
                         };
                         let _ = send(ws, ServerEnvelope::reply(re, paired)).await;
                         Some(Authenticated {
@@ -1013,6 +1361,7 @@ async fn authenticate(
                             host,
                             features,
                             routes,
+                            web_certs,
                         };
                         let _ = send(ws, ServerEnvelope::reply(re, welcome)).await;
                         Some(Authenticated {
