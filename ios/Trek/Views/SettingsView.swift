@@ -5,6 +5,8 @@ enum SettingsRoute: Hashable {
     case appearance
     case feedback
     case storage
+    /// The selected Mac's permission rules (`-TrekTab settings -TrekSheet rules`).
+    case rules
 
     /// Where `-TrekTab` opens Settings.
     static var launched: [SettingsRoute] {
@@ -12,6 +14,7 @@ enum SettingsRoute: Hashable {
         case "appearance": [.appearance]
         case "feedback": [.feedback]
         case "storage": [.storage]
+        case "settings" where Launch.sheet == "rules": [.rules]
         default: []
         }
     }
@@ -67,6 +70,7 @@ struct SettingsView: View {
                 case .appearance: AppearanceView()
                 case .feedback: FeedbackView()
                 case .storage: StorageView()
+                case .rules: RulesView(link: model.selected)
                 }
             }
             .sheet(isPresented: $scanning) {

@@ -212,6 +212,9 @@ struct StatusLook {
             case .approval: return StatusLook(label: "Approval", color: Trek.approval, symbol: "hand.raised.fill", pulses: false)
             case .question: return StatusLook(label: "Question", color: Trek.approval, symbol: "questionmark.bubble.fill", pulses: false)
             case .plan: return StatusLook(label: "Plan", color: Trek.approval, symbol: "list.bullet.clipboard.fill", pulses: false)
+            // A pull request it opened is failing (its turn didn't): the Mac's "CI failed".
+            case .failed where t.checks != nil && t.runState != .failed:
+                return StatusLook(label: "CI failed", color: Trek.failed, symbol: "xmark.circle.fill", pulses: false)
             case .failed: return StatusLook(label: "Failed", color: Trek.failed, symbol: "exclamationmark.triangle.fill", pulses: false)
             case .limit: return StatusLook(label: "Paused", color: Trek.approval, symbol: "clock.fill", pulses: false)
             }

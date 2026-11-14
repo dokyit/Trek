@@ -61,6 +61,20 @@ nonisolated enum MacFeature: String, CaseIterable {
     /// opens from it: `sub_agent` reads what it has done, `sub_agent_action` stops it or sends it
     /// a message where its agent takes one (`SubAgentLog.swift`).
     case subAgentView = "sub_agent_view"
+    /// The failing-checks bar (a row's `checks`), Send to agent and Dismiss, and each project's
+    /// sending them by itself (`BarsProtocol.swift`).
+    case failedChecks = "failed_checks"
+    /// The permission rules: the list, the tester, adding and removing one, and an approval's
+    /// "Always allow…" (writing only where the Mac's `phoneRules` lets this phone).
+    case rules
+    /// The limit bar's "Continue on <account>".
+    case continueOnAccount = "continue_on_account"
+    /// The Compact chip, once a large thread's prompt cache has gone.
+    case compactOffer = "compact_offer"
+    /// Picking another agent holds it for the next message, with what goes with it and Stay on.
+    case switchPreview = "switch_preview"
+    /// Files marked viewed in a diff review, as the Mac's Git panel keeps them.
+    case diffViewed = "diff_viewed"
 }
 
 /// The Mac's snooze menu.

@@ -593,7 +593,8 @@ final class AppModel {
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
              .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
              .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _), .media(let re, _), .contextCard(let re, _),
-             .turnPreview(let re, _), .uploadProgress(let re, _), .sideChat(let re, _), .subAgent(let re, _):
+             .turnPreview(let re, _), .uploadProgress(let re, _), .sideChat(let re, _), .subAgent(let re, _),
+             .switchPreview(let re, _), .rules(let re, _), .ruleTest(let re, _):
             link.reply(re, message)
         case .unlisted(let t):
             setUnlisted(qualify(t, on: link))
@@ -661,8 +662,12 @@ final class AppModel {
              .sendConsult(let tid, _, _, _, _, _), .sideChat(let tid, _, _), .subAgent(let tid, _),
              .subAgentAction(let tid, _, _, _):
             return t(tid)
-        case .setPrefs(let tid, _, _, _, _, _):
+        case .setPrefs(let tid, _, _, _, _, _), .holdSwitch(let tid, _, _), .switchPreview(let tid), .alwaysAllow(let tid, _, _):
             return t(tid)
+        case .setViewed(let g, _, _):
+            switch g {
+            case .thread(let qid), .project(let qid): return t(qid)
+            }
         case .worktreeRemove(let tid, _, _):
             return t(tid)
         case .newThread(let pid, _, _, _, _, _, _, _, _, _):
@@ -729,6 +734,10 @@ final class AppModel {
         case .subAgent(let tid, let call): return .subAgent(threadId: b(tid), callId: call)
         case .subAgentAction(let tid, let call, let action, let text):
             return .subAgentAction(threadId: b(tid), callId: call, action: action, text: text)
+        case .holdSwitch(let tid, let agent, let model): return .holdSwitch(threadId: b(tid), agent: agent, model: model)
+        case .switchPreview(let tid): return .switchPreview(threadId: b(tid))
+        case .alwaysAllow(let tid, let rid, let pattern): return .alwaysAllow(threadId: b(tid), requestId: rid, pattern: pattern)
+        case .setViewed(let g, let path, let viewed): return .setViewed(bareTarget(g, on: link), path: path, viewed: viewed)
         default: return m
         }
     }

@@ -604,6 +604,102 @@ macos = "crates/trek-app/tests/orchestrate.rs::the_agent_s_own_sub_agent_s_steps
 windows = "crates/trek-app/tests/orchestrate.rs::the_agent_s_own_sub_agent_s_steps_outlive_a_restart"
 
 [[feature]]
+id = "phone-failed-checks"
+area = "iPhone"
+what = "On the iPhone, a pull request a thread opened failing CI shows over its composer (CI failed, Send to agent, View on GitHub, Dismiss) and in Needs you, and each project's sending failed checks by itself is switched there, off unless turned on"
+macos = "yes"
+windows = "yes"
+live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
+how = { macos = "The same on both: the phone server's `failed_checks` feature.", windows = "The same on both." }
+code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature.promise]]
+what = "The phone sees the failing checks, sends them to the agent or dismisses them, and turns a project's sending by itself on and off"
+macos = "crates/trek-app/tests/remote.rs::the_failing_checks_bar_from_the_phone"
+windows = "crates/trek-app/tests/remote.rs::the_failing_checks_bar_from_the_phone"
+
+[[feature]]
+id = "phone-permission-rules"
+area = "iPhone"
+what = "On the iPhone, the permission rules are listed and tried, and added, removed or written from an approval's Always allow… only where the computer's Settings › Phone lets it (off by default)"
+macos = "yes"
+windows = "yes"
+live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
+how = { macos = "The same on both: the phone server's `rules` feature.", windows = "The same on both." }
+code = ["crates/trek-app/src/remote/rules.rs", "crates/trek-remote/src/protocol/rules.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature.promise]]
+what = "Writing a rule from the phone is refused until the computer allows it, and an Always allow covers the card it came from"
+macos = "crates/trek-app/tests/remote.rs::the_phone_reads_and_tries_the_rules_and_writes_them_only_where_the_mac_lets_it"
+windows = "crates/trek-app/tests/remote.rs::the_phone_reads_and_tries_the_rules_and_writes_them_only_where_the_mac_lets_it"
+
+[[feature]]
+id = "phone-continue-on-account"
+area = "iPhone"
+what = "On the iPhone, the limit bar offers Continue on another account of the agent with room, and carries on there"
+macos = "yes"
+windows = "yes"
+live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
+how = { macos = "The same on both: the phone server's `continue_on_account` feature.", windows = "The same on both." }
+code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature.promise]]
+what = "The paused thread moves to the account the bar names, and only that one"
+macos = "crates/trek-app/tests/remote.rs::the_limit_bar_offers_another_account_and_the_phone_goes_there"
+windows = "crates/trek-app/tests/remote.rs::the_limit_bar_offers_another_account_and_the_phone_goes_there"
+
+[[feature]]
+id = "phone-compact-chip"
+area = "iPhone"
+what = "On the iPhone, a large idle thread whose prompt cache has gone offers Compact over its composer"
+macos = "yes"
+windows = "yes"
+live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
+how = { macos = "The same on both: the phone server's `compact_offer` feature.", windows = "The same on both." }
+code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature.promise]]
+what = "A large idle thread's row says when its cache goes and why, and a small or working one offers nothing"
+macos = "crates/trek-app/tests/remote.rs::a_large_idle_thread_offers_compact_in_its_row"
+windows = "crates/trek-app/tests/remote.rs::a_large_idle_thread_offers_compact_in_its_row"
+
+[[feature]]
+id = "phone-switch-preview"
+area = "iPhone"
+what = "On the iPhone, picking another agent waits for the next message, with what goes with it and Stay on, as on the computer"
+macos = "yes"
+windows = "yes"
+live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
+how = { macos = "The same on both: the phone server's `switch_preview` feature.", windows = "The same on both." }
+code = ["crates/trek-app/src/remote/bars.rs", "crates/trek-remote/src/protocol/composer_bars.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature.promise]]
+what = "A held switch shows in the row, previews its handover, is dropped by Stay on, and happens with the phone's next message"
+macos = "crates/trek-app/tests/remote.rs::a_phone_holds_a_switch_for_the_next_message_and_previews_it"
+windows = "crates/trek-app/tests/remote.rs::a_phone_holds_a_switch_for_the_next_message_and_previews_it"
+
+[[feature]]
+id = "phone-diff-viewed"
+area = "iPhone"
+what = "On the iPhone, files are ticked viewed in a diff review, the computer's Git panel's own marks, and come back unviewed when they change"
+macos = "yes"
+windows = "yes"
+live_skip = "What's drawn is the iPhone app's: the isolated app can't show it. What the Mac sends and does is driven over the phone protocol in crates/trek-app/tests/remote.rs, the wire in crates/trek-remote/tests/protocol.rs, and the phone's side in ios/TrekTests (ComposerBarsTests) on the simulator."
+how = { macos = "The same on both: the phone server's `diff_viewed` feature.", windows = "The same on both." }
+code = ["crates/trek-app/src/remote/git.rs", "crates/trek-remote/src/protocol/viewed.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature.promise]]
+what = "A file ticked on the phone is the panel's mark, and a file that changed since comes back unviewed"
+macos = "crates/trek-app/tests/remote.rs::files_marked_viewed_from_the_phone_are_the_panels_and_come_back_when_they_change"
+windows = "crates/trek-app/tests/remote.rs::files_marked_viewed_from_the_phone_are_the_panels_and_come_back_when_they_change"
+
+[[feature]]
 id = "phone-discovery"
 area = "iPhone"
 what = "The phone finds the computer again when its address changes (Bonjour)"

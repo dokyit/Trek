@@ -133,6 +133,14 @@ private struct MacSettingsForm: View {
             } label: {
                 LabeledContent("Hand-holding", value: s.defaultAccess.label)
             }
+            // The rules on top of the level: read and tried from here, written where the Mac lets it.
+            if link?.serves(.rules) == true {
+                NavigationLink {
+                    RulesView(link: link)
+                } label: {
+                    LabeledContent("Permission rules", value: s.phoneRules == true ? "" : "Read only")
+                }
+            }
         } header: {
             Text("Permissions")
         } footer: {
@@ -140,6 +148,21 @@ private struct MacSettingsForm: View {
                  ? "What new threads start with. Change it for any thread from its settings bar."
                  : "What new threads start with. Full access is locked: only your Mac can unlock it, in Settings › Permissions.")
                 .font(.ui(.footnote))
+        }
+
+        if let on = s.sendFailedChecks, let projects = link?.projects.filter(\.isRepo), !projects.isEmpty {
+            Section {
+                ForEach(projects) { p in
+                    Toggle(p.name, isOn: Binding(get: { on.contains(p.id) },
+                                                 set: { set(SettingsChange(sendFailedChecks: ProjectSwitch(projectId: p.id, on: $0))) }))
+                }
+            } header: {
+                Text("Send failing checks to the agent")
+            } footer: {
+                Text("When a pull request a thread opened fails CI, its checks and the end of their logs go back to that thread without asking, up to \(FailingChecks.autoTries) tries a pull request. Off, the thread's bar offers Send to agent.")
+                    .font(.ui(.footnote))
+            }
+            .tint(Trek.done)
         }
 
         Section {

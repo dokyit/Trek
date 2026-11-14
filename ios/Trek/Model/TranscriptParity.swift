@@ -47,6 +47,8 @@ nonisolated struct LimitPause: Codable, Hashable {
     var resume: Bool = false
     /// Trek stopped it ahead of the limit, rather than the limit stopping it.
     var wrapped: Bool = false
+    /// Another account of its agent with room: "Continue on <label>" (`continue_on_account`).
+    var otherAccount: OtherAccount? = nil
 }
 
 /// The reply to `media`: a file's bytes from `offset` (a whole scaled-down image, or a piece of a

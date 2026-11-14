@@ -875,6 +875,8 @@ private struct ComposerArea: View {
     @State private var kidWaited = false
     /// Sub-agents answered from here a moment ago: their parent's row hasn't caught up yet.
     @State private var settling: Set<String> = []
+    /// The Compact chip dismissed, by thread: the `lastActive` it was dismissed at.
+    @State private var compactDismissed: [String: Int64] = [:]
     @MotionAllowed private var motion
 
     private struct Felt: Equatable {
@@ -975,6 +977,19 @@ private struct ComposerArea: View {
                 if needsKid == nil, pending.isEmpty {
                     CardChipRow(store: store)
                 }
+                // A large idle thread whose prompt cache has gone: the Mac's Compact chip.
+                if let offer = thread?.compactOffer, model.serves(.compactOffer, on: threadID),
+                   model.serves(.contextCard, on: threadID), pending.isEmpty, !working {
+                    TimelineView(.periodic(from: .now, by: 15)) { ctx in
+                        if offer.shows(at: ctx.date, dismissed: compactDismissed[threadID]) {
+                            HStack {
+                                CompactChip(threadID: threadID, offer: offer) { compactDismissed[threadID] = offer.lastActive }
+                                Spacer(minLength: 0)
+                            }
+                            .transition(.rise(motion))
+                        }
+                    }
+                }
                 if let queued = thread?.queued, !queued.isEmpty, model.serves(.queueAction, on: threadID) {
                     QueuedStrip(threadID: threadID, queued: queued) { text in
                         composer.put(composer.draft.isEmpty ? text : composer.draft + "\n\n" + text)
@@ -990,6 +1005,16 @@ private struct ComposerArea: View {
                 // Cut off when Trek closed on the Mac: its offer to carry on.
                 if let thread, let cut = thread.cutShort, thread.runState != .working, model.serves(.resumeInterrupted, on: threadID) {
                     CutShortBar(thread: thread, cut: cut)
+                        .transition(.rise(motion))
+                }
+                // A pull request it opened is failing: the Mac's failing-checks bar.
+                if let thread, let checks = thread.checks, checks.bar, pending.isEmpty, model.serves(.failedChecks, on: threadID) {
+                    ChecksBar(thread: thread, checks: checks)
+                        .transition(.rise(motion))
+                }
+                // Another agent picked: the move waits for the next message, as on the Mac.
+                if let thread, let switching = thread.pendingSwitch, model.serves(.switchPreview, on: threadID) {
+                    SwitchBar(thread: thread, pending: switching)
                         .transition(.rise(motion))
                 }
                 if !commands.isEmpty {

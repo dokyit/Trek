@@ -350,6 +350,8 @@ nonisolated struct GitStatus: Codable, Hashable {
     /// Another branch can be checked out now; else `switchBlocked` says why.
     var canSwitch: Bool? = nil
     var switchBlocked: String? = nil
+    /// Of `files`, the paths marked viewed in review that haven't changed since (`diff_viewed`).
+    var viewed: [String]? = nil
 }
 
 nonisolated struct WorktreeStatus: Codable, Hashable {
@@ -457,6 +459,12 @@ nonisolated struct MacSettings: Codable, Hashable {
     var resumeInterrupted: Bool? = nil
     /// At a usage limit a thread carries on by itself on another account of its agent.
     var continueOnOtherAccount: Bool? = nil
+    /// The Mac lets this phone write permission rules (only the Mac changes that). Nil from a
+    /// Mac before `rules`.
+    var phoneRules: Bool? = nil
+    /// The projects (by bare id) whose failing checks go back to their threads by themselves.
+    /// Nil from a Mac before `failed_checks`.
+    var sendFailedChecks: [String]? = nil
 }
 
 /// Notifications on the phone through ntfy.
@@ -495,6 +503,8 @@ nonisolated struct SettingsChange: Hashable {
     var theme: MacTheme? = nil
     var resumeInterrupted: Bool? = nil
     var continueOnOtherAccount: Bool? = nil
+    /// A project's sending failing checks by itself (its bare id, as the Mac knows it).
+    var sendFailedChecks: ProjectSwitch? = nil
 
     var json: [String: Any] {
         var o: [String: Any] = [:]
@@ -513,6 +523,7 @@ nonisolated struct SettingsChange: Hashable {
         if let theme { o["theme"] = theme.rawValue }
         if let resumeInterrupted { o["resume_interrupted"] = resumeInterrupted }
         if let continueOnOtherAccount { o["continue_on_other_account"] = continueOnOtherAccount }
+        if let sendFailedChecks { o["send_failed_checks"] = sendFailedChecks.json }
         return o
     }
 
@@ -532,6 +543,11 @@ nonisolated struct SettingsChange: Hashable {
         if let theme { s.theme = theme }
         if let resumeInterrupted { s.resumeInterrupted = resumeInterrupted }
         if let continueOnOtherAccount { s.continueOnOtherAccount = continueOnOtherAccount }
+        if let p = sendFailedChecks, var on = s.sendFailedChecks {
+            on.removeAll { $0 == p.projectId }
+            if p.on { on.append(p.projectId) }
+            s.sendFailedChecks = on
+        }
         return s
     }
 }

@@ -143,6 +143,12 @@ nonisolated enum ThreadAction: Hashable {
     case compact
     /// A turn cut off when Trek closed (`resume_interrupted`): Resume or Retry, or leave it.
     case resumeInterrupted, dismissInterrupted
+    /// The failing-checks bar's Send to agent and Dismiss (`failed_checks`).
+    case sendFailedChecks, dismissFailedChecks
+    /// The limit bar's "Continue on <account>" (`continue_on_account`); nil: the normal login.
+    case continueOnAccount(String?)
+    /// "Stay on …": the switch waiting for the next message goes (`switch_preview`).
+    case stayOnAgent
     var json: [String: Any] {
         switch self {
         case .pin: ["kind": "pin"]
@@ -169,6 +175,10 @@ nonisolated enum ThreadAction: Hashable {
         case .compact: ["kind": "compact"]
         case .resumeInterrupted: ["kind": "resume_interrupted"]
         case .dismissInterrupted: ["kind": "dismiss_interrupted"]
+        case .sendFailedChecks: ["kind": "send_failed_checks"]
+        case .dismissFailedChecks: ["kind": "dismiss_failed_checks"]
+        case .continueOnAccount(let account): account.map { ["kind": "continue_on_account", "account": $0] } ?? ["kind": "continue_on_account"]
+        case .stayOnAgent: ["kind": "stay_on_agent"]
         }
     }
 }
@@ -283,6 +293,12 @@ nonisolated struct ThreadSummary: Codable, Identifiable, Hashable {
     /// Its last turn was cut off when Trek closed on the Mac, and that isn't dealt with yet
     /// (`resumeInterrupted`). Nil from older Macs.
     var cutShort: CutShort? = nil
+    /// A pull request it opened is failing, not dealt with yet (`failed_checks`).
+    var checks: FailingChecks? = nil
+    /// Large and idle: the Compact chip, once its prompt cache has gone (`compact_offer`).
+    var compactOffer: CompactOffer? = nil
+    /// A move to another agent waits for its next message (`switch_preview`).
+    var pendingSwitch: PendingSwitch? = nil
 }
 
 /// The approval behind a row's `needs`.
@@ -481,6 +497,8 @@ nonisolated struct ApprovalRequest: Hashable {
     /// The user's rule that asks about this every time, as the Mac's Settings shows it: there's
     /// no "Allow for session" for it. Nil from a Mac before it, which is told no rule.
     var askedBy: String? = nil
+    /// The rule its "Always allow…" would add (a Mac that serves `rules`).
+    var alwaysAllow: RuleDraft? = nil
 }
 
 nonisolated struct QuestionRequest: Hashable {
@@ -606,6 +624,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         var watch: WatchedMedia? = nil
         var askedBy: String? = nil
         var subAgent: SubAgentLink? = nil
+        var alwaysAllow: RuleDraft? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -626,7 +645,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         case "approval":
             body = .approval(ApprovalRequest(requestId: r.requestId ?? "", title: r.title ?? "", detail: r.detail ?? "",
                                              state: ApprovalState(rawValue: r.state ?? "") ?? .resolved,
-                                             askedBy: r.askedBy))
+                                             askedBy: r.askedBy, alwaysAllow: r.alwaysAllow))
         case "question":
             body = .question(QuestionRequest(requestId: r.requestId ?? "", questions: r.questions ?? [],
                                              state: QuestionState(rawValue: r.state ?? "") ?? .resolved,
@@ -672,6 +691,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         case .approval(let a):
             r.kind = "approval"; r.requestId = a.requestId; r.title = a.title; r.detail = a.detail; r.state = a.state.rawValue
             r.askedBy = a.askedBy
+            r.alwaysAllow = a.alwaysAllow
         case .question(let q): r.kind = "question"; r.requestId = q.requestId; r.questions = q.questions; r.state = q.state.rawValue; r.answers = q.answers
         case .plan(let p): r.kind = "plan"; r.requestId = p.requestId; r.markdown = p.markdown; r.state = p.state.rawValue
         case .turnEnd(let secs): r.kind = "turn_end"; r.tookSecs = secs
@@ -787,6 +807,12 @@ nonisolated enum ServerMessage {
     case sideChat(re: String?, SideChatReply)
     /// What one of the agent's own sub-agents has done (`sub_agent`, `sub_agent_action`).
     case subAgent(re: String?, SubAgentLog)
+    /// What the next message carries to the agent it switches to (`switch_preview`).
+    case switchPreview(re: String?, SwitchPreview)
+    /// The user's permission rules (`rules`, `rule_action`).
+    case rules(re: String?, RulesList)
+    /// Which rule decides a call, and what happens at each level (`rule_test`).
+    case ruleTest(re: String?, RuleTest)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -885,6 +911,9 @@ nonisolated enum ServerMessage {
         case "upload_progress": return .uploadProgress(re: r.re, try decoder.decode(UploadProgress.self, from: data))
         case "side_chat": return .sideChat(re: r.re, try decoder.decode(SideChatReply.self, from: data))
         case "sub_agent": return .subAgent(re: r.re, try decoder.decode(SubAgentLog.self, from: data))
+        case "switch_preview": return .switchPreview(re: r.re, try decoder.decode(SwitchPreview.self, from: data))
+        case "rules": return .rules(re: r.re, try decoder.decode(RulesList.self, from: data))
+        case "rule_test": return .ruleTest(re: r.re, try decoder.decode(RuleTest.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -1009,6 +1038,21 @@ nonisolated enum ClientMessage {
     case subAgent(threadId: String, callId: String)
     /// Stop it, or send it `text` (`sub_agent_action`).
     case subAgentAction(threadId: String, callId: String, action: SubAgentAction, text: String?)
+    // What the Mac's composer and Settings gained (BarsProtocol.swift).
+    /// Another agent for the thread, held for its next message (`set_prefs` with `hold`).
+    case holdSwitch(threadId: String, agent: String, model: String?)
+    /// What the next message would carry to the agent it switches to.
+    case switchPreview(threadId: String)
+    /// The user's permission rules.
+    case rules
+    /// Add a rule or remove one (where the Mac lets this phone).
+    case ruleAction(RuleChange)
+    /// Which rule decides a call, and what happens at each level.
+    case ruleTest(kind: RuleKind, text: String)
+    /// An approval's "Add rule and allow".
+    case alwaysAllow(threadId: String, requestId: String, pattern: String)
+    /// Mark one of the folder's changed files viewed, or not.
+    case setViewed(GitTarget, path: String, viewed: Bool)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     /// The build (the number of commits it was built from, `install-device.sh`).
@@ -1128,6 +1172,8 @@ nonisolated enum ClientMessage {
             o = parityJSON
         case .media, .contextCard, .turnPreview, .sendConsult:
             o = transcriptParityJSON
+        case .holdSwitch, .switchPreview, .rules, .ruleAction, .ruleTest, .alwaysAllow, .setViewed:
+            o = barsJSON
         }
         if let id { o["id"] = id }
         return o

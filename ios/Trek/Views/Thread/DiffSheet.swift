@@ -15,12 +15,40 @@ struct DiffSheet: View {
         _path = State(initialValue: opening.map { [$0] } ?? [])
     }
 
+    /// Files are ticked viewed as on the Mac's Git panel (a Mac that serves `diff_viewed`).
+    private var marks: Bool { model.serves(.diffViewed, for: target) }
+    private var status: GitStatus? { model.gitStatus[target] }
+
     var body: some View {
         NavigationStack(path: $path) {
             List {
                 Section {
                     ForEach(files) { f in
-                        NavigationLink(value: f.path) { ChangedFileRow(file: f) }
+                        let viewed = marks && status?.isViewed(f.path) == true
+                        NavigationLink(value: f.path) {
+                            HStack(spacing: 8) {
+                                ChangedFileRow(file: f).opacity(viewed ? 0.6 : 1)
+                                if viewed {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(Trek.done)
+                                        .accessibilityLabel("Viewed")
+                                }
+                            }
+                        }
+                        .swipeActions(edge: .leading) {
+                            if marks, status?.files.contains(where: { $0.path == f.path }) == true {
+                                Button(viewed ? "Not viewed" : "Viewed", systemImage: viewed ? "circle" : "checkmark.circle") {
+                                    model.setViewed(target, path: f.path, !viewed)
+                                }
+                                .tint(viewed ? Trek.muted : Trek.done)
+                            }
+                        }
+                    }
+                } header: {
+                    if marks, let n = status.map({ s in files.filter { s.isViewed($0.path) }.count }),
+                       let said = GitStatus.viewedLabel(n, of: files.count) {
+                        Text(said).font(.ui(.footnote))
                     }
                 } footer: {
                     Group {
@@ -122,6 +150,19 @@ struct DiffScreen: View {
         .navigationTitle(file.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Ticked viewed, as on the Mac: it comes back unviewed if the file changes again.
+            if model.serves(.diffViewed, for: target), inStatus {
+                let viewed = status?.isViewed(file.path) == true
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        model.setViewed(target, path: file.path, !viewed)
+                    } label: {
+                        Image(systemName: viewed ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(viewed ? Trek.done : Trek.foreground)
+                    }
+                    .accessibilityLabel(viewed ? "Viewed" : "Mark viewed")
+                }
+            }
             if files.count > 1, let at = files.firstIndex(where: { $0.path == file.path }) {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button { go(files[at - 1].path) } label: { Image(systemName: "chevron.up") }

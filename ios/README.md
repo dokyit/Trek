@@ -87,7 +87,12 @@ one as `/side …` does; `image`: a message's first picture full screen, e.g. `-
 parent's thread: an approval unless said), `-TrekAppearance light|dark`, `-TrekTextSize small|large|xxLarge`,
 `-TrekDemoOldMac YES` (the demo Mac is one from before rows carried `busy_in_background` and left
 out a chat folder's branch: `t-chat`, `t-waiting`; `t-quiz` asks five questions at once),
-`-TrekDemoPC YES` (a second demo machine, a Windows PC), `-TrekDemoRelease newer` (the update card),
+`-TrekDemoPC YES` (a second demo machine, a Windows PC),
+the bars over the composer (`-TrekOpen t-tailscale`: a failing pull request, and with `-TrekSheet diff`
+its files, one ticked viewed; `t-limit`: Continue on Work; `t-worktree`: the Compact chip;
+`-TrekOpen t-release -TrekDemoSwitch YES`: a switch held for the next message, with
+`-TrekSheet switch-preview` what goes with it; `-TrekOpen t-flaky -TrekSheet always-allow`: an
+approval's Always allow; `-TrekTab settings -TrekSheet rules`: the permission rules), `-TrekDemoRelease newer` (the update card),
 `-TrekDemoOffline demo-pc` (debug builds: that machine can't be reached, its banner over the threads),
 `-TrekDemoConnection identity|refused|connecting|offline` (debug builds: the demo Mac's own banner),
 `-TrekDemoEmpty none|quiet` (a Mac with no threads and no notes, or with everything settled),

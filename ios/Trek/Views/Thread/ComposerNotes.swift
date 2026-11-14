@@ -109,6 +109,13 @@ struct LimitBar: View {
                 ViewThatFits(in: .horizontal) {
                     actions(compact: false)
                     actions(compact: true)
+                    // With another account offered too: that on a row of its own.
+                    if let other {
+                        VStack(alignment: .leading, spacing: 8) {
+                            action("Continue on \(other.label)", strong: true) { model.continueOnAccount(thread.id, other) }
+                            actions(compact: true, offering: false)
+                        }
+                    }
                 }
             }
         }
@@ -118,23 +125,33 @@ struct LimitBar: View {
         .accessibilityElement(children: .contain)
     }
 
-    private func actions(compact: Bool) -> some View {
+    /// Another account of the agent with room, where the Mac offers it: the quickest way on, and
+    /// the bar says less of the rest then (as the Mac's).
+    private var other: OtherAccount? {
+        model.serves(.continueOnAccount, on: thread.id) ? pause.otherAccount : nil
+    }
+
+    private func actions(compact: Bool, offering: Bool = true) -> some View {
         HStack(spacing: 8) {
+            if offering, let other {
+                action("Continue on \(other.label)", strong: true) { model.continueOnAccount(thread.id, other) }
+                    .accessibilityHint("Goes on now in a new session there, from a recap of this thread")
+            }
             if pause.resetsAt != nil {
                 if pause.resume {
                     action("Cancel", strong: false) { model.threadAction(thread.id, .cancelResume) }
                 } else {
-                    action("Resume at reset", strong: true) { model.threadAction(thread.id, .resumeAtReset, done: "Resumes at the reset") }
+                    action("Resume at reset", strong: other == nil) { model.threadAction(thread.id, .resumeAtReset, done: "Resumes at the reset") }
                 }
             } else {
                 action("Try again", strong: true) { model.threadAction(thread.id, .tryAgain) }
             }
-            if pause.resetsAt != nil, thread.snoozedUntil == nil {
+            if pause.resetsAt != nil, thread.snoozedUntil == nil, other == nil {
                 action(compact ? "Snooze" : "Snooze until reset", strong: false) {
                     model.threadAction(thread.id, .snoozeUntilReset, done: "Snoozed until the reset")
                 }
             }
-            action(compact ? "Switch…" : "Switch agent…", strong: false, action: switchAgent)
+            action(compact || other != nil ? "Switch…" : "Switch agent…", strong: false, action: switchAgent)
             Spacer(minLength: 0)
         }
     }

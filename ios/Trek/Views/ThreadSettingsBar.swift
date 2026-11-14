@@ -57,11 +57,20 @@ struct ThreadSettingsBar: View {
                     return ModelNaming.current(modelID, agent: a)?.efforts ?? []
                 },
                 pickModel: { agentKey, modelID in
+                    // A Mac that holds a move for the next message, as its own composer does (the
+                    // bar over the composer says so, and Stay on drops it); an older one moves now.
+                    let holds = model.serves(.switchPreview, on: thread.id)
                     if agentKey != thread.agent.key {
-                        // Another provider: switch the agent and pick its model in one request.
-                        model.setPrefs(thread.id, agent: agentKey, model: modelID)
-                    } else if modelID != thread.model {
-                        model.setPrefs(thread.id, model: modelID)
+                        if holds {
+                            model.holdSwitch(thread.id, agent: agentKey, model: modelID)
+                        } else {
+                            // Another provider: switch the agent and pick its model in one request.
+                            model.setPrefs(thread.id, agent: agentKey, model: modelID)
+                        }
+                    } else {
+                        // Back on its own agent: nothing waits to move any more.
+                        if holds, thread.pendingSwitch != nil { model.stayOnAgent(thread.id) }
+                        if modelID != thread.model { model.setPrefs(thread.id, model: modelID) }
                     }
                 },
                 pickEffort: { model.setPrefs(thread.id, effort: $0) })

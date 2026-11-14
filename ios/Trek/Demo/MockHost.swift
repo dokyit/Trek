@@ -131,6 +131,7 @@ final class MockHost: Backend {
             }
         default: break
         }
+        seedBars()
         deliver(.welcome(re: "auth", host: host, features: Self.features), after: 0.15)
         deliver(.snapshot(snapshot(look: DemoMac.look)), after: 0.2)
         // `-TrekDemoMacCycle 5`: the demo Mac changes its Trek theme every few seconds (Trek,
@@ -253,6 +254,11 @@ final class MockHost: Backend {
                 return
             }
             ack(id)
+            // A switch held for this message happens now, as the Mac's composer makes it.
+            if let p = thread(tid)?.pendingSwitch {
+                update(tid) { t in t.agent = p.agent; t.model = p.model; t.modelLabel = p.modelLabel; t.pendingSwitch = nil }
+                append(tid, .handoff(from: p.from, to: p.to))
+            }
             append(tid, .user(text: text, images: images.count))
             update(tid) { $0.runState = .working; $0.needs = nil; $0.workingSince = Self.now; $0.activity = "Thinking"; $0.section = $0.pinned ? .pinned : .working }
             if sideOf[tid] != nil { answerAside(tid) } else { respond(in: tid, to: text) }
@@ -273,6 +279,7 @@ final class MockHost: Backend {
                 if let plan { t.plan = plan }
             }
         case .threadAction(let tid, let action):
+            if barThreadAction(tid, action, id: id) { return }
             if moreThreadAction(tid, action, id: id) { return }
             ack(id)
             update(tid) { t in
@@ -334,7 +341,7 @@ final class MockHost: Backend {
              .gitBranches(let target) where gitThread(target)?.project?.id.isEmpty == true:
             refuse(id, .badRequest, "This thread has no folder of its own")
         case .gitStatus(let target):
-            deliver(.gitStatus(re: id, DemoMac.gitStatus(thread: gitThread(target))), after: 0.2)
+            deliver(.gitStatus(re: id, viewedStatus(DemoMac.gitStatus(thread: gitThread(target)), target)), after: 0.2)
         case .gitDiff(_, let path):
             deliver(.gitDiff(re: id, DemoMac.diff(path)), after: 0.2)
         case .gitBranches:
@@ -378,6 +385,10 @@ final class MockHost: Backend {
                 return refuse(id, .badRequest, "Full access is locked on this Mac: unlock it in Trek's Permissions settings first.")
             }
             settings = change.applied(to: settings)
+            // A project's sending failing checks by itself shows on its threads' bars.
+            if let p = change.sendFailedChecks {
+                for t in threads where t.project?.id == p.projectId && t.checks != nil { update(t.id) { $0.checks?.auto = p.on } }
+            }
             if change.push == true && settings.push.topic.isEmpty || change.newPushTopic {
                 settings.push.topic = "trek-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(32))"
             }
@@ -397,6 +408,8 @@ final class MockHost: Backend {
             sideChat(tid, text: text, images: images.count, id: id)
         case .subAgent, .subAgentAction:
             takeSubAgent(message, id: id)
+        case .holdSwitch, .switchPreview, .rules, .ruleAction, .ruleTest, .alwaysAllow, .setViewed:
+            takeBars(message, id: id)
         }
     }
 
@@ -907,7 +920,8 @@ final class MockHost: Backend {
         add(id, tool(.edit, "Write", "db/migrations/0042_add_streak_days.sql", add: 24, del: 0))
         add(id, tool(.edit, "Edit", "src/models/user.rs", add: 14, del: 2))
         add(id, .assistant(text: "Both edits are in. Migration 0042 is written but not applied, so I'd like to run `./migrate` on the development database. It applies 0042 and nothing else.", streaming: false))
-        add(id, .approval(ApprovalRequest(requestId: "r-flaky", title: "Run command", detail: "./migrate", state: .pending)))
+        add(id, .approval(ApprovalRequest(requestId: "r-flaky", title: "Run command", detail: "./migrate", state: .pending,
+                                          alwaysAllow: RuleDraft(kind: .command, pattern: "./migrate"))))
         if let i = threads.firstIndex(where: { $0.id == id }) {
             threads[i].ask = RowAsk(requestId: "r-flaky", detail: "./migrate")
         }

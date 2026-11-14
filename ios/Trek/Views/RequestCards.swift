@@ -78,6 +78,8 @@ struct ApprovalCard: View {
     @State private var expanded = false
     @State private var confirming = false
     @State private var detailHeight: CGFloat = 124
+    /// "Always allow…": the rule being written (its sheet is up).
+    @State private var writingRule = false
 
     /// "Run command" → "run a command": the request's title as the end of a sentence.
     static func phrase(_ title: String) -> String {
@@ -96,6 +98,17 @@ struct ApprovalCard: View {
     /// one every time.
     static func offersSession(_ request: ApprovalRequest, macAllows: Bool?) -> Bool {
         macAllows != false && request.askedBy == nil
+    }
+
+    /// "Always allow…" is offered where the Mac has a rule for it to write, serves `rules`, and
+    /// its own Settings › Phone lets this phone write rules (`macAllows`; nil: it doesn't say,
+    /// so it doesn't).
+    static func offersRule(_ request: ApprovalRequest, served: Bool, macAllows: Bool?) -> Bool {
+        served && macAllows == true && request.alwaysAllow != nil && request.askedBy == nil
+    }
+
+    private var offersRule: Bool {
+        Self.offersRule(request, served: model.serves(.rules, on: threadID), macAllows: model.link(for: threadID)?.macSettings?.phoneRules)
     }
 
     /// Roughly how many lines the detail wraps to in the card (~40 monospaced characters a line).
@@ -159,9 +172,15 @@ struct ApprovalCard: View {
 
                 // Only where the Mac takes it (its Settings › Phone, the user's rules): it refuses
                 // otherwise.
-                if Self.offersSession(request, macAllows: model.link(for: threadID)?.macSettings?.sessionApprovals) {
+                let session = Self.offersSession(request, macAllows: model.link(for: threadID)?.macSettings?.sessionApprovals)
+                if session || offersRule {
                     Menu {
-                        Button("Allow for this session…", systemImage: "checkmark.seal") { allowForSession() }
+                        if session {
+                            Button("Allow for this session…", systemImage: "checkmark.seal") { allowForSession() }
+                        }
+                        if offersRule {
+                            Button("Always allow…", systemImage: "checkmark.shield") { writingRule = true }
+                        }
                     } label: {
                         Image(systemName: "ellipsis").frame(width: 22, height: 22)
                     }
@@ -171,6 +190,12 @@ struct ApprovalCard: View {
                     .disabled(confirming)
                     .accessibilityLabel("More options")
                 }
+            }
+        }
+        .onAppear { if Launch.sheet == "always-allow", offersRule { writingRule = true } }
+        .sheet(isPresented: $writingRule) {
+            if let draft = request.alwaysAllow {
+                AlwaysAllowSheet(request: request, draft: draft, agentName: agentName, threadID: threadID)
             }
         }
     }

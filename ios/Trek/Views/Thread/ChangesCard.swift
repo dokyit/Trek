@@ -34,6 +34,8 @@ struct ChangesCard: View {
         }
         .background(Trek.foreground.opacity(0.025), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Trek.foreground.opacity(0.1), lineWidth: 0.75))
+        // `-TrekSheet diff`: the turn's files listed, for screenshots.
+        .onAppear { if Launch.sheet == "diff", diff == nil { diff = DiffRequest(path: nil) } }
         .sheet(item: $diff) { request in
             // In the card's order: going from file to file follows what was just read down.
             DiffSheet(target: .thread(threadID), files: groups.flatMap(\.files), opening: request.path)
