@@ -43,13 +43,13 @@ pub(super) fn link(
             t.ended
                 .map(|e| e.saturating_duration_since(t.started).as_secs() as u32),
         ),
-        // Trek's own: what it worked, once it's over (while it works its thread's row says).
-        None => (
-            None,
-            sub.elapsed
-                .filter(|_| !sub.state.live())
-                .map(|d| d.as_secs() as u32),
-        ),
+        // Trek's own: while it works, when its clock started, so the phone counts on from what
+        // the Mac's row shows (a usage limit's pause aside); once it's over, what it worked.
+        None => match sub.elapsed {
+            Some(d) if sub.state.live() => (Some(started_ago(d)), None),
+            Some(d) => (None, Some(d.as_secs() as u32)),
+            None => (None, None),
+        },
     };
     Some(tr::SubAgentLink {
         agent: agent_ref(sub.agent.as_ref().unwrap_or(&agent)),
@@ -60,6 +60,13 @@ pub(super) fn link(
         took_secs,
         thread_id: sub.child,
     })
+}
+
+/// When (ms, to the second, as `instant_ms` gives it) a clock that has run for `worked` started:
+/// the same from one read to the next while it runs, so its item doesn't change every time.
+fn started_ago(worked: std::time::Duration) -> i64 {
+    let ms = trek_core::store::now_ms() - worked.as_millis() as i64;
+    (ms + 500).div_euclid(1000) * 1000
 }
 
 pub(super) fn state(s: TaskState) -> tr::SubAgentState {

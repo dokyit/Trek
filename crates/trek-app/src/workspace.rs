@@ -55,7 +55,7 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task,
     WeakEntity,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -278,7 +278,7 @@ pub struct LiveThread {
     /// call that started them.
     pub tasks: Vec<SubTask>,
     /// What its agent's own sub-agents have done, as the agent reported it, by the call that
-    /// started each (this session's; not kept).
+    /// started each; kept with the thread, and read back with its transcript.
     pub sub_logs: HashMap<String, SubLog>,
     /// What the agent has running in the background (`AgentEvent::Background`): shells, monitors
     /// and its own sub-agents. They outlive the turn that started them; the session ending ends
@@ -365,6 +365,25 @@ impl LiveThread {
     /// What's for the agent goes to it now, though checkpoints are still being taken.
     fn past_checkpoints(&self) -> bool {
         self.checkpoint_waited && self.commands.is_some() && self.only_checkpoints()
+    }
+
+    /// The sub-agents' steps the store kept, read back with the transcript. One heard from
+    /// since (it went on while the transcript was read) keeps what it has.
+    fn keep_sub_logs(&mut self, stored: HashMap<String, trek_core::store::StoredSubLog>) {
+        for (call, log) in stored {
+            self.sub_logs
+                .entry(call)
+                .or_insert_with(|| SubLog::stored(log));
+        }
+    }
+
+    /// Write the sub-agents' steps new or changed since the last save.
+    fn save_sub_logs(&mut self, store: &Store, thread: &str) {
+        for (call, log) in self.sub_logs.iter_mut().filter(|(_, l)| l.unsaved()) {
+            if let Err(e) = log.save(store, thread, call) {
+                tracing::warn!("save sub-agent steps {thread}/{call}: {e}");
+            }
+        }
     }
 }
 
@@ -627,7 +646,8 @@ pub const SUB_STEPS: usize = 6;
 pub const SUB_LOG: usize = 300;
 
 /// What one of the agent's own sub-agents has done (`AgentEvent::TaskLog`): opened from its row
-/// on the phone, it reads as a transcript of its own.
+/// on the phone, it reads as a transcript of its own. Kept with its thread (`Store::sub_logs`): a
+/// step is written once it's new or changed (`save`), as the thread's transcript is saved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SubLog {
     /// What it was sent to do.
@@ -637,13 +657,66 @@ pub struct SubLog {
     pub items: Vec<Item>,
     /// How many earlier ones were let go: item `i` is the `dropped + i`th, its id for good.
     pub dropped: usize,
+    /// Steps new or changed since they were last written, by number (`dropped + i`).
+    unsaved: BTreeSet<usize>,
+    /// Its prompt is still to be written.
+    prompt_unsaved: bool,
+    /// Steps were let go since the last write: the store lets them go too.
+    dropped_unsaved: bool,
 }
 
 impl SubLog {
+    /// One as the store kept it. A call still running when it was written was cut off (Trek
+    /// quit while it worked): it ended with its sub-agent.
+    pub fn stored(log: trek_core::store::StoredSubLog) -> SubLog {
+        let mut out = SubLog {
+            prompt: log.prompt,
+            dropped: log.items.first().map_or(0, |(n, _)| *n),
+            items: log.items.into_iter().map(|(_, item)| item).collect(),
+            ..SubLog::default()
+        };
+        out.settle(false);
+        out.unsaved.clear();
+        out
+    }
+
+    /// Something of it is still to be written.
+    pub fn unsaved(&self) -> bool {
+        !self.unsaved.is_empty() || self.prompt_unsaved || self.dropped_unsaved
+    }
+
+    /// Write what changed to the store, as the steps of `thread`'s sub-agent on call `call`.
+    pub fn save(&mut self, store: &Store, thread: &str, call: &str) -> anyhow::Result<()> {
+        if !self.unsaved() {
+            return Ok(());
+        }
+        let items: Vec<(usize, &Item)> = self
+            .unsaved
+            .iter()
+            .filter_map(|n| Some((*n, self.items.get(n.checked_sub(self.dropped)?)?)))
+            .collect();
+        store.save_sub_log(
+            thread,
+            call,
+            trek_core::store::SubLogChange {
+                prompt: self.prompt.as_deref().filter(|_| self.prompt_unsaved),
+                items: &items,
+                dropped: self.dropped,
+            },
+        )?;
+        self.unsaved.clear();
+        self.prompt_unsaved = false;
+        self.dropped_unsaved = false;
+        Ok(())
+    }
+
     pub fn add(&mut self, entry: trek_agents::TaskEntry) {
         use trek_agents::TaskEntry;
         match entry {
-            TaskEntry::Prompt(text) if self.prompt.is_none() => self.prompt = Some(text),
+            TaskEntry::Prompt(text) if self.prompt.is_none() => {
+                self.prompt = Some(text);
+                self.prompt_unsaved = true;
+            }
             // Told more since.
             TaskEntry::Prompt(text) => self.told(text),
             TaskEntry::Text(text) => self.push(Item::Assistant { text }),
@@ -659,13 +732,16 @@ impl SubLog {
                 output,
                 ok,
             } => {
-                if let Some(Item::Tool {
-                    output: o, status, ..
-                }) = self
+                let Some(ix) = self
                     .items
-                    .iter_mut()
-                    .rev()
-                    .find(|i| matches!(i, Item::Tool { id, .. } if *id == call))
+                    .iter()
+                    .rposition(|i| matches!(i, Item::Tool { id, .. } if *id == call))
+                else {
+                    return;
+                };
+                if let Item::Tool {
+                    output: o, status, ..
+                } = &mut self.items[ix]
                 {
                     *o = output;
                     *status = if ok {
@@ -674,6 +750,7 @@ impl SubLog {
                         ToolStatus::Failed
                     };
                 }
+                self.unsaved.insert(self.dropped + ix);
             }
         }
     }
@@ -691,16 +768,19 @@ impl SubLog {
 
     fn push(&mut self, item: Item) {
         self.items.push(item);
+        self.unsaved.insert(self.dropped + self.items.len() - 1);
         if self.items.len() > SUB_LOG {
             let over = self.items.len() - SUB_LOG;
             self.items.drain(..over);
             self.dropped += over;
+            self.dropped_unsaved = true;
+            self.unsaved = self.unsaved.split_off(&self.dropped);
         }
     }
 
     /// Its calls still running end with it.
     fn settle(&mut self, ok: bool) {
-        for i in &mut self.items {
+        for (ix, i) in self.items.iter_mut().enumerate() {
             if let Item::Tool { status, .. } = i
                 && *status == ToolStatus::Running
             {
@@ -709,6 +789,7 @@ impl SubLog {
                 } else {
                     ToolStatus::Failed
                 };
+                self.unsaved.insert(self.dropped + ix);
             }
         }
     }
@@ -3766,11 +3847,12 @@ impl Workspace {
                         store.tool_lines(&tid).unwrap_or_default(),
                         store.items_with_ids(&tid).unwrap_or_default(),
                         spend_data,
+                        store.sub_logs(&tid).unwrap_or_default(),
                     )
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let (id, checkpointed, lines, rows, spend_data) = read;
+                let (id, checkpointed, lines, rows, spend_data, sub_logs) = read;
                 if let Some((own, subs, theirs)) = spend_data {
                     let sub_threads = theirs
                         .iter()
@@ -3810,6 +3892,7 @@ impl Workspace {
                 let live = this.live.entry(id.clone()).or_default();
                 live.checkpointed = checkpointed;
                 live.lines = lines;
+                live.keep_sub_logs(sub_logs);
                 // Anything that arrived while it was read (a message held for it, a notice) goes
                 // after the history, still to be saved.
                 let arrived = std::mem::replace(&mut live.items, Transcript::stored(rows));
@@ -3864,6 +3947,7 @@ impl Workspace {
             .map(|c| c.item_id)
             .collect();
         live.lines = self.store.tool_lines(id).unwrap_or_default();
+        live.keep_sub_logs(self.store.sub_logs(id).unwrap_or_default());
         live.items.mark_edited(0);
         let rows = self.store.items_with_ids(id).unwrap_or_default();
         if !rows.is_empty() {
@@ -7072,11 +7156,10 @@ impl Workspace {
     /// Save `id`'s transcript a second from now (longer once a changed row is large, see
     /// `save_delay`), unless a save is on its way already.
     fn persist_soon(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(live) = self
-            .live
-            .get_mut(id)
-            .filter(|l| l._save_soon.is_none() && l.items.is_dirty())
-        else {
+        let Some(live) = self.live.get_mut(id).filter(|l| {
+            l._save_soon.is_none()
+                && (l.items.is_dirty() || l.sub_logs.values().any(SubLog::unsaved))
+        }) else {
             return;
         };
         let changes = live.items.changes();
@@ -7112,6 +7195,7 @@ impl Workspace {
             if let Err(e) = self.store.save_transcript(id, &mut live.items) {
                 tracing::warn!("save transcript {id}: {e}");
             }
+            live.save_sub_logs(&self.store, id);
         }
     }
 
@@ -7128,6 +7212,8 @@ impl Workspace {
         };
         let began = std::time::Instant::now();
         let saved = self.store.save_transcript(id, &mut live.items);
+        // Its sub-agents' steps, as they've grown: only what's new or changed.
+        live.save_sub_logs(&self.store, id);
         if crate::perf::on() && began.elapsed() >= Duration::from_millis(4) {
             let largest = live
                 .items

@@ -1073,7 +1073,7 @@ of its own) or a first message with nothing in it.
 
 **`sub_agent_view`**: a sub-agent opened from its row, as on the Mac. A `tool` item that stands
 for one carries `sub_agent`: whose it is (`agent`), its `label` and `detail` as the Mac's row says
-them, its `state`, `since` (while one of the agent's own works) or `took_secs`, and for one Trek
+them, its `state`, `since` (while it works: when its clock started) or `took_secs`, and for one Trek
 runs (`delegate_task`) its `thread_id`, which opens like any thread (`subscribe`, `send`,
 `answer`, `interrupt`). One of the agent's own (Claude Code's Task, Codex's agents) lives in its
 parent's session: `sub_agent` reads what it has done (`prompt`; `items` with ids `s0`, `s1`… that
@@ -1082,7 +1082,9 @@ while it works. `sub_agent_action` `stop` or `message` (with `text`) answers wit
 as it stands after; `can_stop` and `can_message` say which work now, and `no_message` why there is
 none (Claude Code takes no message for its sub-agents; Codex's are steered into their own
 thread's turn). What one asks for waits on its parent's thread (`asking`), answered there. `gone`:
-the Mac no longer has its steps (Trek restarted since), and its row's `answer` is all there is.
+the Mac has none of its steps (it ran before the Mac kept them with its thread, or an older Mac
+restarted since), and its row's `answer` is all there is. The Mac keeps the steps with the thread,
+so a restart doesn't lose them.
 An at-work row's `sub_agents` entry for one of the agent's own carries its `call_id`.
 
 ```json

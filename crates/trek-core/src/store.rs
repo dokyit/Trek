@@ -8,11 +8,13 @@ mod adopted;
 mod pr_checks;
 mod restart;
 mod search;
+mod sub_logs;
 mod usage;
 
 pub use adopted::AdoptedWorktree;
 pub use restart::Unsent;
 pub use search::{INDEX_MAX_BYTES, ImportedToIndex, SearchHit, fts_query};
+pub use sub_logs::{StoredSubLog, SubLogChange};
 pub use usage::{Activity, UsageRow};
 
 use crate::import::ImportedThread;
@@ -553,6 +555,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(restart::SCHEMA)?;
     conn.execute_batch(adopted::SCHEMA)?;
     conn.execute_batch(pr_checks::SCHEMA)?;
+    conn.execute_batch(sub_logs::SCHEMA)?;
     migrate_items(conn)?;
     search::ensure_schema(conn)
 }
@@ -1030,6 +1033,8 @@ impl Store {
             "pr_checks",
             "token_usage",
             "turn_stops",
+            "sub_logs",
+            "sub_log_items",
         ] {
             c.execute(&format!("DELETE FROM {table} WHERE thread_id = ?1"), [gone])?;
         }
@@ -1453,6 +1458,8 @@ impl Store {
             tx.execute("DELETE FROM pr_checks WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM token_usage WHERE thread_id = ?1", [gone])?;
             tx.execute("DELETE FROM turn_stops WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM sub_logs WHERE thread_id = ?1", [gone])?;
+            tx.execute("DELETE FROM sub_log_items WHERE thread_id = ?1", [gone])?;
             tx.execute(
                 "DELETE FROM wakes WHERE child_id = ?1 OR parent_id = ?1",
                 [gone],

@@ -81,8 +81,8 @@ pub struct SubAgentView {
     /// It waits on the user: its request is on its parent's thread, answered there.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub asking: bool,
-    /// The Mac no longer has it (its session ended, or Trek restarted since): `items` is empty,
-    /// and its row's answer is all there is.
+    /// The Mac has none of its steps (it ran before the Mac kept them with its thread, or an
+    /// older Mac restarted since): `items` is empty, and its row's answer is all there is.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gone: bool,
 }

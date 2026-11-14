@@ -2008,6 +2008,7 @@ impl Workspace {
             .or_default()
             .told(text.into());
         live.revision += 1;
+        self.persist_soon(thread, cx);
         cx.notify();
         Ok(())
     }

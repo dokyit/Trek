@@ -585,13 +585,23 @@ macos = "yes"
 windows = "yes"
 live_skip = "The sub-agent's sheet is the iPhone app's: the isolated app can't show it. What the Mac sends (the rows' links, `sub_agent` and `sub_agent_action`) is driven over the phone protocol in crates/trek-app/tests/remote.rs, and the sheet in ios/TrekTests on the simulator."
 how = { macos = "The same on both: the phone server's `sub_agent_view` feature.", windows = "The same on both." }
-code = ["crates/trek-app/src/remote/sub_agent_view.rs", "crates/trek-remote/src/protocol/sub_agent_view.rs"]
-tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs"]
+code = ["crates/trek-app/src/remote/sub_agent_view.rs", "crates/trek-remote/src/protocol/sub_agent_view.rs", "crates/trek-core/src/store/sub_logs.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs", "crates/trek-app/tests/orchestrate.rs", "crates/trek-core/src/store/sub_logs.rs"]
 
 [[feature.promise]]
 what = "The agent's own sub-agent reads as a transcript of its own on the phone, and takes Stop and a message there"
 macos = "crates/trek-app/tests/remote.rs::a_phone_opens_a_sub_agent_from_its_row_and_steers_it"
 windows = "crates/trek-app/tests/remote.rs::a_phone_opens_a_sub_agent_from_its_row_and_steers_it"
+
+[[feature.promise]]
+what = "One of Trek's own sub-agents at work tells the phone when its clock started, so its row counts up there as on the Mac"
+macos = "crates/trek-app/tests/orchestrate.rs::trek_s_own_sub_agent_at_work_tells_the_phone_when_it_started"
+windows = "crates/trek-app/tests/orchestrate.rs::trek_s_own_sub_agent_at_work_tells_the_phone_when_it_started"
+
+[[feature.promise]]
+what = "The agent's own sub-agent's steps are kept with its thread, a step at a time and bounded as in memory, and read back on the phone after a restart"
+macos = "crates/trek-app/tests/orchestrate.rs::the_agent_s_own_sub_agent_s_steps_outlive_a_restart"
+windows = "crates/trek-app/tests/orchestrate.rs::the_agent_s_own_sub_agent_s_steps_outlive_a_restart"
 
 [[feature]]
 id = "phone-discovery"

@@ -1879,3 +1879,204 @@ fn the_agent_s_own_sub_agent_reads_as_a_transcript_and_takes_stop_and_a_message(
         );
     });
 }
+
+/// Ask the Mac what the phone asks it, and wait (in real time) for the answer.
+async fn phone_asks<T>(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    make: impl FnOnce(trek_remote::Reply<T>) -> trek_remote::HostRequest,
+) -> trek_remote::HostResult<T> {
+    let (reply, mut rx) = tokio::sync::oneshot::channel();
+    trek.update(cx, |ws, cx| ws.remote_request(make(reply), cx));
+    let deadline = std::time::Instant::now() + common::REAL_TIME_LIMIT;
+    loop {
+        cx.run_until_parked();
+        if let Ok(answer) = rx.try_recv() {
+            return answer;
+        }
+        assert!(std::time::Instant::now() < deadline, "no answer");
+        cx.background_executor.timer(Duration::from_millis(5)).await;
+    }
+}
+
+/// The sub-agent link on `call`'s tool item in `id`'s transcript, as the phone reads it.
+async fn phone_link(
+    trek: &Trek,
+    cx: &mut TestAppContext,
+    id: &str,
+    call: &str,
+) -> trek_remote::SubAgentLink {
+    let thread_id = id.to_string();
+    let transcript = phone_asks(trek, cx, move |reply| {
+        trek_remote::HostRequest::Transcript {
+            thread_id,
+            after_seq: None,
+            limit: None,
+            reply,
+        }
+    })
+    .await
+    .unwrap();
+    transcript
+        .items
+        .into_iter()
+        .find_map(|i| match i.body {
+            trek_remote::ItemBody::Tool {
+                call_id,
+                sub_agent: Some(link),
+                ..
+            } if call_id == call => Some(link),
+            _ => None,
+        })
+        .expect("the sub-agent's row carries its link")
+}
+
+/// One of Trek's own sub-agents at work shows on the phone with when its clock started, as the
+/// agent's own do, so the phone counts its time up as the Mac's row does; once it's over, how long
+/// it worked.
+#[test]
+fn trek_s_own_sub_agent_at_work_tells_the_phone_when_it_started() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let id = trek.send(cx, "mock:delegate mock:long 8s");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let child = children(&trek, cx, &id).pop().expect("a sub-agent");
+        assert_eq!(state(&trek, cx, &child), TaskState::Running);
+        let row = trek_core::orchestrate::task_row(&child);
+        let link = phone_link(&trek, cx, &id, &row).await;
+        assert_eq!(link.thread_id.as_deref(), Some(child.as_str()));
+        assert_eq!(link.state, trek_remote::SubAgentState::Running);
+        assert_eq!(link.took_secs, None, "not over");
+        let since = link.since.expect("when it started, while it works");
+        // The time the Mac's row shows, to the second.
+        let worked = trek.read(cx, |ws, _| ws.task_elapsed(&child)).as_millis() as i64;
+        assert!(
+            (now_ms() - worked - since).abs() <= 1500,
+            "started {}ms ago, by the phone; worked {worked}ms, by the Mac",
+            now_ms() - since
+        );
+        // It stays put while it works: the phone's clock counts on from it.
+        let again = phone_link(&trek, cx, &id, &row).await;
+        assert!(again.since.is_some_and(|s| (s - since).abs() <= 1000));
+        // Over, it says how long it worked.
+        wait_task(&trek, cx, &child, TaskState::Done).await;
+        let done = phone_link(&trek, cx, &id, &row).await;
+        assert_eq!(done.state, trek_remote::SubAgentState::Done);
+        assert_eq!(done.since, None);
+        assert!(done.took_secs.is_some());
+    });
+}
+
+/// The agent's own sub-agent's steps (what it was told, said, called and got back) are kept with
+/// its thread: after a restart the phone reads them as it did before, not just the answer. They're
+/// written as they grow, and the store keeps no more of them than Trek does.
+#[test]
+fn the_agent_s_own_sub_agent_s_steps_outlive_a_restart() {
+    run(async |cx| {
+        let db = common::new_project("sub-log-restart").join("trek.sqlite");
+        let project = common::new_project("sub-log-project");
+        let relaunch = |cx: &mut TestAppContext| {
+            let mut s = common::settings();
+            s.user_projects.push(project.display().to_string());
+            let store = trek_core::store::Store::open(&db).expect("store");
+            store.ensure_project(&project).expect("project");
+            let (ws, root, window) = common::launch(cx, store, s);
+            let trek = Trek {
+                ws,
+                root,
+                window,
+                project: project.clone(),
+            };
+            trek.update(cx, |ws, _| ws.start_test_remote());
+            trek
+        };
+        let trek = relaunch(cx);
+        trek.update(cx, |ws, cx| {
+            ws.navigate(
+                Route::Draft {
+                    project: Some(project.clone()),
+                },
+                cx,
+            )
+        });
+        trek.render(cx);
+        let id = trek.send(cx, "mock:task 300ms");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let (call, before) = trek.read(cx, |ws, _| {
+            let (k, v) = ws.live[&id].sub_logs.iter().next().unwrap();
+            (k.clone(), v.clone())
+        });
+        assert!(before.items.len() >= 5, "{:?}", before.items);
+        let view = async |trek: &Trek, cx: &mut TestAppContext| {
+            let (thread_id, call_id) = (id.clone(), call.clone());
+            phone_asks(trek, cx, move |reply| trek_remote::HostRequest::SubAgent {
+                req: trek_remote::SubAgentRequest { thread_id, call_id },
+                reply,
+            })
+            .await
+            .unwrap()
+        };
+        // The transcript first, as the phone opens the thread before the row.
+        phone_link(&trek, cx, &id, &call).await;
+        let was = view(&trek, cx).await;
+        assert!(!was.gone && was.items.len() == before.items.len());
+        trek.window(cx, |window, _| window.remove_window());
+        drop(trek);
+
+        // Trek restarts.
+        let again = relaunch(cx);
+        let link = phone_link(&again, cx, &id, &call).await;
+        assert_eq!(link.state, trek_remote::SubAgentState::Done);
+        let now = view(&again, cx).await;
+        assert!(!now.gone, "its steps are back");
+        assert_eq!(now.prompt, was.prompt);
+        assert!(
+            now.prompt
+                .as_deref()
+                .unwrap()
+                .starts_with("Survey the test suite")
+        );
+        assert_eq!(now.items, was.items, "the same steps, under the same ids");
+        assert_eq!(now.answer, was.answer);
+        assert!(now.items.iter().any(|i| matches!(
+            &i.body,
+            trek_remote::ItemBody::Tool { title, output, status: trek_remote::ToolStatus::Done, .. }
+                if title == "Read" && output.contains("#[test]")
+        )));
+
+        // A long one is kept only as far as Trek keeps it, written a step at a time.
+        let n = trek_app::workspace::SUB_LOG + 5 - before.items.len();
+        let events: Vec<_> = (0..n)
+            .map(|i| trek_agents::AgentEvent::TaskLog {
+                task: call.clone(),
+                entry: trek_agents::TaskEntry::Text(format!("Step {i}")),
+            })
+            .collect();
+        again.update(cx, |ws, cx| ws.apply_events(&id, events, cx));
+        let (i, c) = (id.clone(), call.clone());
+        again
+            .wait(cx, "the steps saved", move |ws| {
+                ws.store.sub_logs(&i).unwrap()[&c]
+                    .items
+                    .first()
+                    .is_some_and(|(n, _)| *n == 5)
+            })
+            .await;
+        let stored = again.read(cx, |ws, _| ws.store.sub_logs(&id).unwrap());
+        assert_eq!(stored[&call].items.len(), trek_app::workspace::SUB_LOG);
+        again.window(cx, |window, _| window.remove_window());
+        drop(again);
+
+        let third = relaunch(cx);
+        phone_link(&third, cx, &id, &call).await;
+        let long = view(&third, cx).await;
+        assert_eq!(long.earlier, 5);
+        assert_eq!(long.items.len(), trek_app::workspace::SUB_LOG);
+        assert_eq!(long.items[0].id, "s5");
+        assert!(matches!(
+            &long.items.last().unwrap().body,
+            trek_remote::ItemBody::Assistant { text, .. } if *text == format!("Step {}", n - 1)
+        ));
+    });
+}
