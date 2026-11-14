@@ -86,8 +86,9 @@ pub struct Remote {
     /// The port and reach it started with: a change restarts it.
     started_with: (u16, trek_core::settings::Reach),
     /// Whether it serves the web remote (`settings.mobile.web` when it started): a change
-    /// restarts it.
-    pub web: bool,
+    /// restarts it. `None` for a server started some other way (a test's), which the setting
+    /// leaves as it is.
+    pub web: Option<bool>,
     /// Paired devices and which are connected, refreshed from the server's notices.
     pub devices: Vec<tr::DeviceInfo>,
     pub connected: HashSet<String>,
@@ -141,7 +142,7 @@ impl Remote {
             advertise,
             routes,
             started_with,
-            web: false,
+            web: None,
             devices,
             connected,
             sent: HashMap::new(),
@@ -793,7 +794,8 @@ impl Workspace {
             (Some(_), false) => self.stop_remote(cx),
             // Another port or address: start again with it (paired phones stay paired).
             (Some(r), true)
-                if r.started_with != wanted_with || r.web != self.settings.mobile.web =>
+                if r.started_with != wanted_with
+                    || r.web.is_some_and(|web| web != self.settings.mobile.web) =>
             {
                 self.stop_remote(cx);
                 self.start_remote(cx);
@@ -891,7 +893,7 @@ impl Workspace {
                         let mut remote = Remote::new(handle, addresses, advertise, routes, (port, reach), advert, tasks);
                         remote.announce = Some((name, id));
                         remote.policy = policy;
-                        remote.web = web;
+                        remote.web = Some(web);
                         ws.remote = Some(remote);
                         // A port or address changed while it started (`sync_remote` waits for a start
                         // to finish): start again with the new one.
@@ -1004,7 +1006,7 @@ impl Workspace {
             None,
             tasks,
         );
-        remote.web = web;
+        remote.web = Some(web);
         self.remote = Some(remote);
         // On, as its switch would be, so `sync_remote` keeps it rather than stopping it.
         self.settings.mobile.enabled = true;
