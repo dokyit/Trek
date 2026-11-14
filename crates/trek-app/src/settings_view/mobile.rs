@@ -366,162 +366,23 @@ impl SettingsView {
             ));
         }
 
-        // Pairing.
+        // Pairing. Each card is drawn by a function of its own: an unoptimised build gives every
+        // element's temporaries a slot in the frame of the function that builds them, and with
+        // both cards here this page's frame overflowed the 1 MB main thread Windows gives Trek.
         out.push(Self::heading("Pair a phone", cx));
         let ws_entity = self.workspace.clone();
         match offer {
-            // For a phone's browser: the web remote's link, which its camera opens.
-            Some(offer) if self.pair_in_browser && offer.web_url.is_some() => {
-                let web_url = offer.web_url.clone().unwrap_or_default();
-                let left = ((offer.expires_at - trek_core::store::now_ms()) / 60_000).max(0) + 1;
-                let cancel = ws_entity.clone();
-                let again = ws_entity.clone();
-                out.push(self.pair_for(true, cx));
-                out.push(
-                    h_flex()
-                        .id("mobile-pairing-web")
-                        .test_support()
-                        .gap(px(28.))
-                        .p(px(20.))
-                        .rounded(px(fluent::surface(radius::CARD)))
-                        .border_1()
-                        .border_color(theme.border)
-                        .items_start()
-                        .child(qr_low(&web_url, 3.))
-                        .child(
-                            v_flex()
-                                .gap(px(12.))
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_size(px(text::TITLE)).font_semibold().child("Scan this with your phone's camera"))
-                                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child(format!("It opens Trek's web remote in the phone's browser, which pairs with {this} and connects straight to it. When the browser asks to look for devices on your network, allow it. Then add the page to the home screen to open it like an app.")))
-                                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
-                                .child({
-                                    let url = web_url.clone();
-                                    v_flex()
-                                        .gap(px(4.))
-                                        .pt(px(4.))
-                                        .child(div().text_size(px(text::BODY)).font_medium().child("No camera?"))
-                                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("Open this link on the phone (it holds the code, so send it only to yourself):"))
-                                        .child(
-                                            h_flex()
-                                                .gap(px(8.))
-                                                .child(
-                                                    div()
-                                                        .id("pair-web-link")
-                                                        .test_support()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .px(px(8.))
-                                                        .py(px(5.))
-                                                        .rounded(px(fluent::control(radius::CONTROL)))
-                                                        .bg(theme.foreground.opacity(0.06))
-                                                        .font_family(theme.mono_font_family.clone())
-                                                        .text_size(px(text::META))
-                                                        .truncate()
-                                                        .child(web_url.clone()),
-                                                )
-                                                .child(Button::new("pair-web-link-copy").small().ghost().label("Copy link").on_click(move |_, window, cx| {
-                                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-                                                    crate::toast::push(window, "Copied", cx);
-                                                })),
-                                        )
-                                })
-                                .child(
-                                    h_flex()
-                                        .gap(px(8.))
-                                        .child(Button::new("mobile-new-code").small().outline().label("New code").on_click(move |_, _, cx| again.update(cx, |ws, cx| ws.offer_pairing(cx))))
-                                        .child(Button::new("mobile-cancel-code").small().ghost().label("Cancel").on_click(move |_, _, cx| cancel.update(cx, |ws, cx| ws.cancel_pairing(cx)))),
-                                ),
-                        )
-                        .into_any_element(),
-                );
-            }
             Some(offer) => {
-                let left = ((offer.expires_at - trek_core::store::now_ms()) / 60_000).max(0) + 1;
-                let cancel = ws_entity.clone();
-                let again = ws_entity.clone();
+                // For a phone's browser: the web remote's link, which its camera opens.
+                let browser = self.pair_in_browser && offer.web_url.is_some();
                 if offer.web_url.is_some() {
-                    out.push(self.pair_for(false, cx));
+                    out.push(self.pair_for(browser, cx));
                 }
-                out.push(
-                    h_flex()
-                        .id("mobile-pairing")
-                        .test_support()
-                        .gap(px(28.))
-                        .p(px(20.))
-                        .rounded(px(fluent::surface(radius::CARD)))
-                        .border_1()
-                        .border_color(theme.border)
-                        .items_start()
-                        .child(qr(&offer.url, 4.))
-                        .child(
-                            v_flex()
-                                .gap(px(12.))
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_size(px(text::TITLE)).font_semibold().child("Scan this with Trek on your iPhone"))
-                                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type these:"))
-                                .child(
-                                    h_flex()
-                                        .gap(px(20.))
-                                        .child(
-                                            v_flex()
-                                                .gap(px(2.))
-                                                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("Code"))
-                                                .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(offer.code.clone())),
-                                        )
-                                        .when_some(offer.fingerprint.clone(), |el, fp| {
-                                            el.child(
-                                                v_flex()
-                                                    .gap(px(2.))
-                                                    .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(words.computer_fingerprint))
-                                                    .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(fp)),
-                                            )
-                                        }),
-                                )
-                                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
-                                // Another computer running Trek pairs from the same code, pasted as a link.
-                                .child({
-                                    let url = offer.url.clone();
-                                    v_flex()
-                                        .gap(px(4.))
-                                        .pt(px(4.))
-                                        .child(div().text_size(px(text::BODY)).font_medium().child("Pair another machine"))
-                                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("In Trek on the other machine, choose Add a machine… and paste this link:"))
-                                        .child(
-                                            h_flex()
-                                                .gap(px(8.))
-                                                .child(
-                                                    div()
-                                                        .id("pair-link")
-                                                        .test_support()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .px(px(8.))
-                                                        .py(px(5.))
-                                                        .rounded(px(fluent::control(radius::CONTROL)))
-                                                        .bg(theme.foreground.opacity(0.06))
-                                                        .font_family(theme.mono_font_family.clone())
-                                                        .text_size(px(text::META))
-                                                        .truncate()
-                                                        .child(offer.url.clone()),
-                                                )
-                                                .child(Button::new("pair-link-copy").small().ghost().label("Copy link").on_click(move |_, window, cx| {
-                                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
-                                                    crate::toast::push(window, "Copied", cx);
-                                                })),
-                                        )
-                                })
-                                .child(
-                                    h_flex()
-                                        .gap(px(8.))
-                                        .child(Button::new("mobile-new-code").small().outline().label("New code").on_click(move |_, _, cx| again.update(cx, |ws, cx| ws.offer_pairing(cx))))
-                                        .child(Button::new("mobile-cancel-code").small().ghost().label("Cancel").on_click(move |_, _, cx| cancel.update(cx, |ws, cx| ws.cancel_pairing(cx)))),
-                                ),
-                        )
-                        .into_any_element(),
-                );
+                out.push(if browser {
+                    self.web_pairing_card(&offer, &advertise, cx)
+                } else {
+                    self.phone_pairing_card(&offer, &advertise, cx)
+                });
             }
             None => {
                 out.push(
@@ -551,6 +412,12 @@ impl SettingsView {
                 (true, _) => "Connected now".to_string(),
                 (false, Some(at)) => format!("Last seen {}", crate::time::relative(at)),
                 (false, None) => format!("Paired {}", crate::time::relative(d.paired_at)),
+            };
+            // A phone's browser says so: its name is the phone's ("Pixel 9 (Chrome)").
+            let seen = if d.is_web() {
+                format!("Web remote · {seen}")
+            } else {
+                seen
             };
             let ws = self.workspace.clone();
             let id = d.device_id.clone();
@@ -592,6 +459,174 @@ impl SettingsView {
         ));
         out.extend(self.machines_section(cx));
         out
+    }
+
+    /// The pairing code for a phone's browser: the web remote's link, as a QR code its camera opens
+    /// and as a link to copy.
+    #[inline(never)]
+    fn web_pairing_card(
+        &self,
+        offer: &trek_remote::PairingOffer,
+        advertise: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let this = crate::words::words().this_computer;
+        let ws_entity = self.workspace.clone();
+        let web_url = offer.web_url.clone().unwrap_or_default();
+        let left = ((offer.expires_at - trek_core::store::now_ms()) / 60_000).max(0) + 1;
+        let cancel = ws_entity.clone();
+        let again = ws_entity.clone();
+        h_flex()
+        .id("mobile-pairing-web")
+        .test_support()
+        .gap(px(28.))
+        .p(px(20.))
+        .rounded(px(fluent::surface(radius::CARD)))
+        .border_1()
+        .border_color(theme.border)
+        .items_start()
+        .child(qr_low(&web_url, 3.))
+        .child(
+            v_flex()
+                .gap(px(12.))
+                .flex_1()
+                .min_w_0()
+                .child(div().text_size(px(text::TITLE)).font_semibold().child("Scan this with your phone's camera"))
+                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child(format!("It opens Trek's web remote in the phone's browser, which pairs with {this} and connects straight to it. When the browser asks to look for devices on your network, allow it. Then add the page to the home screen to open it like an app.")))
+                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
+                .child({
+                    let url = web_url.clone();
+                    v_flex()
+                        .gap(px(4.))
+                        .pt(px(4.))
+                        .child(div().text_size(px(text::BODY)).font_medium().child("No camera?"))
+                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("Open this link on the phone (it holds the code, so send it only to yourself):"))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .id("pair-web-link")
+                                        .test_support()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .px(px(8.))
+                                        .py(px(5.))
+                                        .rounded(px(fluent::control(radius::CONTROL)))
+                                        .bg(theme.foreground.opacity(0.06))
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_size(px(text::META))
+                                        .truncate()
+                                        .child(web_url.clone()),
+                                )
+                                .child(Button::new("pair-web-link-copy").small().ghost().label("Copy link").on_click(move |_, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                                    crate::toast::push(window, "Copied", cx);
+                                })),
+                        )
+                })
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .child(Button::new("mobile-new-code").small().outline().label("New code").on_click(move |_, _, cx| again.update(cx, |ws, cx| ws.offer_pairing(cx))))
+                        .child(Button::new("mobile-cancel-code").small().ghost().label("Cancel").on_click(move |_, _, cx| cancel.update(cx, |ws, cx| ws.cancel_pairing(cx)))),
+                ),
+        )
+        .into_any_element()
+    }
+
+    /// The pairing code for Trek on iPhone: a QR code, the code and fingerprint to type, and the
+    /// link another machine pastes.
+    #[inline(never)]
+    fn phone_pairing_card(
+        &self,
+        offer: &trek_remote::PairingOffer,
+        advertise: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme().clone();
+        let words = crate::words::words();
+        let ws_entity = self.workspace.clone();
+        let left = ((offer.expires_at - trek_core::store::now_ms()) / 60_000).max(0) + 1;
+        let cancel = ws_entity.clone();
+        let again = ws_entity.clone();
+        h_flex()
+        .id("mobile-pairing")
+        .test_support()
+        .gap(px(28.))
+        .p(px(20.))
+        .rounded(px(fluent::surface(radius::CARD)))
+        .border_1()
+        .border_color(theme.border)
+        .items_start()
+        .child(qr(&offer.url, 4.))
+        .child(
+            v_flex()
+                .gap(px(12.))
+                .flex_1()
+                .min_w_0()
+                .child(div().text_size(px(text::TITLE)).font_semibold().child("Scan this with Trek on your iPhone"))
+                .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child("No camera? Choose “Enter address and code” on the phone and type these:"))
+                .child(
+                    h_flex()
+                        .gap(px(20.))
+                        .child(
+                            v_flex()
+                                .gap(px(2.))
+                                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("Code"))
+                                .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(offer.code.clone())),
+                        )
+                        .when_some(offer.fingerprint.clone(), |el, fp| {
+                            el.child(
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(words.computer_fingerprint))
+                                    .child(div().text_size(px(text::DISPLAY_S)).font_semibold().font_family(theme.mono_font_family.clone()).child(fp)),
+                            )
+                        }),
+                )
+                .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Address {advertise} · works once, for about {left} min")))
+                // Another computer running Trek pairs from the same code, pasted as a link.
+                .child({
+                    let url = offer.url.clone();
+                    v_flex()
+                        .gap(px(4.))
+                        .pt(px(4.))
+                        .child(div().text_size(px(text::BODY)).font_medium().child("Pair another machine"))
+                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child("In Trek on the other machine, choose Add a machine… and paste this link:"))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .id("pair-link")
+                                        .test_support()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .px(px(8.))
+                                        .py(px(5.))
+                                        .rounded(px(fluent::control(radius::CONTROL)))
+                                        .bg(theme.foreground.opacity(0.06))
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_size(px(text::META))
+                                        .truncate()
+                                        .child(offer.url.clone()),
+                                )
+                                .child(Button::new("pair-link-copy").small().ghost().label("Copy link").on_click(move |_, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                                    crate::toast::push(window, "Copied", cx);
+                                })),
+                        )
+                })
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .child(Button::new("mobile-new-code").small().outline().label("New code").on_click(move |_, _, cx| again.update(cx, |ws, cx| ws.offer_pairing(cx))))
+                        .child(Button::new("mobile-cancel-code").small().ghost().label("Cancel").on_click(move |_, _, cx| cancel.update(cx, |ws, cx| ws.cancel_pairing(cx)))),
+                ),
+        )
+        .into_any_element()
     }
 
     /// Which phone the pairing code is for: Trek on iPhone, or a phone's browser (the web

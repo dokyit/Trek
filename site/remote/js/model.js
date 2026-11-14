@@ -65,12 +65,19 @@ export function has(feature) {
 // ---------------------------------------------------------------------------------------------
 // Navigation
 
+/**
+ * Show `route`, as a new entry in the browser's history (Back returns) or in place of this one.
+ * Each entry counts how many of the remote's own lie under it (`depth`), so Back from a screen the
+ * remote opened on (a thread's address, reopened) goes to the thread list, not out of the app.
+ */
 export function go(route, { replace = false } = {}) {
-  state.route = route;
+  const under = (typeof history !== 'undefined' && history.state?.depth) || 0;
+  const entry = { ...route, depth: replace ? under : under + 1 };
+  state.route = entry;
   const url = route.screen === 'thread' ? `#t=${encodeURIComponent(route.threadId)}` : route.screen === 'threads' ? '#' : `#${route.screen}`;
   try {
-    if (replace) history.replaceState(route, '', url === '#' ? location.pathname : url);
-    else history.pushState(route, '', url === '#' ? location.pathname : url);
+    if (replace) history.replaceState(entry, '', url === '#' ? location.pathname : url);
+    else history.pushState(entry, '', url === '#' ? location.pathname : url);
   } catch {
     // A sandboxed page: navigation stays in the app.
   }
@@ -78,7 +85,7 @@ export function go(route, { replace = false } = {}) {
 }
 
 export function back() {
-  if (history.state && history.length > 1) history.back();
+  if ((history.state?.depth || 0) > 0) history.back();
   else go({ screen: 'threads' }, { replace: true });
 }
 
@@ -87,6 +94,16 @@ if (typeof window !== 'undefined') {
     state.route = e.state && e.state.screen ? e.state : { screen: 'threads' };
     changed();
   });
+}
+
+/** Put `text` in a thread's composer (Undo and Edit give back the message taken back). */
+export function setDraft(threadId, text) {
+  try {
+    sessionStorage.setItem(`trek-remote-draft:${threadId}`, text);
+  } catch {
+    // The composer takes it from the event alone.
+  }
+  window.dispatchEvent(new CustomEvent('trek-draft', { detail: { threadId, text } }));
 }
 
 export function toast(text, tone = 'neutral') {
@@ -211,7 +228,21 @@ export function tell(msg) {
 // ---------------------------------------------------------------------------------------------
 // What the machine says
 
+/**
+ * The count on the remote's icon, once it's on the home screen (the Badging API): the threads that
+ * need you, as the Mac's Dock badge counts them. Where the browser has no badge, nothing.
+ */
+let badged = -1;
+function badge() {
+  let count = 0;
+  for (const t of state.threads.values()) if (t.needs || t.run_state === 'needs-you' || t.run_state === 'failed') count += 1;
+  if (count === badged || typeof navigator === 'undefined' || !navigator.setAppBadge) return;
+  badged = count;
+  (count ? navigator.setAppBadge(count) : navigator.clearAppBadge()).catch(() => {});
+}
+
 export function receive(msg) {
+  if (msg.type === 'snapshot' || msg.type === 'thread' || msg.type === 'thread_removed') queueMicrotask(badge);
   switch (msg.type) {
     case 'snapshot': {
       state.threads = new Map((msg.threads || []).map((t) => [t.id, t]));

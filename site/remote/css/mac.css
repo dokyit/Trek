@@ -1,0 +1,799 @@
+/* The computer's own screens (js/features/mac*.js): Basecamp, Usage, Search, the computer's
+   settings and its permission rules. Built on remote.css's tokens, so Night and Paper both follow;
+   status colours mean what they mean everywhere: amber waits on you, red failed, green ran. */
+
+/* ---------------------------------------------------------------- Frame */
+
+.mac-scroll {
+  padding-bottom: calc(24px + var(--bottom));
+}
+
+.mac-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 12px 12px 8px;
+  max-width: 720px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.mac-page > section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mac-asking {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 56px 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.mac-title {
+  margin: 4px 4px 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--fg-strong);
+}
+
+.mac-title span {
+  color: var(--muted);
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.mac-quiet {
+  margin: 0 4px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.mac-foot {
+  margin: -10px 24px 18px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.mac-note {
+  margin: 10px 2px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.mac-small {
+  font-size: 12.5px;
+}
+
+.mac-mono {
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.mac-num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mac-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mac-bar-btn {
+  padding: 0 10px;
+  color: var(--fg-strong);
+}
+
+.mac-bar-spinner {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.mac-gauge.approval {
+  color: var(--approval);
+}
+
+.mac-gauge.failed {
+  color: var(--failed);
+}
+
+/* Status words in the computer's screens. */
+.mac-screen .approval {
+  color: var(--approval);
+}
+
+.mac-screen .failed {
+  color: var(--failed);
+}
+
+.mac-screen .done {
+  color: var(--done);
+}
+
+.mac-card {
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.mac-list {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* An agent's mark and a small project badge, beside a row's words. */
+.mac-agent {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+}
+
+.mac-badge-s {
+  display: inline-flex;
+  flex: none;
+}
+
+.mac-badge-s .mono-badge {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 7.5px;
+  letter-spacing: 0;
+}
+
+.mac-agent .icon.xs {
+  width: 12px;
+  height: 12px;
+}
+
+.mac-sheet-btns {
+  margin-top: 6px;
+}
+
+.mac-sheet-btns .btn {
+  flex: 1;
+}
+
+.mac-confirm {
+  margin: 0 0 16px;
+  line-height: 1.45;
+}
+
+.mac-empty-title {
+  margin: 10px 0 4px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--fg-strong);
+}
+
+.mac-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--approval);
+}
+
+/* ---------------------------------------------------------------- Basecamp */
+
+.mac-review {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  width: 100%;
+  padding: 10px 0;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.mac-review:first-child {
+  border-top: 0;
+}
+
+.mac-review:active {
+  background: var(--hover);
+}
+
+.mac-review-icon {
+  flex: none;
+  width: 20px;
+  display: grid;
+  place-items: center;
+  padding-top: 2px;
+}
+
+.mac-review-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mac-review-title {
+  color: var(--fg-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mac-review.unseen .mac-review-title {
+  font-weight: 650;
+}
+
+.mac-review-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.mac-review-state {
+  flex: none;
+  padding-top: 2px;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.mac-more {
+  align-self: flex-start;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.mac-totals {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 0 14px;
+}
+
+.mac-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 11px 0 11px 12px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.mac-figure:nth-child(3n + 1) {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.mac-figure:nth-child(n + 4) {
+  border-top: 1px solid var(--border-soft);
+}
+
+.mac-figure span {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.mac-figure b {
+  font-size: 19px;
+  font-weight: 550;
+  color: var(--fg-strong);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mac-turns-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.mac-turns-head.on {
+  color: var(--fg-strong);
+}
+
+.mac-chart {
+  margin-top: 10px;
+  min-height: 116px;
+  border-radius: 6px;
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.mac-chart svg {
+  display: block;
+  overflow: visible;
+}
+
+.mac-chart path {
+  fill: var(--fg);
+  opacity: 0.42;
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: mac-grow 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transition: opacity 0.12s;
+}
+
+.mac-chart path.on {
+  opacity: 0.85;
+}
+
+.mac-chart-band {
+  fill: var(--fg);
+  opacity: 0.06;
+}
+
+.mac-chart-base {
+  fill: var(--fg);
+  opacity: 0.14;
+}
+
+.mac-chart text {
+  fill: var(--muted);
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+@keyframes mac-grow {
+  from {
+    transform: scaleY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mac-chart path {
+    animation: none;
+  }
+}
+
+.mac-trow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.mac-trow:first-child {
+  border-top: 0;
+}
+
+.mac-trow-mark {
+  flex: none;
+  width: 22px;
+  min-height: 20px;
+  display: grid;
+  place-items: center;
+  padding-top: 1px;
+  color: var(--muted);
+}
+
+.mac-trow-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mac-trow-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mac-trow-label {
+  color: var(--fg-strong);
+}
+
+.mac-trow-line b {
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--fg-strong);
+}
+
+.mac-trow-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.mac-none {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mac-card-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--fg-strong);
+}
+
+.mac-narrative {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--fg) 75%, transparent);
+}
+
+.mac-narrative b {
+  color: var(--fg-strong);
+  font-weight: 650;
+}
+
+.mac-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mac-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  color: inherit;
+  font-size: 12.5px;
+}
+
+.mac-tile b {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--fg-strong);
+}
+
+.mac-tile[disabled] {
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------- Usage */
+
+.mac-provider {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.mac-provider p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.mac-provider-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mac-provider-head .mac-agent {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+}
+
+.mac-provider-head .mac-agent .icon.xs {
+  width: 17px;
+  height: 17px;
+}
+
+.mac-provider-head .grow {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+
+.mac-provider-name {
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--fg-strong);
+}
+
+.mac-left {
+  font-size: 19px;
+  font-weight: 650;
+  color: var(--fg-strong);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mac-limit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mac-limit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.mac-limit-head .grow {
+  flex: 1;
+}
+
+.mac-limit-label {
+  font-weight: 550;
+  color: var(--fg-strong);
+}
+
+.mac-window {
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.mac-limit-bar {
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.mac-limit-bar span {
+  display: block;
+  height: 100%;
+  min-width: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fg) 85%, transparent);
+}
+
+.mac-limit-bar span.approval {
+  background: var(--approval);
+}
+
+.mac-limit-bar span.failed {
+  background: var(--failed);
+}
+
+.mac-resets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.mac-reset {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--fg-strong);
+}
+
+.mac-reset .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- Search */
+
+.mac-search-field {
+  flex: 1;
+  min-height: 40px;
+  margin-right: 8px;
+  padding: 8px 12px;
+}
+
+.mac-searching {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.mac-hit-line {
+  margin-top: -6px;
+  padding: 0 16px 10px 62px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.mac-hit-parent {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+}
+
+.mac-hit-snippet {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.mac-hit-snippet mark {
+  background: none;
+  color: var(--fg-strong);
+  font-weight: 650;
+}
+
+/* ---------------------------------------------------------------- Settings */
+
+.item.mac-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.mac-choice {
+  cursor: pointer;
+}
+
+.mac-choice .sub {
+  display: block;
+}
+
+.mac-select {
+  flex: none;
+  max-width: 58%;
+  min-height: 36px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--fg-strong);
+  font-size: 14.5px;
+}
+
+.mac-topic {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-strong);
+  overflow-wrap: anywhere;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+.mac-steps {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--fg);
+}
+
+.mac-steps li + li {
+  margin-top: 4px;
+}
+
+.mac-server {
+  gap: 8px;
+}
+
+.mac-server .input {
+  flex: 1;
+  min-height: 40px;
+  min-width: 0;
+}
+
+.mac-inset {
+  margin: 0 14px 10px;
+}
+
+.item.mac-danger {
+  color: var(--failed);
+}
+
+/* ---------------------------------------------------------------- Permission rules */
+
+.mac-rule {
+  align-items: flex-start;
+}
+
+.mac-rule .sub {
+  display: block;
+}
+
+.mac-verdict {
+  flex: none;
+  min-width: 52px;
+  margin-top: 1px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: center;
+  background: color-mix(in srgb, currentColor 13%, transparent);
+}
+
+.mac-pattern {
+  display: block;
+  font-size: 13.5px;
+  color: var(--fg-strong);
+  overflow-wrap: anywhere;
+}
+
+.mac-decided {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--fg);
+}
+
+.mac-level {
+  min-height: 44px;
+}
+
+.mac-level b {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.banner.mac-locked {
+  margin: 0 12px 18px;
+  color: var(--muted);
+}
+
+.mac-detail {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow: auto;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border-soft);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mac-sure {
+  margin: 4px 0 10px;
+  font-weight: 600;
+  color: var(--fg-strong);
+}

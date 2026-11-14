@@ -2263,7 +2263,9 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                 .as_ref()
                 .and_then(|r| r.offer.as_ref())
                 .and_then(|o| o.web_url.clone())
-                .ok_or_else(|| anyhow::anyhow!("pair-web: no link for a browser (is the web remote off?)"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("pair-web: no link for a browser (is the web remote off?)")
+                })
         })?;
         if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
             std::fs::write(Path::new(&dir).join("pair-web.txt"), url)?;

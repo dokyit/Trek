@@ -1,0 +1,2167 @@
+/* viz: answers drawn beyond plain Markdown (js/features/viz*.js): ```trek-viz cards, as the
+   iPhone draws them (Views/Viz), and typeset math. Every colour is a theme token, so Night, Paper
+   and the computer's own look all draw them; marks wear the status and series colours, text the
+   text colours. */
+
+.viz,
+.viz-refused {
+  --viz-hair: color-mix(in srgb, var(--fg) 10%, transparent);
+  --viz-grid: color-mix(in srgb, var(--fg) 6%, transparent);
+  --viz-card: color-mix(in srgb, var(--fg) 2.2%, var(--bg));
+  --viz-inset: color-mix(in srgb, var(--bg) 60%, var(--viz-card));
+  --viz-edge: color-mix(in srgb, var(--fg) 5%, transparent);
+  --viz-gap: var(--bg);
+  --viz-pop: var(--raised);
+  --viz-pink: #f472b6;
+  --viz-sheen: rgb(255 255 255 / 0.07);
+}
+
+:root[data-scheme='light'] .viz,
+:root[data-scheme='light'] .viz-refused {
+  --viz-hair: color-mix(in srgb, var(--fg) 11%, transparent);
+  --viz-grid: color-mix(in srgb, var(--fg) 7%, transparent);
+  --viz-card: var(--bg);
+  --viz-inset: color-mix(in srgb, var(--border) 42%, var(--bg));
+  --viz-edge: color-mix(in srgb, var(--fg) 6%, transparent);
+  --viz-pink: #db2777;
+  --viz-sheen: rgb(255 255 255 / 0.85);
+}
+
+/* ---------------------------------------------------------------- The card */
+
+.viz {
+  margin: 4px 0 0.9em;
+  border-radius: calc(var(--radius) + 2px);
+  border: 1px solid var(--viz-hair);
+  background: linear-gradient(rgb(255 255 255 / 0.022), transparent 64px), var(--viz-card);
+  box-shadow: inset 0 1px 0 var(--viz-sheen);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--fg);
+  overflow-wrap: normal;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+:root[data-scheme='light'] .viz {
+  background: var(--viz-card);
+  box-shadow: inset 0 1px 0 var(--viz-sheen), 0 1px 1.5px rgb(0 0 0 / 0.04);
+}
+
+.viz-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 8px 0 14px;
+  min-height: 40px;
+}
+
+.viz-kind {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--viz-inset);
+  border: 1px solid var(--viz-hair);
+  color: var(--muted);
+}
+
+.viz-ico {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.viz-ico.s {
+  width: 14px;
+  height: 14px;
+}
+
+.viz-ico.xs {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.4;
+}
+
+.viz-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: var(--fg-strong);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* `.viz` first: the answer's own `.md p`, `.md table` and `.md hr` would win otherwise. */
+.viz .viz-summary {
+  margin: 3px 14px 0 48px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.viz .sr {
+  margin: 0;
+}
+
+.viz-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.viz-seg {
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 5.5%, transparent);
+}
+
+.viz-seg button {
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.viz-seg button[aria-pressed='true'] {
+  background: var(--raised);
+  color: var(--fg);
+  font-weight: 550;
+  box-shadow: 0 1px 1px rgb(0 0 0 / 0.4);
+}
+
+:root[data-scheme='light'] .viz-seg button[aria-pressed='true'] {
+  background: var(--surface);
+  box-shadow: 0 1px 1px rgb(0 0 0 / 0.08);
+}
+
+.viz-more {
+  width: 36px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.viz-more:active {
+  background: var(--hover);
+}
+
+.viz-more .viz-ico {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.6;
+}
+
+.viz-drawing {
+  flex: none;
+  padding-right: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  animation: viz-breathe 2.4s ease-in-out infinite;
+}
+
+.viz-body {
+  padding: 12px 14px 14px;
+}
+
+.viz-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.viz-inset {
+  border-radius: 10px;
+  background: var(--viz-inset);
+  border: 1px solid var(--viz-edge);
+  padding: 12px;
+}
+
+.viz-caption {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.viz-caption.center {
+  text-align: center;
+}
+
+.viz-mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.viz-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.viz .muted {
+  color: var(--muted);
+}
+
+/* A floating readout: the top layer, over the marks. */
+.viz-readout {
+  position: absolute;
+  z-index: 3;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--viz-pop);
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 0.45);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: viz-pop 0.16s ease-out;
+}
+
+:root[data-scheme='light'] .viz-readout {
+  border-color: color-mix(in srgb, var(--fg) 10%, transparent);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 0.1);
+}
+
+.viz-readout-head {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+
+.viz-readout-title {
+  font-weight: 550;
+  color: var(--fg);
+}
+
+.viz-readout-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-readout-row b {
+  font-weight: 650;
+  color: var(--fg);
+}
+
+.viz-dash {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  flex: none;
+  background: var(--c);
+}
+
+.viz-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2.5px;
+  flex: none;
+  background: var(--c);
+}
+
+.viz-csv {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 8px 0 0 auto;
+  padding: 4px 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------- Bar */
+
+.viz-bar-rows {
+  position: relative;
+}
+
+.viz-bar-grid {
+  position: absolute;
+  inset: 0 0 0 104px;
+  pointer-events: none;
+}
+
+.viz-bar-grid span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--viz-grid);
+}
+
+.viz-bar-grid span.zero {
+  background: var(--viz-hair);
+}
+
+.viz-bar-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 30px;
+}
+
+.viz-bar-label {
+  width: 104px;
+  flex: none;
+  padding-right: 10px;
+  font-size: 12.5px;
+  color: var(--fg);
+  opacity: calc(0.86 * var(--presence, 1));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-bar-track {
+  position: relative;
+  flex: 1;
+  height: 100%;
+}
+
+.viz-bar-fill {
+  position: absolute;
+  top: 7.5px;
+  height: 15px;
+  border-radius: 4px;
+  background: var(--c);
+  opacity: calc(0.86 * var(--presence, 1));
+  transform-origin: left center;
+}
+
+.viz-bar-fill.neg {
+  transform-origin: right center;
+}
+
+.viz-bar-value {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg);
+  opacity: calc(0.78 * var(--presence, 1));
+  white-space: nowrap;
+}
+
+.viz-bar-row.on .viz-bar-fill,
+.viz-bar-row.on .viz-bar-value,
+.viz-bar-row.on .viz-bar-label {
+  opacity: 1;
+}
+
+.viz-bar-axis {
+  position: relative;
+  height: 14px;
+  margin: 6px 0 0 104px;
+}
+
+.viz-bar-axis span,
+.viz-line-x span,
+.viz-tl-axis span {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.viz-bar-axis span {
+  font-family: var(--mono);
+}
+
+/* ---------------------------------------------------------------- Line */
+
+.viz-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.viz-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 14px;
+  border: 1px solid var(--viz-hair);
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 85%, transparent);
+  font-size: 12px;
+}
+
+.viz-chip.off {
+  border-color: var(--viz-grid);
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
+  text-decoration: line-through;
+}
+
+.viz-chip.off .viz-dash {
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+}
+
+.viz-line {
+  position: relative;
+  height: 210px;
+  padding: 10px;
+}
+
+.viz-plot {
+  position: absolute;
+  inset: 12px 12px 30px 50px;
+  cursor: pointer;
+}
+
+.viz-line-grid span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--viz-grid);
+}
+
+.viz-line-grid span.zero {
+  background: var(--viz-hair);
+}
+
+.viz-line-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.viz-line-stroke {
+  fill: none;
+  stroke: var(--c);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.viz-line-y {
+  position: absolute;
+  inset: 12px auto 30px 10px;
+  width: 34px;
+}
+
+.viz-line-y span {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.viz-line-x {
+  position: absolute;
+  left: 50px;
+  right: 12px;
+  bottom: 9px;
+  height: 14px;
+}
+
+.viz-line-x span {
+  font-size: 11px;
+}
+
+.viz-line-x span.first {
+  transform: none;
+}
+
+.viz-line-x span.last {
+  transform: translateX(-100%);
+}
+
+.viz-line-x span.on {
+  color: var(--fg);
+}
+
+.viz-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--fg) 24%, transparent);
+}
+
+.viz-dot {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: 0 0 0 2.5px var(--viz-gap);
+}
+
+.viz-dot.big {
+  width: 9px;
+  height: 9px;
+  margin: -4.5px 0 0 -4.5px;
+  box-shadow: 0 0 0 3px var(--viz-gap);
+}
+
+/* ---------------------------------------------------------------- Donut */
+
+.viz-donut {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+}
+
+.viz-donut-ring {
+  position: relative;
+  width: 164px;
+  height: 164px;
+}
+
+.viz-donut-ring svg {
+  display: block;
+  overflow: visible;
+}
+
+.viz-donut-track {
+  fill: none;
+  stroke: var(--viz-grid);
+}
+
+.viz-sector {
+  cursor: pointer;
+  transition: opacity 0.18s;
+}
+
+.viz-donut-center {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 106px;
+  height: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.viz-donut-value {
+  font-size: 21px;
+  font-weight: 650;
+  color: var(--fg-strong);
+  white-space: nowrap;
+}
+
+.viz-donut-label {
+  max-width: 100%;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-donut-share {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.viz-donut-legend {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viz-donut-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.viz-donut-row .viz-grow {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-donut-row.on {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.viz-donut-num {
+  font-size: 12.5px;
+  color: color-mix(in srgb, var(--fg) 85%, transparent);
+}
+
+.viz-donut-pct {
+  width: 40px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------- Stats */
+
+.viz-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.viz-tile {
+  min-width: 0;
+  padding: 12px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.viz-tile:last-child:nth-child(odd) {
+  grid-column: span 2;
+}
+
+.viz-tile-label {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-tile-figure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.viz-tile-value {
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.2;
+  color: var(--fg-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.viz-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+  color: var(--c);
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.viz-spark {
+  position: relative;
+  height: 30px;
+  margin: 2px 4px 0 0;
+}
+
+.viz-spark svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.viz-spark-line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--muted) 85%, transparent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.viz-spark .viz-dot {
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  box-shadow: 0 0 0 2px var(--viz-gap);
+}
+
+/* ---------------------------------------------------------------- Table */
+
+.viz-table-wrap {
+  padding: 0 4px 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent);
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+.viz table.viz-table {
+  display: table;
+  margin: 0;
+  border-collapse: collapse;
+  min-width: 100%;
+  font-size: 13px;
+}
+
+.viz .viz-table th,
+.viz .viz-table td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border: 0;
+}
+
+.viz-table th {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--viz-hair);
+}
+
+.viz .viz-table td {
+  color: color-mix(in srgb, var(--fg) 86%, transparent);
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.viz .viz-table td.wrap {
+  min-width: 200px;
+  max-width: 250px;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+.viz-table td.first {
+  color: var(--fg);
+}
+
+.viz-table tbody tr + tr td {
+  border-top: 1px solid var(--viz-grid);
+}
+
+.viz-table .num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.viz-table td.num {
+  font-size: 12.5px;
+}
+
+.viz-table tr.toned td {
+  background: color-mix(in srgb, var(--c) 7%, transparent);
+}
+
+.viz-table tr.toned td:first-child {
+  box-shadow: inset 2px 0 0 var(--c);
+}
+
+/* ---------------------------------------------------------------- Heatmap */
+
+.viz-heat {
+  display: grid;
+  gap: 3px;
+  align-items: center;
+}
+
+.viz-heat-x {
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.viz-heat-y {
+  padding-right: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-heat-x.on,
+.viz-heat-y.on {
+  color: var(--fg);
+}
+
+.viz-cell {
+  height: 26px;
+  border-radius: 4px;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: rgb(0 0 0 / 0.8);
+  cursor: pointer;
+}
+
+.viz-cell.light {
+  color: rgb(255 255 255 / 0.92);
+}
+
+.viz-cell.on {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--fg) 70%, transparent);
+}
+
+.viz-heat-key {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.viz-heat-pick {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font);
+}
+
+.viz-heat-pick b {
+  color: var(--fg);
+  font-weight: 650;
+}
+
+.viz-ramp {
+  width: 104px;
+  height: 6px;
+  border-radius: 3px;
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- Treemap */
+
+.viz-treemap {
+  position: relative;
+}
+
+.viz-tm {
+  position: absolute;
+  box-sizing: border-box;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: opacity 0.18s;
+}
+
+.viz-tm-label {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-tm-num {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- Timeline */
+
+.viz-timeline {
+  padding-right: 22px;
+}
+
+.viz-tl-axis {
+  position: relative;
+  height: 16px;
+  margin: 0 0 6px 100px;
+}
+
+.viz-tl-axis span {
+  top: 1px;
+}
+
+.viz-tl-axis span.named {
+  font-size: 11.5px;
+}
+
+.viz-tl-rows {
+  position: relative;
+}
+
+.viz-tl-grid {
+  position: absolute;
+  inset: 0 0 0 100px;
+  pointer-events: none;
+}
+
+.viz-tl-grid span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--viz-grid);
+}
+
+.viz-tl-row {
+  display: flex;
+  height: 30px;
+}
+
+.viz-tl-row.lane {
+  box-shadow: inset 0 1px 0 var(--viz-hair);
+}
+
+.viz-tl-label {
+  width: 100px;
+  flex: none;
+  padding-right: 10px;
+  line-height: 30px;
+  font-size: 12.5px;
+  color: color-mix(in srgb, var(--fg) 86%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-tl-label.laned {
+  color: var(--fg);
+  font-weight: 550;
+}
+
+.viz-tl-track {
+  position: relative;
+  flex: 1;
+}
+
+.viz-span {
+  position: absolute;
+  top: 5px;
+  height: 20px;
+  border-radius: 4px;
+  transform-origin: left center;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.viz-span span {
+  display: block;
+  padding: 0 6px;
+  line-height: 20px;
+  font-size: 11.5px;
+  font-weight: 550;
+  color: var(--fg);
+  opacity: var(--t, 1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-milestone {
+  position: absolute;
+  top: 0;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.viz-milestone i {
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+}
+
+.viz-milestone i::before {
+  content: '';
+  width: 9px;
+  height: 9px;
+  transform: rotate(45deg);
+  background: var(--c);
+}
+
+.viz-milestone span {
+  font-size: 12px;
+  color: var(--t);
+}
+
+/* ---------------------------------------------------------------- Flow */
+
+.viz-flow {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.viz-flow-canvas {
+  position: relative;
+}
+
+.viz-flow-svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.viz-flow-group {
+  fill: color-mix(in srgb, var(--fg) 2.2%, transparent);
+  stroke: var(--viz-hair);
+}
+
+:root[data-scheme='light'] .viz-flow-group {
+  fill: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+
+.viz-flow-edge {
+  fill: none;
+  stroke-linecap: round;
+}
+
+.viz-flow-group-name {
+  position: absolute;
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.viz-flow-node {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 10px;
+  border-radius: 8px;
+  background: var(--viz-pop);
+  border: 1px solid color-mix(in srgb, var(--fg) 13%, transparent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.35);
+  cursor: pointer;
+  transition: opacity 0.18s;
+}
+
+:root[data-scheme='light'] .viz-flow-node {
+  border-color: color-mix(in srgb, var(--fg) 12%, transparent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+}
+
+.viz-flow-node.toned {
+  padding-left: 13px;
+}
+
+.viz-flow-node.toned::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--c);
+}
+
+.viz-flow-node.on {
+  border-color: color-mix(in srgb, var(--c) 80%, transparent);
+}
+
+.viz-flow-label {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-flow-detail {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-flow-tag {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.viz-flow-edge-label {
+  position: absolute;
+  transform: translateX(-50%);
+  max-width: 140px;
+  height: 19px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--viz-pop);
+  border: 1px solid var(--viz-hair);
+  font-size: 11px;
+  line-height: 17px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.viz-flow-edge-label.on {
+  color: var(--fg);
+}
+
+/* ---------------------------------------------------------------- Layers */
+
+.viz-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 32px 10px 32px 126px;
+}
+
+.viz-layer {
+  position: relative;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  cursor: pointer;
+  transition: opacity 0.18s;
+}
+
+.viz-layer.on {
+  background: color-mix(in srgb, var(--fg) 3.5%, transparent);
+  border-color: color-mix(in srgb, var(--c) 45%, transparent);
+}
+
+.viz-slab {
+  position: absolute;
+  left: -116px;
+  top: 50%;
+  margin-top: -30px;
+  overflow: visible;
+  pointer-events: none;
+  transition: transform 0.22s ease-out;
+}
+
+.viz-layer.on .viz-slab {
+  transform: translateY(-9px);
+}
+
+.viz-slab-base {
+  fill: var(--viz-gap);
+}
+
+.viz-slab-rim {
+  fill: none;
+  stroke: color-mix(in srgb, var(--fg) 22%, transparent);
+}
+
+:root[data-scheme='light'] .viz-slab-rim {
+  stroke: color-mix(in srgb, var(--fg) 18%, transparent);
+}
+
+.viz-layer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.viz-layer-head .viz-mono {
+  font-size: 10.5px;
+}
+
+.viz-layer-head b {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--fg-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-layer-detail {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.viz-layer-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.viz-layer-items span {
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid var(--viz-hair);
+  font-size: 11px;
+  line-height: 18px;
+  color: color-mix(in srgb, var(--fg) 82%, transparent);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- Mockup */
+
+.viz-mock {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.viz-mock.plain {
+  padding: 12px;
+  border-radius: 11px;
+  background: var(--bg);
+  border: 1px solid var(--viz-hair);
+}
+
+.viz-mock.framed {
+  align-items: center;
+  padding: 18px 12px;
+}
+
+.mk-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+/* Parts keep their own width in a row, as the iPhone’s wrapping rows lay them; containers and
+   fields share what’s left. */
+.mk-row > * {
+  flex: none;
+  max-width: 100%;
+}
+
+.mk-row > .mk-card,
+.mk-row > .mk-col,
+.mk-row > .mk-list-wrap,
+.mk-row > .mk-input-wrap,
+.mk-row > .mk-progress,
+.mk-row > .mk-toggle,
+.mk-row > .mk-text,
+.mk-row > .mk-image.wide {
+  flex: 1 1 150px;
+  min-width: 0;
+}
+
+.mk-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.mk-col > .mk-button,
+.mk-col > .mk-badge,
+.mk-col > .mk-avatar {
+  align-self: flex-start;
+}
+
+.mk-card {
+  min-width: min(150px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid var(--viz-hair);
+}
+
+:root[data-scheme='light'] .mk-card {
+  background: color-mix(in srgb, var(--fg) 1.5%, transparent);
+}
+
+.mk-card > .mk-button,
+.mk-card > .mk-badge,
+.mk-card > .mk-avatar {
+  align-self: flex-start;
+}
+
+.mk-card-title {
+  font-size: 13.5px;
+  font-weight: 550;
+  color: var(--fg);
+}
+
+.mk-list-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mk-list-title {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--muted);
+}
+
+.mk-list {
+  border-radius: 9px;
+  border: 1px solid var(--viz-hair);
+  overflow: hidden;
+}
+
+.mk-list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.mk-list-row + .mk-list-row {
+  border-top: 1px solid var(--viz-grid);
+}
+
+.mk-chev {
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.mk-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 12px;
+  box-shadow: inset 0 -1px 0 var(--viz-hair);
+}
+
+.mk-nav-title {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.mk-nav-link {
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.mk-tabs {
+  display: flex;
+  gap: 18px;
+  box-shadow: inset 0 -1px 0 var(--viz-hair);
+}
+
+.mk-tab {
+  padding: 4px 0 7px;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+
+.mk-tab.on {
+  color: var(--fg);
+  font-weight: 550;
+  border-bottom-color: var(--c);
+}
+
+.viz .mk-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--fg) 88%, transparent);
+}
+
+.mk-metric {
+  min-width: 100px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mk-metric span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mk-metric b {
+  font-size: 19px;
+  font-weight: 650;
+  color: var(--fg);
+}
+
+.mk-button {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.mk-button.primary {
+  background: var(--c);
+  color: var(--on-accent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--c) 30%, transparent);
+}
+
+.mk-button.neutral {
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 16%, transparent);
+}
+
+.mk-button.toned {
+  color: var(--c);
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+}
+
+.mk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 21px;
+  padding: 0 8px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+  color: var(--c);
+  font-size: 11.5px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.mk-badge i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--c);
+}
+
+.viz .mk-divider {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--viz-hair);
+}
+
+.mk-input-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mk-input-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.mk-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 14%, transparent);
+  color: color-mix(in srgb, var(--muted) 80%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.mk-input.typed {
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 60%, transparent);
+}
+
+.mk-input .viz-ico {
+  color: var(--muted);
+}
+
+.mk-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13.5px;
+  color: var(--fg);
+}
+
+.mk-switch {
+  position: relative;
+  width: 36px;
+  height: 21px;
+  flex: none;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--fg) 16%, transparent);
+}
+
+.mk-switch.on {
+  background: var(--c);
+}
+
+.mk-switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+}
+
+.mk-switch.on i {
+  left: 17px;
+}
+
+.mk-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mk-progress-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--fg);
+}
+
+.mk-progress-head .viz-mono {
+  font-size: 12px;
+}
+
+.mk-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  overflow: hidden;
+}
+
+.mk-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--c);
+  transform-origin: left center;
+}
+
+.mk-avatar {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--c) 28%, var(--viz-gap));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 45%, transparent);
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--fg);
+}
+
+.mk-image {
+  height: 132px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--fg) 7%, transparent), color-mix(in srgb, var(--fg) 2.5%, transparent));
+  box-shadow: inset 0 0 0 1px var(--viz-grid);
+  color: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+.mk-image .viz-ico {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.8;
+}
+
+.mk-image span {
+  max-width: 100%;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mk-image.square {
+  width: 140px;
+  height: 140px;
+  align-self: flex-start;
+}
+
+.mk-image.tall {
+  width: 130px;
+  height: 190px;
+  align-self: flex-start;
+}
+
+.mk-device {
+  width: 100%;
+  max-width: 296px;
+  padding: 7px;
+  border-radius: 38px;
+  background: rgb(0 0 0 / 0.82);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 14%, transparent), 0 12px 32px rgb(0 0 0 / 0.12);
+}
+
+:root:not([data-scheme='light']) .mk-device {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 16%, transparent), 0 12px 32px rgb(0 0 0 / 0.5);
+}
+
+.mk-device.tablet {
+  max-width: 560px;
+  padding: 10px;
+  border-radius: 24px;
+}
+
+.mk-screen {
+  position: relative;
+  min-height: 440px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 30px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.mk-device.tablet .mk-screen {
+  min-height: 300px;
+  border-radius: 14px;
+}
+
+.mk-island {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  width: 86px;
+  height: 24px;
+  margin-left: -43px;
+  border-radius: 12px;
+  background: #000;
+}
+
+.mk-status {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 24px;
+  font-size: 12.5px;
+  color: var(--fg);
+}
+
+.mk-device.tablet .mk-status {
+  height: 28px;
+  padding: 0 18px;
+}
+
+.mk-screen-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 16px 12px;
+}
+
+.mk-screen-title {
+  font-size: 21px;
+  font-weight: 650;
+  color: var(--fg);
+}
+
+.mk-content {
+  gap: 12px;
+}
+
+.mk-home {
+  align-self: center;
+  width: 108px;
+  height: 4px;
+  margin: 8px 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--fg) 35%, transparent);
+}
+
+.mk-window {
+  width: 100%;
+  border-radius: 11px;
+  background: var(--bg);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 14%, transparent), 0 12px 32px rgb(0 0 0 / 0.5);
+}
+
+:root[data-scheme='light'] .mk-window {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 12%, transparent), 0 12px 32px rgb(0 0 0 / 0.12);
+}
+
+.mk-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 34px;
+  padding: 0 12px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  box-shadow: inset 0 -1px 0 var(--viz-hair);
+}
+
+.mk-window.browser .mk-bar {
+  height: 40px;
+}
+
+.mk-lights {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.mk-lights i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff5f57;
+}
+
+.mk-lights i:nth-child(2) {
+  background: #febc2e;
+}
+
+.mk-lights i:nth-child(3) {
+  background: #28c840;
+}
+
+.mk-url {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.mk-window-title {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mk-pad {
+  width: 46px;
+  flex: none;
+}
+
+.mk-pad.s {
+  width: 8px;
+}
+
+.mk-window-body {
+  padding: 14px;
+}
+
+/* ---------------------------------------------------------------- Still arriving, and refused */
+
+.viz-stub {
+  display: inline-block;
+  height: 10px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  vertical-align: middle;
+}
+
+.viz-stub.title {
+  flex: 1;
+  max-width: 140px;
+}
+
+.viz-stub.summary {
+  width: 190px;
+  max-width: 100%;
+  height: 8px;
+}
+
+.viz-skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--viz-inset);
+  border: 1px solid var(--viz-edge);
+}
+
+.viz-skeleton::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--fg) 5%, transparent), transparent);
+  animation: viz-sweep 1.8s linear infinite;
+}
+
+.viz-skeleton i {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.viz-sk-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.viz-sk-rows > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.viz-sk-rows > div > i {
+  width: 56px;
+  flex: none;
+}
+
+.viz-sk-rows span {
+  flex: 1;
+}
+
+.viz-sk-rows span i {
+  height: 12px;
+  border-radius: 6px;
+}
+
+.viz-sk-tiles {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+}
+
+.viz-sk-tiles > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.viz-sk-tiles .a {
+  width: 60px;
+}
+
+.viz-sk-tiles .b {
+  width: 90px;
+  height: 16px;
+  border-radius: 8px;
+}
+
+.viz-sk-tiles .c {
+  width: 44px;
+}
+
+.viz-refused {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 0 6px;
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--approval) 6%, transparent);
+  border: 1px solid var(--viz-hair);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+:root[data-scheme='light'] .viz-refused {
+  background: color-mix(in srgb, var(--approval) 7%, transparent);
+}
+
+.viz-refused .viz-ico {
+  margin-top: 2px;
+  color: var(--approval);
+}
+
+.viz-refused + pre {
+  margin-top: 0;
+}
+
+/* ---------------------------------------------------------------- Picked and dimmed */
+
+[data-pick] {
+  cursor: pointer;
+}
+
+.viz-bar-row,
+.viz-donut-row,
+.viz-cell,
+.viz-span,
+.viz-milestone {
+  transition: opacity 0.18s;
+}
+
+/* ---------------------------------------------------------------- The entrance, played once */
+
+@media (prefers-reduced-motion: no-preference) {
+  .viz.enter .viz-bar-fill,
+  .viz.enter .viz-span {
+    animation: viz-grow 0.72s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+    animation-delay: calc(var(--d, 0) * 40ms);
+  }
+
+  .viz.enter .viz-bar-value,
+  .viz.enter .viz-milestone,
+  .viz.enter .viz-flow-svg,
+  .viz.enter .viz-flow-edge-label {
+    animation: viz-fade 0.6s ease-out 0.25s both;
+  }
+
+  .viz.enter .viz-line-svg,
+  .viz.enter .viz-spark svg {
+    animation: viz-reveal 0.72s ease-out both;
+  }
+
+  .viz.enter .viz-end {
+    animation: viz-fade 0.3s ease-out 0.62s both;
+  }
+
+  .viz.enter .viz-donut-ring svg {
+    animation: viz-turn 0.72s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  }
+
+  .viz.enter .viz-tile {
+    animation: viz-fade 0.5s ease-out both;
+    animation-delay: calc(var(--i, 0) * 60ms);
+  }
+
+  .viz.enter .viz-cell {
+    animation: viz-fade 0.45s ease-out both;
+    animation-delay: calc(var(--d, 0) * 50ms);
+  }
+
+  .viz.enter .viz-tm {
+    animation: viz-fade 0.5s ease-out both;
+    animation-delay: calc(var(--d, 0) * 30ms);
+  }
+
+  .viz.enter .viz-flow-node {
+    animation: viz-fade 0.5s ease-out both;
+    animation-delay: calc(var(--d, 0) * 80ms);
+  }
+
+  .viz.enter .viz-slab {
+    animation: viz-drop 0.6s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+    animation-delay: calc(var(--k, 0) * 70ms);
+  }
+
+  .viz.enter .viz-mock {
+    animation: viz-fade 0.5s ease-out both;
+  }
+
+  .viz.enter .mk-progress-track span {
+    animation: viz-grow 0.72s cubic-bezier(0.2, 0.7, 0.3, 1) 0.2s both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viz-drawing,
+  .viz-skeleton::after {
+    animation: none;
+  }
+}
+
+@keyframes viz-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+@keyframes viz-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes viz-reveal {
+  from {
+    clip-path: inset(-8px 100% -8px -8px);
+  }
+  to {
+    clip-path: inset(-8px -8px -8px -8px);
+  }
+}
+
+@keyframes viz-turn {
+  from {
+    opacity: 0;
+    transform: rotate(-50deg) scale(0.94);
+  }
+}
+
+@keyframes viz-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-28px);
+  }
+}
+
+@keyframes viz-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@keyframes viz-breathe {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes viz-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
+/* ---------------------------------------------------------------- Math */
+
+/* A formula waiting for KaTeX to arrive: its TeX, quietly. */
+.md-math:not([data-set]) {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--muted);
+}
+
+.md-math-block {
+  margin: 0 0 0.7em;
+}
+
+.md .katex {
+  font-size: 1.21em;
+}
+
+/* Display math: centred, scrolling sideways when it's wider than the column. */
+.md .katex-display {
+  margin: 0.5em 0;
+  padding: 2px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+/* What scrolls sideways does so without a bar, as on the iPhone. */
+.md .katex-display::-webkit-scrollbar,
+.viz-table-wrap::-webkit-scrollbar,
+.viz-flow::-webkit-scrollbar {
+  display: none;
+}
+
+.md .katex-display > .katex {
+  max-width: 100%;
+}
+
+.md-math-block .katex-display {
+  margin: 0;
+}
+
+/* One KaTeX can't set: its source, as code. */
+.md code.md-math-source.block {
+  display: block;
+  margin: 0.3em 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre;
+  border-radius: var(--radius-s);
+  font-size: 0.8em;
+}
+
+/* ---------------------------------------------------------------- Match my computer */
+
+/* The conversation in the face the computer's theme sets it in (js/features/look-mac.js). */
+:root[data-look-convo] .transcript .md,
+:root[data-look-convo] .transcript .msg-user {
+  font-family: var(--look-convo);
+}

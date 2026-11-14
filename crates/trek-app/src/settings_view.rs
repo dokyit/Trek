@@ -151,7 +151,7 @@ pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
     match p {
         SettingsPage::Snapshots => crate::keys::localize("Screenshots you attach from the composer’s + menu or with ⌘⇧S."),
         SettingsPage::Mobile => format!(
-            "Keep your threads going from your iPhone: see what every agent is doing, answer approvals and questions, and steer or start work. The agents keep running on {}.",
+            "Keep your threads going from your phone: see what every agent is doing, answer approvals and questions, and steer or start work. The agents keep running on {}.",
             w.this_computer
         )
         .into(),

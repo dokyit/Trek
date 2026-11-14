@@ -611,8 +611,6 @@ pub struct SearchRequest {
 /// The most threads one `search` returns.
 pub const MAX_SEARCH: u32 = 200;
 
-/// Optional requests and actions a Mac serves, as `welcome` and `paired` list them in `features`.
-/// A phone hides what its Mac doesn't list: an older Mac simply doesn't show it.
 /// A certificate of the web remote's series (`trek_remote::web`): its SHA-256 as a page names it in
 /// `serverCertificateHashes`, and when it's valid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -624,6 +622,8 @@ pub struct WebCertHash {
     pub to: i64,
 }
 
+/// Optional requests and actions a Mac serves, as `welcome` and `paired` list them in `features`.
+/// A phone hides what its Mac doesn't list: an older Mac simply doesn't show it.
 pub mod feature {
     /// `search`.
     pub const SEARCH: &str = "search";

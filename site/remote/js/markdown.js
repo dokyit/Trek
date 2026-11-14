@@ -8,7 +8,7 @@ import DOMPurify from '../vendor/purify.mjs';
 import { h } from '../vendor/preact.mjs';
 import { useLayoutEffect, useRef } from '../vendor/hooks.mjs';
 import { html } from './ui.js';
-import { markdownEnhancers } from './routes.js';
+import { markdownEnhancers, markdownExtensions } from './routes.js';
 
 const marked = new Marked({ gfm: true, breaks: false });
 
@@ -34,8 +34,16 @@ const PURIFY = {
 
 const cache = new Map();
 const KEEP = 300;
+/** How many of the features’ `markdownExtensions` marked uses so far. */
+let extended = 0;
 
 export function toHtml(text) {
+  // Syntax the features add (math) joins marked before the next answer is read.
+  if (extended < markdownExtensions.length) {
+    marked.use(...markdownExtensions.slice(extended));
+    extended = markdownExtensions.length;
+    cache.clear();
+  }
   const source = text || '';
   let out = cache.get(source);
   if (out === undefined) {

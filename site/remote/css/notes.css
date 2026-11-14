@@ -1,0 +1,493 @@
+/* notes: the computer's notes (site/remote/js/features/notes.js): the list, a note read as its
+   markdown or written as text, its pictures, cards for the other files kept with it, and the
+   full-screen viewer. Theme tokens only, so Night and Paper both read. */
+
+.notes .icon-btn[disabled] {
+  opacity: 0.4;
+}
+
+.notes-search {
+  flex: 1;
+  min-height: 38px;
+  margin-right: 8px;
+}
+
+/* ---------------------------------------------------------------- The list */
+
+.notes-list {
+  padding-bottom: calc(24px + var(--bottom));
+}
+
+.note-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 12px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.note-row:active {
+  background: var(--hover);
+}
+
+.note-row-top {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.note-row-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-row-time {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.note-row-preview {
+  font-size: 14px;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.notes-none {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.notes-none > .icon {
+  width: 34px;
+  height: 34px;
+  stroke-width: 1.6;
+}
+
+.notes-none h2 {
+  margin: 6px 0 0;
+  font-size: 17px;
+  color: var(--fg-strong);
+}
+
+.notes-none p {
+  margin: 0 0 10px;
+  max-width: 300px;
+}
+
+/* ---------------------------------------------------------------- A note */
+
+.note-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.note-tools .seg {
+  flex: 0 0 auto;
+  width: 188px;
+}
+
+.note-tools .btn {
+  margin-left: auto;
+}
+
+.note-write {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.note-text {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 16px 18px calc(28px + var(--bottom));
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--fg-strong);
+  font: 400 16px / 1.55 var(--font);
+  overflow-y: auto;
+}
+
+.note-text::placeholder {
+  color: var(--muted);
+}
+
+.note-blank {
+  display: block;
+  width: 100%;
+  padding: 56px 24px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 15px;
+  text-align: center;
+}
+
+.note-body {
+  padding: 14px 18px calc(44px + var(--bottom));
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.note-body > * + * {
+  margin-top: 12px;
+}
+
+.note-body .md h1 {
+  font-size: 1.45em;
+}
+
+.note-body .md mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, #facc15 34%, transparent);
+  color: inherit;
+}
+
+.note-body .md img {
+  display: inline-block;
+  max-height: 320px;
+  vertical-align: middle;
+}
+
+/* Check boxes, which tick. */
+.note-checks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.note-checks li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.note-tick {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  margin: -2px 0 -2px -5px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+}
+
+.note-tick .icon {
+  width: 21px;
+  height: 21px;
+  stroke-width: 1.8;
+}
+
+.note-tick[aria-pressed='true'] {
+  color: var(--done);
+}
+
+.note-tick:not([disabled]):active {
+  background: var(--hover);
+}
+
+.note-tick[disabled] {
+  cursor: default;
+}
+
+.note-inline {
+  flex: 1;
+  min-width: 0;
+}
+
+.note-inline p {
+  margin: 0;
+}
+
+.note-checks li.done .note-inline {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--muted) 70%, transparent);
+}
+
+/* Pictures on lines of their own. */
+.note-imgs {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.note-img {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 12px;
+}
+
+.note-img img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.note-ph {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 132px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px dashed var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13.5px;
+  text-align: center;
+  text-decoration: none;
+}
+
+a.note-ph:active {
+  background: var(--hover);
+}
+
+/* Other files kept with the notes, as cards. */
+.note-file-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.note-file {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px 11px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  text-align: left;
+}
+
+.note-file:not([disabled]):active {
+  background: var(--hover);
+}
+
+.note-file-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--raised);
+  border: 1px solid var(--border-soft);
+  color: var(--fg-strong);
+}
+
+.note-file-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.note-file-name {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--fg-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-file-cap {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.note-file > .icon {
+  color: var(--muted);
+}
+
+.note-file.off {
+  opacity: 0.65;
+}
+
+.note-file.failed .note-file-cap {
+  color: var(--failed);
+}
+
+.note-file-save {
+  color: var(--muted);
+}
+
+/* How much of a file is here: a ring filling clockwise. */
+.note-ring {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: conic-gradient(var(--fg-strong) var(--part, 3%), color-mix(in srgb, var(--fg) 18%, transparent) 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 3px));
+}
+
+.note-video {
+  display: block;
+  width: 100%;
+  max-height: 62vh;
+  border-radius: 12px;
+  background: #000;
+}
+
+/* Asking: delete, and which version to keep. */
+.notes-ask {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 14.5px;
+}
+
+.notes-ask-btns {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.notes-ask-btns.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.notes-foot {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.note-theirs {
+  max-height: 38vh;
+  overflow: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.note-theirs .note-body {
+  padding: 12px 14px;
+  font-size: 15px;
+}
+
+/* ---------------------------------------------------------------- The viewer */
+
+.note-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+  color: #fff;
+  animation: fade 0.15s ease-out;
+  touch-action: pan-y pinch-zoom;
+}
+
+.note-viewer .icon-btn {
+  color: #fff;
+}
+
+.note-viewer .icon-btn:active {
+  background: rgb(255 255 255 / 0.14);
+}
+
+.note-viewer .icon-btn[disabled] {
+  opacity: 0.3;
+}
+
+.note-viewer-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: var(--top) 6px 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.note-viewer-bar .grow {
+  flex: 1;
+  text-align: right;
+  padding-right: 12px;
+  color: rgb(255 255 255 / 0.75);
+}
+
+.note-viewer-pic {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+}
+
+.note-viewer-pic img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.note-viewer-steps {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  padding: 0 10px calc(10px + var(--bottom));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .note-viewer {
+    animation: none;
+  }
+}

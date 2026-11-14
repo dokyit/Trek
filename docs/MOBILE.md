@@ -1,6 +1,7 @@
 # Trek Mobile — Design
 
-> Status: phase 1 in progress (2026-10). Mac side: `crates/trek-remote`. iPhone app: `ios/`.
+> Status: phase 1 in progress (2026-10). Mac side: `crates/trek-remote`. iPhone app: `ios/`. Web remote
+> (a phone's browser, Android first): `site/remote`, see [The web remote](#the-web-remote-siteremote).
 
 ## Goal
 
@@ -1255,6 +1256,113 @@ and pushes changes through `RemoteHandle::push(HostEvent::{Snapshot, Thread, Thr
 TranscriptReset})`. `ChannelHost` turns every trait call into a `HostRequest` with a oneshot reply on
 an `async_channel`, which a GPUI app drains on its foreground executor. See the crate docs for the
 integration checklist.
+
+## The web remote: `site/remote`
+
+Trek's remote for a phone without the iPhone app, an Android phone first of all: a web app at
+`https://trekdesktop.com/remote/` that pairs with Trek from a QR code and then talks to it directly,
+as the iPhone app does. It speaks the same protocol (everything above), so it offers what the
+iPhone app offers, as far as a browser can. It can be added to the home screen, where it opens full
+screen like an app.
+
+### How a page reaches Trek
+
+A page can't pin a WebSocket's certificate, and the phone server's is self-signed, so a WebSocket
+from a page would trust whatever answered. WebTransport can pin one: a page names the SHA-256 of
+the certificate it expects (`serverCertificateHashes`), and the browser then takes a certificate
+no authority vouches for. Browsers only allow this for an ECDSA P-256 certificate valid for 14 days
+at most. So (`trek_remote::web`):
+
+- **Transport.** The phone server also listens over UDP, at the same addresses and port, for
+  WebTransport (HTTP/3 over QUIC, `wtransport`). A session is opened at `https://<address>:<port>/trek`.
+- **Certificates, in a series.**
+  - Each certificate is valid for 13 days. The next one starts 12 days later, so two overlap for
+    a day. The newer one is served from the middle of that day, because a phone's clock may be
+    hours out either way.
+  - The series reaches six months ahead and grows as days pass. It's kept in
+    `<data>/mobile/web-certs.json`, readable by the user alone.
+  - The pairing link carries the hashes of the first two certificates. `paired` and `welcome`
+    over WebTransport carry them all (`web_certs`, with when each is valid).
+  - So a page that has connected once in six months knows the certificate it will meet. One that
+    hasn't connected for longer pairs again.
+- **Only Trek's page gets in.**
+  - A session whose `Origin` isn't `https://trekdesktop.com` is refused with a 403 before anything
+    is read. A session that names no origin is refused too: every browser names its page.
+  - A session at another path gets a 404.
+  - Then the phone server's own admission (which networks it serves) and its limit on
+    unauthenticated connections apply, as for the iPhone.
+- **The same protocol, read by the same code.** The page opens one bidirectional stream and speaks
+  the WebSocket protocol on it: RFC 6455 framing, as a client, masked, with no HTTP upgrade first.
+  The server wraps the stream as a WebSocket, so pairing codes, tokens, limits, pings and the
+  session itself are the iPhone's code (`server.rs`: `connected`).
+- **Pairing.** Settings › Phone & Machines › Show pairing code has a choice of Trek on iPhone or A
+  phone's browser. A phone's browser comes first on Windows, where the iPhone app can't be built.
+  - The browser's code is a link: `https://trekdesktop.com/remote/#p=<base64url JSON>`.
+  - The JSON holds `{v, code, name, hid, routes, certs}`, about 300 characters in all, drawn as a
+    QR code with low error correction.
+  - Everything after `#` stays on the phone, because a browser never sends it to the site. The
+    page takes the code out of the address as soon as it has read it.
+- **Settings.**
+  - `mobile.web` (on by default, "Let a phone's browser connect") turns the web remote off apart
+    from the iPhone's.
+  - Paired browsers are listed with the phones (platform `web`), and are unpaired the same way.
+- **Chrome's Local Network Access.**
+  - Chrome asks before a public page reaches a device on the local network, and it asks only after
+    a tap. So the page's first connection comes from its Connect button. Once that's allowed, it
+    connects by itself.
+  - A browser that refused is told how to allow it in its site settings.
+- **Windows Firewall.** Windows' question for Trek writes a rule for UDP as well as TCP, so
+  answering Allow lets both in.
+- **What's trusted.** The iPhone app trusts its own build. The web remote trusts whatever
+  trekdesktop.com serves at `/remote/`.
+  - Someone who could change those files could drive Trek from a paired phone's browser, as its
+    user can. That means anyone who could deploy the site, or get a script into it.
+  - So the site is static and deployed from this repository's `main` branch. It loads no script
+    from anywhere else, and its policy lets none run.
+  - The page's token is kept in that origin's IndexedDB. It's good only on the user's own network,
+    because Trek doesn't listen anywhere else.
+  - A user who doesn't use the web remote turns it off ("Let a phone's browser connect") and keeps
+    the iPhone's.
+
+### The page
+
+- **How it's built.**
+  - Plain ES modules with no build step, served with the rest of the site.
+  - Preact and htm for the screens, marked and DOMPurify for answers, and KaTeX for math, all
+    vendored in `site/remote/vendor/` with their licences.
+  - `site/_headers` gives `/remote/*` a policy of its own: scripts are still the site's alone, but
+    it may connect to any `https:` address (the user's computer), keep a service worker, and use
+    the microphone (dictation).
+- **The modules**, in `site/remote/js/`:
+
+  | Layer | Modules |
+  |---|---|
+  | The wire | `frame.js` (WebSocket framing), `wire.js` (the WebTransport session), `link.js` (the pairing link) |
+  | The connection | `client.js` (dial every address at once, hello or pair, requests and replies, reconnecting) |
+  | Storage | `store.js` (IndexedDB: the paired machines and their tokens) |
+  | State | `model.js` (the app's state and what the computer says) |
+  | Screens | `screens.js`, `thread.js` and `items.js` (the screens) |
+  | Feature areas | `features/*.js`, each registered through `routes.js` |
+
+- **The demo.** `?demo` (or "Explore the demo") plays a pretend computer in the page
+  (`demo.js`), as the iPhone's demo mode does.
+- **Working on it.**
+  - `node script/site/serve.mjs` serves `site/` with its `_headers` at `http://localhost:8080/`
+    (any port as its argument).
+  - `TREK_WEB_REMOTE_PAGE=http://localhost:8080/remote/` makes a Trek offer links to that copy and
+    let only it in.
+- **Tests.**
+  - `node script/site/test/run.mjs`, in both CIs, tests the page's plain code: the framing, the
+    pairing link and the headers.
+  - `cargo test -p trek-remote --test web` drives the server with a WebTransport client that does
+    what the page does.
+  - `node script/site/remote-e2e.mjs` runs it end to end on one machine. A capture build makes
+    threads and a link, and headless Chrome or Edge pairs, allows a command and sends a follow-up.
+- **Browsers.**
+  - **Supported:** Chrome, Edge and Samsung Internet on Android (and on a computer).
+  - **Not supported:** a browser without WebTransport, or without `serverCertificateHashes`.
+    Firefox's support varies, and Safari on iPhone has neither yet. The page says so instead of
+    failing.
 
 ## iPhone app: `ios/`
 

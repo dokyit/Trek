@@ -567,6 +567,28 @@ code = ["crates/trek-app/src/remote.rs"]
 tests = ["crates/trek-app/src/remote/notes.rs", "crates/trek-app/tests/interactions.rs"]
 
 [[feature]]
+id = "phone-web-remote"
+area = "iPhone"
+what = "A phone's browser (an Android phone first of all) pairs and follows and steers your threads: Trek's web remote at trekdesktop.com/remote, connected straight to this computer"
+macos = "yes"
+windows = "yes"
+live = ["pair-web", "wait 800", "route settings:phone", "wait 400", "count mobile-web 1", "reveal mobile-pair-for#1", "click mobile-pair-for#1", "wait 400", "count mobile-pairing-web 1", "count pair-web-link 1"]
+how = { macos = "Shared code: trek_remote::web serves WebTransport (HTTP/3 over QUIC) beside the phone server's WebSocket, at the same addresses and port over UDP, its certificate a series of 13-day ECDSA ones the page pins by hash; the page is site/remote, deployed with the site.", windows = "The same code. Windows Firewall's question for Trek writes a rule for UDP as well as TCP, so an answer of Allow lets both in." }
+note = "Checked on a Windows 11 PC: headless Chrome opened the pairing link the capture build wrote (`pair-web`, the page served from site/ by script/site/serve.mjs), paired over WebTransport with the certificate pinned from the link, listed the threads, allowed a scripted agent's command (the agent carried on), and sent a follow-up the agent answered; Trek's devices.json had the browser as a `web` device, connected (script/site/remote-e2e.mjs)."
+code = ["crates/trek-remote/src/web.rs", "crates/trek-app/src/remote.rs", "crates/trek-app/src/settings_view/mobile.rs"]
+tests = ["crates/trek-remote/tests/web.rs", "crates/trek-app/src/settings_view/mobile.rs"]
+
+[[feature.promise]]
+what = "A page pairs and says hello over WebTransport, the certificate pinned by the hashes in its pairing link, and learns the whole series of certificates"
+macos = "crates/trek-remote/tests/web.rs::a_page_pairs_and_says_hello_over_webtransport_with_the_certificate_pinned"
+windows = "crates/trek-remote/tests/web.rs::a_page_pairs_and_says_hello_over_webtransport_with_the_certificate_pinned"
+
+[[feature.promise]]
+what = "Only Trek's own page, at its path, gets a session; another origin, none, or another path is refused"
+macos = "crates/trek-remote/tests/web.rs::only_the_remotes_page_gets_in"
+windows = "crates/trek-remote/tests/web.rs::only_the_remotes_page_gets_in"
+
+[[feature]]
 id = "phone-look"
 area = "iPhone"
 what = "The iPhone app draws the computer's look: its Trek theme (built-in, the user's or an agent's) and background art, when the phone matches it"

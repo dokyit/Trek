@@ -3,11 +3,11 @@
 
 import { useEffect, useState } from '../vendor/hooks.mjs';
 import { html, Icon, IconButton, Menu, Sheet, Spinner, Switch, Segmented, ProjectBadge, ago } from './ui.js';
-import { ConnectionBanner } from './thread.js';
+import { ConnectionBanner, Mark, attached } from './thread.js';
 import * as app from './model.js';
 import { supported } from './wire.js';
 import { setScheme, scheme } from './look.js';
-import { threadParts } from './routes.js';
+import { composerPreviews, composerTools, settingsSections, threadParts } from './routes.js';
 
 // ---------------------------------------------------------------------------------------------
 // Threads
@@ -39,7 +39,7 @@ export function ThreadRow({ t }) {
       <div class="thread-meta">
         <span class="grow">${t.project?.name || 'Chat'}</span>
         ${t.branch && html`<span>· <${Icon} name="branch" size="xs" /> ${t.branch}</span>`}
-        ${(t.model_label || t.agent?.name) && html`<span class="grow">· ${t.model_label || t.agent?.name}</span>`}
+        ${(t.model_label || t.agent?.name) && html`<span class="grow">· <${Mark} agent=${t.agent} size=${12} /> ${t.model_label || t.agent?.name}</span>`}
         ${t.additions || t.deletions ? html`<span class="mono"><span class="add">+${t.additions}</span> <span class="del">−${t.deletions}</span></span>` : null}
         ${t.sub_agents?.length > 0 && html`<span class="badge">${t.sub_agents.length} sub-agent${t.sub_agents.length === 1 ? '' : 's'}</span>`}
       </div>
@@ -175,12 +175,30 @@ export function NewThreadScreen({ projectId }) {
   const [worktree, setWorktree] = useState(false);
   const [plan, setPlan] = useState(false);
   const [text, setText] = useState('');
+  // What goes with it (the composer's tools add them): photos, and videos and files sent up first.
+  const [attachments, setAttachments] = useState([]);
+  // Start tapped while its files were still going up: the ones it waits for.
+  const [after, setAfter] = useState(null);
   const [busy, setBusy] = useState(false);
   const chosenModel = model || agent?.default_model || agent?.models?.[0]?.id || null;
   const isRepo = projects.find((p) => p.id === project)?.is_repo;
+  const online = state.status === 'online';
+  const said = text.trim();
+
+  /** What goes with attachments started with no words, as the iPhone words it. */
+  const caption = () => {
+    const photos = attachments.filter((a) => a.kind === 'image').length;
+    const videos = attachments.filter((a) => a.kind === 'file' && a.video).length;
+    const files = attachments.filter((a) => a.kind === 'file' && !a.video).length;
+    const total = photos + videos + files;
+    if (photos === total) return total > 1 ? `Here are ${total} photos.` : 'Here’s a photo.';
+    if (videos === total) return total > 1 ? `Here are ${total} videos.` : 'Here’s a video.';
+    if (files === total) return total > 1 ? `Here are ${total} files.` : 'Here’s a file.';
+    return `Here are ${total} attachments.`;
+  };
 
   const start = async () => {
-    if (!text.trim() || !agent || !project) return;
+    if ((!said && attachments.length === 0) || !agent || !project) return;
     setBusy(true);
     try {
       try {
@@ -188,7 +206,7 @@ export function NewThreadScreen({ projectId }) {
       } catch {
         // Not remembered.
       }
-      const ack = await app.ask({ type: 'new_thread', project_id: project, agent: agent.key, model: chosenModel, text: text.trim(), worktree: worktree && !!isRepo, plan });
+      const ack = await app.ask({ type: 'new_thread', project_id: project, agent: agent.key, model: chosenModel, text: said || caption(), worktree: worktree && !!isRepo, plan, ...attached(attachments) }, { timeout: 120_000 });
       if (ack.thread_id) app.go({ screen: 'thread', threadId: ack.thread_id }, { replace: true });
       else app.back();
     } catch (err) {
@@ -198,11 +216,28 @@ export function NewThreadScreen({ projectId }) {
     }
   };
 
+  // It starts once the files it waits for are in; one that doesn't go up (its toast says why) leaves it to you.
+  useEffect(() => {
+    if (!after) return;
+    const left = attachments.filter((a) => after.includes(a.id));
+    if (left.length < after.length) setAfter(null);
+    else if (left.every((a) => !a.pending)) {
+      setAfter(null);
+      start();
+    }
+  }, [attachments, after]);
+
+  const tapStart = () => {
+    const pending = attachments.filter((a) => a.pending).map((a) => a.id);
+    if (pending.length) setAfter(pending);
+    else start();
+  };
+
   return html`<div class="screen">
     <header class="bar">
       <${IconButton} icon="x" label="Cancel" onClick=${() => app.back()} />
       <div class="bar-title"><h1>New thread</h1></div>
-      <button class="btn small primary" type="button" style=${{ marginRight: '8px' }} disabled=${!text.trim() || busy || state.status !== 'online'} onClick=${start}>${busy ? html`<${Spinner} />` : 'Start'}</button>
+      <button class="btn small primary" type="button" style=${{ marginRight: '8px' }} aria-label=${after ? 'Starting once its files are in' : 'Start'} disabled=${(!said && attachments.length === 0) || busy || !!after || !online} onClick=${tapStart}>${busy || after ? html`<${Spinner} />` : 'Start'}</button>
     </header>
     <${ConnectionBanner} />
     <div class="scroll"><div class="pad">
@@ -227,9 +262,15 @@ export function NewThreadScreen({ projectId }) {
       </label>`}
       ${isRepo && html`<div class="item" style=${{ padding: '6px 0', border: 0 }}><div class="grow">In a new worktree<div class="sub">Its own branch and folder, so it doesn’t touch what you have checked out.</div></div><${Switch} on=${worktree} onChange=${setWorktree} label="In a new worktree" /></div>`}
       <div class="item" style=${{ padding: '6px 0 14px', border: 0 }}><div class="grow">Plan first<div class="sub">The agent plans, and waits for you to approve it.</div></div><${Switch} on=${plan} onChange=${setPlan} label="Plan first" /></div>
-      <label class="field"><span>What should it do?</span>
-        <textarea class="input" rows="6" value=${text} onInput=${(e) => setText(e.target.value)} placeholder="Describe the task" autofocus></textarea>
-      </label>
+      <div class="field"><span>What should it do?</span>
+        <div class="new-compose">
+          ${composerPreviews.map((Preview, i) => html`<${Preview} key=${i} attachments=${attachments} setAttachments=${setAttachments} />`)}
+          <textarea class="input" rows="6" value=${text} onInput=${(e) => setText(e.target.value)} placeholder="Describe the task" aria-label="What should it do?" autofocus></textarea>
+          <div class="new-compose-tools">
+            ${composerTools.map((Tool, i) => html`<${Tool} key=${i} threadId=${null} text=${text} setText=${setText} attachments=${attachments} setAttachments=${setAttachments} disabled=${!online} />`)}
+          </div>
+        </div>
+      </div>
     </div></div>
   </div>`;
 }
@@ -293,6 +334,7 @@ export function SettingsScreen() {
           setScheme(v);
         }} />
       </div></div>
+      ${settingsSections.map((Section, i) => html`<${Section} key=${i} />`)}
       <h2 class="group-title">This phone</h2>
       <div class="group">
         <div class="item"><div class="grow">Connected to<div class="sub">${state.machine ? `${state.machine.name}${state.route ? ` at ${state.machine.routes?.[0] || ''}` : ''}` : 'Nothing'}</div></div></div>

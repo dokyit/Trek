@@ -481,6 +481,8 @@ textarea.input {
 }
 
 .spinner {
+  display: inline-block;
+  vertical-align: middle;
   width: 18px;
   height: 18px;
   border-radius: 50%;
@@ -1122,6 +1124,11 @@ textarea.input {
 
 .composer-tools::-webkit-scrollbar {
   display: none;
+}
+
+/* The row scrolls sideways rather than squeezing its chips. */
+.composer-tools > * {
+  flex: none;
 }
 
 .pinned-ask {

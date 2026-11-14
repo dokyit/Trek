@@ -7,7 +7,7 @@ import { useState } from '../vendor/hooks.mjs';
 import { html, Icon, Spinner, ago, took, plural, clock } from './ui.js';
 import { Markdown } from './markdown.js';
 import * as app from './model.js';
-import { threadParts, turnActions } from './routes.js';
+import { parts, sheets, threadParts, turnActions } from './routes.js';
 
 const TOOL_ICON = { command: 'terminal', read: 'file', edit: 'pencil', search: 'search', web: 'globe', agent: 'bot', other: 'zap' };
 
@@ -17,11 +17,11 @@ export function Item({ item, threadId, last }) {
     case 'user':
       return html`<${UserMessage} item=${item} threadId=${threadId} />`;
     case 'assistant':
-      return html`<div class="msg-assistant"><${Markdown} text=${item.text} />${item.streaming && html`<span class="muted"> ▍</span>`}</div>`;
+      return html`<div class="msg-assistant"><${Markdown} text=${item.text} threadId=${threadId} />${item.streaming && html`<span class="muted"> ▍</span>`}</div>`;
     case 'reasoning':
       return html`<${Reasoning} item=${item} open=${last} />`;
     case 'tool':
-      return html`<${Tool} item=${item} />`;
+      return html`<${Tool} item=${item} threadId=${threadId} /><${Parts} kind="tool" item=${item} threadId=${threadId} />`;
     case 'approval':
       return html`<${Approval} item=${item} threadId=${threadId} />`;
     case 'question':
@@ -30,12 +30,13 @@ export function Item({ item, threadId, last }) {
       return html`<${Plan} item=${item} threadId=${threadId} />`;
     case 'turn_end':
       return html`<${TurnEnd} item=${item} threadId=${threadId} />`;
+    // A turn that stopped with one of these ends with it: its actions (undo, retry) go after it.
     case 'notice':
-      return html`<div class="notice">${item.text}</div>`;
+      return html`<div class="notice">${item.text}</div><${Actions} item=${item} threadId=${threadId} />`;
     case 'error':
-      return html`<div class="notice error">${item.text}</div>`;
+      return html`<div class="notice error">${item.text}</div><${Actions} item=${item} threadId=${threadId} />`;
     case 'limit':
-      return html`<div class="notice limit">${item.text}${item.resets_at ? ` · resets ${clock(item.resets_at)}` : ''}</div>`;
+      return html`<div class="notice limit">${item.text}${item.resets_at ? ` · resets ${clock(item.resets_at)}` : ''}</div><${Actions} item=${item} threadId=${threadId} />`;
     case 'handoff':
       return html`<div class="notice">Handed off from ${item.from_agent?.name || item.from} to ${item.to_agent?.name || item.to}</div>`;
     case 'thread_link':
@@ -51,16 +52,24 @@ export function Item({ item, threadId, last }) {
   }
 }
 
+/** What areas draw under a built-in item (a message's photos, a watched video's frames). */
+function Parts({ kind, item, threadId }) {
+  return (threadParts.itemParts.get(kind) || []).map((P, i) => html`<${P} key=${i} item=${item} threadId=${threadId} />`);
+}
+
 function Actions({ item, threadId }) {
   return turnActions.map((A, i) => html`<${A} key=${i} item=${item} threadId=${threadId} />`);
 }
 
 function UserMessage({ item, threadId }) {
+  // What the media area draws under the bubble isn't said in it again.
   const extras = [];
-  if (item.images) extras.push(plural(item.images, 'image'));
-  if (item.videos?.length) extras.push(plural(item.videos.length, 'video'));
+  if (item.images && !app.has('attachment')) extras.push(plural(item.images, 'image'));
+  if (item.videos?.length && !app.has('media')) extras.push(plural(item.videos.length, 'video'));
   if (item.files?.length) extras.push(plural(item.files.length, 'file'));
-  return html`<div class="msg-user">${item.text}${extras.length > 0 && html`<div class="attach"><${Icon} name="clip" size="xs" /> ${extras.join(' · ')}</div>`}</div><${Actions} item=${item} threadId=${threadId} />`;
+  const split = parts.get('split-mentions');
+  const text = split ? split(item.text || '').text : item.text;
+  return html`<div class="msg-user">${text}${extras.length > 0 && html`<div class="attach"><${Icon} name="clip" size="xs" /> ${extras.join(' · ')}</div>`}</div><${Parts} kind="user" item=${item} threadId=${threadId} /><${Actions} item=${item} threadId=${threadId} />`;
 }
 
 function Reasoning({ item, open }) {
@@ -72,10 +81,15 @@ function Reasoning({ item, open }) {
   </div>`;
 }
 
-function Tool({ item }) {
+function Tool({ item, threadId }) {
   const [open, setOpen] = useState(false);
+  const [sheet, setSheet] = useState(false);
   const status = item.status || 'done';
   const counts = item.added != null || item.removed != null;
+  // A tool call that stands for a sub-agent opens it: Trek's own as a thread, the agent's own in a sheet.
+  const sub = item.sub_agent;
+  const SubSheet = sheets.get('sub-agent');
+  const openSub = sub && (sub.thread_id ? () => app.go({ screen: 'thread', threadId: sub.thread_id }) : SubSheet ? () => setSheet(true) : null);
   return html`<div class=${`tool ${status}`}>
     <button type="button" aria-expanded=${open ? 'true' : 'false'} onClick=${() => setOpen(!open)}>
       ${status === 'running' ? html`<${Spinner} />` : html`<${Icon} name=${TOOL_ICON[item.tool] || 'zap'} size="s" />`}
@@ -86,6 +100,8 @@ function Tool({ item }) {
       ${status === 'denied' && html`<span class="badge failed">Denied</span>`}
     </button>
     ${open && html`<pre>${item.detail && item.detail.length > 60 ? `${item.detail}\n\n` : ''}${item.output || (status === 'running' ? 'Running…' : 'No output.')}</pre>`}
+    ${openSub && html`<button type="button" class="btn small ghost" style=${{ margin: '0 6px 6px' }} onClick=${openSub}><${Icon} name="bot" size="s" />Open the sub-agent</button>`}
+    ${sheet && SubSheet && html`<${SubSheet} threadId=${threadId} callId=${item.call_id} link=${sub} onClose=${() => setSheet(false)} />`}
   </div>`;
 }
 
@@ -122,9 +138,14 @@ function Resolved({ state }) {
 
 export function Approval({ item, threadId }) {
   const [busy, setBusy] = useState(false);
+  const [writing, setWriting] = useState(false);
   const pending = item.state === 'pending';
   const warning = DESTRUCTIVE.test(item.detail || '');
-  const session = pending && app.state.macSettings?.session_approvals === true;
+  // Not for a request a rule of the user's always asks about: the computer refuses that.
+  const session = pending && !item.asked_by && app.state.macSettings?.session_approvals === true;
+  // "Always allow…" writes a rule, which only the computer's setting lets a phone do.
+  const AlwaysAllow = sheets.get('always-allow');
+  const rule = pending && !!item.always_allow && !item.asked_by && !!AlwaysAllow && app.has('rules') && app.state.macSettings?.phone_rules === true;
   const forSession = () => {
     const agent = app.row(threadId)?.agent?.name || 'the agent';
     if (confirm(`Let ${agent} do this kind of thing without asking again this session?`)) answer(threadId, item.request_id, { kind: 'approval', decision: 'allow_for_session' }, setBusy);
@@ -133,12 +154,15 @@ export function Approval({ item, threadId }) {
     <div class="card-head"><${Icon} name="shield" size="s" /><span class="grow">${item.title || 'Approval'}</span>${!pending && html`<${Resolved} state=${item.state} />`}</div>
     ${item.detail && html`<pre class="detail">${item.detail}</pre>`}
     ${warning && pending && html`<p class="muted" style=${{ margin: '0 0 10px', fontSize: '13px' }}><${Icon} name="alert" size="xs" /> This could delete or overwrite things. Read it before you allow it.</p>`}
+    ${item.asked_by && pending && html`<p class="muted" style=${{ margin: '0 0 10px', fontSize: '13px' }}>Your rule asks about this every time: <span class="mono">${item.asked_by}</span></p>`}
     ${pending &&
     html`<div class="row-btns">
       <button class="btn" type="button" disabled=${busy} onClick=${() => answer(threadId, item.request_id, { kind: 'approval', decision: 'deny' }, setBusy)}>Deny</button>
       <button class=${`btn ${warning ? '' : 'primary'}`} type="button" disabled=${busy} onClick=${() => answer(threadId, item.request_id, { kind: 'approval', decision: 'allow' }, setBusy)}>Allow</button>
       ${session && html`<button class="btn ghost small" type="button" disabled=${busy} onClick=${forSession}>Allow for this session…</button>`}
+      ${rule && html`<button class="btn ghost small" type="button" disabled=${busy} onClick=${() => setWriting(true)}>Always allow…</button>`}
     </div>`}
+    ${writing && AlwaysAllow && html`<${AlwaysAllow} threadId=${threadId} item=${item} onClose=${() => setWriting(false)} />`}
   </div>`;
 }
 
@@ -187,7 +211,7 @@ export function Plan({ item, threadId }) {
   const [busy, setBusy] = useState(false);
   return html`<div class=${`card ${pending ? 'plan' : ''}`}>
     <div class="card-head"><${Icon} name="plan" size="s" /><span class="grow">Plan</span>${!pending && html`<${Resolved} state=${item.state} />`}</div>
-    <${Markdown} text=${item.markdown} />
+    <${Markdown} text=${item.markdown} threadId=${threadId} />
     ${pending &&
     html`<div style=${{ marginTop: '10px' }}>
       <textarea class="input" rows="2" placeholder="What to change (to send it back)" value=${feedback} onInput=${(e) => setFeedback(e.target.value)}></textarea>

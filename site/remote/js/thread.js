@@ -7,7 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from '../vendor/hooks.mj
 import { html, Icon, IconButton, Menu, Sheet, Spinner, Segmented, ProjectBadge, took } from './ui.js';
 import { Item, Approval, Questions, Plan } from './items.js';
 import * as app from './model.js';
-import { composerPreviews, composerTools, threadParts } from './routes.js';
+import { composerPreviews, composerTools, parts, threadParts } from './routes.js';
 
 const REQUESTS = new Set(['approval', 'question', 'plan']);
 
@@ -127,6 +127,12 @@ const ACCESS = [
   ['full-access', 'Full access'],
 ];
 
+/** An agent's logo where the media area provides one, else a neutral glyph. */
+export function Mark({ agent, size = 14 }) {
+  const AgentMark = parts.get('agent-mark');
+  return AgentMark ? html`<${AgentMark} agent=${agent} size=${size} />` : html`<${Icon} name="bot" size="xs" />`;
+}
+
 /** What a message's attachments add to `send` or `new_thread`: photos inline, files by their upload's id. */
 export function attached(attachments) {
   const images = attachments.filter((a) => a.kind === 'image').map(({ mime, data }) => ({ mime, data }));
@@ -151,6 +157,11 @@ export function Composer({ row, threadId, onPicker }) {
   const [attachments, setAttachments] = useState([]);
   const area = useRef(null);
   const working = row?.run_state === 'working';
+  useEffect(() => {
+    const take = (e) => e.detail.threadId === threadId && setText(e.detail.text);
+    window.addEventListener('trek-draft', take);
+    return () => window.removeEventListener('trek-draft', take);
+  }, [threadId]);
   const online = app.state.status === 'online';
 
   useLayoutEffect(() => {
@@ -170,9 +181,11 @@ export function Composer({ row, threadId, onPicker }) {
     }
   };
 
+  // Files still going up: the computer refuses a message that names one.
+  const waiting = attachments.some((a) => a.pending);
   const send = async () => {
-    const said = text.trim();
-    if ((!said && attachments.length === 0) || busy) return;
+    const said = text.trim() || (attachments.length ? parts.get('caption')?.(attachments) || '' : '');
+    if ((!said && attachments.length === 0) || busy || waiting) return;
     setBusy(true);
     try {
       const ack = await app.ask({ type: 'send', thread_id: threadId, text: said, mode: working ? mode : undefined, ...attached(attachments) }, { timeout: 120_000 });
@@ -211,7 +224,7 @@ export function Composer({ row, threadId, onPicker }) {
   return html`<div>
     ${row &&
     html`<div class="composer-tools">
-      <button class="chip" type="button" onClick=${onPicker} aria-label="Agent and model"><${Icon} name="bot" size="xs" />${row.model_label || row.model || row.agent?.name || 'Model'}${row.effort_label ? ` · ${row.effort_label}` : ''}</button>
+      <button class="chip" type="button" onClick=${onPicker} aria-label="Agent and model"><${Mark} agent=${row.agent} size=${14} />${row.model_label || row.model || row.agent?.name || 'Model'}${row.effort_label ? ` · ${row.effort_label}` : ''}</button>
       ${row.access && html`<button class=${`chip ${row.access === 'full-access' ? 'on' : ''}`} type="button" onClick=${() => setPref({ access: access[(accessIndex + 1) % access.length][0] })}><${Icon} name="shield" size="xs" />${(ACCESS.find(([v]) => v === row.access) || [, row.access])[1]}</button>`}
       ${row.plan != null && html`<button class=${`chip ${row.plan ? 'on' : ''}`} type="button" aria-pressed=${row.plan ? 'true' : 'false'} onClick=${() => setPref({ plan: !row.plan })}><${Icon} name="plan" size="xs" />Plan</button>`}
       ${row.context?.percent != null && html`<span class="chip" title="Context used"><${Icon} name="gauge" size="xs" />${row.context.percent}%</span>`}
@@ -235,9 +248,9 @@ export function Composer({ row, threadId, onPicker }) {
           }
         }}
       ></textarea>
-      ${working && !text.trim()
+      ${working && !text.trim() && attachments.length === 0
         ? html`<button class="send stop" type="button" aria-label="Stop" disabled=${busy || !online} onClick=${stop}><${Icon} name="stop" size="s" /></button>`
-        : html`<button class="send" type="button" aria-label="Send" disabled=${(!text.trim() && attachments.length === 0) || busy || !online} onClick=${send}>${busy ? html`<${Spinner} />` : html`<${Icon} name="send" size="s" />`}</button>`}
+        : html`<button class="send" type="button" aria-label="Send" disabled=${(!text.trim() && attachments.length === 0) || busy || waiting || !online} onClick=${send}>${busy || waiting ? html`<${Spinner} />` : html`<${Icon} name="send" size="s" />`}</button>`}
     </div>
   </div>`;
 }
@@ -257,7 +270,7 @@ function PrefsSheet({ row, onClose }) {
   return html`<${Sheet} title="Agent and model" onClose=${onClose}>
     ${state.agents.length > 1 &&
     html`<div class="field"><span>Agent</span>
-      <select class="input" value=${row.agent?.key} onChange=${(e) => set({ agent: e.target.value })}>
+      <select class="input" value=${row.agent?.key} onChange=${(e) => set({ agent: e.target.value, ...(app.has('switch_preview') ? { hold: true } : {}) })}>
         ${state.agents.map((a) => html`<option value=${a.key}>${a.name}</option>`)}
       </select></div>`}
     ${agent?.models?.length > 0 &&

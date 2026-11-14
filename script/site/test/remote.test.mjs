@@ -1,7 +1,7 @@
 // The web remote's plain code, in Node: the WebSocket framing it speaks on its WebTransport stream,
 // the pairing link and the addresses in it, and the headers the site serves it with.
 //
-//   node --test script/site/test/
+//   node script/site/test/run.mjs
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -167,4 +167,12 @@ test('the web remote gets its own security policy; the rest of the site keeps th
   assert.match(home['Content-Security-Policy'], /connect-src https:\/\/api\.github\.com/);
   assert.doesNotMatch(home['Content-Security-Policy'], /worker-src/);
   assert.match(home['Permissions-Policy'], /microphone=\(\)/);
+});
+
+// ---------------------------------------------------------------------------------------------
+// The service worker's list
+
+test('the service worker keeps every file the remote loads, and nothing that isn’t there', async () => {
+  const { listed, shell } = await import('../remote-shell.mjs');
+  assert.deepEqual(listed(), shell(), 'out of date: node script/site/remote-shell.mjs');
 });

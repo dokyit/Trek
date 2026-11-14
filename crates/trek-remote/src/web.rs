@@ -472,6 +472,10 @@ mod tests {
         assert_eq!(json["routes"][1], "100.101.1.2:7420");
         assert_eq!(json["certs"].as_array().unwrap().len(), 2);
         assert_eq!(json["certs"][0], series.current(NOW).unwrap().hash());
-        assert!(link.len() < 420, "a plain QR code: {} characters", link.len());
+        assert!(
+            link.len() < 420,
+            "a plain QR code: {} characters",
+            link.len()
+        );
     }
 }

@@ -708,7 +708,10 @@ fn mobile_dir() -> PathBuf {
 /// whose origin is then the one let in.
 fn web_config() -> tr::web::WebConfig {
     let config = tr::web::WebConfig::new(Some(mobile_dir().join("web-certs.json")));
-    match std::env::var("TREK_WEB_REMOTE_PAGE").ok().filter(|p| !p.trim().is_empty()) {
+    match std::env::var("TREK_WEB_REMOTE_PAGE")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+    {
         Some(page) => config.serving_from(page.trim()),
         None => config,
     }
@@ -789,7 +792,9 @@ impl Workspace {
             (None, true) if !self.remote_starting => self.start_remote(cx),
             (Some(_), false) => self.stop_remote(cx),
             // Another port or address: start again with it (paired phones stay paired).
-            (Some(r), true) if r.started_with != wanted_with || r.web != self.settings.mobile.web => {
+            (Some(r), true)
+                if r.started_with != wanted_with || r.web != self.settings.mobile.web =>
+            {
                 self.stop_remote(cx);
                 self.start_remote(cx);
             }
