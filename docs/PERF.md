@@ -23,6 +23,8 @@ dispatched as events through the shots harness, never real keyboard or mouse inp
 200-thread profile is made by `crates/trek-core/examples/perf_seed.rs` through the store's own
 API: 200 mock threads in four projects spread over four months, four turns each with token
 reports, a 2,000-item thread titled "Long transcript", and a 3,000-line Rust file per project.
+`SEED_SESSIONS=1` adds "Agent session #00", shaped like a day-long agent session: 8,200 items, most
+of them tool calls over 600 files.
 
 Trek measures itself with `TREK_PERF=1` (`crates/trek-app/src/perf.rs`): one `perf:` line per
 measurement in the log (`<data dir>\logs` when `TREK_DATA_DIR` is set, else
@@ -110,6 +112,64 @@ this run looked at one of the three once a minute, so 6 MB a minute is within wh
 gives, and "isn't given back when they end" is how it behaved. Both are bounded now (by what they
 weigh, not by count), the same code on both platforms. Whether that is all of the growth here
 hasn't been measured: the 30-minute run has to be done again on this laptop to say so.
+
+### A day-long thread with the hub pinned open (2026-11-14)
+
+Reported on 0.4.52: typing and the wheel lagged far behind, in a day-long thread. Trek's UI thread
+sat at 100 % of a core (its own CPU time read once a second: 1,000 ms each second), with the GPU at
+7 %, while nothing new was arriving.
+
+Reproduced with a release capture build that keeps its symbols
+(`CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo build
+--release -p trek-app --features shots`) on the seed's `SEED_SESSIONS=1` thread, shaped like the
+reported one: 8,200 items, 5,500 of them tool calls reading and editing 600 files. A turn ran in it
+(`mock:long`), the window 1536 × 830 at 125 %, in the Alpenglow theme with the Oxbow painting across
+the chat and glass on. Single runs, each against a fresh copy of the seed.
+
+| What | Before, hub pinned open | Before, hub hidden | After, hub pinned open |
+|---|---|---|---|
+| Frame while the turn runs: p50 / p95 | 1,512 / 1,528 ms | 10.5 / 15.1 ms | **4.5 / 6.4 ms** |
+| Key to paint: p50 / p95 | 272 / 1,621 ms | 14.7 / 29.3 ms | **10.7 / 18.6 ms** |
+| Wheel step: frame p50; steps painted within 500 ms | 1,526 ms; 0 of 60 | 13.8 ms; 60 of 60 | **5.1 ms; 60 of 60** |
+| A new thread, key to paint: p50 / p95 | | | 11.0 / 18.8 ms |
+
+Where the time went, from the sampler below: 78 % of the UI thread in the hub's Open in row, looking
+for the programs that can open the folder. `open_in::windows_targets` reads App Paths and searches
+the PATH, with each PATHEXT extension, for a dozen editors and Windows Terminal: thousands of
+`CreateFileW`s with a long PATH, on every frame. Another 15 % went to the hub's Sources, a walk
+through all 8,200 items that checked each file against the hundreds already found by comparing
+strings it made for every comparison. The hub is drawn with the window, so both ran on every frame
+of the working bar's animation, every key and every wheel step. With the hub hidden neither ran,
+which is why hiding it was a workaround.
+
+What changed: the Open in programs are looked for once at launch, off the UI thread, and kept;
+once a minute old they're used while they're looked for again on a thread of their own
+(`open_in::Kept`, both platforms: a Mac looks for each app's bundle). The Sources are worked out once
+for each change to the thread's items (`hub::sources_kept`), with a set for what's been seen.
+`tests/hub.rs` holds frames that change nothing to no lookups and no walks, on both CIs, and fails
+with either kept answer taken away. After the change the UI thread is idle 81 % of the time with
+the turn running.
+
+Left: a few single file checks a frame, about 1 % of the UI thread. `paths::data_dir()` makes the
+data folder again each time it's asked for (97 callers rely on that), and the hub's branch switch
+looks for `.git` up the folder tree.
+
+## Where a frame's time goes: the sampler
+
+Windows' own profilers need an administrator. `script/sampler` doesn't: it suspends one thread of a
+process of the same user, reads its stack with dbghelp and lets it go, a few hundred times a second,
+then names each frame from the PDB beside the executable. Against a capture build that kept its
+symbols (above):
+
+```powershell
+cargo build --release --manifest-path script/sampler/Cargo.toml
+script\sampler\target\release\sampler.exe <pid> main 6 1 frames.folded
+```
+
+`main` is the process's first thread, Trek's UI thread. It prints the functions most often on the
+stack (inclusive) and at its top (self), which modules had symbols, and the stacks folded
+(`root;…;leaf count`) for a closer look: `grep CreateFileW frames.folded` finds what touches the
+disk while drawing. Each sample holds the thread 1.5 to 4 ms, so treat absolute times with care.
 
 ## What was slow, and what changed
 

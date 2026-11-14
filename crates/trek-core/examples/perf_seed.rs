@@ -19,6 +19,10 @@
 //!   a third, no picture used twice while the folder has enough.
 //! - `SEED_ARTIFACTS` threads titled "Artifact thread #n", four turns each, each answer a small
 //!   `trek-html` page of its own.
+//! - `SEED_SESSIONS` threads titled "Agent session #n" of `SEED_SESSION_TURNS` turns (100 by
+//!   default: 8,200 items), shaped like a day-long agent session: each turn a message, then
+//!   eleven rounds of a thought, five tool calls (reads, an edit, commands, ~1.5 KB of output each)
+//!   and an answer, over 600 different files, so the thread's Sources have hundreds of entries.
 //!
 //! Run with `TREK_DATA_DIR=<new folder> cargo run --release -p trek-core --example perf_seed`.
 //! It refuses a folder that already has a database: it never adds to someone's data.
@@ -188,6 +192,13 @@ fn main() {
             .flat_map(|k| artifact_round(i, k, now - (4 - k) as i64 * 150_000))
             .collect();
         extra.push((format!("Artifact thread #{i:02}"), items));
+    }
+    let session_turns = env_n("SEED_SESSION_TURNS", 100);
+    for i in 0..env_n("SEED_SESSIONS", 0) {
+        let items = (0..session_turns)
+            .flat_map(|k| session_round(i, k, now - (session_turns - k) as i64 * 600_000))
+            .collect();
+        extra.push((format!("Agent session #{i:02}"), items));
     }
     let extras = extra.len();
     for (e, (title, items)) in extra.into_iter().enumerate() {
@@ -361,6 +372,82 @@ fn heavy_round(i: usize, k: usize, at: i64) -> [Item; 5] {
             took_secs: 90,
         },
     ]
+}
+
+/// A turn of an "Agent session": a message, then eleven rounds of a thought, five tool calls and a
+/// short answer (82 items). The calls read and edit files from a pool of 600, in an order that
+/// reaches every one of them over 100 turns, and run commands; each prints about 1.5 KB.
+fn session_round(i: usize, k: usize, at: i64) -> Vec<Item> {
+    const FILES: usize = 600;
+    let file = |n: usize| {
+        let n = n % FILES;
+        format!("crates/module_{}/src/part_{}.rs", n / 20, n % 20)
+    };
+    let mut items = vec![Item::User {
+        text: format!("Turn {k}: carry on with the refactor, then run the tests (session {i})."),
+        images: vec![],
+        at: Some(at),
+        resume: None,
+        aside: false,
+    }];
+    for c in 0..11 {
+        items.push(Item::Reasoning {
+            text: format!(
+                "Round {c} of turn {k}: the call sites in the next module still take the old \
+                 config; reading them before changing the signature."
+            ),
+        });
+        for t in 0..5 {
+            let n = (k * 55 + c * 5 + t) * 7;
+            let (title, detail) = match t {
+                0 | 1 => ("Read", file(n)),
+                2 => ("Edit", file(n + 3)),
+                3 => (
+                    "Run",
+                    format!("cargo test -p module_{} --lib", (n / 20) % 30),
+                ),
+                _ => (
+                    "Run",
+                    format!("rg -n \"Config::\" crates/module_{}", (n / 20) % 30),
+                ),
+            };
+            let output: String = (1..=24)
+                .map(|l| {
+                    format!("{l:>4} | let step_{l} = config.part({l}).apply(input, turn_{k});\n")
+                })
+                .collect();
+            items.push(Item::Tool {
+                id: format!("s{i}-{k}-{c}-{t}"),
+                title: title.into(),
+                detail,
+                output,
+                status: ToolStatus::Done,
+            });
+        }
+        items.push(Item::Assistant {
+            text: format!(
+                "Module {c} takes the new `Config` now, and its tests pass. {}",
+                if c % 3 == 0 {
+                    "The next one has two call sites behind a feature flag."
+                } else {
+                    "On to the next."
+                }
+            ),
+        });
+        if c % 3 == 2 {
+            items.push(Item::Assistant {
+                text: format!(
+                    "Checked in: `cargo test` is green for the first {} modules.",
+                    c + 1
+                ),
+            });
+        }
+    }
+    items.push(Item::TurnEnd {
+        at: at + 480_000,
+        took_secs: 480,
+    });
+    items
 }
 
 /// A turn of an "Image thread": a message with two pictures attached, and an answer that shows

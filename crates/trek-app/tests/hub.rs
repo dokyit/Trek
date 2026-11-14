@@ -254,3 +254,75 @@ fn a_thread_window_has_the_hub_too() {
         )));
     });
 }
+
+/// The hub pinned open is drawn with the window, many times a second while anything in it moves
+/// (a working thread's clock, a key, the wheel). On each of those frames it once looked for the Open
+/// in programs on disk (thousands of file checks with a long PATH on Windows) and walked every item
+/// of the thread for its sources: over a second a frame on a thread of 8,000 items, with typing and
+/// scrolling waiting behind it. A frame that changes nothing the hub shows does neither now, and a
+/// change to the thread works the sources out once.
+#[test]
+fn the_pinned_hub_looks_for_nothing_on_frames_that_change_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        let project = trek.project.clone();
+        // A day-long session's worth of reads and edits, over 600 files.
+        let items: Vec<Item> = (0..6_000)
+            .map(|n| {
+                let file = format!("src/part_{}.rs", (n * 7) % 600);
+                tool(
+                    &format!("t{n}"),
+                    if n % 3 == 0 { "Edit" } else { "Read" },
+                    &file,
+                )
+            })
+            .collect();
+        let id = trek.update(cx, |ws, cx| {
+            let t = ws
+                .store
+                .create_thread(
+                    Some(&project),
+                    common::mock(),
+                    None,
+                    trek_core::Effort::Medium,
+                    trek_core::HandHolding::Auto,
+                )
+                .expect("thread");
+            common::store_items(&ws.store, &t.id, items);
+            ws.reload(cx);
+            ws.navigate(Route::Thread(t.id.clone()), cx);
+            t.id
+        });
+        trek_core::open_in::warm();
+        trek.render(cx);
+        assert!(trek.visible(cx, "hub-card"), "pinned open");
+        assert!(trek.visible(cx, "hub-sources-all"), "600 sources: View all");
+        let lookups = trek_core::open_in::lookups_on_this_thread();
+        let walks = trek_app::hub::sources_worked_out();
+        for _ in 0..30 {
+            trek.render(cx);
+        }
+        assert_eq!(
+            trek_core::open_in::lookups_on_this_thread(),
+            lookups,
+            "no frame waited for the Open in programs"
+        );
+        assert_eq!(
+            trek_app::hub::sources_worked_out(),
+            walks,
+            "no frame walked the thread's items"
+        );
+        // A change to the thread: its sources are worked out again, once.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![trek_agents::AgentEvent::Notice("A notice".into())],
+                cx,
+            )
+        });
+        for _ in 0..5 {
+            trek.render(cx);
+        }
+        assert_eq!(trek_app::hub::sources_worked_out(), walks + 1);
+    });
+}

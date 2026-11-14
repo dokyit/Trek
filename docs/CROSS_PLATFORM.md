@@ -330,6 +330,13 @@ In order of how much each removes the problem, smallest first where that's close
   it needs is the fixture binary (a verb, or copied under the program's name), not a script; a
   platform's keys are bound with `keys::with_mac`; a link on Windows is a junction. A test gated
   to one platform says why the other can't run it, and the feature's ledger note says so too.
+- Drawing something: a `render` runs on every frame its window draws, many times a second while
+  anything in the window moves (a working thread's clock, a key, the wheel). Nothing in one
+  searches the disk or the registry, or walks all of a thread's items: work it out when what it
+  depends on changes (a thread's `revision`), or off the UI thread, and keep the answer
+  (`open_in::Kept`, `hub::sources_kept`). The hub did both on every frame, over a second a frame on
+  a long thread on Windows (docs/PERF.md); `tests/hub.rs` now counts what a frame looks for, on
+  both CIs.
 - Saving a secret: through `trek-private`, never `fs::write` with a `#[cfg(unix)]` mode beside it.
 - Adding C or C++ to the Windows build: give it the static runtime (/MT), as
   `vendor/whisper-rs-sys/build.rs` does for whisper.cpp (`tests/hardening.rs` fails otherwise),

@@ -158,12 +158,96 @@ pub const MAC_APPS: &[(&str, &str)] = &[
 ];
 
 /// Those of `MAC_APPS` this Mac has: Terminal always (it comes with macOS), the rest when installed.
+/// As last found (`Kept`).
 pub fn mac_apps() -> Vec<(&'static str, &'static str)> {
+    static KEPT: Kept<Vec<(&'static str, &'static str)>> = Kept::new();
+    KEPT.get(find_mac_apps)
+}
+
+fn find_mac_apps() -> Vec<(&'static str, &'static str)> {
+    looked();
     MAC_APPS
         .iter()
         .copied()
         .filter(|(_, app)| *app == "Terminal" || mac_app_installed(app))
         .collect()
+}
+
+/// Find this machine's Open in programs now, on the caller's thread, so the first menu or hub drawn
+/// has them without waiting (Trek does it at launch, off the UI thread, once the login PATH is in).
+pub fn warm() {
+    if cfg!(windows) {
+        let _ = windows_targets();
+    } else if cfg!(target_os = "macos") {
+        let _ = mac_apps();
+    }
+}
+
+/// How many times this thread has looked for the Open in programs (`warm`, an ask before the first
+/// answer): a test holds a window's frames to none. A look again once an answer is old happens on
+/// a thread of its own.
+pub fn lookups_on_this_thread() -> usize {
+    LOOKED.with(std::cell::Cell::get)
+}
+
+thread_local! {
+    static LOOKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn looked() {
+    LOOKED.with(|n| n.set(n.get() + 1));
+}
+
+/// How long a lookup's answer is used before it's looked for again.
+const KEEP_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A lookup's answer, kept. The Open in menus are drawn with their window, the hub's on every frame
+/// while it's pinned open, and finding the programs reads the registry and searches the PATH for a
+/// dozen of them on Windows, thousands of file checks with a long PATH (it was most of each frame's
+/// time, and typing and scrolling waited on it), or looks for each app's bundle on a Mac. An answer
+/// older than `KEEP_FOR` is used while it's looked for again on a thread of its own, so a program
+/// installed meanwhile shows within a minute; only an ask before the first answer waits for one.
+struct Kept<T> {
+    found: std::sync::Mutex<Option<(std::time::Instant, T)>>,
+    looking: std::sync::atomic::AtomicBool,
+}
+
+impl<T: Clone + Send + 'static> Kept<T> {
+    const fn new() -> Self {
+        Self {
+            found: std::sync::Mutex::new(None),
+            looking: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn get(&'static self, find: fn() -> T) -> T {
+        if let Some((at, value)) = &*self.found.lock().unwrap_or_else(|e| e.into_inner()) {
+            if at.elapsed() > KEEP_FOR {
+                self.look_again(find);
+            }
+            return value.clone();
+        }
+        let value = find();
+        self.keep(value.clone());
+        value
+    }
+
+    /// `find` on a thread of its own, unless it's already being looked for.
+    fn look_again(&'static self, find: fn() -> T) {
+        use std::sync::atomic::Ordering;
+        if self.looking.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        std::thread::spawn(move || {
+            self.keep(find());
+            self.looking.store(false, Ordering::Release);
+        });
+    }
+
+    fn keep(&self, value: T) {
+        *self.found.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((std::time::Instant::now(), value));
+    }
 }
 
 /// Whether the Mac app `name` (`Zed`, `Visual Studio Code`) is installed where `open -a` finds
@@ -185,8 +269,15 @@ pub fn mac_app_installed_in(name: &str, home: &Path, exists: impl Fn(&Path) -> b
 }
 
 /// The menu's rows for this machine (after the file manager's): each program found, as
-/// `windows_targets_with` answers them from the machine's registry and PATH.
+/// `windows_targets_with` answers them from the machine's registry and PATH. As last found
+/// (`Kept`).
 pub fn windows_targets() -> Vec<Target> {
+    static KEPT: Kept<Vec<Target>> = Kept::new();
+    KEPT.get(find_windows_targets)
+}
+
+fn find_windows_targets() -> Vec<Target> {
+    looked();
     windows_targets_with(
         app_path,
         |name| detect::which_in(detect::login_path(), name),
@@ -319,6 +410,37 @@ fn registered_value(raw: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    /// The programs are looked for once, and the answer used from then on; once it's old it's still
+    /// used while they're looked for again off the caller's thread, once.
+    #[test]
+    fn a_lookup_is_kept_and_looked_for_again_once_old() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn find() -> usize {
+            CALLS.fetch_add(1, Ordering::SeqCst) + 1
+        }
+        static KEPT: Kept<usize> = Kept::new();
+        assert_eq!(KEPT.get(find), 1);
+        assert_eq!(KEPT.get(find), 1, "kept");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+        let Some(long_ago) = Instant::now().checked_sub(KEEP_FOR * 2) else {
+            return;
+        };
+        *KEPT.found.lock().unwrap() = Some((long_ago, 1));
+        assert_eq!(
+            KEPT.get(find),
+            1,
+            "the old answer, while it's looked for again"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while KEPT.get(find) != 2 {
+            assert!(Instant::now() < deadline, "looked for again");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2, "once");
+    }
 
     #[test]
     fn a_mac_app_is_found_in_either_applications_folder() {

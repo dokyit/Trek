@@ -2023,6 +2023,8 @@ impl Workspace {
         // doesn't wait for it on the UI thread, as it did when its session started.
         std::thread::spawn(|| {
             trek_core::detect::login_path();
+            // And the Open in programs, found on that PATH: the hub lists them on every frame.
+            trek_core::open_in::warm();
         });
         // Agents and language servers a crashed run left behind go first.
         cx.background_executor()

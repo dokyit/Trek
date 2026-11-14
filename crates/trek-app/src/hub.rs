@@ -265,7 +265,7 @@ struct Model {
     context: Option<(u64, u64)>,
     usage: Option<(AgentId, UsageLimit)>,
     agents: Vec<(String, String, TaskState)>,
-    sources: Vec<Source>,
+    sources: Rc<[Source]>,
     lineage: Vec<Lineage>,
     thread: Option<String>,
 }
@@ -346,8 +346,8 @@ fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
         })
         .unwrap_or_default();
     let sources = match (&thread, live) {
-        (Some(t), Some(l)) => sources(&l.items, t.cwd.as_deref()),
-        _ => vec![],
+        (Some(t), Some(l)) => sources_kept(t, l),
+        _ => Rc::from([]),
     };
     let lineage = thread
         .as_ref()
@@ -399,9 +399,65 @@ fn this_computer() -> String {
     name
 }
 
+/// `sources` of `thread`, worked out once for each change to its items. The hub is drawn with the
+/// window, so many times a second while anything in it moves (a working thread's clock, a key
+/// typed, the wheel), and a day-long thread's sources are a walk through 8,000 items: done on every
+/// frame, that walk was most of each frame's time, and typing and scrolling lagged behind it.
+fn sources_kept(thread: &Thread, live: &crate::workspace::LiveThread) -> Rc<[Source]> {
+    kept_sources(&thread.id, thread.cwd.as_deref(), live)
+}
+
+/// How many times the hub has worked a thread's sources out on this thread (the UI thread; a test's
+/// own): a test holds frames that change nothing to none.
+#[cfg(any(test, feature = "test-support"))]
+pub fn sources_worked_out() -> usize {
+    WORKED_OUT.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static WORKED_OUT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// `sources_kept`, by the thread's id and folder.
+fn kept_sources(
+    thread: &str,
+    cwd: Option<&Path>,
+    live: &crate::workspace::LiveThread,
+) -> Rc<[Source]> {
+    /// The last few threads' (a split, a thread window): id, items' revision, folder, sources.
+    type Kept = Vec<(String, u64, Option<PathBuf>, Rc<[Source]>)>;
+    thread_local! {
+        static KEPT: std::cell::RefCell<Kept> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        if let Some((.., s)) = kept
+            .iter()
+            .find(|(id, rev, c, _)| id == thread && *rev == live.revision && c.as_deref() == cwd)
+        {
+            return s.clone();
+        }
+        let s: Rc<[Source]> = sources(&live.items, cwd).into();
+        kept.retain(|(id, ..)| id != thread);
+        if kept.len() >= 4 {
+            kept.remove(0);
+        }
+        kept.push((
+            thread.to_string(),
+            live.revision,
+            cwd.map(Path::to_path_buf),
+            s.clone(),
+        ));
+        s
+    })
+}
+
 /// What the thread used, newest first, each once: images attached, files mentioned (`@path`),
 /// read or edited, pages fetched. Relative paths are the thread's folder's.
 fn sources(items: &[Item], cwd: Option<&Path>) -> Vec<Source> {
+    #[cfg(any(test, feature = "test-support"))]
+    WORKED_OUT.with(|n| n.set(n.get() + 1));
     let resolve = |p: &str| -> Option<PathBuf> {
         let p = p.trim();
         if p.is_empty() {
@@ -415,9 +471,10 @@ fn sources(items: &[Item], cwd: Option<&Path>) -> Vec<Source> {
         Some(path)
     };
     let mut out: Vec<Source> = vec![];
+    // Each once: a thread can read hundreds of files thousands of times.
+    let mut seen = std::collections::HashSet::new();
     let mut push = |s: Source| {
-        let key = s.key();
-        if !out.iter().any(|o| o.key() == key) {
+        if seen.insert(s.key()) {
             out.push(s);
         }
     };
@@ -1525,8 +1582,9 @@ fn open_source(s: &Source, window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Source, sources};
+    use super::{Source, kept_sources, sources};
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use trek_core::store::{Item, ToolStatus};
 
     fn tool(title: &str, detail: &str, status: ToolStatus) -> Item {
@@ -1537,6 +1595,52 @@ mod tests {
             output: String::new(),
             status,
         }
+    }
+
+    /// A day-long session: 6,000 calls reading and editing 600 files. Each file is listed once,
+    /// the newest first, and the list is worked out again only when the thread's items change.
+    #[test]
+    fn a_long_threads_sources_are_listed_once_each_and_kept_until_it_changes() {
+        let items: Vec<Item> = (0..6_000)
+            .map(|n| {
+                let file = format!("src/part_{}.rs", (n * 7) % 600);
+                if n % 3 == 0 {
+                    tool("Edit", &file, ToolStatus::Done)
+                } else {
+                    tool("Read", &file, ToolStatus::Done)
+                }
+            })
+            .collect();
+        let got = sources(&items, Some(Path::new("/p")));
+        assert_eq!(got.len(), 600);
+        assert_eq!(
+            got[0],
+            Source::File {
+                path: PathBuf::from(format!("/p/src/part_{}.rs", (5_999 * 7) % 600)),
+                verb: "Read"
+            }
+        );
+        let mut live = crate::workspace::LiveThread::default();
+        live.items = trek_core::transcript::Transcript::unsaved(items);
+        let cwd = Some(Path::new("/p"));
+        let first = kept_sources("long", cwd, &live);
+        assert!(
+            Rc::ptr_eq(&first, &kept_sources("long", cwd, &live)),
+            "kept"
+        );
+        live.revision += 1;
+        let again = kept_sources("long", cwd, &live);
+        assert!(
+            !Rc::ptr_eq(&first, &again),
+            "worked out again after a change"
+        );
+        assert_eq!(&*first, &*again);
+        assert!(
+            kept_sources("long", Some(Path::new("/q")), &live)
+                .iter()
+                .all(|s| matches!(s, Source::File { path, .. } if path.starts_with("/q"))),
+            "another folder is another list"
+        );
     }
 
     #[test]
