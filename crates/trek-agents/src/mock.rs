@@ -112,7 +112,7 @@
 use crate::rules::Ruling;
 use crate::{
     AgentEvent, BackgroundKind, BackgroundTask, Billing, Command, Decision, Prompt, Question,
-    SessionConfig,
+    SessionConfig, TaskEntry,
 };
 use anyhow::Result;
 use std::collections::HashMap;
@@ -817,6 +817,8 @@ struct Session {
     next_id: u64,
     /// Prompts sent while a turn ran; the turn acknowledges them at its next step.
     steer: Vec<String>,
+    /// Sub-agents of its own in the turn's foreground the user stopped (`mock:task`), by call.
+    sub_stopped: Vec<String>,
     /// Work left running between turns: background sub-agents and shells. Shared with the tasks
     /// that play the shells, which run on while the session waits for its next message.
     background: Jobs,
@@ -1082,6 +1084,7 @@ pub async fn run(
         context: 9_400,
         next_id: 0,
         steer: vec![],
+        sub_stopped: vec![],
         background: Jobs::default(),
         notes,
         note,
@@ -1172,6 +1175,7 @@ pub async fn run(
             Command::SetModes { plan, .. } => s.plan = plan,
             Command::ReadTask { id } => s.read_task(&id),
             Command::StopTask { id } => s.stop_task(&id),
+            Command::MessageTask { id, text } => s.message_task(&id, &text),
             Command::Shutdown => break,
             // No turn is running and nothing is pending between turns.
             Command::Interrupt | Command::Respond { .. } | Command::Answer { .. } => {}
@@ -1754,7 +1758,13 @@ impl Session {
             Ok(Command::SetHandHolding(h)) => self.hand_holding = h,
             Ok(Command::SetModes { plan, .. }) => self.plan = plan,
             Ok(Command::ReadTask { id }) => self.read_task(&id),
+            // One that isn't in the background is in the turn's foreground: it stops at its next
+            // step.
+            Ok(Command::StopTask { id }) if !self.background.running(&id) => {
+                self.sub_stopped.push(id)
+            }
             Ok(Command::StopTask { id }) => self.stop_task(&id),
+            Ok(Command::MessageTask { id, text }) => self.message_task(&id, &text),
             Ok(Command::Shutdown) | Err(_) => return Err(Stop::Closed),
             Ok(Command::SetModel { .. } | Command::Respond { .. } | Command::Answer { .. }) => {}
         }
@@ -1770,6 +1780,17 @@ impl Session {
                 output,
             });
         }
+    }
+
+    /// A message for a sub-agent of its own at work: it says it has it, in its transcript.
+    fn message_task(&self, id: &str, text: &str) {
+        let _ = self.events.try_send(AgentEvent::TaskLog {
+            task: id.to_string(),
+            entry: TaskEntry::Text(format!(
+                "Got your message: “{}”. I'll take it into account.",
+                text.trim()
+            )),
+        });
     }
 
     /// Stop a background task: it's off the list at once. A sub-agent's call ends, failed, and
@@ -2666,6 +2687,13 @@ impl Session {
                 done: None,
             })
             .await?;
+            self.emit(AgentEvent::TaskLog {
+                task: id.clone(),
+                entry: TaskEntry::Prompt(format!(
+                    "{description}. Read what you need, change nothing, and report what you find."
+                )),
+            })
+            .await?;
             self.background.add(BackgroundTask {
                 id: id.clone(),
                 kind: BackgroundKind::Agent,
@@ -2706,6 +2734,14 @@ impl Session {
                         title: title.into(),
                         detail: detail.into(),
                     });
+                    send(AgentEvent::TaskLog {
+                        task: id.clone(),
+                        entry: TaskEntry::Call {
+                            id: format!("{id}-step"),
+                            title: title.into(),
+                            detail: detail.into(),
+                        },
+                    });
                     send(AgentEvent::Task {
                         id: id.clone(),
                         description: None,
@@ -2729,6 +2765,10 @@ impl Session {
                 });
                 if done {
                     back += 1;
+                    send(AgentEvent::TaskLog {
+                        task: id.clone(),
+                        entry: TaskEntry::Text("Found what it was sent for.".into()),
+                    });
                     send(jobs.event());
                     send(AgentEvent::ToolFinished {
                         id,
@@ -2760,6 +2800,18 @@ impl Session {
             done: None,
         })
         .await?;
+        let log = |entry: TaskEntry| AgentEvent::TaskLog {
+            task: id.clone(),
+            entry,
+        };
+        self.emit(log(TaskEntry::Prompt(
+            "Survey the test suite: how many tests there are, in which files, and which are ignored. Report the counts.".into(),
+        )))
+        .await?;
+        self.emit(log(TaskEntry::Text(
+            "I'll start with the route tests, then count the rest.".into(),
+        )))
+        .await?;
         let steps = [
             ("Read", "tests/routes.rs", "Reading tests/routes.rs"),
             ("Search", "#[test]", "Searching for #[test]"),
@@ -2771,11 +2823,49 @@ impl Session {
         ];
         for (i, (title, detail, activity)) in steps.into_iter().enumerate() {
             self.pause(total / steps.len() as u32).await?;
+            if self.sub_stopped.contains(&id) {
+                self.emit(AgentEvent::Task {
+                    id: id.clone(),
+                    description: None,
+                    activity: None,
+                    tool_uses: None,
+                    done: Some(false),
+                })
+                .await?;
+                self.emit(AgentEvent::ToolFinished {
+                    id,
+                    output: "Stopped by the user.".into(),
+                    ok: false,
+                })
+                .await?;
+                return self
+                    .say("The sub-agent was stopped before it finished.")
+                    .await;
+            }
+            let call = format!("{id}-{i}");
             self.emit(AgentEvent::TaskStep {
                 task: id.clone(),
                 title: title.into(),
                 detail: detail.into(),
             })
+            .await?;
+            self.emit(log(TaskEntry::Call {
+                id: call.clone(),
+                title: title.into(),
+                detail: detail.into(),
+            }))
+            .await?;
+            self.emit(log(TaskEntry::Result {
+                id: call,
+                output: match i {
+                    0 => {
+                        "#[test] fn lists_routes() { … }\n#[test] fn rejects_unknown() { … }".into()
+                    }
+                    1 => "212 matches in 18 files".into(),
+                    _ => "Finished `test` profile; 18 test binaries built".into(),
+                },
+                ok: true,
+            }))
             .await?;
             self.emit(AgentEvent::Task {
                 id: id.clone(),
@@ -2793,6 +2883,10 @@ impl Session {
             tool_uses: None,
             done: Some(true),
         })
+        .await?;
+        self.emit(log(TaskEntry::Text(
+            "212 tests across 18 files; 3 are ignored.".into(),
+        )))
         .await?;
         self.emit(AgentEvent::ToolFinished {
             id,

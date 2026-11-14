@@ -538,11 +538,82 @@ pub enum Command {
     ReadTask {
         id: String,
     },
-    /// Stop a background task (`BackgroundTask::stoppable`).
+    /// Stop a background task (`BackgroundTask::stoppable`), or one of the agent's own
+    /// sub-agents by the call that launched it (`SubAgentControl::stop`).
     StopTask {
         id: String,
     },
+    /// A message for one of the agent's own sub-agents mid-run, by the call that launched it
+    /// (`SubAgentControl::message`).
+    MessageTask {
+        id: String,
+        text: String,
+    },
     Shutdown,
+}
+
+/// A piece of a sub-agent's own transcript (`AgentEvent::TaskLog`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskEntry {
+    /// What it was sent to do.
+    Prompt(String),
+    /// Something it said.
+    Text(String),
+    /// A call it made, titled as the agent's own rows are.
+    Call {
+        id: String,
+        title: String,
+        detail: String,
+    },
+    /// What call `id` gave back.
+    Result {
+        id: String,
+        output: String,
+        ok: bool,
+    },
+}
+
+/// What Trek can do with an agent's own sub-agents while they run (Trek's, which run in threads
+/// of their own, take anything a thread does).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SubAgentControl {
+    /// `Command::StopTask` with the call that launched one stops it, and leaves its parent
+    /// working.
+    pub stop: bool,
+    /// `Command::MessageTask` reaches it mid-run.
+    pub message: bool,
+}
+
+impl SubAgentControl {
+    /// For `agent`'s own: Claude Code stops one (`stop_task`) and takes no message for it; Codex
+    /// steers and interrupts its sub-agents' own threads (`turn/steer`, `turn/interrupt`); Trek's
+    /// scripted mock does both, as the tests and the isolated app drive it. Others have none
+    /// Trek can reach.
+    pub fn of(agent: &AgentId) -> SubAgentControl {
+        match agent {
+            AgentId::ClaudeCode => SubAgentControl {
+                stop: true,
+                message: false,
+            },
+            AgentId::Codex => SubAgentControl {
+                stop: true,
+                message: true,
+            },
+            AgentId::Direct(p) if trek_core::catalog::is_mock(p) => SubAgentControl {
+                stop: true,
+                message: true,
+            },
+            _ => SubAgentControl::default(),
+        }
+    }
+
+    /// Why there's no message for `agent`'s own sub-agents, in the words the row says it.
+    pub fn no_message(agent: &AgentId) -> String {
+        format!(
+            "{} doesn't take messages for its sub-agents while they run. Write to the thread, and its agent can pass it on.",
+            agent.display_name()
+        )
+    }
 }
 
 /// Work an agent left running between turns: a shell command (a dev server, a test watcher, a
@@ -658,6 +729,13 @@ pub enum AgentEvent {
         task: String,
         title: String,
         detail: String,
+    },
+    /// One more piece of what a sub-agent of the agent's own has done (keyed by the call that
+    /// launched it), for its transcript: what it was told, what it said, a call it made and what
+    /// that gave back.
+    TaskLog {
+        task: String,
+        entry: TaskEntry,
     },
     /// The work the agent has running in the background now, all of it: it replaces the last
     /// set. A turn can end with some still running.

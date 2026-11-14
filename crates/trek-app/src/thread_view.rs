@@ -501,6 +501,9 @@ pub struct ThreadView {
     /// Lines each opened sub-agent's live activity showed when last measured, by its row's key:
     /// its row is measured again when that changes.
     activity_lines: HashMap<String, usize>,
+    /// The field under a sub-agent's row for a message to it (one of the agent's own, whose agent
+    /// takes one mid-run): its row's transcript index and item id.
+    sub_message: Option<(usize, String, Entity<InputState>, Subscription)>,
     /// Repaints on scroll activity of the scroller on screen; replaced when another one is.
     _scroller_sub: Subscription,
     _subscriptions: Vec<Subscription>,
@@ -768,6 +771,7 @@ impl ThreadView {
             confirm: None,
             _ticker: None,
             activity_lines: HashMap::new(),
+            sub_message: None,
             _scroller_sub: scroller_sub,
             _subscriptions: subscriptions,
         };
@@ -1281,6 +1285,60 @@ impl ThreadView {
                 let _ = s.remeasure_items(r..r + 1, cx);
             }
         });
+    }
+
+    /// Open the field for a message to the sub-agent on item `ix` (`row`, its id), or close it.
+    fn toggle_sub_message(
+        &mut self,
+        ix: usize,
+        row: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sub_message.take().is_some_and(|(at, ..)| at == ix) {
+            self.remeasure_sub_agents(cx);
+            return;
+        }
+        let field = cx.new(|cx| InputState::new(window, cx).placeholder("Message the sub-agent"));
+        let sub = cx.subscribe_in(&field, window, |this, _, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.send_sub_message(window, cx);
+            }
+        });
+        field.update(cx, |f, cx| f.focus(window, cx));
+        self.sub_message = Some((ix, row, field, sub));
+        self.remeasure_sub_agents(cx);
+    }
+
+    /// Send what's in the sub-agent's message field; it closes once the message is on its way.
+    fn send_sub_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(thread), Some((_, row, field, _))) = (self.current.clone(), &self.sub_message)
+        else {
+            return;
+        };
+        let text = field.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        let row = row.clone();
+        let sent = self
+            .workspace
+            .update(cx, |ws, cx| ws.message_sub_agent(&thread, &row, &text, cx));
+        match sent {
+            Ok(()) => {
+                self.sub_message = None;
+                self.remeasure_sub_agents(cx);
+            }
+            Err(why) => {
+                field.update(cx, |f, cx| f.set_value("", window, cx));
+                self.workspace.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: why,
+                        undo: None,
+                    })
+                });
+            }
+        }
     }
 
     /// Measure the sub-agent rows again (their answers' previews come and go).
@@ -3196,6 +3254,71 @@ impl ThreadView {
                             .border_color(theme.background)
                             .bg(dot.opacity(breath)),
                     );
+                // Steering it from here: Stop while it works (Trek's own, or the agent's where its
+                // agent lets Trek), and a message for the agent's own where its agent takes one.
+                let control = trek_agents::SubAgentControl::of(&at.agent);
+                let session = ws
+                    .live
+                    .get(&at.thread)
+                    .is_some_and(|l| l.commands.is_some());
+                let in_background = ws.live.get(&at.thread).is_some_and(|l| {
+                    l.background_agents().any(|b| {
+                        b.task.call.as_deref() == Some(row_id.as_str()) && b.task.stoppable
+                    })
+                });
+                let stoppable = sub.state.live()
+                    && (sub.child.is_some() || session && (control.stop || in_background));
+                let messageable = sub.child.is_none()
+                    && sub.state == TaskState::Running
+                    && session
+                    && control.message;
+                let stop = stoppable.then(|| {
+                    let ws = at.workspace.clone();
+                    let (thread, row) = (at.thread.clone(), row_id.clone());
+                    Button::new(("subagent-stop", ix))
+                        .ghost()
+                        .xsmall()
+                        .map(control_button)
+                        .icon(Icon::new(crate::assets::Lucide::Square).text_color(muted))
+                        .tooltip("Stop this sub-agent")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            ws.update(cx, |ws, cx| {
+                                if let Err(why) = ws.stop_sub_agent(&thread, &row, cx) {
+                                    cx.emit(WorkspaceEvent::Toast {
+                                        message: why,
+                                        undo: None,
+                                    });
+                                }
+                            });
+                        })
+                });
+                let message = messageable.then(|| {
+                    let (view, row) = (view.clone(), row_id.clone());
+                    Button::new(("subagent-message", ix))
+                        .ghost()
+                        .xsmall()
+                        .map(control_button)
+                        .icon(Icon::new(crate::assets::Lucide::MessageSquare).text_color(muted))
+                        .tooltip("Send the sub-agent a message")
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            let row = row.clone();
+                            let _ = view.update(cx, |this, cx| {
+                                this.toggle_sub_message(ix, row, window, cx)
+                            });
+                        })
+                });
+                let field = view
+                    .upgrade()
+                    .and_then(|v| {
+                        v.read(cx)
+                            .sub_message
+                            .as_ref()
+                            .filter(|(at, ..)| *at == ix)
+                            .map(|(_, _, f, _)| f.clone())
+                    })
+                    .filter(|_| messageable);
                 let opener = sub.child.clone().map(|child| {
                     let ws = at.workspace.clone();
                     Button::new(("subagent-open", ix))
@@ -3273,9 +3396,24 @@ impl ThreadView {
                                             .child(crate::time::elapsed(d)),
                                     )
                                 })
+                                .children(stop)
+                                .children(message)
                                 .children(opener)
                                 .children(chevron),
                         )
+                        .when_some(field, |el, f| {
+                            el.child(
+                                div()
+                                    .id(("subagent-message-field", ix))
+                                    .test_support()
+                                    .pl(px(32.))
+                                    .pr(px(28.))
+                                    .pb(px(4.))
+                                    .child(Input::new(&f).small().when(fluent::WINDOWS, |i| {
+                                        i.rounded(px(fluent::CONTROL_RADIUS))
+                                    })),
+                            )
+                        })
                         .when_some(activity, |el, a| {
                             el.child(
                                 div()

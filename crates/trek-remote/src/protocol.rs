@@ -11,6 +11,7 @@ mod machines;
 mod parity;
 mod phone_update;
 mod side_chat;
+mod sub_agent_view;
 mod thread_parity;
 mod uploads;
 pub use cards::*;
@@ -18,6 +19,7 @@ pub use machines::*;
 pub use parity::*;
 pub use phone_update::*;
 pub use side_chat::*;
+pub use sub_agent_view::*;
 pub use thread_parity::*;
 pub use uploads::*;
 
@@ -247,6 +249,12 @@ pub enum ClientMessage {
     /// The side chat beside a thread: the one there is, or a new one started with its first
     /// message (answered with `side_chat`; feature `side_chat`, `side_chat.rs`).
     SideChat(SideChatRequest),
+    /// What one of the agent's own sub-agents has done so far (answered with `sub_agent`;
+    /// feature `sub_agent_view`, `sub_agent_view.rs`).
+    SubAgent(SubAgentRequest),
+    /// Stop one of the agent's own sub-agents, or send it a message (answered with `sub_agent`;
+    /// feature `sub_agent_view`).
+    SubAgentAction(SubAgentActionRequest),
 }
 
 impl ClientMessage {
@@ -305,6 +313,8 @@ impl ClientMessage {
             Self::TurnPreview(_) => "turn_preview",
             Self::UploadPart(_) => "upload_part",
             Self::SideChat(_) => "side_chat",
+            Self::SubAgent(_) => "sub_agent",
+            Self::SubAgentAction(_) => "sub_agent_action",
         }
     }
 }
@@ -607,6 +617,9 @@ pub mod feature {
     /// `side_chat`: a thread's side chat found, or one started beside it; its row then follows as
     /// `unlisted` while a phone has it open.
     pub const SIDE_CHAT: &str = "side_chat";
+    /// Tool items carry `sub_agent` (the sub-agent a row stands for), and `sub_agent` and
+    /// `sub_agent_action` read, stop and message the agent's own sub-agents (`sub_agent_view.rs`).
+    pub const SUB_AGENT_VIEW: &str = "sub_agent_view";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -635,6 +648,7 @@ pub mod feature {
         RESUME_INTERRUPTED,
         UPLOADS,
         SIDE_CHAT,
+        SUB_AGENT_VIEW,
     ];
 }
 
@@ -1000,6 +1014,8 @@ pub enum ServerMessage {
     UploadProgress(UploadProgress),
     /// The reply to `side_chat`.
     SideChat(SideChat),
+    /// The reply to `sub_agent` and `sub_agent_action`.
+    SubAgent(SubAgentView),
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.
@@ -1278,6 +1294,10 @@ pub struct SubAgent {
     /// `unlisted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+    /// For one of the agent's own: the call that started it, which `sub_agent` opens (feature
+    /// `sub_agent_view`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1565,6 +1585,9 @@ pub enum ItemBody {
         /// For a finished `watch_video` call: what it watched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         watch: Option<WatchedVideo>,
+        /// The row stands for a sub-agent: which, and how it opens (feature `sub_agent_view`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sub_agent: Option<SubAgentLink>,
     },
     Approval {
         request_id: String,

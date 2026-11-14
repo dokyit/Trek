@@ -277,6 +277,9 @@ pub struct LiveThread {
     /// Sub-agents launched this turn (and those still out from earlier ones), keyed by the tool
     /// call that started them.
     pub tasks: Vec<SubTask>,
+    /// What its agent's own sub-agents have done, as the agent reported it, by the call that
+    /// started each (this session's; not kept).
+    pub sub_logs: HashMap<String, SubLog>,
     /// What the agent has running in the background (`AgentEvent::Background`): shells, monitors
     /// and its own sub-agents. They outlive the turn that started them; the session ending ends
     /// them.
@@ -338,8 +341,13 @@ pub struct LiveThread {
     /// The key its session's orchestration tools use to reach Trek (`ipc`).
     ipc_session: Option<String>,
     /// Rows for sub-agents and threads it started whose `delegate_task` (or `start_thread`,
-    /// `handoff`) call hasn't reached the transcript yet (`place_task_rows`).
-    pending_rows: VecDeque<Item>,
+    /// `handoff`) call hasn't reached the transcript yet (`place_task_rows`), with when each came.
+    pending_rows: VecDeque<(Item, Instant)>,
+    /// The calls of this turn that placed rows stand for, by item id (`place_task_rows`).
+    claimed_calls: HashSet<String>,
+    /// Calls to start one that its agent's own sub-agents made this turn (steps of theirs, never
+    /// rows of this transcript), not yet stood for by a row.
+    spawn_steps: usize,
     /// Project notes its session gives the agent with the next message: recorded as told once
     /// that message goes (`Store::told_notes`).
     pub notes_pending: Option<String>,
@@ -615,6 +623,97 @@ impl Background {
 /// Calls a sub-agent made that its row keeps, newest last (`SubTask::steps`).
 pub const SUB_STEPS: usize = 6;
 
+/// The most items a sub-agent's transcript keeps (`SubLog`): its latest.
+pub const SUB_LOG: usize = 300;
+
+/// What one of the agent's own sub-agents has done (`AgentEvent::TaskLog`): opened from its row
+/// on the phone, it reads as a transcript of its own.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubLog {
+    /// What it was sent to do.
+    pub prompt: Option<String>,
+    /// What it said (`Item::Assistant`), its calls (`Item::Tool`, with their output once back),
+    /// and the messages it was sent since (`Item::User`), oldest first: the latest `SUB_LOG`.
+    pub items: Vec<Item>,
+    /// How many earlier ones were let go: item `i` is the `dropped + i`th, its id for good.
+    pub dropped: usize,
+}
+
+impl SubLog {
+    pub fn add(&mut self, entry: trek_agents::TaskEntry) {
+        use trek_agents::TaskEntry;
+        match entry {
+            TaskEntry::Prompt(text) if self.prompt.is_none() => self.prompt = Some(text),
+            // Told more since.
+            TaskEntry::Prompt(text) => self.told(text),
+            TaskEntry::Text(text) => self.push(Item::Assistant { text }),
+            TaskEntry::Call { id, title, detail } => self.push(Item::Tool {
+                id,
+                title,
+                detail,
+                output: String::new(),
+                status: ToolStatus::Running,
+            }),
+            TaskEntry::Result {
+                id: call,
+                output,
+                ok,
+            } => {
+                if let Some(Item::Tool {
+                    output: o, status, ..
+                }) = self
+                    .items
+                    .iter_mut()
+                    .rev()
+                    .find(|i| matches!(i, Item::Tool { id, .. } if *id == call))
+                {
+                    *o = output;
+                    *status = if ok {
+                        ToolStatus::Done
+                    } else {
+                        ToolStatus::Failed
+                    };
+                }
+            }
+        }
+    }
+
+    /// A message it was sent.
+    pub fn told(&mut self, text: String) {
+        self.push(Item::User {
+            text,
+            images: vec![],
+            at: Some(trek_core::store::now_ms()),
+            resume: None,
+            aside: false,
+        });
+    }
+
+    fn push(&mut self, item: Item) {
+        self.items.push(item);
+        if self.items.len() > SUB_LOG {
+            let over = self.items.len() - SUB_LOG;
+            self.items.drain(..over);
+            self.dropped += over;
+        }
+    }
+
+    /// Its calls still running end with it.
+    fn settle(&mut self, ok: bool) {
+        for i in &mut self.items {
+            if let Item::Tool { status, .. } = i
+                && *status == ToolStatus::Running
+            {
+                *status = if ok {
+                    ToolStatus::Done
+                } else {
+                    ToolStatus::Failed
+                };
+            }
+        }
+    }
+}
+
 /// A sub-agent's progress, shown on its tool row and in the working bar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubTask {
@@ -632,6 +731,8 @@ pub struct SubTask {
     /// When it started, and when it finished.
     pub started: Instant,
     pub ended: Option<Instant>,
+    /// It was taken to be over because its turn ended, not because its agent said so.
+    pub closed_with_turn: bool,
 }
 
 impl LiveThread {
@@ -705,6 +806,23 @@ impl LiveThread {
 
     /// Take in the agent's report of what it has running in the background (the whole set).
     fn set_background(&mut self, tasks: Vec<trek_agents::BackgroundTask>) {
+        // A sub-agent of its own listed as out after the turn that sent it ended (which closed
+        // it with the turn) is still at work.
+        for call in tasks
+            .iter()
+            .filter(|t| t.kind == trek_agents::BackgroundKind::Agent)
+            .filter_map(|t| t.call.as_deref())
+        {
+            if let Some(t) = self
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == call && t.closed_with_turn)
+            {
+                t.done = None;
+                t.ended = None;
+                t.closed_with_turn = false;
+            }
+        }
         let mut old = std::mem::take(&mut self.background);
         self.background = tasks
             .into_iter()
@@ -809,16 +927,48 @@ impl LiveThread {
 
     /// Append the rows of sub-agents started since, each after the agent's own call to
     /// `delegate_task` (transcripts only grow at the end, and the call may reach Trek before the
-    /// agent's report of it does). `flush`: the turn is over; whatever waits goes in now.
+    /// agent's report of it does). A row goes in once a call of this turn that no row stands for
+    /// yet is there (calls to `start_thread` and `handoff` have rows of their own too,
+    /// `lineage`), or one of the agent's own sub-agents made such a call (`spawn_steps`); it waits
+    /// for no call at all once it has waited `ROW_WAIT` (`place_waited_rows`: an agent that names
+    /// the tool its own way), and `flush` (the turn is over) puts in whatever waits. Calls are
+    /// told apart by id, within the turn: a row placed with no call to stand for (one asked
+    /// between turns, or after waiting) holds back none after it.
     pub fn place_task_rows(&mut self, flush: bool) {
-        while !self.pending_rows.is_empty() {
-            // Calls to `start_thread` and `handoff` have rows of their own too (`lineage`).
-            let calls = self.items.iter().filter(|i| matches!(i, Item::Tool { title, status, .. } if trek_core::orchestrate::is_spawn_call(title) && *status != ToolStatus::Failed)).count();
-            let rows = self.items.iter().filter(|i| matches!(i, Item::Tool { id, .. } if trek_core::orchestrate::task_of_row(id).is_some() || trek_core::lineage::of_row(id).is_some_and(|(l, _)| l.answers_a_call()))).count();
-            if !flush && calls <= rows {
-                return;
+        self.place_rows(flush, None);
+    }
+
+    /// `place_task_rows`, with the rows that came by `came_by` waiting no longer for a call.
+    pub fn place_waited_rows(&mut self, came_by: Instant) {
+        self.place_rows(false, Some(came_by));
+    }
+
+    fn place_rows(&mut self, flush: bool, waited: Option<Instant>) {
+        while let Some((_, came)) = self.pending_rows.front() {
+            let came = *came;
+            // The turn's own calls: back to where the last one ended.
+            let call = self
+                .items
+                .ids()
+                .iter()
+                .zip(self.items.iter())
+                .rev()
+                .take_while(|(_, i)| !matches!(i, Item::TurnEnd { .. }))
+                .filter(|(id, i)| {
+                    matches!(i, Item::Tool { title, status, .. } if trek_core::orchestrate::is_spawn_call(title) && *status != ToolStatus::Failed)
+                        && !self.claimed_calls.contains(*id)
+                })
+                .map(|(id, _)| id.to_string())
+                .last();
+            match call {
+                Some(call) => {
+                    self.claimed_calls.insert(call);
+                }
+                None if self.spawn_steps > 0 => self.spawn_steps -= 1,
+                None if flush || waited.is_some_and(|by| came <= by) => {}
+                None => return,
             }
-            let Some(row) = self.pending_rows.pop_front() else {
+            let Some((row, _)) = self.pending_rows.pop_front() else {
                 return;
             };
             self.streaming = None;
@@ -828,11 +978,22 @@ impl LiveThread {
         }
     }
 
+    /// One of its agent's own sub-agents called `delegate_task` (or `start_thread`, `handoff`):
+    /// the row Trek makes for it has no call in this transcript to wait for.
+    fn spawned_by_step(&mut self) {
+        if self.turn_started.is_some() {
+            self.spawn_steps += 1;
+            self.place_task_rows(false);
+        }
+    }
+
     /// The turn is over: open sub-agents and running tool rows end with it, done or failed. Those
     /// still at work in the background go on: Trek's own (each ends with its thread), and the
     /// agent's that it says run in the background (they end when it says).
     fn close_turn(&mut self, ok: bool) {
         self.place_task_rows(true);
+        self.claimed_calls.clear();
+        self.spawn_steps = 0;
         let out: Vec<String> = self
             .background_agents()
             .filter_map(|b| b.task.call.clone())
@@ -844,6 +1005,7 @@ impl LiveThread {
         {
             t.done = Some(ok);
             t.ended = Some(Instant::now());
+            t.closed_with_turn = true;
         }
         for ix in 0..self.items.len() {
             let ends = matches!(&self.items[ix], Item::Tool { status: ToolStatus::Running, id, .. } if trek_core::orchestrate::task_of_row(id).is_none() && !out.contains(id));
@@ -1308,6 +1470,11 @@ pub const STOP_GRACE: Duration = Duration::from_secs(20);
 /// How soon after the user stops its sub-agents an agent's turn of its own is taken to be it
 /// saying so (Claude Code takes one within seconds).
 const STOPPED_ECHO: Duration = Duration::from_secs(30);
+
+/// The longest a sub-agent's row waits in its parent's transcript for the call that started it
+/// (`LiveThread::place_task_rows`): the agent's report of a call it made comes within moments,
+/// so a row that has waited this long has none in this transcript to follow.
+pub const ROW_WAIT: Duration = Duration::from_millis(1500);
 
 /// How long a background task asked to stop shows as stopping before Stop is offered again.
 const STOP_WAIT: Duration = Duration::from_secs(10);
@@ -5510,6 +5677,7 @@ impl Workspace {
                         | AgentEvent::ToolFinished { .. }
                         | AgentEvent::ToolLines { .. }
                         | AgentEvent::TaskStep { .. }
+                        | AgentEvent::TaskLog { .. }
                 );
                 // Text after a thought ends the thought, which then gets a row of its own.
                 appended &= match ev {
@@ -5541,6 +5709,7 @@ impl Workspace {
                                     done: None,
                                     started: Instant::now(),
                                     ended: None,
+                                    closed_with_turn: false,
                                 });
                                 Some(live.tasks.len() - 1)
                             }
@@ -5555,9 +5724,13 @@ impl Workspace {
                             if let Some(n) = tool_uses {
                                 task.tool_uses = n;
                             }
-                            if done.is_some() {
+                            if let Some(ok) = done {
                                 task.done = done;
+                                task.closed_with_turn = false;
                                 task.ended.get_or_insert_with(Instant::now);
+                                if let Some(log) = live.sub_logs.get_mut(&tid) {
+                                    log.settle(ok);
+                                }
                             }
                             let status = match task.done {
                                 None => ToolStatus::Running,
@@ -5577,6 +5750,9 @@ impl Workspace {
                         title,
                         detail,
                     } => {
+                        if trek_core::orchestrate::is_spawn_call(&title) {
+                            live.spawned_by_step();
+                        }
                         if let Some(t) = live.tasks.iter_mut().find(|t| t.id == task) {
                             t.steps.push((title, detail));
                             if t.steps.len() > SUB_STEPS {
@@ -5584,6 +5760,9 @@ impl Workspace {
                             }
                             t.stepped += 1;
                         }
+                    }
+                    AgentEvent::TaskLog { task, entry } => {
+                        live.sub_logs.entry(task).or_default().add(entry);
                     }
                     AgentEvent::Background(tasks) => {
                         live.set_background(tasks);

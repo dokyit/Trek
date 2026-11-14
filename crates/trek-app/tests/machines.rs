@@ -364,6 +364,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 added: None,
                 removed: None,
                 watch: None,
+                sub_agent: None,
             },
         ),
         item(
@@ -1505,6 +1506,7 @@ fn row_at_work() -> tr::ThreadSummary {
                 state: tr::SubAgentState::Running,
                 since: Some(trek_core::store::now_ms() - 30_000),
                 thread_id: Some("t-10".into()),
+                call_id: None,
             },
             tr::SubAgent {
                 agent,
@@ -1513,6 +1515,7 @@ fn row_at_work() -> tr::ThreadSummary {
                 state: tr::SubAgentState::Running,
                 since: Some(trek_core::store::now_ms() - 20_000),
                 thread_id: None,
+                call_id: None,
             },
         ],
         ..Default::default()

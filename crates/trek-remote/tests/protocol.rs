@@ -513,6 +513,7 @@ fn every_item_state_round_trips() {
                 added: None,
                 removed: Some(1),
                 watch: None,
+                sub_agent: None,
             });
         }
     }
@@ -1401,6 +1402,7 @@ fn features_sub_agents_the_thread_menu_and_search() {
             state: SubAgentState::NeedsYou,
             since: None,
             thread_id: Some("kid".into()),
+            call_id: None,
         }],
         ..Default::default()
     };
@@ -1471,7 +1473,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat","sub_agent_view"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -1739,7 +1741,14 @@ fn a_thread_as_the_mac_shows_it_on_items_and_rows() {
     let old = item_round_trip(
         r#"{"id":"i3","seq":3,"at":null,"kind":"tool","call_id":"c1","tool":"read","title":"Read","detail":"a.rs","status":"done","output":"","added":null,"removed":null}"#,
     );
-    assert!(matches!(old.body, ItemBody::Tool { watch: None, .. }));
+    assert!(matches!(
+        old.body,
+        ItemBody::Tool {
+            watch: None,
+            sub_agent: None,
+            ..
+        }
+    ));
     let old =
         item_round_trip(r#"{"id":"i2","seq":3,"at":null,"kind":"user","text":"hi","images":0}"#);
     assert!(matches!(old.body, ItemBody::User { ref videos, .. } if videos.is_empty()));
@@ -2091,4 +2100,44 @@ fn a_side_chat_is_found_or_started_and_older_messages_still_read() {
     };
     assert_eq!(side, None);
     assert!(feature::ALL.contains(&feature::SIDE_CHAT));
+}
+
+#[test]
+fn a_sub_agent_row_says_which_it_is_and_opens_and_steers_it() {
+    // A tool item standing for one of the agent's own; an older phone just ignores `sub_agent`.
+    let item = item_round_trip(
+        r#"{"id":"i4","seq":4,"at":null,"kind":"tool","call_id":"toolu_a","tool":"agent","title":"Agent","detail":"Survey the tests","status":"running","output":"","added":null,"removed":null,"sub_agent":{"agent":{"key":"claude-code","name":"Claude Code","logo":"claude-code"},"label":"Survey the tests","detail":"Reading tests/a.rs · 2 steps","state":"running","since":1791000000000}}"#,
+    );
+    let ItemBody::Tool {
+        sub_agent: Some(link),
+        ..
+    } = item.body
+    else {
+        panic!()
+    };
+    assert_eq!((link.state, link.thread_id), (SubAgentState::Running, None));
+    let read =
+        client_round_trip(r#"{"type":"sub_agent","id":"6","thread_id":"t","call_id":"toolu_a"}"#);
+    assert!(matches!(read.msg, ClientMessage::SubAgent(ref r) if r.call_id == "toolu_a"));
+    let say = client_round_trip(
+        r#"{"type":"sub_agent_action","id":"7","thread_id":"t","call_id":"toolu_a","action":"message","text":"Count the doc tests too"}"#,
+    );
+    let ClientMessage::SubAgentAction(req) = say.msg else {
+        panic!()
+    };
+    assert_eq!(req.action, SubAgentAction::Message);
+    let stop = client_round_trip(
+        r#"{"type":"sub_agent_action","id":"8","thread_id":"t","call_id":"toolu_a","action":"stop"}"#,
+    );
+    assert!(
+        matches!(stop.msg, ClientMessage::SubAgentAction(ref r) if r.action == SubAgentAction::Stop && r.text.is_none())
+    );
+    let view = server_round_trip(
+        r#"{"type":"sub_agent","re":"6","thread_id":"t","call_id":"toolu_a","link":{"agent":{"key":"claude-code","name":"Claude Code"},"label":"Survey the tests","detail":"Running","state":"running"},"prompt":"Survey the tests.","items":[{"id":"s0","seq":0,"at":null,"kind":"assistant","text":"On it.","streaming":false}],"can_stop":true,"can_message":false,"no_message":"Claude Code doesn't take messages for its sub-agents while they run. Write to the thread, and its agent can pass it on."}"#,
+    );
+    let ServerMessage::SubAgent(v) = view.msg else {
+        panic!()
+    };
+    assert!(v.can_stop && !v.can_message && !v.gone && v.earlier == 0);
+    assert!(feature::ALL.contains(&feature::SUB_AGENT_VIEW));
 }

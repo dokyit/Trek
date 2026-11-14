@@ -5882,3 +5882,146 @@ fn a_side_chat_is_refused_where_there_is_nothing_to_put_it_beside() {
         }
     });
 }
+
+/// A sub-agent row on the phone: the tool item says which sub-agent it stands for (Trek's own by
+/// its thread, the agent's own by its call), and `sub_agent` reads the agent's own as a transcript
+/// of its own, live; `sub_agent_action` sends it a message and stops it, as its row on the Mac
+/// does. The Mac lists the feature.
+#[test]
+fn a_phone_opens_a_sub_agent_from_its_row_and_steers_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        assert!(
+            trek_remote::feature::ALL.contains(&tr::feature::SUB_AGENT_VIEW),
+            "advertised"
+        );
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let id = trek.send(cx, "mock:task 6s");
+        let p = id.clone();
+        trek.wait(cx, "the sub-agent's first call", move |ws| {
+            ws.live.get(&p).is_some_and(|l| {
+                l.sub_logs.values().any(|s| {
+                    s.items
+                        .iter()
+                        .any(|i| matches!(i, trek_core::store::Item::Tool { .. }))
+                })
+            })
+        })
+        .await;
+        let transcript = ask_later(&trek, cx, transcript_req(&id, None, None))
+            .await
+            .unwrap();
+        let link = transcript
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                tr::ItemBody::Tool {
+                    call_id,
+                    sub_agent: Some(link),
+                    ..
+                } => Some((call_id.clone(), link.clone())),
+                _ => None,
+            })
+            .expect("the sub-agent's row carries its link");
+        let (call, link) = link;
+        assert_eq!(link.label, "Survey the test suite");
+        assert_eq!(link.state, tr::SubAgentState::Running);
+        assert!(link.thread_id.is_none() && link.since.is_some());
+        // Every other tool row carries none.
+        assert!(transcript.items.iter().all(|i| match &i.body {
+            tr::ItemBody::Tool {
+                call_id, sub_agent, ..
+            } => (*call_id == call) == sub_agent.is_some(),
+            _ => true,
+        }));
+        let view = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+            let req = tr::SubAgentRequest {
+                thread_id: id.clone(),
+                call_id: call.clone(),
+            };
+            ask(trek, cx, move |reply| tr::HostRequest::SubAgent {
+                req,
+                reply,
+            })
+            .unwrap()
+        };
+        let v = view(&trek, cx);
+        assert!(
+            v.prompt
+                .as_deref()
+                .unwrap()
+                .starts_with("Survey the test suite")
+        );
+        assert!(
+            matches!(&v.items[1].body, tr::ItemBody::Tool { title, detail, .. } if title == "Read" && detail == "tests/routes.rs"),
+            "{:?}",
+            v.items
+        );
+        assert_eq!(v.items[0].id, "s0");
+        assert!(v.can_stop && v.can_message && v.no_message.is_none() && !v.gone);
+        // A message, from the phone.
+        let req = tr::SubAgentActionRequest {
+            thread_id: id.clone(),
+            call_id: call.clone(),
+            action: tr::SubAgentAction::Message,
+            text: Some("Count the doc tests too.".into()),
+        };
+        let after = ask(&trek, cx, move |reply| tr::HostRequest::SubAgentAction {
+            req,
+            reply,
+        })
+        .unwrap();
+        assert!(after.items.iter().any(
+            |i| matches!(&i.body, tr::ItemBody::User { text, .. } if text == "Count the doc tests too.")
+        ));
+        // Stop, from the phone: it ends, and says so on its row.
+        let req = tr::SubAgentActionRequest {
+            thread_id: id.clone(),
+            call_id: call.clone(),
+            action: tr::SubAgentAction::Stop,
+            text: None,
+        };
+        ask(&trek, cx, move |reply| tr::HostRequest::SubAgentAction {
+            req,
+            reply,
+        })
+        .unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let v = view(&trek, cx);
+        assert_eq!(v.link.state, tr::SubAgentState::Failed);
+        assert!(!v.can_stop && !v.can_message);
+        // Trek's own open as threads; a row that isn't one is no sub-agent.
+        let req = tr::SubAgentRequest {
+            thread_id: id.clone(),
+            call_id: "nothing".into(),
+        };
+        assert!(
+            ask(&trek, cx, move |reply| tr::HostRequest::SubAgent {
+                req,
+                reply
+            })
+            .is_err()
+        );
+    });
+}
+
+/// An agent that can't take a message for its sub-agents says so, in place of a way to send one.
+#[test]
+fn a_sub_agent_whose_agent_takes_no_message_says_so() {
+    assert_eq!(
+        trek_agents::SubAgentControl::of(&trek_core::AgentId::ClaudeCode),
+        trek_agents::SubAgentControl {
+            stop: true,
+            message: false
+        }
+    );
+    assert_eq!(
+        trek_agents::SubAgentControl::no_message(&trek_core::AgentId::ClaudeCode),
+        "Claude Code doesn't take messages for its sub-agents while they run. Write to the thread, and its agent can pass it on."
+    );
+    assert!(trek_agents::SubAgentControl::of(&trek_core::AgentId::Codex).message);
+    assert_eq!(
+        trek_agents::SubAgentControl::of(&trek_core::AgentId::Acp("cursor".into())),
+        trek_agents::SubAgentControl::default()
+    );
+}

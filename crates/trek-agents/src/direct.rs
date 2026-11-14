@@ -1876,7 +1876,8 @@ async fn session(
                             | Command::Interrupt
                             | Command::Respond { .. }
                             | Command::ReadTask { .. }
-                            | Command::StopTask { .. } => {}
+                            | Command::StopTask { .. }
+                            | Command::MessageTask { .. } => {}
                         }
                     }
                     if shutdown {
@@ -1905,7 +1906,8 @@ async fn session(
             Command::Interrupt
             | Command::Respond { .. }
             | Command::ReadTask { .. }
-            | Command::StopTask { .. } => {}
+            | Command::StopTask { .. }
+            | Command::MessageTask { .. } => {}
         }
     }
     // Servers and watchers the model started end with the session rather than outliving it. Here

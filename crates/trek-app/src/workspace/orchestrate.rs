@@ -743,10 +743,31 @@ impl Workspace {
         let Some(live) = self.live.get_mut(parent) else {
             return;
         };
-        live.pending_rows.push_back(row);
+        let came = std::time::Instant::now();
+        live.pending_rows.push_back((row, came));
         // Asked outside a turn, there's no call row to wait for.
         let idle = live.turn_started.is_none();
         live.place_task_rows(idle);
+        if !live.pending_rows.is_empty() {
+            // Its call may never show here (an agent naming the tool its own way): it goes in
+            // once it has waited long enough.
+            let id = parent.to_string();
+            let due = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(super::ROW_WAIT).await;
+                let _ = this.update(cx, |ws, cx| {
+                    let Some(live) = ws.live.get_mut(&id) else {
+                        return;
+                    };
+                    let before = live.revision;
+                    live.place_waited_rows(came);
+                    if live.revision != before {
+                        ws.persist_soon(&id, cx);
+                        cx.notify();
+                    }
+                });
+            });
+            self.keep(due);
+        }
         self.persist_soon(parent, cx);
         cx.notify();
     }
@@ -767,11 +788,12 @@ impl Workspace {
             status: s,
             output: o,
             ..
-        }) = self
-            .live
-            .get_mut(parent)
-            .and_then(|l| l.pending_rows.iter_mut().find(|i| is_row(i)))
-        {
+        }) = self.live.get_mut(parent).and_then(|l| {
+            l.pending_rows
+                .iter_mut()
+                .map(|(i, _)| i)
+                .find(|i| is_row(i))
+        }) {
             *s = status;
             *o = output;
             return;
@@ -1896,6 +1918,99 @@ fn still_parked(items: &[Item]) -> bool {
         .iter()
         .rposition(|i| matches!(i, Item::User { text, aside: false, .. } if !orch::is_wake(text)));
     notice.is_some_and(|n| user.is_none_or(|u| u < n))
+}
+
+/// Steering a sub-agent from its row: the Mac's and the phone's. Trek's own runs in a thread of
+/// its own, which takes anything a thread does; the agent's own (`SubTask`) only what its agent
+/// lets Trek do (`SubAgentControl`).
+impl Workspace {
+    /// Stop the sub-agent on `thread`'s row `row` (a transcript item id): Trek's own, as
+    /// `cancel_task` does, or the agent's own, by the call that started it, leaving its parent at
+    /// work. `Err` says why it can't be.
+    pub fn stop_sub_agent(
+        &mut self,
+        thread: &str,
+        row: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Some(child) = orch::task_of_row(row) {
+            if self
+                .thread(child)
+                .is_none_or(|t| t.parent_id.as_deref() != Some(thread))
+            {
+                return Err("That sub-agent isn't this thread's.".into());
+            }
+            if self.task_state(child).live() {
+                self.stop_task(child, cx);
+            }
+            return Ok(());
+        }
+        let agent = self
+            .thread(thread)
+            .map(|t| t.agent.clone())
+            .ok_or("No such thread.")?;
+        let live = self.live.get(thread).ok_or("No such thread.")?;
+        if !live.tasks.iter().any(|t| t.id == row && t.done.is_none()) {
+            return Err("It has already finished.".into());
+        }
+        let background = live
+            .background_agents()
+            .find(|b| b.task.call.as_deref() == Some(row) && b.task.stoppable)
+            .map(|b| b.task.id.clone());
+        let tx = live.commands.clone().ok_or("Its session has ended.")?;
+        // One out in the background stops as background work does (Stop in the working bar).
+        if let Some(task) = background {
+            self.stop_background(thread, &task, cx);
+            return Ok(());
+        }
+        if !trek_agents::SubAgentControl::of(&agent).stop {
+            return Err(format!(
+                "{} doesn't let Trek stop its sub-agents.",
+                agent.display_name()
+            ));
+        }
+        let _ = tx.try_send(Command::StopTask { id: row.into() });
+        Ok(())
+    }
+
+    /// Send the agent's own sub-agent on `thread`'s row `row` a message mid-run, where its agent
+    /// takes one (`SubAgentControl::message`). It shows in the sub-agent's transcript at once.
+    pub fn message_sub_agent(
+        &mut self,
+        thread: &str,
+        row: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("Write something to send.".into());
+        }
+        let agent = self
+            .thread(thread)
+            .map(|t| t.agent.clone())
+            .ok_or("No such thread.")?;
+        if !trek_agents::SubAgentControl::of(&agent).message {
+            return Err(trek_agents::SubAgentControl::no_message(&agent));
+        }
+        let live = self.live.get_mut(thread).ok_or("No such thread.")?;
+        if !live.tasks.iter().any(|t| t.id == row && t.done.is_none()) {
+            return Err("It has already finished.".into());
+        }
+        let tx = live.commands.clone().ok_or("Its session has ended.")?;
+        tx.try_send(Command::MessageTask {
+            id: row.into(),
+            text: text.into(),
+        })
+        .map_err(|_| "Its session has ended.".to_string())?;
+        live.sub_logs
+            .entry(row.to_string())
+            .or_default()
+            .told(text.into());
+        live.revision += 1;
+        cx.notify();
+        Ok(())
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
