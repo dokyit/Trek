@@ -657,6 +657,7 @@ fn the_warm_draft_session_is_dropped_after_ten_minutes() {
                 mcp_servers: vec![],
                 instructions: None,
                 read_dirs: vec![],
+                claude_extra_tools: false,
                 script: false,
                 transcript: None,
             };

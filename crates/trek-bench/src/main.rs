@@ -437,6 +437,7 @@ async fn bench(
         mcp_servers: vec![],
         instructions,
         read_dirs: vec![],
+        claude_extra_tools: false,
         script: args.script,
         transcript: None,
     };

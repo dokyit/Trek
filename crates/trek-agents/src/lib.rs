@@ -84,6 +84,10 @@ pub struct SessionConfig {
     /// Folders outside `cwd` the agent may read without asking (the guides Trek ships): Claude
     /// Code gets them with `--add-dir`; Codex reads anywhere already.
     pub read_dirs: Vec<PathBuf>,
+    /// Claude Code keeps the built-in tools Trek does its own way or can't show
+    /// (`claude::LEFT_OUT_TOOLS`); without it they're left out of the session. Other agents
+    /// ignore it.
+    pub claude_extra_tools: bool,
     /// Offer the `script` tool (`trek-script`: a program that calls the other tools). Direct
     /// sessions only; off in Trek for now (`trek-bench --script on` turns it on).
     pub script: bool,
@@ -775,6 +779,19 @@ pub(crate) fn sign_in_as_account(command: &mut tokio::process::Command) {
             command.env(home.var, &home.dir);
         }
     });
+}
+
+/// The config folder the running task's agent processes are pointed at with `var`, when they run
+/// on an account (`on_account`).
+pub(crate) fn account_dir(var: &str) -> Option<PathBuf> {
+    ACCOUNT_HOME
+        .try_with(|home| {
+            home.as_ref()
+                .filter(|h| h.var == var)
+                .map(|h| h.dir.clone())
+        })
+        .ok()
+        .flatten()
 }
 
 /// Whether the running task's agent processes run on an account (`on_account`).
@@ -2573,6 +2590,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            claude_extra_tools: false,
             script: false,
             read_only: false,
             transcript: None,
@@ -2696,6 +2714,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            claude_extra_tools: false,
             script: false,
             read_only: false,
             transcript: None,
@@ -2780,6 +2799,7 @@ mod live_usage {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            claude_extra_tools: false,
             script: false,
             read_only: false,
             transcript: None,

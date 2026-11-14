@@ -4505,6 +4505,7 @@ mod tests {
                 mcp_servers: vec![],
                 instructions: None,
                 read_dirs: vec![],
+                claude_extra_tools: false,
                 script: false,
                 transcript: None,
             };
@@ -4590,6 +4591,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            claude_extra_tools: false,
             script: false,
             transcript: None,
         }
