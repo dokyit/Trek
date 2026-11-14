@@ -72,6 +72,11 @@ gpui-base = { path = "vendor/gpui-base" }
 # has the keys (the Browser's WKWebView) gets ⌘C/⌘X/⌘V/⌥⇧⌘V/⌘A/⌘Z/⇧⌘Z as Edit commands, which
 # GPUI's keymap otherwise takes. See "Trek:" in vendor/gpui-pre-macos/src/window.rs.
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+# And to gpui-pre-apple: the window's Metal layer keeps a third drawable only while frames come
+# close together (a stream, a scroll, an animation), and a second after the last frame lets its
+# spare drawables go (they stayed for good: 24 MB each at 1600 x 1000, more on a larger window).
+# See "Trek:" in vendor/gpui-pre-apple/src/{metal_renderer.rs,drawables.rs}.
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 # And to gpui-pre: a visible tooltip checks the mouse against its element's hitbox in the frame
 # being drawn, not the bounds it had when it appeared, so one whose element moved out from under a
 # still mouse (a scroll, an answer streaming in, a row's hover-only buttons going away) goes away
