@@ -527,6 +527,7 @@ impl DemoHost {
                         detail: "pnpm add -D @testing-library/user-event".into(),
                         state: ApprovalState::Pending,
                         asked_by: None,
+                        always_allow: None,
                     },
                 );
                 self.needs_you(
@@ -964,6 +965,7 @@ impl RemoteHost for DemoHost {
                     detail,
                     state,
                     asked_by,
+                    always_allow,
                 },
                 AnswerResponse::Approval { decision },
             ) => {
@@ -984,6 +986,7 @@ impl RemoteHost for DemoHost {
                         detail: detail.clone(),
                         state,
                         asked_by,
+                        always_allow,
                     },
                 );
                 tokio::spawn(self.clone().after_approval(
@@ -1275,7 +1278,11 @@ impl RemoteHost for DemoHost {
             | ThreadAction::Delete { .. }
             | ThreadAction::Compact
             | ThreadAction::ResumeInterrupted
-            | ThreadAction::DismissInterrupted => {}
+            | ThreadAction::DismissInterrupted
+            | ThreadAction::SendFailedChecks
+            | ThreadAction::DismissFailedChecks
+            | ThreadAction::ContinueOnAccount { .. }
+            | ThreadAction::StayOnAgent => {}
         });
         Ok(())
     }
@@ -2043,6 +2050,7 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
                 detail: "rm -rf target/".into(),
                 state: ApprovalState::Pending,
                 asked_by: None,
+                always_allow: None,
             },
         ],
     });
@@ -2463,6 +2471,8 @@ fn settings() -> MacSettings {
         session_approvals: false,
         resume_interrupted: None,
         continue_on_other_account: None,
+        phone_rules: None,
+        send_failed_checks: None,
     }
 }
 

@@ -186,6 +186,9 @@ impl SettingsView {
             s.mobile.session_approvals,
             |s, v| s.mobile.session_approvals = v,
         );
+        let phone_rules = self.switch("mobile-phone-rules", s.mobile.phone_rules, |s, v| {
+            s.mobile.phone_rules = v
+        });
         let mut rows = vec![Self::row(
             "Let your iPhone connect",
             "Trek listens for phones you've paired, on your network or tailnet. Off, nothing listens.",
@@ -197,6 +200,12 @@ impl SettingsView {
                 "Let it allow for a whole session",
                 format!("Off, the phone can allow or deny what an agent asks, one request at a time. On, it can also allow that kind of request for the rest of the session. Only {this} changes this: Trek can't check from here who is holding the phone."),
                 session_approvals,
+                cx,
+            ));
+            rows.push(Self::row(
+                "Let it write permission rules",
+                format!("Off, the phone can read your rules in Settings › Permissions and try them out. On, it can also add and remove rules, and allow a request with a rule from its card. A rule lasts until it's removed. Only {this} changes this."),
+                phone_rules,
                 cx,
             ));
         }

@@ -160,6 +160,54 @@ fn read_diff(place: &Place, path: &str) -> tr::HostResult<tr::GitDiff> {
     })
 }
 
+/// What `path`'s diff in `place` says now, as its viewed mark keeps it (the Git panel's
+/// `diff_review::sig_of` of the diff it shows); `None` when it has no change there.
+fn diff_sig(place: &Place, path: &str) -> Option<String> {
+    match &place.worktree {
+        Some((_, wt)) => {
+            let review = worktree::review(wt).ok()?;
+            let change = review.files.iter().find(|c| c.path == path)?;
+            Some(panel::viewed_sig_of_text(&worktree::file_diff(
+                wt,
+                &review.merge_base,
+                change,
+            )))
+        }
+        None => {
+            let snap = panel::snapshot(&place.cwd);
+            let file = snap.files.iter().find(|f| f.path == path)?;
+            Some(panel::viewed_sig(&place.cwd, file))
+        }
+    }
+}
+
+/// Which of `status`'s files are viewed (into `status.viewed`), from the marks kept for them
+/// (name and what its diff was); and the marks that change: one made from a list learns its diff,
+/// one whose file changed since goes.
+fn recheck_viewed(
+    place: &Place,
+    status: &mut tr::GitStatus,
+    marks: &[(String, String)],
+) -> Vec<(String, Option<String>)> {
+    let mut changed = vec![];
+    for f in &status.files {
+        let Some((_, was)) = marks.iter().find(|(name, _)| *name == f.path) else {
+            continue;
+        };
+        let Some(now) = diff_sig(place, &f.path) else {
+            continue;
+        };
+        if *was == crate::diff_review::SIG_UNKNOWN {
+            changed.push((f.path.clone(), Some(now)));
+        } else if *was != now {
+            changed.push((f.path.clone(), None));
+            continue;
+        }
+        status.viewed.push(f.path.clone());
+    }
+    changed
+}
+
 /// As the Git panel reads a file's diff: an untracked file is all added.
 fn local_diff(cwd: &Path, file: &FileChange) -> String {
     if file.status == "??" {
@@ -252,7 +300,88 @@ impl Workspace {
             Err(e) => return drop(reply.send(Err(e))),
         };
         let blocked = self.place_switch_blocked(&place);
-        self.git_job(place, reply, cx, move |place| read_status(place, blocked));
+        let key = self.viewed_key(&target);
+        // Files marked viewed: still viewed while their diff is what it was, else not any more,
+        // as the Git panel finds when it looks (`recheck_viewed`).
+        let marks: Vec<(String, String)> = key
+            .as_ref()
+            .and_then(|k| self.review_notes.get(k))
+            .map(|n| n.viewed.clone().into_iter().collect())
+            .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let cwd = place.cwd.clone();
+            let (result, marked) = cx
+                .background_executor()
+                .spawn(async move {
+                    match read_status(&place, blocked) {
+                        Ok(mut status) => {
+                            let marked = recheck_viewed(&place, &mut status, &marks);
+                            (Ok(status), marked)
+                        }
+                        Err(e) => (Err(e), vec![]),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |ws, cx| {
+                if let Some(key) = &key {
+                    for (name, sig) in marked {
+                        ws.set_viewed(key, &name, sig, cx);
+                    }
+                }
+                ws.refresh_git_at(cwd, cx)
+            });
+            let _ = reply.send(result);
+        })
+        .detach();
+    }
+
+    /// Where `target`'s viewed marks are kept, as the Git panel keeps them: the thread's, or the
+    /// project folder's.
+    fn viewed_key(&self, target: &tr::GitTarget) -> Option<String> {
+        if let Some(id) = &target.thread_id {
+            return Some(id.clone());
+        }
+        let project = self.project(target.project_id.as_deref()?)?;
+        Some(crate::diff_review::folder_key(&project.path))
+    }
+
+    /// `set_viewed`: the mark is made at the file's diff as it is now (a file with no change
+    /// isn't one to mark), then the status goes back as `git_status` would send it.
+    pub(super) fn remote_set_viewed(
+        &mut self,
+        req: tr::SetViewedRequest,
+        reply: tr::Reply<tr::GitStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        let (place, key) = match self.git_place(&req.target) {
+            Ok(place) => match self.viewed_key(&req.target) {
+                Some(key) => (place, key),
+                None => return drop(reply.send(Err(tr::HostError::not_found("No such project")))),
+            },
+            Err(e) => return drop(reply.send(Err(e))),
+        };
+        if !req.viewed {
+            self.set_viewed(&key, &req.path, None, cx);
+            return self.remote_git_status(req.target, reply, cx);
+        }
+        cx.spawn(async move |this, cx| {
+            let path = req.path.clone();
+            let sig = cx
+                .background_executor()
+                .spawn(async move { diff_sig(&place, &path) })
+                .await;
+            let _ = this.update(cx, |ws, cx| match sig {
+                Some(sig) => {
+                    ws.set_viewed(&key, &req.path, Some(sig), cx);
+                    ws.remote_git_status(req.target, reply, cx);
+                }
+                None => drop(reply.send(Err(tr::HostError::not_found(format!(
+                    "{} has no changes here",
+                    req.path
+                ))))),
+            });
+        })
+        .detach();
     }
 
     pub(super) fn remote_git_diff(

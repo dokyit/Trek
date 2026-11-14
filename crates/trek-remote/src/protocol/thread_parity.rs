@@ -74,6 +74,10 @@ pub struct LimitPause {
     /// before the limit").
     #[serde(default)]
     pub wrapped: bool,
+    /// Another account of its agent with room: "Continue on <label>" (feature
+    /// `continue_on_account`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other_account: Option<super::OtherAccount>,
 }
 
 /// The approval behind a row's `needs` (`ThreadSummary::ask`): which request it is, and all of what

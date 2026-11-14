@@ -6032,3 +6032,529 @@ fn a_sub_agent_whose_agent_takes_no_message_says_so() {
         trek_agents::SubAgentControl::default()
     );
 }
+
+// ---- the bars over the Mac's composer, rules and viewed files (`tr::feature`) ----
+
+/// A pull request `id` opened, failing `clippy` on `oid`, as the slow watch sees it. `gh` is one
+/// that isn't there: a send names what failed without asking GitHub for the log.
+fn failing_pr(trek: &common::Trek, cx: &mut gpui_kit::TestAppContext, id: &str, oid: &str) {
+    let (id, oid) = (id.to_string(), oid.to_string());
+    let gh = trek.project.join("no-gh-here");
+    trek.update(cx, move |ws, cx| {
+        ws.pr_checks.set_gh_path(Some(gh));
+        let card = trek_app::pr_card::Card {
+            kind: trek_app::pr_card::Kind::Pr,
+            url: Some("https://github.com/acme/web/pull/128".into()),
+            number: Some(128),
+            phase: trek_app::pr_card::Phase::Open,
+            opened: true,
+            head_oid: oid,
+            checks: vec![trek_app::pr_card::Check {
+                name: "clippy".into(),
+                state: trek_app::pr_card::CheckState::Fail,
+            }],
+            ..Default::default()
+        };
+        ws.pr_checks_saw(&id, "", &card, cx);
+    });
+}
+
+fn settings_change(
+    change: tr::SettingsChange,
+) -> impl FnOnce(tr::Reply<tr::MacSettings>) -> tr::HostRequest {
+    move |reply| tr::HostRequest::SetSettings { change, reply }
+}
+
+#[test]
+fn the_failing_checks_bar_from_the_phone() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "first thread");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        assert_eq!(row(&trek, cx, &id).checks, None);
+        let refused = ask(
+            &trek,
+            cx,
+            thread_action(&id, tr::ThreadAction::SendFailedChecks),
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, tr::ErrorCode::Conflict, "nothing is failing");
+
+        // Failing: the bar's state rides in the row, and the row waits on the user with the Mac's
+        // words (an older phone shows them as a failure).
+        failing_pr(&trek, cx, &id, "a1");
+        let r = row(&trek, cx, &id);
+        let checks = r.checks.expect("the bar");
+        assert_eq!(checks.failing, ["clippy"]);
+        assert_eq!(checks.number, Some(128));
+        assert!(checks.bar && !checks.stopped && !checks.sending && !checks.auto);
+        let needs = r.needs.expect("in Needs you");
+        assert_eq!(
+            (needs.kind, needs.text.as_str()),
+            (tr::NeedsKind::Failed, "CI failed: clippy")
+        );
+
+        // Sending by itself is the project's, off unless turned on; the phone turns it on and off.
+        let project_id = r.project.id.clone();
+        let s = ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap();
+        assert_eq!(s.send_failed_checks, Some(vec![]));
+        let on = |on: bool| tr::SettingsChange {
+            send_failed_checks: Some(tr::ProjectSwitch {
+                project_id: project_id.clone(),
+                on,
+            }),
+            ..Default::default()
+        };
+        let s = ask(&trek, cx, settings_change(on(true))).unwrap();
+        assert_eq!(s.send_failed_checks, Some(vec![project_id.clone()]));
+        assert!(row(&trek, cx, &id).checks.unwrap().auto);
+        let s = ask(&trek, cx, settings_change(on(false))).unwrap();
+        assert_eq!(s.send_failed_checks, Some(vec![]));
+        assert!(!trek.read(cx, |ws, _| ws.pr_checks_auto_on(&id)));
+        let elsewhere = ask(
+            &trek,
+            cx,
+            settings_change(tr::SettingsChange {
+                send_failed_checks: Some(tr::ProjectSwitch {
+                    project_id: "no-such-project".into(),
+                    on: true,
+                }),
+                ..Default::default()
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(elsewhere.code, tr::ErrorCode::NotFound);
+
+        // Dismissed: quiet, until a new commit fails.
+        ask(
+            &trek,
+            cx,
+            thread_action(&id, tr::ThreadAction::DismissFailedChecks),
+        )
+        .unwrap();
+        let r = row(&trek, cx, &id);
+        assert_eq!((r.checks, r.needs), (None, None));
+        let again = ask(
+            &trek,
+            cx,
+            thread_action(&id, tr::ThreadAction::DismissFailedChecks),
+        )
+        .unwrap_err();
+        assert_eq!(again.code, tr::ErrorCode::Conflict);
+        failing_pr(&trek, cx, &id, "a2");
+        assert!(
+            row(&trek, cx, &id).checks.is_some(),
+            "a new commit failing is news"
+        );
+
+        // Send to agent: what failed goes to the thread, and the bar goes.
+        ask(
+            &trek,
+            cx,
+            thread_action(&id, tr::ThreadAction::SendFailedChecks),
+        )
+        .unwrap();
+        let thread = id.clone();
+        trek.wait(cx, "the failing checks to go", move |ws| {
+            ws.live.get(&thread).is_some_and(|l| {
+                l.items.iter().any(|i| {
+                    matches!(i, trek_core::store::Item::User { text, .. } if text.contains("clippy"))
+                })
+            })
+        })
+        .await;
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(row(&trek, cx, &id).checks, None);
+    });
+}
+
+#[test]
+fn the_phone_reads_and_tries_the_rules_and_writes_them_only_where_the_mac_lets_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "permission mock:run ./scripts/phone-rule.sh --go");
+        trek.wait_needs_you(cx, &id).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        // The card says what "Always allow…" would write.
+        let transcript = ask_later(&trek, cx, transcript_req(&id, None, Some(50)))
+            .await
+            .unwrap();
+        let (request_id, draft) = transcript
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                tr::ItemBody::Approval {
+                    request_id,
+                    state: tr::ApprovalState::Pending,
+                    always_allow,
+                    ..
+                } => Some((request_id.clone(), always_allow.clone())),
+                _ => None,
+            })
+            .expect("its approval");
+        assert_eq!(
+            draft,
+            Some(tr::RuleDraft {
+                kind: tr::RuleKind::Command,
+                pattern: "./scripts/phone-rule.sh --go".into()
+            })
+        );
+
+        // Off, as it starts: the list and the tester are open, writing isn't.
+        let s = ask(&trek, cx, |reply| tr::HostRequest::Settings { reply }).unwrap();
+        assert_eq!(s.phone_rules, Some(false));
+        let list = ask(&trek, cx, |reply| tr::HostRequest::Rules { reply }).unwrap();
+        assert_eq!(list, tr::RulesList::default());
+        let deny = tr::Rule {
+            kind: tr::RuleKind::Command,
+            pattern: "rm".into(),
+            action: tr::RuleVerdict::Deny,
+        };
+        let add = |rule: tr::Rule| {
+            move |reply| tr::HostRequest::RuleAction {
+                req: tr::RuleActionRequest::Add { rule },
+                reply,
+            }
+        };
+        let refused = ask(&trek, cx, add(deny.clone())).unwrap_err();
+        assert!(refused.message.contains("Settings › Phone"), "{refused:?}");
+        let always = |pattern: &str| {
+            let req = tr::AlwaysAllowRequest {
+                thread_id: id.clone(),
+                request_id: request_id.clone(),
+                pattern: pattern.into(),
+            };
+            move |reply| tr::HostRequest::AlwaysAllow { req, reply }
+        };
+        let refused = ask(&trek, cx, always("./scripts/phone-rule.sh --go")).unwrap_err();
+        assert_eq!(refused.code, tr::ErrorCode::BadRequest);
+        assert_eq!(
+            trek.run_state(cx, &id),
+            RunState::NeedsYou,
+            "the card stays"
+        );
+        assert!(trek.read(cx, |ws, _| ws.settings.permissions.rules.is_empty()));
+
+        // Turned on at the Mac: rules are added and removed, and the tester says which decides.
+        trek.update(cx, |ws, cx| {
+            ws.settings.mobile.phone_rules = true;
+            ws.save_settings(cx);
+        });
+        let list = ask(&trek, cx, add(deny.clone())).unwrap();
+        assert_eq!(
+            (list.rules.clone(), list.editable),
+            (vec![deny.clone()], true)
+        );
+        let empty = tr::Rule {
+            pattern: " ".into(),
+            ..deny.clone()
+        };
+        assert_eq!(
+            ask(&trek, cx, add(empty)).unwrap_err().code,
+            tr::ErrorCode::BadRequest
+        );
+        let tried = ask(&trek, cx, |reply| tr::HostRequest::RuleTest {
+            req: tr::RuleTestRequest {
+                kind: tr::RuleKind::Command,
+                text: "rm -rf build; echo done".into(),
+            },
+            reply,
+        })
+        .unwrap();
+        assert_eq!(tried.rule, Some(0));
+        assert!(
+            tried
+                .decided_by
+                .as_deref()
+                .is_some_and(|w| w.contains("rm -rf build")),
+            "{tried:?}"
+        );
+        assert_eq!(tried.levels.len(), 4);
+        assert!(
+            tried
+                .levels
+                .iter()
+                .all(|l| l.outcome == tr::RuleOutcome::Refused)
+        );
+        let remove = |index: u32, rule: tr::Rule| {
+            move |reply| tr::HostRequest::RuleAction {
+                req: tr::RuleActionRequest::Remove { index, rule },
+                reply,
+            }
+        };
+        let moved = tr::Rule {
+            pattern: "mv".into(),
+            ..deny.clone()
+        };
+        assert_eq!(
+            ask(&trek, cx, remove(0, moved)).unwrap_err().code,
+            tr::ErrorCode::Conflict
+        );
+        assert!(ask(&trek, cx, remove(0, deny)).unwrap().rules.is_empty());
+
+        // "Add rule and allow": not a rule that wouldn't cover the card, then the card's own.
+        let refused = ask(&trek, cx, always("./scripts/other.sh")).unwrap_err();
+        assert!(refused.message.contains("wouldn't cover"), "{refused:?}");
+        ask(&trek, cx, always("./scripts/phone-rule.sh --go")).unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let rules = trek.read(cx, |ws, _| ws.settings.permissions.rules.clone());
+        assert_eq!(
+            rules,
+            vec![trek_core::permission_rules::PermissionRule::new(
+                trek_core::permission_rules::RuleKind::Command,
+                "./scripts/phone-rule.sh --go",
+                trek_core::permission_rules::RuleAction::Allow
+            )]
+        );
+        trek.update(cx, |ws, cx| ws.remove_permission_rule(0, cx));
+    });
+}
+
+#[test]
+fn the_limit_bar_offers_another_account_and_the_phone_goes_there() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:limit 2m");
+        let thread = id.clone();
+        trek.wait(cx, "the limit to pause the thread", move |ws| {
+            ws.pause(&thread).is_some() && !ws.turn_running(&thread)
+        })
+        .await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let continue_on = |account: Option<String>| {
+            thread_action(&id, tr::ThreadAction::ContinueOnAccount { account })
+        };
+        // One account: nowhere to go.
+        assert_eq!(row(&trek, cx, &id).pause.unwrap().other_account, None);
+        let refused = ask(&trek, cx, continue_on(None)).unwrap_err();
+        assert_eq!(refused.code, tr::ErrorCode::Conflict);
+
+        // Another, signed in with room: the bar offers it by name, and only it.
+        let work = trek.update(cx, |ws, cx| {
+            let id = ws.add_account(&common::mock(), cx).expect("an account");
+            ws.rename_account(&id, "Work", cx);
+            ws.accounts.status.insert(
+                id.clone(),
+                trek_agents::AgentStatus {
+                    account: Some("work@example.com".into()),
+                    logged_in: true,
+                    ..Default::default()
+                },
+            );
+            id
+        });
+        let other = row(&trek, cx, &id)
+            .pause
+            .unwrap()
+            .other_account
+            .expect("offered");
+        assert_eq!(
+            (other.account.as_deref(), other.label.as_str()),
+            (Some(work.as_str()), "Work")
+        );
+        let wrong = ask(&trek, cx, continue_on(Some("not-that-one".into()))).unwrap_err();
+        assert!(wrong.message.contains("Work has"), "{wrong:?}");
+        ask(&trek, cx, continue_on(Some(work.clone()))).unwrap();
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.thread(&id).and_then(|t| t.account.clone())),
+            Some(work)
+        );
+        assert!(trek.read(cx, |ws, _| ws.pause(&id).is_none()));
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let refused = ask(&trek, cx, continue_on(None)).unwrap_err();
+        assert_eq!(refused.code, tr::ErrorCode::Conflict, "not paused now");
+    });
+}
+
+#[test]
+fn a_large_idle_thread_offers_compact_in_its_row() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "hello");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let set = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext, used: u64| {
+            let id = id.clone();
+            trek.update(cx, move |ws, _| {
+                let live = ws.live.get_mut(&id).unwrap();
+                live.context = Some((used, 200_000));
+                live.billing = Some(trek_agents::Billing::Metered);
+            })
+        };
+        // Small: re-reading it costs little, so nothing's offered.
+        set(&trek, cx, 20_000);
+        assert_eq!(row(&trek, cx, &id).compact_offer, None);
+        // Large: offered, from when an API key's cache goes (five minutes after it last did
+        // anything), with the Mac's words for why.
+        set(&trek, cx, 90_000);
+        let offer = row(&trek, cx, &id).compact_offer.expect("offered");
+        assert_eq!((offer.used, offer.window), (90_000, 200_000));
+        assert_eq!(offer.lapses_at - offer.last_active, 5 * 60 * 1000);
+        assert!(
+            offer.why.contains("5 minutes on an API key"),
+            "{}",
+            offer.why
+        );
+        // At work: nothing to offer while it is.
+        trek.send(cx, "mock:long 5s");
+        assert_eq!(row(&trek, cx, &id).compact_offer, None);
+    });
+}
+
+#[test]
+fn a_phone_holds_a_switch_for_the_next_message_and_previews_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "remember APPLE");
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        trek.update(cx, |ws, _| ws.start_test_remote());
+        let relay = trek_core::AgentId::Direct(trek_core::catalog::MOCK_RELAY_PROVIDER.into());
+        let hold = |id: &str| {
+            let req = tr::PrefsRequest {
+                thread_id: id.to_string(),
+                agent: Some(relay.key()),
+                hold: true,
+                ..Default::default()
+            };
+            move |reply| tr::HostRequest::SetPrefs { req, reply }
+        };
+        let agent = |trek: &common::Trek, cx: &gpui_kit::TestAppContext, id: &str| {
+            trek.read(cx, |ws, _| ws.thread(id).unwrap().agent.clone())
+        };
+        let preview = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+            let thread_id = id.clone();
+            ask(trek, cx, |reply| tr::HostRequest::SwitchPreview {
+                thread_id,
+                reply,
+            })
+        };
+        assert_eq!(
+            preview(&trek, cx).unwrap_err().code,
+            tr::ErrorCode::NotFound
+        );
+
+        // Held: the thread stays where it is, and its row says where the next message goes.
+        ask(&trek, cx, hold(&id)).unwrap();
+        assert_eq!(agent(&trek, cx, &id), common::mock());
+        let waiting = row(&trek, cx, &id).pending_switch.expect("the bar");
+        assert_eq!(waiting.agent.key, relay.key());
+        assert_eq!(waiting.to, relay.display_name());
+        assert_eq!(waiting.from, common::mock().display_name());
+        // What goes with it: the conversation so far.
+        let p = preview(&trek, cx).unwrap();
+        assert!(p.text.contains("APPLE"), "{}", p.text);
+        assert!(p.tokens > 0 && p.tokens <= p.budget);
+
+        // "Stay on": nothing changed.
+        ask(&trek, cx, thread_action(&id, tr::ThreadAction::StayOnAgent)).unwrap();
+        assert_eq!(row(&trek, cx, &id).pending_switch, None);
+        let again = ask(&trek, cx, thread_action(&id, tr::ThreadAction::StayOnAgent)).unwrap_err();
+        assert_eq!(again.code, tr::ErrorCode::Conflict);
+
+        // Held again, the phone's next message makes the move, and goes to the new agent.
+        ask(&trek, cx, hold(&id)).unwrap();
+        ask(&trek, cx, |reply| tr::HostRequest::Send {
+            req: tr::SendRequest {
+                thread_id: id.clone(),
+                text: "carry on".into(),
+                mode: None,
+                images: vec![],
+                consult: None,
+                files: vec![],
+            },
+            reply,
+        })
+        .unwrap();
+        assert_eq!(agent(&trek, cx, &id), relay);
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        assert_eq!(row(&trek, cx, &id).pending_switch, None);
+        assert!(
+            trek.items(cx, &id)
+                .iter()
+                .any(|i| matches!(i, trek_core::store::Item::Handoff { .. }))
+        );
+
+        // A thread nothing was said in has nothing to carry: it moves now.
+        let quiet = trek.quiet_thread(cx);
+        ask(&trek, cx, hold(&quiet)).unwrap();
+        assert_eq!(agent(&trek, cx, &quiet), relay);
+    });
+}
+
+#[test]
+fn files_marked_viewed_from_the_phone_are_the_panels_and_come_back_when_they_change() {
+    run(async |cx| {
+        let trek = open(cx);
+        common::make_repo(&trek, cx);
+        let project_id = trek.read(cx, |ws, _| {
+            ws.projects
+                .iter()
+                .find(|p| p.path == trek.project)
+                .unwrap()
+                .id
+                .clone()
+        });
+        let target = tr::GitTarget::project(project_id);
+        let key = trek_app::diff_review::folder_key(&trek.project);
+        std::fs::write(trek.project.join("README.md"), "hello\nworld\n").unwrap();
+        std::fs::write(trek.project.join("new.txt"), "one\ntwo\n").unwrap();
+        let status = async |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+            let target = target.clone();
+            ask_later(trek, cx, move |reply| tr::HostRequest::GitStatus {
+                target,
+                reply,
+            })
+            .await
+        };
+        let mark = |path: &str, viewed: bool| {
+            let req = tr::SetViewedRequest {
+                target: target.clone(),
+                path: path.into(),
+                viewed,
+            };
+            move |reply| tr::HostRequest::SetViewed { req, reply }
+        };
+        assert!(status(&trek, cx).await.unwrap().viewed.is_empty());
+
+        // Marked from the phone: the Mac's panel has it, at the diff it has now.
+        let s = ask_later(&trek, cx, mark("README.md", true)).await.unwrap();
+        assert_eq!(s.viewed, ["README.md"]);
+        let sig = trek.read(cx, |ws, _| {
+            ws.viewed_sig(&key, "README.md").map(str::to_string)
+        });
+        assert!(sig.is_some_and(|s| s != trek_app::diff_review::SIG_UNKNOWN));
+        // One the Mac's list marked before it read the diff is viewed too, and learns it.
+        let k = key.clone();
+        trek.update(cx, move |ws, cx| {
+            ws.set_viewed(
+                &k,
+                "new.txt",
+                Some(trek_app::diff_review::SIG_UNKNOWN.into()),
+                cx,
+            )
+        });
+        let s = status(&trek, cx).await.unwrap();
+        assert_eq!(s.viewed, ["README.md", "new.txt"]);
+        assert!(trek.read(cx, |ws, _| ws.viewed_sig(&key, "new.txt")
+            != Some(trek_app::diff_review::SIG_UNKNOWN)));
+
+        // Changed again, it comes back unviewed, here and on the Mac.
+        std::fs::write(trek.project.join("README.md"), "hello\nthere\n").unwrap();
+        assert_eq!(status(&trek, cx).await.unwrap().viewed, ["new.txt"]);
+        assert!(!trek.read(cx, |ws, _| ws.is_viewed(&key, "README.md")));
+        // Unmarked from the phone.
+        assert!(
+            ask_later(&trek, cx, mark("new.txt", false))
+                .await
+                .unwrap()
+                .viewed
+                .is_empty()
+        );
+        // A file with no change isn't one to mark.
+        let refused = ask_later(&trek, cx, mark("Cargo.toml", true))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, tr::ErrorCode::NotFound);
+    });
+}

@@ -144,6 +144,9 @@ pub struct Mobile {
     /// The phone may allow a kind of request for the rest of a session, not just the one asked.
     /// Off, only this Mac can: Trek can't check from here who is holding the phone.
     pub session_approvals: bool,
+    /// The phone may write permission rules (add or remove one, or "Always allow…" from an
+    /// approval card). A rule outlasts the request it came from, so off, only this Mac can.
+    pub phone_rules: bool,
 }
 
 impl Default for Mobile {
@@ -158,6 +161,7 @@ impl Default for Mobile {
             push_when: PushWhen::Away,
             push_names: false,
             session_approvals: false,
+            phone_rules: false,
         }
     }
 }

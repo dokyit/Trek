@@ -126,11 +126,8 @@ impl Workspace {
                 }
                 self.send_to(id, "/compact".to_string(), vec![], cx);
             }
-            _ => {
-                return Err(tr::HostError::bad_request(
-                    "This Mac can't do that to a thread",
-                ));
-            }
+            // The failing-checks bar, "Continue on <account>" and "Stay on …" (`bars.rs`).
+            action => return self.remote_bar_action(id, action, cx),
         }
         Ok(())
     }

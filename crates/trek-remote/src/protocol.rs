@@ -7,23 +7,29 @@
 use serde::{Deserialize, Serialize};
 
 mod cards;
+mod composer_bars;
 mod look;
 mod machines;
 mod parity;
 mod phone_update;
+mod rules;
 mod side_chat;
 mod sub_agent_view;
 mod thread_parity;
 mod uploads;
+mod viewed;
 pub use cards::*;
+pub use composer_bars::*;
 pub use look::*;
 pub use machines::*;
 pub use parity::*;
 pub use phone_update::*;
+pub use rules::*;
 pub use side_chat::*;
 pub use sub_agent_view::*;
 pub use thread_parity::*;
 pub use uploads::*;
+pub use viewed::*;
 
 /// The protocol version this crate speaks (`hello`/`pair` carry the phone's, `welcome`/`paired`
 /// the Mac's).
@@ -257,6 +263,24 @@ pub enum ClientMessage {
     /// Stop one of the agent's own sub-agents, or send it a message (answered with `sub_agent`;
     /// feature `sub_agent_view`).
     SubAgentAction(SubAgentActionRequest),
+    // What the Mac's composer and Settings gained since (`composer_bars.rs`, `rules.rs`,
+    // `viewed.rs`; the Mac lists each in `features`).
+    /// What a move to another agent waiting for the next message carries (answered with
+    /// `switch_preview`; feature `switch_preview`).
+    SwitchPreview {
+        thread_id: String,
+    },
+    /// The user's permission rules (answered with `rules`; feature `rules`).
+    Rules,
+    /// Add a rule or remove one (answered with `rules`; feature `rules`).
+    RuleAction(RuleActionRequest),
+    /// What the rules say about a call (answered with `rule_test`; feature `rules`).
+    RuleTest(RuleTestRequest),
+    /// An approval card's "Add rule and allow" (answered with `ack`; feature `rules`).
+    AlwaysAllow(AlwaysAllowRequest),
+    /// Mark a changed file viewed, or not (answered with its folder's status; feature
+    /// `diff_viewed`).
+    SetViewed(SetViewedRequest),
 }
 
 impl ClientMessage {
@@ -317,6 +341,12 @@ impl ClientMessage {
             Self::SideChat(_) => "side_chat",
             Self::SubAgent(_) => "sub_agent",
             Self::SubAgentAction(_) => "sub_agent_action",
+            Self::SwitchPreview { .. } => "switch_preview",
+            Self::Rules => "rules",
+            Self::RuleAction(_) => "rule_action",
+            Self::RuleTest(_) => "rule_test",
+            Self::AlwaysAllow(_) => "always_allow",
+            Self::SetViewed(_) => "set_viewed",
         }
     }
 }
@@ -346,6 +376,9 @@ impl ClientMessage {
                 | Self::Media(_)
                 | Self::ContextCard { .. }
                 | Self::TurnPreview(_)
+                | Self::SwitchPreview { .. }
+                | Self::Rules
+                | Self::RuleTest(_)
         )
     }
 }
@@ -471,6 +504,11 @@ pub struct PrefsRequest {
     pub access: Option<Access>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<bool>,
+    /// Another `agent` (or account) waits for the thread's next message, as the Mac's composer
+    /// holds its pick, instead of moving now: the row's `pending_switch` says so, and the next
+    /// `send` makes the move (feature `switch_preview`). A thread nothing was said in yet moves now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hold: bool,
 }
 
 /// `thread_action`.
@@ -530,6 +568,21 @@ pub enum ThreadAction {
     ResumeInterrupted,
     /// Leave it as it is: it stays stopped and the offer goes.
     DismissInterrupted,
+    // The failing-checks bar (feature `failed_checks`); `conflict` with nothing failing.
+    /// "Send to agent": the failing checks and the useful end of their logs go to the thread, as
+    /// a message queued behind a turn under way.
+    SendFailedChecks,
+    /// "Dismiss": quiet until a new commit fails, or another check.
+    DismissFailedChecks,
+    /// The limit bar's "Continue on <account>" (feature `continue_on_account`): the paused thread
+    /// moves to `account` (`None`: the normal login) and carries on now, from a recap. `conflict`
+    /// when it isn't paused or that account isn't the one with room any more.
+    ContinueOnAccount {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    /// "Stay on …": the move waiting for the next message is dropped (feature `switch_preview`).
+    StayOnAgent,
 }
 
 /// The Mac's snooze menu.
@@ -622,6 +675,23 @@ pub mod feature {
     /// Tool items carry `sub_agent` (the sub-agent a row stands for), and `sub_agent` and
     /// `sub_agent_action` read, stop and message the agent's own sub-agents (`sub_agent_view.rs`).
     pub const SUB_AGENT_VIEW: &str = "sub_agent_view";
+    /// `ThreadSummary::checks` (the failing-checks bar), `thread_action` `send_failed_checks` and
+    /// `dismiss_failed_checks`, and the projects' `send_failed_checks` in `settings`
+    /// (`composer_bars.rs`).
+    pub const FAILED_CHECKS: &str = "failed_checks";
+    /// `rules`, `rule_action`, `rule_test` and `always_allow`, an approval's `always_allow` draft
+    /// and `settings.phone_rules` (`rules.rs`).
+    pub const RULES: &str = "rules";
+    /// `LimitPause::other_account` and `thread_action` `continue_on_account`.
+    pub const CONTINUE_ON_ACCOUNT: &str = "continue_on_account";
+    /// `ThreadSummary::compact_offer`: the Compact chip (it compacts with `thread_action`
+    /// `compact`).
+    pub const COMPACT_OFFER: &str = "compact_offer";
+    /// `set_prefs.hold`, `ThreadSummary::pending_switch`, `switch_preview` and `thread_action`
+    /// `stay_on_agent`: a move to another agent waits for the next message.
+    pub const SWITCH_PREVIEW: &str = "switch_preview";
+    /// `GitStatus::viewed` and `set_viewed`: files marked viewed in review (`viewed.rs`).
+    pub const DIFF_VIEWED: &str = "diff_viewed";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -651,6 +721,12 @@ pub mod feature {
         UPLOADS,
         SIDE_CHAT,
         SUB_AGENT_VIEW,
+        FAILED_CHECKS,
+        RULES,
+        CONTINUE_ON_ACCOUNT,
+        COMPACT_OFFER,
+        SWITCH_PREVIEW,
+        DIFF_VIEWED,
     ];
 }
 
@@ -807,6 +883,10 @@ pub struct SettingsChange {
     /// A thread its usage limit stops carries on by itself on another account of its agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_on_other_account: Option<bool>,
+    /// A project's pull requests' failing checks go back to the thread that opened them without
+    /// asking, up to two tries a pull request (feature `failed_checks`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_failed_checks: Option<ProjectSwitch>,
 }
 
 /// How a follow-up reaches a working thread. On an idle thread both just start a turn.
@@ -1024,6 +1104,12 @@ pub enum ServerMessage {
     SideChat(SideChat),
     /// The reply to `sub_agent` and `sub_agent_action`.
     SubAgent(SubAgentView),
+    /// The reply to `switch_preview`.
+    SwitchPreview(SwitchPreview),
+    /// The reply to `rules` and `rule_action`.
+    Rules(RulesList),
+    /// The reply to `rule_test`.
+    RuleTest(RuleTest),
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.
@@ -1242,6 +1328,17 @@ pub struct ThreadSummary {
     /// offer the Mac's sidebar and composer make (feature `resume_interrupted`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cut_short: Option<CutShort>,
+    /// A pull request it opened is failing, and that isn't dealt with yet: the Mac's
+    /// failing-checks bar (feature `failed_checks`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<FailingChecks>,
+    /// Large and idle on an agent that can compact: the Compact chip, once `lapses_at` has
+    /// passed (feature `compact_offer`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_offer: Option<CompactOffer>,
+    /// A move to another agent waits for its next message (feature `switch_preview`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_switch: Option<PendingSwitch>,
 }
 
 /// A context window's use.
@@ -1611,6 +1708,10 @@ pub enum ItemBody {
         /// no "Allow for session" for it (the Mac refuses one). Absent from a Mac before it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         asked_by: Option<String>,
+        /// The rule "Always allow…" would add for it (none: a rule asks about it, or no allow
+        /// could cover it). Feature `rules`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        always_allow: Option<RuleDraft>,
     },
     Question {
         request_id: String,
@@ -2259,6 +2360,10 @@ pub struct GitStatus {
     pub can_switch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch_blocked: Option<String>,
+    /// Of `files`, the paths marked viewed in review that haven't changed since (feature
+    /// `diff_viewed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub viewed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -2365,6 +2470,15 @@ pub struct MacSettings {
     /// room left (off: that's offered). Missing from an older Mac.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continue_on_other_account: Option<bool>,
+    /// The phone may write permission rules: add one, remove one, or "Always allow…" from an
+    /// approval card (only the Mac can change that; off, `rule_action` and `always_allow` are
+    /// refused). Missing from a Mac before `rules`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone_rules: Option<bool>,
+    /// The projects (by id) whose failing checks go back to their threads by themselves. Missing
+    /// from a Mac before `failed_checks`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_failed_checks: Option<Vec<String>>,
 }
 
 /// Notifications on the phone through ntfy.

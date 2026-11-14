@@ -69,6 +69,8 @@ fn settings() -> MacSettings {
         session_approvals: false,
         resume_interrupted: None,
         continue_on_other_account: None,
+        phone_rules: None,
+        send_failed_checks: None,
     }
 }
 
@@ -109,6 +111,7 @@ fn long_transcript() -> Transcript {
         detail: "make".into(),
         state: ApprovalState::Pending,
         asked_by: None,
+        always_allow: None,
     };
     items.push(Item {
         id: "rreq".into(),

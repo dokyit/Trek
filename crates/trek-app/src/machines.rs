@@ -1726,6 +1726,8 @@ impl Workspace {
                 access: (prefs.hand_holding != before.hand_holding)
                     .then(|| access_of(prefs.hand_holding)),
                 plan: (prefs.plan != plan_before).then_some(prefs.plan),
+                // Another machine's thread moves when asked, as it always has.
+                hold: false,
             })
         };
         // Shown at once; the machine's row confirms it (or puts it back).

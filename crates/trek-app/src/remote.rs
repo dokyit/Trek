@@ -35,6 +35,7 @@ use trek_remote as tr;
 
 mod attachments;
 mod background;
+mod bars;
 mod basecamp;
 pub mod bonjour;
 mod cards;
@@ -49,6 +50,7 @@ mod media;
 mod notes;
 pub mod phone_update;
 mod queue;
+mod rules;
 pub mod search;
 mod settings;
 mod side_chat;
@@ -1235,6 +1237,28 @@ impl Workspace {
             tr::HostRequest::SideChat { req, reply } => {
                 let _ = reply.send(self.remote_side_chat(req, cx));
             }
+            // A move to another agent waiting for the next message (`bars.rs`).
+            tr::HostRequest::SwitchPreview { thread_id, reply } => {
+                let id = thread_id.clone();
+                self.when_loaded(thread_id, reply, cx, move |ws, _| {
+                    ws.remote_switch_preview(&id)
+                });
+            }
+            // Settings › Permissions and "Always allow…" (`rules.rs`).
+            tr::HostRequest::Rules { reply } => {
+                let _ = reply.send(Ok(self.remote_rules()));
+            }
+            tr::HostRequest::RuleAction { req, reply } => {
+                let _ = reply.send(self.remote_rule_action(req, cx));
+            }
+            tr::HostRequest::RuleTest { req, reply } => {
+                let _ = reply.send(self.remote_rule_test(req));
+            }
+            tr::HostRequest::AlwaysAllow { req, reply } => {
+                let _ = reply.send(self.remote_always_allow(req, cx));
+            }
+            // A changed file marked viewed in review (`git.rs`).
+            tr::HostRequest::SetViewed { req, reply } => self.remote_set_viewed(req, reply, cx),
         }
     }
 
@@ -1280,6 +1304,10 @@ impl Workspace {
             tr::SendMode::Steer => trek_core::settings::FollowUp::Steer,
             tr::SendMode::Queue => trek_core::settings::FollowUp::Queue,
         });
+        // The message goes to the agent the user picked: a move waiting for it happens now, as
+        // the Mac's composer makes it (not for a command Trek answers itself, nor `/compact`).
+        let scope = crate::workspace::Scope::Thread(req.thread_id.clone());
+        self.commit_switch_in(&scope, &req.text, cx);
         // Typed on the phone as on the Mac: waiting on an approval or a plan, the words decline
         // it and go now, rather than wait behind the very card they answer.
         self.send_typed_to(&req.thread_id, text, images, follow, cx);
@@ -1346,7 +1374,14 @@ impl Workspace {
         if let Some(plan) = req.plan {
             prefs.plan = plan;
         }
-        self.set_prefs_in(&scope, prefs, cx);
+        // Held, as the Mac's composer holds a pick of another agent: it moves with the next
+        // message (with nothing said yet, it moves now). Unheld, as phones always moved it: now.
+        if req.hold {
+            self.choose_prefs_in(&scope, prefs, cx);
+            self.threads_gen += 1;
+        } else {
+            self.set_prefs_in(&scope, prefs, cx);
+        }
         Ok(())
     }
 
@@ -1847,7 +1882,10 @@ impl Workspace {
                         text: last_error.unwrap_or_else(|| "The turn failed".into()),
                     }
                 })
-            });
+            })
+            // A pull request it opened is failing: the Mac's row says so ("CI failed: clippy"),
+            // and an older phone lists it with what failed.
+            .or_else(|| self.remote_checks_needs(t));
         // (A snoozed thread that needs you is in the inbox already: it raised its hand.)
         // A sub-agent (sent `unlisted`): where it would sit on its own.
         let section = match t
@@ -1979,6 +2017,8 @@ impl Workspace {
                 resets_at: p.resets_at,
                 resume: p.resume,
                 wrapped: p.wrapped,
+                // "Continue on <account>": another account of its agent with room.
+                other_account: self.remote_other_account(&t.id),
             }),
             // Only whole: a one-tap Allow (the Lock Screen's) on a command with its middle cut out
             // to fit would allow what nobody read. That one is answered in the thread.
@@ -1992,6 +2032,10 @@ impl Workspace {
                     detail,
                 }),
             cut_short: self.remote_cut_short(t),
+            // The bars over the Mac's composer (`bars.rs`).
+            checks: self.remote_checks(t),
+            compact_offer: self.remote_compact_offer(t),
+            pending_switch: self.remote_pending_switch(t),
         };
         self.remote_sub_agent_needs(t, &mut row);
         row
@@ -3101,6 +3145,8 @@ fn request_cards(ws: &Workspace, id: &str) -> Vec<(String, tr::ItemBody)> {
                     asked_by: ws
                         .rule_asking(id, &p.request_id)
                         .map(|r| clip_text_to(&r, 1 << 10)),
+                    // "Always allow…": the rule it would add (`rules.rs`).
+                    always_allow: rules::always_allow_draft(ws, id, p),
                 },
                 Some(trek_agents::Prompt::Questions(qs)) => tr::ItemBody::Question {
                     request_id: p.request_id.clone(),

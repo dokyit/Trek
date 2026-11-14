@@ -878,7 +878,7 @@ impl Workspace {
     }
 
     /// Whether `id`'s project sends failing checks by itself.
-    fn pr_checks_auto_on(&self, id: &str) -> bool {
+    pub fn pr_checks_auto_on(&self, id: &str) -> bool {
         self.thread(id)
             .and_then(|t| self.project_dir(t))
             .is_some_and(|p| self.project_prefs(&p).send_failed_checks)

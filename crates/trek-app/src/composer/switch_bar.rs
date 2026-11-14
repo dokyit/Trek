@@ -85,32 +85,9 @@ impl Composer {
     ) -> Option<AnyElement> {
         let handover = self.handover_preview(id, cx);
         let ws = self.workspace.read(cx);
-        let pending = ws.pending_switch(id)?;
-        let thread = ws.thread(id)?;
         // Another account of the same agent is named by its account; another agent by its name,
-        // with the account picked there, if one was.
-        let label =
-            |agent: &trek_core::AgentId, account: Option<&str>| ws.account_label(agent, account);
-        let (to, from) = if pending.agent == thread.agent {
-            (
-                label(&pending.agent, pending.account.as_deref())
-                    .map(|l| format!("the {l} account"))
-                    .unwrap_or_else(|| pending.agent.display_name()),
-                label(&thread.agent, thread.account.as_deref())
-                    .unwrap_or_else(|| thread.agent.display_name()),
-            )
-        } else {
-            let named = |agent: &trek_core::AgentId, account: Option<&str>| match account
-                .and_then(|a| label(agent, Some(a)))
-            {
-                Some(l) => format!("{} · {l}", agent.display_name()),
-                None => agent.display_name(),
-            };
-            (
-                named(&pending.agent, pending.account.as_deref()),
-                named(&thread.agent, thread.account.as_deref()),
-            )
-        };
+        // with the account picked there, if one was (the phone's bar says the same).
+        let (to, from) = ws.pending_switch_names(id)?;
         let running = ws.turn_running(id);
         let (lead, rest) = sentence(&to, running, compact);
         let whole = {
@@ -236,16 +213,7 @@ impl Composer {
 fn preview_card(handover: &Handover, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let tokens = crate::context_popover::fmt_tokens;
-    let left_out = handover.left_out.list().map(|list| {
-        let mut said = format!("Left out: {list}.");
-        if handover.searchable {
-            said.push_str(&format!(
-                " The new agent can search the transcript on {} if it needs them, with secrets removed.",
-                crate::words::words().this_computer
-            ));
-        }
-        said
-    });
+    let left_out = crate::workspace::switching::left_out_words(handover);
     look::surface(cx)
         .id("switch-preview-body")
         .test_support()

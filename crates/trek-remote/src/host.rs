@@ -11,6 +11,10 @@ use crate::protocol::{
     AddNoteImageRequest, NoteAsset, NoteAssetRequest, NoteFileChunk, NoteFileRequest, NoteImage,
 };
 use crate::protocol::{
+    AlwaysAllowRequest, RuleActionRequest, RuleTest, RuleTestRequest, RulesList, SetViewedRequest,
+    SwitchPreview,
+};
+use crate::protocol::{
     AnswerRequest, Attachment, AttachmentRequest, BackgroundOutput, Basecamp, BasecampRange,
     CommandInfo, ErrorCode, GitBranches, GitCommitRequest, GitDiff, GitDiffRequest, GitStatus,
     GitSwitchRequest, GitTarget, Icon, IconRequest, Item, MacSettings, NewThreadRequest, Note,
@@ -465,6 +469,51 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("steer a sub-agent")
     }
 
+    /// What a move to another agent waiting for `thread_id`'s next message carries (feature
+    /// `switch_preview`); `not_found` when no move waits.
+    fn switch_preview(
+        &self,
+        thread_id: &str,
+    ) -> impl Future<Output = HostResult<SwitchPreview>> + Send {
+        let _ = thread_id;
+        unsupported("preview a switch")
+    }
+
+    /// The user's permission rules (feature `rules`).
+    fn rules(&self) -> impl Future<Output = HostResult<RulesList>> + Send {
+        unsupported("show your rules")
+    }
+
+    /// Add a rule or remove one (feature `rules`); refused unless the Mac lets phones write rules.
+    fn rule_action(
+        &self,
+        req: RuleActionRequest,
+    ) -> impl Future<Output = HostResult<RulesList>> + Send {
+        let _ = req;
+        unsupported("change your rules")
+    }
+
+    /// What the rules say about a call, at each level (feature `rules`).
+    fn rule_test(&self, req: RuleTestRequest) -> impl Future<Output = HostResult<RuleTest>> + Send {
+        let _ = req;
+        unsupported("try your rules")
+    }
+
+    /// An approval card's "Add rule and allow" (feature `rules`).
+    fn always_allow(&self, req: AlwaysAllowRequest) -> impl Future<Output = HostResult<()>> + Send {
+        let _ = req;
+        unsupported("add a rule")
+    }
+
+    /// Mark a changed file viewed, or not, and the folder's status after (feature `diff_viewed`).
+    fn set_viewed(
+        &self,
+        req: SetViewedRequest,
+    ) -> impl Future<Output = HostResult<GitStatus>> + Send {
+        let _ = req;
+        unsupported("mark files viewed")
+    }
+
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -735,6 +784,29 @@ pub enum HostRequest {
     SubAgentAction {
         req: SubAgentActionRequest,
         reply: Reply<SubAgentView>,
+    },
+    SwitchPreview {
+        thread_id: String,
+        reply: Reply<SwitchPreview>,
+    },
+    Rules {
+        reply: Reply<RulesList>,
+    },
+    RuleAction {
+        req: RuleActionRequest,
+        reply: Reply<RulesList>,
+    },
+    RuleTest {
+        req: RuleTestRequest,
+        reply: Reply<RuleTest>,
+    },
+    AlwaysAllow {
+        req: AlwaysAllowRequest,
+        reply: Reply<()>,
+    },
+    SetViewed {
+        req: SetViewedRequest,
+        reply: Reply<GitStatus>,
     },
 }
 
@@ -1081,6 +1153,36 @@ impl RemoteHost for ChannelHost {
 
     async fn sub_agent_action(&self, req: SubAgentActionRequest) -> HostResult<SubAgentView> {
         self.call(|reply| HostRequest::SubAgentAction { req, reply })
+            .await
+    }
+
+    async fn switch_preview(&self, thread_id: &str) -> HostResult<SwitchPreview> {
+        let thread_id = thread_id.to_string();
+        self.call(|reply| HostRequest::SwitchPreview { thread_id, reply })
+            .await
+    }
+
+    async fn rules(&self) -> HostResult<RulesList> {
+        self.call(|reply| HostRequest::Rules { reply }).await
+    }
+
+    async fn rule_action(&self, req: RuleActionRequest) -> HostResult<RulesList> {
+        self.call(|reply| HostRequest::RuleAction { req, reply })
+            .await
+    }
+
+    async fn rule_test(&self, req: RuleTestRequest) -> HostResult<RuleTest> {
+        self.call(|reply| HostRequest::RuleTest { req, reply })
+            .await
+    }
+
+    async fn always_allow(&self, req: AlwaysAllowRequest) -> HostResult<()> {
+        self.call(|reply| HostRequest::AlwaysAllow { req, reply })
+            .await
+    }
+
+    async fn set_viewed(&self, req: SetViewedRequest) -> HostResult<GitStatus> {
+        self.call(|reply| HostRequest::SetViewed { req, reply })
             .await
     }
 }

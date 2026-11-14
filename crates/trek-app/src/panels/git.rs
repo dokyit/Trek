@@ -378,6 +378,21 @@ fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
     diff_body(&text, file.status == "??")
 }
 
+/// What a changed file's diff says as this panel reads it, for its viewed mark
+/// (`diff_review::sig_of`), so the phone's marks (`remote::git`) and the panel's agree.
+pub(crate) fn viewed_sig(cwd: &Path, file: &FileChange) -> String {
+    sig_of_lines(&file_diff(cwd, file))
+}
+
+/// `viewed_sig` for a worktree's file against its base, from `worktree::file_diff`'s text.
+pub(crate) fn viewed_sig_of_text(text: &str) -> String {
+    sig_of_lines(&diff_lines(text))
+}
+
+fn sig_of_lines(lines: &[(LineKind, String)]) -> String {
+    diff_review::sig_of(lines.iter().map(|(_, t)| t.as_str()))
+}
+
 /// A pull request's description: the agent's last answer (it usually sums up the work), then the
 /// branch's commits.
 fn pr_body(summary: Option<&str>, commits: &[String]) -> String {

@@ -56,6 +56,14 @@ impl Workspace {
             session_approvals: m.session_approvals,
             resume_interrupted: Some(s.general.resume_interrupted),
             continue_on_other_account: Some(s.general.continue_on_other_account),
+            phone_rules: Some(m.phone_rules),
+            send_failed_checks: Some(
+                self.workspace_projects()
+                    .into_iter()
+                    .filter(|p| self.project_prefs(&p.path).send_failed_checks)
+                    .map(|p| p.id.clone())
+                    .collect(),
+            ),
         }
     }
 
@@ -168,6 +176,16 @@ impl Workspace {
         if let Some(on) = change.continue_on_other_account {
             s.general.continue_on_other_account = on;
         }
+        // A project's own setting, as its page in the Mac's Settings has it.
+        let failed_checks = match &change.send_failed_checks {
+            Some(switch) => Some((
+                self.project(&switch.project_id)
+                    .map(|p| p.path.clone())
+                    .ok_or_else(|| tr::HostError::not_found("No such project"))?,
+                switch.on,
+            )),
+            None => None,
+        };
         if change.push_test && !s.mobile.push {
             return Err(tr::HostError::bad_request(
                 "Turn on notifications to your phone first",
@@ -183,6 +201,11 @@ impl Workspace {
         self.settings.inbox.auto_settle_days = s.inbox.auto_settle_days;
         self.settings.appearance.theme = s.appearance.theme;
         self.save_settings(cx);
+        if let Some((path, on)) = failed_checks {
+            self.update_project_prefs(&path, |p| p.send_failed_checks = on, cx);
+            // Its threads' rows say so (`checks.auto`) with the next push, not in a few seconds.
+            self.threads_gen += 1;
+        }
         if change.push_test {
             self.test_push(cx);
         }

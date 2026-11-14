@@ -390,6 +390,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 detail: "rm -rf target".into(),
                 state: tr::ApprovalState::Pending,
                 asked_by: None,
+                always_allow: None,
             },
         ),
         item(
@@ -400,6 +401,7 @@ fn a_machines_items_become_the_thread_views_and_requests_its_cards() {
                 detail: String::new(),
                 state: tr::ApprovalState::Allowed,
                 asked_by: None,
+                always_allow: None,
             },
         ),
         item(

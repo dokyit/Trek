@@ -167,6 +167,34 @@ impl Workspace {
         })
     }
 
+    /// Where the move waiting on `id` goes and what it's on now, as the bar names them ("Codex",
+    /// "Codex · Work"; another account of the same agent: "the Work account" and "Default").
+    pub fn pending_switch_names(&self, id: &str) -> Option<(String, String)> {
+        let pending = self.pending_switch(id)?;
+        let thread = self.thread(id)?;
+        let label = |agent: &AgentId, account: Option<&str>| self.account_label(agent, account);
+        Some(if pending.agent == thread.agent {
+            (
+                label(&pending.agent, pending.account.as_deref())
+                    .map(|l| format!("the {l} account"))
+                    .unwrap_or_else(|| pending.agent.display_name()),
+                label(&thread.agent, thread.account.as_deref())
+                    .unwrap_or_else(|| thread.agent.display_name()),
+            )
+        } else {
+            let named = |agent: &AgentId, account: Option<&str>| match account
+                .and_then(|a| label(agent, Some(a)))
+            {
+                Some(l) => format!("{} · {l}", agent.display_name()),
+                None => agent.display_name(),
+            };
+            (
+                named(&pending.agent, pending.account.as_deref()),
+                named(&thread.agent, thread.account.as_deref()),
+            )
+        })
+    }
+
     /// What `id`'s next message would carry as things stand, for the banner's preview.
     pub fn pending_handover(&self, id: &str) -> Option<Handover> {
         let pending = self.pending_switch(id)?;
@@ -306,6 +334,20 @@ impl Workspace {
                 .as_deref(),
         )
     }
+}
+
+/// What a handover left out, as its preview says it (and that the new agent can look it up).
+pub fn left_out_words(handover: &Handover) -> Option<String> {
+    handover.left_out.list().map(|list| {
+        let mut said = format!("Left out: {list}.");
+        if handover.searchable {
+            said.push_str(&format!(
+                " The new agent can search the transcript on {} if it needs them, with secrets removed.",
+                crate::words::words().this_computer
+            ));
+        }
+        said
+    })
 }
 
 /// `text` is a command Trek answers itself, whatever agent the thread is on.

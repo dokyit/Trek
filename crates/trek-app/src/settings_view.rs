@@ -8,7 +8,7 @@ mod connections;
 mod mobile;
 mod pages;
 pub mod privacy;
-mod rules;
+pub(crate) mod rules;
 pub(crate) use mobile::qr;
 pub(crate) use pages::theme_tiles;
 

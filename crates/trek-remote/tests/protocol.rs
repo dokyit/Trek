@@ -446,6 +446,7 @@ fn every_item_state_round_trips() {
             detail: "ls".into(),
             state,
             asked_by: None,
+            always_allow: None,
         });
     }
     bodies.push(ItemBody::Approval {
@@ -454,6 +455,7 @@ fn every_item_state_round_trips() {
         detail: "./deploy.sh".into(),
         state: ApprovalState::Pending,
         asked_by: Some("Ask before running ./deploy.sh".into()),
+        always_allow: None,
     });
     for state in [
         QuestionState::Pending,
@@ -549,6 +551,7 @@ fn every_item_state_round_trips() {
         detail: String::new(),
         state: ApprovalState::AllowedForSession,
         asked_by: None,
+        always_allow: None,
     }))
     .unwrap();
     assert_eq!(v["state"], "allowed_for_session");
@@ -581,6 +584,7 @@ fn a_rule_that_always_asks_reaches_phones_old_and_new() {
             detail: "./deploy.sh".into(),
             state: ApprovalState::Pending,
             asked_by: Some("Ask before running ./deploy.sh".into()),
+            always_allow: None,
         },
     })
     .unwrap();
@@ -623,6 +627,7 @@ fn settings_actions_and_photos() {
             effort: Some("high".into()),
             access: Some(Access::AutoAcceptEdits),
             plan: Some(true),
+            hold: false,
         })
     );
     let a = client_round_trip(
@@ -1476,7 +1481,7 @@ fn parity_requests_and_replies() {
         r#"{"type":"background_output","re":"5","thread_id":"t","task_id":"b1"}"#,
         r#"{"type":"icon","re":"7","agent":"acp:mistral-vibe","hash":"0f3a","png":"iVBORw0K","template":true}"#,
         r#"{"type":"ack","re":"2","text":"and open a PR"}"#,
-        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat","sub_agent_view"]}"#,
+        r#"{"type":"welcome","re":"1","protocol":1,"host":{"id":"h","name":"Mac","version":"0.4.0"},"features":["search","sub_agents","snooze","mark_unread","delete","regenerate_title","use_reset","queue_action","attachment","background","icon","basecamp_v2","note_images","machines","note_files","card_actions","update_phone","media","limit_actions","context_card","turn_preview","consult","resume_interrupted","uploads","side_chat","sub_agent_view","failed_checks","rules","continue_on_account","compact_offer","switch_preview","diff_viewed"]}"#,
         r#"{"type":"usage","re":"9","providers":[{"agent":{"key":"codex","name":"Codex","logo":"codex"},"plan":"ChatGPT Pro","limits":[],
             "resets":[{"id":"rc-1","title":"Full reset (Weekly + 5 hr)","expires_at":1791030000000}]},
             {"agent":{"key":"acp:devin","name":"Devin"},"limits":[],"no_limits":true,"as_of":1791020000000,"today":"Today in Trek: 12K tokens"}],"picked":true}"#,
@@ -1807,7 +1812,8 @@ fn a_thread_as_the_mac_shows_it_on_items_and_rows() {
         Some(LimitPause {
             resets_at: Some(1791030000000),
             resume: true,
-            wrapped: false
+            wrapped: false,
+            other_account: None,
         })
     );
     let unknown: ThreadSummary = serde_json::from_str(
@@ -2183,4 +2189,260 @@ fn a_sub_agent_row_says_which_it_is_and_opens_and_steers_it() {
     };
     assert!(v.can_stop && !v.can_message && !v.gone && v.earlier == 0);
     assert!(feature::ALL.contains(&feature::SUB_AGENT_VIEW));
+}
+
+/// A row as docs/MOBILE.md writes one, with `extra` fields after its own.
+fn row_with(extra: &str) -> ThreadSummary {
+    let row = format!(
+        r#"{{"id":"t","title":"Fix the login","project":{{"id":"p","name":"web","hue":10,"monogram":"WE"}},"agent":{{"key":"claude-code","name":"Claude Code"}},"run_state":"idle","section":"inbox"{extra}}}"#
+    );
+    serde_json::from_str(&row).unwrap_or_else(|e| panic!("{row}: {e}"))
+}
+
+#[test]
+fn the_failing_checks_bar_rides_on_the_row_and_its_buttons_are_thread_actions() {
+    // As docs/MOBILE.md shows it ("failed_checks").
+    let t = row_with(
+        r#","needs":{"kind":"failed","text":"CI failed: clippy and 1 more"},"checks":{"url":"https://github.com/acme/web/pull/128","number":128,"failing":["clippy","test (macos)"],"bar":true}"#,
+    );
+    let checks = t.checks.clone().expect("the bar");
+    assert_eq!(checks.failing, ["clippy", "test (macos)"]);
+    assert!(checks.bar && !checks.stopped && !checks.sending && !checks.auto);
+    // An older phone reads it as a failure with the Mac's words.
+    assert_eq!(t.needs.unwrap().kind, NeedsKind::Failed);
+    let v = serde_json::to_value(&checks).unwrap();
+    assert_eq!(
+        v,
+        json!({"url":"https://github.com/acme/web/pull/128","number":128,"failing":["clippy","test (macos)"],"bar":true}),
+        "only what's set goes"
+    );
+    for kind in ["send_failed_checks", "dismiss_failed_checks"] {
+        let a = client_round_trip(&format!(
+            r#"{{"type":"thread_action","id":"1","thread_id":"t","action":{{"kind":"{kind}"}}}}"#
+        ));
+        assert!(matches!(
+            a.msg,
+            ClientMessage::ThreadAction(ThreadActionRequest {
+                action: ThreadAction::SendFailedChecks | ThreadAction::DismissFailedChecks,
+                ..
+            })
+        ));
+    }
+    // The project's sending by itself, in the settings.
+    let on = client_round_trip(
+        r#"{"type":"set_settings","id":"2","send_failed_checks":{"project_id":"p","on":true}}"#,
+    );
+    let ClientMessage::SetSettings(change) = on.msg else {
+        panic!()
+    };
+    assert_eq!(
+        change.send_failed_checks,
+        Some(ProjectSwitch {
+            project_id: "p".into(),
+            on: true
+        })
+    );
+    assert!(feature::ALL.contains(&feature::FAILED_CHECKS));
+}
+
+#[test]
+fn rules_are_read_tried_and_written_from_the_phone() {
+    // As docs/MOBILE.md shows it ("rules").
+    let item = item_round_trip(
+        r#"{"id":"r3","seq":9,"at":null,"kind":"approval","request_id":"perm-3","title":"Run command","detail":"cargo test --workspace","state":"pending","always_allow":{"kind":"command","pattern":"cargo test"}}"#,
+    );
+    let ItemBody::Approval {
+        always_allow: Some(draft),
+        ..
+    } = item.body
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (draft.kind, draft.pattern.as_str()),
+        (RuleKind::Command, "cargo test")
+    );
+    let read = client_round_trip(r#"{"type":"rules","id":"3"}"#);
+    assert!(read.msg.is_query());
+    let list = server_round_trip(
+        r#"{"type":"rules","re":"3","rules":[{"kind":"command","pattern":"rm","action":"deny"},{"kind":"fetch","pattern":"example.com","action":"allow"}],"editable":false}"#,
+    );
+    let ServerMessage::Rules(list) = list.msg else {
+        panic!()
+    };
+    assert_eq!(list.rules[0].action, RuleVerdict::Deny);
+    assert!(!list.editable);
+    let add = client_round_trip(
+        r#"{"type":"rule_action","id":"4","action":"add","rule":{"kind":"edit","pattern":"~/.ssh/**","action":"deny"}}"#,
+    );
+    assert!(matches!(
+        add.msg,
+        ClientMessage::RuleAction(RuleActionRequest::Add { ref rule }) if rule.kind == RuleKind::Edit
+    ));
+    let remove = client_round_trip(
+        r#"{"type":"rule_action","id":"5","action":"remove","index":0,"rule":{"kind":"command","pattern":"rm","action":"deny"}}"#,
+    );
+    assert!(matches!(
+        remove.msg,
+        ClientMessage::RuleAction(RuleActionRequest::Remove { index: 0, .. })
+    ));
+    let test = client_round_trip(
+        r#"{"type":"rule_test","id":"6","kind":"command","text":"rm -rf build; echo done"}"#,
+    );
+    assert!(test.msg.is_query());
+    let tried = server_round_trip(
+        r#"{"type":"rule_test","re":"6","kind":"command","text":"rm -rf build; echo done","decided_by":"Deny command “rm” decides, because this line runs “rm -rf build”.","rule":0,"levels":[{"level":"supervised","outcome":"refused"},{"level":"auto-accept-edits","outcome":"refused"},{"level":"auto","outcome":"refused"},{"level":"full-access","outcome":"refused"}]}"#,
+    );
+    let ServerMessage::RuleTest(tried) = tried.msg else {
+        panic!()
+    };
+    assert_eq!(tried.levels[3].level, Access::FullAccess);
+    let always = client_round_trip(
+        r#"{"type":"always_allow","id":"7","thread_id":"t","request_id":"perm-3","pattern":"cargo test"}"#,
+    );
+    assert!(!always.msg.is_query());
+    assert_eq!(always.msg.kind(), "always_allow");
+    // The Mac's say-so, and an older Mac's settings without it.
+    let s: MacSettings = serde_json::from_value(json!({
+        "default_agent":"codex","default_effort":"high","default_access":"supervised",
+        "follow_up":"steer","notifications":"banner",
+        "push":{"enabled":false,"when":"away","server":"https://ntfy.sh"},
+        "auto_settle_days":3,"theme":"system","phone_rules":false,"send_failed_checks":["p"]
+    }))
+    .unwrap();
+    assert_eq!(
+        (s.phone_rules, s.send_failed_checks),
+        (Some(false), Some(vec!["p".into()]))
+    );
+    let old: MacSettings = serde_json::from_value(json!({
+        "default_agent":"codex","default_effort":"high","default_access":"supervised",
+        "follow_up":"steer","notifications":"banner",
+        "push":{"enabled":false,"when":"away","server":"https://ntfy.sh"},
+        "auto_settle_days":3,"theme":"system"
+    }))
+    .unwrap();
+    assert_eq!((old.phone_rules, old.send_failed_checks), (None, None));
+    assert!(feature::ALL.contains(&feature::RULES));
+}
+
+#[test]
+fn the_limit_bar_names_another_account_to_carry_on_with() {
+    // As docs/MOBILE.md shows it ("continue_on_account").
+    let t = row_with(
+        r#","pause":{"resets_at":1791030000000,"resume":false,"wrapped":false,"other_account":{"account":"acct-2","label":"Work"}}"#,
+    );
+    let other = t.pause.unwrap().other_account.unwrap();
+    assert_eq!(
+        (other.account.as_deref(), other.label.as_str()),
+        (Some("acct-2"), "Work")
+    );
+    let go = client_round_trip(
+        r#"{"type":"thread_action","id":"8","thread_id":"t","action":{"kind":"continue_on_account","account":"acct-2"}}"#,
+    );
+    assert!(matches!(
+        go.msg,
+        ClientMessage::ThreadAction(ThreadActionRequest {
+            action: ThreadAction::ContinueOnAccount { account: Some(ref a) },
+            ..
+        }) if a == "acct-2"
+    ));
+    // The normal login has no id.
+    let login = client_round_trip(
+        r#"{"type":"thread_action","id":"9","thread_id":"t","action":{"kind":"continue_on_account"}}"#,
+    );
+    assert!(matches!(
+        login.msg,
+        ClientMessage::ThreadAction(ThreadActionRequest {
+            action: ThreadAction::ContinueOnAccount { account: None },
+            ..
+        })
+    ));
+    assert!(feature::ALL.contains(&feature::CONTINUE_ON_ACCOUNT));
+}
+
+#[test]
+fn a_row_offers_compact_once_its_cache_goes() {
+    // As docs/MOBILE.md shows it ("compact_offer").
+    let t = row_with(
+        r#","compact_offer":{"used":90000,"window":200000,"last_active":1791000000000,"lapses_at":1791000300000,"why":"The prompt cache has expired: it lasts about 5 minutes on an API key."}"#,
+    );
+    let offer = t.compact_offer.unwrap();
+    assert_eq!(offer.lapses_at - offer.last_active, 300_000);
+    // An older phone, or a row without one: nothing.
+    assert_eq!(row_with("").compact_offer, None);
+    assert!(feature::ALL.contains(&feature::COMPACT_OFFER));
+}
+
+#[test]
+fn a_switch_waits_for_the_next_message_and_says_what_goes_with_it() {
+    // As docs/MOBILE.md shows it ("switch_preview").
+    let hold = client_round_trip(
+        r#"{"type":"set_prefs","id":"10","thread_id":"t","agent":"codex","hold":true}"#,
+    );
+    let ClientMessage::SetPrefs(req) = hold.msg else {
+        panic!()
+    };
+    assert!(req.hold);
+    // Unheld (an older phone's), it says nothing of holding.
+    let now = serde_json::to_value(ClientMessage::SetPrefs(PrefsRequest {
+        thread_id: "t".into(),
+        agent: Some("codex".into()),
+        ..Default::default()
+    }))
+    .unwrap();
+    assert_eq!(now.get("hold"), None);
+    let t = row_with(
+        r#","pending_switch":{"agent":{"key":"codex","name":"Codex","logo":"codex"},"model":"gpt-5.6-sol","model_label":"GPT-5.6 Sol","effort":"high","to":"Codex","from":"Claude Code"}"#,
+    );
+    let waiting = t.pending_switch.unwrap();
+    assert_eq!(
+        (waiting.to.as_str(), waiting.from.as_str()),
+        ("Codex", "Claude Code")
+    );
+    let ask = client_round_trip(r#"{"type":"switch_preview","id":"11","thread_id":"t"}"#);
+    assert!(ask.msg.is_query());
+    let preview = server_round_trip(
+        r#"{"type":"switch_preview","re":"11","thread_id":"t","text":"You're picking up a conversation from Claude Code.","tokens":3100,"budget":24000,"left_out":"Left out: 2 tool outputs."}"#,
+    );
+    let ServerMessage::SwitchPreview(p) = preview.msg else {
+        panic!()
+    };
+    assert!(p.tokens < p.budget);
+    let stay = client_round_trip(
+        r#"{"type":"thread_action","id":"12","thread_id":"t","action":{"kind":"stay_on_agent"}}"#,
+    );
+    assert!(matches!(
+        stay.msg,
+        ClientMessage::ThreadAction(ThreadActionRequest {
+            action: ThreadAction::StayOnAgent,
+            ..
+        })
+    ));
+    assert!(feature::ALL.contains(&feature::SWITCH_PREVIEW));
+}
+
+#[test]
+fn files_marked_viewed_come_with_the_folder_s_status() {
+    // As docs/MOBILE.md shows it ("diff_viewed").
+    let mark = client_round_trip(
+        r#"{"type":"set_viewed","id":"13","project_id":"p","path":"README.md","viewed":true}"#,
+    );
+    let ClientMessage::SetViewed(req) = mark.msg else {
+        panic!()
+    };
+    assert_eq!(
+        (req.target.project_id.as_deref(), req.viewed),
+        (Some("p"), true)
+    );
+    let status = server_round_trip(
+        r#"{"type":"git_status","re":"13","is_repo":true,"branch":"main","ahead":0,"behind":0,"has_upstream":false,"files":[{"path":"README.md","status":"modified","added":1,"removed":0},{"path":"new.txt","status":"untracked","added":2,"removed":0}],"can_switch":true,"viewed":["README.md"]}"#,
+    );
+    let ServerMessage::GitStatus(s) = status.msg else {
+        panic!()
+    };
+    assert_eq!(s.viewed, ["README.md"]);
+    // An older Mac's status: nothing viewed.
+    let old: GitStatus = serde_json::from_value(json!({"is_repo":true,"files":[]})).unwrap();
+    assert!(old.viewed.is_empty());
+    assert!(feature::ALL.contains(&feature::DIFF_VIEWED));
 }

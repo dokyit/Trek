@@ -1567,6 +1567,15 @@ async fn call<H: RemoteHost>(
             .sub_agent_action(req)
             .await
             .map(ServerMessage::SubAgent),
+        ClientMessage::SwitchPreview { thread_id } => host
+            .switch_preview(&thread_id)
+            .await
+            .map(ServerMessage::SwitchPreview),
+        ClientMessage::Rules => host.rules().await.map(ServerMessage::Rules),
+        ClientMessage::RuleAction(req) => host.rule_action(req).await.map(ServerMessage::Rules),
+        ClientMessage::RuleTest(req) => host.rule_test(req).await.map(ServerMessage::RuleTest),
+        ClientMessage::AlwaysAllow(req) => host.always_allow(req).await.map(|()| ack(None)),
+        ClientMessage::SetViewed(req) => host.set_viewed(req).await.map(ServerMessage::GitStatus),
         other => Err(HostError::bad_request(format!(
             "Unexpected \"{}\"",
             other.kind()

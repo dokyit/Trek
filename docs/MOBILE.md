@@ -169,7 +169,12 @@ header let a sandboxed agent upgrade itself):
   session" sits behind the approval card's ••• menu and the app requires the device owner first
   (LocalAuthentication `.deviceOwnerAuthentication`: Face ID / Touch ID, falling back to the
   passcode; no passcode set means it can't be sent). That is enforced on the phone only; phase 2
-  enforces it on the Mac side with a signed step-up.
+  enforces it on the Mac side with a signed step-up. The Mac refuses it anyway unless its own
+  Settings › Phone allows it (`session_approvals`, off by default).
+- **A rule outlasts a request.** Reading the user's permission rules and trying them is open to a
+  phone; writing one (adding or removing a rule, an approval's "Add rule and allow") is refused
+  unless the Mac's Settings › Phone lets phones write rules (`phone_rules`, off by default, and
+  only the Mac can turn it on). The phone asks for the device owner before it adds an allow rule.
 - **Approvals are read before they're allowed.** The card shows the whole command, wrapped and
   monospaced (long ones fold at about seven lines with "Show all", then scroll). Commands that look
   destructive (`rm -rf`, `git push --force`, `git reset --hard`, `sudo`, `curl … | sh`, `dd of=/dev/…`,
@@ -1088,6 +1093,115 @@ An at-work row's `sub_agents` entry for one of the agent's own carries its `call
 
 **Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
 question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
+**`failed_checks`**: the Mac's failing-checks bar. While a pull request a thread opened has
+failing checks nobody has dealt with, its row carries `checks`: the PR's `url` and `number`, the
+`failing` checks by name, `bar` while the Mac shows the bar over the composer (the thread is idle or
+its turn failed: at work or asking, it may be on it already), `stopped` once sending by itself has
+used up its two tries ("CI still failing"), `sending` while the log is being read ("Reading the
+log…"), and `auto` when the thread's project sends failing checks by itself. While the thread is
+idle the row's `needs` is `failed` with the Mac's row words, so an older phone lists it under Needs
+you with what failed. `thread_action` `send_failed_checks` is the bar's Send to agent (the checks'
+names and the useful end of their logs go as a message, queued behind a turn under way) and
+`dismiss_failed_checks` its Dismiss (quiet until a new commit fails, or another check); both are
+`conflict` with nothing failing. Sending by itself is each project's, off unless turned on (each go
+is a turn someone pays for): `settings.send_failed_checks` lists the projects it's on for, and
+`set_settings.send_failed_checks` turns one on or off (`not_found` for a project that's gone).
+
+```json
+row: "needs":{"kind":"failed","text":"CI failed: clippy and 1 more"},"checks":{"url":"https://github.com/acme/web/pull/128","number":128,"failing":["clippy","test (macos)"],"bar":true}
+{"type":"thread_action","id":"1","thread_id":"t","action":{"kind":"send_failed_checks"}}   → ack
+{"type":"thread_action","id":"1","thread_id":"t","action":{"kind":"dismiss_failed_checks"}}   → ack
+{"type":"set_settings","id":"2","send_failed_checks":{"project_id":"p","on":true}}   → settings, with "send_failed_checks":["p"]
+```
+
+**`rules`**: the user's permission rules, as Settings › Permissions has them. `rules` lists them in
+order (`kind` `command` · `edit` · `fetch` · `tool`, `action` `allow` · `ask` · `deny`) and says
+whether this phone may change them (`editable`). `rule_test` is the page's tester: which rule
+decides a call and why, in the Mac's words, and what happens at each level, tried in the folder the
+Mac's page tries it in. `rule_action` adds a rule (`bad_request` for a pattern the Mac wouldn't
+take, with why) or removes one, naming it as shown (`conflict` if the list changed meanwhile); both
+answer with the list. A pending `approval` carries `always_allow`, the rule its "Always allow…"
+would add (none where a rule of the user's asks about it every time, or no allow could cover it);
+`always_allow` takes the draft's pattern, maybe shortened, adds it as an allow rule and allows the
+card, and is refused (`bad_request`, with why) when the rule wouldn't let the card's call through
+with the rest of the list. Reading and trying the rules is always open. Writing one is not: a rule
+lasts until it's removed, so `rule_action` and `always_allow` are refused unless the Mac's own
+Settings › Phone lets phones write rules (`settings.phone_rules`, off unless turned on there and
+never from a phone, as `session_approvals`). The phone also asks for Face ID before it adds an
+allow rule.
+
+```json
+item: {"id":"r3","seq":9,"at":null,"kind":"approval","request_id":"perm-3","title":"Run command","detail":"cargo test --workspace","state":"pending","always_allow":{"kind":"command","pattern":"cargo test"}}
+{"type":"rules","id":"3"}
+  → {"type":"rules","re":"3","rules":[{"kind":"command","pattern":"rm","action":"deny"},{"kind":"fetch","pattern":"example.com","action":"allow"}],"editable":false}
+{"type":"rule_action","id":"4","action":"add","rule":{"kind":"edit","pattern":"~/.ssh/**","action":"deny"}}   → rules
+{"type":"rule_action","id":"5","action":"remove","index":0,"rule":{"kind":"command","pattern":"rm","action":"deny"}}   → rules
+{"type":"rule_test","id":"6","kind":"command","text":"rm -rf build; echo done"}
+  → {"type":"rule_test","re":"6","kind":"command","text":"rm -rf build; echo done","decided_by":"Deny command “rm” decides, because this line runs “rm -rf build”.","rule":0,"levels":[{"level":"supervised","outcome":"refused"},{"level":"auto-accept-edits","outcome":"refused"},{"level":"auto","outcome":"refused"},{"level":"full-access","outcome":"refused"}]}
+{"type":"always_allow","id":"7","thread_id":"t","request_id":"perm-3","pattern":"cargo test"}   → ack
+```
+
+**`continue_on_account`**: the limit bar's "Continue on <account>". A paused thread's `pause`
+carries `other_account` while another account of its agent has room (the one with most, as the
+Mac's bar picks it): its `account` id (none: the user's normal login) and `label`. `thread_action`
+`continue_on_account` with that `account` moves the thread there and carries on now, in a new
+session from a recap, what waited for the reset going first. `conflict` when it isn't paused, or
+that account isn't the one with room any more (the message names the one that is).
+
+```json
+row: "pause":{"resets_at":1791030000000,"resume":false,"wrapped":false,"other_account":{"account":"acct-2","label":"Work"}}
+{"type":"thread_action","id":"8","thread_id":"t","action":{"kind":"continue_on_account","account":"acct-2"}}   → ack
+{"type":"thread_action","id":"9","thread_id":"t","action":{"kind":"continue_on_account"}}   → ack  (the normal login)
+```
+
+**`compact_offer`**: the Mac's Compact chip. A provider's prompt cache lasts a set time after a
+thread last did anything (about an hour on a subscription, five minutes on an API key); after that
+the next message re-reads the whole context at full price. A large thread (40% of its window or
+more), idle, waiting on nothing, on an agent that can compact, carries `compact_offer`: `used` and
+`window`, `last_active`, `lapses_at` (when its cache goes) and `why` in the Mac's words. The phone
+shows the chip from `lapses_at` on, until it's used (`thread_action` `compact`, as the context
+card's Compact now) or dismissed, which is the phone's own until the thread is next active (a new
+`last_active`).
+
+```json
+row: "compact_offer":{"used":90000,"window":200000,"last_active":1791000000000,"lapses_at":1791000300000,"why":"The prompt cache has expired: it lasts about 5 minutes on an API key.\nYour next message re-reads all 90k tokens at full price.\nCompact first to send less."}
+```
+
+**`switch_preview`**: picking another agent as the Mac's composer does. `set_prefs` with `hold`
+and another `agent` (or another account of it) doesn't move the thread: the move waits for its
+next message, and the old agent keeps its session, its running turn and its queue meanwhile. The
+row says so with `pending_switch`: the agent, model and effort it moves to, and the bar's words for
+where it goes (`to`: "Codex", "Codex · Work", "the Work account") and what it's on (`from`, for
+"Stay on …"). `switch_preview` answers with what the next message carries, as the bar's preview
+card shows it: the handover's `text` (secrets taken out), its `tokens` against its `budget`, and
+what was `left_out`; `not_found` when no move waits. `thread_action` `stay_on_agent` drops the
+move (`conflict` with none). The next `send` makes the move, as the Mac's composer does (not for a
+command Trek answers itself, nor `/compact`, which compacts the session there is; nor an answer to
+the old agent's question). A thread nothing has been said in has nothing to carry, and moves at
+once. Without `hold`, `set_prefs` moves the thread now, as it always has: older phones, and other
+Treks driving this one, rely on that.
+
+```json
+{"type":"set_prefs","id":"10","thread_id":"t","agent":"codex","hold":true}   → ack
+row: "pending_switch":{"agent":{"key":"codex","name":"Codex","logo":"codex"},"model":"gpt-5.6-sol","model_label":"GPT-5.6 Sol","effort":"high","to":"Codex","from":"Claude Code"}
+{"type":"switch_preview","id":"11","thread_id":"t"}
+  → {"type":"switch_preview","re":"11","thread_id":"t","text":"You're picking up a conversation from Claude Code.","tokens":3100,"budget":24000,"left_out":"Left out: 2 tool outputs."}
+{"type":"thread_action","id":"12","thread_id":"t","action":{"kind":"stay_on_agent"}}   → ack
+```
+
+**`diff_viewed`**: files ticked viewed in review, the marks the Mac's Git panel keeps: a thread's
+(for a `thread_id` target), or a project folder's. Each is kept with what its diff said when it was
+ticked, so a file that changes again comes back unviewed. `git_status` lists in `viewed` the files
+whose mark still holds (a mark that no longer does goes, on the Mac too; one the Mac's list made
+before it read the diff learns it). `set_viewed` ticks one of the folder's changed files at its
+diff now, or clears it, and answers with the folder's `git_status` as it is then; `not_found` for a
+file with no change there.
+
+```json
+{"type":"set_viewed","id":"13","project_id":"p","path":"README.md","viewed":true}
+  → {"type":"git_status","re":"13","is_repo":true,"branch":"main","ahead":0,"behind":0,"has_upstream":false,"files":[{"path":"README.md","status":"modified","added":1,"removed":0},{"path":"new.txt","status":"untracked","added":2,"removed":0}],"can_switch":true,"viewed":["README.md"]}
+```
+
 doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the
 Mac's status line does (`"cached":"92% cached"`, and `cached_detail` in words).
 

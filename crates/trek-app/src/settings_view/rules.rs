@@ -106,7 +106,7 @@ fn outcome_tint(outcome: Outcome, cx: &App) -> Hsla {
 }
 
 /// The call the tester tries.
-fn test_call(kind: RuleKind, text: &str) -> Call {
+pub(crate) fn test_call(kind: RuleKind, text: &str) -> Call {
     match kind {
         RuleKind::Command => Call::command("Bash", text),
         RuleKind::Edit => Call::edit("Write", text),
@@ -116,7 +116,7 @@ fn test_call(kind: RuleKind, text: &str) -> Call {
 }
 
 /// Which rule decides what the tester holds, in words. `None` when nothing decides it.
-fn decided_by(rule: &PermissionRule, verdict: &rules::Verdict, whole: &str) -> String {
+pub(crate) fn decided_by(rule: &PermissionRule, verdict: &rules::Verdict, whole: &str) -> String {
     let named = rule.shown();
     if let Some(why) = verdict.unreadable {
         return format!("{named} decides. {why} That counts as matching.");
