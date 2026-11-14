@@ -211,7 +211,12 @@ fn serve(mut tools: Box<dyn rpc::ToolSet>) {
         }
         if let Some(response) = server.handle_line(&line, tools.as_mut()) {
             let mut out = stdout.lock();
-            if writeln!(out, "{response}")
+            // A call that changed the tools says so before it answers, so a client reading up
+            // to its answer has heard.
+            let changed = tools.take_tools_changed().then(rpc::tools_changed_line);
+            if changed
+                .map_or(Ok(()), |line| writeln!(out, "{line}"))
+                .and_then(|_| writeln!(out, "{response}"))
                 .and_then(|_| out.flush())
                 .is_err()
             {
@@ -245,6 +250,9 @@ mod prompt_budget {
         ("orchestrate", 920, 11_000),
         ("browser", 700, 7_300),
         ("phone", 1_100, 8_150),
+        // Before an iPhone has been connected: phone_status alone (docs/PROMPT_BUDGET.md,
+        // "2026-11-14").
+        ("phone-setup", 300, 700),
     ];
     /// Everything on (computer use in the background and every default family) together
     /// (43,800 measured after the cut of 2026-11-13; 44,883 before).
@@ -268,6 +276,7 @@ mod prompt_budget {
             ),
             ("browser", Box::new(crate::browser::Browser::from_env())),
             ("phone", Box::new(crate::phone::Phone::from_env())),
+            ("phone-setup", Box::new(crate::phone::Phone::in_setup())),
         ]
     }
 
@@ -294,7 +303,7 @@ mod prompt_budget {
                 "trek-mcp {name}'s tool schemas grew to {tools} chars (budget {max_tools}); see \
                  prompt_budget in main.rs before raising it"
             );
-            if name != "computer" {
+            if name != "computer" && name != "phone-setup" {
                 all += instructions + tools;
             }
         }

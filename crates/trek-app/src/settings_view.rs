@@ -2221,12 +2221,22 @@ impl SettingsView {
         ));
         out.push(Self::heading("Sub-agents", cx));
         out.push(ui::group(
-            vec![Self::row(
-                "Sub-agent tools",
-                "Agents can hand work to other agents and models you have in Trek, to review or to build, and get their answers back. Each shows inline in its thread with its logo; open it to follow along.",
-                self.switch("orchestration", s.tools.orchestration, |s, v| s.tools.orchestration = v),
-                cx,
-            )],
+            vec![
+                Self::row(
+                    "Sub-agent tools",
+                    "Agents can hand work to other agents and models you have in Trek, to review or to build, and get their answers back. Each shows inline in its thread with its logo; open it to follow along.",
+                    self.switch("orchestration", s.tools.orchestration, |s, v| s.tools.orchestration = v),
+                    cx,
+                ),
+                Self::row(
+                    "Claude Code's workflows and wake-ups",
+                    "Gives Claude Code its own Workflow scripts, /loop wake-ups, worktree switching and code-review findings card. Off, Trek's sub-agents, threads and worktrees do that work, and each request is about 3,700 tokens lighter.",
+                    self.switch("claude-extra-tools", s.tools.claude_extra_tools, |s, v| {
+                        s.tools.claude_extra_tools = v
+                    }),
+                    cx,
+                ),
+            ],
             cx,
         ));
         if !bundled {

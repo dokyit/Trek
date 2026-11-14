@@ -47,6 +47,11 @@ pub struct Phone {
     refs: Refs,
     /// How long `phone_wait` rests between two readings of the screen.
     pause: Duration,
+    /// No iPhone has been connected to Trek yet: the family is `phone_status` alone until one
+    /// answers it (`trek_ipc::phone::ENV_SEEN`, the file to write then).
+    setup: Option<std::path::PathBuf>,
+    /// The tools changed since the client last heard (`ToolSet::take_tools_changed`).
+    changed: bool,
 }
 
 /// Whether this is a PC, where the family is the phone's apps and files (`pc_tools`).
@@ -58,7 +63,12 @@ const WAIT_MAX_MS: u64 = 60_000;
 
 impl Phone {
     pub fn from_env() -> Self {
-        Self::with(trek_ipc::Client::from_env().map(|client| Box::new(client) as Box<dyn Ask>))
+        let mut phone =
+            Self::with(trek_ipc::Client::from_env().map(|client| Box::new(client) as Box<dyn Ask>));
+        phone.setup = std::env::var_os(trek_ipc::phone::ENV_SEEN)
+            .map(std::path::PathBuf::from)
+            .filter(|seen| !seen.exists() && !connected_now());
+        phone
     }
 
     fn with(trek: Option<Box<dyn Ask>>) -> Self {
@@ -67,6 +77,30 @@ impl Phone {
             pc: PC,
             refs: Refs::new("phone_elements"),
             pause: Duration::from_millis(400),
+            setup: None,
+            changed: false,
+        }
+    }
+
+    /// The family before any iPhone has been connected (for the prompt budget).
+    #[cfg(test)]
+    pub fn in_setup() -> Self {
+        let mut phone = Self::with(None);
+        phone.setup = Some(std::env::temp_dir().join("trek-phone-never-seen"));
+        phone
+    }
+
+    /// `phone_status` found a phone: the family is whole from now on, here and in every session
+    /// after this one.
+    fn found_phone(&mut self) {
+        if let Some(seen) = self.setup.take() {
+            if let Some(dir) = seen.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = std::fs::write(&seen, b"") {
+                eprintln!("trek-mcp phone: couldn't write {}: {e}", seen.display());
+            }
+            self.changed = true;
         }
     }
 
@@ -234,7 +268,9 @@ impl ToolSet for Phone {
     }
 
     fn instructions(&self) -> &'static str {
-        if self.pc {
+        if self.setup.is_some() {
+            trek_ipc::phone::SETUP_INSTRUCTIONS
+        } else if self.pc {
             trek_ipc::phone::PC_INSTRUCTIONS
         } else {
             trek_ipc::phone::INSTRUCTIONS
@@ -242,11 +278,14 @@ impl ToolSet for Phone {
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        let tools = if self.pc {
+        let mut tools = if self.pc {
             trek_ipc::phone::pc_tools()
         } else {
             trek_ipc::phone::tools()
         };
+        if self.setup.is_some() {
+            tools.retain(|(name, ..)| *name == "phone_status");
+        }
         tools
             .into_iter()
             .map(|(name, description, input_schema)| ToolDef {
@@ -273,10 +312,35 @@ impl ToolSet for Phone {
             "phone_tap" if !(given("x") && given("y")) => {
                 return Err("phone_tap takes ref (from phone_elements), or x and y (pixels in the latest phone_screenshot).".into());
             }
+            "phone_status" if self.setup.is_some() => {
+                let answer = self.ask(name, args)?;
+                self.found_phone();
+                let mut content = crate::browser::content(answer);
+                content.push(rpc::text(trek_ipc::phone::TOOLS_ADDED));
+                return Ok(content);
+            }
             _ => return Ok(crate::browser::content(self.ask(name, args)?)),
         };
         Ok(vec![rpc::text(text)])
     }
+
+    fn tools_can_change(&self) -> bool {
+        self.setup.is_some()
+    }
+
+    fn take_tools_changed(&mut self) -> bool {
+        std::mem::take(&mut self.changed)
+    }
+}
+
+/// Whether an iPhone is on the cable or the Wi-Fi now, as far as usbmuxd can say within a
+/// quarter of a second: a session started with one there gets the whole family at once.
+fn connected_now() -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(trek_phone::device::any_connected());
+    });
+    rx.recv_timeout(Duration::from_millis(250)).unwrap_or(false)
 }
 
 /// The iPhone's screen as Trek Driver listed it, read into the tree `outline.rs` writes out:
@@ -787,6 +851,59 @@ mod tests {
             let err = tools.call(tool, &args).unwrap_err();
             assert!(err.contains("only in agents that Trek started"), "{err}");
         }
+    }
+
+    /// Before an iPhone has been connected the family is `phone_status` alone, saying so in its
+    /// instructions; the first status that finds one writes the record, adds the other tools and
+    /// tells the client once. A status that finds none changes nothing.
+    #[test]
+    fn until_a_phone_is_connected_only_phone_status_is_served() {
+        let dir = std::env::temp_dir().join(format!("trek-phone-seen-{}", std::process::id()));
+        let seen = dir.join("phone").join("seen");
+        let _ = std::fs::remove_dir_all(&dir);
+        for pc in [false, true] {
+            let _ = std::fs::remove_file(&seen);
+            let trek = Trek::default();
+            let mut phone = Phone::with(Some(Box::new(trek.clone())));
+            phone.pc = pc;
+            phone.setup = Some(seen.clone());
+            assert!(phone.tools_can_change());
+            let names: Vec<&str> = phone.tools().iter().map(|t| t.name).collect();
+            assert_eq!(names, ["phone_status"]);
+            assert_eq!(phone.instructions(), trek_ipc::phone::SETUP_INSTRUCTIONS);
+            assert!(!phone.take_tools_changed());
+
+            let said = phone.call("phone_status", &json!({})).unwrap();
+            assert!(
+                said.iter()
+                    .any(|c| c["text"] == trek_ipc::phone::TOOLS_ADDED),
+                "{said:?}"
+            );
+            assert!(seen.exists());
+            assert!(phone.take_tools_changed());
+            assert!(!phone.take_tools_changed());
+            let all = if pc {
+                trek_ipc::phone::PC_TOOL_NAMES
+            } else {
+                trek_ipc::phone::TOOL_NAMES
+            };
+            assert_eq!(phone.tools().len(), all.len());
+            assert!(!phone.tools_can_change());
+        }
+
+        struct NoPhone;
+        impl Ask for NoPhone {
+            fn ask(&mut self, _: &str, _: &Value) -> Result<Value, String> {
+                Err("No iPhone is connected: ask the user to plug it in.".into())
+            }
+        }
+        let _ = std::fs::remove_file(&seen);
+        let mut phone = Phone::with(Some(Box::new(NoPhone)));
+        phone.setup = Some(seen.clone());
+        assert!(phone.call("phone_status", &json!({})).is_err());
+        assert!(!seen.exists() && !phone.take_tools_changed());
+        assert_eq!(phone.tools().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// On a PC the family is the whole of the phone's, in its own words, and goes to Trek as on a

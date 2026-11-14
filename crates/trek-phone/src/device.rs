@@ -139,6 +139,18 @@ fn block_on<F: std::future::Future>(f: F) -> Result<F::Output, String> {
     Ok(rt.block_on(f))
 }
 
+/// Whether usbmuxd lists any iPhone now (on the cable, or paired and on the Wi-Fi), asking
+/// nothing of the phone itself. `false` when usbmuxd can't be reached.
+pub fn any_connected() -> bool {
+    block_on(async {
+        let Ok(mut mux) = usbmuxd().await else {
+            return false;
+        };
+        mux.get_devices().await.is_ok_and(|d| !d.is_empty())
+    })
+    .unwrap_or(false)
+}
+
 /// usbmuxd's devices, the cable first, then each one's name and iOS version.
 pub fn list() -> Result<Vec<Phone>, String> {
     block_on(async {

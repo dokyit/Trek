@@ -400,6 +400,11 @@ pub struct Tools {
     /// Give agents Trek's sub-agent tools (`delegate_task` and friends): they can hand work to
     /// other agents and models, which Trek runs as child threads.
     pub orchestration: bool,
+    /// Hand Claude Code the built-in tools Trek does its own way or can't show
+    /// (`trek_agents::claude::LEFT_OUT_TOOLS`: workflows, /loop's wake-ups, switching worktrees,
+    /// the code-review findings card). Off by default: Trek leaves them out of every request,
+    /// some 3.7K tokens each (docs/PROMPT_BUDGET.md, "2026-11-14").
+    pub claude_extra_tools: bool,
     /// Extra MCP servers passed to every session.
     pub mcp_servers: Vec<McpServerConfig>,
     /// Give agents the Figma desktop app's Dev Mode MCP server (`FIGMA_DESKTOP_URL`), as
@@ -421,6 +426,7 @@ impl Default for Tools {
             phone_follow: true,
             video: true,
             orchestration: true,
+            claude_extra_tools: false,
             mcp_servers: vec![],
             figma_desktop: false,
         }

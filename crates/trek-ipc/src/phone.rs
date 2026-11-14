@@ -19,6 +19,19 @@ use serde_json::{Value, json};
 /// The name sessions know the phone tools' server by.
 pub const SERVER: &str = "trek-phone";
 
+/// A file whose presence says an iPhone has been connected to Trek on this computer: trek-mcp
+/// writes it the first time `phone_status` finds one. Until then, and while none is connected,
+/// the family serves `phone_status` alone ([`SETUP_INSTRUCTIONS`]), and adds the other tools
+/// once a phone answers. Without the variable the family is whole from the start.
+pub const ENV_SEEN: &str = "TREK_PHONE_SEEN";
+
+/// The family's instructions while no iPhone has been connected yet: `phone_status` alone, and
+/// what it does when one is.
+pub const SETUP_INSTRUCTIONS: &str = "The user's real iPhone, through Trek's iPhone tool. None has been connected yet: phone_status says what the user must do to connect one, and once one is connected it adds the tools that see and use it (screen, taps, apps and files).";
+
+/// What `phone_status` adds the first time it finds a phone, while the family served only it.
+pub const TOOLS_ADDED: &str = "Trek has now added the iPhone's other tools (phone_elements, phone_tap, phone_screenshot, phone_apps and the rest): look for them with your tool search, or ask the user to start a new thread if you can't find them.";
+
 /// What the agent is told about the tools as a whole (MCP `instructions`).
 pub const INSTRUCTIONS: &str = "The user's real iPhone, on this Mac's cable or Wi-Fi. phone_status says how Trek reaches it and where the screen comes from; if a tool says the user must lock, unlock or connect something, ask them rather than retrying. The user watches in Trek's iPhone tool, so act as you would with them looking over your shoulder. Start with phone_elements, the screen as an outline: what you can tap carries a ref (e12) for phone_tap while it stays on screen; read again after acting, or phone_wait. Take a phone_screenshot when how it looks matters, or when there are no elements; x/y are pixels in the latest one. If a tool says the outcome is unknown, look before repeating it. Apps and files: phone_apps, phone_install, phone_files, phone_push_file, phone_pull_file, phone_remove_file. One agent drives the phone at a time: call phone_release when done. It's the user's own phone: never send messages, buy, delete things or change settings unless they asked for exactly that. If a tool says the user took over the iPhone, stop and wait for them.";
 

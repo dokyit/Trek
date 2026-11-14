@@ -978,6 +978,38 @@ code = ["crates/trek-agents/src/lib.rs", "crates/trek-agents/src/acp.rs", "crate
 tests = ["crates/trek-agents/src/lib.rs", "crates/trek-agents/src/tests_cmd_args.rs"]
 
 [[feature]]
+id = "lean-requests"
+area = "Agents"
+what = "Each request carries only the tools an agent can use"
+macos = "yes"
+windows = "yes"
+live = ["route settings:tools", "wait 300", "reveal claude-extra-tools", "count claude-extra-tools 1"]
+how = { macos = "The same on both.", windows = "The same on both: Claude Code without its Workflow, ScheduleWakeup, EnterWorktree, ExitWorktree and ReportFindings tools unless Settings › Tools turns them on, with its tool search on for Anthropic's own API, and the iPhone's server offering phone_status alone until a phone has been connected (an iPhone on the PC's cable counts, through Apple Mobile Device Service)." }
+note = "Measured against a local stand-in for Anthropic's API (docs/PROMPT_BUDGET.md, \"2026-11-14\"): Trek's request for \"hi\" through Claude Code 2.1.325 went from 14,857 to 11,543 o200k tokens, below the bare CLI's 12,386."
+code = ["crates/trek-agents/src/claude.rs", "crates/trek-mcp/src/phone.rs", "crates/trek-agents/src/direct/mcp.rs"]
+tests = ["crates/trek-agents/src/claude.rs", "crates/trek-mcp/src/phone.rs", "crates/trek-agents/src/direct/mcp.rs"]
+
+[[feature.promise]]
+what = "Claude Code's tools that Trek does its own way are left out unless the setting keeps them"
+macos = "crates/trek-agents/src/claude.rs::the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them"
+windows = "crates/trek-agents/src/claude.rs::the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them"
+
+[[feature.promise]]
+what = "Claude Code's tool search is turned on only for Anthropic's own API, never past a gateway or a choice of the user's"
+macos = "crates/trek-agents/src/claude.rs::tool_search_is_forced_only_for_anthropics_own_api"
+windows = "crates/trek-agents/src/claude.rs::tool_search_is_forced_only_for_anthropics_own_api"
+
+[[feature.promise]]
+what = "Until an iPhone has been connected, agents get phone_status alone, and the iPhone's other tools once it finds one"
+macos = "crates/trek-mcp/src/phone.rs::until_a_phone_is_connected_only_phone_status_is_served"
+windows = "crates/trek-mcp/src/phone.rs::until_a_phone_is_connected_only_phone_status_is_served"
+
+[[feature.promise]]
+what = "Tools a server adds as it goes reach a Direct model after the call that added them"
+macos = "crates/trek-agents/src/direct/mcp.rs::tools_a_server_adds_are_listed_after_it_says_so"
+windows = "crates/trek-agents/src/direct/mcp.rs::tools_a_server_adds_are_listed_after_it_says_so"
+
+[[feature]]
 id = "codex-sandbox"
 area = "Agents"
 what = "Codex runs a thread's commands in its own sandbox under Supervised and Auto"
@@ -1330,3 +1362,7 @@ macos = "yes"
 windows = "yes"
 live = ["route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system"]
 tests = ["crates/trek-app/tests/render.rs"]
+
+[[feature.promise]]
+what = "A window lets its spare drawing buffers go a second after it stops drawing"
+untested = { macos = "The Metal layer keeps a third drawable only while frames come close together, and a second after the last frame its spare drawables are let go of (vendor/gpui-pre-apple/src/drawables.rs). Measured with footprint on the isolated app, 1600 x 1000: 97 MB at rest and 122 MB after a stream, against 135 and 171 before; no test reads a layer's drawables.", windows = "Not on Windows: the DirectX swap chain's buffers (three, vendor/gpui-pre-windows/src/directx_renderer.rs) change only through ResizeBuffers, which needs every reference to them released and redraws the window; not tried." }

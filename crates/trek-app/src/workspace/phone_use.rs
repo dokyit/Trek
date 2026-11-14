@@ -74,11 +74,22 @@ impl Drop for PhoneCall {
 pub type PhoneCallSlot = std::rc::Rc<std::cell::RefCell<Option<PhoneCall>>>;
 
 /// Trek's phone server, for a session with the channel environment `env`.
-pub(super) fn server(bin: String, env: Vec<(String, String)>) -> McpServer {
+pub(super) fn server(bin: String, mut env: Vec<(String, String)>) -> McpServer {
+    // Until an iPhone has been connected, the server offers phone_status alone, and adds the rest
+    // when one answers: a session without one doesn't carry 16 tools it can't use.
+    env.push((
+        trek_ipc::phone::ENV_SEEN.to_string(),
+        seen_file().display().to_string(),
+    ));
     McpServer {
         tool_timeout_secs: Some(TOOL_TIMEOUT_SECS),
         ..McpServer::stdio(trek_ipc::phone::SERVER, bin, vec!["phone".into()], env)
     }
+}
+
+/// The file that says an iPhone has been connected to this Trek (`trek_ipc::phone::ENV_SEEN`).
+fn seen_file() -> std::path::PathBuf {
+    trek_core::paths::data_dir().join("phone").join("seen")
 }
 
 impl Workspace {
@@ -147,6 +158,12 @@ mod tests {
             trek_agents::McpTransport::Stdio { args, env, .. } => {
                 assert_eq!(args, &["phone".to_string()]);
                 assert_eq!(env[0].1, "k");
+                // Told where the record of a connected iPhone is kept, it starts with
+                // phone_status alone until there is one.
+                assert!(
+                    env.iter()
+                        .any(|(k, v)| k == trek_ipc::phone::ENV_SEEN && v.ends_with("seen"))
+                );
             }
             other => panic!("{other:?}"),
         }

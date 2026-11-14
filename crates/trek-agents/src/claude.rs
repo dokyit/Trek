@@ -405,6 +405,105 @@ fn modes_requests(
 /// environment already says `sdk-cli` or `sdk-ts`.
 pub const ENTRYPOINT: &str = "trek";
 
+/// Claude Code's built-in tools Trek leaves out unless Settings › Tools › "Claude Code's
+/// workflows and wake-ups" is on (`SessionConfig::claude_extra_tools`). Each is something Trek
+/// does its own way or can't show, and each went out in full with every request (about 3.7K
+/// tokens together on Claude Code 2.1.325, 5.7K on 2.1.303; docs/PROMPT_BUDGET.md, "2026-11-14"):
+/// - `Workflow`: multi-agent scripts, run only when the user asks for one. Trek's sub-agents and
+///   threads (`delegate_task`, `start_thread`) do this where the user sees it, and a workflow's
+///   progress view (`/workflows`) is the terminal's.
+/// - `ScheduleWakeup`: `/loop` with no interval waking the session later. Trek ends an idle
+///   session after 5 to 15 minutes (`Workspace::reap_idle_sessions`), and its wake-ups with it.
+/// - `EnterWorktree`, `ExitWorktree`: moving the session into a worktree of its own. A Trek
+///   thread has its own worktree when asked, and its changes, checkpoints and links follow the
+///   thread's folder, which these would leave behind.
+/// - `ReportFindings`: a code review's findings for a host to draw as a card, which Trek doesn't;
+///   without it the review writes them in its answer.
+pub const LEFT_OUT_TOOLS: &[&str] = &[
+    "Workflow",
+    "ScheduleWakeup",
+    "EnterWorktree",
+    "ExitWorktree",
+    "ReportFindings",
+];
+
+/// The variable that turns Claude Code's tool search on, off or to a threshold.
+const TOOL_SEARCH_VAR: &str = "ENABLE_TOOL_SEARCH";
+
+/// Variables that send Claude Code's requests somewhere other than Anthropic's own API, or turn
+/// its betas off, as the process's environment or a settings file's `env` has them.
+const OTHER_HOST_VARS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "ANTHROPIC_FOUNDRY_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+];
+
+/// Whether Trek sets `ENABLE_TOOL_SEARCH=true` for a session: when its requests go to
+/// Anthropic's own API (no variable above, in the environment or in any of the `settings` file
+/// texts Claude Code reads, names another host) and the user hasn't chosen a tool search mode.
+///
+/// Claude Code then sends Trek's MCP tools and its rarely used built-in ones as names, loading a
+/// schema when the model searches for it, on every version and whatever the server's flags pick.
+/// Left to itself it may send all of them in full: 2.1.303 did on ADEMark's machine (17.3K tokens
+/// of built-in tools against 9.5K deferred), which for Trek adds its 64 MCP tools, about 10K
+/// tokens more, to every request (docs/PROMPT_BUDGET.md, "2026-11-14"). Not for another host: a
+/// gateway may not pass tool search's blocks through, and Claude Code leaves it off there.
+pub(crate) fn forces_tool_search(
+    var: &dyn Fn(&str) -> Option<String>,
+    settings: &[String],
+) -> bool {
+    let settings: Vec<Value> = settings
+        .iter()
+        .filter_map(|text| serde_json::from_str(text).ok())
+        .collect();
+    let set = |name: &str| {
+        let named = |value: &str| !value.trim().is_empty() && !anthropic_url(name, value);
+        var(name).is_some_and(|v| named(&v))
+            || settings.iter().any(|s| match &s["env"][name] {
+                Value::Null => false,
+                Value::String(v) => named(v),
+                other => named(&other.to_string()),
+            })
+    };
+    !set(TOOL_SEARCH_VAR) && !OTHER_HOST_VARS.iter().any(|name| set(name))
+}
+
+/// `ANTHROPIC_BASE_URL` set to Anthropic's own API, which is no other host.
+fn anthropic_url(name: &str, value: &str) -> bool {
+    name == "ANTHROPIC_BASE_URL"
+        && value
+            .trim()
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case("https://api.anthropic.com")
+}
+
+/// The settings files whose `env` Claude Code applies to a session in `cwd`: the user's (the
+/// account's folder, else `CLAUDE_CONFIG_DIR`, else `~/.claude`), the project's and its local
+/// ones, and the machine's managed settings (each platform's place; only one exists).
+fn settings_files(cwd: &Path) -> Vec<PathBuf> {
+    let user = crate::account_dir("CLAUDE_CONFIG_DIR")
+        .or_else(|| {
+            std::env::var_os("CLAUDE_CONFIG_DIR")
+                .map(PathBuf::from)
+                .filter(|d| d.is_absolute())
+        })
+        .unwrap_or_else(|| trek_core::paths::home().join(".claude"));
+    vec![
+        user.join("settings.json"),
+        cwd.join(".claude").join("settings.json"),
+        cwd.join(".claude").join("settings.local.json"),
+        "/Library/Application Support/ClaudeCode/managed-settings.json".into(),
+        r"C:\Program Files\ClaudeCode\managed-settings.json".into(),
+        r"C:\ProgramData\ClaudeCode\managed-settings.json".into(),
+        "/etc/claude-code/managed-settings.json".into(),
+    ]
+}
+
 /// The CLI's arguments for a session (MCP servers aside).
 fn cli_args(config: &SessionConfig) -> Vec<String> {
     let mode = if config.plan {
@@ -455,14 +554,18 @@ fn cli_args(config: &SessionConfig) -> Vec<String> {
         settings.insert("fastMode".into(), json!(true));
     }
     // Denied tools stay denied whatever the user's allow rules say; asking to run anything else
-    // still comes to Trek, which declines it for a session that only advises.
+    // still comes to Trek, which declines it for a session that only advises. A denied tool is
+    // left out of the request too.
+    let mut denied: Vec<&str> = vec![];
     if config.read_only {
-        flag(
-            &mut args,
-            "--disallowedTools",
-            "Edit,MultiEdit,Write,NotebookEdit",
-        );
+        denied.extend(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
         settings.insert("sandbox".into(), read_only_sandbox(config));
+    }
+    if !config.claude_extra_tools {
+        denied.extend(LEFT_OUT_TOOLS);
+    }
+    if !denied.is_empty() {
+        flag(&mut args, "--disallowedTools", &denied.join(","));
     }
     if !settings.is_empty() {
         flag(
@@ -607,6 +710,13 @@ impl Cli {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        let settings: Vec<String> = settings_files(&config.cwd)
+            .iter()
+            .filter_map(|f| std::fs::read_to_string(f).ok())
+            .collect();
+        if forces_tool_search(&|name| std::env::var(name).ok(), &settings) {
+            cmd.env(TOOL_SEARCH_VAR, "true");
+        }
         crate::sign_in_as_account(&mut cmd);
         let mut child = crate::spawn_group(&mut cmd).context("failed to start claude")?;
         let stdin = child.stdin.take().unwrap();
@@ -2966,6 +3076,7 @@ mod tests {
             mcp_servers: vec![],
             instructions: None,
             read_dirs: vec![],
+            claude_extra_tools: false,
             script: false,
             transcript: None,
         }
@@ -3212,6 +3323,7 @@ mod tests {
         let guides = std::env::temp_dir();
         let dirs = cli_args(&SessionConfig {
             read_dirs: vec![guides.clone(), "/no/such/dir".into()],
+            claude_extra_tools: false,
             script: false,
             ..config()
         });
@@ -3226,6 +3338,7 @@ mod tests {
     fn a_read_only_session_has_no_editing_tools() {
         let args = cli_args(&SessionConfig {
             read_only: true,
+            claude_extra_tools: true,
             ..config()
         });
         assert!(
@@ -3235,7 +3348,93 @@ mod tests {
             ),
             "{args:?}"
         );
-        assert!(!cli_args(&config()).iter().any(|a| a == "--disallowedTools"));
+        let full = SessionConfig {
+            claude_extra_tools: true,
+            ..config()
+        };
+        assert!(!cli_args(&full).iter().any(|a| a == "--disallowedTools"));
+    }
+
+    /// Tool search is forced on only where requests go to Anthropic's own API and the user chose
+    /// no mode: a gateway, Bedrock, Vertex, Foundry or betas turned off, in the environment or in
+    /// a settings file's `env`, leave Claude Code to decide.
+    #[test]
+    fn tool_search_is_forced_only_for_anthropics_own_api() {
+        let none = |_: &str| None;
+        assert!(forces_tool_search(&none, &[]));
+        assert!(forces_tool_search(&none, &["not json".into(), "{}".into()]));
+        let base =
+            |v: &'static str| move |n: &str| (n == "ANTHROPIC_BASE_URL").then(|| v.to_string());
+        assert!(forces_tool_search(&base("https://api.anthropic.com/"), &[]));
+        assert!(forces_tool_search(&base(""), &[]));
+        assert!(!forces_tool_search(
+            &base("https://gateway.example.com"),
+            &[]
+        ));
+        assert!(!forces_tool_search(&base("http://127.0.0.1:8787"), &[]));
+        let chosen = |n: &str| (n == "ENABLE_TOOL_SEARCH").then(|| "false".to_string());
+        assert!(!forces_tool_search(&chosen, &[]));
+        for settings in [
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://llm.example.com"}}"#,
+            r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#,
+            r#"{"env":{"CLAUDE_CODE_USE_VERTEX":1}}"#,
+            r#"{"env":{"ENABLE_TOOL_SEARCH":"auto:5"}}"#,
+            r#"{"env":{"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS":"1"}}"#,
+        ] {
+            assert!(
+                !forces_tool_search(&none, &["{}".into(), settings.into()]),
+                "{settings}"
+            );
+        }
+        assert!(forces_tool_search(
+            &none,
+            &[
+                r#"{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com"},"model":"opus"}"#
+                    .into()
+            ]
+        ));
+    }
+
+    /// The tools Trek does its own way are left out by default, in the one deny list a read-only
+    /// session's editing tools go in too (Claude Code takes the flag once), and kept with the
+    /// setting on. Checked against Claude Code 2.1.303 and 2.1.325 through a local stand-in for
+    /// the API: a denied tool leaves the request's `tools`.
+    #[test]
+    fn the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them() {
+        let denied = |c: &SessionConfig| -> Vec<String> {
+            let args = cli_args(c);
+            assert!(
+                args.iter().filter(|a| *a == "--disallowedTools").count() <= 1,
+                "{args:?}"
+            );
+            args.iter()
+                .position(|a| a == "--disallowedTools")
+                .map(|i| args[i + 1].split(',').map(String::from).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(denied(&config()), LEFT_OUT_TOOLS);
+        let read_only = denied(&SessionConfig {
+            read_only: true,
+            ..config()
+        });
+        assert!(read_only.contains(&"Edit".to_string()) && read_only.contains(&"Workflow".into()));
+        // What Trek draws or uses itself stays: questions, plans, sub-agents and their messages.
+        for kept in [
+            "AskUserQuestion",
+            "ExitPlanMode",
+            "Agent",
+            "SendMessage",
+            "Bash",
+        ] {
+            assert!(!read_only.contains(&kept.to_string()), "{kept}");
+        }
+        assert!(
+            denied(&SessionConfig {
+                claude_extra_tools: true,
+                ..config()
+            })
+            .is_empty()
+        );
     }
 
     #[test]
@@ -3257,6 +3456,7 @@ mod tests {
         let s = settings(&SessionConfig {
             read_only: true,
             read_dirs: vec![guides.clone()],
+            claude_extra_tools: false,
             script: false,
             ..config()
         })

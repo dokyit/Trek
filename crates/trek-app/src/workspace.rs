@@ -5391,6 +5391,7 @@ impl Workspace {
             mcp_servers,
             instructions,
             read_dirs: vec![trek_core::skills::shipped_root()],
+            claude_extra_tools: self.settings.tools.claude_extra_tools,
             script: false,
             transcript: log.map(|(path, _)| path),
         });
@@ -5534,6 +5535,7 @@ impl Workspace {
             mcp_servers,
             instructions,
             read_dirs: vec![trek_core::skills::shipped_root()],
+            claude_extra_tools: self.settings.tools.claude_extra_tools,
             script: false,
             transcript: None,
         });

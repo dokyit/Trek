@@ -38,6 +38,20 @@ pub trait ToolSet {
     fn tools(&self) -> Vec<ToolDef>;
     /// Run a tool. Only called with names returned by [`ToolSet::tools`].
     fn call(&mut self, name: &str, args: &Value) -> ToolResult;
+    /// Whether [`ToolSet::tools`] can change while the server runs (MCP `listChanged`).
+    fn tools_can_change(&self) -> bool {
+        false
+    }
+    /// Whether the tools changed since this was last asked: the server then tells the client
+    /// (`notifications/tools/list_changed`), which lists them again.
+    fn take_tools_changed(&mut self) -> bool {
+        false
+    }
+}
+
+/// The notification that the tool list changed, as a line to write.
+pub fn tools_changed_line() -> String {
+    json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }).to_string()
 }
 
 pub fn text(s: impl Into<String>) -> Value {
@@ -152,7 +166,11 @@ impl Server {
         self.protocol_version = Some(version.to_string());
         json!({
             "protocolVersion": version,
-            "capabilities": { "tools": {} },
+            "capabilities": { "tools": if tools.tools_can_change() {
+                json!({ "listChanged": true })
+            } else {
+                json!({})
+            } },
             "serverInfo": {
                 "name": "trek",
                 "title": format!("Trek {}", tools.family()),
