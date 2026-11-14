@@ -1139,6 +1139,8 @@ const CLIENT_TYPES: &[&str] = &[
     "turn_preview",
     "upload_part",
     "side_chat",
+    "sub_agent",
+    "sub_agent_action",
 ];
 
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
@@ -1560,6 +1562,11 @@ async fn call<H: RemoteHost>(
             .await
             .map(ServerMessage::UploadProgress),
         ClientMessage::SideChat(req) => host.side_chat(req).await.map(ServerMessage::SideChat),
+        ClientMessage::SubAgent(req) => host.sub_agent(req).await.map(ServerMessage::SubAgent),
+        ClientMessage::SubAgentAction(req) => host
+            .sub_agent_action(req)
+            .await
+            .map(ServerMessage::SubAgent),
         other => Err(HostError::bad_request(format!(
             "Unexpected \"{}\"",
             other.kind()

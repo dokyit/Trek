@@ -69,6 +69,10 @@
 //! - **`side_chat`** (feature `side_chat`, `side_chat.rs`): the newest side chat beside a thread,
 //!   or a new one started with its first message, without moving the Mac's own screen; its row
 //!   goes as `HostEvent::Unlisted` while a phone has it open.
+//! - **Sub-agents** (feature `sub_agent_view`, `sub_agent_view.rs`): a tool item standing for one
+//!   carries `sub_agent` (Trek's own open by `thread_id`); **`sub_agent`** reads what one of the
+//!   agent's own has done so far, **`sub_agent_action`** stops it or sends it a message where its
+//!   agent can take one.
 //! - **`mark_seen`**: clear the thread's unseen flag, as opening it on the desktop does.
 //! - **Push** through [`RemoteHandle::push`]: `HostEvent::Thread` whenever a thread's row changes
 //!   (state, title, needs, activity, diff stat), `ThreadRemoved` on delete/archive, `Item` for every

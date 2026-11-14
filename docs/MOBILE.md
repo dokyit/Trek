@@ -264,8 +264,9 @@ listed, so an older Mac (no list) simply doesn't show them. The protocol version
 | `resume_interrupted` | a row's `cut_short`, and `thread_action` `resume_interrupted`, `dismiss_interrupted` |
 | `uploads` | `upload_part` (answered with `upload_progress`), and `send.files` / `new_thread.files`: videos and files sent with a message |
 | `side_chat` | `side_chat`: a thread's side chat found, or one started beside it (the phone's `/side`) |
+| `sub_agent_view` | tool items' `sub_agent`, at-work rows' `call_id`, and `sub_agent` / `sub_agent_action`: a sub-agent opened from its row, stopped and sent a message |
 
-`use_reset` to `icon`, and `card_actions` to `consult`, `uploads` and `side_chat`, are described under "Keeping up with the
+`use_reset` to `icon`, and `card_actions` to `consult`, `uploads`, `side_chat` and `sub_agent_view`, are described under "Keeping up with the
 Mac" below, `basecamp_v2` under
 Basecamp, `note_images` and `note_files` under Notes.
 
@@ -1063,6 +1064,26 @@ of its own) or a first message with nothing in it.
   → {"type":"side_chat","re":"31","thread_id":"t","side":{"id":"s","title":"What does retry() do?","run_state":"working",…}}
 {"type":"subscribe","id":"32","thread_id":"s","after_seq":null,"limit":60}            → transcript, then items and `unlisted` rows
 {"type":"send","id":"33","thread_id":"s","text":"And backoff()?","mode":null}         → ack
+```
+
+**`sub_agent_view`**: a sub-agent opened from its row, as on the Mac. A `tool` item that stands
+for one carries `sub_agent`: whose it is (`agent`), its `label` and `detail` as the Mac's row says
+them, its `state`, `since` (while one of the agent's own works) or `took_secs`, and for one Trek
+runs (`delegate_task`) its `thread_id`, which opens like any thread (`subscribe`, `send`,
+`answer`, `interrupt`). One of the agent's own (Claude Code's Task, Codex's agents) lives in its
+parent's session: `sub_agent` reads what it has done (`prompt`; `items` with ids `s0`, `s1`… that
+stay put, `earlier` for those the Mac let go; `answer` once it's done), as often as the phone likes
+while it works. `sub_agent_action` `stop` or `message` (with `text`) answers with the same reply,
+as it stands after; `can_stop` and `can_message` say which work now, and `no_message` why there is
+none (Claude Code takes no message for its sub-agents; Codex's are steered into their own
+thread's turn). What one asks for waits on its parent's thread (`asking`), answered there. `gone`:
+the Mac no longer has its steps (Trek restarted since), and its row's `answer` is all there is.
+An at-work row's `sub_agents` entry for one of the agent's own carries its `call_id`.
+
+```json
+{"type":"sub_agent","id":"40","thread_id":"t","call_id":"toolu_a"}
+  → {"type":"sub_agent","re":"40","thread_id":"t","call_id":"toolu_a","link":{"agent":{"key":"claude-code","name":"Claude Code"},"label":"Survey the tests","detail":"Reading tests/a.rs · 2 steps","state":"running","since":1791000000000},"prompt":"Survey the tests…","items":[{"id":"s0","seq":0,"at":null,"kind":"tool","call_id":"toolu_k","tool":"read","title":"Read","detail":"tests/a.rs","status":"done","output":"…"}],"can_stop":true,"can_message":false,"no_message":"Claude Code doesn't take messages for its sub-agents while they run. Write to the thread, and its agent can pass it on."}
+{"type":"sub_agent_action","id":"41","thread_id":"t","call_id":"toolu_a","action":"stop"}   → sub_agent
 ```
 
 **Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a

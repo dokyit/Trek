@@ -57,6 +57,10 @@ nonisolated enum MacFeature: String, CaseIterable {
     case uploads
     /// `side_chat`: a thread's side chat found, or one started beside it (`/side`, the thread's menu).
     case sideChat = "side_chat"
+    /// Tool items carry `sub_agent` (the sub-agent a row stands for), and one of the agent's own
+    /// opens from it: `sub_agent` reads what it has done, `sub_agent_action` stops it or sends it
+    /// a message where its agent takes one (`SubAgentLog.swift`).
+    case subAgentView = "sub_agent_view"
 }
 
 /// The Mac's snooze menu.

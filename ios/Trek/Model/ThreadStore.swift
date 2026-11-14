@@ -27,6 +27,9 @@ nonisolated struct Block: Identifiable, Equatable {
         case changes(TurnChanges)
         /// A live card: a pull request, a workflow run, a release.
         case card(RemoteCard)
+        /// A sub-agent's call: a row of its own, as on the Mac, that opens it (a Mac that says
+        /// which sub-agent a row stands for, `ToolCall.subAgent`).
+        case subAgent(ToolCall)
     }
 
     let id: String
@@ -65,6 +68,7 @@ nonisolated struct Block: Identifiable, Equatable {
             guard !c.files.isEmpty else { return nil }
             kind = .changes(c)
         case .card(let c): kind = .card(c)
+        case .tool(let c) where c.subAgent != nil: kind = .subAgent(c)
         case .reasoning, .tool, .unknown: return nil
         }
         return Block(id: item.id, itemID: item.id, kind: kind, version: item.seq, count: 1, extras: item.extras)
@@ -92,7 +96,7 @@ nonisolated struct Block: Identifiable, Equatable {
             // An aside (a command Trek answered) doesn't start a turn.
             case .user(_, _, _, let aside): if !aside { close() }
             case .turnEnd: ends.append(b.id); ended = true
-            case .group, .assistant, .resolved: worked = true; stop = nil
+            case .group, .assistant, .resolved, .subAgent: worked = true; stop = nil
             case .error, .limit: stop = b.id
             case .notice: if worked { stop = b.id }
             case .changes, .handoff, .threadLink, .card: break
@@ -104,7 +108,8 @@ nonisolated struct Block: Identifiable, Equatable {
 
     static func folds(_ item: TItem) -> Bool {
         switch item.body {
-        case .reasoning, .tool: true
+        case .reasoning: true
+        case .tool(let c): c.subAgent == nil
         default: false
         }
     }

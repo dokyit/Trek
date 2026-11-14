@@ -7,6 +7,8 @@ struct SubAgentsCard: View {
     var agents: [SubAgent]
     @Environment(AppModel.self) private var model
     @Environment(\.openThread) private var openThread
+    /// The thread it's in: the agent's own sub-agents open over it.
+    @Environment(\.liveThreadID) private var liveThreadID
     @State private var open = true
 
     private var running: Int { agents.count { $0.state == .running } }
@@ -78,9 +80,15 @@ struct SubAgentsCard: View {
     @ViewBuilder
     private func row(_ s: SubAgent, now: Date) -> some View {
         let opens = model.serves(.subAgents, on: s.threadId) ? s.threadId : nil
+        // One of the agent's own opens over the thread, where the Mac shows what it's doing.
+        let parent = liveThreadID
+        let shows = opens == nil && s.callId != nil && parent.map { model.serves(.subAgentView, on: $0) } == true
         Button {
-            guard let kid = opens else { return }
-            if let openThread { openThread(kid) } else { model.openRequest = kid }
+            if let kid = opens {
+                if let openThread { openThread(kid) } else { model.openRequest = kid }
+            } else if shows, let parent, let call = s.callId {
+                model.openSubAgent = SubAgentTarget(threadId: parent, callId: call, link: nil)
+            }
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 BeaconDot(color: Self.color(s.state), pulses: s.state == .running, size: 7)
@@ -115,7 +123,7 @@ struct SubAgentsCard: View {
                     .font(.ui(.caption).weight(.semibold))
                     .foregroundStyle(Trek.muted.opacity(0.7))
                     .frame(height: 18)
-                    .opacity(opens == nil ? 0 : 1)
+                    .opacity(opens == nil && !shows ? 0 : 1)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -123,14 +131,14 @@ struct SubAgentsCard: View {
         }
         .buttonStyle(.plain)
         // Not `disabled`: a row with no thread to open reads the same, it just doesn't open.
-        .allowsHitTesting(opens != nil)
+        .allowsHitTesting(opens != nil || shows)
         .contextMenu {
             if let kid = opens, s.state == .running || s.state == .needsYou {
                 Button("Stop sub-agent", systemImage: "stop.fill", role: .destructive) { model.interrupt(kid) }
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityHint(opens == nil ? "" : "Opens its thread")
+        .accessibilityHint(opens != nil ? "Opens its thread" : shows ? "Shows what it's doing" : "")
     }
 
     static func label(_ state: SubAgentState) -> String {

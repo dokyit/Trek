@@ -4,7 +4,7 @@
 use crate::rules::Ruling;
 use crate::{
     AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, SessionConfig, StderrTail,
-    Step, clip, load_image, mcp_servers_json, plan_row, plan_title,
+    Step, TaskEntry, clip, load_image, mcp_servers_json, plan_row, plan_title,
 };
 use anyhow::{Context as _, Result};
 use serde_json::{Value, json};
@@ -726,6 +726,14 @@ impl BackgroundTasks {
         self.live.iter().any(|(t, ..)| t == id)
     }
 
+    /// The task call `call` started (a sub-agent, by the `Agent` call that sent it out).
+    fn task_of_call(&self, call: &str) -> Option<String> {
+        self.started
+            .iter()
+            .find(|(_, (c, _))| c == call)
+            .map(|(task, _)| task.clone())
+    }
+
     /// The call a sub-agent that ran detached was started by, once it has ended (`task_id`).
     fn detached_agent(&self, task: &str) -> Option<&str> {
         self.started
@@ -935,23 +943,59 @@ impl Turns {
             self.background.set(v);
             return vec![AgentEvent::Background(self.background.list())];
         }
-        // A sub-agent at work: the tools it calls are its row's activity.
+        // A sub-agent at work: the tools it calls are its row's activity, and what it says and
+        // calls its own transcript.
         if v["type"] == "assistant"
+            && let Some(task) = v["parent_tool_use_id"].as_str()
+        {
+            let log = |entry| AgentEvent::TaskLog {
+                task: task.to_string(),
+                entry,
+            };
+            let mut out = vec![];
+            for b in v["message"]["content"].as_array().into_iter().flatten() {
+                match b["type"].as_str() {
+                    Some("text") => {
+                        let text = b["text"].as_str().unwrap_or_default().trim();
+                        if !text.is_empty() {
+                            out.push(log(TaskEntry::Text(text.to_string())));
+                        }
+                    }
+                    Some("tool_use") => {
+                        let (title, detail) =
+                            tool_title(b["name"].as_str().unwrap_or("tool"), &b["input"]);
+                        out.push(log(TaskEntry::Call {
+                            id: b["id"].as_str().unwrap_or_default().to_string(),
+                            title: title.clone(),
+                            detail: detail.clone(),
+                        }));
+                        out.push(AgentEvent::TaskStep {
+                            task: task.to_string(),
+                            title,
+                            detail,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            return out;
+        }
+        // What a sub-agent's calls gave back.
+        if v["type"] == "user"
             && let Some(task) = v["parent_tool_use_id"].as_str()
         {
             return v["message"]["content"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|b| b["type"] == "tool_use")
-                .map(|b| {
-                    let (title, detail) =
-                        tool_title(b["name"].as_str().unwrap_or("tool"), &b["input"]);
-                    AgentEvent::TaskStep {
-                        task: task.to_string(),
-                        title,
-                        detail,
-                    }
+                .filter(|b| b["type"] == "tool_result")
+                .map(|b| AgentEvent::TaskLog {
+                    task: task.to_string(),
+                    entry: TaskEntry::Result {
+                        id: b["tool_use_id"].as_str().unwrap_or_default().to_string(),
+                        output: clip(&result_text(&b["content"]), 4000),
+                        ok: b["is_error"] != true,
+                    },
                 })
                 .collect();
         }
@@ -1395,7 +1439,13 @@ pub async fn run(
                         output_requests.insert(r["request_id"].as_str().unwrap_or_default().to_string(), id);
                         write_line(&mut cli.stdin, &r).await?;
                     }
+                    // Not Claude's to take: a sub-agent of its own runs on in the session, and
+                    // the user's words go to the thread's agent.
+                    Command::MessageTask { .. } => {}
                     Command::StopTask { id } => {
+                        // One of its sub-agents, by the call that sent it out: Claude stops tasks
+                        // by their own ids.
+                        let id = turns.background.task_of_call(&id).unwrap_or(id);
                         let r = ctl.request("stop_task", json!({ "task_id": id }));
                         stop_requests.insert(r["request_id"].as_str().unwrap_or_default().to_string());
                         write_line(&mut cli.stdin, &r).await?;
@@ -1717,6 +1767,19 @@ impl Drop for TempFile {
     }
 }
 
+/// A tool result's text: the string it is, or its text blocks.
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 /// A message of the conversation is a point `--resume-session-at` can cut it back to.
 fn mark(v: &Value) -> Option<AgentEvent> {
     v["uuid"]
@@ -1814,6 +1877,15 @@ fn translate(
                             title,
                             detail,
                         });
+                        // A sub-agent sent out: what it was told is the start of its transcript.
+                        if matches!(name, "Agent" | "Task")
+                            && let Some(prompt) = block["input"]["prompt"].as_str()
+                        {
+                            out.push(AgentEvent::TaskLog {
+                                task: id.clone(),
+                                entry: TaskEntry::Prompt(prompt.to_string()),
+                            });
+                        }
                         if let Some((added, removed)) = edit_lines(name, &block["input"]) {
                             out.push(AgentEvent::ToolLines { id, added, removed });
                         }
@@ -3569,9 +3641,14 @@ mod tests {
             }]
         );
         // A sub-agent detached from the start, alongside; housekeeping tasks aren't shown.
-        step(
-            json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"description":"Background sleep task","prompt":"…","run_in_background":true}}]}}),
+        let ev = step(
+            json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"description":"Background sleep task","prompt":"Sleep, then say so.","run_in_background":true}}]}}),
         );
+        // What it was told starts its transcript.
+        assert!(ev.contains(&AgentEvent::TaskLog {
+            task: "toolu_a".into(),
+            entry: TaskEntry::Prompt("Sleep, then say so.".into())
+        }));
         let ev = step(changed(json!([
             {"task_id":"brc5","task_type":"local_bash","description":"tick counter"},
             {"task_id":"ae33","task_type":"local_agent","description":"Background sleep task"},
@@ -3602,10 +3679,35 @@ mod tests {
         );
         assert_eq!(
             ev,
-            [AgentEvent::TaskStep {
+            [
+                AgentEvent::TaskLog {
+                    task: "toolu_a".into(),
+                    entry: TaskEntry::Call {
+                        id: "toolu_k".into(),
+                        title: "Run command".into(),
+                        detail: "sleep 6".into()
+                    }
+                },
+                AgentEvent::TaskStep {
+                    task: "toolu_a".into(),
+                    title: "Run command".into(),
+                    detail: "sleep 6".into()
+                }
+            ]
+        );
+        // What its calls give back is its transcript's too, never the session's.
+        let ev = step(
+            json!({"type":"user","parent_tool_use_id":"toolu_a","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_k","content":"slept","is_error":false}]}}),
+        );
+        assert_eq!(
+            ev,
+            [AgentEvent::TaskLog {
                 task: "toolu_a".into(),
-                title: "Run command".into(),
-                detail: "sleep 6".into()
+                entry: TaskEntry::Result {
+                    id: "toolu_k".into(),
+                    output: "slept".into(),
+                    ok: true
+                }
             }]
         );
         let ev = step(

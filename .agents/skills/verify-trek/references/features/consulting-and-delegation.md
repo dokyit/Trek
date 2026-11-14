@@ -29,6 +29,13 @@ Open the composer’s **Consult** control, choose agents/models and advise/discu
 ./.agents/skills/verify-trek/scripts/trek-dev screenshot lineage
 ```
 
+A sub-agent's row stops it while it works (`subagent-stop#<ix>`: Trek's own, and the agent's own where its agent lets Trek), and one of the agent's own whose agent takes a message mid-run (Codex, the mock) has a message button (`subagent-message#<ix>`) that opens a field under the row (`subagent-message-field#<ix>`). Every sub-agent the sidebar counts has its row while the turn runs: Trek's own after its `delegate_task` call, or within `ROW_WAIT` when no such call shows in the transcript (a sub-agent of the agent's own made it, or the agent names the tool its own way) (`LiveThread::place_task_rows`). `mock:task 8s` is one of the agent's own in the foreground that reports its prompt, calls, their output and what it said (`AgentEvent::TaskLog`), answers a message and stops at its next step; `mock:agents` sends two into the background.
+
+```sh
+./.agents/skills/verify-trek/scripts/trek-dev send "mock:task 8s"
+./.agents/skills/verify-trek/scripts/trek-dev screenshot sub-agents
+```
+
 The mock path exercises child-thread presentation without launching another vendor process. Full multi-agent selection is covered by headless UI tests rather than the shots command protocol. `mock:start-thread` leaves the started thread working in the background; the completion toast appears only while another thread is on screen (send from the starter and stay there).
 
 ## Code

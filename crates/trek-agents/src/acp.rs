@@ -1685,7 +1685,7 @@ pub async fn run(
                         }
                     }
                     // ACP has no background work to read or stop.
-                    Command::Answer { .. } | Command::SetModes { .. } | Command::ReadTask { .. } | Command::StopTask { .. } => {}
+                    Command::Answer { .. } | Command::SetModes { .. } | Command::ReadTask { .. } | Command::StopTask { .. } | Command::MessageTask { .. } => {}
                     Command::Shutdown => break,
                 }
             }

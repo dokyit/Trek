@@ -4,7 +4,8 @@
 use crate::rules::Ruling;
 use crate::{
     AgentEvent, BatchHandOff, Billing, Command, Decision, GroupChild, Prompt, Question,
-    SessionConfig, StderrTail, Step, clip, diff_stat, mcp_servers_json, plan_row, plan_title,
+    SessionConfig, StderrTail, Step, TaskEntry, clip, diff_stat, mcp_servers_json, plan_row,
+    plan_title,
 };
 use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
@@ -596,6 +597,36 @@ fn codex_mcp_servers_with(
     (out, left_out)
 }
 
+/// What one of a sub-agent's own items gave back once it completed: (output, ok). `None` for
+/// items that aren't calls.
+fn sub_item_result(item: &Value) -> Option<(String, bool)> {
+    let status = item["status"].as_str().unwrap_or_default();
+    Some(match item["type"].as_str()? {
+        "commandExecution" => (
+            clip(item["aggregatedOutput"].as_str().unwrap_or_default(), 4000),
+            status == "completed" && item["exitCode"].as_i64().unwrap_or(0) == 0,
+        ),
+        "fileChange" => (String::new(), status == "completed"),
+        "mcpToolCall" | "dynamicToolCall" => (
+            clip(&tool_output(item), 4000),
+            status != "failed" && item["success"] != false,
+        ),
+        "webSearch" | "imageView" => (String::new(), true),
+        _ => return None,
+    })
+}
+
+/// A `userMessage` item's text.
+fn message_text(item: &Value) -> String {
+    item["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn tool_output(item: &Value) -> String {
     let text: Vec<&str> = item["result"]["content"]
         .as_array()
@@ -722,6 +753,10 @@ enum Call {
     Account,
     /// `thread/backgroundTerminals/terminate` for the command run by item `0`.
     Terminate(String),
+    /// `turn/steer` (or with `stop`, `turn/interrupt`) into the turn of a sub-agent's own thread.
+    SubAgent {
+        stop: bool,
+    },
     Other,
 }
 
@@ -759,6 +794,10 @@ struct SubAgent {
     done: bool,
     /// The model it was spawned on, when not the session's.
     model: Option<String>,
+    /// The turn its own thread runs now: what a message for it steers, and a stop interrupts.
+    turn: Option<String>,
+    /// It has said what it was told (its thread's first message).
+    prompted: bool,
 }
 
 /// What handling one message produced: events for the UI, messages for Codex.
@@ -1129,8 +1168,30 @@ impl Session {
                         Call::Terminate(id),
                     );
                     out.send.push(m);
+                } else if let Some((thread, turn)) = self.sub_agent_turn(&id) {
+                    // One of its sub-agents, by its row: its own thread's turn is interrupted.
+                    let m = self.request(
+                        "turn/interrupt",
+                        json!({ "threadId": thread, "turnId": turn }),
+                        Call::SubAgent { stop: true },
+                    );
+                    out.send.push(m);
                 }
             }
+            Command::MessageTask { id, text } => match self.sub_agent_turn(&id) {
+                // Steered into the turn its own thread runs, as the parent's own are.
+                Some((thread, turn)) => {
+                    let m = self.request(
+                        "turn/steer",
+                        json!({ "threadId": thread, "expectedTurnId": turn, "input": user_input(&text, &[]) }),
+                        Call::SubAgent { stop: false },
+                    );
+                    out.send.push(m);
+                }
+                None => out.events.push(AgentEvent::Notice(
+                    "The sub-agent had finished before your message reached it.".into(),
+                )),
+            },
             Command::Shutdown => {}
         }
         out
@@ -1243,6 +1304,10 @@ impl Session {
             )),
             (Call::Terminate(_), Some(e)) => out.events.push(AgentEvent::Notice(format!(
                 "Codex couldn't stop the background command: {e}"
+            ))),
+            (Call::SubAgent { stop, .. }, Some(e)) => out.events.push(AgentEvent::Notice(format!(
+                "Codex couldn't {} its sub-agent: {e}",
+                if stop { "stop" } else { "pass your message to" }
             ))),
             (_, Some(e)) => tracing::debug!("codex request failed: {e}"),
             _ => {}
@@ -1976,6 +2041,8 @@ impl Session {
                         last: String::new(),
                         done: false,
                         model,
+                        turn: None,
+                        prompted: false,
                     },
                 );
                 out.events.push(AgentEvent::ToolStarted {
@@ -2023,6 +2090,8 @@ impl Session {
                             last: String::new(),
                             done: false,
                             model,
+                            turn: None,
+                            prompted: false,
                         },
                     );
                     out.events.push(AgentEvent::Task {
@@ -2061,8 +2130,45 @@ impl Session {
         let Some(a) = self.agents.get_mut(thread) else {
             return;
         };
+        let log = |row: &str, entry| AgentEvent::TaskLog {
+            task: row.to_string(),
+            entry,
+        };
         match method {
+            "turn/started" => a.turn = p["turn"]["id"].as_str().map(String::from),
+            // What it was told: its thread's first message (later ones are the messages it was
+            // sent, which the parent's transcript has already).
+            "item/started" if p["item"]["type"] == "userMessage" => {
+                if !std::mem::replace(&mut a.prompted, true) {
+                    let text = message_text(&p["item"]);
+                    if !text.trim().is_empty() {
+                        out.events.push(log(&a.row, TaskEntry::Prompt(text)));
+                    }
+                }
+            }
+            "item/completed" if p["item"]["type"] != "agentMessage" => {
+                if let Some((output, ok)) = sub_item_result(&p["item"]) {
+                    out.events.push(log(
+                        &a.row,
+                        TaskEntry::Result {
+                            id: p["item"]["id"].as_str().unwrap_or_default().to_string(),
+                            output,
+                            ok,
+                        },
+                    ));
+                }
+            }
             "item/started" => {
+                if let Some((title, detail)) = tool_row(&p["item"]) {
+                    out.events.push(log(
+                        &a.row,
+                        TaskEntry::Call {
+                            id: p["item"]["id"].as_str().unwrap_or_default().to_string(),
+                            title,
+                            detail,
+                        },
+                    ));
+                }
                 if let Some(activity) = activity(&p["item"]) {
                     a.tool_uses += 1;
                     out.events.push(AgentEvent::Task {
@@ -2082,14 +2188,27 @@ impl Session {
                 }
             }
             "item/completed" if p["item"]["type"] == "agentMessage" => {
-                a.last = p["item"]["text"].as_str().unwrap_or_default().to_string()
+                a.last = p["item"]["text"].as_str().unwrap_or_default().to_string();
+                if !a.last.trim().is_empty() {
+                    out.events
+                        .push(log(&a.row, TaskEntry::Text(a.last.trim().to_string())));
+                }
             }
             "turn/completed" => {
+                a.turn = None;
                 let ok = p["turn"]["status"] == "completed";
                 self.finish_agent(thread, ok, out);
             }
             _ => {}
         }
+    }
+
+    /// The thread and running turn of the sub-agent on row `row`, while it works.
+    fn sub_agent_turn(&self, row: &str) -> Option<(String, String)> {
+        self.agents
+            .iter()
+            .find(|(_, a)| a.row == row && !a.done)
+            .and_then(|(thread, a)| Some((thread.clone(), a.turn.clone()?)))
     }
 
     fn finish_agent(&mut self, thread: &str, ok: bool, out: &mut Out) {
@@ -4421,6 +4540,14 @@ mod tests {
                     output: String::new(),
                     ok: true
                 },
+                AgentEvent::TaskLog {
+                    task: "call1".into(),
+                    entry: TaskEntry::Call {
+                        id: "e1".into(),
+                        title: "Run command".into(),
+                        detail: "ls".into()
+                    }
+                },
                 AgentEvent::Task {
                     id: "call1".into(),
                     description: None,
@@ -4821,6 +4948,8 @@ mod tests {
                 last: String::new(),
                 done: false,
                 model: None,
+                turn: None,
+                prompted: false,
             },
         );
         let out = feed(
@@ -4840,6 +4969,84 @@ mod tests {
         );
         // The sub-agent's commands aren't the session's: they never run in its background.
         assert!(s.commands.is_empty());
+    }
+
+    /// A sub-agent's own thread reads as its transcript (what it was told, its calls and their
+    /// output, what it said), and a message for it steers its thread's turn, a stop interrupts it.
+    #[test]
+    fn a_sub_agent_s_thread_is_its_transcript_and_takes_a_message_and_a_stop() {
+        let mut s = session("t", false);
+        s.agents.insert(
+            "kid".into(),
+            SubAgent {
+                row: "kid".into(),
+                runs: 1,
+                tool_uses: 0,
+                last: String::new(),
+                done: false,
+                model: None,
+                turn: None,
+                prompted: false,
+            },
+        );
+        let out = feed(
+            &mut s,
+            &[
+                json!({"method":"turn/started","params":{"threadId":"kid","turn":{"id":"k1"}}}),
+                json!({"method":"item/started","params":{"threadId":"kid","turnId":"k1","item":{"type":"userMessage","id":"u1","content":[{"type":"text","text":"Map the routes"}]}}}),
+                json!({"method":"item/started","params":{"threadId":"kid","turnId":"k1","item":{"type":"commandExecution","id":"e1","command":"ls","cwd":"/tmp","status":"inProgress","commandActions":[]}}}),
+                json!({"method":"item/completed","params":{"threadId":"kid","turnId":"k1","item":{"type":"commandExecution","id":"e1","command":"ls","cwd":"/tmp","status":"completed","exitCode":0,"aggregatedOutput":"src\n","commandActions":[]}}}),
+                json!({"method":"item/completed","params":{"threadId":"kid","turnId":"k1","item":{"type":"agentMessage","id":"m1","text":"Two routes."}}}),
+            ],
+        );
+        let log: Vec<&TaskEntry> = out
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TaskLog { task, entry } if task == "kid" => Some(entry),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            log,
+            [
+                &TaskEntry::Prompt("Map the routes".into()),
+                &TaskEntry::Call {
+                    id: "e1".into(),
+                    title: "Run command".into(),
+                    detail: "ls".into()
+                },
+                &TaskEntry::Result {
+                    id: "e1".into(),
+                    output: "src\n".into(),
+                    ok: true
+                },
+                &TaskEntry::Text("Two routes.".into()),
+            ]
+        );
+        let out = s.command(Command::MessageTask {
+            id: "kid".into(),
+            text: "Only the public ones".into(),
+        });
+        assert_eq!(out.send[0]["method"], "turn/steer");
+        assert_eq!(out.send[0]["params"]["threadId"], "kid");
+        assert_eq!(out.send[0]["params"]["expectedTurnId"], "k1");
+        let out = s.command(Command::StopTask { id: "kid".into() });
+        assert_eq!(out.send[0]["method"], "turn/interrupt");
+        assert_eq!(out.send[0]["params"]["turnId"], "k1");
+        // Its turn over, there's nothing to steer: it says so instead.
+        feed(
+            &mut s,
+            &[
+                json!({"method":"turn/completed","params":{"threadId":"kid","turn":{"id":"k1","status":"completed"}}}),
+            ],
+        );
+        let out = s.command(Command::MessageTask {
+            id: "kid".into(),
+            text: "And?".into(),
+        });
+        assert!(out.send.is_empty());
+        assert!(matches!(&out.events[..], [AgentEvent::Notice(_)]));
     }
 }
 

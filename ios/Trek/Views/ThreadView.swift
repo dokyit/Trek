@@ -166,6 +166,9 @@ private struct ThreadScreen: View {
             .sheet(isPresented: $snoozePicking) { if let t = thread { SnoozePicker(thread: t) } }
             // Over the thread, which stays as it is under it: closed, the reader is where they were.
             .sheet(item: $sideChat) { SideChatSheet(parent: threadID, ask: $0) }
+            // One of the agent's own sub-agents, opened from its row or the at-work card.
+            .sheet(item: Binding(get: { model.openSubAgent.flatMap { $0.threadId == threadID ? $0 : nil } },
+                                 set: { if $0 == nil { model.openSubAgent = nil } })) { SubAgentView(target: $0) }
             .deleteConfirmation($deleteAsk, model: model) { _ in dismiss() }
             .sheet(item: $newThread) { request in
                 NewThreadSheet(project: request.project, prompt: request.prompt, on: request.link) { model.openRequest = $0 }
@@ -195,6 +198,12 @@ private struct ThreadScreen: View {
                 case "side":
                     // Once the Mac has said what it serves.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { sideChat = SideChatAsk(question: Launch.sideAsk ?? "") }
+                case let s? where s.hasPrefix("sub-agent:"):
+                    // `-TrekSheet sub-agent:<call>`: one of the agent's own sub-agents, opened.
+                    let call = String(s.dropFirst("sub-agent:".count))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        model.openSubAgent = SubAgentTarget(threadId: threadID, callId: call, link: nil)
+                    }
                 default: break
                 }
             }
@@ -581,6 +590,7 @@ enum TranscriptRow: View, nonisolated Equatable, Identifiable {
             case .notice, .handoff: h = 22
             case .error(let text), .limit(let text, _): h = 24 + 20 * lines(text, per: perLine)
             case .threadLink: h = 44
+            case .subAgent: h = 52
             case .changes(let c): h = 54 + 30 * CGFloat(min(c.files.count, 8))
             case .card(let c): h = 150 + 34 * CGFloat(c.stages.count + c.checks.count + min(c.history.count, 3))
             }
@@ -827,6 +837,8 @@ struct BlockRow: View, nonisolated Equatable {
             HandoffRow(from: from, to: to, fromAgent: block.extras.fromAgent, toAgent: block.extras.toAgent)
         case .threadLink(let link):
             ThreadLinkRow(link: link)
+        case .subAgent(let call):
+            SubAgentCallRow(call: call, threadID: threadID)
         case .changes(let changes):
             ChangesCard(changes: changes, threadID: threadID, rootName: projectName,
                         folded: Binding(get: { folded }, set: { fold($0) }))

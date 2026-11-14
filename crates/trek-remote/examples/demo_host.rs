@@ -286,6 +286,7 @@ impl Shared {
                     added,
                     removed,
                     watch: None,
+                    sub_agent: None,
                 },
                 ItemBody::Assistant { text, .. } => ItemBody::Assistant {
                     text,
@@ -348,6 +349,7 @@ impl DemoHost {
             added: if done { diff.map(|d| d.0) } else { None },
             removed: if done { diff.map(|d| d.1) } else { None },
             watch: None,
+            sub_agent: None,
         };
         let verb = match tool {
             ToolKind::Command => "Running",
@@ -1904,6 +1906,7 @@ fn tool(
         added: diff.map(|d| d.0),
         removed: diff.map(|d| d.1),
         watch: None,
+        sub_agent: None,
     }
 }
 
@@ -2129,6 +2132,7 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
             state: SubAgentState::Running,
             since: Some(now_ms() - 95_000),
             thread_id: None,
+            call_id: None,
         },
         SubAgent {
             agent: AgentRef::new("claude-code", "Claude Code", Some("claude-code")),
@@ -2137,6 +2141,7 @@ fn seed() -> (Vec<ProjectSummary>, Vec<Seed>) {
             state: SubAgentState::Running,
             since: Some(now_ms() - 40_000),
             thread_id: None,
+            call_id: None,
         },
     ];
     t.background = vec!["pnpm dev".into()];

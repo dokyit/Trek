@@ -24,6 +24,7 @@ use crate::protocol::{
 };
 use crate::protocol::{ContextCard, Media, MediaRequest, TurnPreview, TurnPreviewRequest};
 use crate::protocol::{SideChat, SideChatRequest, UploadPart, UploadProgress};
+use crate::protocol::{SubAgentActionRequest, SubAgentRequest, SubAgentView};
 
 pub type HostResult<T> = Result<T, HostError>;
 
@@ -444,6 +445,26 @@ pub trait RemoteHost: Send + Sync + 'static {
         unsupported("open a side chat")
     }
 
+    /// What one of the agent's own sub-agents has done so far (feature `sub_agent_view`).
+    /// `not_found` for a thread that's gone or a call that started no sub-agent.
+    fn sub_agent(
+        &self,
+        req: SubAgentRequest,
+    ) -> impl Future<Output = HostResult<SubAgentView>> + Send {
+        let _ = req;
+        unsupported("show a sub-agent")
+    }
+
+    /// Stop one of the agent's own sub-agents, or send it a message (feature `sub_agent_view`);
+    /// `bad_request` when its agent can't take that now.
+    fn sub_agent_action(
+        &self,
+        req: SubAgentActionRequest,
+    ) -> impl Future<Output = HostResult<SubAgentView>> + Send {
+        let _ = req;
+        unsupported("steer a sub-agent")
+    }
+
     /// No phone has `thread_id` open any more (its last subscriber unsubscribed or went away):
     /// the host can stop following its transcript. A `transcript` call for it after this starts
     /// following it again. Called as it happens, in order with the calls that follow.
@@ -704,6 +725,16 @@ pub enum HostRequest {
     SideChat {
         req: SideChatRequest,
         reply: Reply<SideChat>,
+    },
+    /// See [`RemoteHost::sub_agent`].
+    SubAgent {
+        req: SubAgentRequest,
+        reply: Reply<SubAgentView>,
+    },
+    /// See [`RemoteHost::sub_agent_action`].
+    SubAgentAction {
+        req: SubAgentActionRequest,
+        reply: Reply<SubAgentView>,
     },
 }
 
@@ -1040,6 +1071,16 @@ impl RemoteHost for ChannelHost {
 
     async fn side_chat(&self, req: SideChatRequest) -> HostResult<SideChat> {
         self.call(|reply| HostRequest::SideChat { req, reply })
+            .await
+    }
+
+    async fn sub_agent(&self, req: SubAgentRequest) -> HostResult<SubAgentView> {
+        self.call(|reply| HostRequest::SubAgent { req, reply })
+            .await
+    }
+
+    async fn sub_agent_action(&self, req: SubAgentActionRequest) -> HostResult<SubAgentView> {
+        self.call(|reply| HostRequest::SubAgentAction { req, reply })
             .await
     }
 }

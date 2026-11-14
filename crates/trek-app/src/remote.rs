@@ -52,6 +52,7 @@ mod queue;
 pub mod search;
 mod settings;
 mod side_chat;
+mod sub_agent_view;
 mod sub_agents;
 mod thread_actions;
 mod thread_parity;
@@ -1224,6 +1225,13 @@ impl Workspace {
             // A video or file from the phone, a piece at a time (`uploads.rs`).
             tr::HostRequest::UploadPart { req, reply } => uploads::part(req, reply, cx),
             // The Side Chat panel's quick question, from a phone's sheet (`side_chat.rs`).
+            // A sub-agent of the agent's own, opened from its row (`sub_agent_view.rs`).
+            tr::HostRequest::SubAgent { req, reply } => {
+                let _ = reply.send(self.remote_sub_agent(&req));
+            }
+            tr::HostRequest::SubAgentAction { req, reply } => {
+                let _ = reply.send(self.remote_sub_agent_action(req, cx));
+            }
             tr::HostRequest::SideChat { req, reply } => {
                 let _ = reply.send(self.remote_side_chat(req, cx));
             }
@@ -2038,30 +2046,32 @@ impl Workspace {
                 // drift by the odd millisecond between ticks.
                 since: Some((now_ms() - self.task_elapsed(&c.id).as_millis() as i64) / 1000 * 1000),
                 thread_id: Some(c.id.clone()),
+                call_id: None,
             })
             .collect();
         let Some(l) = self.live.get(&t.id) else {
             return (kids, vec![]);
         };
-        let own = |title: &str, started: std::time::Instant| tr::SubAgent {
+        let own = |title: &str, started: std::time::Instant, call: Option<&str>| tr::SubAgent {
             agent: agent_ref(&t.agent),
             model: None,
             title: title.to_string(),
             state: tr::SubAgentState::Running,
             since: Some(instant_ms(started)),
             thread_id: None,
+            call_id: call.map(str::to_string),
         };
         let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
         kids.extend(
             l.tasks
                 .iter()
                 .filter(|k| k.done.is_none())
-                .map(|k| own(&k.description, k.started)),
+                .map(|k| own(&k.description, k.started, Some(&k.id))),
         );
         kids.extend(
             l.background_agents()
                 .filter(|b| !b.task.call.as_deref().is_some_and(out))
-                .map(|b| own(&b.task.title, b.started)),
+                .map(|b| own(&b.task.title, b.started, b.task.call.as_deref())),
         );
         (
             kids,
@@ -2239,7 +2249,7 @@ impl Workspace {
                     continue;
                 }
             }
-            let body = item_body(self, live, cwd.as_deref(), probe.as_ref(), ix);
+            let body = item_body(self, id, live, cwd.as_deref(), probe.as_ref(), ix);
             let h = hash(&body);
             if w.items[ix].hash == Some(h) {
                 continue;
@@ -2380,7 +2390,7 @@ impl Workspace {
         };
         let old = w.from.min(live.items.len()).min(w.items.len());
         for ix in start..old {
-            let body = item_body(self, live, cwd.as_deref(), probe.as_ref(), ix);
+            let body = item_body(self, id, live, cwd.as_deref(), probe.as_ref(), ix);
             w.items[ix].hash = Some(hash(&body));
             out.items.insert(ix, body);
         }
@@ -2452,7 +2462,7 @@ impl Workspace {
                 let at = item_time(&live.items[ix]);
                 if newer(w.items[ix].seq) {
                     let body = converted.items.remove(&ix).unwrap_or_else(|| {
-                        item_body(self, live, cwd.as_deref(), probe.as_ref(), ix)
+                        item_body(self, id, live, cwd.as_deref(), probe.as_ref(), ix)
                     });
                     items.push(tr::Item {
                         id: format!("i{ix}"),
@@ -2558,10 +2568,9 @@ impl Workspace {
             };
             for ix in start..end.min(live.items.len()) {
                 let at = item_time(&live.items[ix]);
-                let body = converted
-                    .items
-                    .remove(&ix)
-                    .unwrap_or_else(|| item_body(self, live, cwd.as_deref(), probe.as_ref(), ix));
+                let body = converted.items.remove(&ix).unwrap_or_else(|| {
+                    item_body(self, id, live, cwd.as_deref(), probe.as_ref(), ix)
+                });
                 items.push(tr::Item {
                     id: format!("i{ix}"),
                     seq: seq(ix),
@@ -2903,6 +2912,7 @@ fn clip_text_to(text: &str, limit: usize) -> String {
 /// Item `ix` of `live` as the phone shows it (`cwd`: its thread's folder).
 fn item_body(
     ws: &Workspace,
+    thread: &str,
     live: &LiveThread,
     cwd: Option<&std::path::Path>,
     probe: Option<&trek_core::verification::Probe>,
@@ -2982,6 +2992,7 @@ fn item_body(
                     .then(|| media::watch_of(output))
                     .flatten()
                     .map(|w| media::remote_watch(&w)),
+                sub_agent: sub_agent_view::link(ws, thread, live, &live.items[ix]),
             }
         }
         Item::TurnEnd { took_secs, .. } => tr::ItemBody::TurnEnd {

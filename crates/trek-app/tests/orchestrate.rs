@@ -1534,3 +1534,348 @@ fn full_access_allows_what_an_agent_still_asks() {
         });
     });
 }
+
+/// What `id`'s sidebar row counts at work, and the transcript rows saying so: Trek's sub-agents
+/// (its threads under `id`) and the agent's own (`LiveThread::tasks`).
+fn at_work_and_shown(trek: &Trek, cx: &TestAppContext, id: &str) -> (usize, usize) {
+    let counted = trek.read(cx, |ws, _| {
+        ws.running_children(id).len() + ws.live.get(id).map_or(0, |l| l.active_tasks())
+    });
+    let shown = trek
+        .rows(cx)
+        .iter()
+        .filter(|r| r.starts_with("subagent:") && r.contains("(Running"))
+        .count();
+    (counted, shown)
+}
+
+/// The transcript position of `child`'s row in `parent`'s transcript.
+fn row_at(trek: &Trek, cx: &TestAppContext, parent: &str, child: &str) -> Option<usize> {
+    let row = trek_core::orchestrate::task_row(child);
+    trek.items(cx, parent)
+        .iter()
+        .position(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+}
+
+/// A sub-agent of the agent's own (Claude's Task) that asks Trek for a sub-agent: the call is one
+/// of its steps, never a row of the parent's transcript. Its row, and every later one, still shows
+/// while the turn runs, each after its own call.
+#[test]
+fn every_sub_agent_the_sidebar_counts_shows_in_the_thread_while_the_turn_runs() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let call = format!(
+            "mcp__{}__delegate_task",
+            trek_agents::mock::ORCHESTRATE_SERVER
+        );
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::TextDelta("I'll send a scout.".into()),
+                    AgentEvent::TextDone("I'll send a scout.".into()),
+                    AgentEvent::ToolStarted {
+                        id: "toolu_scout".into(),
+                        title: "Subagent".into(),
+                        detail: "Scout the parser".into(),
+                    },
+                    AgentEvent::Task {
+                        id: "toolu_scout".into(),
+                        description: Some("Scout the parser".into()),
+                        activity: None,
+                        tool_uses: None,
+                        done: None,
+                    },
+                    AgentEvent::TaskStep {
+                        task: "toolu_scout".into(),
+                        title: call.clone(),
+                        detail: "Second opinion".into(),
+                    },
+                ],
+                cx,
+            )
+        });
+        let nested = trek
+            .update(cx, |ws, cx| {
+                ws.delegate(
+                    &id,
+                    &json!({ "title": "Second opinion", "prompt": "mock:long 30s" }),
+                    cx,
+                )
+            })
+            .unwrap();
+        assert!(
+            row_at(&trek, cx, &id, &nested).is_some(),
+            "{:?}",
+            trek.items(cx, &id)
+        );
+        // Later in the same turn the agent asks for one itself: its row follows its call.
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![AgentEvent::ToolStarted {
+                    id: "call-2".into(),
+                    title: call.clone(),
+                    detail: "Third opinion".into(),
+                }],
+                cx,
+            )
+        });
+        let own = trek
+            .update(cx, |ws, cx| {
+                ws.delegate(
+                    &id,
+                    &json!({ "title": "Third opinion", "prompt": "mock:long 30s" }),
+                    cx,
+                )
+            })
+            .unwrap();
+        trek.render(cx);
+        let items = trek.items(cx, &id);
+        let call_ix = items
+            .iter()
+            .position(|i| matches!(i, Item::Tool { id, .. } if id == "call-2"))
+            .unwrap();
+        assert_eq!(row_at(&trek, cx, &id, &own), Some(call_ix + 1), "{items:?}");
+        let (counted, shown) = at_work_and_shown(&trek, cx, &id);
+        assert_eq!(counted, 3, "two of Trek's and the scout");
+        assert_eq!(shown, counted, "{:?}", trek.rows(cx));
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+    });
+}
+
+/// A thread whose transcript once got a sub-agent row with no call of Trek's before it (asked
+/// between turns): the rows of its next turn's sub-agents still show as they start.
+#[test]
+fn a_row_with_no_call_in_an_earlier_turn_holds_back_no_later_row() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let call = format!(
+            "mcp__{}__delegate_task",
+            trek_agents::mock::ORCHESTRATE_SERVER
+        );
+        // Between turns (a sub-agent of the agent's own working in the background asked).
+        let first = trek
+            .update(cx, |ws, cx| {
+                ws.delegate(
+                    &id,
+                    &json!({ "title": "Second opinion", "prompt": "mock:long 30s" }),
+                    cx,
+                )
+            })
+            .unwrap();
+        assert!(row_at(&trek, cx, &id, &first).is_some());
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::TextDelta("Another, then.".into()),
+                    AgentEvent::ToolStarted {
+                        id: "call-2".into(),
+                        title: call,
+                        detail: "Third opinion".into(),
+                    },
+                ],
+                cx,
+            )
+        });
+        let second = trek
+            .update(cx, |ws, cx| {
+                ws.delegate(
+                    &id,
+                    &json!({ "title": "Third opinion", "prompt": "mock:long 30s" }),
+                    cx,
+                )
+            })
+            .unwrap();
+        assert!(trek.read(cx, |ws, _| ws.turn_running(&id)), "mid-turn");
+        assert!(
+            row_at(&trek, cx, &id, &second).is_some(),
+            "{:?}",
+            trek.items(cx, &id)
+        );
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+    });
+}
+
+/// An agent that names Trek's tool its own way (its call is a plain tool row): the row of the
+/// sub-agent it started shows soon all the same, mid-turn.
+#[test]
+fn a_sub_agent_row_whose_call_trek_cannot_tell_shows_soon_all_the_same() {
+    use trek_agents::AgentEvent;
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![AgentEvent::ToolStarted {
+                    id: "call-1".into(),
+                    title: "Delegate Task".into(),
+                    detail: "Second opinion".into(),
+                }],
+                cx,
+            )
+        });
+        let child = trek
+            .update(cx, |ws, cx| {
+                ws.delegate(
+                    &id,
+                    &json!({ "title": "Second opinion", "prompt": "mock:long 30s" }),
+                    cx,
+                )
+            })
+            .unwrap();
+        let row = trek_core::orchestrate::task_row(&child);
+        let p = id.clone();
+        trek.wait(cx, "its row, with no call Trek knows", move |ws| {
+            ws.live.get(&p).is_some_and(|l| {
+                l.items
+                    .iter()
+                    .any(|i| matches!(i, Item::Tool { id, .. } if *id == row))
+            })
+        })
+        .await;
+        assert!(trek.read(cx, |ws, _| ws.turn_running(&id)), "mid-turn");
+        trek.update(cx, |ws, cx| ws.interrupt(&id, cx));
+    });
+}
+
+/// One of the agent's own sub-agents sent into the background, which its agent lists as out only
+/// after the turn that sent it has ended: its row says it's still at work, as the sidebar does.
+#[test]
+fn a_background_sub_agent_listed_after_its_turn_shows_at_work() {
+    use trek_agents::{AgentEvent, BackgroundKind, BackgroundTask};
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![
+                    AgentEvent::TextDelta("Sending a scout.".into()),
+                    AgentEvent::ToolStarted {
+                        id: "toolu_bg".into(),
+                        title: "Subagent".into(),
+                        detail: "Watch the logs".into(),
+                    },
+                    AgentEvent::Task {
+                        id: "toolu_bg".into(),
+                        description: Some("Watch the logs".into()),
+                        activity: None,
+                        tool_uses: None,
+                        done: None,
+                    },
+                    AgentEvent::ToolFinished {
+                        id: "toolu_bg".into(),
+                        output: "Async agent launched successfully.".into(),
+                        ok: true,
+                    },
+                    AgentEvent::TurnComplete { error: None },
+                    AgentEvent::Background(vec![BackgroundTask {
+                        id: "task-1".into(),
+                        kind: BackgroundKind::Agent,
+                        title: "Watch the logs".into(),
+                        call: Some("toolu_bg".into()),
+                        readable: false,
+                        stoppable: true,
+                    }]),
+                ],
+                cx,
+            )
+        });
+        trek.render(cx);
+        let (counted, shown) = at_work_and_shown(&trek, cx, &id);
+        assert_eq!(counted, 1, "the sidebar counts it");
+        assert_eq!(shown, 1, "{:?}", trek.rows(cx));
+    });
+}
+
+/// What the phone opens from one of the agent's own sub-agent rows: its prompt, its calls with
+/// their output and what it said, live; and Stop and a message reach it through its agent.
+#[test]
+fn the_agent_s_own_sub_agent_reads_as_a_transcript_and_takes_stop_and_a_message() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:task 6s");
+        let p = id.clone();
+        trek.wait(cx, "the sub-agent's first call and its output", move |ws| {
+            ws.live.get(&p).is_some_and(|l| {
+                l.sub_logs.values().any(|s| {
+                    s.items.iter().any(|i| {
+                        matches!(
+                            i,
+                            Item::Tool {
+                                status: ToolStatus::Done,
+                                ..
+                            }
+                        )
+                    })
+                })
+            })
+        })
+        .await;
+        let (call, log) = trek.read(cx, |ws, _| {
+            let (k, v) = ws.live[&id].sub_logs.iter().next().unwrap();
+            (k.clone(), v.clone())
+        });
+        assert!(
+            log.prompt
+                .as_deref()
+                .unwrap()
+                .starts_with("Survey the test suite")
+        );
+        assert!(
+            matches!(&log.items[0], Item::Assistant { .. }),
+            "{:?}",
+            log.items
+        );
+        assert!(
+            matches!(&log.items[1], Item::Tool { title, output, .. } if title == "Read" && output.contains("#[test]")),
+            "{:?}",
+            log.items
+        );
+        // A message, mid-run: it shows at once, and the sub-agent answers it.
+        trek.update(cx, |ws, cx| {
+            ws.message_sub_agent(&id, &call, "Count the doc tests too.", cx)
+        })
+        .unwrap();
+        let (p, c) = (id.clone(), call.clone());
+        trek.wait(cx, "its answer to the message", move |ws| {
+            ws.live[&p].sub_logs[&c].items.iter().any(
+                |i| matches!(i, Item::Assistant { text } if text.contains("Count the doc tests too.")),
+            )
+        })
+        .await;
+        assert!(trek.read(cx, |ws, _| {
+            ws.live[&id].sub_logs[&call]
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::User { text, .. } if text == "Count the doc tests too."))
+        }));
+        // Stop: it ends, failed, and its parent carries on to the end of its turn.
+        trek.update(cx, |ws, cx| ws.stop_sub_agent(&id, &call, cx))
+            .unwrap();
+        trek.wait_done(cx, &id, RunState::Idle).await;
+        let c = call.clone();
+        assert!(
+            trek.items(cx, &id).iter().any(
+                |i| matches!(i, Item::Tool { id, status: ToolStatus::Failed, .. } if *id == c)
+            )
+        );
+        assert!(
+            trek.answers(cx, &id).contains("stopped before it finished"),
+            "{}",
+            trek.answers(cx, &id)
+        );
+        // Over, it takes neither.
+        assert!(
+            trek.update(cx, |ws, cx| ws.message_sub_agent(&id, &call, "More?", cx))
+                .is_err()
+        );
+    });
+}
