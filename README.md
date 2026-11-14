@@ -65,7 +65,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
     <td colspan="3">
       <img src="docs/assets/icons/platforms/iphone.svg" width="24" height="24" align="top" alt="">&nbsp; <b>iPhone</b> &nbsp;<sub>iOS 26 · SwiftUI</sub>
       <br>
-      <sub>The agents keep running on your computer; the phone is the inbox and the remote. Every thread and its status, approvals, questions and plans, steering, new threads, Notes and voice input. Built from source for now (<a href="ios/README.md">ios/README.md</a>).</sub>
+      <sub>The agents keep running on your computer; the phone is the inbox and the remote. Every thread and its status, approvals, questions and plans, steering, new threads, Notes and voice input. A sub-agent opens to its own work, where you can stop it or message it. The four themes are there too, or it matches your Mac. Built from source for now (<a href="ios/README.md">ios/README.md</a>).</sub>
     </td>
   </tr>
   <tr>
@@ -95,6 +95,12 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
 
 ## Features
 
+<p align="center">
+  <img src="docs/assets/screenshots/mac/inbox-loop.gif" width="800" alt="A thread stops to ask for ./migrate, goes to the top of the Inbox, is allowed, and gets back to work while another finishes">
+  <br>
+  <sub>One stops to ask, goes to the top, and gets back to work once you answer. Staged threads.</sub>
+</p>
+
 <table>
   <tr><th colspan="4" align="left">Agents and models</th></tr>
   <tr>
@@ -122,7 +128,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
     <td valign="top"><img src="docs/assets/icons/features/square-terminal.svg" width="22" height="22" alt=""><br><b>Terminal</b><br><sub>A real one, next to every thread</sub></td>
     <td valign="top"><img src="docs/assets/icons/features/globe.svg" width="22" height="22" alt=""><br><b>Browser</b><br><sub>Element picking, devtools, agent-driven</sub></td>
     <td valign="top"><img src="docs/assets/icons/features/tablet-smartphone.svg" width="22" height="22" alt=""><br><b>iOS Simulator</b><br><sub>A live mirror with touch (macOS)</sub></td>
-    <td valign="top"><img src="docs/assets/icons/features/mouse-pointer-click.svg" width="22" height="22" alt=""><br><b>Computer use and MCP</b><br><sub>Opt-in, plus your own MCP servers</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/mouse-pointer-click.svg" width="22" height="22" alt=""><br><b>Computer use and MCP</b><br><sub>Opt-in, in the background on a Mac; your own MCP servers</sub></td>
   </tr>
   <tr><th colspan="4" align="left">Phone and machines</th></tr>
   <tr>
@@ -135,7 +141,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
   <tr>
     <td valign="top"><img src="docs/assets/icons/features/app-window-mac.svg" width="22" height="22" alt=""><br><b>Menu bar and tray</b><br><sub>Idle, working or needs you</sub></td>
     <td valign="top"><img src="docs/assets/icons/features/refresh-cw.svg" width="22" height="22" alt=""><br><b>Signed updates</b><br><sub>Stable, Beta or Nightly; never mid-turn</sub></td>
-    <td valign="top"><img src="docs/assets/icons/features/palette.svg" width="22" height="22" alt=""><br><b>Night, Paper, glass</b><br><sub>Themes for the whole app</sub></td>
+    <td valign="top"><img src="docs/assets/icons/features/palette.svg" width="22" height="22" alt=""><br><b>Themes and backgrounds</b><br><sub>Four themes, Paper or Night, glass; painted and ASCII art</sub></td>
     <td valign="top"><img src="docs/assets/icons/features/feather.svg" width="22" height="22" alt=""><br><b>Light and fast</b><br><sub>Rust and GPUI, drawn on the GPU</sub></td>
   </tr>
 </table>
