@@ -374,3 +374,69 @@ fn the_composers_chips_hold_still_in_and_out_of_its_cache() {
         }
     });
 }
+
+/// A new thread's composer sits in the middle of its pane, which at most window heights puts it
+/// between two device pixels. The window lays the composer out from its content on frames where
+/// it changed (a hover over a chip, a key) and from its cache on the others (a timer in the
+/// sidebar ticking, another thread's progress): both have to put its chips' labels on the same
+/// device pixels, or the labels hop a pixel each time it goes in and out of its cache while the
+/// chips hold still (the model's name, "Plan"; seen at 125 % in a window 1,033 points tall).
+#[test]
+fn a_new_threads_composer_holds_its_chip_labels_still_in_and_out_of_its_cache() {
+    run(async |cx| {
+        let trek = open(cx);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        let ids = [
+            "model-pill",
+            "model-pill-label",
+            "plan-pill",
+            "plan-pill-label",
+            // Laid out from the right.
+            "send",
+        ];
+        let mut checked = 0;
+        for scale in [1., 1.25, 1.5, 1.75, 2.] {
+            cx.simulate_window_scale_factor_change(trek.window, scale);
+            for height in 820..828 {
+                cx.simulate_window_resize(trek.window, size(px(1280.), px(height as f32)));
+                trek.render(cx);
+                // Where each is drawn, in device pixels.
+                let drawn = |trek: &common::Trek, cx: &mut gpui_kit::TestAppContext| {
+                    ids.map(|id| {
+                        trek.bounds(cx, id).map(|b| {
+                            (
+                                (b.origin.x.as_f32() * scale).round() as i32,
+                                (b.origin.y.as_f32() * scale).round() as i32,
+                            )
+                        })
+                    })
+                };
+                let mut seen = vec![];
+                for _ in 0..2 {
+                    // Laid out from its content: it changed, and the window draws that frame itself.
+                    composer.update(cx, |_, cx| cx.notify());
+                    cx.run_until_parked();
+                    seen.push(("from its content", drawn(&trek, cx)));
+                    // From its cache: nothing changed since.
+                    trek.render(cx);
+                    seen.push(("from its cache", drawn(&trek, cx)));
+                }
+                let first = seen[0].1;
+                assert!(
+                    first.iter().all(Option::is_some),
+                    "at {scale}, {height} pt: the chips are up: {first:?}"
+                );
+                for (how, at) in &seen {
+                    for (k, id) in ids.iter().enumerate() {
+                        assert_eq!(
+                            at[k], first[k],
+                            "at {scale}, {height} pt: {id}, laid out {how}"
+                        );
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 40);
+    });
+}

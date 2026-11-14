@@ -1238,6 +1238,9 @@ pub struct Window {
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
+    /// Trek: the layout node of the element being prepainted, for a cached view to find where it
+    /// sits (`layout_origin_fraction`).
+    pub(crate) prepainting_layout: Option<LayoutId>,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2095,6 +2098,7 @@ impl Window {
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
+            prepainting_layout: None,
             activation_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -5151,6 +5155,34 @@ impl Window {
         let mut layout_engine = self.layout_engine.take().unwrap();
         layout_engine.compute_layout(layout_id, available_space, self, cx);
         self.layout_engine = Some(layout_engine);
+    }
+
+    /// Trek: `compute_layout` for a root that starts `offset` device pixels past a whole pixel, as a
+    /// cached view does where it sits in the window (`layout_origin_fraction`).
+    pub(crate) fn compute_layout_offset(
+        &mut self,
+        layout_id: LayoutId,
+        available_space: Size<AvailableSpace>,
+        offset: Point<f32>,
+        cx: &mut App,
+    ) {
+        if offset != Point::default() {
+            self.layout_engine
+                .as_mut()
+                .unwrap()
+                .set_root_offset(layout_id, offset);
+        }
+        self.compute_layout(layout_id, available_space, cx);
+    }
+
+    /// Trek: how far past the device pixel it's drawn at `layout_id`'s origin sits, in device
+    /// pixels (`TaffyLayoutEngine::origin_fraction`).
+    pub(crate) fn layout_origin_fraction(&mut self, layout_id: LayoutId) -> Point<f32> {
+        let scale_factor = self.scale_factor();
+        self.layout_engine
+            .as_mut()
+            .unwrap()
+            .origin_fraction(layout_id, scale_factor)
     }
 
     /// Obtain the bounds computed for the given LayoutId relative to the window. This method will usually be invoked by

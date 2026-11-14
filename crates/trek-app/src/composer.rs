@@ -4727,7 +4727,7 @@ impl Render for Composer {
                             .selected(plan)
                             .tooltip(crate::keys::shared(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" }))
                             .child(Icon::new(crate::assets::Lucide::ListChecks).size(px(look::ICON)).text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
-                            .when(!narrow, |p| p.child(div().when(plan, |el| el.text_color(theme.foreground).font_medium()).child("Plan")))
+                            .when(!narrow, |p| p.child(div().id("plan-pill-label").test_support().when(plan, |el| el.text_color(theme.foreground).font_medium()).child("Plan")))
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
                     ))
                     .child(div().flex_1().min_w(px(4.)))
