@@ -40,7 +40,8 @@ README images live in [`assets/`](assets):
 - `screenshots/mac/`: from `SIZE=1280x800 script/capture.sh mac/readme` (an isolated build with
   only the mock agent), resized to 2048 or 1200 px wide.
 - `screenshots/iphone/`: the demo mode, shot with `ios/scripts/shoot.sh` and framed.
-- `screenshots/windows/`: frames from a Windows build of the same suite.
+- `screenshots/windows/`: from `pwsh script/capture.ps1 windows/readme` (SIZE=1280x860, two demo
+  projects, the scripted agent in its demo dress), resized to 1200 px wide; captioned as an example.
 - `icons/features/`: [Lucide](https://lucide.dev) icons (ISC, see the `LICENSE` there) in Trek's ember.
 - `icons/tech/`, `icons/platforms/`: tiles drawn around [Simple Icons](https://simpleicons.org) glyphs (CC0).
 - `buttons/`, `trek-icon.png`: rendered from `assets/brand/` with Trek's own Inter.

@@ -50,9 +50,12 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
     <td width="50%" valign="top">
       <img src="docs/assets/icons/platforms/windows.svg" width="24" height="24" align="top" alt="">&nbsp; <b>Windows</b> &nbsp;<sub>11 · x64</sub>
       <br><br>
-      <img src="docs/assets/screenshots/windows/thread-night.png" alt="Trek on Windows: a finished answer in the Night theme">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/windows/thread-night.png">
+        <img src="docs/assets/screenshots/windows/thread-paper.png" alt="Trek on Windows, an example thread: the files an agent edited and its plan waiting for approval, with the threads that need you in the sidebar">
+      </picture>
       <br>
-      <sub>Tray icon, taskbar badge, toasts.</sub>
+      <sub>Tray icon, taskbar badge, toasts. The thread pictured is an example.</sub>
     </td>
   </tr>
 </table>

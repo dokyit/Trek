@@ -32,7 +32,7 @@ $script:ShotProc = $null
 $script:LogSubs = $null
 
 $Verbs = @('route', 'send', 'attach', 'project', 'diff', 'pair', 'push', 'new', 'settled',
-    'glass', 'tint', 'theme', 'tools', 'range', 'usage-demo', 'pace', 'wait', 'record',
+    'glass', 'tint', 'theme', 'dress', 'title', 'tools', 'range', 'usage-demo', 'pace', 'wait', 'record',
     'editor', 'agent-install', 'toast', 'click', 'rclick', 'hover', 'elements', 'type',
     'key', 'scroll', 'resize', 'hittest', 'realclick', 'realmove', 'realleave', 'legacy-pointer', 'count', 'approve', 'deny', 'answer', 'rewind', 'shot', 'browser', 'perf', 'quit')
 
@@ -75,7 +75,10 @@ function Test-Manifests([string]$Suite) {
     $ok = $true
     if ($Suite -and $Suite -ne 'all') {
         $name = $Suite -replace '^(mac|ios|windows)/', ''
-        $cmds = if (Test-Path "media/mac/$name.cmds") { "media/mac/$name.cmds" } else { "media/windows/$name.cmds" }
+        # A named platform's own file (`windows/readme` isn't `mac/readme`); a bare name, the Mac's first.
+        $cmds = if ($Suite -like 'windows/*') { "media/windows/$name.cmds" }
+                elseif ($Suite -like 'mac/*' -or (Test-Path "media/mac/$name.cmds")) { "media/mac/$name.cmds" }
+                else { "media/windows/$name.cmds" }
         $list = "media/ios/$name.list"
         if (Test-Path $cmds) { return (Test-Cmds (Resolve-Path $cmds).Path) }
         if (Test-Path $list) { return (Test-ListFile (Resolve-Path $list).Path) }
