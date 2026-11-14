@@ -7,7 +7,7 @@
 <p><b>Every agent. One trail.</b></p>
 
 <p>A native desktop app that runs your coding agents from one inbox.<br>
-Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS and Windows, with an iPhone companion.</p>
+Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS and Windows, with an iPhone companion and a remote for any phone’s browser.</p>
 
 <p>
   <a href="https://github.com/dokyit/Trek/releases/latest"><img src="https://img.shields.io/github/v/release/dokyit/Trek?label=release&color=F4692B" alt="Latest release"></a>
@@ -65,7 +65,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
     <td colspan="3">
       <img src="docs/assets/icons/platforms/iphone.svg" width="24" height="24" align="top" alt="">&nbsp; <b>iPhone</b> &nbsp;<sub>iOS 26 · SwiftUI</sub>
       <br>
-      <sub>The agents keep running on your computer; the phone is the inbox and the remote. Every thread and its status, approvals, questions and plans, steering, new threads, Notes and voice input. A sub-agent opens to its own work, where you can stop it or message it. The four themes are there too, or it matches your Mac. Built from source for now (<a href="ios/README.md">ios/README.md</a>).</sub>
+      <sub>The agents keep running on your computer; the phone is the inbox and the remote. Every thread and its status, approvals, questions and plans, steering, new threads, Notes and voice input. A sub-agent opens to its own work, where you can stop it or message it. The four themes are there too, or it matches your Mac. Built from source for now (<a href="ios/README.md">ios/README.md</a>). No iPhone? An Android phone, or any phone’s browser, pairs from the same Settings page and gets the same remote at <a href="https://trekdesktop.com/remote/">trekdesktop.com/remote</a>, connected straight to your computer (<a href="docs/MOBILE.md#the-web-remote-siteremote">docs/MOBILE.md</a>).</sub>
     </td>
   </tr>
   <tr>

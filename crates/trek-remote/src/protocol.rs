@@ -611,6 +611,17 @@ pub struct SearchRequest {
 /// The most threads one `search` returns.
 pub const MAX_SEARCH: u32 = 200;
 
+/// A certificate of the web remote's series (`trek_remote::web`): its SHA-256 as a page names it in
+/// `serverCertificateHashes`, and when it's valid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebCertHash {
+    /// SHA-256 of the DER certificate, base64.
+    pub hash: String,
+    /// When it starts and stops being valid (unix ms).
+    pub from: i64,
+    pub to: i64,
+}
+
 /// Optional requests and actions a Mac serves, as `welcome` and `paired` list them in `features`.
 /// A phone hides what its Mac doesn't list: an older Mac simply doesn't show it.
 pub mod feature {
@@ -987,6 +998,10 @@ pub enum ServerMessage {
         /// answer, so pairing at home still reaches the Mac over Tailscale.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         routes: Vec<String>,
+        /// Over WebTransport alone (the web remote): every certificate of the series it's served
+        /// with, for the page to pin the ones it will meet (`trek_remote::web`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        web_certs: Vec<WebCertHash>,
     },
     /// `hello` succeeded.
     Welcome {
@@ -997,6 +1012,9 @@ pub enum ServerMessage {
         /// As in `Paired`, as they are now (an address may have changed since).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         routes: Vec<String>,
+        /// As in `Paired`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        web_certs: Vec<WebCertHash>,
     },
     /// Everything the phone shows in its inbox (replaces its copy).
     Snapshot(Snapshot),

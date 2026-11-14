@@ -31,3 +31,18 @@
   Cache-Control: public, max-age=3600
 /apple-touch-icon.png
   Cache-Control: public, max-age=3600
+
+# The web remote (remote/, a phone's browser driving Trek on the user's own computer). It connects
+# straight to that computer over WebTransport, at whatever address it has on the user's network
+# (connect-src https:), keeps a service worker to open without a connection, may use the
+# microphone for dictation and the camera for a photo to send, and draws agents' answers, which
+# may colour their text (style-src 'unsafe-inline'; scripts stay the site's own). Rules are taken
+# in order, so these replace the site's own policy for it rather than adding to it. Its files
+# keep their names from release to release, so they're checked each time they're used.
+/remote/*
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self' https:; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  ! Permissions-Policy
+  Permissions-Policy: accelerometer=(), camera=(self), geolocation=(), gyroscope=(), magnetometer=(), microphone=(self), payment=(), usb=()
+  Cache-Control: no-cache
+  X-Robots-Tag: noindex

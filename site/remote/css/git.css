@@ -1,0 +1,500 @@
+/* git: a thread's Git (site/remote/js/features/git.js): its branch, changed files, commit and
+   push, worktree and branches, and one file's diff, which scrolls sideways under a gutter that
+   stays put. Added and removed lines are Trek's done and failed colours, in Night and Paper. */
+
+.git .icon-btn[disabled] {
+  opacity: 0.4;
+}
+
+.git-busy {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  color: var(--muted);
+}
+
+.git-page {
+  padding: 4px 0 calc(40px + var(--bottom));
+}
+
+.git-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 12px 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-soft);
+  background: var(--surface);
+}
+
+.git-head-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+  color: var(--fg-strong);
+}
+
+.git-head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-head-branch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-strong);
+  font-weight: 650;
+}
+
+.git-head-branch .mono {
+  font-size: 14.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-head-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.git-ab {
+  display: inline-flex;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.git-ab > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.git-ab .on {
+  color: var(--fg-strong);
+}
+
+.git-ab .behind {
+  color: var(--approval);
+}
+
+.git-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 18px 24px 8px;
+}
+
+.git-section-head h2 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.git-seen {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.git-section-head .git-lines {
+  margin-left: auto;
+}
+
+.git-lines {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.git-foot {
+  margin: -10px 24px 14px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.git-commit .git-foot {
+  margin: 8px 12px 0;
+}
+
+.git-wait {
+  justify-content: center;
+  color: var(--muted);
+}
+
+.git-clean {
+  gap: 8px;
+  color: var(--muted);
+}
+
+/* The changed files. */
+.git-file {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid var(--border-soft);
+}
+
+.git-file:first-child {
+  border-top: 0;
+}
+
+.git-file-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 9px 6px 9px 14px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  text-align: left;
+}
+
+.git-file-open:active {
+  background: var(--hover);
+}
+
+.git-file-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.git-file-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.git-file-name {
+  min-width: 0;
+  font-size: 14.5px;
+  font-weight: 550;
+  color: var(--fg-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-file-name.gone {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.git-file-dir {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-tag {
+  flex: none;
+  max-width: 50%;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-tag.new {
+  color: var(--done);
+  background: color-mix(in srgb, var(--done) 13%, transparent);
+}
+
+.git-tag.deleted {
+  color: var(--failed);
+  background: color-mix(in srgb, var(--failed) 13%, transparent);
+}
+
+.git-file.viewed .git-file-open {
+  opacity: 0.6;
+}
+
+.git-tick {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+}
+
+.git-tick[aria-pressed='true'] {
+  color: var(--done);
+}
+
+.git-tick:active {
+  background: var(--hover);
+}
+
+/* Commit and push. */
+.git-commit {
+  margin: 0 12px 4px;
+}
+
+.git-commit textarea.input {
+  font-size: 16px;
+}
+
+.git-btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* The worktree and the branches. */
+.git .item[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.git .item:not([disabled]):active {
+  background: var(--hover);
+}
+
+.git-danger {
+  color: var(--failed);
+}
+
+.git-branch .mono {
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-branch[aria-current='true'] {
+  opacity: 1 !important;
+  font-weight: 650;
+}
+
+.git-branch[aria-current='true'] .icon {
+  color: var(--accent);
+}
+
+.git-none {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.git-none > .icon {
+  width: 34px;
+  height: 34px;
+  stroke-width: 1.6;
+}
+
+.git-none h2 {
+  margin: 6px 0 0;
+  font-size: 17px;
+  color: var(--fg-strong);
+}
+
+.git-none p {
+  margin: 0;
+  max-width: 320px;
+}
+
+.git-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 16px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.git-note .icon {
+  margin-top: 2px;
+}
+
+.git-ask {
+  margin: 0 0 14px;
+  font-size: 14.5px;
+  color: var(--muted);
+}
+
+.git-ask-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.git-ask-row {
+  justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------- A diff */
+
+.git-diff-page {
+  padding: 10px 0 calc(40px + var(--bottom));
+}
+
+.git-diff-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  padding: 0 16px 10px;
+  font-size: 13px;
+}
+
+.git-diff-at {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.diff {
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  font: 12px / 1.6 var(--mono);
+  -webkit-overflow-scrolling: touch;
+}
+
+.diff-rows {
+  width: max-content;
+  min-width: 100%;
+  padding: 2px 0 4px;
+}
+
+.diff-line {
+  --tint: transparent;
+  display: flex;
+  background: var(--tint);
+}
+
+.diff-line.add {
+  --tint: color-mix(in srgb, var(--done) 13%, transparent);
+}
+
+.diff-line.del {
+  --tint: color-mix(in srgb, var(--failed) 13%, transparent);
+}
+
+/* The number and sign stay at the left edge while the code scrolls under them. */
+.diff-gut {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: none;
+  display: flex;
+  background: linear-gradient(var(--tint), var(--tint)), var(--surface);
+  color: color-mix(in srgb, var(--muted) 80%, transparent);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.diff-line.add .diff-gut {
+  box-shadow: inset 2px 0 var(--done);
+}
+
+.diff-line.del .diff-gut {
+  box-shadow: inset 2px 0 var(--failed);
+}
+
+.diff-n {
+  min-width: calc(var(--digits, 2) * 1ch + 14px);
+  padding: 0 4px 0 8px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-s {
+  width: 16px;
+  text-align: center;
+}
+
+.diff-line.add .diff-s {
+  color: var(--done);
+}
+
+.diff-line.del .diff-s {
+  color: var(--failed);
+}
+
+.diff-code {
+  padding-right: 16px;
+  white-space: pre;
+  tab-size: 4;
+  color: var(--fg-strong);
+}
+
+.diff-line.ctx .diff-code {
+  color: color-mix(in srgb, var(--fg) 82%, transparent);
+}
+
+.diff-mark {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--done) 34%, transparent);
+  color: inherit;
+}
+
+.diff-line.del .diff-mark {
+  background: color-mix(in srgb, var(--failed) 34%, transparent);
+}
+
+.diff-hunk {
+  padding: 4px 12px;
+  color: var(--plan);
+  background: color-mix(in srgb, var(--plan) 9%, transparent);
+  white-space: pre;
+}
+
+.diff-note {
+  padding: 1px 12px;
+  font-style: italic;
+  color: var(--muted);
+  white-space: pre;
+}
+
+.diff-fold {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 46px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.diff-fold:active {
+  background: var(--hover);
+}

@@ -123,6 +123,9 @@ pub struct PairingOffer {
     pub expires_at: i64,
     /// `trek://pair?host=…&code=…&name=…&hid=…&fp=…`, for the QR code.
     pub url: String,
+    /// The web remote's link (`https://trekdesktop.com/remote/#p=…`), for a phone without the
+    /// iPhone app, when the server serves it ([`crate::web`]).
+    pub web_url: Option<String>,
     /// The certificate's short fingerprint (`ABCD-1234-EF56-7890`), to type with the code when
     /// there's no camera; `None` without TLS.
     pub fingerprint: Option<String>,
@@ -348,7 +351,8 @@ pub struct DeviceRecord {
     /// The app's version, as it last said when it connected ("0.4.20").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_version: Option<String>,
-    /// What it runs on, as it said: `ios` for the iPhone app, `macos` or `windows` for a machine.
+    /// What it runs on, as it said: `ios` for the iPhone app, `web` for the web remote, `macos` or
+    /// `windows` for a machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
     /// Connected now. The iPhone app holds its connection only while it's open, so the phone
@@ -368,9 +372,24 @@ pub struct DeviceInfo {
     /// The app's version, as it last said ("0.4.20").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_version: Option<String>,
-    /// `ios` for the iPhone app, `macos` or `windows` for a machine.
+    /// `ios` for the iPhone app, `web` for the web remote, `macos` or `windows` for a machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+}
+
+impl DeviceInfo {
+    /// A phone: Trek on iPhone (`ios`, or one from before devices said what they are) or the web
+    /// remote (`web`). A machine that paired with this one to start threads here isn't one.
+    pub fn is_phone(&self) -> bool {
+        self.platform
+            .as_deref()
+            .is_none_or(|p| p == "ios" || p == "web")
+    }
+
+    /// The web remote, in a phone's browser.
+    pub fn is_web(&self) -> bool {
+        self.platform.as_deref() == Some("web")
+    }
 }
 
 impl From<&DeviceRecord> for DeviceInfo {

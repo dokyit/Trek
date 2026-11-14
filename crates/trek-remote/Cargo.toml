@@ -25,6 +25,10 @@ subtle = "2.6"
 # TLS with a self-signed certificate the phone pins (src/tls.rs); ring, as reqwest already uses.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"] }
+# The web remote's certificates: dates for their two weeks.
+time = "0.3"
+# The web remote (src/web.rs): WebTransport over HTTP/3, ring as above.
+wtransport = { version = "0.7", default-features = false, features = ["ring", "quinn"] }
 
 [target.'cfg(windows)'.dependencies]
 # The TLS key file's ACL (src/tls.rs): the user's alone, as 0600 makes it on a Mac.

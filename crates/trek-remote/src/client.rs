@@ -961,12 +961,14 @@ impl Driver {
                     host,
                     features,
                     routes,
+                    ..
                 } => (protocol, Some(token), host, features, routes),
                 ServerMessage::Welcome {
                     protocol,
                     host,
                     features,
                     routes,
+                    ..
                 } => (protocol, None, host, features, routes),
                 _ => unreachable!("authenticate returns paired or welcome"),
             };

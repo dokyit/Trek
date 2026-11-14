@@ -421,7 +421,7 @@ fn the_phone_page_explains_the_firewall_question_on_windows_only() {
             "{mobile:?}"
         );
         assert!(
-            has(&mobile, "Let your iPhone connect"),
+            has(&mobile, "Let your phone connect"),
             "the page itself is there: {mobile:?}"
         );
     });
@@ -474,7 +474,7 @@ fn a_mac_reads_as_it_always_has() {
         );
         assert_eq!(
             page_blurb(SettingsPage::Mobile),
-            "Keep your threads going from your iPhone: see what every agent is doing, answer approvals and questions, and steer or start work. The agents keep running on this Mac."
+            "Keep your threads going from your phone: see what every agent is doing, answer approvals and questions, and steer or start work. The agents keep running on this Mac."
         );
         assert_eq!(
             page_blurb(SettingsPage::Import),

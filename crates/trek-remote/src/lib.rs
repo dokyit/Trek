@@ -95,6 +95,7 @@ pub mod pairing;
 pub mod protocol;
 pub mod server;
 pub mod tls;
+pub mod web;
 
 pub use host::{
     ChannelHost, CloneProgress, HostError, HostEvent, HostRequest, HostResult, RemoteHost, Reply,

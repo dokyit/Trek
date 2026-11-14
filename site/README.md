@@ -8,6 +8,9 @@ site/
   index.html            the page: the first screen's photograph, the story played by scrolling,
                         the app's window, the iOS section and the download list
   privacy/index.html    docs/PRIVACY.md in plain words, and what this site itself does
+  remote/               the web remote: Trek's remote for a phone's browser (an Android phone first of
+                        all), which pairs from Trek's QR code and talks to Trek on the user's computer
+                        over WebTransport. A web app of its own; docs/MOBILE.md, "The web remote"
   404.html
   assets/site.css       every style (no inline styles: the CSP forbids them)
   assets/site.js        the download button, the hiker's walk, and the story played by scrolling
@@ -31,7 +34,10 @@ python3 -m http.server 8731 --bind 127.0.0.1
 # then open http://127.0.0.1:8731/
 ```
 
-Any static server will do. Addresses in the pages start at `/`, so serve the `site` folder as the
+Or `node script/site/serve.mjs 8731`, which also sends each page the headers `_headers` gives it, as
+Cloudflare does: the web remote (`/remote/`) needs its own security policy to connect to Trek.
+
+Any static server will do for the rest. Addresses in the pages start at `/`, so serve the `site` folder as the
 root; opening `index.html` from the disk won't find its styles. `_headers` and `_redirects` only
 take effect on Cloudflare.
 

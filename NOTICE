@@ -42,14 +42,19 @@ Third-party materials bundled in this repository:
   backends left out (vendor/whisper-rs-sys/whisper.cpp/LICENSE). The speech model dictation
   downloads the first time the mic is used is OpenAI's Whisper base model
   (github.com/openai/whisper), MIT, as whisper.cpp publishes it.
-* Agent and provider logos under crates/trek-app/assets/logos and
-  ios/Trek/Assets.xcassets/Logos are trademarks of their respective owners
+* Agent and provider logos under crates/trek-app/assets/logos,
+  ios/Trek/Assets.xcassets/Logos and site/remote/logos are trademarks of their respective owners
   (Anthropic, OpenAI, Google, Microsoft/GitHub, xAI, Cursor, Factory, DeepSeek,
   Moonshot, Alibaba, Ollama, LM Studio, OpenRouter, Mistral, Groq, Cognition,
   Sourcegraph, SST, Pi, and others). They are included solely to identify which
   agent or provider a thread or setting uses; no endorsement or affiliation is
   implied, and Trek claims no rights in those marks. Trademark holders may
   request removal via a GitHub issue.
+* site/remote/vendor — the web remote's libraries, as their authors publish them: Preact
+  (Jason Miller), MIT; htm (Google), Apache-2.0; marked (Christopher Jeffrey and contributors), MIT;
+  DOMPurify (Cure53 and contributors), Apache-2.0 or MPL-2.0; and KaTeX (Khan Academy and other
+  contributors), MIT, with its fonts under the SIL Open Font License 1.1. Each licence is beside
+  it in that folder.
 * Model metadata (context windows, pricing) is sourced from models.dev.
 * docs/assets/icons/features — Lucide icons (Lucide Icons and Contributors), ISC
   (docs/assets/icons/features/LICENSE), recoloured. docs/assets/icons/tech and

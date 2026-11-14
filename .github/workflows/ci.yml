@@ -53,13 +53,15 @@ jobs:
       # The release notes step (script/lib/notes.sh) against its fixtures: every release body
       # carries the install block exactly once. The phone updater's words, against stand-ins.
       # The capture manifests against the commands this driver knows, so a suite can't use one it
-      # would refuse (media/README.md).
+      # would refuse (media/README.md). The web remote's plain code (its framing, pairing link and
+      # headers) and the site's headers, in Node (script/site/test).
       - name: Script tests
         run: |
           bash script/tests/release-notes.sh
           bash script/tests/merge-manifest.sh
           zsh ios/scripts/tests/phone-update.sh
           zsh script/capture.sh check
+          node script/site/test/run.mjs
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -230,12 +232,14 @@ jobs:
       # Assertions over the release-manifest merge the Windows release runs (the step above
       # only checks syntax), and over the uninstallers' clean-up of Trek's registry keys (run
       # against throwaway keys of the test's own). Then every capture manifest, the Windows
-      # suites too, against the commands capture.ps1 knows.
+      # suites too, against the commands capture.ps1 knows. And the web remote's plain code, in
+      # Node, as on the Mac.
       - name: Script tests
         run: |
           script\tests\release-manifest.Tests.ps1
           script\tests\uninstall-keys.Tests.ps1
           script\capture.ps1 check
+          node script/site/test/run.mjs
 
       - uses: dtolnay/rust-toolchain@master
         with:
