@@ -2251,6 +2251,26 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // The web remote's pairing link, for a browser to open: the phone server on the loopback (as
+    // for `pair-phone`), with the web remote beside it, and a pairing code shown for a phone's
+    // browser, its link written to `pair-web.txt`. The page it opens is trekdesktop.com's, or the
+    // copy `TREK_WEB_REMOTE_PAGE` names (`script/site/serve.mjs`), which a live check drives.
+    if verb == "pair-web" {
+        let url = ws.update(cx, |ws, cx| -> anyhow::Result<String> {
+            ws.start_loopback_remote(cx)?;
+            ws.offer_pairing(cx);
+            ws.remote
+                .as_ref()
+                .and_then(|r| r.offer.as_ref())
+                .and_then(|o| o.web_url.clone())
+                .ok_or_else(|| anyhow::anyhow!("pair-web: no link for a browser (is the web remote off?)"))
+        })?;
+        if let Some(dir) = std::env::var_os("TREK_SHOT_DIR") {
+            std::fs::write(Path::new(&dir).join("pair-web.txt"), url)?;
+        }
+        cx.refresh_windows();
+        return Ok(());
+    }
     // A stand-in iPhone pairs with this Trek as the iPhone app does: Trek's own client, pinned to
     // the phone server's certificate, says `pair` with the code Settings shows and `ios` as its
     // platform, and stays connected. An isolated run starts no phone server, so one starts on the
