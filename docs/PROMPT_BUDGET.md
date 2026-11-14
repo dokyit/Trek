@@ -36,7 +36,8 @@ The notes, in order (each goes in only when its setting is on, every one is on b
    reach with a tool search: look there before saying you can't."
 
 MCP servers by default: trek-simulator (only where Xcode's `simctl` is, `detect::has_simulator`),
-trek-video, trek-browser, trek-phone, trek-orchestrate (64 tools; 50 without the simulator). Everything on adds trek-computer (Tools › Computer use, background mode by default): 67
+trek-video, trek-browser, trek-phone (`phone_status` alone until an iPhone has been connected; see
+"2026-11-14"), trek-orchestrate (64 tools; 50 without the simulator). Everything on adds trek-computer (Tools › Computer use, background mode by default): 67
 tools. Figma's desktop server (off by default) and the user's own MCP servers are theirs and aren't
 counted here. Trek writes no CLAUDE.md, AGENTS.md or skill listing for the agent: the skills folder
 it passes with `--add-dir` isn't a `.claude/skills` folder, so Claude Code only notes the folder.
@@ -285,6 +286,80 @@ spec, and Claude Code's own 17K of tools.
 Also: Trek's title side call (`trek-agents/src/title.rs`) went with a thinking budget of 31,999
 tokens; it now goes with thinking off (`alwaysThinkingEnabled: false`, `MAX_THINKING_TOKENS=0`).
 
+## 2026-11-14: Claude Code's own tools, its tool search, and the iPhone's server
+
+The cut of 2026-11-13 left Claude Code's own request, and ADEMark's numbers hid how much of Trek's
+went out in full. Measured as before ("hi", `claude -p` with Trek's flags, `--strict-mcp-config`,
+o200k), but against a local stand-in that Claude Code takes for
+Anthropic's own API: no `ANTHROPIC_BASE_URL`, `HTTPS_PROXY` at a local proxy that answers
+`api.anthropic.com` from the replay server with a throwaway certificate, so the CLI behaves as it
+does for a signed-in user (with a custom base URL, 2.1.303 turns its tool search off). Nothing
+left the machine. Both the CLI ADEMark ran (2.1.303) and today's (2.1.325).
+
+What was found:
+
+- **Claude Code sends some built-in tools in full that Trek does its own way.** On 2.1.325 these
+  go out on every request even with tool search on: `Workflow` 1,295, `ScheduleWakeup` 1,175,
+  `ReportFindings` 484 (o200k). On 2.1.303 `EnterWorktree` and `ExitWorktree` (1,547 together)
+  too. They are now left out (`--disallowedTools`, `trek_agents::claude::LEFT_OUT_TOOLS`, which
+  says why each one), unless Settings › Tools › "Claude Code's workflows and wake-ups" is on
+  (`tools.claude_extra_tools`, off by default). A denied tool leaves the request's `tools`.
+  Questions, plans, sub-agents and their messages stay: Trek draws or uses each of them.
+- **Whether Claude Code defers tools is up to its tool search, and that varies.** With it on, the
+  rarely used built-ins (Cron, plan mode, worktrees, notebooks, web, `SendMessage`, `TaskStop`)
+  and every MCP tool go as names. With it on `auto`, Claude Code counts the tools first and sends
+  them all in full under its threshold: 2.1.303's bare TUI then sends 23 tools, 13,706 o200k,
+  which is ADEMark's 17,282 for the Bare CLI at 1.26 Anthropic tokens to one (deferred, it would
+  be 7,368, and ADEMark's MCP-heavy apps show their MCP schemas in full too). So on ADEMark's
+  machine Claude Code wasn't deferring, and Trek's 64 MCP tools would have gone in full: 7,976
+  o200k more on every request, not the names this doc counted. Trek now sets
+  `ENABLE_TOOL_SEARCH=true` when the session's requests go to Anthropic's own API and the user
+  hasn't chosen a mode (`claude::forces_tool_search`: no base URL, Bedrock, Vertex, Foundry or
+  betas-off variable, in the environment or a settings file's `env`). Past a gateway it's left to
+  Claude Code, which keeps it off where tool search's blocks may not pass. A user who wants it
+  off sets `ENABLE_TOOL_SEARCH=false` in Claude Code's settings, and Trek leaves it.
+- **The iPhone's server starts with `phone_status` alone** until an iPhone has been connected:
+  usbmuxd lists one when the session starts, or `phone_status` once found one on this computer
+  (`TREK_PHONE_SEEN`, a file in Trek's data folder). The agent can still tell the user how to
+  connect one. When `phone_status` finds one, trek-mcp sends `notifications/tools/list_changed`
+  and lists all 17: checked with Claude Code 2.1.303 and 2.1.325, a tool added that way is found
+  by the tool search in the same turn, and Trek's Direct harness lists the server again after the
+  call. Instructions and schemas 1,037 + 7,502 chars → 232 + 451; −349 o200k for Claude Code.
+
+| Request ("hi"), o200k | System | Built-in tools | MCP schemas | Messages | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| **2.1.325, Anthropic's API (tool search on by default)** | | | | | |
+| Bare CLI, its own TUI | 1,499 | 7,841 | 0 | 2,892 | 12,386 |
+| Trek before | 2,229 | 7,944 | 0 | 4,524 | 14,857 |
+| Trek after | 2,228 | 4,990 | 0 | 4,167 | **11,543** |
+| Trek after, an iPhone connected before | 2,229 | 4,990 | 0 | 4,516 | 11,891 |
+| Everything on (computer use), before → after | | | | | 15,256 → 11,945 |
+| **2.1.303, tool search on `auto` (as on ADEMark's machine)** | | | | | |
+| Bare CLI, its own TUI | 1,468 | 13,706 | 0 | 2,834 | 18,162 |
+| Trek before, MCP in full | 2,144 | 13,809 | 7,976 | 3,679 | 27,755 |
+| Trek before, if its MCP tools were deferred | 2,197 | 7,471 | 0 | 4,466 | 14,292 |
+| Trek after (tool search on) | 2,196 | 4,519 | 0 | 4,109 | **10,986** |
+
+(Totals include the request's parameters, about 150. "Trek before, MCP in full" was taken
+through a custom base URL, where 2.1.303 turns tool search off; in `auto` against the stand-in,
+whose token count is a guess, Claude Code deferred Trek's tools, so which of the two ADEMark would
+have seen depends on its real count against the threshold.)
+
+On today's CLI Trek's request is now below the bare CLI's: 3,314 o200k (22%) less than before,
+about 4.3K Anthropic tokens. In ADEMark's terms (its Bare CLI's segments plus Trek's difference
+from the bare TUI on 2.1.303 in the same state, built-in tools at 1.26, the notes at 1.43 and the
+MCP text at 1.56), the first request is about 11.7K tokens against 20.2K for the Bare CLI, from
+16.0K (deferred) or 32.7K (in full) before.
+
+Not done:
+
+- **One `trek-mcp` per session.** Still about 150 o200k of server prefixes and preambles and four
+  processes (2.2 MB each) a session; the renaming it needs is unchanged from 2026-11-13.
+- **`trek-viz` as a skill.** 424 o200k a request; moving the spec out would cost a read of the
+  skill before every picture, and the agent might stop offering one unprompted.
+- **`ListAgents`** (268): it lists what `SendMessage` reaches, Claude Code's own sub-agents and
+  teammates among them, which Trek doesn't replace.
+
 ## The budget tests
 
 - `crates/trek-app/src/workspace/prompt_budget.rs` builds the notes with `agent_notes`, the function
@@ -296,7 +371,11 @@ tokens; it now goes with thinking off (`alwaysThinkingEnabled: false`, `MAX_THIN
   everything on to 4,000 (3,688 today).
 - `crates/trek-mcp/src/main.rs`, `prompt_budget`: each family's server instructions and tool schemas,
   as `initialize` and `tools/list` return them, against a per-family budget, and all of them
-  together (45,000 chars since 2026-11-13; 46,200 since elements; 40,500 before).
+  together (45,000 chars since 2026-11-13; 46,200 since elements; 40,500 before). Since
+  2026-11-14 also the iPhone's family before a phone is connected (`phone-setup`: 300 and 700
+  chars, 232 and 451 today).
+- `trek_agents::claude`: `the_tools_trek_replaces_are_left_out_unless_the_setting_keeps_them` and
+  `tool_search_is_forced_only_for_anthropics_own_api` hold the command line and the environment.
 - `trek_core::visualization`'s and `trek_core::artifact`'s own compactness tests now stop at 1,600
   and 500 chars; `artifact`'s checks the skill keeps every rule the note used to carry.
 
