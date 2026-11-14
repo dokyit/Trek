@@ -60,6 +60,9 @@ struct Toast: Identifiable, Equatable {
 final class AppModel {
     /// A thread to bring up, from a notification's `trek://open?thread=…&host=…` link.
     var openRequest: String?
+    /// One of an agent's own sub-agents to show over its parent's thread (`SubAgentView`), from
+    /// its row in the transcript or the at-work card.
+    var openSubAgent: SubAgentTarget?
     /// A thread to scroll the list to (and unfold whatever hides it), without opening it.
     var revealRequest: String?
     /// The iPhone update a Mac is building and installing (AppModel+Update.swift), from the moment
@@ -504,6 +507,11 @@ final class AppModel {
             l.threadId = link.qualified(l.threadId)
             i.body = .threadLink(l)
         }
+        // A sub-agent's row opens its thread, on the same machine.
+        if case .tool(var c) = i.body, let kid = c.subAgent?.threadId {
+            c.subAgent?.threadId = link.qualified(kid)
+            i.body = .tool(c)
+        }
         return i
     }
 
@@ -584,7 +592,7 @@ final class AppModel {
              .gitDiff(let re, _), .gitBranches(let re, _), .commands(let re, _, _), .settings(let re, _),
              .searchResults(let re, _), .attachment(let re, _), .backgroundOutput(let re, _), .icon(let re, _),
              .noteAsset(let re, _), .noteImage(let re, _), .noteFileChunk(let re, _), .media(let re, _), .contextCard(let re, _),
-             .turnPreview(let re, _), .uploadProgress(let re, _), .sideChat(let re, _):
+             .turnPreview(let re, _), .uploadProgress(let re, _), .sideChat(let re, _), .subAgent(let re, _):
             link.reply(re, message)
         case .unlisted(let t):
             setUnlisted(qualify(t, on: link))
@@ -649,7 +657,8 @@ final class AppModel {
              .commands(let tid), .turnAction(let tid, _, _, _, _), .queueAction(let tid, _, _, _, _),
              .attachment(let tid, _, _, _), .backgroundOutput(let tid, _), .stopBackground(let tid, _),
              .cardAction(let tid, _, _), .media(let tid, _, _, _, _), .contextCard(let tid), .turnPreview(let tid, _, _),
-             .sendConsult(let tid, _, _, _, _, _), .sideChat(let tid, _, _):
+             .sendConsult(let tid, _, _, _, _, _), .sideChat(let tid, _, _), .subAgent(let tid, _),
+             .subAgentAction(let tid, _, _, _):
             return t(tid)
         case .setPrefs(let tid, _, _, _, _, _):
             return t(tid)
@@ -716,6 +725,9 @@ final class AppModel {
         case .addNoteImage(let nid, let data, let name): return .addNoteImage(noteId: b(nid), data: data, name: name)
         case .icon(let a, let pid): return .icon(agent: a, projectId: pid.map(b))
         case .sideChat(let tid, let text, let images): return .sideChat(threadId: b(tid), text: text, images: images)
+        case .subAgent(let tid, let call): return .subAgent(threadId: b(tid), callId: call)
+        case .subAgentAction(let tid, let call, let action, let text):
+            return .subAgentAction(threadId: b(tid), callId: call, action: action, text: text)
         default: return m
         }
     }

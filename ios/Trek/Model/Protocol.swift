@@ -378,6 +378,9 @@ nonisolated struct SubAgent: Codable, Hashable {
     var since: Int64? = nil
     /// Its thread, for one Trek runs: it opens like any other.
     var threadId: String? = nil
+    /// For one of the agent's own: the call that started it, which `sub_agent` opens (a Mac that
+    /// serves `sub_agent_view`).
+    var callId: String? = nil
 }
 
 nonisolated struct GitSummary: Codable, Hashable {
@@ -465,6 +468,9 @@ nonisolated struct ToolCall: Hashable {
     var output: String
     var added: Int?
     var removed: Int?
+    /// The row stands for a sub-agent: which, and how it opens (a Mac that serves
+    /// `sub_agent_view`; nil from an older one, whose rows fold with the other calls).
+    var subAgent: SubAgentLink? = nil
 }
 
 nonisolated struct ApprovalRequest: Hashable {
@@ -599,6 +605,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         var videos: [String]? = nil
         var watch: WatchedMedia? = nil
         var askedBy: String? = nil
+        var subAgent: SubAgentLink? = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -615,7 +622,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         case "tool":
             body = .tool(ToolCall(callId: r.callId ?? r.id, tool: r.tool ?? .other, title: r.title ?? "",
                                   detail: r.detail ?? "", status: r.status ?? .done, output: r.output ?? "",
-                                  added: r.added, removed: r.removed))
+                                  added: r.added, removed: r.removed, subAgent: r.subAgent))
         case "approval":
             body = .approval(ApprovalRequest(requestId: r.requestId ?? "", title: r.title ?? "", detail: r.detail ?? "",
                                              state: ApprovalState(rawValue: r.state ?? "") ?? .resolved,
@@ -661,6 +668,7 @@ nonisolated struct TItem: Identifiable, Hashable, Codable {
         case .tool(let c):
             r.kind = "tool"; r.callId = c.callId; r.tool = c.tool; r.title = c.title; r.detail = c.detail
             r.status = c.status; r.output = c.output; r.added = c.added; r.removed = c.removed
+            r.subAgent = c.subAgent
         case .approval(let a):
             r.kind = "approval"; r.requestId = a.requestId; r.title = a.title; r.detail = a.detail; r.state = a.state.rawValue
             r.askedBy = a.askedBy
@@ -775,6 +783,8 @@ nonisolated enum ServerMessage {
     case phoneUpdate(PhoneUpdate)
     /// The side chat beside a thread (`side_chat`): the one found or just started, or none.
     case sideChat(re: String?, SideChatReply)
+    /// What one of the agent's own sub-agents has done (`sub_agent`, `sub_agent_action`).
+    case subAgent(re: String?, SubAgentLog)
     case unknown(String)
 
     private struct Raw: Decodable {
@@ -871,6 +881,7 @@ nonisolated enum ServerMessage {
         case "turn_preview": return .turnPreview(re: r.re, try decoder.decode(TurnPreview.self, from: data))
         case "upload_progress": return .uploadProgress(re: r.re, try decoder.decode(UploadProgress.self, from: data))
         case "side_chat": return .sideChat(re: r.re, try decoder.decode(SideChatReply.self, from: data))
+        case "sub_agent": return .subAgent(re: r.re, try decoder.decode(SubAgentLog.self, from: data))
         default: return .unknown(r.type)
         }
     }
@@ -991,6 +1002,10 @@ nonisolated enum ClientMessage {
     /// The side chat beside a thread (`side_chat`): without `text` the newest one it has, with
     /// `text` a new one started with that message (and `images`, as `send`'s).
     case sideChat(threadId: String, text: String?, images: [ImageUpload])
+    /// What the agent's own sub-agent started by call `callId` has done so far (`sub_agent`).
+    case subAgent(threadId: String, callId: String)
+    /// Stop it, or send it `text` (`sub_agent_action`).
+    case subAgentAction(threadId: String, callId: String, action: SubAgentAction, text: String?)
 
     static let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     /// The build (the number of commits it was built from, `install-device.sh`).
@@ -1036,6 +1051,11 @@ nonisolated enum ClientMessage {
             o = ["type": "side_chat", "thread_id": threadId]
             if let text { o["text"] = text }
             if !images.isEmpty { o["images"] = images.map(\.json) }
+        case .subAgent(let threadId, let callId):
+            o = ["type": "sub_agent", "thread_id": threadId, "call_id": callId]
+        case .subAgentAction(let threadId, let callId, let action, let text):
+            o = ["type": "sub_agent_action", "thread_id": threadId, "call_id": callId, "action": action.rawValue]
+            if let text { o["text"] = text }
         case .setPrefs(let threadId, let agent, let model, let effort, let access, let plan):
             o = ["type": "set_prefs", "thread_id": threadId]
             if let agent { o["agent"] = agent }

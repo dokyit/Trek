@@ -384,6 +384,27 @@ final class MockHost: Backend {
             takeUpload(message, id: id)
         case .sideChat(let tid, let text, let images):
             sideChat(tid, text: text, images: images.count, id: id)
+        case .subAgent, .subAgentAction:
+            takeSubAgent(message, id: id)
+        }
+    }
+
+    /// One of an agent's own sub-agents was stopped: its row in the transcript, and its parent's
+    /// at-work card, say so.
+    func subAgentStopped(_ tid: String, call: String, _ link: SubAgentLink) {
+        if let item = items[tid]?.first(where: { if case .tool(let c) = $0.body { c.callId == call } else { false } }),
+           case .tool(var c) = item.body {
+            c.status = .failed
+            c.subAgent = link
+            c.output = "Stopped by the user."
+            put(tid, TItem(id: item.id, seq: 0, body: .tool(c)), keepID: true)
+        }
+        update(tid) { t in
+            t.subAgents = t.subAgents?.map { s in
+                var s = s
+                if s.callId == call { s.state = .stopped }
+                return s
+            }
         }
     }
 
@@ -871,6 +892,7 @@ final class MockHost: Backend {
         add(id, tool(.read, "Read", "src/routes/login.rs"))
         add(id, tool(.read, "Read", "src/state.rs"))
         add(id, tool(.search, "Search", "\"redis\" in Cargo.toml"))
+        for row in DemoSubAgents.rows(in: id) { add(id, row) }
         add(id, .assistant(text: "The handler is easy to wrap with a middleware. One decision first: the service runs **3 replicas** behind the load balancer, so an in-memory counter would let an attacker get 15 tries a minute.", streaming: false))
         add(id, .question(QuestionRequest(requestId: "r-rate", questions: [
             Question(header: "Store", question: "Where should the counters live?", options: [
@@ -905,6 +927,8 @@ final class MockHost: Backend {
         add(id, tool(.search, "Search", "\"Section::Snoozed\" in crates/"))
         add(id, tool(.read, "Read", "crates/trek-app/src/sidebar.rs"))
         add(id, .assistant(text: "`own_section` returns **Snoozed** before it checks `needs_you()`, so a snoozed thread with a pending approval stays hidden. I'll check needs-you first and add a `raised_hand` flag so the sidebar can flash the row when it wakes.", streaming: false))
+        // Sub-agents sent out: Trek's own (a thread of its own) and Claude Code's.
+        for row in DemoSubAgents.rows(in: id) { add(id, row) }
         add(id, tool(.edit, "Edit", "crates/trek-core/src/store.rs", add: 18, del: 4))
         add(id, tool(.edit, "Edit", "crates/trek-app/src/sidebar.rs", add: 22, del: 6))
         add(id, tool(.command, "Run", "cargo test -p trek-core inbox", out: "   Compiling trek-core v0.3.2\n    Finished test profile in 14.2s\n     Running unittests src/lib.rs\ntest result: ok. 29 passed; 0 failed"))
@@ -919,6 +943,7 @@ final class MockHost: Backend {
         add(id, .user(text: "Scrolling a 3,000-item transcript drops frames. Profile it and tell me where the time goes before changing anything.", images: 0), at: now - 12 * m)
         add(id, tool(.command, "Run", "cargo build --release -p trek-app"))
         add(id, tool(.read, "Read", "crates/trek-app/src/thread_view.rs"))
+        for row in DemoSubAgents.rows(in: id) { add(id, row) }
         id = "t-docs"
         add(id, .user(text: "Add a dark theme to the docs site that follows the system setting.", images: 0), at: now - 1 * m)
         add(id, tool(.edit, "Edit", "docs/.vitepress/theme/style.css", add: 31, del: 14))

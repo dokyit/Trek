@@ -38,10 +38,12 @@ enum DemoMac {
             t.subAgents = [
                 SubAgent(agent: codex, model: "Sol", title: "Review the inbox section rules", state: .running, since: now - 95_000,
                          threadId: "t-inbox-review"),
-                SubAgent(agent: claude, title: "Find every place that reads snoozed_until", state: .running, since: now - 40_000),
+                SubAgent(agent: claude, title: "Find every place that reads snoozed_until", state: .running, since: now - 40_000,
+                         callId: "toolu-scout"),
                 SubAgent(agent: AgentRef(key: "acp:devin", name: "Devin", logo: "devin"), model: "SWE-2",
                          title: "Write the migration for settled_at", state: .running, since: now - 25_000),
-                SubAgent(agent: claude, model: "Sonnet 5.5", title: "Check the sidebar's empty state copy", state: .done, since: now - 300_000),
+                SubAgent(agent: claude, title: "Check the sidebar's empty state copy", state: .done, since: now - 300_000,
+                         callId: "toolu-copy"),
             ]
             t.background = ["cargo watch -x 'test -p trek-core'"]
             t.backgroundTasks = [BackgroundTask(id: "bg-watch", kind: .shell, title: "cargo watch -x 'test -p trek-core'",
@@ -85,7 +87,8 @@ enum DemoMac {
                                                 readable: true, stoppable: true)]
         case "t-profile":
             t.subAgents = [SubAgent(agent: claude, model: "Sonnet 5.5", title: "Benchmark the scroll path", state: .needsYou,
-                                    since: now - 240_000, threadId: "t-profile-bench")]
+                                    since: now - 240_000, threadId: "t-profile-bench"),
+                           SubAgent(agent: codex, title: "layout timer", state: .running, since: now - 70_000, callId: "agent-layout")]
         case "t-worktree":
             // An agent added on the Mac, with its registry icon.
             t.agent = vibe
