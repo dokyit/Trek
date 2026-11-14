@@ -1093,8 +1093,6 @@ An at-work row's `sub_agents` entry for one of the agent's own carries its `call
 {"type":"sub_agent_action","id":"41","thread_id":"t","call_id":"toolu_a","action":"stop"}   → sub_agent
 ```
 
-**Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
-question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
 **`failed_checks`**: the Mac's failing-checks bar. While a pull request a thread opened has
 failing checks nobody has dealt with, its row carries `checks`: the PR's `url` and `number`, the
 `failing` checks by name, `bar` while the Mac shows the bar over the composer (the thread is idle or
@@ -1204,6 +1202,8 @@ file with no change there.
   → {"type":"git_status","re":"13","is_repo":true,"branch":"main","ahead":0,"behind":0,"has_upstream":false,"files":[{"path":"README.md","status":"modified","added":1,"removed":0},{"path":"new.txt","status":"untracked","added":2,"removed":0}],"can_switch":true,"viewed":["README.md"]}
 ```
 
+**Also**: a `user` item that isn't a prompt (a command Trek answered itself, a typed answer to a
+question) says `"aside":true`: the Mac refuses to rewind to it or fork from it, so the phone
 doesn't offer to. A thread's `cost` says how much of its prompts the prompt cache served, as the
 Mac's status line does (`"cached":"92% cached"`, and `cached_detail` in words).
 
