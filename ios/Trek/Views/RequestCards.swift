@@ -28,7 +28,7 @@ private struct CardChrome<Content: View>: View {
     var title: String
     @ViewBuilder var content: Content
 
-    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 16, style: .continuous) }
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: Trek.corner(16), style: .continuous) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -202,7 +202,7 @@ struct ApprovalCard: View {
                                          startPoint: .top, endPoint: .bottom))
                 }
             }
-            .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: Trek.corner(8), style: .continuous))
             if isLong {
                 Button(expanded ? "Show less" : "Show all \(estimatedLines) lines") {
                     withAnimation(.snappy) { expanded.toggle() }
@@ -281,8 +281,8 @@ struct QuestionCard: View {
                                 Spacer(minLength: 0)
                             }
                             .padding(10)
-                            .background(on ? Trek.ember.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(on ? Trek.ember.opacity(0.7) : Trek.foreground.opacity(0.1), lineWidth: 1))
+                            .background(on ? Trek.ember.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous).strokeBorder(on ? Trek.ember.opacity(0.7) : Trek.foreground.opacity(0.1), lineWidth: 1))
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.press)
@@ -291,7 +291,7 @@ struct QuestionCard: View {
                         .font(.ui(.subheadline))
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                        .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: Trek.corner(8), style: .continuous))
                         .focused($typing, equals: qi)
                         .id(fieldID(qi))
                 }
@@ -363,7 +363,7 @@ struct PlanCard: View {
                     .lineLimit(1...4)
                     .font(.ui(.subheadline))
                     .padding(10)
-                    .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(Trek.background.opacity(0.7), in: RoundedRectangle(cornerRadius: Trek.corner(8), style: .continuous))
                     .focused($writing)
                     .id("\(request.requestId)-feedback")
             } else {

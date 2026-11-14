@@ -1244,6 +1244,9 @@ fn the_newer_replies() {
         r#"{"type":"settings","re":"9","default_agent":"claude-code","default_effort":"high","default_access":"auto-accept-edits","follow_up":"steer",
             "notifications":"banner","push":{"enabled":true,"when":"away","server":"https://ntfy.sh","topic":"trek-abc","topic_url":"https://ntfy.sh/trek-abc","subscribe_url":"ntfy://ntfy.sh/trek-abc"},
             "auto_settle_days":3,"theme":"system","full_access":false,"session_approvals":false}"#,
+        r#"{"type":"settings","re":"10","default_agent":"claude-code","default_effort":"high","default_access":"auto-accept-edits","follow_up":"steer",
+            "notifications":"banner","push":{"enabled":false,"when":"away","server":"https://ntfy.sh","topic":""},
+            "auto_settle_days":3,"theme":"system","full_access":false,"session_approvals":false,"resume_interrupted":true,"continue_on_other_account":false}"#,
     ];
     for line in cases {
         server_round_trip(line);
@@ -1683,6 +1686,46 @@ fn updating_the_iphone_app() {
     server_round_trip(
         r#"{"type":"snapshot","threads":[],"projects":[],"agents":[],"release":{"version":"0.4.27"}}"#,
     );
+}
+
+#[test]
+fn the_snapshot_carries_the_macs_look() {
+    // As docs/MOBILE.md shows it ("The Mac's look").
+    let snapshot = server_round_trip(
+        r##"{"type":"snapshot","threads":[],"projects":[],"agents":[],
+            "look":{"theme":{"id":"journal","name":"Journal","description":"Warm paper, the conversation set in a serif, terracotta accents.",
+                             "mode":"light","ui_font":"sans","conversation_font":"serif","ui_size":15.0,"conversation_size":16.0,
+                             "corners":1.25,"density":"roomy","motion":"calm",
+                             "dark":{"accent":"#E0895AFF","window":"#14110EFF","text":"#ECE4D8FF"},
+                             "light":{"accent":"#B0552CFF","on_accent":"#FFFFFFFF","window":"#FBF8F2FF"}},
+                    "background":"builtin:paintings/matterhorn","placement":"chat","dim":0.5}}"##,
+    );
+    let ServerMessage::Snapshot(s) = snapshot.msg else {
+        panic!()
+    };
+    let look = s.look.unwrap();
+    assert_eq!(look.theme.conversation_font, "serif");
+    assert_eq!(look.theme.light.accent.as_deref(), Some("#B0552CFF"));
+    assert_eq!(look.theme.dark.sidebar, None);
+    assert_eq!(
+        look.background.as_deref(),
+        Some("builtin:paintings/matterhorn")
+    );
+    // Trek's own look sets no colours and may have no art: neither is sent.
+    server_round_trip(
+        r#"{"type":"snapshot","threads":[],"projects":[],"agents":[],
+            "look":{"theme":{"id":"trek","name":"Trek","mode":"any","ui_font":"sans","conversation_font":"sans",
+                             "ui_size":14.0,"conversation_size":14.5,"corners":1.0,"density":"regular","motion":"standard"},
+                    "placement":"new_thread","dim":0.5}}"#,
+    );
+    // An older Mac's snapshot has none.
+    let older: ServerEnvelope =
+        serde_json::from_str(r#"{"type":"snapshot","threads":[],"projects":[],"agents":[]}"#)
+            .unwrap();
+    let ServerMessage::Snapshot(s) = older.msg else {
+        panic!()
+    };
+    assert_eq!(s.look, None);
 }
 
 #[test]

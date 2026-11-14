@@ -16,11 +16,12 @@ struct RichText: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.projectHue) private var projectHue
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.trekConversation) private var conversation
 
     var body: some View {
         let s = size * TextScale.factor(dynamicType, style: style)
         Inline.cachedText(markdown, size: s, weight: weight, dark: scheme == .dark, projectHue: projectHue, autoPaths: autoPaths)
-            .font(.ui(size: s, weight: weight))
+            .font(.text(size: s, weight: weight, conversation: conversation))
             .textRenderer(ChipRenderer())
             // Links in ember, a shade darker on Paper (the Mac's `link`).
             .tint(Trek.link)
@@ -78,6 +79,8 @@ enum Inline {
         var dark: Bool
         var projectHue: Int?
         var autoPaths: Bool
+        /// The look it was built in: its chips take the look's colours.
+        var look: Int
     }
 
     /// Lines of text kept, built and parsed: 6 MiB each by what they're reckoned to cost, eight
@@ -105,7 +108,8 @@ enum Inline {
     /// to, or around a row that changed) doesn't parse and assemble its text again.
     @MainActor static func cachedText(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular, dark: Bool,
                                       projectHue: Int? = nil, autoPaths: Bool = false) -> Text {
-        let key = Key(markdown: markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, autoPaths: autoPaths)
+        let key = Key(markdown: markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, autoPaths: autoPaths,
+                      look: LookStore.shared.generation)
         if let hit = texts.value(for: key) { return hit }
         let t = text(markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, autoPaths: autoPaths)
         texts.insert(t, for: key, cost: cost(markdown))

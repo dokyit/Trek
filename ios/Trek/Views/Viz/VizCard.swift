@@ -253,7 +253,7 @@ struct VizShell<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: Trek.corner(14), style: .continuous)
         VStack(alignment: .leading, spacing: 0) { content }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
@@ -286,8 +286,8 @@ struct VizHeader<Title: View, Summary: View, Actions: View>: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(look.muted)
                     .frame(width: 24, height: 24)
-                    .background(look.inset, in: RoundedRectangle(cornerRadius: 6.5, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 6.5, style: .continuous).strokeBorder(look.hairline, lineWidth: 0.75))
+                    .background(look.inset, in: RoundedRectangle(cornerRadius: Trek.corner(6.5), style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: Trek.corner(6.5), style: .continuous).strokeBorder(look.hairline, lineWidth: 0.75))
                 title.frame(maxWidth: .infinity, alignment: .leading)
                 actions
             }
@@ -339,7 +339,7 @@ private struct ChartDataSwitch: View {
             segment("Data", active: showData) { showData = true }
         }
         .padding(2)
-        .background(look.fg.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(look.fg.opacity(0.055), in: RoundedRectangle(cornerRadius: Trek.corner(8), style: .continuous))
     }
 
     private func segment(_ label: String, active: Bool, _ action: @escaping () -> Void) -> some View {
@@ -356,7 +356,7 @@ private struct ChartDataSwitch: View {
                 .frame(height: 24)
                 .background {
                     if active {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        RoundedRectangle(cornerRadius: Trek.corner(6), style: .continuous)
                             .fill(look.dark ? Trek.elevated : Trek.surface)
                             .shadow(color: .black.opacity(look.dark ? 0.4 : 0.08), radius: 1, y: 1)
                     }
@@ -436,8 +436,8 @@ struct VizPending: View {
                         .allowsHitTesting(false)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(look.fg.opacity(look.dark ? 0.05 : 0.06), lineWidth: 0.75))
+                .clipShape(RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous).strokeBorder(look.fg.opacity(look.dark ? 0.05 : 0.06), lineWidth: 0.75))
                 .padding(.horizontal, 14)
                 .padding(.bottom, 14)
         }
@@ -515,8 +515,8 @@ struct VizInvalid: View {
             }
             .padding(.horizontal, 11)
             .padding(.vertical, 8)
-            .background(Trek.approval.opacity(look.dark ? 0.06 : 0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(look.hairline, lineWidth: 0.75))
+            .background(Trek.approval.opacity(look.dark ? 0.06 : 0.07), in: RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous).strokeBorder(look.hairline, lineWidth: 0.75))
             Button {
                 withAnimation(.snappy(duration: 0.22)) { open.toggle() }
             } label: {
@@ -540,8 +540,8 @@ struct VizInvalid: View {
                         .textSelection(.enabled)
                         .padding(12)
                 }
-                .background(Trek.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+                .background(Trek.surface, in: RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -560,8 +560,8 @@ struct VizInset: ViewModifier {
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(look.inset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(look.fg.opacity(look.dark ? 0.05 : 0.06), lineWidth: 0.75))
+            .background(look.inset, in: RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous).strokeBorder(look.fg.opacity(look.dark ? 0.05 : 0.06), lineWidth: 0.75))
     }
 }
 
@@ -579,8 +579,8 @@ struct VizReadout<Content: View>: View {
             .font(.system(size: 12))
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(look.popover, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).strokeBorder(look.fg.opacity(look.dark ? 0.14 : 0.10), lineWidth: 0.75))
+            .background(look.popover, in: RoundedRectangle(cornerRadius: Trek.corner(9), style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Trek.corner(9), style: .continuous).strokeBorder(look.fg.opacity(look.dark ? 0.14 : 0.10), lineWidth: 0.75))
             .shadow(color: .black.opacity(look.dark ? 0.45 : 0.10), radius: 9, y: 5)
             .fixedSize()
             .allowsHitTesting(false)

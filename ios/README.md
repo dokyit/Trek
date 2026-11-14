@@ -154,8 +154,11 @@ Trek/Model      Protocol.swift (wire types, mirrors trek-remote/src/protocol.rs)
 Trek/Net        TrekClient: URLSessionWebSocketTask over pinned TLS (PinningDelegate), pair/hello,
                 reconnect with backoff, pings; PairingLink
 Trek/Demo       MockHost: the in-process demo Mac
-Trek/Design     Trek palette (the Mac's trek.json and palette.rs), Inter and JetBrains Mono NL (Resources/Fonts,
-                OFL), status colours, project hues, file-type chips, agent logos
+Trek/Design     Trek palette (the Mac's trek.json and palette.rs), Inter, JetBrains Mono NL and Spectral
+                (Resources/Fonts, OFL), status colours, project hues, file-type chips, agent logos; the
+                Mac's Trek themes drawn natively, or the paired Mac's own (Looks.swift: Console, Journal,
+                Alpenglow, "Match your Mac"), and its background art with the contrast scrim
+                (Backgrounds.swift; Backgrounds.xcassets, cut to phone shape by scripts/backgrounds.py)
 Trek/Assets     App icons: Night (with iOS 18 dark and tinted variants), Paper and Glass, rendered from
                 assets/brand/trek-icon-*-ios.svg by scripts/app-icons.sh
 Trek/Views      Threads, Thread (transcript grouping, tool rows, request cards, composer, the side

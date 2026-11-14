@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 mod cards;
+mod look;
 mod machines;
 mod parity;
 mod phone_update;
@@ -14,6 +15,7 @@ mod side_chat;
 mod thread_parity;
 mod uploads;
 pub use cards::*;
+pub use look::*;
 pub use machines::*;
 pub use parity::*;
 pub use phone_update::*;
@@ -785,6 +787,12 @@ pub struct SettingsChange {
     pub auto_settle_days: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<Theme>,
+    /// At launch, resume by itself each thread a quit or crash cut off while it worked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_interrupted: Option<bool>,
+    /// A thread its usage limit stops carries on by itself on another account of its agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_on_other_account: Option<bool>,
 }
 
 /// How a follow-up reaches a working thread. On an idle thread both just start a turn.
@@ -1104,6 +1112,10 @@ pub struct Snapshot {
     /// (`phone_update.rs`). Missing from an older Mac: the phone compares with `host.version`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<TrekRelease>,
+    /// How the Mac looks (its theme and background art), for a phone that matches it. Missing
+    /// from an older Mac: the phone draws Trek's own look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<MacLook>,
 }
 
 /// One thread's row.
@@ -2322,6 +2334,14 @@ pub struct MacSettings {
     /// off, `allow_for_session` is refused).
     #[serde(default)]
     pub session_approvals: bool,
+    /// At launch, the Mac resumes by itself the threads a quit or crash cut off (off: it offers
+    /// them). Missing from an older Mac, which has no such setting to show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_interrupted: Option<bool>,
+    /// A thread its usage limit stops carries on by itself on another account of its agent with
+    /// room left (off: that's offered). Missing from an older Mac.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_on_other_account: Option<bool>,
 }
 
 /// Notifications on the phone through ntfy.

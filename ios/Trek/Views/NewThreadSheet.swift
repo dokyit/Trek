@@ -78,7 +78,7 @@ struct NewThreadSheet: View {
                     .padding(.bottom, 10)
             }
             .background(alignment: .top) {
-                RidgeBackdrop(height: 520)
+                RidgeBackdrop(height: 520, surface: .newThread)
             }
             .navigationTitle("New thread")
             .navigationBarTitleDisplayMode(.inline)

@@ -247,7 +247,7 @@ struct SettingsView: View {
         Section {
             NavigationLink(value: SettingsRoute.appearance) {
                 SettingsValueRow {
-                    Text((ThemeChoice(rawValue: theme) ?? .system).label)
+                    Text(LookStore.shared.look.name)
                 } label: {
                     SettingsLabel(title: "Appearance", subtitle: appearanceLine, symbol: "circle.lefthalf.filled")
                 }
@@ -270,7 +270,8 @@ struct SettingsView: View {
     /// "Night icon · iPhone's text size", "Paper icon · Larger text".
     private var appearanceLine: String {
         let size = TextSizeChoice(rawValue: textSize) ?? .system
-        return "\(icon.label) icon · " + (size == .system ? "iPhone's text size" : "\(size.label) text")
+        let mode = (ThemeChoice(rawValue: theme) ?? .system).label
+        return "\(mode) · \(icon.label) icon · " + (size == .system ? "iPhone's text size" : "\(size.label) text")
     }
 
     /// "14 threads and 3 files kept for quick opening".

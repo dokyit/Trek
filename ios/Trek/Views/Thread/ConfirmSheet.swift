@@ -43,7 +43,7 @@ struct ConfirmSheet: View {
                     Text(verb).font(.ui(.body).weight(.semibold)).frame(maxWidth: .infinity).frame(height: 46)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Trek.failed)
+                .tint(Trek.danger)
                 .disabled(preview == nil && failed == nil)
             }
             .padding(.top, 4)

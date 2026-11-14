@@ -1119,10 +1119,16 @@ fn a_phone_changes_only_the_settings_it_may() {
                 push_when: Some(tr::PushWhen::Always),
                 auto_settle_days: Some(7),
                 theme: Some(tr::Theme::Paper),
+                resume_interrupted: Some(true),
+                continue_on_other_account: Some(true),
                 ..Default::default()
             }),
         )
         .unwrap();
+        assert_eq!(
+            (s.resume_interrupted, s.continue_on_other_account),
+            (Some(true), Some(true))
+        );
         assert!(
             s.push.enabled && s.push.topic.starts_with("trek-"),
             "turning push on makes a topic"
@@ -1148,6 +1154,7 @@ fn a_phone_changes_only_the_settings_it_may() {
             (mac.inbox.auto_settle_days, mac.appearance.theme),
             (7, trek_core::settings::ThemeChoice::Paper)
         );
+        assert!(mac.general.resume_interrupted && mac.general.continue_on_other_account);
         assert_eq!(
             trek.read(cx, |ws, _| ws.draft_prefs.hand_holding),
             HandHolding::Auto,

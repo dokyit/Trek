@@ -193,12 +193,38 @@ struct RootView: View {
         }
         .preferredColorScheme(scheme)
         .modifier(TextSizeModifier(size: TextSizeChoice(rawValue: Launch.textSize ?? textSize)?.dynamicType))
-        .environment(\.trekCalm, calm)
-        .environment(\.compactRows, compact)
+        // A theme that holds still is Trek's Reduce motion; a compact one has compact rows.
+        .environment(\.trekCalm, calm || look.look.motion == .still)
+        .environment(\.compactRows, compact || look.look.density == .compact)
+        .modifier(LookFollower(mac: model.selected?.look))
     }
+
+    private var look: LookStore { LookStore.shared }
 
     private var scheme: ColorScheme? {
         ThemeChoice(rawValue: Launch.appearance ?? appearance)?.scheme
+    }
+}
+
+/// Keeps `LookStore` up to date: Settings › Appearance's theme and art, and the look the paired
+/// Mac sends (for "Match your Mac").
+private struct LookFollower: ViewModifier {
+    var mac: MacLook?
+    @AppStorage(AppearanceKey.trekTheme) private var theme = AppearanceKey.matchMac
+    @AppStorage(AppearanceKey.background) private var art = AppearanceKey.matchMac
+    @AppStorage(AppearanceKey.placement) private var placement = ArtPlacement.newThread.rawValue
+    @AppStorage(AppearanceKey.dim) private var dim = 0.35
+    @MotionAllowed private var motion
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: mac, initial: true) { _, mac in change { LookStore.shared.macSent(mac) } }
+            .onChange(of: [theme, art, placement, "\(dim)"]) { _, _ in change { LookStore.shared.refresh() } }
+    }
+
+    /// A new look comes in over the old one, quickly, unless motion is turned down.
+    private func change(_ body: () -> Void) {
+        withAnimation(motion ? .easeInOut(duration: 0.3) : nil, body)
     }
 }
 

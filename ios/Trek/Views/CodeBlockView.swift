@@ -54,7 +54,7 @@ struct CodeBlockView: View {
                     .padding(12)
             }
         }
-        .background(Trek.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+        .background(Trek.surface, in: RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
     }
 }

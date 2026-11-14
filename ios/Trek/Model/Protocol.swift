@@ -717,6 +717,8 @@ nonisolated struct Snapshot: Decodable {
     var unlisted: [ThreadSummary] = []
     /// The newest Trek the Mac knows of (none from a Mac before `update_phone`).
     var release: TrekRelease? = nil
+    /// How the Mac looks, for "Match your Mac" (none from a Mac before themes).
+    var look: MacLook? = nil
 }
 
 nonisolated enum ErrorCode: String, LenientEnum {
@@ -805,6 +807,7 @@ nonisolated enum ServerMessage {
         var text: String?
         var more: Bool?
         var release: TrekRelease?
+        var look: MacLook.Lenient?
     }
 
     static let decoder: JSONDecoder = {
@@ -825,7 +828,7 @@ nonisolated enum ServerMessage {
         case "snapshot":
             return .snapshot(Snapshot(threads: r.threads?.elements ?? [], projects: r.projects?.elements ?? [],
                                       agents: r.agents?.elements ?? [], fullAccess: r.fullAccess,
-                                      unlisted: r.unlisted?.elements ?? [], release: r.release))
+                                      unlisted: r.unlisted?.elements ?? [], release: r.release, look: r.look?.value))
         case "thread":
             guard let t = r.thread else { throw ProtocolError.missing("thread") }
             return .thread(t)

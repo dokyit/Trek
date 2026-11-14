@@ -98,6 +98,35 @@ private struct MacSettingsForm: View {
                 .font(.ui(.footnote))
         }
 
+        if s.resumeInterrupted != nil || s.continueOnOtherAccount != nil {
+            Section {
+                if let on = s.resumeInterrupted {
+                    Toggle(isOn: Binding(get: { on }, set: { set(SettingsChange(resumeInterrupted: $0)) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Resume interrupted threads")
+                            Text("When Trek opens, threads a quit or crash cut off carry on by themselves")
+                                .font(.ui(.footnote)).foregroundStyle(Trek.muted)
+                        }
+                    }
+                }
+                if let on = s.continueOnOtherAccount {
+                    Toggle(isOn: Binding(get: { on }, set: { set(SettingsChange(continueOnOtherAccount: $0)) })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Continue on another account")
+                            Text("At a usage limit, carry on with another account of the same agent that has room")
+                                .font(.ui(.footnote)).foregroundStyle(Trek.muted)
+                        }
+                    }
+                }
+            } header: {
+                Text("Interruptions")
+            } footer: {
+                Text("Off, the Mac offers these and waits for you.")
+                    .font(.ui(.footnote))
+            }
+            .tint(Trek.done)
+        }
+
         Section {
             NavigationLink {
                 AccessPicker(current: s.defaultAccess, unlocked: s.fullAccess == true) { set(SettingsChange(defaultAccess: $0)) }

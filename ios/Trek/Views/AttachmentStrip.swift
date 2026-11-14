@@ -29,9 +29,9 @@ struct AttachmentStrip: View {
                             .resizable()
                             .scaledToFill()
                             .frame(width: Self.tile, height: Self.tile)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous))
                             // The tile, not the whole picture its fill crops: taps stay on their own photo.
-                            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .contentShape(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous))
                     }
                     .buttonStyle(.press)
                     .accessibilityLabel("Attached photo")
@@ -129,8 +129,8 @@ private struct VideoTile: View {
                 .padding(.bottom, 4)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Attached video")
         .accessibilityValue(value)
@@ -175,8 +175,8 @@ private struct FileTile: View {
         .padding(.leading, 10)
         .padding(.trailing, 14)
         .frame(height: AttachmentStrip.tile)
-        .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+        .background(Trek.foreground.opacity(0.05), in: RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Attached file \(file.name)")
         .accessibilityValue(file.progress.map { "Sending, \(Int($0 * 100)) percent" } ?? fileSizeWords(file.size))

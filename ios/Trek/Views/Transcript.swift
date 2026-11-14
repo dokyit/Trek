@@ -23,6 +23,7 @@ struct UserBubble: View {
                 }
                 RichText(markdown: preview ?? text, size: 16)
                     .lineSpacing(2)
+                    .environment(\.trekConversation, true)
                 if preview != nil {
                     Button { showingAll = true } label: {
                         Label("Show all · \(LongText.size(text))", systemImage: "text.alignleft")
@@ -35,8 +36,8 @@ struct UserBubble: View {
             }
             .padding(.horizontal, 15)
             .padding(.vertical, 11)
-            .background(Trek.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+            .background(Trek.surface, in: RoundedRectangle(cornerRadius: Trek.corner(18), style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Trek.corner(18), style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
         }
     }
 }
@@ -309,8 +310,8 @@ struct ToolRow: View {
                             .foregroundStyle(c.status == .failed ? Trek.failed : Trek.muted)
                             .padding(10)
                     }
-                    .background(Trek.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
+                    .background(Trek.surface, in: RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: Trek.corner(10), style: .continuous).strokeBorder(Trek.border, lineWidth: 0.5))
                 }
             }
         default:

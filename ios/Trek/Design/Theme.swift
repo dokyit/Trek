@@ -44,29 +44,37 @@ nonisolated extension UIColor {
     }
 }
 
-// Taken from the Mac's theme (crates/trek-app/assets/themes/trek.json) and status colours
-// (crates/trek-app/src/palette.rs): (Paper, Night).
+// The look's colours (`LookStore`, Design/Looks.swift): Trek's own are taken from the Mac's theme
+// (crates/trek-app/assets/themes/trek.json), a theme's from its file. Read in a view's body, they
+// redraw it when the look changes. Status colours (crates/trek-app/src/palette.rs) are Trek's in
+// every theme, as on the Mac: (Paper, Night).
 enum Trek {
-    static let background = Color(light: 0xFFFFFF, dark: 0x0A0A0B)
+    private static var paint: Paint { LookStore.shared.paint }
+
+    static var background: Color { paint.background }
     /// Behind grouped lists (Settings): the Mac's sidebar, so the rows' cards stand out.
-    static let grouped = Color(light: 0xF6F5F3, dark: 0x0A0A0B)
+    static var grouped: Color { paint.grouped }
     /// Cards, code and tool blocks (`muted.background`).
-    static let surface = Color(light: 0xF4F3F1, dark: 0x161618)
+    static var surface: Color { paint.surface }
     /// Popovers and cards that float over content (`popover.background`).
-    static let elevated = Color(light: 0xFFFFFF, dark: 0x161618)
-    static let border = Color(light: 0xE7E5E1, dark: 0x232327)
-    static let foreground = Color(light: 0x1A1A1C, dark: 0xE4E4E7)
-    static let muted = Color(light: 0x6E6C68, dark: 0x8B8B94)
-    static let ember = Color(light: 0xE85D1F, dark: 0xFF7A3D)
+    static var elevated: Color { paint.elevated }
+    static var border: Color { paint.border }
+    static var foreground: Color { paint.foreground }
+    static var muted: Color { paint.muted }
+    /// The accent: ember in Trek's own look, the theme's otherwise.
+    static var ember: Color { paint.ember }
     /// Text on an ember button (`primary.foreground`).
-    static let onEmber = Color(light: 0xFFFFFF, dark: 0x160A04)
+    static var onEmber: Color { paint.onEmber }
     /// Links in answers: ember, a shade darker on Paper so it reads at body size.
-    static let link = Color(light: 0xC2410C, dark: 0xFF7A3D)
+    static var link: Color { paint.link }
     static let sunrise = LinearGradient(colors: [Color(hex: 0xFF4D2E), Color(hex: 0xFF8A3D), Color(hex: 0xFFC56B)],
                                         startPoint: .bottomLeading, endPoint: .topTrailing)
 
     // Status. Paper's are dark enough to read as small text.
-    static let working = ember
+    static var working: Color { ember }
+    /// A filled button that destroys something, with white text on it (the Mac's
+    /// `danger.background`: 4.5:1 under white, which `failed` isn't in Night).
+    static let danger = Color(hex: 0xD93A3F)
     /// Anything waiting on you (an approval, a question, a plan): amber, as on the Mac.
     static let approval = Color(light: 0x976300, dark: 0xFFB020)
     static let indigo = Color(light: 0x5B5BD6, dark: 0x8B8CFF)
@@ -85,10 +93,13 @@ enum Trek {
 // MARK: Type
 
 /// The Mac's faces, bundled (OFL): Inter for the interface, JetBrains Mono NL for code, paths and
-/// commands. Both grow with Dynamic Type from the text style they stand in for.
+/// commands, and Spectral, the serif a theme may set the conversation (or everything) in. A theme
+/// picks the interface's and the conversation's (`Look`); code is always JetBrains Mono. All grow
+/// with Dynamic Type from the text style they stand in for.
 nonisolated enum TrekFont {
     static let ui = "Inter"
     static let code = "JetBrains Mono NL"
+    static let serif = "Spectral"
 
     /// The point size of `style` at the Default text size (UIKit's).
     static func size(_ style: Font.TextStyle) -> CGFloat {
@@ -107,28 +118,45 @@ nonisolated enum TrekFont {
         }
     }
 
-    /// Navigation titles in Inter too: UIKit draws them, so SwiftUI's font doesn't reach them.
-    @MainActor static func styleBars() {
+    /// Navigation titles in the look's interface face too (Inter in Trek's own): UIKit draws
+    /// them, so SwiftUI's font doesn't reach them. Bars made after a change take it.
+    @MainActor static func styleBars(_ look: Look = LookStore.shared.look) {
         let bar = UINavigationBar.appearance()
-        if let large = UIFont(name: "Inter-Bold", size: 34) {
+        let scale = look.uiScale
+        if let large = UIFont(name: look.uiFont.postScript(.bold), size: 34 * scale) {
             bar.largeTitleTextAttributes = [.font: UIFontMetrics(forTextStyle: .largeTitle).scaledFont(for: large)]
         }
-        if let title = UIFont(name: "Inter-SemiBold", size: 17) {
+        if let title = UIFont(name: look.uiFont.postScript(.semibold), size: 17 * scale) {
             bar.titleTextAttributes = [.font: UIFontMetrics(forTextStyle: .headline).scaledFont(for: title)]
         }
     }
 }
 
 extension Font {
-    /// Inter in place of a text style (`.ui(.subheadline)` for `.subheadline`).
+    /// The interface's face (Inter in Trek's own look) in place of a text style
+    /// (`.ui(.subheadline)` for `.subheadline`), at the look's size.
     static func ui(_ style: TextStyle) -> Font {
-        let f = Font.custom(TrekFont.ui, size: TrekFont.size(style), relativeTo: style)
+        let look = LookStore.shared.look
+        let f = Font.custom(look.uiFont.family, size: TrekFont.size(style) * look.uiScale, relativeTo: style)
         return style == .headline ? f.weight(.semibold) : f
     }
 
-    /// Inter at a point size: fixed, or growing with Dynamic Type like `style`.
+    /// The interface's face at a point size (scaled by the look): fixed, or growing with Dynamic
+    /// Type like `style`.
     static func ui(size: CGFloat, weight: Weight = .regular, relativeTo style: TextStyle? = nil) -> Font {
-        let f = style.map { Font.custom(TrekFont.ui, size: size, relativeTo: $0) } ?? Font.custom(TrekFont.ui, fixedSize: size)
+        let look = LookStore.shared.look
+        return face(look.uiFont.family, size: size * look.uiScale, weight: weight, relativeTo: style)
+    }
+
+    /// The conversation's face (messages and answers: Journal's serif) at a point size, scaled
+    /// by the look's conversation size.
+    static func conversation(size: CGFloat, weight: Weight = .regular, relativeTo style: TextStyle? = nil) -> Font {
+        let look = LookStore.shared.look
+        return face(look.conversationFont.family, size: size * look.conversationScale, weight: weight, relativeTo: style)
+    }
+
+    private static func face(_ family: String, size: CGFloat, weight: Weight, relativeTo style: TextStyle?) -> Font {
+        let f = style.map { Font.custom(family, size: size, relativeTo: $0) } ?? Font.custom(family, fixedSize: size)
         return weight == .regular ? f : f.weight(weight)
     }
 

@@ -43,6 +43,7 @@ pub mod firewall;
 mod git;
 mod icons;
 pub mod link;
+mod look;
 mod machines;
 mod media;
 mod notes;
@@ -1039,7 +1040,7 @@ impl Workspace {
     pub fn remote_request(&mut self, req: tr::HostRequest, cx: &mut Context<Self>) {
         match req {
             tr::HostRequest::Snapshot { reply } => {
-                let snapshot = self.remote_snapshot();
+                let snapshot = self.remote_snapshot(cx);
                 // The first phone's snapshot is what later ones are compared with (not every
                 // phone's: one connecting mustn't hide a change from those connected before).
                 if let Some(remote) = self.remote.as_mut().filter(|r| r.snapshot_key.is_none()) {
@@ -1048,6 +1049,7 @@ impl Workspace {
                         &snapshot.agents,
                         snapshot.full_access,
                         &snapshot.release,
+                        &snapshot.look,
                     )));
                 }
                 let _ = reply.send(Ok(snapshot));
@@ -2091,7 +2093,7 @@ impl Workspace {
         out
     }
 
-    fn remote_snapshot(&self) -> tr::Snapshot {
+    fn remote_snapshot(&self, cx: &gpui_kit::App) -> tr::Snapshot {
         let now = now_ms();
         let threads: Vec<tr::ThreadSummary> = self
             .remote_threads()
@@ -2107,6 +2109,7 @@ impl Workspace {
             full_access,
             unlisted,
             release: Some(phone_update::release(&self.updater)),
+            look: Some(self.remote_look(cx)),
         }
     }
 
@@ -2637,10 +2640,12 @@ impl Workspace {
         // Projects, agents and their models, Full access: only a snapshot carries them, so a new
         // one goes when they change (agents found or signed in after a phone connected, models
         // fetched, a project added, Full access unlocked).
-        // And the newest Trek this Mac knows of, which phones offer to update to.
+        // And the newest Trek this Mac knows of, which phones offer to update to, and how the
+        // Mac looks (its theme and art), which phones that match it follow.
         let choices = self.remote_choices();
         let release = Some(phone_update::release(&self.updater));
-        let choices_key = hash(&(&choices.0, &choices.1, choices.2, &release));
+        let look = Some(self.remote_look(cx));
+        let choices_key = hash(&(&choices.0, &choices.1, choices.2, &release, &look));
         let snapshot = (remote.snapshot_key != Some(choices_key)).then(|| {
             let threads: Vec<tr::ThreadSummary> = self
                 .remote_threads()
@@ -2656,6 +2661,7 @@ impl Workspace {
                 full_access,
                 unlisted,
                 release,
+                look,
             }
         });
         let Some(remote) = self.remote.as_mut() else {

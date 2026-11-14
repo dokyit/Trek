@@ -35,7 +35,7 @@ struct UpdateCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Trek.corner(16), style: .continuous))
         .accessibilityElement(children: .contain)
     }
 

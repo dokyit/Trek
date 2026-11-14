@@ -392,6 +392,35 @@ A listed thread that drops out of the list while a phone has it open gets `threa
 `unlisted`. Older phones ignore `unlisted`. The Mac may send a fresh `snapshot` at any time (it replaces
 everything: projects and agents included).
 
+#### The Mac's look
+
+The snapshot's `look` is how the Mac looks, for a phone whose Settings › Appearance says "Match
+your Mac": the Trek theme in use, whole (a built-in, or the user's or an agent's own file from
+`<data>/themes`), and the background art and where it shows. A new snapshot goes whenever it
+changes. An older Mac has no `look` (the phone draws Trek's own look), and older phones ignore it.
+
+```json
+"look":{"theme":{"id":"journal","name":"Journal","description":"Warm paper, the conversation set in a serif, terracotta accents.",
+                 "mode":"light","ui_font":"sans","conversation_font":"serif","ui_size":15.0,"conversation_size":16.0,
+                 "corners":1.25,"density":"roomy","motion":"calm",
+                 "dark":{"accent":"#E0895AFF","window":"#14110EFF","text":"#ECE4D8FF"},
+                 "light":{"accent":"#B0552CFF","on_accent":"#FFFFFFFF","window":"#FBF8F2FF"}},
+        "background":"builtin:paintings/matterhorn","placement":"chat","dim":0.5}
+```
+
+- `theme`: `trek_core::themes::Theme` with its defaults filled in. `mode` is `dark`, `light` or
+  `any`; fonts are `sans` (Inter), `mono` (JetBrains Mono NL) or `serif` (Spectral); `ui_size`
+  and `conversation_size` are the Mac's points (Trek's own: 14 and 14.5); `corners` scales every
+  radius (0 square, 1 Trek's); `density` is `compact`, `regular` or `roomy`; `motion` is `still`,
+  `brisk`, `standard` or `calm`. `dark` and `light` hold the colours the theme sets, each
+  `#RRGGBBAA` (`accent`, `on_accent`, `window`, `sidebar`, `surface`, `raised`, `text`, `muted`,
+  `border`); what's missing is Night's or Paper's, and Trek's own sends none. Enumerations are
+  strings: a value the phone doesn't know reads as the nearest it does.
+- `background`: the art, only when it's one of Trek's own (`builtin:dawn`,
+  `builtin:paintings/oxbow`, …; `crates/trek-app/src/backgrounds.rs`): a picture of the user's
+  own stays on the Mac. `placement` is where it shows (`chat`, `sidebar`, `new_thread`; ASCII
+  art is always `sidebar`), and `dim` how much the user dims it beyond what the text needs.
+
 ### Transcripts
 
 Phone → Mac:
@@ -775,6 +804,9 @@ whole change):
 
 - `default_model: ""` goes back to the agent's default; `default_access: "full-access"` needs the
   Mac's unlock. `full_access` and `session_approvals` are read-only: the Mac alone decides whether threads may run with Full access, and whether a phone may answer a request with `allow_for_session` (off by default; refused then with `bad_request`, and the phone hides the option). Trek can't check from the Mac who is holding the phone, so anything that outlasts one request is the Mac's to grant. Turning `push` on makes a topic the first time.
+- `resume_interrupted` (resume by itself at launch the threads a quit or crash cut off) and
+  `continue_on_other_account` (carry on by itself on another account of the agent at a usage
+  limit) are booleans in both, missing from an older Mac (the phone then hides them).
 - `push_server` must be an `https://` address (the Mac's own settings may still name an `http://`
   one).
 - `push_test: true` sends a test notification once the rest is changed (refused while `push` is

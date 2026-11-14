@@ -193,12 +193,13 @@ struct RichMathText: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.projectHue) private var projectHue
     @Environment(\.dynamicTypeSize) private var dynamicType
+    @Environment(\.trekConversation) private var conversation
 
     var body: some View {
         if MathInline.hasMath(markdown) {
             let s = size * TextScale.factor(dynamicType, style: style)
             MathInline.cachedText(markdown, size: s, weight: weight, dark: scheme == .dark, projectHue: projectHue)
-                .font(.ui(size: s, weight: weight))
+                .font(.text(size: s, weight: weight, conversation: conversation))
                 .textRenderer(ChipRenderer())
                 .tint(Trek.link)
         } else {
@@ -237,13 +238,14 @@ enum MathInline {
         var weight: Font.Weight
         var dark: Bool
         var projectHue: Int?
+        var look: Int
     }
 
     private static var texts: [Key: Text] = [:]
 
     /// `text(…)`, built once per Markdown, size and look.
     static func cachedText(_ markdown: String, size: CGFloat, weight: Font.Weight, dark: Bool, projectHue: Int?) -> Text {
-        let key = Key(markdown: markdown, size: size, weight: weight, dark: dark, projectHue: projectHue)
+        let key = Key(markdown: markdown, size: size, weight: weight, dark: dark, projectHue: projectHue, look: LookStore.shared.generation)
         if let hit = texts[key] { return hit }
         let t = text(markdown, size: size, weight: weight, dark: dark, projectHue: projectHue)
         if texts.count > 2000 { texts.removeAll(keepingCapacity: true) }

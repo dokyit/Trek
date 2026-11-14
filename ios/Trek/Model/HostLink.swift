@@ -32,6 +32,8 @@ final class HostLink: Identifiable, Equatable {
     var fullAccessAllowed = false
     /// The newest Trek it knows of, from its snapshot (`AppUpdate`).
     var release: TrekRelease?
+    /// How it looks (its Trek theme and art), from its snapshot: "Match your Mac" draws it.
+    var look: MacLook?
     /// Its snapshot has come since it was paired or the app started: it has said what its threads are.
     @ObservationIgnored var listed = false
 

@@ -67,6 +67,8 @@ fn settings() -> MacSettings {
         theme: Theme::System,
         full_access: false,
         session_approvals: false,
+        resume_interrupted: None,
+        continue_on_other_account: None,
     }
 }
 

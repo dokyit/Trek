@@ -20,6 +20,17 @@ enum DemoMac {
         return TrekRelease(version: version, note: "Update the iPhone app from the iPhone: the Mac builds and installs it when you tap Update now.")
     }
 
+    /// How the demo Mac looks: `-TrekDemoMacTheme journal` puts one of Trek's themes on it (the
+    /// art it comes with too), `-TrekDemoMacArt builtin:ascii/braille` art of its own; else
+    /// Trek's own look and no art, as a new Mac.
+    static var look: MacLook {
+        let defaults = UserDefaults.standard
+        let theme = defaults.string(forKey: "TrekDemoMacTheme").flatMap(Look.builtIn) ?? .trek
+        let piece = (defaults.string(forKey: "TrekDemoMacArt") ?? theme.art).flatMap(ArtPiece.named)
+        let art = piece.map { ArtChoice(piece: $0, placement: $0.collection.placement ?? .newThread, dim: 0) }
+        return MacLook(theme, art: art)
+    }
+
     // MARK: Thread details
 
     /// The details a Mac row carries, for the seeded threads (context, cost, sub-agents…).
@@ -507,7 +518,8 @@ enum DemoMac {
                     push: PushSettings(enabled: true, when: .away, server: "https://ntfy.sh", topic: "trek-q7Hx2VbK9pL3mN8RtY4wZ6cE1fJ5aD0s",
                                        topicUrl: "https://ntfy.sh/trek-q7Hx2VbK9pL3mN8RtY4wZ6cE1fJ5aD0s",
                                        subscribeUrl: "ntfy://ntfy.sh/trek-q7Hx2VbK9pL3mN8RtY4wZ6cE1fJ5aD0s"),
-                    autoSettleDays: 3, theme: .system, fullAccess: true, sessionApprovals: false)
+                    autoSettleDays: 3, theme: .system, fullAccess: true, sessionApprovals: false,
+                    resumeInterrupted: false, continueOnOtherAccount: true)
     }
 
     /// ntfy's links for a topic, as the Mac makes them.

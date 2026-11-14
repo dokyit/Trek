@@ -54,6 +54,8 @@ impl Workspace {
             },
             full_access: s.permissions.full_access_unlocked,
             session_approvals: m.session_approvals,
+            resume_interrupted: Some(s.general.resume_interrupted),
+            continue_on_other_account: Some(s.general.continue_on_other_account),
         }
     }
 
@@ -159,6 +161,12 @@ impl Workspace {
         });
         if let Some(t) = theme {
             s.appearance.theme = t;
+        }
+        if let Some(on) = change.resume_interrupted {
+            s.general.resume_interrupted = on;
+        }
+        if let Some(on) = change.continue_on_other_account {
+            s.general.continue_on_other_account = on;
         }
         if change.push_test && !s.mobile.push {
             return Err(tr::HostError::bad_request(

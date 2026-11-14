@@ -13,6 +13,11 @@ Third-party materials bundled in this repository:
   (Design Science, Inc. and Khan Academy), seven of them modified and renamed TrekMath,
   SIL Open Font License 1.1 (OFL-KaTeX.txt), and Spectral (The Spectral Project Authors),
   SIL Open Font License 1.1 (OFL-Spectral.txt), the serif Trek themes may set text in.
+  The iPhone app bundles the same Inter, JetBrains Mono, KaTeX and Spectral fonts, with their
+  licences, in ios/Trek/Resources/Fonts.
+* ios/Trek/Backgrounds.xcassets — the background art of crates/trek-assets/assets/backgrounds
+  cut to a phone's shape (ios/scripts/backgrounds.py); the paintings are public domain, as
+  assets/backgrounds/SOURCES.md says.
 * crates/trek-app/src/math/tables.rs — glyph metrics and the math symbol table from
   KaTeX (Khan Academy and other contributors), MIT; the layout rules in
   crates/trek-app/src/math/layout.rs follow KaTeX's implementation of TeX's

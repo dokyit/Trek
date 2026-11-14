@@ -637,6 +637,7 @@ impl RemoteHost for DemoHost {
             full_access: true,
             unlisted: vec![],
             release: None,
+            look: None,
         })
     }
 
@@ -2455,6 +2456,8 @@ fn settings() -> MacSettings {
         theme: Theme::System,
         full_access: true,
         session_approvals: false,
+        resume_interrupted: None,
+        continue_on_other_account: None,
     }
 }
 

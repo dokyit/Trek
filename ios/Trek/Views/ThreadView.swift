@@ -124,7 +124,7 @@ private struct ThreadScreen: View {
             .equatable()
             .environment(\.projectHue, t?.project?.hue)
             .environment(\.liveThreadID, threadID)
-            .background(Trek.background)
+            .background(RidgeBackdrop(surface: .thread))
             .safeAreaBar(edge: .top, spacing: 0) {
                 if let t {
                     ThreadStatusStrip(thread: t)

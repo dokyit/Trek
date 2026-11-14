@@ -28,6 +28,8 @@ struct MarkdownText: View, nonisolated Equatable {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Answers, thoughts and notes are the conversation: set in the theme's face for it.
+        .environment(\.trekConversation, true)
     }
 
     @ViewBuilder
@@ -58,7 +60,7 @@ struct MarkdownText: View, nonisolated Equatable {
             }
         case .quote(let s):
             HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 1).fill(Trek.border).frame(width: 3)
+                RoundedRectangle(cornerRadius: Trek.corner(1)).fill(Trek.border).frame(width: 3)
                 RichMathText(markdown: s, size: size).foregroundStyle(Trek.muted)
             }
         case .math(let tex, let source):
@@ -352,8 +354,8 @@ struct MarkdownTable: View {
             }
             .fixedSize()
             .background(Trek.surface.opacity(0.6))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Trek.border, lineWidth: 0.75))
+            .clipShape(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Trek.corner(12), style: .continuous).strokeBorder(Trek.border, lineWidth: 0.75))
             .padding(.vertical, 1)
         }
         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)

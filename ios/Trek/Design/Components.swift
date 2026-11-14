@@ -223,18 +223,22 @@ struct FileChip: View {
     }
 }
 
-/// The ridge art behind the large titles, fading into the background (the desktop's backdrop), when
-/// Settings › Appearance › Background art is on; `always` for the welcome screen. Otherwise the
-/// plain background, as a new Mac shows it.
+/// The ground behind a screen, with the background art Settings › Appearance (or the Mac) has
+/// there (`ArtBackdrop`): edge to edge under its scrim, or at the top fading into the ground.
+/// `always` is the welcome screen's ridge, there whatever the setting. Otherwise the plain
+/// background, as a new Mac shows it.
 struct RidgeBackdrop: View {
     var height: CGFloat = 320
     var always = false
-    @AppStorage(AppearanceKey.backgroundArt) private var art = false
+    /// The thread list is the phone's sidebar: the art "in the sidebar" shows only there.
+    var surface = ArtSurface.threadList
 
     var body: some View {
         ZStack(alignment: .top) {
             Trek.background
-            if art || always {
+            if !always {
+                ArtBackdrop(surface: surface, height: height)
+            } else {
                 Image("Backdrop")
                     .resizable()
                     .interpolation(.none)

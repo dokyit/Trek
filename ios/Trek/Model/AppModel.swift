@@ -525,6 +525,7 @@ final class AppModel {
             link.agents = s.agents
             link.fullAccessAllowed = s.fullAccess ?? false
             link.release = s.release
+            link.look = s.look
             // Rows the host no longer lists (a sub-agent deleted while this phone was away) go,
             // unless a thread is open on one. Other hosts' unlisted rows are theirs alone.
             let kept = Set(s.unlisted.map { link.qualified($0.id) })

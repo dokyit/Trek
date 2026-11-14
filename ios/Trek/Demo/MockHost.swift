@@ -131,7 +131,7 @@ final class MockHost: Backend {
         deliver(.welcome(re: "auth", host: host, features: Self.features), after: 0.15)
         // Sub-agents' threads aren't listed: they come as unlisted rows.
         deliver(.snapshot(Snapshot(threads: threads.filter { $0.parentId == nil && sideOf[$0.id] == nil }, projects: projects, agents: agents, fullAccess: true,
-                                   unlisted: threads.filter { $0.parentId != nil }, release: DemoMac.release(running: host.version))),
+                                   unlisted: threads.filter { $0.parentId != nil }, release: DemoMac.release(running: host.version), look: DemoMac.look)),
                 after: 0.2)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.onState?(.connected) }
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in

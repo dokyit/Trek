@@ -44,7 +44,7 @@ struct NotesView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .fadesUnderBottomBars()
-            .background(RidgeBackdrop(height: 300))
+            .background(RidgeBackdrop(height: 300, surface: .pane))
             .overlay {
                 if shown.isEmpty {
                     if query.isEmpty {

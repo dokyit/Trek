@@ -178,7 +178,7 @@ struct Composer: View {
                 }
                 // Not `.interactive()`: its touch tracking took a tap on a menu row over the
                 // capsule (the + menu's, the follow-up menu's) and the row never chose.
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Trek.corner(22), style: .continuous))
             }
         }
         .animation(.snappy(duration: 0.2), value: working)

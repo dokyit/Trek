@@ -41,7 +41,7 @@ enum CardInk {
     static let mono = Color.card(fg.0, 0.52, fg.1, 0.58)
     static let dot = Color.card(fg.0, 0.32, fg.1, 0.36)
     static let button = Color.card(fg.0, 0.92, fg.1, 0.92)
-    static let onButton = Trek.background
+    static var onButton: Color { Trek.background }
     /// The chip: the page's own colour, a touch lifted on Night so the pill reads.
     static let chipFill = Color(light: 0xFFFFFF, dark: 0x131314)
     static let chipBorder = Color.card(fg.0, 0.085, fg.1, 0.12)
@@ -116,7 +116,7 @@ struct MonoPill: View {
             .truncationMode(.middle)
             .padding(.horizontal, 5)
             .padding(.vertical, 1)
-            .background(CardInk.pill, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .background(CardInk.pill, in: RoundedRectangle(cornerRadius: Trek.corner(4), style: .continuous))
     }
 }
 
@@ -391,9 +391,9 @@ struct CardFrame<Body: View, Footer: View>: View {
             footer()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(CardInk.fill, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(CardInk.hairline, lineWidth: 0.75))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(CardInk.fill, in: RoundedRectangle(cornerRadius: Trek.corner(14), style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Trek.corner(14), style: .continuous).strokeBorder(CardInk.hairline, lineWidth: 0.75))
+        .clipShape(RoundedRectangle(cornerRadius: Trek.corner(14), style: .continuous))
         .contextMenu { CardMenu(card: card) }
         .animation(.snappy(duration: 0.3), value: card)
     }

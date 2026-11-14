@@ -541,6 +541,17 @@ code = ["crates/trek-app/src/remote.rs"]
 tests = ["crates/trek-app/src/remote/notes.rs", "crates/trek-app/tests/interactions.rs"]
 
 [[feature]]
+id = "phone-look"
+area = "iPhone"
+what = "The iPhone app draws the computer's look: its Trek theme (built-in, the user's or an agent's) and background art, when the phone matches it"
+macos = "yes"
+windows = "yes"
+live_skip = "What changes is drawn on the phone: the snapshot's look is checked by trek-app's remote::look tests and trek-remote's protocol tests, and the iPhone's LookTests draw it (screenshots of each theme and collection in the simulator)."
+how = { macos = "Shared code: the snapshot carries `look` (trek_remote::MacLook), made from the theme Settings names and the art (remote/look.rs); the phone draws it natively (ios/Trek/Design/Looks.swift, Backgrounds.swift).", windows = "The same code: a PC's phone server sends the same look." }
+code = ["crates/trek-app/src/remote/look.rs", "crates/trek-remote/src/protocol/look.rs"]
+tests = ["crates/trek-app/src/remote/look.rs", "crates/trek-remote/tests/protocol.rs"]
+
+[[feature]]
 id = "phone-discovery"
 area = "iPhone"
 what = "The phone finds the computer again when its address changes (Bonjour)"

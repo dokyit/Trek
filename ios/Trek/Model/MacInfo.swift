@@ -452,6 +452,11 @@ nonisolated struct MacSettings: Codable, Hashable {
     /// The Mac lets this phone allow a request for the rest of a session (only the Mac changes
     /// that). Nil from a Mac that doesn't say: it takes them.
     var sessionApprovals: Bool? = nil
+    /// At launch the Mac resumes by itself the threads a quit or crash cut off. Nil from a Mac
+    /// before the setting: not shown.
+    var resumeInterrupted: Bool? = nil
+    /// At a usage limit a thread carries on by itself on another account of its agent.
+    var continueOnOtherAccount: Bool? = nil
 }
 
 /// Notifications on the phone through ntfy.
@@ -488,6 +493,8 @@ nonisolated struct SettingsChange: Hashable {
     var pushTest = false
     var autoSettleDays: Int? = nil
     var theme: MacTheme? = nil
+    var resumeInterrupted: Bool? = nil
+    var continueOnOtherAccount: Bool? = nil
 
     var json: [String: Any] {
         var o: [String: Any] = [:]
@@ -504,6 +511,8 @@ nonisolated struct SettingsChange: Hashable {
         if pushTest { o["push_test"] = true }
         if let autoSettleDays { o["auto_settle_days"] = autoSettleDays }
         if let theme { o["theme"] = theme.rawValue }
+        if let resumeInterrupted { o["resume_interrupted"] = resumeInterrupted }
+        if let continueOnOtherAccount { o["continue_on_other_account"] = continueOnOtherAccount }
         return o
     }
 
@@ -521,6 +530,8 @@ nonisolated struct SettingsChange: Hashable {
         if let pushServer { s.push.server = pushServer }
         if let autoSettleDays { s.autoSettleDays = autoSettleDays }
         if let theme { s.theme = theme }
+        if let resumeInterrupted { s.resumeInterrupted = resumeInterrupted }
+        if let continueOnOtherAccount { s.continueOnOtherAccount = continueOnOtherAccount }
         return s
     }
 }

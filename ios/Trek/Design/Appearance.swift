@@ -2,13 +2,26 @@ import SwiftUI
 
 /// The phone's own appearance settings (Settings › Appearance), kept on the phone: theme, text
 /// size, background art, motion and row density. `RootView` applies them app-wide.
-enum AppearanceKey {
+nonisolated enum AppearanceKey {
     static let theme = "appearance"
     static let textSize = "textSize"
     static let calm = "reduceMotion"
     static let compact = "compactRows"
-    /// The ridge art behind the lists and the new-thread screen: off unless chosen, as on the Mac.
+    /// The ridge art behind the lists and the new-thread screen: the switch before the Mac's
+    /// collections came, read once as Classic Night (`LookStore.artSetting`).
     static let backgroundArt = "backgroundArt"
+    /// The Trek theme: `mac` (Match your Mac, the default) or a built-in's id (`Look.builtIn`).
+    static let trekTheme = "trekTheme"
+    /// The background art: `mac` (the default), `none`, or a piece (`builtin:paintings/oxbow`).
+    static let background = "backgroundPiece"
+    /// Where the phone's own Classic art shows (`ArtPlacement`): other collections say themselves.
+    static let placement = "backgroundPlacement"
+    /// How much the phone's own art is dimmed beyond what the text needs, 0 to 0.9.
+    static let dim = "backgroundDim"
+    /// The last look the Mac sent, as it came (`MacLook`).
+    static let macLook = "macLook"
+    /// The setting that follows the paired Mac.
+    static let matchMac = "mac"
 }
 
 /// Theme names as the Mac has them: Night is dark, Paper is light.
@@ -118,6 +131,16 @@ extension EnvironmentValues {
     @Entry var compactRows = false
     /// The open thread's project hue: folders named in it take the project's colour.
     @Entry var projectHue: Int? = nil
+    /// Text here is the conversation (messages, answers, notes): set in the theme's conversation
+    /// face (Journal's serif) at its size.
+    @Entry var trekConversation = false
+}
+
+extension Font {
+    /// Body text at `size`: the conversation's face where `conversation`, the interface's else.
+    static func text(size: CGFloat, weight: Weight = .regular, conversation: Bool) -> Font {
+        conversation ? .conversation(size: size, weight: weight) : .ui(size: size, weight: weight)
+    }
 }
 
 /// Whether animation is welcome here: neither iOS nor Trek's own setting asks for less motion.

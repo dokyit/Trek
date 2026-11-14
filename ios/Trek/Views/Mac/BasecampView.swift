@@ -64,7 +64,7 @@ struct BasecampView: View {
                 .transition(.opacity)
             }
             .fadesUnderBottomBars()
-            .background(RidgeBackdrop(height: 300))
+            .background(RidgeBackdrop(height: 300, surface: .pane))
             .navigationTitle("Basecamp")
             .navigationSubtitle(link?.serves(.basecampV2) == true ? "" : recap?.greeting ?? "")
             .refreshable { await reload() }

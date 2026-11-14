@@ -107,7 +107,7 @@ struct SettingsHeader: View {
                     .resizable()
                     .interpolation(.high)
                     .frame(width: 58, height: 58)
-                    .clipShape(RoundedRectangle(cornerRadius: 13.5, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Trek.corner(13.5), style: .continuous))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(SettingsGlance.headline(glances, demo: demo))
