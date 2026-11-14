@@ -8,13 +8,15 @@ typeset -g SHOT_WORK="" SHOT_DIR="" SHOT_PID=""
 
 die() { print -r -- "capture: $*" >&2; exit 1; }
 
-# Build the app with the shots feature once; prints the binary path.
+# Build the app with the shots feature once; prints the binary path (in CARGO_TARGET_DIR when one
+# is set, as in a worktree with a target directory of its own).
 shot_build() {
-  [[ ${BUILD:-1} == 1 ]] || { print -r -- target/debug/trek; return; }
+  local bin=${CARGO_TARGET_DIR:-target}/debug/trek
+  [[ ${BUILD:-1} == 1 ]] || { print -r -- $bin; return; }
   print -r -- "capture: building trek --features shots" >&2
   cargo build -p trek-app --features shots -q >&2 || die "cargo build failed"
-  [[ -x target/debug/trek ]] || die "target/debug/trek missing after build"
-  print -r -- target/debug/trek
+  [[ -x $bin ]] || die "$bin missing after build"
+  print -r -- $bin
 }
 
 # shot_launch <workdir> — seed a throwaway data folder and start Trek headless. Isolation comes

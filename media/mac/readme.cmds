@@ -7,7 +7,11 @@
 # The mock agent picks its script by a keyword anywhere in the prompt ("subagents", "tools",
 # "permission", "plan", "mock:long" …), so the prompts can read like real ones.
 # The `wait 7000`s let the "Finished" toasts fade before a shot.
+# The scripted agent wears its demo dress (`dress`: the names only, still the mock with no process
+# or network), and threads are renamed as their owner would, so no "Mock" and no script keyword is
+# on screen. The README captions the Mac frames as the app with staged threads.
 
+dress Claude Code|Sonnet 5.5|Opus 5.5
 pace 0
 glass off
 theme night
@@ -16,12 +20,15 @@ theme night
 project @REPO@
 send Review the API with two subagents 3s
 wait idle 30000
+title Review the API
 project @REPO@
 send Walk me through how the app starts
 wait idle 30000
+title Tour the startup code
 project @REPO@
 send Add a --verbose flag to the CLI, use your tools
 wait idle 30000
+title Add a verbose flag
 # The thread's side panel names the machine; the frames go without it.
 click hub
 
@@ -30,22 +37,26 @@ click hub
 route draft
 send Apply the schema migration once I give permission
 wait permission 20000
+title Migrate the schema
 route draft
 send Run the whole test suite on every platform mock:long 900s
 wait 1500
+title Run the full test suite
 
 # The hero: a plan waiting for approval, the sidebar showing what needs you.
 project @REPO@
 send Make a plan for session auth on every route
 wait plan 20000
+title Require session auth
 wait 7000
+hover title-text
 shot hero-night
 theme paper
 wait 800
 shot hero-paper
 
 # An approval card.
-route title:Apply the schema
+route title:Migrate the schema
 wait 800
 shot approval-paper
 theme night
