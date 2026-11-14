@@ -20,6 +20,9 @@ final class MockHost: Backend {
     /// it gets the whole transcript again.
     private var rewritten: [String: Int64] = [:]
     private var timer: Timer?
+    /// `-TrekDemoMacCycle`: the demo Mac's theme changing, and how far it's gone.
+    private var lookTimer: Timer?
+    private var lookStep = 0
     private var chatter: Timer?
     private var tick = 0
     private var notes = DemoMac.notes()
@@ -129,10 +132,16 @@ final class MockHost: Backend {
         default: break
         }
         deliver(.welcome(re: "auth", host: host, features: Self.features), after: 0.15)
-        // Sub-agents' threads aren't listed: they come as unlisted rows.
-        deliver(.snapshot(Snapshot(threads: threads.filter { $0.parentId == nil && sideOf[$0.id] == nil }, projects: projects, agents: agents, fullAccess: true,
-                                   unlisted: threads.filter { $0.parentId != nil }, release: DemoMac.release(running: host.version), look: DemoMac.look)),
-                after: 0.2)
+        deliver(.snapshot(snapshot(look: DemoMac.look)), after: 0.2)
+        // `-TrekDemoMacCycle 5`: the demo Mac changes its Trek theme every few seconds (Trek,
+        // Console, Journal, Alpenglow with its painting), each sent in a new snapshot as a Mac
+        // sends a change, for "Match your Mac".
+        let cycle = UserDefaults.standard.double(forKey: "TrekDemoMacCycle")
+        if cycle > 0 {
+            lookTimer = Timer.scheduledTimer(withTimeInterval: cycle, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.nextLook() }
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.onState?(.connected) }
         timer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.advanceWorkingThread() }
@@ -158,6 +167,8 @@ final class MockHost: Backend {
     func stop() {
         timer?.invalidate()
         timer = nil
+        lookTimer?.invalidate()
+        lookTimer = nil
         chatter?.invalidate()
         chatter = nil
     }
@@ -688,6 +699,21 @@ final class MockHost: Backend {
 
     func later(_ secs: Double, _ f: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + secs) { f() }
+    }
+
+    /// Everything the demo Mac's inbox has, with its look.
+    private func snapshot(look: MacLook) -> Snapshot {
+        // Sub-agents' threads aren't listed: they come as unlisted rows.
+        Snapshot(threads: threads.filter { $0.parentId == nil && sideOf[$0.id] == nil }, projects: projects, agents: agents, fullAccess: true,
+                 unlisted: threads.filter { $0.parentId != nil }, release: DemoMac.release(running: host.version), look: look)
+    }
+
+    /// The next of Trek's themes on the demo Mac, sent as a Mac sends a change: a new snapshot.
+    private func nextLook() {
+        lookStep += 1
+        let look = Look.builtIn[lookStep % Look.builtIn.count]
+        let art = look.art.flatMap(ArtPiece.named).map { ArtChoice(piece: $0, placement: .chat, dim: 0) }
+        deliver(.snapshot(snapshot(look: MacLook(look, art: art))))
     }
 
     func deliver(_ m: ServerMessage, after: Double = 0.03) {

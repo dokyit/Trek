@@ -437,10 +437,10 @@ struct NeedsWash: View {
     static let radius: CGFloat = 18
 
     var body: some View {
-        UnevenRoundedRectangle(topLeadingRadius: part == .top ? Self.radius : 0,
-                               bottomLeadingRadius: part == .bottom ? Self.radius : 0,
-                               bottomTrailingRadius: part == .bottom ? Self.radius : 0,
-                               topTrailingRadius: part == .top ? Self.radius : 0,
+        UnevenRoundedRectangle(topLeadingRadius: part == .top ? Trek.corner(Self.radius) : 0,
+                               bottomLeadingRadius: part == .bottom ? Trek.corner(Self.radius) : 0,
+                               bottomTrailingRadius: part == .bottom ? Trek.corner(Self.radius) : 0,
+                               topTrailingRadius: part == .top ? Trek.corner(Self.radius) : 0,
                                style: .continuous)
             .fill(Trek.approval.opacity(0.08))
             .padding(.horizontal, 12)
@@ -535,7 +535,7 @@ private struct ProjectHeader: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Trek.muted)
                         .frame(width: 22, height: 18)
-                        .background(Trek.foreground.opacity(0.08), in: RoundedRectangle(cornerRadius: 4.5))
+                        .background(Trek.foreground.opacity(0.08), in: RoundedRectangle(cornerRadius: Trek.corner(4.5)))
                 }
                 Text(group.name)
                     .font(.ui(.subheadline).weight(.semibold))
@@ -568,7 +568,11 @@ private struct ProjectHeader: View {
 private struct HeaderGround: ViewModifier {
     func body(content: Content) -> some View {
         content.background {
+            // Over art across the list, the ground is that art, in its place on the screen and
+            // under the same scrim: a plain band would cut across the picture.
             Trek.background
+                .overlay { ArtBackdrop(surface: .threadList, fullOnly: true) }
+                .clipped()
                 .padding(.horizontal, -24)
                 .padding(.top, -12)
                 .padding(.bottom, -4)
@@ -945,7 +949,7 @@ struct SubAgentsPill: View {
                     ForEach(Array(logos.enumerated()), id: \.offset) { _, entry in
                         AgentGlyph(entry.agent, size: size)
                             .padding(1)
-                            .background(Trek.background, in: RoundedRectangle(cornerRadius: size * 0.3))
+                            .background(Trek.background, in: RoundedRectangle(cornerRadius: Trek.corner(size * 0.3)))
                     }
                 }
                 Text("\(agents.count)")
@@ -1008,7 +1012,7 @@ struct ConnectionBanner: View {
         .padding(12)
         .contentShape(Rectangle())
         .onTapGesture { if waiting { retry?() } }
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: Trek.corner(16), style: .continuous))
         .accessibilityElement(children: .combine)
     }
 }
@@ -1046,8 +1050,8 @@ struct IdentityChangedCard: View {
             .padding(.top, 2)
         }
         .padding(16)
-        .background(Trek.failed.opacity(0.08), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Trek.failed.opacity(0.4), lineWidth: 1))
+        .background(Trek.failed.opacity(0.08), in: RoundedRectangle(cornerRadius: Trek.corner(20), style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Trek.corner(20), style: .continuous).strokeBorder(Trek.failed.opacity(0.4), lineWidth: 1))
     }
 }
 

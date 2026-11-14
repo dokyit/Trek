@@ -239,22 +239,36 @@ struct ArtBackdrop: View {
     var surface: ArtSurface
     /// The header's height, when it's the header.
     var height: CGFloat = 320
+    /// Only art edge to edge (a section header's ground): never the fading header.
+    var fullOnly = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         let store = LookStore.shared
-        if let art = store.art, let style = art.shows(on: surface) {
+        if let art = store.art, let style = art.shows(on: surface), style == .full || !fullOnly {
             let dark = scheme == .dark
             switch style {
             case .full:
                 let c = store.colors
                 let alpha = Scrim.over(art, dark: dark, ground: c.background.rgb(dark: dark),
                                        text: c.foreground.rgb(dark: dark), muted: c.muted.rgb(dark: dark))
-                Color.clear
-                    .overlay { Image(art.piece.asset).resizable().interpolation(.medium).scaledToFill() }
-                    .overlay(Trek.background.opacity(alpha))
-                    .clipped()
-                    .accessibilityHidden(true)
+                // Laid out across the whole window wherever it's drawn, so a piece of it (behind
+                // the bar, a held section header) lines up with the rest.
+                GeometryReader { g in
+                    let frame = g.frame(in: .global)
+                    let window = Self.window
+                    Image(art.piece.asset)
+                        .resizable()
+                        .interpolation(.medium)
+                        .scaledToFill()
+                        .frame(width: window.width, height: window.height)
+                        .clipped()
+                        .overlay(Trek.background.opacity(alpha))
+                        .offset(x: -frame.minX, y: -frame.minY)
+                }
+                .ignoresSafeArea()
+                .clipped()
+                .accessibilityHidden(true)
             case .header:
                 Color.clear
                     .frame(height: height)
@@ -267,5 +281,11 @@ struct ArtBackdrop: View {
                     .accessibilityHidden(true)
             }
         }
+    }
+
+    /// The window's size: what edge-to-edge art is laid out across.
+    private static var window: CGSize {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        return scene?.windows.first?.bounds.size ?? scene?.screen.bounds.size ?? CGSize(width: 390, height: 844)
     }
 }

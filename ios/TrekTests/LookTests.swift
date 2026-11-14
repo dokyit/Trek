@@ -184,6 +184,13 @@ struct LookTests {
         #expect(c.background.dark == 0x0A0A0B)
     }
 
+    @Test func motionPacesAsOnTheMac() {
+        #expect(Look.console.motion.scale == 0.75)
+        #expect(Look.journal.motion.scale == 1.35 && Look.alpenglow.motion.scale == 1.35)
+        #expect(Look.trek.motion.scale == 1)
+        #expect(Look.Motion.still.scale == 0)
+    }
+
     @Test func sizesAndCornersScale() {
         #expect(Look.trek.uiScale == 1 && Look.trek.conversationScale == 1)
         #expect(abs(Look.journal.conversationScale - 16 / 14.5) < 1e-9)

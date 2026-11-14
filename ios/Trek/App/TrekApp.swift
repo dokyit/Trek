@@ -197,6 +197,7 @@ struct RootView: View {
         .environment(\.trekCalm, calm || look.look.motion == .still)
         .environment(\.compactRows, compact || look.look.density == .compact)
         .modifier(LookFollower(mac: model.selected?.look))
+        .modifier(MotionPace(scale: look.look.motion.scale))
     }
 
     private var look: LookStore { LookStore.shared }
@@ -225,6 +226,20 @@ private struct LookFollower: ViewModifier {
     /// A new look comes in over the old one, quickly, unless motion is turned down.
     private func change(_ body: () -> Void) {
         withAnimation(motion ? .easeInOut(duration: 0.3) : nil, body)
+    }
+}
+
+/// The theme's pace: Console's brisk motion takes three quarters of the designed time, Journal's
+/// and Alpenglow's calm a third longer, as on the Mac. Every animation under the root runs at it
+/// (still is Reduce motion's, `trekCalm`).
+struct MotionPace: ViewModifier {
+    var scale: Double
+
+    func body(content: Content) -> some View {
+        content.transaction { t in
+            guard scale > 0, scale != 1, let a = t.animation else { return }
+            t.animation = a.speed(1 / scale)
+        }
     }
 }
 

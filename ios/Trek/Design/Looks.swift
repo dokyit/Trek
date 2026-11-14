@@ -45,7 +45,20 @@ nonisolated struct Look: Equatable, Sendable, Identifiable {
     }
 
     enum Density: String, Sendable { case compact, regular, roomy }
-    enum Motion: String, Sendable { case still, brisk, standard, calm }
+    enum Motion: String, Sendable {
+        case still, brisk, standard, calm
+
+        /// How long every animation takes against its designed time (themes.rs `Motion::scale`);
+        /// still is none at all, which Reduce motion does.
+        var scale: Double {
+            switch self {
+            case .still: 0
+            case .brisk: 0.75
+            case .standard: 1
+            case .calm: 1.35
+            }
+        }
+    }
 
     /// A theme's colours for light or dark, each `0xRRGGBBAA`. What it leaves out is Night's or
     /// Paper's.

@@ -129,6 +129,31 @@ nonisolated enum TrekFont {
         if let title = UIFont(name: look.uiFont.postScript(.semibold), size: 17 * scale) {
             bar.titleTextAttributes = [.font: UIFontMetrics(forTextStyle: .headline).scaledFont(for: title)]
         }
+        // The tab bar's labels too (Console's are monospace).
+        let tab = UIFont(name: look.uiFont.postScript(.medium), size: 10 * scale)
+        if let tab {
+            let item = UITabBarItem.appearance()
+            for state in [UIControl.State.normal, .selected] {
+                item.setTitleTextAttributes([.font: tab], for: state)
+            }
+        }
+        // Appearance proxies reach bars made from now on: the ones on screen take it here.
+        let navBar = UINavigationBar.appearance()
+        func restyle(_ view: UIView) {
+            if let bar = view as? UINavigationBar {
+                bar.titleTextAttributes = navBar.titleTextAttributes
+                bar.largeTitleTextAttributes = navBar.largeTitleTextAttributes
+            }
+            if let bar = view as? UITabBar, let tab {
+                for item in bar.items ?? [] {
+                    for state in [UIControl.State.normal, .selected] { item.setTitleTextAttributes([.font: tab], for: state) }
+                }
+            }
+            view.subviews.forEach(restyle)
+        }
+        for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
+            scene.windows.forEach(restyle)
+        }
     }
 }
 
