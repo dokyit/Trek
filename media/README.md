@@ -37,6 +37,10 @@ Literally the `shots.rs` command file (`crates/trek-app/src/shots.rs` documents 
 ## windows/`*.cmds`
 
 Windows-only suites (`pwsh script/capture.ps1 windows/hittest`; `capture.sh` doesn't know them).
+`readme.cmds` makes the README's Windows frames: the website's scene (`script/site/masters.sh`) with
+the scripted agent in its demo dress (`dress Claude Code|Sonnet 5.5|Opus 5.5`, the names only), so
+nothing in them says "Mock"; the README captions them as an example. Its header says how to make
+the two demo projects it opens.
 `hittest.cmds` asks the real window what Windows' `WM_NCHITTEST` gets as an answer where the
 title bar's controls, its empty strip and its caption buttons are, and sends the window the
 move, press and release of a real click (to its own handle, never the desktop), so a control

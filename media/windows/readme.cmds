@@ -1,0 +1,64 @@
+# media/windows/readme.cmds — the README's Windows frames (docs/assets/screenshots/windows/).
+# Run: $env:SIZE='1280x860'; $env:SHOT_REPO='<folder>'; pwsh script/capture.ps1 windows/readme
+# `@REPO@` is a folder holding two clean demo projects, `atlas-web` and `mobile`: what
+# script/site/make_repo.py makes, or with git, in each: README.md, src/cli.rs and src/main.rs, then
+# `git init -b main`, `git config core.autocrlf false`, and one commit as Demo <demo@example.com>.
+# The scene is the website's (script/site/masters.sh), and the scripted agent wears its demo dress
+# (`dress`: the names only, still the mock with no process or network), so the frames read like a
+# real window without "Mock" in them. The README captions them as an example.
+# 860 tall shows the first turn's edits whole above the plan. The frames come out at the display's
+# scale (125 % on the dev laptop: 1600x1075) and go into the README at 1200 wide (ffmpeg's lanczos).
+
+dress Claude Code|Sonnet 5.5|Opus 5.5
+pace 0
+glass off
+theme night
+
+# Finished and read, in the open thread's project.
+project @REPO@/atlas-web
+send Walk me through how the app starts
+wait idle 40000
+title Tour the startup code
+# The thread's side panel names the machine; the frames go without it.
+click hub
+
+# The open thread's first turn: an answer with tool calls and the files it changed.
+project @REPO@/atlas-web
+send Add a --verbose flag to the CLI tools
+wait idle 40000
+
+# The other project: one at work, one asking for an approval, one with a question, and one whose
+# sub-agents report back while another thread is on screen (unread in the Inbox).
+project @REPO@/mobile
+send Run the whole test suite on every platform mock:long 7200s
+wait 900
+title Run the full test suite
+project @REPO@/mobile
+send Apply the schema migration once I give permission mock:run ./migrate
+wait permission 20000
+title Migrate the schema
+project @REPO@/mobile
+send One question first mock:ask Which database?
+wait question 20000
+title Choose a database
+project @REPO@/mobile
+send Review the sync code with two subagents 8s
+wait 1500
+title Review the sync code
+
+# The open thread's second turn: a plan that waits for approval.
+route title:Add a verbose
+wait 10000
+send Now plan session auth for every route
+wait plan 20000
+title Require session auth
+# The toasts fade before a frame.
+wait 9000
+hover title-text
+shot thread-night
+theme paper
+wait 1200
+hover title-text
+shot thread-paper
+
+quit

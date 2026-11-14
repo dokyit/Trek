@@ -52,11 +52,14 @@ jobs:
 
       # The release notes step (script/lib/notes.sh) against its fixtures: every release body
       # carries the install block exactly once. The phone updater's words, against stand-ins.
+      # The capture manifests against the commands this driver knows, so a suite can't use one it
+      # would refuse (media/README.md).
       - name: Script tests
         run: |
           bash script/tests/release-notes.sh
           bash script/tests/merge-manifest.sh
           zsh ios/scripts/tests/phone-update.sh
+          zsh script/capture.sh check
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -226,11 +229,13 @@ jobs:
 
       # Assertions over the release-manifest merge the Windows release runs (the step above
       # only checks syntax), and over the uninstallers' clean-up of Trek's registry keys (run
-      # against throwaway keys of the test's own).
+      # against throwaway keys of the test's own). Then every capture manifest, the Windows
+      # suites too, against the commands capture.ps1 knows.
       - name: Script tests
         run: |
           script\tests\release-manifest.Tests.ps1
           script\tests\uninstall-keys.Tests.ps1
+          script\capture.ps1 check
 
       - uses: dtolnay/rust-toolchain@master
         with:
