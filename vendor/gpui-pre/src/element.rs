@@ -250,6 +250,14 @@ trait ElementObject {
         window: &mut Window,
         cx: &mut App,
     ) -> Size<Pixels>;
+
+    fn layout_as_root_offset(
+        &mut self,
+        available_space: Size<AvailableSpace>,
+        offset: Point<f32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels>;
 }
 
 /// A wrapper around an implementer of [`Element`] that allows it to be drawn in a window.
@@ -364,6 +372,8 @@ impl<E: Element> Drawable<E> {
                 }
 
                 let bounds = window.layout_bounds(layout_id);
+                // Trek: for a cached view, where it sits (`view.rs`).
+                window.prepainting_layout = Some(layout_id);
                 let mut pushed_a11y_node = false;
                 if window.a11y.is_active() {
                     if let Some(global_id) = global_id.as_ref() {
@@ -504,6 +514,18 @@ impl<E: Element> Drawable<E> {
         window: &mut Window,
         cx: &mut App,
     ) -> Size<Pixels> {
+        self.layout_as_root_offset(available_space, Point::default(), window, cx)
+    }
+
+    /// Trek: `layout_as_root`, starting `offset` device pixels past a whole pixel
+    /// (`Window::compute_layout_offset`).
+    pub(crate) fn layout_as_root_offset(
+        &mut self,
+        available_space: Size<AvailableSpace>,
+        offset: Point<f32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels> {
         if matches!(&self.phase, ElementDrawPhase::Start) {
             self.request_layout(window, cx);
         }
@@ -515,7 +537,7 @@ impl<E: Element> Drawable<E> {
                 inspector_id,
                 request_layout,
             } => {
-                window.compute_layout(layout_id, available_space, cx);
+                window.compute_layout_offset(layout_id, available_space, offset, cx);
                 self.phase = ElementDrawPhase::LayoutComputed {
                     layout_id,
                     global_id,
@@ -533,7 +555,7 @@ impl<E: Element> Drawable<E> {
                 request_layout,
             } => {
                 if available_space != prev_available_space {
-                    window.compute_layout(layout_id, available_space, cx);
+                    window.compute_layout_offset(layout_id, available_space, offset, cx);
                 }
                 self.phase = ElementDrawPhase::LayoutComputed {
                     layout_id,
@@ -583,6 +605,17 @@ where
         cx: &mut App,
     ) -> Size<Pixels> {
         Drawable::layout_as_root(self, available_space, window, cx)
+    }
+
+    #[inline]
+    fn layout_as_root_offset(
+        &mut self,
+        available_space: Size<AvailableSpace>,
+        offset: Point<f32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels> {
+        Drawable::layout_as_root_offset(self, available_space, offset, window, cx)
     }
 }
 
@@ -638,6 +671,19 @@ impl AnyElement {
         cx: &mut App,
     ) -> Size<Pixels> {
         self.0.layout_as_root(available_space, window, cx)
+    }
+
+    /// Trek: `layout_as_root`, starting `offset` device pixels past a whole pixel, as a cached view
+    /// does where it sits in the window (`Window::layout_origin_fraction`).
+    pub(crate) fn layout_as_root_offset(
+        &mut self,
+        available_space: Size<AvailableSpace>,
+        offset: Point<f32>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Size<Pixels> {
+        self.0
+            .layout_as_root_offset(available_space, offset, window, cx)
     }
 
     /// Prepaints this element at the given absolute origin.

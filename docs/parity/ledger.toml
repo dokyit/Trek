@@ -118,7 +118,7 @@ what = "Open a project in another app"
 macos = "yes"
 windows = "yes"
 live = ["route project:{project}", "pace 0", "send Show a short answer", "wait idle 30000", "count hub-open 1", "count hub-open-more 1"]
-how = { macos = "Finder, Terminal, Ghostty, Zed, Cursor, VS Code, the JetBrains IDEs and Xcode, found in /Applications or the user's own ~/Applications (one list, trek_core::open_in::MAC_APPS, for both menus).", windows = "File Explorer, Windows Terminal (its default profile: PowerShell, cmd or Git Bash as the user set it), Zed, Cursor, VS Code, the JetBrains IDEs (JetBrains Toolbox's scripts on the PATH) and Visual Studio, found through App Paths and the PATH." }
+how = { macos = "Finder, Terminal, Ghostty, Zed, Cursor, VS Code, the JetBrains IDEs and Xcode, found in /Applications or the user's own ~/Applications (one list, trek_core::open_in::MAC_APPS, for both menus). Looked for once at launch and kept; looked for again off the UI thread once a minute old.", windows = "File Explorer, Windows Terminal (its default profile: PowerShell, cmd or Git Bash as the user set it), Zed, Cursor, VS Code, the JetBrains IDEs (JetBrains Toolbox's scripts on the PATH) and Visual Studio, found through App Paths and the PATH. Looked for once at launch and kept; looked for again off the UI thread once a minute old (a search of the PATH is thousands of file checks: done on each frame, it was most of each frame's time with the hub pinned open)." }
 code = ["crates/trek-core/src/open_in.rs", "crates/trek-app/src/hub.rs", "crates/trek-app/src/thread_menu.rs"]
 tests = ["crates/trek-app/tests/hub.rs"]
 
@@ -1362,6 +1362,16 @@ macos = "yes"
 windows = "yes"
 live = ["route project:{project}", "motion on", "pace 1", "send mock:long 10s", "wait 3000", "renders mark", "wait 2000", "renders WorkingBar 5+ ThreadView <=WorkingBar WindowTitle 0- Sidebar 3-", "click stop", "pace 0", "motion system"]
 tests = ["crates/trek-app/tests/render.rs"]
+
+[[feature.promise]]
+what = "The hub pinned open looks for no programs on disk and walks no thread on a frame that changes nothing it shows"
+macos = "crates/trek-app/tests/hub.rs::the_pinned_hub_looks_for_nothing_on_frames_that_change_nothing"
+windows = "crates/trek-app/tests/hub.rs::the_pinned_hub_looks_for_nothing_on_frames_that_change_nothing"
+
+[[feature.promise]]
+what = "The composer's chips hold still whether it's drawn from its cache or laid out again, over its top and on a new thread between two device pixels"
+macos = "crates/trek-app/tests/placement.rs::a_new_threads_composer_holds_its_chip_labels_still_in_and_out_of_its_cache"
+windows = "crates/trek-app/tests/placement.rs::a_new_threads_composer_holds_its_chip_labels_still_in_and_out_of_its_cache"
 
 [[feature.promise]]
 what = "A window lets its spare drawing buffers go a second after it stops drawing"

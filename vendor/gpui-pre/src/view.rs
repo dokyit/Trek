@@ -1,7 +1,7 @@
 use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ContentMask, Context,
     Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
+    LayoutId, PaintIndex, Pixels, Point, PrepaintStateIndex, Render, RenderOnce, Size, Style,
     StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
@@ -303,6 +303,8 @@ struct ViewElementCacheKey {
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
+    /// Trek: where the view sits past a whole device pixel (`Window::layout_origin_fraction`).
+    fraction: Point<f32>,
 }
 
 impl<V: View> Element for ViewElement<V> {
@@ -360,11 +362,18 @@ impl<V: View> Element for ViewElement<V> {
         cx: &mut App,
     ) -> Option<AnyElement> {
         if let Some(entity_id) = self.entity_id {
+            // Trek: where a cached view sits past a whole device pixel, read before anything in it is
+            // prepainted (`prepaint_view`).
+            let fraction = match (self.cached_style.is_some(), window.prepainting_layout) {
+                (true, Some(layout_id)) => window.layout_origin_fraction(layout_id),
+                _ => Point::default(),
+            };
             // Stateful path.
             prepaint_view(
                 entity_id,
                 global_id,
                 bounds,
+                fraction,
                 element,
                 window,
                 cx,
@@ -463,6 +472,7 @@ fn prepaint_view(
     entity_id: EntityId,
     global_id: Option<&GlobalElementId>,
     bounds: Bounds<Pixels>,
+    fraction: Point<f32>,
     element: &mut Option<AnyElement>,
     window: &mut Window,
     cx: &mut App,
@@ -485,6 +495,7 @@ fn prepaint_view(
                     && element_state.cache_key.bounds == bounds
                     && element_state.cache_key.content_mask == content_mask
                     && element_state.cache_key.text_style == text_style
+                    && element_state.cache_key.fraction == fraction
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
                 {
@@ -502,7 +513,16 @@ fn prepaint_view(
                 let prepaint_start = window.prepaint_index();
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                     let mut element = render(window, cx);
-                    element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+                    // Trek: laid out as a root of its own, starting where the view sits past a whole
+                    // device pixel: its contents then land on the pixels the window's own layout
+                    // gives them, so a view drawn from its cache on some frames and laid out in the
+                    // window on others (Trek's composer) never moves a pixel between the two.
+                    element.layout_as_root_offset(
+                        Size::<AvailableSpace>::from(bounds.size),
+                        fraction,
+                        window,
+                        cx,
+                    );
                     element.prepaint_at(bounds.origin, window, cx);
                     element
                 });
@@ -520,6 +540,7 @@ fn prepaint_view(
                             bounds,
                             content_mask,
                             text_style,
+                            fraction,
                         },
                     },
                 )

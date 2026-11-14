@@ -246,6 +246,8 @@ pub fn model_pill<H: PickerHost>(
                 .child(ui::agent_glyph(&prefs.agent, cx))
                 .child(
                     div()
+                        .id("model-pill-label")
+                        .test_support()
                         .min_w_0()
                         .max_w(px(if narrow {
                             92.

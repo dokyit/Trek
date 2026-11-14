@@ -33,6 +33,9 @@ pub struct TaffyLayoutEngine {
     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
+    /// Trek: where a root starts past a whole device pixel (`set_root_offset`): a cached view laid
+    /// out on its own starts where it sits in the window, so its contents round as they do there.
+    root_offsets: FxHashMap<LayoutId, Point<f32>>,
     computed_layouts: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
 }
@@ -47,6 +50,7 @@ impl TaffyLayoutEngine {
             taffy,
             absolute_layout_bounds: FxHashMap::default(),
             absolute_outer_origins: FxHashMap::default(),
+            root_offsets: FxHashMap::default(),
             computed_layouts: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
         }
@@ -56,6 +60,7 @@ impl TaffyLayoutEngine {
         self.taffy.clear();
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
+        self.root_offsets.clear();
         self.computed_layouts.clear();
     }
 
@@ -364,7 +369,11 @@ impl TaffyLayoutEngine {
                     .expect("parent absolute outer origin should be cached");
                 parent_origin + Point::from(layout_location)
             }
-            None => Point::from(layout_location),
+            // Trek: a root laid out on its own starts where it sits in the window, past a whole
+            // device pixel (`set_root_offset`).
+            None => {
+                Point::from(layout_location) + self.root_offsets.get(&id).copied().unwrap_or_default()
+            }
         };
         self.absolute_outer_origins
             .insert(id, absolute_outer_origin);
@@ -383,6 +392,32 @@ impl TaffyLayoutEngine {
         let bounds = (snapped_bounds / scale_factor).map(Pixels);
         self.absolute_layout_bounds.insert(id, bounds);
         bounds
+    }
+}
+
+impl TaffyLayoutEngine {
+    /// Trek: how far past the device pixel it's drawn at `id`'s outer origin sits, in device
+    /// pixels, in (-0.5, 0.5]. Edges round in the window's coordinates (`layout_bounds`), so a
+    /// tree laid out as a root of its own and moved to where `id` is drawn rounds its contents
+    /// differently from the window's own layout unless it starts here too (`set_root_offset`).
+    pub fn origin_fraction(&mut self, id: LayoutId, scale_factor: f32) -> Point<f32> {
+        self.layout_bounds(id, scale_factor);
+        let origin = self
+            .absolute_outer_origins
+            .get(&id)
+            .copied()
+            .unwrap_or_default();
+        origin - origin.map(round_half_down)
+    }
+
+    /// Trek: lay the root `id` out as starting `offset` device pixels past a whole pixel (see
+    /// `origin_fraction`). Before its layout is computed.
+    pub fn set_root_offset(&mut self, id: LayoutId, offset: Point<f32>) {
+        if offset == Point::default() {
+            self.root_offsets.remove(&id);
+        } else {
+            self.root_offsets.insert(id, offset);
+        }
     }
 }
 
