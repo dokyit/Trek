@@ -22,6 +22,8 @@ pub fn run(mode: Option<String>) {
     writeln!(out, "fake-mcp starting up").unwrap();
     out.flush().unwrap();
 
+    // `grow` adds `grown` to the tools, and says so (`notifications/tools/list_changed`).
+    let mut grown = false;
     let mut lines = stdin.lock().split(b'\n');
     while let Some(Ok(line)) = lines.next() {
         if line.is_empty() {
@@ -84,6 +86,9 @@ pub fn run(mode: Option<String>) {
                     tools.push(json!({ "name": "picture" }));
                     tools.push(json!({ "name": "fail" }));
                 }
+                if grown {
+                    tools.push(json!({ "name": "grown" }));
+                }
                 if std::env::var("FAKE_TOKEN").as_deref() == Ok("abc") {
                     tools.push(json!({ "name": "env_ok" }));
                 }
@@ -102,6 +107,14 @@ pub fn run(mode: Option<String>) {
                 }
                 Some("picture") => {
                     json!({ "content": [{ "type": "image", "mimeType": "image/png", "data": "aGk=" }] })
+                }
+                Some("grow") => {
+                    grown = true;
+                    say(
+                        &mut out,
+                        json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }),
+                    );
+                    json!({ "content": [{ "type": "text", "text": "grew" }] })
                 }
                 _ => json!({ "content": [{ "type": "text", "text": "done" }] }),
             };

@@ -55,6 +55,8 @@ enum Conn {
         stdin: ChildStdin,
         lines: ProtocolLines<BufReader<ChildStdout>>,
         next_id: u64,
+        /// The server said its tools changed (`notifications/tools/list_changed`).
+        tools_changed: bool,
     },
     Http {
         client: reqwest::Client,
@@ -90,6 +92,7 @@ impl Conn {
                     stdin,
                     lines: ProtocolLines::new(BufReader::new(stdout)),
                     next_id: 1,
+                    tools_changed: false,
                 };
                 conn.rpc("initialize", initialize()).await?;
                 conn.notify("notifications/initialized").await?;
@@ -149,6 +152,7 @@ impl Conn {
                 stdin,
                 lines,
                 next_id,
+                tools_changed,
                 ..
             } => {
                 let id = *next_id;
@@ -169,6 +173,10 @@ impl Conn {
                     let Ok(message) = serde_json::from_str::<Value>(&line) else {
                         continue;
                     };
+                    if message["method"] == "notifications/tools/list_changed" {
+                        *tools_changed = true;
+                        continue;
+                    }
                     // A reply to a call a Stop abandoned has an older id, and is passed over.
                     if message["id"] == json!(id) && message.get("method").is_none() {
                         if let Some(error) = message.get("error") {
@@ -214,6 +222,14 @@ impl Conn {
                 .await?;
                 answer.ok_or_else(|| format!("It didn't answer {method}."))
             }
+        }
+    }
+
+    /// Whether the server said its tools changed since this was last asked.
+    fn take_tools_changed(&mut self) -> bool {
+        match self {
+            Conn::Stdio { tools_changed, .. } => std::mem::take(tools_changed),
+            Conn::Http { .. } => false,
         }
     }
 
@@ -450,6 +466,10 @@ impl McpHub {
         .await;
         match answer {
             Ok(Ok(result)) => {
+                // Tools it added (the iPhone's, once one is connected) are listed afresh.
+                if conn.as_mut().is_some_and(Conn::take_tools_changed) {
+                    *entry.tools.lock().await = None;
+                }
                 let (text, ok, images) = render(&result);
                 self.images.lock().expect("images").extend(images);
                 (text, ok)
@@ -590,6 +610,19 @@ mod tests {
             [("image/png".to_string(), "aGk=".to_string())]
         );
         assert!(hub.take_images().is_empty());
+    }
+
+    /// A server that adds tools as it goes (Trek's iPhone tools, once a phone is connected) says
+    /// so, and they're listed afresh after the call that added them.
+    #[tokio::test]
+    async fn tools_a_server_adds_are_listed_after_it_says_so() {
+        let hub = fake();
+        assert!(hub.tool("fake", "grown").await.is_err());
+        let (out, ok) = hub.call("fake", "grow", json!({})).await;
+        assert!(ok && out == "grew", "{out}");
+        assert!(hub.tool("fake", "grown").await.is_ok());
+        let (out, ok) = hub.call("fake", "echo", json!({ "text": "still" })).await;
+        assert!(ok && out == "still", "{out}");
     }
 
     #[tokio::test]
