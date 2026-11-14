@@ -82,8 +82,9 @@ impl Phone {
         }
     }
 
-    /// The family before any iPhone has been connected (for the prompt budget).
-    #[cfg(test)]
+    /// The family before any iPhone has been connected (for the prompt budget, whose test runs on a
+    /// Mac: `main.rs`'s tool-family test module).
+    #[cfg(all(test, target_os = "macos"))]
     pub fn in_setup() -> Self {
         let mut phone = Self::with(None);
         phone.setup = Some(std::env::temp_dir().join("trek-phone-never-seen"));
