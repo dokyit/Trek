@@ -393,6 +393,7 @@ impl RemoteHandle {
                 &config.host.id,
                 &routes,
                 &w.certs().link_hashes(now_ms()),
+                w.config.push_key.is_some(),
             )
         });
         PairingOffer {

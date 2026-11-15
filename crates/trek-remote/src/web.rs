@@ -339,7 +339,9 @@ pub fn server_config(
 /// The pairing link a page opens (`https://trekdesktop.com/remote/#p=…`): everything after `#`,
 /// which a browser never sends to the site, is a base64url JSON of the code, the machine, every
 /// `host:port` it answers on, and the first certificates' hashes alone (when each is valid, the
-/// page is told once it pairs): the shorter the link, the plainer its QR code.
+/// page is told once it pairs): the shorter the link, the plainer its QR code. `push`: the
+/// machine sends notifications to the page (`web_push`), which an iPhone's Safari then says
+/// how to get (a Trek from before them leaves it out, and the page says nothing of them).
 pub fn pairing_link(
     base: &str,
     code: &str,
@@ -347,9 +349,10 @@ pub fn pairing_link(
     host_id: &str,
     routes: &[String],
     hashes: &[WebCertHash],
+    push: bool,
 ) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "v": 1,
         "code": code,
         "name": host_name,
@@ -357,6 +360,9 @@ pub fn pairing_link(
         "routes": routes,
         "certs": hashes.iter().map(|h| h.hash.as_str()).collect::<Vec<_>>(),
     });
+    if push {
+        payload["push"] = serde_json::Value::Bool(true);
+    }
     format!(
         "{base}#p={}",
         URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes())
@@ -468,6 +474,7 @@ mod tests {
             "7f3c",
             &["192.168.1.20:7420".into(), "100.101.1.2:7420".into()],
             &series.link_hashes(NOW),
+            true,
         );
         let (base, fragment) = link.split_once('#').unwrap();
         assert_eq!(base, REMOTE_URL);
@@ -482,6 +489,15 @@ mod tests {
         assert_eq!(json["routes"][1], "100.101.1.2:7420");
         assert_eq!(json["certs"].as_array().unwrap().len(), 2);
         assert_eq!(json["certs"][0], series.current(NOW).unwrap().hash());
+        assert_eq!(json["push"], true, "it sends notifications");
+        let without = pairing_link(REMOTE_URL, "K7Q2-9XMV", "Toby's PC", "7f3c", &[], &[], false);
+        assert!(!String::from_utf8(
+            URL_SAFE_NO_PAD
+                .decode(without.split_once("#p=").unwrap().1)
+                .unwrap()
+        )
+        .unwrap()
+        .contains("push"));
         assert!(
             link.len() < 420,
             "a plain QR code: {} characters",
