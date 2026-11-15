@@ -120,7 +120,7 @@ impl IdeWorkbench {
                                 .justify_center()
                                 .text_size(px(text::META))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(gpui_kit::white())
+                                .text_color(crate::palette::on_ember(cx))
                                 .child(if badge > 99 {
                                     "99+".to_string()
                                 } else {

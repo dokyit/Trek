@@ -1527,12 +1527,12 @@ impl EditorView {
                 .child(
                     button("editor-hunk-keep")
                         .bg(ember)
-                        .text_color(gpui_kit::white())
+                        .text_color(palette::on_ember(cx))
                         .hover(|s| s.opacity(0.9))
                         .child("Keep")
                         .child(kbd(
                             keys::hint(Id::KeepHunk),
-                            gpui_kit::white().opacity(0.75),
+                            palette::on_ember(cx).opacity(0.75),
                         ))
                         .on_click(cx.listener(|this, _, _, cx| this.act_on_hunk(true, cx))),
                 )

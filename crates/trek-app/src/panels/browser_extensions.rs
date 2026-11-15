@@ -619,7 +619,7 @@ pub fn toolbar(
                         .px(px(3.))
                         .rounded(px(radius::TAG))
                         .bg(crate::palette::ember(cx))
-                        .text_color(gpui::white())
+                        .text_color(crate::palette::on_ember(cx))
                         .text_size(px(text::META))
                         .line_height(px(11.))
                         .child(action.badge.clone())

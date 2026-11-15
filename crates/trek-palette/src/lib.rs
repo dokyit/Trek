@@ -95,6 +95,12 @@ pub fn send(cx: &App) -> Hsla {
 pub fn on_send(cx: &App) -> Hsla {
     theme_accent(cx).map_or(gpui_kit::white(), |a| a.on_accent)
 }
+/// The ink on an [`ember`] fill (a button, a count badge): the theme's own primary text, which is
+/// dark on Night (white on its ember is 2.6:1) and white on Paper; a theme with its own accent
+/// brings its ink.
+pub fn on_ember(cx: &App) -> Hsla {
+    theme_accent(cx).map_or(cx.theme().primary_foreground, |a| a.on_accent)
+}
 pub fn token(cx: &App) -> Hsla {
     pick(cx, TOKEN)
 }
@@ -311,5 +317,15 @@ mod tests {
             let c = contrast(colour(name, "base.red"), colour(name, "background"));
             assert!(c >= 4.5, "{name}: red text on the window is {c:.2}:1");
         }
+    }
+
+    #[test]
+    fn the_ink_on_night_s_ember_is_dark_not_white() {
+        // `on_ember` is the theme's primary text: white on Night's ember is 2.6:1, so it must not
+        // be white there (the editor's Keep and the count badges once drew white).
+        let ink = colour("Trek Night", "primary.foreground");
+        let c = contrast(ink, EMBER.0);
+        assert!(c >= 4.5, "Night's text on ember is {c:.2}:1");
+        assert!(contrast(0xFFFFFF, EMBER.0) < 4.5);
     }
 }
