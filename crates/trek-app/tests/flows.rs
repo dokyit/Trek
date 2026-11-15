@@ -673,6 +673,30 @@ fn an_approval_card_keeps_a_long_command_to_a_scrolling_box() {
     });
 }
 
+/// Several approvals waiting: the card says which one it is.
+#[test]
+fn an_approval_card_counts_the_ones_waiting() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let ask = |rid: &str| AgentEvent::PermissionRequest {
+            request_id: rid.into(),
+            title: "Run command".into(),
+            detail: format!("make {rid}"),
+            prompt: None,
+            call: None,
+        };
+        trek.update(cx, |ws, cx| ws.apply_events(&id, vec![ask("one")], cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "allow") && !trek.visible(cx, "permission-count"));
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(&id, vec![ask("two"), ask("three")], cx)
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "permission-count"));
+    });
+}
+
 #[test]
 fn question_cards_take_picks_typed_answers_or_a_skip() {
     run(async |cx| {
@@ -986,9 +1010,11 @@ fn a_failed_turn_s_error_can_be_copied_and_stays_short() {
             ws.apply_events(&id, vec![AgentEvent::Error(long)], cx)
         });
         trek.render(cx);
-        let last = trek.item_ix(cx, &id, |i| {
-            matches!(i, Item::Error { text } if text.contains("line 60"))
-        });
+        let last = trek.item_ix(
+            cx,
+            &id,
+            |i| matches!(i, Item::Error { text } if text.contains("line 60")),
+        );
         let area = trek
             .bounds(cx, ("error-text", last))
             .expect("the error's box");

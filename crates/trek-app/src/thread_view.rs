@@ -2358,7 +2358,8 @@ impl ThreadView {
                     rewinding,
                     action(
                         ("rewind-user", ix),
-                        Icon::new(crate::assets::Lucide::Undo2),
+                        // Not Undo's arrow: rewinding takes back this message and all after it.
+                        Icon::new(crate::assets::Lucide::RotateCcwClock),
                         if busy {
                             "Stop the running turn to rewind".into()
                         } else {
@@ -4857,6 +4858,8 @@ impl ThreadView {
         let theme = cx.theme().clone();
         if let Some(p) = live.permissions.first().cloned() {
             let agent = thread.agent.display_name();
+            // More than one waiting: this is the first, the others come after it.
+            let waiting = live.permissions.len();
             let rid_anim = p.request_id.clone();
             let rise = ws.motion(cx);
             let ws_handle = self.workspace.clone();
@@ -4918,7 +4921,16 @@ impl ThreadView {
                                         div()
                                             .font_semibold()
                                             .child(format!("{agent} wants to: {}", p.title)),
-                                    ),
+                                    )
+                                    .when(waiting > 1, |el| {
+                                        el.child(
+                                            div()
+                                                .id("permission-count")
+                                                .test_support()
+                                                .text_color(theme.muted_foreground)
+                                                .child(format!("1 of {waiting}")),
+                                        )
+                                    }),
                             )
                             .when(!p.detail.is_empty(), |el| {
                                 // A long command scrolls here: the buttons stay in reach.
