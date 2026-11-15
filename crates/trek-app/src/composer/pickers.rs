@@ -37,6 +37,9 @@ enum Sub {
 enum Rail {
     Favorites,
     Agent(AgentId),
+    /// An agent that can't run now (signed out, not installed, its server not running): it has
+    /// no models to list, and says why instead.
+    Unready(AgentId),
 }
 
 /// A composer's menus and picker, as they stand.
@@ -49,6 +52,8 @@ pub struct Pickers {
     /// The `/`, `@` or `$` token being completed, and the highlighted row.
     pub trigger: Option<Trigger>,
     pub picked: usize,
+    /// The model the keyboard is on in the model list (↑ ↓, ↩ picks it).
+    model_cursor: usize,
     /// Project files for `@`: indexed per folder, and again once they're `INDEX_TTL` old
     /// (the agent creates and deletes files while the app is open).
     file_index: Option<(PathBuf, Arc<Vec<String>>)>,
@@ -83,6 +88,7 @@ impl Pickers {
             rail: None,
             trigger: None,
             picked: 0,
+            model_cursor: 0,
             file_index: None,
             indexed_at: None,
             indexing: None,
@@ -212,6 +218,15 @@ pub fn model_pill<H: PickerHost>(
         .map(|m| model_name(&models, m))
         .or_else(|| default_model(&models).map(|m| m.name.clone()))
         .unwrap_or_else(|| prefs.agent.display_name());
+    // An effort the model ignores isn't drawn (a model on this computer has none to give).
+    let has_effort = {
+        let shown = prefs
+            .model
+            .as_deref()
+            .and_then(|m| models.iter().find(|i| same_model(m, &i.id)))
+            .or_else(|| default_model(&models));
+        trek_core::catalog::takes_effort(&prefs.agent, shown)
+    };
     // Which account it runs on, once the agent has more than one and there's room for it beside
     // the model's name (which would be cut short for it otherwise).
     let account = ws
@@ -272,7 +287,7 @@ pub fn model_pill<H: PickerHost>(
                             .child(label),
                     )
                 })
-                .when(!narrow, |el| {
+                .when(!narrow && has_effort, |el| {
                     let max = prefs.effort == Effort::Max;
                     el.child(
                         h_flex()
@@ -310,6 +325,7 @@ fn close_model_menu<H: PickerHost>(this: &mut H, cx: &mut Context<H>) {
     let p = this.pickers();
     p.model_open = false;
     p.sub = None;
+    p.model_cursor = 0;
     p.model_fetches.clear();
     this.overlay_changed(cx);
     cx.notify();
@@ -328,6 +344,7 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         .and_then(|c| models.iter().find(|m| same_model(c, &m.id)))
         .cloned();
     let fast_ok = current_info.as_ref().is_some_and(|m| m.fast.is_some());
+    let has_effort = trek_core::catalog::takes_effort(&prefs.agent, current_info.as_ref());
     // Not there at all for an agent with one account. The agent's accounts the menu shows: with a
     // switch waiting, the new agent's.
     let choices = ws.account_choices_for(host.scope(), &prefs.agent);
@@ -361,7 +378,8 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                     ),
             )
         })
-        .child(
+        .when(has_effort, |el| {
+            el.child(
             look::row("mm-effort", sub == Some(Sub::Effort), cx)
                 .test_support()
                 .child(
@@ -384,7 +402,8 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                     this.pickers().sub = Some(Sub::Effort);
                     cx.notify();
                 })),
-        )
+            )
+        })
         .child(
             look::row("mm-model", sub == Some(Sub::Model), cx)
                 .test_support()
@@ -399,15 +418,13 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
                     ),
                 )
                 .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
-                .on_hover(cx.listener(|this: &mut H, hovered: &bool, _, cx| {
+                .on_hover(cx.listener(|this: &mut H, hovered: &bool, window, cx| {
                     if *hovered {
-                        this.pickers().sub = Some(Sub::Model);
-                        cx.notify();
+                        show_model_panel(this, window, cx);
                     }
                 }))
-                .on_click(cx.listener(|this: &mut H, _, _, cx| {
-                    this.pickers().sub = Some(Sub::Model);
-                    cx.notify();
+                .on_click(cx.listener(|this: &mut H, _, window, cx| {
+                    show_model_panel(this, window, cx);
                 })),
         )
         .when(!choices.is_empty(), |el| {
@@ -563,17 +580,140 @@ fn account_panel<H: PickerHost>(
         .into_any_element()
 }
 
+/// The model panel's rail and what it lists for the search typed: the models (of the agent on the
+/// rail, or the favourites), and "Use <what was typed>" when no model has that exact id (an agent
+/// takes models its list doesn't know).
+struct Choices {
+    rail: Rail,
+    list: Vec<(AgentId, ModelInfo)>,
+    custom: Option<(AgentId, String)>,
+}
+
+fn model_choices<H: PickerHost>(host: &H, prefs: &Prefs, cx: &App) -> Choices {
+    let ws = host.workspace().read(cx);
+    let rail = host
+        .pickers_ref()
+        .rail
+        .clone()
+        .unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
+    let favorites = ws.settings.general.favorite_models.clone();
+    let query_clean = host
+        .pickers_ref()
+        .model_search
+        .read(cx)
+        .value()
+        .trim()
+        .to_string();
+    let query = query_clean.to_lowercase();
+    let list: Vec<(AgentId, ModelInfo)> = match &rail {
+        Rail::Agent(a) => ws
+            .models_for(a)
+            .into_iter()
+            .map(|m| (a.clone(), m))
+            .collect(),
+        Rail::Favorites => ws
+            .ready_agents()
+            .iter()
+            .flat_map(|a| ws.models_for(a).into_iter().map(move |m| (a.clone(), m)))
+            .filter(|(a, m)| favorites.contains(&format!("{}/{}", a.key(), m.id)))
+            .collect(),
+        Rail::Unready(_) => vec![],
+    };
+    let list: Vec<(AgentId, ModelInfo)> = list
+        .into_iter()
+        .filter(|(_, m)| {
+            query.is_empty()
+                || m.name.to_lowercase().contains(&query)
+                || m.id.to_lowercase().contains(&query)
+        })
+        .collect();
+    let has_exact_match = list
+        .iter()
+        .any(|(_, m)| m.id.eq_ignore_ascii_case(&query_clean));
+    let custom = match &rail {
+        Rail::Agent(a) if !query_clean.is_empty() && !has_exact_match => {
+            Some((a.clone(), query_clean))
+        }
+        _ => None,
+    };
+    Choices { rail, list, custom }
+}
+
+/// The Model panel opens beside the menu, and the keyboard goes to its search field.
+fn show_model_panel<H: PickerHost>(host: &mut H, window: &mut Window, cx: &mut Context<H>) {
+    let p = host.pickers();
+    p.sub = Some(Sub::Model);
+    let search = p.model_search.clone();
+    if !search.read(cx).focus_handle(cx).is_focused(window) {
+        search.update(cx, |s, cx| s.focus(window, cx));
+    }
+    cx.notify();
+}
+
+/// Choose `agent`'s `model` and close the menu.
+fn pick_model<H: PickerHost>(host: &mut H, agent: AgentId, model: String, cx: &mut Context<H>) {
+    update_prefs(host, cx, |p| {
+        p.agent = agent;
+        p.model = Some(model);
+    });
+    close_model_menu(host, cx);
+}
+
+/// A key while the model menu is open: ↑ ↓ move through the models (opening the panel first),
+/// ↩ chooses the one the keyboard is on, ⎋ closes the menu. Returns whether the key was taken.
+fn model_key<H: PickerHost>(
+    host: &mut H,
+    key: &str,
+    window: &mut Window,
+    cx: &mut Context<H>,
+) -> bool {
+    if !matches!(key, "up" | "down" | "enter" | "escape") {
+        return false;
+    }
+    if key == "escape" {
+        close_model_menu(host, cx);
+        let input = host.input().read(cx).focus_handle(cx);
+        input.focus(window, cx);
+        return true;
+    }
+    if host.pickers_ref().sub != Some(Sub::Model) {
+        if key == "enter" {
+            return false;
+        }
+        show_model_panel(host, window, cx);
+        return true;
+    }
+    let prefs = shown_prefs(host, cx);
+    let choices = model_choices(host, &prefs, cx);
+    let n = choices.list.len() + usize::from(choices.custom.is_some());
+    if n == 0 {
+        return key != "enter";
+    }
+    let at = host.pickers_ref().model_cursor.min(n - 1);
+    match key {
+        "up" => host.pickers().model_cursor = (at + n - 1) % n,
+        "down" => host.pickers().model_cursor = (at + 1) % n,
+        _ => {
+            let chosen = match choices.list.get(at) {
+                Some((agent, m)) => Some((agent.clone(), m.id.clone())),
+                None => choices.custom.clone(),
+            };
+            if let Some((agent, id)) = chosen {
+                pick_model(host, agent, id, cx);
+            }
+        }
+    }
+    cx.notify();
+    true
+}
+
 fn model_panel<H: PickerHost>(
     host: &mut H,
     prefs: &Prefs,
     current: Option<&str>,
     cx: &mut Context<H>,
 ) -> AnyElement {
-    let rail = host
-        .pickers_ref()
-        .rail
-        .clone()
-        .unwrap_or_else(|| Rail::Agent(prefs.agent.clone()));
+    let Choices { rail, list, custom } = model_choices(host, prefs, cx);
     if let Rail::Agent(AgentId::Direct(ref p)) = rail {
         let (empty, inflight) = {
             let ws = host.workspace().read(cx);
@@ -601,10 +741,19 @@ fn model_panel<H: PickerHost>(
 
     let ws = host.workspace().read(cx);
     let agents = ws.ready_agents();
+    let unready = ws.unready_agents();
     let favorites = ws.settings.general.favorite_models.clone();
-    let query_raw = host.pickers_ref().model_search.read(cx).value();
-    let query_clean = query_raw.trim().to_string();
-    let query = query_clean.to_lowercase();
+    let searching = !host
+        .pickers_ref()
+        .model_search
+        .read(cx)
+        .value()
+        .trim()
+        .is_empty();
+    let cursor = host
+        .pickers_ref()
+        .model_cursor
+        .min((list.len() + usize::from(custom.is_some())).saturating_sub(1));
     let theme = cx.theme().clone();
     // The rail names the agent that runs a model, not necessarily its maker. GitHub Copilot,
     // Devin and routed Codex setups can each offer models from several providers, so say
@@ -612,44 +761,18 @@ fn model_panel<H: PickerHost>(
     let source = match &rail {
         Rail::Favorites => "Favorite models".to_string(),
         Rail::Agent(agent) => format!("Models through {}", agent.display_name()),
+        Rail::Unready(agent) => agent.display_name(),
     };
-
-    // (agent, model) pairs for the selected rail entry.
-    let list: Vec<(AgentId, ModelInfo)> = match &rail {
-        Rail::Agent(a) => ws
-            .models_for(a)
-            .into_iter()
-            .map(|m| (a.clone(), m))
-            .collect(),
-        Rail::Favorites => agents
+    // What an agent that can't run says, and where to put that right.
+    let unready_note = match &rail {
+        Rail::Unready(agent) => unready
             .iter()
-            .flat_map(|a| ws.models_for(a).into_iter().map(move |m| (a.clone(), m)))
-            .filter(|(a, m)| favorites.contains(&format!("{}/{}", a.key(), m.id)))
-            .collect(),
-    };
-    let list: Vec<(AgentId, ModelInfo)> = list
-        .into_iter()
-        .filter(|(_, m)| {
-            query.is_empty()
-                || m.name.to_lowercase().contains(&query)
-                || m.id.to_lowercase().contains(&query)
-        })
-        .collect();
-
-    let has_exact_match = list
-        .iter()
-        .any(|(_, m)| m.id.eq_ignore_ascii_case(&query_clean));
-    let custom_target = if let Rail::Agent(ref a) = rail {
-        if !query_clean.is_empty() && !has_exact_match {
-            Some((a.clone(), query_clean.clone()))
-        } else {
-            None
-        }
-    } else {
-        None
+            .find(|(a, ..)| a == agent)
+            .map(|(_, name, why)| why.says(name)),
+        _ => None,
     };
 
-    let custom_row = custom_target.map(|(agent, custom_id)| {
+    let custom_row = custom.map(|(agent, custom_id)| {
         let agent2 = agent.clone();
         let id2 = custom_id.clone();
         look::picked_row(
@@ -657,7 +780,9 @@ fn model_panel<H: PickerHost>(
             false,
             cx,
         )
+        .test_support()
         .group("model-row")
+        .when(cursor == list.len(), |el| el.bg(look::chip_fill(cx)))
         .child(
             h_flex()
                 .gap(px(6.))
@@ -676,12 +801,7 @@ fn model_panel<H: PickerHost>(
                 ),
         )
         .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-            let (agent, id) = (agent2.clone(), id2.clone());
-            update_prefs(this, cx, |p| {
-                p.agent = agent;
-                p.model = Some(id);
-            });
-            close_model_menu(this, cx);
+            pick_model(this, agent2.clone(), id2.clone(), cx);
         }))
     });
 
@@ -708,8 +828,14 @@ fn model_panel<H: PickerHost>(
                 gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
             })
             .child(icon)
-            .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-                this.pickers().rail = Some(target.clone());
+            .on_click(cx.listener(move |this: &mut H, _, window, cx| {
+                let p = this.pickers();
+                p.rail = Some(target.clone());
+                p.model_cursor = 0;
+                // The search keeps the keyboard when another agent's list comes up.
+                if !matches!(target, Rail::Unready(_)) {
+                    show_model_panel(this, window, cx);
+                }
                 cx.notify();
             }))
     };
@@ -739,8 +865,24 @@ fn model_panel<H: PickerHost>(
             cx,
         ));
     }
+    // Agents that can't run now: dimmed, and the panel says why.
+    for (a, name, why) in &unready {
+        rail_col = rail_col.child(
+            rail_button(
+                SharedString::from(format!("rail-{}", a.key())),
+                rail == Rail::Unready(a.clone()),
+                div()
+                    .opacity(0.45)
+                    .child(ui::agent_glyph(a, cx))
+                    .into_any_element(),
+                why.says(name).into(),
+                Rail::Unready(a.clone()),
+                cx,
+            ),
+        );
+    }
 
-    let rows = list.into_iter().map(|(agent, m)| {
+    let rows = list.into_iter().enumerate().map(|(i, (agent, m))| {
         let selected = agent == prefs.agent && current.is_some_and(|c| same_model(c, &m.id));
         let fav_key = format!("{}/{}", agent.key(), m.id);
         let is_fav = favorites.contains(&fav_key);
@@ -753,6 +895,7 @@ fn model_panel<H: PickerHost>(
         )
         .test_support()
         .group("model-row")
+        .when(i == cursor, |el| el.bg(look::chip_fill(cx)))
         .child(div().flex_1().min_w_0().truncate().child(m.name.clone()))
         .child(
             div()
@@ -787,16 +930,44 @@ fn model_panel<H: PickerHost>(
             el.child(Icon::new(IconName::Check).size(px(13.)))
         })
         .on_click(cx.listener(move |this: &mut H, _, _, cx| {
-            let (agent, id) = (agent2.clone(), id.clone());
-            update_prefs(this, cx, |p| {
-                p.agent = agent;
-                p.model = Some(id);
-            });
-            close_model_menu(this, cx);
+            pick_model(this, agent2.clone(), id.clone(), cx);
         }))
     });
 
     let search = host.pickers_ref().model_search.clone();
+    // What an empty list says, and where to put it right: a provider that gave no models (not
+    // running, no key) isn't "no match".
+    let (empty_text, fix): (String, Option<crate::workspace::SettingsPage>) = {
+        use crate::workspace::SettingsPage;
+        if is_inflight {
+            ("Loading models…".into(), None)
+        } else {
+            match &rail {
+                Rail::Favorites => ("Hover a model and press the star to keep it here.".into(), None),
+                Rail::Unready(_) => (
+                    unready_note.clone().unwrap_or_default(),
+                    Some(SettingsPage::Agents),
+                ),
+                Rail::Agent(_) if searching => ("No models match.".into(), None),
+                Rail::Agent(AgentId::Direct(provider)) => {
+                    let name = AgentId::Direct(provider.clone()).display_name();
+                    if matches!(provider.as_str(), "ollama" | "lmstudio" | "llamacpp") {
+                        (
+                            format!("No models came back from {name}. Is it running?"),
+                            Some(SettingsPage::LocalModels),
+                        )
+                    } else {
+                        (
+                            format!("No models came back from {name}. Check its key."),
+                            Some(SettingsPage::ApiKeys),
+                        )
+                    }
+                }
+                Rail::Agent(agent) => (format!("{} hasn't listed its models yet.", agent.display_name()), None),
+            }
+        }
+    };
+    let unready_panel = matches!(rail, Rail::Unready(_));
     look::surface(cx)
         .p_0()
         .w(px(360.))
@@ -812,12 +983,12 @@ fn model_panel<H: PickerHost>(
                             v_flex()
                                 .px(px(9.))
                                 .pt(px(8.))
-                                .pb(px(4.))
+                                .pb(px(if unready_panel { 8. } else { 4. }))
                                 .gap(px(4.))
                                 .border_b_1()
                                 .border_color(look::hairline(cx))
                                 .child(div().id("model-source").test_support().text_size(px(text::LABEL)).text_color(theme.muted_foreground).child(source))
-                                .child(Input::new(&search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground))),
+                                .when(!unready_panel, |el| el.child(Input::new(&search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)))),
                         )
                         .child(
                             v_flex()
@@ -828,14 +999,39 @@ fn model_panel<H: PickerHost>(
                                 .children(rows)
                                 .when_some(custom_row, |el, row| el.child(row))
                                 .when(empty, |el| {
-                                    el.child(div().p_3().text_size(to_rems(text::LABEL)).text_color(theme.muted_foreground).child(if is_inflight {
-                                        "Loading models…"
-                                    } else {
-                                        match rail {
-                                            Rail::Favorites => "Hover a model and press the star to keep it here.",
-                                            _ => "No models match.",
-                                        }
-                                    }))
+                                    el.child(
+                                        v_flex()
+                                            .id("model-empty")
+                                            .test_support()
+                                            .p_3()
+                                            .gap(px(8.))
+                                            .text_size(to_rems(text::LABEL))
+                                            .text_color(theme.muted_foreground)
+                                            .child(empty_text)
+                                            .when_some(fix, |el, page| {
+                                                el.child(
+                                                    div()
+                                                        .id("model-fix")
+                                                        .test_support()
+                                                        .cursor_pointer()
+                                                        .text_color(theme.foreground)
+                                                        .hover(|s| s.underline())
+                                                        .child(format!("Open {}", page.label()))
+                                                        .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+                                                            let route = Route::Settings(page);
+                                                            let main = this.scope().in_main_window();
+                                                            this.workspace().update(cx, |ws, cx| {
+                                                                if main {
+                                                                    ws.navigate(route, cx)
+                                                                } else {
+                                                                    ws.show_in_main(route, cx)
+                                                                }
+                                                            });
+                                                            close_model_menu(this, cx);
+                                                        })),
+                                                )
+                                            }),
+                                    )
                                 }),
                         ),
                 ),
@@ -1312,6 +1508,11 @@ pub fn picker_action<H: PickerHost>(
     window: &mut Window,
     cx: &mut Context<H>,
 ) {
+    if host.pickers_ref().model_open && model_key(host, key, window, cx) {
+        cx.stop_propagation();
+        cx.notify();
+        return;
+    }
     let n = picker_items(host, cx).len();
     if host.pickers_ref().trigger.is_none() || (n == 0 && key != "escape") {
         cx.propagate();
@@ -1348,6 +1549,30 @@ pub fn picker_key<H: PickerHost>(
     window: &mut Window,
     cx: &mut Context<H>,
 ) {
+    // The model menu open: its keys first. Typing starts the search (the Model panel opens, the
+    // field takes the letter), and moves the keyboard back to the top of the list.
+    if host.pickers_ref().model_open {
+        let ks = &ev.keystroke;
+        if !ks.modifiers.modified() && model_key(host, ks.key.as_str(), window, cx) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if !ks.modifiers.secondary() && !ks.modifiers.alt && !ks.modifiers.control {
+            host.pickers().model_cursor = 0;
+            if let Some(typed) = ks.key_char.as_deref().filter(|c| c.chars().all(|c| !c.is_control()))
+                && host.pickers_ref().sub != Some(Sub::Model)
+            {
+                show_model_panel(host, window, cx);
+                let search = host.pickers_ref().model_search.clone();
+                let text = format!("{}{typed}", search.read(cx).value());
+                search.update(cx, |s, cx| s.set_value(text, window, cx));
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }
+        return;
+    }
     if host.pickers_ref().trigger.is_none() {
         return;
     }

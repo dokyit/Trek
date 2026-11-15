@@ -1609,3 +1609,148 @@ fn files(trek: &Trek, names: [&str; 2]) -> (std::path::PathBuf, std::path::PathB
 fn tiles(trek: &Trek, cx: &gpui_kit::TestAppContext) -> Vec<std::path::PathBuf> {
     cx.read(|cx| trek.root.read(cx).composer.read(cx).attached_files())
 }
+
+fn open_model_list(trek: &Trek, cx: &mut gpui_kit::TestAppContext) {
+    trek.render(cx);
+    trek.click(cx, "model-pill");
+    trek.render(cx);
+    // Its search has the keyboard from here.
+    trek.click(cx, "mm-model");
+    trek.render(cx);
+}
+
+fn chosen_model(trek: &Trek, cx: &mut gpui_kit::TestAppContext) -> Option<String> {
+    trek.read(cx, |ws, _| ws.prefs().model)
+}
+
+/// The model menu works without the mouse once its Model panel is up: typing narrows the list,
+/// ↑ ↓ move through it, ↩ chooses and ⎋ closes.
+#[test]
+fn the_model_menu_is_driven_from_the_keyboard() {
+    run(async |cx| {
+        let trek = open(cx);
+        open_model_list(&trek, cx);
+        assert!(trek.visible(cx, "m-direct:mock-mock-swift"));
+        assert!(trek.visible(cx, "m-direct:mock-mock-deep"));
+        // ↓ to the second row, ↩ picks it.
+        trek.press(cx, "down");
+        trek.press(cx, "enter");
+        assert_eq!(chosen_model(&trek, cx).as_deref(), Some("mock-deep"));
+        trek.render(cx);
+        assert!(!trek.visible(cx, "mm-model"), "the menu closed");
+        // Typing narrows it; ↩ takes the first match.
+        open_model_list(&trek, cx);
+        trek.type_text(cx, "swift");
+        trek.render(cx);
+        assert!(trek.visible(cx, "m-direct:mock-mock-swift"));
+        assert!(!trek.visible(cx, "m-direct:mock-mock-deep"));
+        trek.press(cx, "enter");
+        assert_eq!(chosen_model(&trek, cx).as_deref(), Some("mock-swift"));
+        // ⎋ closes it with nothing changed.
+        open_model_list(&trek, cx);
+        trek.press(cx, "down");
+        trek.press(cx, "escape");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "mm-model"));
+        assert_eq!(chosen_model(&trek, cx).as_deref(), Some("mock-swift"));
+    });
+}
+
+/// An agent that can't run (signed out, a server that isn't running) is still on the rail,
+/// dimmed, and its panel says why and where to put it right.
+#[test]
+fn an_agent_that_needs_sign_in_is_in_the_model_menu_with_the_reason() {
+    use trek_core::AgentId;
+    use trek_core::detect::{Availability, DetectedAgent};
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.agents = vec![DetectedAgent {
+                agent: AgentId::Codex,
+                name: "Codex".into(),
+                path: None,
+                version: None,
+                availability: Availability::NeedsLogin,
+                models: vec![],
+                install_hint: None,
+            }];
+            cx.notify();
+        });
+        let listed = trek.read(cx, |ws, _| ws.unready_agents());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, AgentId::Codex);
+        assert_eq!(listed[0].2.says("Codex"), "Codex needs you to sign in.");
+        open_model_list(&trek, cx);
+        assert!(trek.visible(cx, "rail-codex"));
+        trek.click(cx, "rail-codex");
+        trek.render(cx);
+        assert!(trek.visible(cx, "model-empty") && trek.visible(cx, "model-fix"));
+        trek.click(cx, "model-fix");
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Settings(trek_app::workspace::SettingsPage::Agents)
+        );
+    });
+}
+
+/// A provider that gave no models says so and points at its settings, instead of "No models
+/// match." with nothing typed.
+#[test]
+fn a_provider_with_no_models_does_not_say_no_models_match() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.settings.api_providers.push("ollama".into());
+            cx.notify();
+        });
+        open_model_list(&trek, cx);
+        trek.click(cx, "rail-direct:ollama");
+        trek.render(cx);
+        assert!(trek.visible(cx, "model-fix"), "a way to Local Models");
+        trek.type_text(cx, "zzz");
+        trek.render(cx);
+        // A name typed is offered as it is ("Use \"zzz\""): nothing is wrong, nothing to fix.
+        assert!(trek.visible(cx, "m-custom-zzz") && !trek.visible(cx, "model-fix"));
+    });
+}
+
+/// A model on this computer takes no effort: its menu has no Effort row and its pill no signal
+/// bars, where a model with levels keeps both.
+#[test]
+fn a_local_model_has_no_effort_to_pick() {
+    use trek_core::AgentId;
+    use trek_core::catalog::ModelInfo;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.render(cx);
+        trek.click(cx, "model-pill");
+        trek.render(cx);
+        assert!(trek.visible(cx, "mm-effort"), "the mock's models have levels");
+        trek.press(cx, "escape");
+        trek.update(cx, |ws, cx| {
+            ws.direct_models.insert(
+                "ollama".into(),
+                vec![ModelInfo {
+                    id: "llama3".into(),
+                    name: "llama3".into(),
+                    efforts: vec![],
+                    tier: 0,
+                    fast: None,
+                    context: None,
+                    caps: None,
+                }],
+            );
+            ws.settings.api_providers.push("ollama".into());
+            let mut prefs = ws.prefs();
+            prefs.agent = AgentId::Direct("ollama".into());
+            prefs.model = Some("llama3".into());
+            ws.set_prefs(prefs, cx);
+        });
+        trek.render(cx);
+        trek.click(cx, "model-pill");
+        trek.render(cx);
+        assert!(trek.visible(cx, "mm-model"));
+        assert!(!trek.visible(cx, "mm-effort"));
+    });
+}

@@ -673,7 +673,11 @@ impl AiInput {
     /// Enter reaches here before the textarea: it picks a row while the picker is open; ⌘↩ is
     /// `keep_all_or_send`.
     fn on_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pickers.trigger.is_some() && !action.shift && !action.secondary {
+        // The model menu open takes ↩ too, when its search has the keyboard (`pickers::model_key`).
+        if (self.pickers.trigger.is_some() || self.pickers.model_open)
+            && !action.shift
+            && !action.secondary
+        {
             pickers::picker_action(self, "enter", window, cx);
         } else if action.secondary && !action.shift {
             cx.stop_propagation();

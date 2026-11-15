@@ -180,6 +180,25 @@ impl SettingsPage {
     }
 }
 
+/// Why an agent isn't in the model menu's list of agents to pick from (`unready_agents`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unready {
+    SignedOut,
+    NotRunning,
+    NotInstalled,
+}
+
+impl Unready {
+    /// What the menu says of an agent named `name`.
+    pub fn says(self, name: &str) -> String {
+        match self {
+            Unready::SignedOut => format!("{name} needs you to sign in."),
+            Unready::NotRunning => format!("{name} isn't running."),
+            Unready::NotInstalled => format!("{name} isn't installed."),
+        }
+    }
+}
+
 /// Composer choices: agent, model, effort, hand-holding, plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prefs {
@@ -5074,6 +5093,43 @@ impl Workspace {
         out.retain(|a| !self.settings.disabled_agents.contains(&a.key()));
         if out.is_empty() {
             out.push(AgentId::ClaudeCode);
+        }
+        out
+    }
+
+    /// Agents the model menu can't offer, and why, so it can say so and point at Settings: signed
+    /// out, a local server that isn't running, and (only when nothing else is ready, so a user who
+    /// never installed Codex isn't reminded of it) not installed.
+    pub fn unready_agents(&self) -> Vec<(AgentId, String, Unready)> {
+        let ready = self.ready_agents();
+        let nothing_works = ready.iter().all(|a| {
+            self.agents
+                .iter()
+                .find(|d| d.agent == *a)
+                .is_some_and(|d| d.availability != Availability::Ready)
+        });
+        let mut out = Vec::new();
+        for d in &self.agents {
+            if ready.contains(&d.agent) || self.settings.disabled_agents.contains(&d.agent.key()) {
+                continue;
+            }
+            let why = match d.availability {
+                Availability::NeedsLogin => Unready::SignedOut,
+                Availability::Offline => Unready::NotRunning,
+                Availability::NotInstalled if nothing_works => Unready::NotInstalled,
+                Availability::NotInstalled => continue,
+                // Installed, but its login lapsed (found when it was probed).
+                Availability::Ready
+                    if self
+                        .acp_info
+                        .get(&d.agent.key())
+                        .is_some_and(|i| i.as_ref().is_ok_and(|i| i.needs_auth)) =>
+                {
+                    Unready::SignedOut
+                }
+                Availability::Ready => continue,
+            };
+            out.push((d.agent.clone(), d.name.clone(), why));
         }
         out
     }
