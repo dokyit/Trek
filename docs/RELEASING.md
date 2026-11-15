@@ -414,7 +414,7 @@ access (ransomware protection), when it's on, lets only programs it trusts write
 
 The install line comes from `release.sh`, not from whoever writes the notes. Before that, each release's
 body depended on its `--notes` file: beta.3's said "Unzip it into a folder you own (not Program Files)",
-which put Tobias's own install under `OneDrive\Documents`, where Controlled folder access blocked the
+which put one install under `OneDrive\Documents`, where Controlled folder access blocked the
 updater. Now every body carries the block from `trek_install_block`, and a `--notes` file that has its own
 keeps it.
 

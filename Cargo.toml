@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.4.54"
 edition = "2024"
 license = "Apache-2.0"
-authors = ["Tobias"]
+authors = ["Toby Dokyi"]
 repository = "https://github.com/dokyit/Trek"
 
 [workspace.dependencies]
