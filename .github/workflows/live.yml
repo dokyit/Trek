@@ -127,6 +127,7 @@ jobs:
             ${{ env.RUNTIME }}/shot/live-*.png
             ${{ env.RUNTIME }}/trek.log
           if-no-files-found: warn
+          retention-days: 7
 
       - name: Cache contents
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
@@ -284,6 +285,7 @@ jobs:
             start.json
             live-files/
           if-no-files-found: warn
+          retention-days: 7
 
       - name: Cache contents
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
