@@ -673,7 +673,7 @@ live = ["pair-web", "wait 800", "route settings:phone", "wait 400", "reveal mobi
 how = { macos = "Shared code: trek_remote::web serves WebTransport (HTTP/3 over QUIC) beside the phone server's WebSocket, at the same addresses and port over UDP, its certificate a series of 13-day ECDSA ones the page pins by hash; the page is site/remote, deployed with the site.", windows = "The same code. Windows Firewall's question for Trek writes a rule for UDP as well as TCP, so an answer of Allow lets both in." }
 note = "Checked on a Windows 11 PC: headless Chrome opened the pairing link the capture build wrote (`pair-web`, the page served from site/ by script/site/serve.mjs), paired over WebTransport with the certificate pinned from the link, listed the threads, allowed a scripted agent's command (the agent carried on), and sent a follow-up the agent answered; Trek's devices.json had the browser as a `web` device, connected (script/site/remote-e2e.mjs)."
 code = ["crates/trek-remote/src/web.rs", "crates/trek-app/src/remote.rs", "crates/trek-app/src/settings_view/mobile.rs"]
-tests = ["crates/trek-remote/tests/web.rs", "crates/trek-app/src/settings_view/mobile.rs"]
+tests = ["crates/trek-remote/tests/web.rs", "crates/trek-app/src/settings_view/mobile.rs", "crates/trek-app/tests/setup_flows.rs"]
 
 [[feature.promise]]
 what = "A page pairs and says hello over WebTransport, the certificate pinned by the hashes in its pairing link, and learns the whole series of certificates"
