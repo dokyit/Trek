@@ -387,7 +387,8 @@ mod tests {
             B64.encode(&body),
             "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN"
         );
-        assert_eq!(body.len(), 145);
+        // The header, the 41 bytes of text, the delimiter and the tag.
+        assert_eq!(body.len(), 86 + 41 + 1 + 16);
     }
 
     /// What `encrypt` sends, a phone opens: the browser's side, with a key pair made for the test.
