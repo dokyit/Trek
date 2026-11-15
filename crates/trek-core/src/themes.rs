@@ -42,6 +42,25 @@
 //! [motion]
 //! style = "brisk"                      # "still", "brisk", "standard" or "calm"
 //!
+//! [lines]
+//! pills = "like-corners"               # pills and circles too: "round" (Trek's) or "like-corners"
+//! borders = 1                          # every border's weight against Trek's: 0 none, up to 3
+//! shadows = 0                          # 0 flat to 1 Trek's
+//!
+//! [messages]
+//! user = "line"                        # "bubble" (Trek's) or "line": the user's words set flush
+//! user_mark = "›"                      # a mark before them, in the accent (up to 3 characters)
+//!
+//! [composer]
+//! prompt = "›"                         # a mark before what's typed (up to 3 characters)
+//!
+//! [hiker]
+//! show = true                          # the hiker on the working trail
+//! pack = "#E0B341"                     # its pack's colour
+//!
+//! [marks]
+//! agents = "letter"                    # "logo" (Trek's), "letter" or "none"
+//!
 //! [dark]                               # and [light]: colours, "#RRGGBB" or "#RRGGBBAA"
 //! accent = "#6BDB9A"                   # buttons, links, selection, the working beacon
 //! on_accent = "#06140C"                # text and icons on an accent fill
@@ -52,6 +71,9 @@
 //! text = "#D4DDD7"
 //! muted = "#7C8A82"                    # secondary text
 //! border = "#222A26"
+//!
+//! [dark.kit]                           # any of the kit's own colours, by its key
+//! "title_bar.background" = "#0B0D0C"
 //! ```
 
 use crate::settings::{
@@ -235,6 +257,57 @@ impl Palette {
     }
 }
 
+/// How the agents' marks are drawn (sidebar rows, the composer's agent pill).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Marks {
+    /// Each agent's own logo.
+    #[default]
+    Logo,
+    /// Its initial, in a square in the theme's colours.
+    Letter,
+    /// None.
+    None,
+}
+
+/// What a theme sets besides colours and type: lines, how messages and the composer are set,
+/// the hiker and the agents' marks. Trek's own is `Default`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Look {
+    /// Every border's weight against Trek's: 0 none, 1 as designed, up to 3.
+    pub borders: f32,
+    /// Shadows' strength, 0 (flat) to 1.
+    pub shadows: f32,
+    /// Pills and circles take the corners too (square, in a square theme).
+    pub pills_follow: bool,
+    /// The user's messages as a bubble (Trek's) or a line set flush with the answers.
+    pub user_bubble: bool,
+    /// A mark before the user's words, in the accent.
+    pub user_mark: Option<String>,
+    /// A mark before what's typed in the composer.
+    pub prompt: Option<String>,
+    pub hiker: bool,
+    /// The hiker's pack, `0xRRGGBB` (Trek's ember when `None`).
+    pub hiker_pack: Option<u32>,
+    pub marks: Marks,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Look {
+            borders: 1.,
+            shadows: 1.,
+            pills_follow: false,
+            user_bubble: true,
+            user_mark: None,
+            prompt: None,
+            hiker: true,
+            hiker_pack: None,
+            marks: Marks::Logo,
+        }
+    }
+}
+
 /// Where a theme comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
@@ -267,6 +340,11 @@ pub struct Theme {
     pub motion: Motion,
     pub dark: Palette,
     pub light: Palette,
+    /// The kit's own colours a theme sets by key, for dark and light (`[dark.kit]`): checked
+    /// against the kit's keys by trek-app.
+    pub dark_kit: std::collections::BTreeMap<String, Colour>,
+    pub light_kit: std::collections::BTreeMap<String, Colour>,
+    pub look: Look,
 }
 
 impl Theme {
@@ -293,6 +371,18 @@ impl Theme {
             motion: Motion::Standard,
             dark: Palette::default(),
             light: Palette::default(),
+            dark_kit: Default::default(),
+            light_kit: Default::default(),
+            look: Look::default(),
+        }
+    }
+
+    /// The kit colours it sets by key, for dark (`true`) or light.
+    pub fn kit(&self, dark: bool) -> &std::collections::BTreeMap<String, Colour> {
+        if dark {
+            &self.dark_kit
+        } else {
+            &self.light_kit
         }
     }
 
@@ -328,6 +418,74 @@ struct File {
     motion: MotionFile,
     dark: Option<PaletteFile>,
     light: Option<PaletteFile>,
+    #[serde(default)]
+    lines: LinesFile,
+    #[serde(default)]
+    messages: MessagesFile,
+    #[serde(default)]
+    composer: ComposerFile,
+    #[serde(default)]
+    hiker: HikerFile,
+    #[serde(default)]
+    marks: MarksFile,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct LinesFile {
+    borders: Option<f32>,
+    shadows: Option<f32>,
+    pills: Option<Pills>,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum Pills {
+    Round,
+    LikeCorners,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum UserStyle {
+    Bubble,
+    Line,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct MessagesFile {
+    user: Option<UserStyle>,
+    user_mark: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ComposerFile {
+    prompt: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct HikerFile {
+    show: Option<bool>,
+    pack: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct MarksFile {
+    agents: Option<Marks>,
+}
+
+/// A mark (a prompt, the user's): 1 to 3 characters, no line breaks.
+fn mark(key: &str, v: Option<String>) -> Result<Option<String>, String> {
+    match v {
+        None => Ok(None),
+        Some(m) if m.is_empty() => Ok(None),
+        Some(m) if m.chars().count() <= 3 && !m.chars().any(char::is_control) => Ok(Some(m)),
+        Some(m) => Err(format!("{key} = \"{m}\": a mark is 1 to 3 characters")),
+    }
 }
 
 fn format_one() -> u32 {
@@ -410,6 +568,22 @@ struct PaletteFile {
     text: Option<String>,
     muted: Option<String>,
     border: Option<String>,
+    /// The kit's own colours by key.
+    #[serde(default)]
+    kit: std::collections::BTreeMap<String, String>,
+}
+
+fn kit(
+    table: &str,
+    keys: &std::collections::BTreeMap<String, String>,
+) -> Result<std::collections::BTreeMap<String, Colour>, String> {
+    keys.iter()
+        .map(|(k, v)| {
+            Colour::parse(v).map(|c| (k.clone(), c)).ok_or_else(|| {
+                format!("[{table}.kit] \"{k}\" = \"{v}\" isn't a colour; write \"#RRGGBB\" or \"#RRGGBBAA\"")
+            })
+        })
+        .collect()
 }
 
 /// WCAG contrast of two `0xRRGGBB` colours.
@@ -437,9 +611,9 @@ fn in_range(what: &str, v: f32, lo: f32, hi: f32) -> Result<f32, String> {
     }
 }
 
-fn palette(table: &str, file: PaletteFile, base: Base) -> Result<Palette, String> {
-    let colour = |key: &str, v: Option<String>| -> Result<Option<Colour>, String> {
-        v.map(|text| {
+fn palette(table: &str, file: &PaletteFile, base: Base) -> Result<Palette, String> {
+    let colour = |key: &str, v: &Option<String>| -> Result<Option<Colour>, String> {
+        v.as_ref().map(|text| {
             Colour::parse(&text).ok_or_else(|| {
                 format!("[{table}] {key} = \"{text}\" isn't a colour; write \"#RRGGBB\" or \"#RRGGBBAA\"")
             })
@@ -447,15 +621,15 @@ fn palette(table: &str, file: PaletteFile, base: Base) -> Result<Palette, String
         .transpose()
     };
     let p = Palette {
-        accent: colour("accent", file.accent)?,
-        on_accent: colour("on_accent", file.on_accent)?,
-        window: colour("window", file.window)?,
-        sidebar: colour("sidebar", file.sidebar)?,
-        surface: colour("surface", file.surface)?,
-        raised: colour("raised", file.raised)?,
-        text: colour("text", file.text)?,
-        muted: colour("muted", file.muted)?,
-        border: colour("border", file.border)?,
+        accent: colour("accent", &file.accent)?,
+        on_accent: colour("on_accent", &file.on_accent)?,
+        window: colour("window", &file.window)?,
+        sidebar: colour("sidebar", &file.sidebar)?,
+        surface: colour("surface", &file.surface)?,
+        raised: colour("raised", &file.raised)?,
+        text: colour("text", &file.text)?,
+        muted: colour("muted", &file.muted)?,
+        border: colour("border", &file.border)?,
     };
     // Text has to be readable on the window it's on: a theme that would make it hard isn't taken.
     let window = p.window.map_or(base.window, Colour::rgb);
@@ -598,6 +772,27 @@ pub fn parse(id: &str, text: &str, origin: Origin) -> Result<Theme, String> {
         glass = g.on.unwrap_or(true);
         glass_tint = in_range("[glass] tint", g.tint.unwrap_or(glass_tint), 0.2, 0.95)?;
     }
+    let look = Look {
+        borders: in_range("[lines] borders", file.lines.borders.unwrap_or(1.), 0., 3.)?,
+        shadows: in_range("[lines] shadows", file.lines.shadows.unwrap_or(1.), 0., 1.)?,
+        pills_follow: file.lines.pills == Some(Pills::LikeCorners),
+        user_bubble: file.messages.user != Some(UserStyle::Line),
+        user_mark: mark("[messages] user_mark", file.messages.user_mark)?,
+        prompt: mark("[composer] prompt", file.composer.prompt)?,
+        hiker: file.hiker.show.unwrap_or(true),
+        hiker_pack: file
+            .hiker
+            .pack
+            .map(|p| {
+                Colour::parse(&p)
+                    .map(Colour::rgb)
+                    .ok_or_else(|| format!("[hiker] pack = \"{p}\" isn't a colour"))
+            })
+            .transpose()?,
+        marks: file.marks.agents.unwrap_or_default(),
+    };
+    let dark_file = file.dark.unwrap_or_default();
+    let light_file = file.light.unwrap_or_default();
     Ok(Theme {
         id: id.to_string(),
         name,
@@ -616,8 +811,11 @@ pub fn parse(id: &str, text: &str, origin: Origin) -> Result<Theme, String> {
         glass,
         glass_tint,
         motion: file.motion.style.unwrap_or(Motion::Standard),
-        dark: palette("dark", file.dark.unwrap_or_default(), NIGHT)?,
-        light: palette("light", file.light.unwrap_or_default(), PAPER)?,
+        dark: palette("dark", &dark_file, NIGHT)?,
+        light: palette("light", &light_file, PAPER)?,
+        dark_kit: kit("dark", &dark_file.kit)?,
+        light_kit: kit("light", &light_file.kit)?,
+        look,
     })
 }
 
@@ -1031,6 +1229,50 @@ mod tests {
                 (want, Some("builtin:light/aurora"))
             );
         }
+    }
+
+    #[test]
+    fn a_theme_sets_lines_messages_the_composer_the_hiker_and_kit_colours() {
+        let t = parse(
+            "t",
+            r##"name = "T"
+[lines]
+borders = 0
+shadows = 0
+[messages]
+user = "line"
+user_mark = "›"
+[composer]
+prompt = "$"
+[hiker]
+show = false
+pack = "#E0B341"
+[marks]
+agents = "letter"
+[dark.kit]
+"title_bar.background" = "#101010"
+"##,
+            Origin::BuiltIn,
+        )
+        .unwrap();
+        assert_eq!((t.look.borders, t.look.shadows), (0., 0.));
+        assert!(!t.look.user_bubble && !t.look.hiker);
+        assert_eq!(t.look.user_mark.as_deref(), Some("›"));
+        assert_eq!(t.look.prompt.as_deref(), Some("$"));
+        assert_eq!(t.look.hiker_pack, Some(0xE0B341));
+        assert_eq!(t.look.marks, Marks::Letter);
+        assert_eq!(
+            t.kit(true).get("title_bar.background"),
+            Some(&Colour(0x101010FF))
+        );
+        assert!(t.kit(false).is_empty());
+        // Trek's own is as designed.
+        assert_eq!(Theme::trek().look, Look::default());
+        let bad = |text: &str| parse("b", text, Origin::BuiltIn).unwrap_err();
+        assert!(bad("name = \"B\"\n[lines]\nborders = 9\n").contains("borders"));
+        assert!(bad("name = \"B\"\n[composer]\nprompt = \"tooLong\"\n").contains("1 to 3"));
+        assert!(bad("name = \"B\"\n[dark.kit]\nx = \"blue\"\n").contains("[dark.kit]"));
+        assert!(bad("name = \"B\"\n[messages]\nuser = \"card\"\n").contains("line"));
     }
 
     #[test]

@@ -101,7 +101,10 @@ pub(crate) use arena::*;
 pub use asset_cache::*;
 pub use assets::*;
 pub use color::*;
-pub use corner_scale::{MAX_CORNER_SCALE, corner_scale, set_corner_scale};
+pub use corner_scale::{
+    MAX_BORDER_SCALE, MAX_CORNER_SCALE, border_scale, corner_scale, set_border_scale,
+    set_corner_scale, set_pills_follow, set_shadow_scale, shadow_scale,
+};
 pub use ctor::ctor;
 #[cfg(feature = "profiler")]
 pub use debug_overlay::*;

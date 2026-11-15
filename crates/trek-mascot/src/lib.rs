@@ -184,10 +184,38 @@ const POSES: [[&str; SPRITE_H]; 5] = [
 /// The standing pose's index in [`POSES`]; the walk is the four after it, in order.
 pub const STAND: usize = 0;
 
+/// Whether a theme shows the hiker (`set_look`): the trail is drawn either way.
+static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// The pack's colour a theme gives it, `0x01RRGGBB` (0: Trek's ember).
+static PACK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A Trek theme's say in the hiker: shown or not, and its pack's colour (`None`: Trek's ember).
+pub fn set_look(shown: bool, pack: Option<u32>) {
+    use std::sync::atomic::Ordering::Relaxed;
+    SHOWN.store(shown, Relaxed);
+    PACK.store(pack.map_or(0, |c| 0x0100_0000 | (c & 0xFF_FFFF)), Relaxed);
+}
+
+/// Whether the hiker is drawn (a theme may leave it out).
+pub fn shown() -> bool {
+    SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `rgb` a quarter of the way to black: the pack's shade.
+fn shade(rgb: u32) -> u32 {
+    let ch = |s: u32| (((rgb >> s) & 0xFF) as f32 * 0.75) as u32;
+    (ch(16) << 16) | (ch(8) << 8) | ch(0)
+}
+
 /// The hiker's colours on Night and Paper, `(night, paper)`: eight in all, the pack in Trek's
-/// ember. The near and far sides of the body are the theme's ink at two strengths, so the
-/// hiker reads on either background and its legs read apart.
+/// ember (or the theme's, `set_look`). The near and far sides of the body are the theme's ink at
+/// two strengths, so the hiker reads on either background and its legs read apart.
 fn color(c: char, dark: bool) -> Option<u32> {
+    let pack = PACK.load(std::sync::atomic::Ordering::Relaxed);
+    if pack != 0 && matches!(c, 'E' | 'e') {
+        let rgb = pack & 0xFF_FFFF;
+        return Some(if c == 'E' { rgb } else { shade(rgb) });
+    }
     let (night, paper) = match c {
         'h' => (0xC9A47C, 0xB58A5C),
         's' => (0xEBC6A0, 0xE9BF95),
@@ -453,9 +481,11 @@ fn paint(b: Bounds<Pixels>, share: f32, pose: usize, right: bool, ink: Ink, wind
     let cell = cell_size(scale);
     let x = b.origin.x.as_f32() + 4. + travel_of(b, cell) * share.clamp(0., 1.);
     // The sprite's pixels sit on whole device pixels, so none blurs between two; its boots
-    // stand on the dots.
-    let (left, feet, cell) = grid(x, ground - 1., scale);
-    sprite(left, feet, cell, pose, right, ink.dark, window);
+    // stand on the dots. A theme may leave it out: the trail stays.
+    if shown() {
+        let (left, feet, cell) = grid(x, ground - 1., scale);
+        sprite(left, feet, cell, pose, right, ink.dark, window);
+    }
 }
 
 fn sprite(
@@ -488,9 +518,71 @@ fn sprite(
     }
 }
 
+/// The hiker's walking pose after `walked` art pixels from where it set off: one of the four of
+/// the walk, a new one every [`STEP`] pixels, so its feet stay planted at any pace.
+pub fn pose_after(walked: f32) -> usize {
+    1 + (walked.max(0.) / STEP) as usize % 4
+}
+
+/// The hiker's size in art pixels, (width, height).
+pub const SPRITE: (usize, usize) = (SPRITE_W, SPRITE_H);
+
+/// Paint the hiker standing on a line at `feet` (its boots' middle, in points), turned a quarter
+/// turn clockwise `turns` times: 0 upright on a floor, walking right; 1 on a wall to its right,
+/// walking down; 2 hanging under a ceiling, walking left; 3 on a wall to its left, walking up —
+/// the four sides of a box walked round clockwise. `cell` is an art pixel in points (whole device
+/// pixels: `cell_size`). Turned by quarter turns the grid stays a grid, so it's as crisp on its
+/// side as standing.
+pub fn paint_turned(
+    feet: Point<Pixels>,
+    cell: f32,
+    pose: usize,
+    turns: u8,
+    dark: bool,
+    window: &mut Window,
+) {
+    if !shown() {
+        return;
+    }
+    let scale = window.scale_factor();
+    let (fx, fy) = (snap(feet.x.as_f32(), scale), snap(feet.y.as_f32(), scale));
+    let half = SPRITE_W as f32 / 2.;
+    for (y, row) in POSES[pose.min(POSES.len() - 1)].iter().enumerate() {
+        for (x, ch) in row.chars().enumerate() {
+            let Some(rgb) = color(ch, dark) else {
+                continue;
+            };
+            // The pixel's square relative to the boots, standing: x across, y up from the floor.
+            let (lx, ly) = (
+                (x as f32 - half) * cell,
+                (y as f32 - SPRITE_H as f32) * cell,
+            );
+            // A quarter turn clockwise on screen (y down) takes (x, y) to (-y, x).
+            let (ax, ay) = match turns % 4 {
+                0 => (lx, ly),
+                1 => (-ly - cell, lx),
+                2 => (-lx - cell, -ly - cell),
+                _ => (ly, -lx - cell),
+            };
+            window.paint_quad(fill(
+                Bounds::new(point(px(fx + ax), px(fy + ay)), size(px(cell), px(cell))),
+                gpui_kit::rgb(rgb),
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{POSES, STAND, STEP, WALK, WORD_EVERY, WORDS, Walk, word};
+
+    #[test]
+    fn a_pose_every_four_pixels() {
+        assert_eq!(super::pose_after(0.), 1);
+        assert_eq!(super::pose_after(3.9), 1);
+        assert_eq!(super::pose_after(STEP), 2);
+        assert_eq!(super::pose_after(STEP * 4.), 1, "round again after four");
+    }
 
     #[test]
     fn trail_words_hold_then_move_on() {

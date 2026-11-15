@@ -283,6 +283,25 @@ fn config(
     }
 }
 
+/// The kit's colours for `theme` in dark or light: its nine (`colours`), then any of the kit's own
+/// it sets by key (`[dark.kit]`), which have the last word.
+fn theme_colours(theme: &Theme, dark: bool) -> Map<String, Value> {
+    let mut out = colours(theme.palette(dark), dark);
+    for (key, c) in theme.kit(dark) {
+        out.insert(key.clone(), Value::String(c.hex()));
+    }
+    out
+}
+
+/// The kit's colour keys (the base theme's): what `[dark.kit]` may set.
+fn kit_keys(dark: bool) -> Vec<String> {
+    base(dark)
+        .get("colors")
+        .and_then(Value::as_object)
+        .map(|c| c.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 fn config_for(theme: &Theme, dark: bool) -> Option<Rc<ThemeConfig>> {
     let name = format!(
         "{} {}",
@@ -290,7 +309,7 @@ fn config_for(theme: &Theme, dark: bool) -> Option<Rc<ThemeConfig>> {
         theme.id
     );
     config(
-        &colours(theme.palette(dark), dark),
+        &theme_colours(theme, dark),
         dark,
         theme.ui_font.family(),
         &name,
@@ -341,12 +360,36 @@ pub fn conversation_font(cx: &App) -> Option<SharedString> {
     cx.try_global::<ConversationFont>()?.0.clone()
 }
 
-/// Put `theme`'s own parts up: Trek's accents, the corners, the conversation's font. The kit's
-/// theme is `apply_theme`'s (`configs`).
+/// What the theme on screen sets besides colours and type (`trek_core::themes::Look`): the
+/// views that draw messages, the composer, the hiker and agents' marks read it.
+struct ShownLook(Rc<core::Look>);
+
+impl Global for ShownLook {}
+
+/// The look of the theme on screen: Trek's own (`Look::default`) unless a theme sets one.
+pub fn look(cx: &App) -> Rc<core::Look> {
+    cx.try_global::<ShownLook>()
+        .map(|l| l.0.clone())
+        .unwrap_or_default()
+}
+
+/// Put `theme`'s look up: line weight and shadows (every quad GPUI paints), the hiker's, and the
+/// rest for the views to read.
+fn show_look(theme: &Theme, cx: &mut App) {
+    set_border_scale(theme.look.borders);
+    set_shadow_scale(theme.look.shadows);
+    set_pills_follow(theme.look.pills_follow);
+    trek_mascot::set_look(theme.look.hiker, theme.look.hiker_pack);
+    cx.set_global(ShownLook(Rc::new(theme.look.clone())));
+}
+
+/// Put `theme`'s own parts up: Trek's accents, the corners, the conversation's font, its look.
+/// The kit's theme is `apply_theme`'s (`configs`).
 fn show(theme: &Theme, cx: &mut App) {
     trek_palette::set_theme_accents(accents(theme), cx);
     set_corner_scale(theme.corners);
     cx.set_global(ConversationFont(conversation(theme)));
+    show_look(theme, cx);
 }
 
 // ---------- the list and the folder ----------
@@ -357,7 +400,29 @@ fn known_art(scan: core::Scan) -> core::Scan {
         themes: Vec::new(),
         problems: scan.problems,
     };
+    let (dark_keys, light_keys) = (kit_keys(true), kit_keys(false));
     for t in scan.themes {
+        let file = match &t.origin {
+            core::Origin::File(file) => file.clone(),
+            core::Origin::BuiltIn => PathBuf::from(&t.id),
+        };
+        let unknown = [("dark", true, &dark_keys), ("light", false, &light_keys)]
+            .into_iter()
+            .find_map(|(table, dark, keys)| {
+                t.kit(dark)
+                    .keys()
+                    .find(|k| !keys.contains(k))
+                    .map(|k| (table, k.clone()))
+            });
+        if let Some((table, key)) = unknown {
+            out.problems.push(core::Problem {
+                file,
+                message: format!(
+                    "[{table}.kit] \"{key}\" isn't one of the kit's colours (the trek-plugin skill lists them)"
+                ),
+            });
+            continue;
+        }
         match t.art.as_deref() {
             Some(art)
                 if art.starts_with("builtin:") && crate::backgrounds::piece_for(art).is_none() =>
@@ -687,7 +752,7 @@ pub fn switch_to(id: &str, ws: &Entity<Workspace>, cx: &mut App) {
             }
         }
     });
-    let to_colours = colours(to.palette(to_dark), to_dark);
+    let to_colours = theme_colours(&to, to_dark);
     let veil = reflows.then(|| {
         let window = to_colours
             .get("background")
@@ -696,7 +761,7 @@ pub fn switch_to(id: &str, ws: &Entity<Workspace>, cx: &mut App) {
         Hsla::from(rgb(window >> 8))
     });
     let switch = Switch {
-        from_colours: colours(from.palette(from_dark), from_dark),
+        from_colours: theme_colours(&from, from_dark),
         to_colours,
         from_dark,
         to_dark,
@@ -817,6 +882,7 @@ fn step(ws: &Entity<Workspace>, cx: &mut App) -> bool {
         });
         cx.global_mut::<Themes>().shown = to.clone();
         cx.set_global(ConversationFont(conversation(&to)));
+        show_look(&to, cx);
     }
     trek_palette::set_theme_accents(accents, cx);
     set_corner_scale(corners);
@@ -872,7 +938,7 @@ struct Swatch {
 }
 
 fn swatch(theme: &Theme, dark: bool) -> Swatch {
-    let c = colours(theme.palette(dark), dark);
+    let c = theme_colours(theme, dark);
     let get = |key: &str| -> Hsla {
         let v = c.get(key).and_then(rgba).unwrap_or(0x808080FF);
         Rgba {
@@ -1043,7 +1109,7 @@ pub fn mode_tile(dark: bool, cx: &App) -> Option<(u32, u32, u32, u32)> {
     if shown.is_default() {
         return None;
     }
-    let c = colours(shown.palette(dark), dark);
+    let c = theme_colours(shown, dark);
     let get = |key: &str| c.get(key).and_then(rgba).unwrap_or(0x808080FF);
     Some((
         get("background") >> 8,
@@ -1344,6 +1410,44 @@ mod tests {
         let checked = super::known_art(bad);
         assert!(checked.themes.is_empty());
         assert!(checked.problems[0].message.contains("nowhere"));
+    }
+
+    /// Every example plugin's theme is one Trek takes whole: its kit colours name real keys.
+    #[test]
+    fn the_example_plugins_themes_read_and_name_real_kit_colours() {
+        let mut seen = 0;
+        for (name, files) in trek_core::plugins::examples::ALL {
+            let manifest = files.iter().find(|(p, _)| *p == "plugin.toml").unwrap().1;
+            for (path, text) in files.iter().filter(|(p, _)| {
+                p.ends_with(".toml") && *p != "plugin.toml" && manifest.contains(p)
+            }) {
+                let t = core::parse(name, text, core::Origin::BuiltIn)
+                    .unwrap_or_else(|e| panic!("{name}/{path}: {e}"));
+                let checked = super::known_art(core::Scan {
+                    themes: vec![t],
+                    problems: vec![],
+                });
+                assert!(
+                    checked.problems.is_empty(),
+                    "{name}/{path}: {:?}",
+                    checked.problems
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen >= 1, "the terminal look at least");
+        // A misspelt kit key is a problem, not a silent no-op.
+        let t = core::parse(
+            "x",
+            "name = \"X\"\n[dark.kit]\n\"titlebar.background\" = \"#000000\"\n",
+            core::Origin::BuiltIn,
+        )
+        .unwrap();
+        let checked = super::known_art(core::Scan {
+            themes: vec![t],
+            problems: vec![],
+        });
+        assert!(checked.problems[0].message.contains("titlebar.background"));
     }
 
     #[test]

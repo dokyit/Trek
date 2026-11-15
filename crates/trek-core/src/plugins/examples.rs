@@ -19,7 +19,7 @@ macro_rules! example {
 }
 
 /// Every example: its name (its id) and its files.
-pub const ALL: &[(&str, &[File])] = &[];
+pub const ALL: &[(&str, &[File])] = &[example!("terminal-look": "plugin.toml", "terminal.toml")];
 
 /// An example's name and description, from its manifest.
 pub fn about(files: &[File]) -> (String, String) {

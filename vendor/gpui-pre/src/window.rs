@@ -4451,7 +4451,11 @@ impl Window {
         let corner_radii = crate::corner_scale::scaled_corners(corner_radii, bounds.size);
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
-        let opacity = self.element_opacity();
+        // Trek: the theme's shadow strength (`shadow_scale`); none at all for a flat look.
+        let opacity = self.element_opacity() * crate::corner_scale::shadow_scale();
+        if opacity <= 0. {
+            return;
+        }
         let element_bounds = self.cover_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
@@ -4489,7 +4493,11 @@ impl Window {
         let corner_radii = crate::corner_scale::scaled_corners(corner_radii, bounds.size);
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
-        let opacity = self.element_opacity();
+        // Trek: the theme's shadow strength (`shadow_scale`); none at all for a flat look.
+        let opacity = self.element_opacity() * crate::corner_scale::shadow_scale();
+        if opacity <= 0. {
+            return;
+        }
         let element_bounds = self.cover_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
@@ -4574,7 +4582,13 @@ impl Window {
 
         let opacity = self.element_opacity();
         let snapped_bounds = self.snap_bounds(quad.bounds);
-        let snapped_border_widths = self.snap_border_widths(quad.border_widths);
+        // Trek: the theme's line weight (`border_scale`).
+        let borders = crate::corner_scale::border_scale();
+        let snapped_border_widths = if borders == 1. {
+            self.snap_border_widths(quad.border_widths)
+        } else {
+            self.snap_border_widths(quad.border_widths.map(|w| *w * borders))
+        };
         let quad = Quad {
             order: 0,
             bounds: snapped_bounds,

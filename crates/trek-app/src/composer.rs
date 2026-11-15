@@ -4676,7 +4676,7 @@ impl Render for Composer {
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
             .children(self.edit_banner(cx))
             .children(self.attachment_strip(cx))
-            .child(div().px(px(if self.voice.active() { look::PAD } else { look::PAD - look::INPUT_INSET })).pt(px(if is_draft || session || !self.outbox.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
+            .child(div().px(px(if self.voice.active() { look::PAD } else { look::PAD - look::INPUT_INSET })).pt(px(if is_draft || session || !self.outbox.is_empty() || self.editing.is_some() { look::PAD - 7. } else { 2. })).text_size(rems(look::TEXT)).when(self.voice.active(), |el| el.pb(px(6.))).map(|el| if self.voice.active() { el.child(self.voice_preview(window, cx)) } else { el.relative().when_some(crate::themes::look(cx).prompt.clone(), |el, mark| el.pl(px(look::PROMPT)).child(look::prompt_mark(mark, cx))).child(Textarea::new(&self.input).appearance(false).text_size(rems(look::TEXT)).token(|token, _, cx| {
                 // An accepted `/` command or skill: plain blue text, no pill.
                 div().text_color(crate::palette::token(cx)).child(token.token().label().clone())
             }).on_paste({

@@ -30,10 +30,68 @@ pub fn corner_scale() -> f32 {
     f32::from_bits(SCALE.load(Ordering::Relaxed))
 }
 
+static BORDERS: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
+static PILLS_FOLLOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Trek: whether pills and circles take the corner scale too (a theme with square everything),
+/// rather than keeping their shape (as designed).
+pub fn set_pills_follow(follow: bool) {
+    PILLS_FOLLOW.store(follow, Ordering::Relaxed);
+}
+static SHADOWS: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
+
+/// The heaviest border scale taken.
+pub const MAX_BORDER_SCALE: f32 = 3.0;
+
+fn finite_in(v: f32, hi: f32) -> f32 {
+    if v.is_finite() { v.clamp(0., hi) } else { 1. }
+}
+
+/// Trek: scale every border the app paints from the next frame on, as a theme's line weight: 0
+/// leaves borders out, 1 is as each element asks, up to [`MAX_BORDER_SCALE`]. A border scaled
+/// below a device pixel but above none still takes one (`snap_stroke`).
+pub fn set_border_scale(scale: f32) {
+    BORDERS.store(finite_in(scale, MAX_BORDER_SCALE).to_bits(), Ordering::Relaxed);
+}
+
+/// The scale borders are painted at (see [`set_border_scale`]).
+pub fn border_scale() -> f32 {
+    f32::from_bits(BORDERS.load(Ordering::Relaxed))
+}
+
+/// Trek: how strong every shadow the app paints is from the next frame on, 0 (none, a flat look)
+/// to 1 (as each element asks).
+pub fn set_shadow_scale(scale: f32) {
+    SHADOWS.store(finite_in(scale, 1.).to_bits(), Ordering::Relaxed);
+}
+
+/// The strength shadows are painted at (see [`set_shadow_scale`]).
+pub fn shadow_scale() -> f32 {
+    f32::from_bits(SHADOWS.load(Ordering::Relaxed))
+}
+
 /// `radii`, for a shape of `size`, at the current corner scale: a corner as round as half the
 /// shorter side (or rounder) is a pill's or a circle's and is left alone.
 pub(crate) fn scaled_corners(radii: Corners<Pixels>, size: Size<Pixels>) -> Corners<Pixels> {
+    if PILLS_FOLLOW.load(Ordering::Relaxed) {
+        return scaled_all_at(corner_scale(), radii, size);
+    }
     scaled_corners_at(corner_scale(), radii, size)
+}
+
+/// `radii` at `scale`, pills and circles too: each no rounder than half the shorter side first.
+fn scaled_all_at(scale: f32, radii: Corners<Pixels>, size: Size<Pixels>) -> Corners<Pixels> {
+    if scale == 1. {
+        return radii;
+    }
+    let half = size.width.min(size.height) / 2.;
+    let one = |r: Pixels| (r.min(half) * scale).min(half);
+    Corners {
+        top_left: one(radii.top_left),
+        top_right: one(radii.top_right),
+        bottom_right: one(radii.bottom_right),
+        bottom_left: one(radii.bottom_left),
+    }
 }
 
 fn scaled_corners_at(scale: f32, radii: Corners<Pixels>, size: Size<Pixels>) -> Corners<Pixels> {

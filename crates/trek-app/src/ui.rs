@@ -646,6 +646,36 @@ pub fn logo_key(agent: &AgentId) -> Option<&'static str> {
 /// The agent's real logo, theme-aware, falling back to a neutral glyph. An agent the user added
 /// shows its registry icon, or its monogram.
 pub fn agent_logo(agent: &AgentId, size: Pixels, cx: &App) -> AnyElement {
+    // A Trek theme may draw agents by their initial, or not at all.
+    match crate::themes::look(cx).marks {
+        trek_core::themes::Marks::Logo => {}
+        trek_core::themes::Marks::None => {
+            return div().size(px(0.)).flex_none().into_any_element();
+        }
+        trek_core::themes::Marks::Letter => {
+            let theme = cx.theme();
+            let initial: String = agent
+                .display_name()
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .map(|c| c.to_uppercase().collect())
+                .unwrap_or_else(|| "?".into());
+            return div()
+                .size(size)
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .border_color(theme.muted_foreground.opacity(0.6))
+                .text_color(theme.foreground)
+                .text_size(size * 0.62)
+                .font_family(theme.mono_font_family.clone())
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(initial)
+                .into_any_element();
+        }
+    }
     match (logo_key(agent), agent) {
         (Some(key), _) => {
             let theme = if cx.theme().mode.is_dark() {

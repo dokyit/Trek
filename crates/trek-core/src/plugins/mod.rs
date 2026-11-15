@@ -787,6 +787,29 @@ fn check_actions(m: &Manifest) -> Result<(), String> {
             _ => {}
         }
     }
+    // Trek's components that read the user's data need the permission for it.
+    for (at, tree) in m
+        .slots
+        .iter()
+        .map(|s| (s.slot.name().to_string(), &s.tree))
+        .chain(
+            m.replacements
+                .iter()
+                .map(|r| (format!("[[replace]] {}", r.surface.name()), &r.tree)),
+        )
+    {
+        for c in tree.components() {
+            if let Some(p) = c.needs()
+                && !m.wants(&p)
+            {
+                return Err(format!(
+                    "{at}: trek:{} needs the {} permission",
+                    c.name(),
+                    p.key()
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1210,7 +1233,7 @@ icon = "flame"
 
 [[replace]]
 surface = "thread-list"
-ui = { type = "column", children = [{ type = "trek:thread-list" }] }
+ui = { type = "column", children = [{ type = "text", text = "Mine" }] }
 
 [[command]]
 id = "reset"

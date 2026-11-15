@@ -25,6 +25,21 @@ pub const ICON: f32 = 14.;
 /// The kit's multi-line input pads its text by this much on each side; the composer takes it
 /// off its own padding, so the text lines up with the `+` under it.
 pub const INPUT_INSET: f32 = 10.;
+/// Room a Trek theme's prompt mark takes before the text (`[composer] prompt`).
+pub const PROMPT: f32 = 16.;
+
+/// A Trek theme's prompt mark, in the accent, where the first line of text is.
+pub fn prompt_mark(mark: String, cx: &App) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(PAD - 1.))
+        .top(px(6.))
+        .text_color(cx.theme().primary)
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(mark)
+        .into_any_element()
+}
+
 /// The prompt's text size and line height in rems: 13 px on 20 at the default 14 px UI size,
 /// and they grow with it.
 pub const TEXT: f32 = text::BODY / crate::scale::REM;

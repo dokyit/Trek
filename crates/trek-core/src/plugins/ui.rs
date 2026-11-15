@@ -104,6 +104,15 @@ impl Component {
         }
     }
 
+    /// The permission it needs, when it shows the user's data.
+    pub fn needs(self) -> Option<super::Permission> {
+        match self {
+            Component::CommitTrail => Some(super::Permission::GitRead),
+            Component::ThreadList => Some(super::Permission::ThreadsRead),
+            _ => None,
+        }
+    }
+
     /// What it can be told to do (`Action::Trek`).
     pub fn verbs(self) -> &'static [&'static str] {
         match self {

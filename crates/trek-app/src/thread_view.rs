@@ -2280,6 +2280,11 @@ impl ThreadView {
                     .filter(|f| !videos.contains(f))
                     .collect();
                 let text = SharedString::from(words.to_string());
+                // A Trek theme may set the user's words as a line, flush with the answers, after
+                // a mark of its own, rather than in a bubble.
+                let look = crate::themes::look(cx);
+                let line = !look.user_bubble;
+                let user_mark = look.user_mark.clone();
                 // A study session's first message shows what the learner asked for and what came
                 // with it, not the instructions Trek wrote the tutor.
                 let intro = trek_core::study::intro(said);
@@ -2402,7 +2407,13 @@ impl ThreadView {
                             .test_support()
                             .w_full()
                             .group("user-msg")
-                            .items_end()
+                            .map(|el| {
+                                if line {
+                                    el.items_start()
+                                } else {
+                                    el.items_end()
+                                }
+                            })
                             .pt_4()
                             .gap(px(4.))
                             .when(!images.is_empty(), |el| {
@@ -2457,13 +2468,19 @@ impl ThreadView {
                             .when(has_text, |el| {
                                 el.child(
                                     v_flex()
-                                        .max_w(relative(0.78))
-                                        .px(px(16.))
-                                        .py(px(10.))
+                                        .map(|el| {
+                                            if line {
+                                                el.max_w_full().py(px(2.))
+                                            } else {
+                                                el.max_w(relative(0.78))
+                                                    .px(px(16.))
+                                                    .py(px(10.))
+                                                    .rounded(px(fluent::surface(radius::CARD)))
+                                                    .bg(theme.secondary)
+                                            }
+                                        })
                                         .gap_1()
-                                        .rounded(px(fluent::surface(radius::CARD)))
-                                        .bg(theme.secondary)
-                                        .when(fluent::WINDOWS, |el| {
+                                        .when(fluent::WINDOWS && !line, |el| {
                                             el.border_1()
                                                 .border_color(fluent::stroke(theme.border, cx))
                                         })
@@ -2478,9 +2495,27 @@ impl ThreadView {
                                                 el.child(crate::study::intro_bubble(intro, cx))
                                             }
                                             None => el.child(
-                                                div()
-                                                    .when(long && !open, |el| el.line_clamp(10))
-                                                    .child(text),
+                                                h_flex()
+                                                    .items_start()
+                                                    .gap(px(8.))
+                                                    .when_some(user_mark.clone(), |el, mark| {
+                                                        el.child(
+                                                            div()
+                                                                .flex_none()
+                                                                .text_color(theme.primary)
+                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                .child(mark),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .when(long && !open, |el| {
+                                                                el.line_clamp(10)
+                                                            })
+                                                            .child(text),
+                                                    ),
                                             ),
                                         })
                                         .when(long, |el| {

@@ -1,0 +1,11 @@
+id = "terminal-look"
+name = "Terminal look"
+version = "1.0.0"
+description = "Trek as a terminal: monospace throughout, square and flat, with trail-blaze yellow prompt marks."
+author = "Trek"
+trek = ">=0.4.54"
+
+# A look and nothing else: no permissions, no logic. Turn it on, then pick it in
+# Settings › Appearance or "Use Terminal look theme" in the palette.
+[[theme]]
+file = "terminal.toml"
