@@ -142,7 +142,11 @@ fn a_question_still_takes_typed_words_as_its_answer() {
         let trek = open(cx);
         let id = trek.send(cx, "question");
         trek.wait_needs_you(cx, &id).await;
-        assert_eq!(trek.read(cx, |ws, _| ws.reply_note(&id)), None);
+        // The composer says its words will answer the question, not steer the turn.
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.reply_note(&id)),
+            Some(ReplyNote::Answers)
+        );
         trek.send(cx, "Postgres");
         // The first of two questions took it; the card is still there for the other.
         assert!(user_said(&trek, cx, &id, "Postgres"));

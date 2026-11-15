@@ -80,13 +80,16 @@ pub enum ReplyNote {
     KeepsPlanning,
     /// It won't go: a secret belongs in the card.
     SecretInCard,
+    /// It answers the first open question, in the user's own words.
+    Answers,
 }
 
-/// What the composer's message would do to `request`, if anything (a question takes it as the
-/// answer, and a plan offered after its turn is simply replaced by it).
+/// What the composer's message would do to `request`, if anything (a plan offered after its turn
+/// is simply replaced by it).
 fn note_for(request: &PendingPermission) -> Option<ReplyNote> {
     match &request.prompt {
         None => Some(ReplyNote::Declines),
+        Some(Prompt::Questions(_)) => Some(ReplyNote::Answers),
         Some(Prompt::Plan(_)) if !request.after_turn => Some(ReplyNote::KeepsPlanning),
         Some(Prompt::Secret { .. }) => Some(ReplyNote::SecretInCard),
         Some(_) => None,
@@ -480,10 +483,10 @@ mod tests {
         );
         // A plan offered after its turn: the next message replaces it, as it did.
         assert_eq!(note_for(&card(Some(Prompt::Plan("p".into())), true)), None);
-        // A question takes the words as its answer.
+        // A question takes the words as its answer, and the composer says so.
         assert_eq!(
             note_for(&card(Some(Prompt::Questions(vec![])), false)),
-            None
+            Some(ReplyNote::Answers)
         );
         assert_eq!(
             note_for(&card(

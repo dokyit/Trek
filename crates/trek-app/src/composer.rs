@@ -5224,6 +5224,7 @@ fn reply_placeholder(note: ReplyNote) -> std::borrow::Cow<'static, str> {
         ReplyNote::Declines => "Reply to decline this and say why".into(),
         ReplyNote::KeepsPlanning => "Reply to keep planning and say what to change".into(),
         ReplyNote::SecretInCard => "The secret goes in the card above, not here".into(),
+        ReplyNote::Answers => "Type your own answer to the first question".into(),
     }
 }
 
@@ -5232,6 +5233,7 @@ fn reply_hint(cmd_enter: bool, follow: FollowUp, note: ReplyNote) -> String {
     let send = if cmd_enter { "⌘↩" } else { "↩" }; // keys::localize below
     let text = match (note, follow) {
         (ReplyNote::SecretInCard, _) => "The secret goes in the card above".to_string(),
+        (ReplyNote::Answers, _) => format!("{send} answers the first question"), // keys::localize below
         // The other key queues: the card stays, and the words wait for the turn to end.
         (_, FollowUp::Steer) => {
             format!("{send} declines the card and sends this · ⌥↩ queues for after the turn") // keys::localize below
