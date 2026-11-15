@@ -25,7 +25,7 @@ body:
         - Inbox and threads
         - Review and git
         - Tools (terminal, browser, editor, simulator)
-        - Phone and other machines
+        - Phone (iPhone or phone browser) and other machines
         - Something else
   - type: textarea
     id: alternatives
