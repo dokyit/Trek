@@ -528,6 +528,15 @@ impl Composer {
             cx.notify();
             return;
         }
+        // Plan mode is on for an agent with none: it would refuse the message after it was sent.
+        {
+            let ws = self.workspace.read(cx);
+            let prefs = ws.chosen_prefs_in(&self.scope);
+            if prefs.plan && let Some(why) = ws.plan_unavailable(&prefs.agent) {
+                self.toast(format!("{why} Turn Plan off to send this."), cx);
+                return;
+            }
+        }
         // A file's path is this Mac's: another machine can't open it, so the message doesn't go
         // with it. The message stays as it is.
         if !self.outbox.files.is_empty()
@@ -4396,6 +4405,8 @@ impl Render for Composer {
             };
         let narrow = self.width.get() < px(narrow_below);
         let plan = prefs.plan;
+        // An agent that has no plan mode: the pill says so, and can only turn the mode off.
+        let no_plan = ws.plan_unavailable(&prefs.agent);
         let preparing = live.is_some_and(|l| l.preparing);
         // Its agent's CLI is being updated: messages wait for the new version.
         let updating = thread
@@ -4802,10 +4813,17 @@ impl Render for Composer {
                         Pill::new("plan-pill")
                             .chip()
                             .selected(plan)
-                            .tooltip(crate::keys::shared(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" }))
+                            .ghost(no_plan.is_some() && !plan)
+                            .tooltip(match &no_plan {
+                                Some(why) => SharedString::from(if plan { format!("{why} Turn Plan off to send.") } else { why.clone() }),
+                                None => crate::keys::shared(if plan { "Plan mode is on: the agent plans before it changes anything (⇧⇥)" } else { "Plan mode: the agent plans before it changes anything (⇧⇥)" }),
+                            })
                             .child(Icon::new(crate::assets::Lucide::ListChecks).size(px(look::ICON)).text_color(if plan { palette::indigo(cx) } else { theme.muted_foreground }))
                             .when(!narrow, |p| p.child(div().id("plan-pill-label").test_support().when(plan, |el| el.text_color(theme.foreground).font_medium()).child("Plan")))
-                            .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
+                            .on_click({
+                                let unavailable = no_plan.is_some();
+                                cx.listener(move |this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan && !unavailable))
+                            }),
                     ))
                     .children(plugin_actions)
                     .child(div().flex_1().min_w(px(4.)))
@@ -5101,7 +5119,14 @@ impl Render for Composer {
                 cx.listener(|this, action: &Enter, window, cx| this.on_enter(action, window, cx)),
             )
             .on_action(cx.listener(|this, _: &TogglePlan, _, cx| {
-                pickers::update_prefs(this, cx, |p| p.plan = !p.plan)
+                let ws = this.workspace.read(cx);
+                // Study has no plan pill, so no hidden setting to flip; an agent with no plan mode
+                // can only have it turned off.
+                if ws.is_study_in(&this.scope) || ws.is_study_session_in(&this.scope) {
+                    return;
+                }
+                let unavailable = ws.plan_unavailable(&ws.prefs_in(&this.scope).agent).is_some();
+                pickers::update_prefs(this, cx, |p| p.plan = !p.plan && !unavailable)
             }))
             .child(
                 v_flex()

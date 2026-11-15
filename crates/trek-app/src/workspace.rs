@@ -5101,6 +5101,13 @@ impl Workspace {
         out
     }
 
+    /// Why `agent` can't be put in plan mode, when what it reported says it has none: said in the
+    /// composer before a message goes, not after (`None`: it has one, or isn't known not to).
+    pub fn plan_unavailable(&self, agent: &AgentId) -> Option<String> {
+        let reported = self.acp_info.get(&agent.key())?.as_ref().ok()?;
+        (reported.plan == Some(false)).then(|| format!("{} has no plan mode.", agent.display_name()))
+    }
+
     /// Agents the model menu can't offer, and why, so it can say so and point at Settings: signed
     /// out, a local server that isn't running, and (only when nothing else is ready, so a user who
     /// never installed Codex isn't reminded of it) not installed.

@@ -1787,3 +1787,53 @@ fn a_refused_microphone_offers_the_privacy_pane() {
         ));
     });
 }
+
+/// An agent that reported no plan mode can't be put in it: the pill says so, and a message with
+/// Plan on stays in the prompt with a note, instead of going and being refused.
+#[test]
+fn plan_mode_for_an_agent_with_none_is_said_before_the_message_goes() {
+    use trek_agents::AcpInfo;
+    use trek_core::AgentId;
+    run(async |cx| {
+        let trek = open(cx);
+        trek.update(cx, |ws, cx| {
+            ws.acp_info.insert(
+                "opencode".into(),
+                Ok(AcpInfo {
+                    plan: Some(false),
+                    ..Default::default()
+                }),
+            );
+            let mut prefs = ws.prefs();
+            prefs.agent = AgentId::OpenCode;
+            prefs.plan = true;
+            ws.set_prefs(prefs, cx);
+        });
+        let toasts = toasts(&trek, cx);
+        trek.render(cx);
+        trek.type_text(cx, "make a plan");
+        trek.press(cx, "enter");
+        assert_eq!(trek.composer_text(cx), "make a plan");
+        assert!(matches!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Draft { .. }
+        ));
+        assert_eq!(
+            said(&toasts),
+            ["OpenCode has no plan mode. Turn Plan off to send this."]
+        );
+        // The pill turns it off, and can't turn it on again.
+        trek.click(cx, "plan-pill");
+        assert!(!trek.read(cx, |ws, _| ws.prefs().plan));
+        trek.click(cx, "plan-pill");
+        assert!(!trek.read(cx, |ws, _| ws.prefs().plan));
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.plan_unavailable(&AgentId::OpenCode)),
+            Some("OpenCode has no plan mode.".to_string())
+        );
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.plan_unavailable(&AgentId::ClaudeCode)),
+            None
+        );
+    });
+}

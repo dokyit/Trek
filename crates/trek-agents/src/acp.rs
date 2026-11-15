@@ -28,6 +28,9 @@ pub struct AcpInfo {
     pub auth_methods: Vec<(String, String)>,
     /// The agent refused to open a session until the user signs in.
     pub needs_auth: bool,
+    /// Whether the agent has a plan mode (`None`: not seen yet, so nothing is said against it).
+    #[serde(default)]
+    pub plan: Option<bool>,
 }
 
 /// Binary and arguments that start `agent` as an ACP server.
@@ -1508,6 +1511,7 @@ pub async fn run(
             &agent.bin,
             &ctl.models,
             auth_methods(&init),
+            Some(ctl.plan_mode.is_some()),
         );
     }
     // Into plan mode, or out of it when a resumed session was left there. A read-only session
@@ -1672,7 +1676,7 @@ pub async fn run(
                         told_efforts = None;
                         if let Some(ev) = efforts_news(&ctl, &mut told_efforts) {
                             if !agent.stand_in {
-                                ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init));
+                                ProbeCache::session_opened(&ProbeCache::dir(), &config.agent, &agent.bin, &ctl.models, auth_methods(&init), Some(ctl.plan_mode.is_some()));
                             }
                             if events.send(ev).await.is_err() {
                                 break;
@@ -2064,7 +2068,9 @@ async fn probe_at(agent_id: &AgentId, home: &Path, cache: &Path) -> Result<AcpIn
             .await?
         {
             Ok(r) => {
-                info.models = controls(&r).models;
+                let seen = controls(&r);
+                info.plan = Some(seen.plan_mode.is_some());
+                info.models = seen.models;
                 opened = r["sessionId"].as_str().map(String::from);
                 // Deleted through ACP where the agent offers it (OpenCode 2, whose CLI would start
                 // its background server to do it).
@@ -2166,7 +2172,9 @@ pub async fn acp_authenticate(id: &str, method_id: Option<&str>) -> Result<AcpIn
             .await?
         {
             Ok(r) => {
-                info.models = controls(&r).models;
+                let seen = controls(&r);
+                info.plan = Some(seen.plan_mode.is_some());
+                info.models = seen.models;
                 opened = r["sessionId"].as_str().map(String::from);
                 if let Some(session) = opened.clone().filter(|_| deletes_sessions(&init))
                     && let Ok(Ok(_)) = agent
@@ -2322,6 +2330,7 @@ impl ProbeCache {
         bin: &Path,
         models: &[ModelInfo],
         auth_methods: Vec<(String, String)>,
+        plan: Option<bool>,
     ) {
         if !models.is_empty() {
             Self::store(
@@ -2332,6 +2341,7 @@ impl ProbeCache {
                     models: models.to_vec(),
                     auth_methods,
                     needs_auth: false,
+                    plan,
                 },
             );
         }
@@ -4226,17 +4236,20 @@ mod tests {
             models: vec![model("a")],
             auth_methods: vec![("login".into(), "Log in".into())],
             needs_auth: false,
+            plan: Some(false),
         };
         ProbeCache::store(&dir, &agent, &bin, &info);
         assert!(dir.join("acp_grok.json").exists());
         assert_eq!(ProbeCache::load(&dir, &agent, &bin), Some(info.clone()));
         // A session's list replaces it; one with no models (Copilot) leaves it alone.
-        ProbeCache::session_opened(&dir, &agent, &bin, &[model("b")], vec![]);
+        ProbeCache::session_opened(&dir, &agent, &bin, &[model("b")], vec![], Some(true));
         assert_eq!(
             ProbeCache::load(&dir, &agent, &bin).unwrap().models,
             vec![model("b")]
         );
-        ProbeCache::session_opened(&dir, &agent, &bin, &[], vec![]);
+        // And says whether the agent has a plan mode.
+        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().plan, Some(true));
+        ProbeCache::session_opened(&dir, &agent, &bin, &[], vec![], Some(true));
         assert_eq!(
             ProbeCache::load(&dir, &agent, &bin).unwrap().models,
             vec![model("b")]
