@@ -60,44 +60,53 @@ pub fn hold(ws: &Entity<Workspace>, cx: &mut AsyncApp) -> anyhow::Result<()> {
 }
 
 pub async fn check(ws: &Entity<Workspace>, cx: &mut AsyncApp) -> anyhow::Result<()> {
-    let (_main, composer, view) = composer(ws, cx)?;
+    let (main, composer, view) = composer(ws, cx)?;
+    // On every platform: GPUI has the composer focused.
+    let focused = main.update(cx, |_, window, cx| composer.read(cx).has_focus(window, cx))?;
+    anyhow::ensure!(focused, "plugin-keys: the composer doesn't have the focus");
+    // On a Mac, at the window itself: its first responder is GPUI's view, and real key-downs
+    // reach the composer.
+    real_keys(&composer, view, cx).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn real_keys(
+    _composer: &Entity<crate::composer::Composer>,
+    _view: usize,
+    _cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn real_keys(
+    composer: &Entity<crate::composer::Composer>,
+    view: usize,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
     let text = |cx: &mut AsyncApp| cx.update(|cx| composer.read(cx).text(cx));
     let before = text(cx);
-    #[cfg(target_os = "macos")]
-    {
-        anyhow::ensure!(view != 0, "plugin-keys: the window has no native view");
-        // Between updates: the events below come back into GPUI through its own view.
-        mac::first_responder_is(view)?;
-        mac::key_down(view, "q", 12)?;
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(150))
-            .await;
-        let typed = text(cx);
-        anyhow::ensure!(
-            typed == format!("{before}q"),
-            "plugin-keys: a key-down reached the window but not the composer (it holds {typed:?})"
-        );
-        mac::key_down(view, "\u{7f}", 51)?;
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(150))
-            .await;
-        let after = text(cx);
-        anyhow::ensure!(
-            after == before,
-            "plugin-keys: Delete didn't reach the composer (it holds {after:?})"
-        );
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (view, before);
-        let focused = _main.update(cx, |_, window, cx| {
-            composer
-                .read(cx)
-                .focus_handle(cx)
-                .contains_focused(window, cx)
-        })?;
-        anyhow::ensure!(focused, "plugin-keys: the composer doesn't have the focus");
-    }
+    anyhow::ensure!(view != 0, "plugin-keys: the window has no native view");
+    // Between updates: the events below come back into GPUI through its own view.
+    mac::first_responder_is(view)?;
+    mac::key_down(view, "q", 12)?;
+    cx.background_executor()
+        .timer(std::time::Duration::from_millis(150))
+        .await;
+    let typed = text(cx);
+    anyhow::ensure!(
+        typed == format!("{before}q"),
+        "plugin-keys: a key-down reached the window but not the composer (it holds {typed:?})"
+    );
+    mac::key_down(view, "\u{7f}", 51)?;
+    cx.background_executor()
+        .timer(std::time::Duration::from_millis(150))
+        .await;
+    let after = text(cx);
+    anyhow::ensure!(
+        after == before,
+        "plugin-keys: Delete didn't reach the composer (it holds {after:?})"
+    );
     Ok(())
 }
 

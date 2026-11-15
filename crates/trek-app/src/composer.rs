@@ -1986,6 +1986,12 @@ impl Composer {
         self.input.read(cx).value().to_string()
     }
 
+    /// Whether the prompt has the keys (the capture build's `plugin-keys`).
+    #[cfg(feature = "shots")]
+    pub fn has_focus(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle(cx).is_focused(window)
+    }
+
     /// The open picker's rows, by label.
     #[cfg(any(test, feature = "test-support"))]
     pub fn picks(&self, cx: &App) -> Vec<String> {

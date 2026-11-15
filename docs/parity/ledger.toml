@@ -101,6 +101,57 @@ code = ["crates/trek-core/src/themes.rs", "crates/trek-app/src/themes.rs", "vend
 tests = ["crates/trek-app/tests/themes.rs"]
 
 [[feature]]
+id = "plugins"
+area = "App"
+what = "Plugins: a folder that changes how Trek looks and works (a look, element trees in the composer, a thread's header, the sidebar, the new-thread screen and the title bar, a surface of its own in place of the thread list, the composer or the new-thread screen, palette commands with keys, text effects, logic that hears Trek's events), installed with trek plugin, listed with its permissions in Settings › Plugins, read again as it changes"
+macos = "yes"
+windows = "yes"
+live = ["plugin install example:focus-timer", "plugin install example:commit-graph", "plugin on commit-graph", "plugin install example:trail-board", "plugin on trail-board", "plugin install example:terminal-look", "plugin problems 0", "route settings:plugins", "wait 300", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "route project:{project}", "new", "wait shown commit-trail 10000", "count focus-chip 1", "plugin focus at 300", "wait 300", "count plugin-surface-thread-list 1", "look terminal-look", "wait 1500", "look is terminal-look", "look trek", "wait 1500", "look is trek", "plugin off trail-board", "wait 300", "count plugin-surface-thread-list 0", "plugin focus stop", "plugin off focus-timer", "plugin off commit-graph", "wait 300", "count focus-chip 0"]
+how = { macos = "Shared code: the manifest, the folder, the CLI and the element trees' format in trek_core::plugins; drawing with GPUI, the registry and Settings in trek-app's plugins; logic in the QuickJS trek-script already ships; line weight, shadows and square pills as scales in GPUI's quad painting. `cmd` in a plugin's key is Cmd.", windows = "The same code. `cmd` in a plugin's key is Ctrl (keys::is_mac, a runtime value). `trek plugin` run from a console prints nothing in a release build, which is a GUI program: an agent's pipe gets its output, and the plugins folder is the same either way." }
+code = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-core/src/plugins/data.rs", "crates/trek-core/src/plugins/examples.rs", "crates/trek-app/src/plugins/mod.rs", "crates/trek-app/src/plugins/render.rs", "crates/trek-app/src/plugins/logic.rs", "crates/trek-app/src/plugins/focus.rs", "crates/trek-app/src/plugins/trail.rs", "crates/trek-app/src/settings_view/plugins.rs", "crates/trek-script/src/plugin.rs", "vendor/gpui-pre/src/corner_scale.rs"]
+tests = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-script/src/plugin.rs"]
+
+[[feature.promise]]
+what = "A plugin that asks for permissions waits for the user: the CLI turns on only what asks for nothing"
+macos = "crates/trek-core/src/plugins/mod.rs::an_agent_cant_grant_itself_permissions"
+windows = "crates/trek-core/src/plugins/mod.rs::an_agent_cant_grant_itself_permissions"
+
+[[feature.promise]]
+what = "A plugin's logic that throws, runs away or hogs memory fails that call alone, within its budget, and reaches nothing of the machine"
+macos = "crates/trek-script/src/plugin.rs::an_exception_a_runaway_and_a_hog_fail_the_call_alone"
+windows = "crates/trek-script/src/plugin.rs::an_exception_a_runaway_and_a_hog_fail_the_call_alone"
+
+[[feature.promise]]
+what = "A wrong plugin says what's wrong and where, and isn't loaded"
+macos = "crates/trek-core/src/plugins/mod.rs::a_bad_plugin_says_why"
+windows = "crates/trek-core/src/plugins/mod.rs::a_bad_plugin_says_why"
+
+[[feature]]
+id = "plugin-pages"
+area = "App"
+what = "Plugin pages and panels: a plugin's own HTML in a fenced web view, as a page in the sidebar's Pages group or a tab beside the thread, with Trek's look as CSS variables and a bridge for its storage and the data its permissions allow"
+macos = "yes"
+windows = "yes"
+live = ["plugin install example:summit-log", "plugin on summit-log", "route project:{project}", "new", "plugin page-view 0", "plugin page summit-log summit-log", "wait 5000", "count plugin-page 1", "plugin page-view 1", "plugin-keys hold", "route project:{project}", "wait 500", "plugin page-view 0", "plugin-keys", "plugin off summit-log"]
+how = { macos = "WKWebView through wry, served under the plugin's own scheme (trek-plugin://<id>/) with its own files and no network it wasn't allowed; made when the page opens and dropped when it closes. Before it's hidden or dropped the keys go back to GPUI's view.", windows = "WebView2 through wry, in the profile artifacts use (WebView2-pages), served as http://trek-plugin.<id>/ (WebView2 can't load a custom scheme) with the same policy; made without focus, so it never takes the keys from Trek by itself." }
+code = ["crates/trek-core/src/plugins/page.rs", "crates/trek-app/src/plugins/page.rs", "crates/trek-app/src/plugins/data.rs", "crates/trek-app/src/shots/plugin_keys.rs"]
+tests = ["crates/trek-core/src/plugins/page.rs"]
+
+[[feature.promise]]
+what = "A page is served its plugin's own files and nothing else: nothing above its folder, nothing through a link out of it"
+macos = "crates/trek-core/src/plugins/page.rs::only_the_plugins_own_files_are_served"
+windows = "crates/trek-core/src/plugins/page.rs::only_the_plugins_own_files_are_served"
+
+[[feature.promise]]
+what = "A page reaches no network unless the user allowed a host"
+macos = "crates/trek-core/src/plugins/page.rs::a_page_reaches_no_network_unless_a_host_was_allowed"
+windows = "crates/trek-core/src/plugins/page.rs::a_page_reaches_no_network_unless_a_host_was_allowed"
+
+[[feature.promise]]
+what = "The keyboard is Trek's again after a page that held it closes"
+untested = { macos = "Checked live at the window, not by a test (a test has no native window): `plugin-keys hold` makes the page's web view the window's first responder, the page closes, and `plugin-keys` checks the first responder is GPUI's view and hands the window real key-downs that must reach the composer (crates/trek-app/src/shots/plugin_keys.rs).", windows = "WebView2 is made without focus and hidden through wry, which hands focus to its parent; the live check asserts the composer has GPUI's focus after a page closes. Nothing delivers real key events to the window on Windows." }
+
+[[feature]]
 id = "backgrounds"
 area = "App"
 what = "Background art: Classic, Paintings and Light across the chat, ASCII in the sidebar"
