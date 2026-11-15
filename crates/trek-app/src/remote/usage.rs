@@ -48,12 +48,12 @@ impl Workspace {
                 // As the card says it: only for a provider with no limits to show.
                 let today = u.limits.is_empty().then(|| match &u.today {
                     Some((n, spend)) if spend.priced() => Some(format!(
-                        "Today in Trek: {} tokens · ≈ {}",
+                        "Today in Trek: {} tokens with cache · ≈ {}",
                         crate::cost::fmt_tokens(*n),
                         crate::cost::usd(spend.usd())
                     )),
                     Some((n, _)) => Some(format!(
-                        "Today in Trek: {} tokens",
+                        "Today in Trek: {} tokens with cache",
                         crate::cost::fmt_tokens(*n)
                     )),
                     None if u.plan.is_none() && !u.no_limits && u.error.is_none() => {

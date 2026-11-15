@@ -2372,8 +2372,8 @@ impl Sidebar {
                     // an account not signed in ends at its own words.
                     .when(u.limits.is_empty(), |el| {
                         let said = match &u.today {
-                            Some((n, spend)) if spend.priced() => format!("Today in Trek: {} tokens · ≈ {}", crate::cost::fmt_tokens(*n), crate::cost::usd(spend.usd())),
-                            Some((n, _)) => format!("Today in Trek: {} tokens", crate::cost::fmt_tokens(*n)),
+                            Some((n, spend)) if spend.priced() => format!("Today in Trek: {} tokens with cache · ≈ {}",crate::cost::fmt_tokens(*n), crate::cost::usd(spend.usd())),
+                            Some((n, _)) => format!("Today in Trek: {} tokens with cache",crate::cost::fmt_tokens(*n)),
                             None if u.plan.is_none() && !u.no_limits && u.error.is_none() => "Nothing used today.".to_string(),
                             None => String::new(),
                         };

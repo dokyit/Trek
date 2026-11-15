@@ -429,17 +429,26 @@ impl Basecamp {
     fn totals(&self, recap: &Recap, spend: &Spend, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let line = theme.foreground.opacity(0.07);
+        // The tokens tile says what its figure counts (cache reads are in it) and how much of the
+        // work it covers: a short line under it, all of it in the tooltip.
+        let tokens_line = tokens_note(recap, during(recap.window.range));
         let figures = [
-            ("Threads", recap.threads.to_string(), None),
-            ("Turns", recap.turns.to_string(), None),
-            ("Tokens", fmt_tokens(recap.tokens.total()), None),
-            ("API cost", cost(spend), None),
+            ("Threads", recap.threads.to_string(), None, None),
+            ("Turns", recap.turns.to_string(), None, None),
+            (
+                "Tokens",
+                tokens_cell(recap.tokens.total()),
+                None,
+                Some(tokens_line),
+            ),
+            ("API cost", cost(spend), None, None),
             (
                 "Failures",
                 recap.failed.to_string(),
                 (recap.failed > 0).then(|| palette::red(cx)),
+                None,
             ),
-            ("Agent time", agent_time(recap.agent_secs), None),
+            ("Agent time", agent_time(recap.agent_secs), None, None),
         ];
         h_flex()
             .id("basecamp-totals")
@@ -453,8 +462,21 @@ impl Basecamp {
                 figures
                     .into_iter()
                     .enumerate()
-                    .map(|(i, (label, value, color))| {
+                    .map(|(i, (label, value, color, note))| {
+                        let tip = note.as_ref().map(|n| {
+                            SharedString::from(format!(
+                                "Input, output and cache tokens, as your agents reported them. {n}"
+                            ))
+                        });
                         v_flex()
+                            .id(("basecamp-total", i))
+                            .test_support()
+                            .when_some(tip, |el, tip| {
+                                el.tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                })
+                            })
                             .flex_1()
                             .min_w_0()
                             .py(px(12.))
@@ -476,6 +498,13 @@ impl Basecamp {
                                     .when_some(color, |el, c| el.text_color(c))
                                     .child(value),
                             )
+                            .children(note.map(|n| {
+                                div()
+                                    .text_size(px(text::LABEL))
+                                    .text_color(theme.muted_foreground)
+                                    .truncate()
+                                    .child(n)
+                            }))
                     }),
             )
             .into_any_element()
@@ -692,7 +721,7 @@ impl Basecamp {
                 )
                 .child(number(r.threads.to_string()))
                 .child(number(r.turns.to_string()))
-                .child(number(fmt_tokens(r.tokens)))
+                .child(number(tokens_cell(r.tokens)))
                 .child(number(cost(&r.spend)))
                 .child(
                     number(r.failed.to_string())
@@ -1804,6 +1833,16 @@ pub fn ticks(w: &basecamp::Window) -> Vec<(f32, String)> {
         }
     }
     out
+}
+
+/// A token count for a table cell or a tile: a dash when nothing was reported, which isn't the
+/// same as none used.
+pub fn tokens_cell(tokens: u64) -> String {
+    if tokens == 0 {
+        "—".to_string()
+    } else {
+        fmt_tokens(tokens)
+    }
 }
 
 /// What the tokens tile says under its figure: what they'd cost at API prices (as far as they

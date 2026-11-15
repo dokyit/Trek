@@ -14,6 +14,13 @@ use trek_core::settings::ThemeChoice;
 use trek_core::store::{Activity, Item, Store, UsageRow, now_ms};
 use trek_core::{AgentId, Effort, HandHolding, RunState, TokenUsage};
 
+/// A model that reported no tokens reads as a dash, not as a zero it never used.
+#[test]
+fn tokens_nobody_reported_read_as_a_dash() {
+    assert_eq!(trek_app::basecamp::tokens_cell(0), "—");
+    assert_eq!(trek_app::basecamp::tokens_cell(93_000), "93K");
+}
+
 /// A needs row's id.
 fn row(thread: &str) -> gpui_kit::SharedString {
     format!("review-{thread}").into()
@@ -628,6 +635,8 @@ fn the_week_the_palette_and_the_clock() {
         assert_eq!((week.recap.prompts, week.recap.turns), (1, 1));
         trek.render(cx);
         assert!(trek.visible(cx, "basecamp-totals") && trek.visible(cx, "basecamp-chart"));
+        // The tokens tile (the third) carries its caveat line and tooltip, as the phone's does.
+        assert!(trek.visible(cx, ("basecamp-total", 2usize)));
         // A minute on, with nothing changed: the summary stays, its "now" moves.
         let later = week.recap.now + 60_000;
         basecamp.update(cx, |b, cx| b.tick(later, cx));
