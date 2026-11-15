@@ -399,6 +399,8 @@ pub fn nav_row(
         .gap(px(10.))
         .rounded(px(fluent::control(radius::BUTTON)))
         .cursor_pointer()
+        .keyboard_reachable(cx)
+        .arrow_walk()
         .text_size(px(text::BODY))
         .when(active, |el| {
             el.bg(theme.foreground.opacity(0.08))
@@ -1031,6 +1033,44 @@ impl gpui_kit::component::Selectable for Pill {
     }
 }
 
+/// A hand-built control the keyboard can reach: a Tab stop that Enter and Space press (GPUI
+/// clicks a focused element on both) and a ring while it has focus from the keyboard. A click
+/// doesn't take focus (as the kit's Button's doesn't), so the text field keeps it.
+pub trait KeyboardReachable: Sized {
+    fn keyboard_reachable(self, cx: &App) -> Self;
+    /// Up and Down move to the control before and after, so a list can be walked by arrow keys.
+    fn arrow_walk(self) -> Self;
+}
+
+impl KeyboardReachable for Stateful<Div> {
+    fn keyboard_reachable(self, cx: &App) -> Self {
+        let ring = cx.theme().ring.alpha(0.5);
+        self.focusable()
+            .tab_stop(true)
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .focus_visible(move |s| {
+                s.shadow(vec![BoxShadow {
+                    color: ring,
+                    offset: point(px(0.), px(0.)),
+                    blur_radius: px(0.),
+                    spread_radius: px(2.),
+                    inset: false,
+                }])
+            })
+    }
+
+    fn arrow_walk(self) -> Self {
+        self.on_key_down(|event, window, cx| {
+            match event.keystroke.key.as_str() {
+                "down" => window.focus_next(cx),
+                "up" => window.focus_prev(cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+        })
+    }
+}
+
 impl RenderOnce for Pill {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         if self.chip {
@@ -1039,6 +1079,7 @@ impl RenderOnce for Pill {
         let theme = cx.theme();
         h_flex()
             .id(self.id)
+            .keyboard_reachable(cx)
             .test_support()
             .h(px(28.))
             .px(px(10.))
@@ -1082,6 +1123,7 @@ impl Pill {
         let (fill, hover, pressed) = (look::chip_fill(cx), look::chip_hover(cx), look::pressed(cx));
         h_flex()
             .id(self.id)
+            .keyboard_reachable(cx)
             .test_support()
             .h(px(look::CONTROL))
             .px(px(11.))

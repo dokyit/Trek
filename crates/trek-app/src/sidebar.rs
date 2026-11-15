@@ -16,7 +16,7 @@ use crate::fluent::{self, PillExt as _};
 use crate::palette;
 use crate::scale::{radius, text, to_rems};
 use crate::time;
-use crate::ui;
+use crate::ui::{self, KeyboardReachable as _};
 use crate::workspace::attention::Why;
 use crate::workspace::{ItemRef, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
 use gpui_kit::component::Disableable as _;
@@ -1040,6 +1040,8 @@ impl Sidebar {
         let inset = look::ROW_INSET - look::INBOX_BORDER - look::INBOX_ROW_MX;
         let row = v_flex()
             .id(SharedString::from(format!("inbox-{}", t.id)))
+            .keyboard_reachable(cx)
+            .arrow_walk()
             .test_support()
             .relative()
             .mx(px(look::INBOX_ROW_MX))
@@ -1114,6 +1116,8 @@ impl Sidebar {
             ));
         let row = v_flex()
             .id(SharedString::from(format!("line-{}", t.id)))
+            .keyboard_reachable(cx)
+            .arrow_walk()
             .test_support()
             .relative()
             .mx_2()
@@ -1367,6 +1371,8 @@ impl Sidebar {
         };
         let row = v_flex()
             .id(SharedString::from(format!("live-line-{}", t.id)))
+            .keyboard_reachable(cx)
+            .arrow_walk()
             .test_support()
             .relative()
             .mx_2()
