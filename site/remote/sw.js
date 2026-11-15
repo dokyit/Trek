@@ -2,8 +2,13 @@
 // a new version shows the next time it opens), and from what was kept when it isn't, so the
 // remote opens without a connection and says so. It keeps nothing else: what Trek says comes over
 // WebTransport, which this doesn't see.
+//
+// And notifications: the computer sends them itself, through the browser's push service, encrypted
+// to this browser (Web Push; `js/push.js` subscribes). Each is shown as it comes (a browser drops
+// a page's push permission if one isn't), and tapping it opens its thread. What a note says is
+// read as in `js/push.js` (`notificationFor`, `openUrl`): a classic worker can't import it.
 
-const CACHE = 'trek-remote-v1';
+const CACHE = 'trek-remote-v2';
 const SHELL = [
   '/remote/',
   '/remote/css/git.css',
@@ -34,6 +39,7 @@ const SHELL = [
   '/remote/js/features/mac.js',
   '/remote/js/features/media.js',
   '/remote/js/features/notes.js',
+  '/remote/js/features/notify.js',
   '/remote/js/features/thread-extras.js',
   '/remote/js/features/turn-actions.js',
   '/remote/js/features/viz-card.js',
@@ -51,6 +57,7 @@ const SHELL = [
   '/remote/js/main.js',
   '/remote/js/markdown.js',
   '/remote/js/model.js',
+  '/remote/js/push.js',
   '/remote/js/routes.js',
   '/remote/js/screens.js',
   '/remote/js/store.js',
@@ -103,5 +110,46 @@ self.addEventListener('fetch', (event) => {
         return response;
       })
       .catch(() => caches.match(request, { ignoreSearch: true }).then((hit) => hit || (request.mode === 'navigate' ? caches.match('/remote/') : Response.error()))),
+  );
+});
+
+self.addEventListener('push', (event) => {
+  let note = {};
+  try {
+    note = event.data ? event.data.json() : {};
+  } catch {
+    // Shown plainly: every push shows something.
+  }
+  const title = typeof note.title === 'string' && note.title ? note.title : 'Trek';
+  const data = { thread: typeof note.thread === 'string' ? note.thread : null, host: typeof note.host === 'string' ? note.host : null };
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: typeof note.body === 'string' ? note.body : '',
+      tag: typeof note.tag === 'string' && note.tag ? note.tag : data.host || 'trek',
+      icon: '/assets/img/icon-192.png',
+      badge: '/assets/img/icon-192.png',
+      data,
+    }),
+  );
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const data = event.notification.data || {};
+  const params = new URLSearchParams();
+  if (data.thread) params.set('t', data.thread);
+  if (data.host) params.set('h', data.host);
+  const hash = params.toString();
+  const url = hash ? `/remote/#${hash}` : '/remote/';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
+      // The remote open already: it goes to the thread itself, and comes to the front.
+      const open = windows.find((w) => new URL(w.url).pathname.startsWith('/remote/'));
+      if (open) {
+        open.postMessage({ type: 'open', thread: data.thread || null, host: data.host || null });
+        return open.focus();
+      }
+      return self.clients.openWindow(url);
+    }),
   );
 });

@@ -6,6 +6,7 @@ import { render } from '../vendor/preact.mjs';
 import { html } from './ui.js';
 import * as app from './model.js';
 import { parsePairing } from './link.js';
+import { openTarget } from './push.js';
 import { localNetworkPermission } from './client.js';
 import { apply } from './look.js';
 import { ThreadScreen } from './thread.js';
@@ -60,7 +61,9 @@ async function start() {
   }
   const machines = await app.loadMachines();
   if (pairing) {
-    app.state.pairing = { hostId: pairing.hostId, name: pairing.name, routes: pairing.routes, certs: pairing.certs, pairing: { code: pairing.code } };
+    // The link itself too: an iPhone's Safari copies it into the Home Screen app, which keeps a
+    // pairing of its own (`PairScreen`).
+    app.state.pairing = { hostId: pairing.hostId, name: pairing.name, routes: pairing.routes, certs: pairing.certs, pairing: { code: pairing.code }, link: location.origin + location.pathname + hash };
     app.go({ screen: 'pair' }, { replace: true });
     // A browser that already lets the page on the network pairs at once; otherwise Connect asks.
     if ((await localNetworkPermission()) === 'granted') app.use(app.state.pairing);
@@ -73,15 +76,24 @@ async function start() {
     } catch {
       // The newest, then.
     }
-    app.use(machines.find((m) => m.hostId === last) || machines[0]);
-    const thread = hash.match(/^#t=(.+)$/);
-    app.go(thread ? { screen: 'thread', threadId: decodeURIComponent(thread[1]) } : { screen: 'threads' }, { replace: true });
+    // A notification tapped opens its thread, on the computer it came from.
+    const target = openTarget(hash);
+    app.use(machines.find((m) => target?.host && m.hostId === target.host) || machines.find((m) => m.hostId === last) || machines[0]);
+    app.go(target ? { screen: 'thread', threadId: target.thread } : { screen: 'threads' }, { replace: true });
   } else {
     app.go({ screen: 'welcome' }, { replace: true });
   }
   render(html`<${App} />`, document.getElementById('app'));
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('/remote/sw.js', { scope: '/remote/' }).catch(() => {});
+    // A notification tapped while the remote is open: to its thread (`sw.js`).
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      const { type, thread, host } = event.data || {};
+      if (type !== 'open' || !thread) return;
+      const machine = host && app.state.machines.find((m) => m.hostId === host);
+      if (machine && app.state.machine?.hostId !== host) app.use(machine);
+      app.go({ screen: 'thread', threadId: thread });
+    });
   }
 }
 

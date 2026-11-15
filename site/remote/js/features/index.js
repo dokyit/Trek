@@ -8,3 +8,4 @@ import './notes.js';
 import './git.js';
 import './viz.js';
 import './look-mac.js';
+import './notify.js';

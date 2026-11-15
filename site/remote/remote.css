@@ -1361,3 +1361,12 @@ textarea.input {
   border: 1px solid var(--border);
   color: var(--fg-strong);
 }
+
+/* Pairing from a pasted link, under the steps on the first screen. */
+.paste-link {
+  margin-top: 18px;
+  text-align: left;
+}
+.paste-link .btn {
+  margin-top: 8px;
+}

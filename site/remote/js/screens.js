@@ -2,10 +2,12 @@
 // from a link, a new thread, the paired machines, and Settings.
 
 import { useEffect, useState } from '../vendor/hooks.mjs';
-import { html, Icon, IconButton, Menu, Sheet, Spinner, Switch, Segmented, ProjectBadge, ago } from './ui.js';
+import { html, Icon, IconButton, Menu, Sheet, Spinner, Switch, Segmented, ProjectBadge, ago, copy } from './ui.js';
 import { ConnectionBanner, Mark, attached } from './thread.js';
 import * as app from './model.js';
 import { supported } from './wire.js';
+import { parsePairing } from './link.js';
+import { environment } from './push.js';
 import { setScheme, scheme } from './look.js';
 import { composerPreviews, composerTools, settingsSections, threadParts } from './routes.js';
 
@@ -125,8 +127,40 @@ export function WelcomeScreen() {
     </ol>
     <p>This phone connects straight to your computer, on your Wi-Fi or tailnet. Nothing goes through trekdesktop.com.</p>
     ${!supported() && html`<div class="banner bad" style=${{ margin: '16px 0 0' }}><${Icon} name="alert" /><span class="grow">This browser can’t make the connection Trek needs (WebTransport). Use Chrome, Edge or Samsung Internet.</span></div>`}
+    <${PasteLink} />
     <p style=${{ marginTop: '18px' }}><button class="btn ghost" type="button" onClick=${() => app.startDemo()}><${Icon} name="play" size="s" />Explore the demo</button></p>
   </div></div></div>`;
+}
+
+/**
+ * Pairing from a link pasted in: a Home Screen app on an iPhone has its own storage, apart from
+ * Safari's, and a scanned code opens Safari, so the link is copied there and pasted here.
+ */
+function PasteLink() {
+  const [text, setText] = useState('');
+  const [bad, setBad] = useState(false);
+  const pair = (e) => {
+    e.preventDefault();
+    const raw = text.trim();
+    const hash = raw.includes('#') ? raw.slice(raw.indexOf('#')) : raw;
+    const pairing = parsePairing(hash);
+    if (!pairing) {
+      setBad(true);
+      return;
+    }
+    app.state.pairing = { hostId: pairing.hostId, name: pairing.name, routes: pairing.routes, certs: pairing.certs, pairing: { code: pairing.code } };
+    app.go({ screen: 'pair' });
+  };
+  return html`<form class="paste-link" onSubmit=${pair}>
+    <label class="field"><span>Or paste a pairing link</span>
+      <input class="input" id="paste-link" type="url" inputmode="url" autocomplete="off" placeholder="https://trekdesktop.com/remote/#p=…" value=${text} onInput=${(e) => {
+        setText(e.target.value);
+        setBad(false);
+      }} />
+    </label>
+    ${bad && html`<p class="muted" id="paste-link-bad">That isn’t a pairing link. Copy it again from the pairing screen, or show a new code on your computer.</p>`}
+    <button class="btn block" type="submit" disabled=${!text.trim()}>Pair</button>
+  </form>`;
 }
 
 export function PairScreen() {
@@ -153,6 +187,9 @@ export function PairScreen() {
       ${status === 'connecting' ? html`<${Spinner} /> Connecting…` : 'Connect'}
     </button>
     <p class="muted" style=${{ marginTop: '14px', fontSize: '13px' }}>Addresses: ${pairing.routes.join(', ')}</p>
+    ${pairing.link && environment().ios && !environment().standalone &&
+    html`<div class="banner" id="pair-home-screen" style=${{ margin: '16px 0 0' }}><${Icon} name="bell" /><span class="grow">For notifications on this iPhone, pair from the Home Screen app instead: it keeps a pairing of its own. Copy the link, then tap Share › Add to Home Screen, open Trek from there and paste it.</span>
+      <button class="btn small" type="button" onClick=${() => copy(pairing.link, app.toast)}>Copy link</button></div>`}
   </div></div></div>`;
 }
 
