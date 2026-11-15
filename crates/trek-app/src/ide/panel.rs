@@ -437,14 +437,30 @@ impl IdeWorkbench {
             .map(|(p, d)| (p.clone(), d.clone()))
             .collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
+        // A language with no server isn't clean, only unchecked: said first.
+        let missing = crate::lsp_client::missing_note(ws.lsp_missing());
         if files.is_empty() {
-            return crate::panels::empty("No problems in the open files.", cx).into_any_element();
+            let text = missing.unwrap_or_else(|| "No problems in the open files.".into());
+            return crate::panels::empty(text, cx)
+                .id("ide-problems-empty")
+                .test_support()
+                .into_any_element();
         }
         let mut list = v_flex()
             .id("ide-problems")
             .size_full()
             .overflow_y_scroll()
-            .py_1();
+            .py_1()
+            .children(missing.map(|note| {
+                div()
+                    .id("ide-problems-missing")
+                    .test_support()
+                    .px_3()
+                    .py(px(4.))
+                    .text_size(px(text::META))
+                    .text_color(theme.muted_foreground)
+                    .child(note)
+            }));
         let mut row_ix = 0usize;
         for (path, diags) in files {
             let name = path
@@ -640,8 +656,12 @@ impl IdeWorkbench {
                     }
                 }
                 if servers.is_empty() {
+                    let missing =
+                        crate::lsp_client::missing_note(self.workspace.read(cx).lsp_missing());
                     crate::panels::empty(
-                        "No language server is running. They start as files open.",
+                        missing.unwrap_or_else(|| {
+                            "No language server is running. They start as files open.".into()
+                        }),
                         cx,
                     )
                     .into_any_element()

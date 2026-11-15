@@ -128,6 +128,18 @@ impl Render for IdeStatus {
                 e.crlf(cx),
             )
         });
+        // The file's language has a server, and it wasn't found: said, as a running one is.
+        let missing = self.editor.as_ref().and_then(|e| {
+            let e = e.read(cx);
+            let ext = e
+                .path
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or_default();
+            let (program, _, language_id) = crate::lsp_client::spec(ext)?;
+            (e.lsp_name.is_none() && ws.lsp_missing().contains(&program))
+                .then_some((program, crate::lsp_client::language_name(language_id)))
+        });
         let preview = self.preview.as_ref().map(|p| p.read(cx).status_items());
         let muted = theme.muted_foreground;
         h_flex()
@@ -204,6 +216,21 @@ impl Render for IdeStatus {
                             Self::item("ide-status-lsp", cx)
                                 .child(div().text_color(crate::palette::emerald(cx)).child("●"))
                                 .child(name)
+                                .test_support(),
+                        )
+                    })
+                    .when_some(missing, |el, (program, language)| {
+                        let tip = format!(
+                            "Install {program} to see completions and problems in {language} files."
+                        );
+                        el.child(
+                            Self::item("ide-status-lsp-missing", cx)
+                                .child("○")
+                                .child(format!("{program} not found"))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                })
                                 .test_support(),
                         )
                     })

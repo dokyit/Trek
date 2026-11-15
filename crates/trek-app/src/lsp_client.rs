@@ -651,6 +651,9 @@ fn end_child(mut child: Child, grace: Duration) {
 pub struct Servers {
     by_key: HashMap<(PathBuf, &'static str), Arc<Client>>,
     roots: RecentRoots,
+    /// The servers looked for and not found on PATH, by program: Problems and the status bar
+    /// say so rather than look like a file with no problems.
+    missing: Vec<&'static str>,
 }
 
 impl Default for Servers {
@@ -658,6 +661,69 @@ impl Default for Servers {
         Self {
             by_key: HashMap::new(),
             roots: RecentRoots::new(LIVE_ROOTS),
+            missing: vec![],
+        }
+    }
+}
+
+/// A language as Problems names it, by its server's language id.
+pub fn language_name(language_id: &str) -> &'static str {
+    match language_id {
+        "rust" => "Rust",
+        "swift" => "Swift",
+        "typescript" => "TypeScript",
+        "javascript" => "JavaScript",
+        "python" => "Python",
+        "go" => "Go",
+        "c" => "C",
+        "cpp" => "C++",
+        _ => "these",
+    }
+}
+
+/// What Problems says with no server for some languages: `missing` are the server programs not
+/// found (each named with its language). `None` when nothing is missing.
+pub fn missing_note(missing: &[&str]) -> Option<String> {
+    let mut languages: Vec<&str> = vec![];
+    for program in missing {
+        for (ext, name) in [
+            ("rs", "Rust"),
+            ("swift", "Swift"),
+            ("ts", "TypeScript and JavaScript"),
+            ("py", "Python"),
+            ("go", "Go"),
+            ("c", "C and C++"),
+        ] {
+            if spec(ext).is_some_and(|(p, _, _)| p == *program) && !languages.contains(&name) {
+                languages.push(name);
+            }
+        }
+    }
+    let and = |items: &[&str]| match items {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    (!missing.is_empty()).then(|| {
+        format!(
+            "{} files aren't checked: install {} to see their problems.",
+            and(&languages),
+            and(missing)
+        )
+    })
+}
+
+impl Servers {
+    /// The server programs looked for and not found, in the order they were looked for.
+    pub fn missing(&self) -> &[&'static str] {
+        &self.missing
+    }
+
+    /// Whether `program` was found when it was looked for.
+    pub fn note_found(&mut self, program: &'static str, found: bool) {
+        self.missing.retain(|p| *p != program);
+        if !found {
+            self.missing.push(program);
         }
     }
 }
@@ -666,7 +732,7 @@ impl Servers {
     /// The server for `lang` at `root`, started if there's none (or it stopped). Servers of
     /// the root that falls out of the most recent few are stopped.
     pub fn get_or_start(&mut self, root: PathBuf, lang: &str) -> Option<Arc<Client>> {
-        let (_, _, language_id) = spec(lang)?;
+        let (program, _, language_id) = spec(lang)?;
         for old in self.roots.touch(&root) {
             self.by_key.retain(|(r, _), c| {
                 if *r == old {
@@ -679,7 +745,12 @@ impl Servers {
         if let Some(c) = self.by_key.get(&key).filter(|c| !c.stopped()) {
             return Some(c.clone());
         }
-        let c = Client::start(key.0.clone(), lang)?;
+        let started = Client::start(key.0.clone(), lang);
+        self.note_found(
+            program,
+            started.is_some() || trek_core::detect::which(program).is_some(),
+        );
+        let c = started?;
         self.by_key.insert(key, c.clone());
         Some(c)
     }
@@ -878,6 +949,37 @@ pub fn uri_for(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// A server not found is noted (and forgotten once found), and Problems names its
+    /// languages and the programs to install.
+    #[test]
+    fn a_missing_server_is_named_with_its_languages() {
+        let mut servers = Servers::default();
+        assert_eq!(missing_note(servers.missing()), None);
+        servers.note_found("rust-analyzer", false);
+        assert_eq!(
+            missing_note(servers.missing()).as_deref(),
+            Some("Rust files aren't checked: install rust-analyzer to see their problems.")
+        );
+        servers.note_found("pyright-langserver", false);
+        servers.note_found("rust-analyzer", false);
+        assert_eq!(servers.missing(), ["pyright-langserver", "rust-analyzer"]);
+        assert_eq!(
+            missing_note(servers.missing()).as_deref(),
+            Some(
+                "Python and Rust files aren't checked: install pyright-langserver and rust-analyzer to see their problems."
+            )
+        );
+        servers.note_found("rust-analyzer", true);
+        servers.note_found("pyright-langserver", true);
+        assert!(servers.missing().is_empty());
+        assert_eq!(
+            missing_note(&["typescript-language-server"]).as_deref(),
+            Some(
+                "TypeScript and JavaScript files aren't checked: install typescript-language-server to see their problems."
+            )
+        );
+    }
     #[cfg(unix)]
     use std::os::unix::net::UnixStream as Socket;
 

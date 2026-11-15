@@ -501,6 +501,40 @@ fn the_unsaved_question_names_one_file_or_counts_them() {
     );
 }
 
+/// A file whose language server isn't installed: the status bar says it wasn't found, and
+/// Problems says the file isn't checked rather than that it has no problems.
+#[test]
+fn a_missing_language_server_is_said_not_taken_for_no_problems() {
+    run(async |cx| {
+        let trek = open(cx);
+        let file = trek.project.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        editor_on_draft(&trek, cx);
+        trek.update(cx, |ws, cx| ws.open_editor(file.clone(), None, cx));
+        let ide = ide(&trek, cx);
+        trek.window(cx, |window, cx| {
+            ide.update(cx, |i, cx| {
+                i.show_panel(trek_app::ide::PanelTab::Problems, window, cx)
+            })
+        });
+        trek.render(cx);
+        assert!(!trek.visible(cx, "ide-status-lsp-missing"));
+        trek.update(cx, |ws, cx| {
+            ws.note_lsp_found("rust-analyzer", false);
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "ide-status-lsp-missing"));
+        assert!(trek.visible(cx, "ide-problems-empty"));
+        assert_eq!(
+            trek.read(cx, |ws, _| trek_app::lsp_client::missing_note(
+                ws.lsp_missing()
+            )),
+            Some("Rust files aren't checked: install rust-analyzer to see their problems.".into())
+        );
+    });
+}
+
 #[test]
 fn explorer_clicks_preview_and_edits_keep_the_tab() {
     run(async |cx| {

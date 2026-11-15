@@ -4717,6 +4717,17 @@ impl Workspace {
         self.keep(task);
     }
 
+    /// The language server programs looked for and not found on PATH (`lsp_client::Servers`).
+    pub fn lsp_missing(&self) -> &[&'static str] {
+        self.lsp_servers.missing()
+    }
+
+    /// Note whether a language server's `program` was found (tests have no servers to look for).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn note_lsp_found(&mut self, program: &'static str, found: bool) {
+        self.lsp_servers.note_found(program, found);
+    }
+
     /// The language server for a file's grammar, spawning it on first use. Rooted at the IDE
     /// folder (or the file's git root when opened outside one).
     pub fn lsp_for(&mut self, path: &Path, lang: &str) -> Option<Arc<crate::lsp_client::Client>> {
