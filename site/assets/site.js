@@ -114,7 +114,12 @@
         label.textContent = who.os === "windows" ? "Download for Windows" : "Download for macOS";
         const size = assets[who.build] && assets[who.build].size ? `, ${megabytes(assets[who.build].size)}` : "";
         const version = release && release.version ? ` Version ${release.version}, ${CHIP[who.build]}${size}.` : "";
-        fine.textContent = `Free and open source.${version}`;
+        fine.textContent = `Free and open source.${version} The first launch asks you to `;
+        const once = document.createElement("a");
+        once.href = "#install";
+        once.className = "text-link";
+        once.textContent = "allow it once";
+        fine.append(once, ".");
         if (who.os === "mac" && !who.sure) {
           const other = document.createElement("a");
           other.href = href("mac-intel");
@@ -125,9 +130,16 @@
       } else if (who.os === "mobile" || who.os === "linux") {
         primary.href = "#install";
         label.textContent = "See the downloads";
-        fine.textContent = who.os === "mobile"
-          ? "Trek is a desktop app. Open this page on your Mac or PC to download it."
-          : "There is no Linux build yet. Trek runs on macOS and Windows.";
+        if (who.os === "mobile") {
+          const remote = document.createElement("a");
+          remote.href = "/remote/";
+          remote.className = "text-link";
+          remote.textContent = "the remote";
+          fine.textContent = "Trek is a desktop app. Open this page on your Mac or PC to download it. On a phone, use ";
+          fine.append(remote, " to answer your agents.");
+        } else {
+          fine.textContent = "There is no Linux build yet. Trek runs on macOS and Windows.";
+        }
       }
     }
 
