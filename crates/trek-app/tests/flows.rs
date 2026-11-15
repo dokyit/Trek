@@ -638,6 +638,41 @@ fn a_question_card_shows_every_option_whole() {
     });
 }
 
+/// A long command scrolls inside its box: the card stays short enough to reach its buttons.
+#[test]
+fn an_approval_card_keeps_a_long_command_to_a_scrolling_box() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        let script = (1..=60)
+            .map(|n| format!("echo step {n} && sleep 1"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(
+                &id,
+                vec![AgentEvent::PermissionRequest {
+                    request_id: "long".into(),
+                    title: "Run command".into(),
+                    detail: script,
+                    prompt: None,
+                    call: None,
+                }],
+                cx,
+            )
+        });
+        trek.render(cx);
+        let detail = trek
+            .bounds(cx, "permission-detail")
+            .expect("the command's box");
+        assert!(
+            detail.size.height <= gpui_kit::px(160.5),
+            "the command's box stops at its limit: {detail:?}"
+        );
+        assert!(trek.visible(cx, "allow"), "the buttons are still on screen");
+    });
+}
+
 #[test]
 fn question_cards_take_picks_typed_answers_or_a_skip() {
     run(async |cx| {

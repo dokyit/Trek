@@ -4897,8 +4897,13 @@ impl ThreadView {
                                     ),
                             )
                             .when(!p.detail.is_empty(), |el| {
+                                // A long command scrolls here: the buttons stay in reach.
                                 el.child(
                                     div()
+                                        .id("permission-detail")
+                                        .test_support()
+                                        .max_h(px(PERMISSION_DETAIL_MAX))
+                                        .overflow_y_scroll()
                                         .px_2()
                                         .py_1()
                                         .rounded(px(fluent::control(theme.radius.as_f32())))
@@ -5086,6 +5091,8 @@ fn thought_after(items: &[Item], reasoning: Option<usize>, members: &[usize]) ->
     .then_some(thought)
 }
 
+/// The tallest an approval card's command grows before it scrolls.
+const PERMISSION_DETAIL_MAX: f32 = 160.;
 /// How strong a row's chevron is: on Windows' opaque window the Mac's falls under 3:1 on Paper.
 const CHEVRON: f32 = fluent::pick(0.8, 0.6);
 /// A button in a card on Windows is this tall; the kit's small one is under Windows' 28 px.
