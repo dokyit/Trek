@@ -794,6 +794,9 @@ pub struct TerminalPanel {
     size: (u16, u16),
     focus: FocusHandle,
     exited: bool,
+    /// A plain shell's folder and shell, to start a new one in its place once it exits (Return).
+    /// A command's terminal has none: it stays as it ended, to be read.
+    relaunch: Option<(Option<PathBuf>, String)>,
     /// The text size (⌘+ / ⌘-).
     font_size: f32,
     /// Resolved for a size: font family, that size, and a cell's width at it.
@@ -820,6 +823,8 @@ pub struct TerminalPanel {
     title: Option<String>,
     /// When the bell last rang, while its flash shows.
     bell_at: Option<Instant>,
+    /// Redraws as the keys come and go (the cursor is solid only with them), made at first draw.
+    focus_watch: Vec<Subscription>,
 }
 
 impl EventEmitter<TitleChanged> for TerminalPanel {}
@@ -894,6 +899,7 @@ impl TerminalPanel {
             size,
             focus: cx.focus_handle(),
             exited: false,
+            relaunch: job.is_none().then(|| (cwd.clone(), shell.clone())),
             font_size: FONT_SIZE,
             font: None,
             grid: Rc::new(Cell::new(Bounds::default())),
@@ -907,25 +913,9 @@ impl TerminalPanel {
             pointer: None,
             title: None,
             bell_at: None,
+            focus_watch: vec![],
         };
-        // An isolated (test) process starts no shell: one would run the user's login profile,
-        // and the command (a project's tests, an agent's sign-in) for real. Unless a live check
-        // asks the capture build for one (`verify_shell`): a shell without a profile, never a
-        // command.
-        if trek_core::paths::isolated() && (job.is_some() || !verify_shell()) {
-            this.screen().process(
-                format!(
-                    "$ {}\r\n(no shell in tests)\r\n",
-                    job.as_ref().map_or("", Job::command)
-                )
-                .as_bytes(),
-            );
-            return this;
-        }
-        if let Err(e) = this.spawn(cwd, job, &shell, cx) {
-            this.screen()
-                .process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
-        }
+        this.start(cwd, job, &shell, cx);
         this
     }
 
@@ -960,18 +950,84 @@ impl TerminalPanel {
                 }
                 cx.background_executor().timer(FRAME).await;
             }
-            let _ = this.update(cx, |this, cx| {
-                this.exited = true;
-                // Closes the pseudoconsole, and with it the output the reading thread waits on.
-                this.master = None;
-                this.writer = None;
-                if let Some(f) = this.on_exit.take() {
-                    f(this.recent_output(EXIT_OUTPUT_LINES), cx);
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.ended(cx));
         }));
         Ok(())
+    }
+
+    /// The process ended. A plain shell says so, and how to start a new one; a command's
+    /// terminal already said how it finished.
+    fn ended(&mut self, cx: &mut Context<Self>) {
+        self.exited = true;
+        // Closes the pseudoconsole, and with it the output the reading thread waits on.
+        self.master = None;
+        self.writer = None;
+        if self.relaunch.is_some() {
+            let key = if crate::fluent::WINDOWS {
+                "Enter"
+            } else {
+                "Return"
+            };
+            self.screen().process(
+                format!(
+                    "\r\n\x1b[2m[The shell exited. Press {key} to start a new one.]\x1b[0m\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some(f) = self.on_exit.take() {
+            f(self.recent_output(EXIT_OUTPUT_LINES), cx);
+        }
+        cx.notify();
+    }
+
+    /// The process ends, as when it exits (a test has no shell to exit).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn end(&mut self, cx: &mut Context<Self>) {
+        self.ended(cx);
+    }
+
+    /// Whether the process has ended (and Return hasn't started a new shell since).
+    pub fn has_exited(&self) -> bool {
+        self.exited
+    }
+
+    /// Start a new shell where the one that exited was.
+    fn relaunch(&mut self, cx: &mut Context<Self>) {
+        let Some((cwd, shell)) = self.relaunch.clone() else {
+            return;
+        };
+        self.exited = false;
+        self.screen().process(b"\r\n");
+        self.start(cwd, None, &shell, cx);
+        cx.notify();
+    }
+
+    /// Start the shell (or the job's command in one). An isolated (test) process starts none: one
+    /// would run the user's login profile, and the command (a project's tests, an agent's
+    /// sign-in) for real. Unless a live check asks the capture build for one (`verify_shell`): a
+    /// shell without a profile, never a command.
+    fn start(
+        &mut self,
+        cwd: Option<PathBuf>,
+        job: Option<Job>,
+        shell: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if trek_core::paths::isolated() && (job.is_some() || !verify_shell()) {
+            self.screen().process(
+                format!(
+                    "$ {}\r\n(no shell in tests)\r\n",
+                    job.as_ref().map_or("", Job::command)
+                )
+                .as_bytes(),
+            );
+            return;
+        }
+        if let Err(e) = self.spawn(cwd, job, shell, cx) {
+            self.screen()
+                .process(format!("Couldn't start a shell: {e}\r\n").as_bytes());
+        }
     }
 
     /// Runs once when the process exits, with its last lines of output.
@@ -1283,6 +1339,12 @@ impl TerminalPanel {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         let m = &k.modifiers;
+        // The shell exited: Return starts a new one in its place.
+        if self.exited && self.relaunch.is_some() && k.key == "enter" && !m.modified() {
+            self.relaunch(cx);
+            cx.stop_propagation();
+            return;
+        }
         // Shift+PageUp / PageDown page through the scrollback, as in Terminal.
         if m.shift
             && !m.control
@@ -1583,6 +1645,13 @@ impl TerminalPanel {
 
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_watch.is_empty() {
+            let focus = self.focus.clone();
+            self.focus_watch = vec![
+                cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
+                cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
+            ];
+        }
         let theme = cx.theme().clone();
         let (family, cell_width) = self.metrics(window, &theme.mono_font_family);
         let (font_size, line_height) = (self.font_size, self.line_height());
@@ -1595,6 +1664,12 @@ impl Render for TerminalPanel {
         let (cur_row, cur_col) = screen.cursor_position();
         let cur_row = cur_row as usize + scrollback;
         let show_cursor = !screen.hide_cursor() && !self.exited;
+        // Solid while the keys are here; faint while they're elsewhere (the composer, say).
+        let cursor_bg = if self.focus.is_focused(window) {
+            theme.foreground.opacity(0.75)
+        } else {
+            theme.foreground.opacity(0.3)
+        };
         let selection = self.selection.as_ref().map(Selection::ordered);
         let mut lines = Vec::with_capacity(rows as usize);
         for r in 0..rows {
@@ -1624,7 +1699,7 @@ impl Render for TerminalPanel {
                     bg = bg.or(Some(theme.foreground));
                 }
                 if show_cursor && r as usize == cur_row && c == cur_col {
-                    bg = Some(theme.foreground.opacity(0.75));
+                    bg = Some(cursor_bg);
                     fg = Some(theme.background);
                 }
                 if selection.is_some_and(|s| is_selected(s, line, c)) {

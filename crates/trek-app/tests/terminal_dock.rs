@@ -57,10 +57,51 @@ fn the_composer_terminal_docks_under_the_chat_and_is_kept() {
         assert!(
             trek.visible(cx, "terminal-dock") && !trek.visible(cx, ("terminal-dock-tab", 1usize))
         );
+        // The shell left in front takes the keys.
+        let left = dock.read_with(cx, |d, cx| d.terminals(cx)[0].clone());
+        assert!(trek.window(cx, |window, cx| {
+            left.read(cx).focus_handle().is_focused(window)
+        }));
         trek.click(cx, "terminal-dock-kill");
         trek.render(cx);
         assert!(!trek.visible(cx, "terminal-dock"), "no shell, no dock");
         assert!(!trek.read(cx, |ws, _| ws.settings.layout.terminal_open));
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        assert!(trek.window(cx, |window, cx| composer.read(cx).is_focused(window, cx)));
+    });
+}
+
+/// A shell that exits says so, takes no keys, and Return starts a new one in its place.
+#[test]
+fn an_exited_shell_says_so_and_return_starts_a_new_one() {
+    run(async |cx| {
+        let trek = open(cx);
+        trek.click(cx, "open-terminal");
+        trek.render(cx);
+        let dock = trek.root.read_with(cx, |r, _| r.terminal_dock.clone());
+        let term = dock.read_with(cx, |d, cx| d.terminals(cx)[0].clone());
+        term.update(cx, |t, cx| t.end(cx));
+        trek.render(cx);
+        let text = term.read_with(cx, |t, _| t.recent_output(5));
+        assert!(
+            text.contains("[The shell exited. Press Return to start a new one.]")
+                || text.contains("[The shell exited. Press Enter to start a new one.]"),
+            "{text}"
+        );
+        assert!(term.read_with(cx, |t, _| t.has_exited()));
+        trek.press(cx, "x");
+        assert!(
+            term.read_with(cx, |t, _| t.has_exited()),
+            "other keys do nothing"
+        );
+        trek.press(cx, "enter");
+        trek.render(cx);
+        assert!(!term.read_with(cx, |t, _| t.has_exited()), "a new shell");
+        assert_eq!(
+            dock.read_with(cx, |d, cx| d.count(cx)),
+            1,
+            "in the same tab"
+        );
     });
 }
 

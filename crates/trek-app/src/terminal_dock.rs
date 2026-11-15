@@ -272,15 +272,17 @@ impl TerminalDock {
             .detach();
     }
 
-    /// Close the shell in front; the dock goes with the last one.
-    fn kill_terminal(&mut self, cx: &mut Context<Self>) {
+    /// Close the shell in front, the keys going to the one in front after it; the dock goes with
+    /// the last one, the keys back to the composer.
+    pub fn kill_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dock = self.dock_mut(cx);
         if dock.active < dock.terminals.len() {
             dock.terminals.remove(dock.active);
         }
         dock.active = dock.active.min(dock.terminals.len().saturating_sub(1));
-        if dock.terminals.is_empty() {
-            self.hide(cx);
+        match self.front(cx) {
+            Some(t) => t.read(cx).focus_handle().focus(window, cx),
+            None => self.hide(cx),
         }
         cx.notify();
     }
@@ -472,7 +474,7 @@ impl Render for TerminalDock {
                     crate::assets::Lucide::Trash,
                     "Kill terminal",
                 )
-                .on_click(cx.listener(|this, _, _, cx| this.kill_terminal(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.kill_terminal(window, cx))),
             )
             .child(
                 crate::ui::icon_button(
