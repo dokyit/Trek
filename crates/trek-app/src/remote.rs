@@ -708,7 +708,11 @@ fn mobile_dir() -> PathBuf {
 /// (`http://localhost:8080/remote/`, one served on this machine while it's worked on or checked),
 /// whose origin is then the one let in.
 fn web_config() -> tr::web::WebConfig {
-    let config = tr::web::WebConfig::new(Some(mobile_dir().join("web-certs.json")));
+    let mut config = tr::web::WebConfig::new(Some(mobile_dir().join("web-certs.json")));
+    // Its pages may ask for notifications, sent through their browser's push service.
+    if let Some(key) = crate::push::vapid_key() {
+        config = config.with_push_key(key.public_key());
+    }
     match std::env::var("TREK_WEB_REMOTE_PAGE")
         .ok()
         .filter(|p| !p.trim().is_empty())
@@ -801,6 +805,10 @@ impl Workspace {
                 self.start_remote(cx);
             }
             _ => {}
+        }
+        // What the web remote is told when it asks about notifications (`web_push`).
+        if let Some(r) = &self.remote {
+            r.handle.set_push_enabled(self.settings.mobile.push);
         }
     }
 
@@ -2908,6 +2916,26 @@ impl Workspace {
             }
             tr::ServerNotice::Disconnected { device_id } => {
                 remote.connected.remove(&device_id);
+            }
+            tr::ServerNotice::PushChanged { device_id, on } => {
+                let name = remote
+                    .devices
+                    .iter()
+                    .find(|d| d.device_id == device_id)
+                    .map_or_else(|| "Your phone".to_string(), |d| d.name.clone());
+                // Asked for on the phone itself: phone notifications are wanted.
+                if on && !self.settings.mobile.push {
+                    self.settings.mobile.push = true;
+                    self.save_settings(cx);
+                }
+                cx.emit(WorkspaceEvent::Toast {
+                    message: if on {
+                        format!("{name} will get notifications when a thread needs you")
+                    } else {
+                        format!("{name} won't get notifications any more")
+                    },
+                    undo: None,
+                });
             }
         }
         cx.notify();

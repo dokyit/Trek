@@ -1,17 +1,26 @@
-//! Notifications on your phone, through ntfy: when a thread needs you, finishes or fails (what
-//! the Mac would alert for), Trek publishes a short note to your ntfy topic, and the ntfy app on
-//! the phone shows it. Tapping it opens the thread in Trek on iPhone (`trek://open?thread=…`).
+//! Notifications on your phone: when a thread needs you, finishes or fails (what the computer
+//! would alert for), Trek tells the phone, by two routes.
 //!
-//! ntfy rather than Apple's push service: sending through Apple needs a paid developer account
-//! and a server holding its key. ntfy is free, open source, and can be your own server. Anyone
-//! who knows the topic can read what's sent to it, so the topic is a long random name and the
-//! notes say only the thread's title and what kind of news it is. What a thread asks for stays
-//! off the topic: a command can hold a secret (`for_the_phone`).
+//! - **The web remote** (`site/remote`), added to the phone's home screen, asks its browser for
+//!   notifications, and the computer sends each one itself, through the browser's own push
+//!   service (Apple's, Google's, Mozilla's): standard Web Push, encrypted to the phone's key and
+//!   signed with a key pair this computer made for itself (`trek_remote::webpush`). No account,
+//!   no app to install, no server of Trek's. Tapping one opens the thread in the web remote.
+//! - **ntfy**, optional, for anyone who uses its app: Trek publishes a short note to a topic of
+//!   theirs, and tapping it opens the thread in Trek on iPhone (`trek://open?thread=…`). Anyone
+//!   who knows the topic can read what's sent to it, so the topic is a long random name.
+//!
+//! Apple's push service for the iPhone app itself needs a paid developer account and a server
+//! holding its key, so it isn't one of them. Either way a note says only the thread's title and
+//! what kind of news it is, and with names off not even that; what a thread asks for stays off
+//! the phone's notes: a command can hold a secret (`for_the_phone`).
 
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::Context;
+use std::sync::OnceLock;
 use std::time::Duration;
 use trek_core::settings::PushWhen;
+use trek_remote::webpush;
 
 /// No keyboard or mouse for this long counts as away from the computer.
 const AWAY_AFTER: Duration = Duration::from_secs(120);
@@ -257,12 +266,181 @@ pub fn publish(
     })
 }
 
+/// This computer's Web Push key pair, kept in the data folder (`mobile/push-key.json`, the user's
+/// alone) and made the first time it's needed. `None` when it can be neither read nor written:
+/// the web remote then isn't offered notifications.
+pub fn vapid_key() -> Option<&'static webpush::VapidKey> {
+    static KEY: OnceLock<Option<webpush::VapidKey>> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let path = trek_core::paths::data_dir()
+            .join("mobile")
+            .join("push-key.json");
+        webpush::VapidKey::load_or_create(&path)
+            .inspect_err(|e| tracing::warn!("phone notifications: no push key: {e}"))
+            .ok()
+    })
+    .as_ref()
+}
+
+/// The web remote's note for an ntfy-shaped one: the same words, and a tag per thread so a newer
+/// note about it replaces the older one on the phone. Urgent when it needs the user.
+pub fn web_note(note: &Note, thread: Option<&str>, host: &str) -> (webpush::PushNote, bool) {
+    (
+        webpush::PushNote {
+            title: note.title.clone(),
+            body: note.message.clone(),
+            thread: thread.map(str::to_string),
+            host: host.to_string(),
+            tag: match thread {
+                Some(t) => format!("{host}:{t}"),
+                None => host.to_string(),
+            },
+        },
+        note.priority >= 4,
+    )
+}
+
+/// Send `note` to one phone's browser through its push service, trying again after a failure that
+/// may pass (`tries` in all). A subscription the service says is gone (404, 410) is forgotten.
+pub fn send_web_push(
+    remote: trek_remote::RemoteHandle,
+    device_id: String,
+    sub: webpush::PushSubscription,
+    note: webpush::PushNote,
+    urgent: bool,
+    tries: usize,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    trek_core::runtime().spawn(async move {
+        let key = vapid_key().ok_or("there's no push key")?;
+        let body = webpush::encrypt(&sub, &note.to_bytes()).map_err(|e| e.to_string())?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let service = sub.audience();
+        let mut waits = RETRIES.iter().take(tries.saturating_sub(1));
+        loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let auth = key.authorization(&sub, now).map_err(|e| e.to_string())?;
+            let mut request = client.post(&sub.endpoint).body(body.clone());
+            for (name, value) in webpush::headers(auth, urgent) {
+                request = request.header(name, value);
+            }
+            let (outcome, error) = match request.send().await {
+                Ok(r) => (
+                    webpush::Outcome::of(r.status().as_u16()),
+                    format!("{service} said {}", r.status()),
+                ),
+                Err(e) => (webpush::Outcome::Retry, e.to_string()),
+            };
+            match outcome {
+                webpush::Outcome::Sent => return Ok(()),
+                webpush::Outcome::Gone => {
+                    remote.drop_push(&device_id, &sub.endpoint);
+                    return Err(format!("{error}: the phone no longer takes notifications"));
+                }
+                webpush::Outcome::Refused => return Err(error),
+                webpush::Outcome::Retry => match waits.next() {
+                    Some(wait) => tokio::time::sleep(*wait).await,
+                    None => return Err(error),
+                },
+            }
+        }
+    })
+}
+
+/// Which phones' browsers get a note: each device that asked for notifications (`web_push`).
+fn web_targets(
+    remote: Option<&crate::remote::Remote>,
+) -> Vec<(String, webpush::PushSubscription)> {
+    remote.map_or_else(Vec::new, |r| r.handle.push_targets())
+}
+
 impl Workspace {
-    /// An alert the Mac raised: to the phone too, when push is on (and you're away, if that's the
-    /// setting).
+    /// Phones' browsers that asked for notifications, by device id.
+    pub fn web_push_devices(&self) -> Vec<String> {
+        web_targets(self.remote.as_ref())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Send `note` by every route there is: each phone's browser that asked, and ntfy when it has
+    /// a topic. One job per route, each with its result.
+    fn note_jobs(
+        &self,
+        note: Note,
+        thread: Option<&str>,
+        tries: usize,
+    ) -> Vec<tokio::task::JoinHandle<Result<(), String>>> {
+        let m = &self.settings.mobile;
+        let host = crate::remote::host_info().id;
+        let mut jobs = Vec::new();
+        if let Some(remote) = self.remote.as_ref() {
+            for (device_id, sub) in remote.handle.push_targets() {
+                let (web, urgent) = web_note(&note, thread, &host);
+                jobs.push(send_web_push(
+                    remote.handle.clone(),
+                    device_id,
+                    sub,
+                    web,
+                    urgent,
+                    tries,
+                ));
+            }
+        }
+        if !m.push_topic.is_empty() {
+            jobs.push(publish(&m.push_server, note, tries));
+        }
+        jobs
+    }
+
+    /// `jobs` sent, and a toast saying how it went: `sent` when any route took it, else the
+    /// first failure after `failed`.
+    fn toast_when_sent(
+        jobs: Vec<tokio::task::JoinHandle<Result<(), String>>>,
+        sent: &'static str,
+        failed: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let mut error = None;
+            let mut any = false;
+            for job in jobs {
+                match job.await.map_err(|e| e.to_string()).and_then(|r| r) {
+                    Ok(()) => any = true,
+                    Err(e) => {
+                        error.get_or_insert(e);
+                    }
+                }
+            }
+            let message = match (any, error) {
+                (true, _) => sent.to_string(),
+                (false, Some(e)) => format!("{failed}: {e}"),
+                (false, None) => format!("{failed}: no phone takes notifications yet"),
+            };
+            let _ = this.update(cx, |_, cx| {
+                cx.emit(WorkspaceEvent::Toast {
+                    message,
+                    undo: None,
+                })
+            });
+        })
+        .detach();
+    }
+
+    /// Whether any route reaches a phone: ntfy has a topic, or a phone's browser asked.
+    fn has_phone_route(&self) -> bool {
+        !self.settings.mobile.push_topic.is_empty() || !self.web_push_devices().is_empty()
+    }
+
+    /// An alert the computer raised: to the phone too, when phone notifications are on (and
+    /// you're away, if that's the setting).
     pub fn push_alert(&mut self, message: &str, thread: &str) {
         let m = &self.settings.mobile;
-        if !m.push || m.push_topic.is_empty() || cfg!(any(test, feature = "test-support")) {
+        if !m.push || cfg!(any(test, feature = "test-support")) || !self.has_phone_route() {
             return;
         }
         if !due(m.push_when, idle_seconds, screen_locked) {
@@ -285,45 +463,39 @@ impl Workspace {
             m.push_names,
             &crate::remote::host_info().id,
         );
-        let job = publish(&m.push_server, note, 1 + RETRIES.len());
-        trek_core::runtime().spawn(async move {
-            if let Ok(Err(e)) = job.await {
-                tracing::warn!("phone notification: {e}");
-            }
-        });
+        for job in self.note_jobs(note, Some(thread), 1 + RETRIES.len()) {
+            trek_core::runtime().spawn(async move {
+                if let Ok(Err(e)) = job.await {
+                    tracing::warn!("phone notification: {e}");
+                }
+            });
+        }
     }
 
-    /// Whether a thread can be sent to the phone: phone notifications are on, with a topic.
+    /// Whether a thread can be sent to the phone: phone notifications are on, and reach one.
     pub fn can_send_to_phone(&self) -> bool {
-        let m = &self.settings.mobile;
-        m.push && !m.push_topic.is_empty()
+        self.settings.mobile.push && self.has_phone_route()
     }
 
     /// The paired phone's name, as it gave it when it paired (the last one seen), if any phone
     /// has paired.
     pub fn phone_name(&self) -> Option<String> {
         let remote = self.remote.as_ref()?;
-        let machines: Vec<&str> = self
-            .machines
-            .list
-            .iter()
-            .map(|m| m.entry.name.as_str())
-            .collect();
         remote
             .devices
             .iter()
-            .filter(|d| !machines.contains(&d.name.as_str()))
+            .filter(|d| d.is_phone())
             .max_by_key(|d| d.last_seen_at.unwrap_or(d.paired_at))
             .map(|d| d.name.clone())
     }
 
-    /// "Continue on iPhone": a notification on the phone that opens thread `id` in Trek there
-    /// when tapped (Trek has no other way to put a thread in front of the phone). Without phone
+    /// "Continue on your phone": a notification on the phone that opens thread `id` there when
+    /// tapped (Trek has no other way to put a thread in front of the phone). Without phone
     /// notifications, says how to turn them on and opens Settings › Phone & Machines.
     pub fn send_thread_to_phone(&mut self, id: &str, cx: &mut Context<Self>) {
         if !self.can_send_to_phone() {
             cx.emit(WorkspaceEvent::Toast {
-                message: "Turn on phone notifications first: the thread goes to your iPhone as one, which opens it when tapped.".into(),
+                message: "Turn on phone notifications first: the thread goes to your phone as one, which opens it when tapped.".into(),
                 undo: None,
             });
             self.navigate(
@@ -341,39 +513,31 @@ impl Workspace {
             m.push_names,
             &crate::remote::host_info(),
         );
-        let job = publish(&m.push_server, note, 1);
-        cx.spawn(async move |this, cx| {
-            let result = job.await.map_err(|e| e.to_string()).and_then(|r| r);
-            let message = match result {
-                Ok(()) => "Sent to your iPhone. Tap the notification to open the thread there."
-                    .to_string(),
-                Err(e) => format!("Couldn't send it to your iPhone: {e}"),
-            };
-            let _ = this.update(cx, |_, cx| {
-                cx.emit(WorkspaceEvent::Toast {
-                    message,
-                    undo: None,
-                })
-            });
-        })
-        .detach();
+        let jobs = self.note_jobs(note, Some(id), 1);
+        Self::toast_when_sent(
+            jobs,
+            "Sent to your phone. Tap the notification to open the thread there.",
+            "Couldn't send it to your phone",
+            cx,
+        );
     }
 
-    /// Turn push on (making a topic the first time) or off.
+    /// Turn phone notifications on or off. They go to each phone whose web remote asked for them,
+    /// and through ntfy once that's set up (`set_ntfy`).
     pub fn set_push(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.mobile.push = on;
-        if on && self.settings.mobile.push_topic.is_empty() {
-            self.settings.mobile.push_topic = new_topic();
-        }
         self.save_settings(cx);
     }
 
-    /// A test note, now, whatever the "when" setting; says in a toast how it went.
+    /// Send notifications through ntfy too (a new topic), or stop (the topic is forgotten).
+    pub fn set_ntfy(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.mobile.push_topic = if on { new_topic() } else { String::new() };
+        self.save_settings(cx);
+    }
+
+    /// A test note, now, whatever the "when" setting, by every route; says in a toast how it went.
     pub fn test_push(&mut self, cx: &mut Context<Self>) {
         let m = self.settings.mobile.clone();
-        if m.push_topic.is_empty() {
-            return;
-        }
         let mut note = note_for(
             &m.push_topic,
             &format!(
@@ -389,21 +553,13 @@ impl Workspace {
         // Plain: the status emoji (done, needs you) carry meaning; this one would only decorate.
         note.tags = vec![];
         // Once: the user is waiting to hear how it went.
-        let job = publish(&m.push_server, note, 1);
-        cx.spawn(async move |this, cx| {
-            let result = job.await.map_err(|e| e.to_string()).and_then(|r| r);
-            let message = match result {
-                Ok(()) => "Sent. It should be on your phone in a moment.".to_string(),
-                Err(e) => format!("Couldn't send it: {e}"),
-            };
-            let _ = this.update(cx, |_, cx| {
-                cx.emit(WorkspaceEvent::Toast {
-                    message,
-                    undo: None,
-                })
-            });
-        })
-        .detach();
+        let jobs = self.note_jobs(note, None, 1);
+        Self::toast_when_sent(
+            jobs,
+            "Sent. It should be on your phone in a moment.",
+            "Couldn't send it",
+            cx,
+        );
     }
 }
 
@@ -432,6 +588,33 @@ mod tests {
             for_the_phone("Finished: Fix the login bug", "Fix the login bug"),
             "Finished: Fix the login bug"
         );
+    }
+
+    /// The web remote's banner says what ntfy's does: needs-you notes urgent, the rest not, one
+    /// per thread (a newer one replaces it), and with names off nothing of the thread's.
+    #[test]
+    fn the_web_remote_hears_what_ntfy_hears() {
+        let n = note_for(
+            "",
+            "Needs your approval: Fix the bug",
+            Some("t1"),
+            Some("api"),
+            true,
+            "m1",
+        );
+        let (w, urgent) = web_note(&n, Some("t1"), "m1");
+        assert_eq!(
+            (w.title.as_str(), w.body.as_str(), urgent),
+            ("Trek · api", "Needs your approval: Fix the bug", true)
+        );
+        assert_eq!((w.tag.as_str(), w.thread.as_deref()), ("m1:t1", Some("t1")));
+        let done = note_for("", "Finished: Fix the bug", Some("t1"), Some("api"), false, "m1");
+        let (w, urgent) = web_note(&done, Some("t1"), "m1");
+        assert_eq!((w.title.as_str(), w.body.as_str(), urgent), ("Trek", "A thread finished", false));
+        let sent = String::from_utf8(w.to_bytes()).unwrap();
+        assert!(!sent.contains("Fix") && !sent.contains("api"), "{sent}");
+        let (test, _) = web_note(&done, None, "m1");
+        assert_eq!(test.tag, "m1", "a note about no thread has the computer's tag");
     }
 
     #[test]

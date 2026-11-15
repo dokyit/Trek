@@ -551,7 +551,7 @@ fn build(
     }
     // Where else it can go on: the phone, and each paired machine (not the one it's on).
     menu = menu.item(
-        entry("thread-to-phone", "Continue on iPhone", None)
+        entry("thread-to-phone", "Continue on your phone", None)
             .icon(crate::assets::Lucide::Smartphone)
             .on_click({
                 let (ws, id) = (ws.clone(), f.id.clone());

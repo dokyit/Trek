@@ -68,8 +68,9 @@ fn qr_code(code: Result<qrcode::QrCode, qrcode::types::QrError>, module: f32) ->
 }
 
 impl SettingsView {
-    /// Notifications on the phone, through the ntfy app: on its own switch, as it works without
-    /// the phone server.
+    /// Notifications on the phone: on its own switch. They go to each phone whose web remote asked
+    /// for them (its browser's push service; no account, no other app), and through the ntfy app
+    /// for whoever sets that up as well.
     fn push_section(&mut self, s: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let this = crate::words::words().this_computer;
         let theme = cx.theme().clone();
@@ -81,7 +82,7 @@ impl SettingsView {
                 vec![Self::row(
                     "Tell my phone when a thread needs me",
                     format!(
-                        "Also when one finishes or fails: what {this} would alert you for, sent through the free ntfy app. Tapping one opens the thread in Trek on iPhone."
+                        "Also when one finishes or fails: what {this} would alert you for. Tapping one opens the thread on the phone."
                     ),
                     gpui_kit::component::switch::Switch::new("push-on")
                         .checked(m.push)
@@ -96,8 +97,6 @@ impl SettingsView {
         if !m.push {
             return out;
         }
-        let topic = m.push_topic.clone();
-        let url = format!("{}/{}", m.push_server.trim_end_matches('/'), topic);
         out.push(div().h(px(12.)).into_any_element());
         let names = self.switch("push-names", m.push_names, |s, v| s.mobile.push_names = v);
         out.push(ui::group(
@@ -110,18 +109,95 @@ impl SettingsView {
                 ),
                 Self::row(
                     "Name the thread and its project",
-                    format!("Off, a notification says only that a thread needs you, finished or failed. On, it says which and what for, as {this}'s own alerts do; the ntfy server it goes through can read that."),
+                    format!("Off, a notification says only that a thread needs you, finished or failed. On, it says which thread and project, as {this}'s own alerts do."),
                     names,
                     cx,
                 ),
             ],
             cx,
         ));
-        let (copy_topic, test, fresh) = (
-            topic.clone(),
-            self.workspace.clone(),
-            self.workspace.clone(),
+
+        // The phones whose web remote asked for notifications, by name.
+        let (phones, can_test) = {
+            let ws = self.workspace.read(cx);
+            let ids = ws.web_push_devices();
+            let names: Vec<String> = ws
+                .remote
+                .as_ref()
+                .map(|r| {
+                    r.devices
+                        .iter()
+                        .filter(|d| ids.contains(&d.device_id))
+                        .map(|d| d.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let can_test = !names.is_empty() || !m.push_topic.is_empty();
+            (names, can_test)
+        };
+        let test = self.workspace.clone();
+        let muted = theme.muted_foreground;
+        out.push(div().h(px(12.)).into_any_element());
+        out.push(
+            v_flex()
+                .id("push-web")
+                .test_support()
+                .gap(px(8.))
+                .p(px(20.))
+                .rounded(px(fluent::surface(radius::CARD)))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(text::BODY))
+                .child(div().text_size(px(text::TITLE)).font_semibold().child("On your phone"))
+                .child(if phones.is_empty() {
+                    div()
+                        .id("push-web-none")
+                        .test_support()
+                        .text_color(muted)
+                        .child("No phone gets them yet. Pair Trek's web remote with Show pairing code › A phone's browser, add it to the phone's Home Screen, and in its Settings tap Turn on notifications. On an iPhone, open it from the Home Screen first (iOS 26.4 or later).")
+                        .into_any_element()
+                } else {
+                    div()
+                        .id("push-web-phones")
+                        .test_support()
+                        .child(format!("Going to {}.", phones.join(", ")))
+                        .into_any_element()
+                })
+                .child(div().text_size(to_rems(text::META)).text_color(muted).child("Sent by this computer through the phone's own push service, encrypted to the phone. No account, no other app."))
+                .child(
+                    h_flex().child(
+                        Button::new("push-test")
+                            .small()
+                            .outline()
+                            .label("Send a test")
+                            .disabled(!can_test)
+                            .on_click(move |_, _, cx| test.update(cx, |ws, cx| ws.test_push(cx))),
+                    ),
+                )
+                .into_any_element(),
         );
+
+        // ntfy: optional, for an app the user already has.
+        let topic = m.push_topic.clone();
+        let ntfy_on = !topic.is_empty();
+        let toggle = self.workspace.clone();
+        out.push(div().h(px(12.)).into_any_element());
+        out.push(ui::group(
+            vec![Self::row(
+                "Also through the ntfy app",
+                "Optional, for anyone who uses ntfy: Trek sends the same notes to a private topic there. The ntfy server can read what's sent.",
+                gpui_kit::component::switch::Switch::new("push-ntfy")
+                    .checked(ntfy_on)
+                    .on_click(move |v: &bool, _, cx| toggle.update(cx, |ws, cx| ws.set_ntfy(*v, cx))),
+                cx,
+            )],
+            cx,
+        ));
+        if !ntfy_on {
+            return out;
+        }
+        let url = format!("{}/{}", m.push_server.trim_end_matches('/'), topic);
+        let (copy_topic, fresh) = (topic.clone(), self.workspace.clone());
         out.push(div().h(px(12.)).into_any_element());
         out.push(
             h_flex()
@@ -140,9 +216,8 @@ impl SettingsView {
                         .flex_1()
                         .min_w_0()
                         .text_size(px(text::BODY))
-                        .child(div().text_size(px(text::TITLE)).font_semibold().child("Set up ntfy on your iPhone"))
-                        .child(div().text_color(theme.muted_foreground).child("1. Install ntfy from the App Store."))
-                        .child(div().text_color(theme.muted_foreground).child("2. In ntfy, tap + and subscribe to this topic:"))
+                        .child(div().text_size(px(text::TITLE)).font_semibold().child("Subscribe in ntfy"))
+                        .child(div().text_color(muted).child("In the ntfy app, tap + and subscribe to this topic:"))
                         .child(
                             div()
                                 .px(px(10.))
@@ -153,11 +228,10 @@ impl SettingsView {
                                 .text_size(px(text::LABEL))
                                 .child(topic.clone()),
                         )
-                        .child(div().text_color(theme.muted_foreground).child("3. Send a test. Keep the topic to yourself: anyone who has it can read what's sent."))
+                        .child(div().text_color(muted).child("Keep the topic to yourself: anyone who has it can read what's sent."))
                         .child(
                             h_flex()
                                 .gap(px(8.))
-                                .child(Button::new("push-test").small().outline().label("Send a test").on_click(move |_, _, cx| test.update(cx, |ws, cx| ws.test_push(cx))))
                                 .child(Button::new("push-copy").small().ghost().label("Copy topic").on_click(move |_, window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(copy_topic.clone()));
                                     crate::toast::push(window, "Copied", cx);
@@ -169,7 +243,7 @@ impl SettingsView {
                                     })
                                 })),
                         )
-                        .child(div().text_size(to_rems(text::META)).text_color(theme.muted_foreground).child(format!("Through {}", m.push_server))),
+                        .child(div().text_size(to_rems(text::META)).text_color(muted).child(format!("Through {}", m.push_server))),
                 )
                 .into_any_element(),
         );
