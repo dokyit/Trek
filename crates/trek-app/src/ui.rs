@@ -669,6 +669,7 @@ pub fn agent_logo(agent: &AgentId, size: Pixels, cx: &App) -> AnyElement {
                 .border_1()
                 .border_color(theme.muted_foreground.opacity(0.6))
                 .text_color(theme.foreground)
+                // scale: ok, an agent's initial, sized to its mark
                 .text_size(size * 0.62)
                 .font_family(theme.mono_font_family.clone())
                 .font_weight(FontWeight::SEMIBOLD)

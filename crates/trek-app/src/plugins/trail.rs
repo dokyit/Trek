@@ -245,6 +245,7 @@ fn paint(
         }
     }
     // The trail along the ridge: dots a step apart, along the line between weeks.
+    // scale: ok, a trail's dot, a whole number of device pixels across
     let dot = ((2. * scale).round() / scale).max(1. / scale);
     let step = if dots_only { 4. } else { 5. };
     let mut carry = 0.;
@@ -264,6 +265,7 @@ fn paint(
                     ),
                     accent.opacity(0.9),
                 )
+                // scale: ok, a trail's dot is round
                 .corner_radii(px(dot / 2.)),
             );
             s += step;

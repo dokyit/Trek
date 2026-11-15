@@ -135,7 +135,7 @@ fn install(src: &str, dir: &Path, out: &mut dyn std::io::Write) -> Result<(), St
         fetched.clone()
     } else if is_git(src) {
         let _ = writeln!(out, "cloning {src}…");
-        let status = std::process::Command::new("git")
+        let status = crate::procs::command(crate::git::git_program())
             .args(["clone", "--depth", "1", "--quiet", src])
             .arg(&fetched)
             .env("GIT_TERMINAL_PROMPT", "0")

@@ -501,6 +501,7 @@ impl Render for Ring {
                         let from = chip_end;
                         let at = share * journey;
                         let scale = window.scale_factor();
+                        // scale: ok, a trail's dot, a whole number of device pixels across
                         let dot = ((2. * scale).round() / scale).max(1. / scale);
                         let mut paint_dot = |s: f32, colour: Hsla| {
                             let (x, y, _) = edge.at(from + s);
@@ -515,6 +516,7 @@ impl Render for Ring {
                                     ),
                                     colour,
                                 )
+                                // scale: ok, a trail's dot is round
                                 .corner_radii(px(dot / 2.)),
                             );
                         };

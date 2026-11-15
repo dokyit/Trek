@@ -520,7 +520,7 @@ fn badge(text: &'static str, cx: &App) -> AnyElement {
     div()
         .px(px(6.))
         .py(px(1.))
-        .rounded(px(4.))
+        .rounded(px(crate::scale::radius::TAG))
         .border_1()
         .border_color(theme.border)
         .text_size(px(text::META))

@@ -170,7 +170,7 @@ pub fn text_effects(
                                         ),
                                         colour.opacity(0.24 * colour.a),
                                     )
-                                    .corner_radii(px(3.)),
+                                    .corner_radii(px(radius::TAG)),
                                 );
                             }
                         }
