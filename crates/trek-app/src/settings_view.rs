@@ -7,6 +7,7 @@ mod coming_from;
 mod connections;
 mod mobile;
 mod pages;
+mod plugins;
 pub mod privacy;
 pub(crate) mod rules;
 pub(crate) use mobile::qr;
@@ -71,6 +72,7 @@ pub fn page_icon(p: SettingsPage) -> Icon {
         SettingsPage::Project => Icon::new(crate::assets::Lucide::FolderCog),
         SettingsPage::General => Icon::new(IconName::Settings2),
         SettingsPage::Appearance => Icon::new(IconName::Palette),
+        SettingsPage::Plugins => Icon::new(crate::assets::Lucide::Puzzle),
         SettingsPage::Notifications => Icon::new(IconName::Bell),
         SettingsPage::Snapshots => Icon::new(crate::assets::Lucide::Camera),
         SettingsPage::Skills => Icon::new(crate::assets::Lucide::Sparkle),
@@ -95,6 +97,7 @@ const NAV_GROUPS: &[(&str, &[SettingsPage])] = &[
         &[
             SettingsPage::General,
             SettingsPage::Appearance,
+            SettingsPage::Plugins,
             SettingsPage::Notifications,
             SettingsPage::Mobile,
             SettingsPage::Snapshots,
@@ -161,6 +164,7 @@ pub fn page_blurb(p: SettingsPage) -> std::borrow::Cow<'static, str> {
         SettingsPage::Project | SettingsPage::About => "".into(),
         SettingsPage::General => "What a new thread starts with, and how the composer behaves while an agent works.".into(),
         SettingsPage::Appearance => "Theme, text size, background art and motion.".into(),
+        SettingsPage::Plugins => "Themes, mods and pages that change how Trek looks and works. Ask an agent to make one: it follows Trek's skill trek-plugin.".into(),
         SettingsPage::Notifications => "How Trek tells you an agent finished or needs a decision.".into(),
         SettingsPage::Skills => "Instructions your agents can load on demand. Turn a skill off and every agent stops seeing it; turn it on to bring it back.".into(),
         SettingsPage::Shortcuts => "Every keyboard shortcut in Trek.".into(),
@@ -2545,6 +2549,7 @@ impl SettingsView {
             SettingsPage::Project => out.extend(self.project_page(cx)),
             SettingsPage::General => out.extend(self.general_page(&s, cx)),
             SettingsPage::Appearance => out.extend(self.appearance_page(&s, cx)),
+            SettingsPage::Plugins => out.extend(self.plugins_page(cx)),
             SettingsPage::Notifications => out.extend(self.notifications_page(&s, cx)),
             SettingsPage::Shortcuts => out.extend(self.shortcuts_page(cx)),
             SettingsPage::Agents => out.extend(self.agents_page(cx)),

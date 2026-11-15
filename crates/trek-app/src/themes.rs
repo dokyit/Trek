@@ -45,6 +45,8 @@ pub struct Themes {
     dir: PathBuf,
     fingerprint: Vec<(String, u64, Option<std::time::SystemTime>)>,
     switch: Option<Switch>,
+    /// The theme files running plugins bring: (id, file).
+    plugin_files: Vec<(String, PathBuf)>,
 }
 
 impl Global for Themes {}
@@ -377,6 +379,32 @@ fn known_art(scan: core::Scan) -> core::Scan {
     out
 }
 
+/// The themes running plugins bring, read from their files: those Trek can use, and the
+/// problems of the rest.
+fn plugin_themes(files: &[(String, PathBuf)]) -> core::Scan {
+    let mut out = core::Scan::default();
+    for (id, file) in files {
+        let text = match std::fs::read_to_string(file) {
+            Ok(t) => t,
+            Err(e) => {
+                out.problems.push(core::Problem {
+                    file: file.clone(),
+                    message: format!("couldn't be read: {e}"),
+                });
+                continue;
+            }
+        };
+        match core::parse(id, &text, core::Origin::File(file.clone())) {
+            Ok(t) => out.themes.push(t),
+            Err(message) => out.problems.push(core::Problem {
+                file: file.clone(),
+                message,
+            }),
+        }
+    }
+    known_art(out)
+}
+
 fn full_list(found: Vec<Theme>) -> Vec<Theme> {
     let mut list = core::built_in();
     let mut found = found;
@@ -443,6 +471,7 @@ pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
         dir,
         fingerprint,
         switch: None,
+        plugin_files: Vec::new(),
     });
     watch(ws.downgrade(), cx);
 }
@@ -484,9 +513,18 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
         return;
     };
     let fingerprint = core::fingerprint(&dir);
-    let scan = known_art(core::scan(&dir));
+    let mut scan = known_art(core::scan(&dir));
+    let from_plugins = plugin_themes(&cx.global::<Themes>().plugin_files);
+    for t in from_plugins.themes {
+        if !scan.themes.iter().any(|f| f.id == t.id)
+            && !core::built_in().iter().any(|b| b.id == t.id)
+        {
+            scan.themes.push(t);
+        }
+    }
     let request = core::take_apply_request(&dir);
     let mut problems = scan.problems;
+    problems.extend(from_plugins.problems);
     if let Some(id) = request.as_deref()
         && !core::built_in()
             .iter()
@@ -507,8 +545,8 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
         .cloned()
         .collect();
     let shown = themes.shown.clone();
-    // The theme on screen, as the folder has it now. One that has gone bad stays as it was until
-    // it's fixed; one that has gone is Trek's own again.
+    // The theme on screen, as the folder (and the plugins) have it now. One that has gone bad
+    // stays as it was until it's fixed; one that has gone is Trek's own again.
     let now_shown = if shown.is_default() || shown.origin == core::Origin::BuiltIn {
         Some(shown.clone())
     } else if let Some(t) = list.iter().find(|t| t.id == shown.id) {
@@ -560,6 +598,20 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
         switch_to(&id, ws, cx);
     }
     ws.update(cx, |_, cx| cx.notify());
+}
+
+/// The themes running plugins bring changed: (id, file) each. The list is read again, and a
+/// plugin's theme on screen whose plugin went is Trek's own again.
+pub fn set_plugin_themes(files: Vec<(String, PathBuf)>, ws: &Entity<Workspace>, cx: &mut App) {
+    if !cx.has_global::<Themes>() {
+        return;
+    }
+    let themes = cx.global_mut::<Themes>();
+    if themes.plugin_files == files {
+        return;
+    }
+    themes.plugin_files = files;
+    reread(ws, cx);
 }
 
 fn stem(path: &std::path::Path) -> String {

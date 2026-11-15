@@ -56,6 +56,7 @@ pub mod panels;
 pub mod permissions;
 pub mod photos;
 pub mod pictures;
+pub mod plugins;
 pub use trek_perf as perf;
 pub mod push;
 pub mod remote;
@@ -280,6 +281,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 }
 
 pub fn run() {
+    // `trek plugin …` is the plugins CLI: it does its work on the plugins folder and exits, with
+    // no window (`trek_core::plugins::cli`).
+    if let Some(code) = trek_core::plugins::cli::from_args() {
+        std::process::exit(code);
+    }
     // A capture run is signed out of the user's accounts before anything else starts.
     #[cfg(feature = "shots")]
     shots::isolate_accounts();
@@ -401,6 +407,8 @@ pub fn run() {
         tray::init(ws.clone(), cx);
         // The Trek theme the settings name, before the kit's theme goes up from it.
         themes::init(&ws, cx);
+        // Plugins after themes: the themes they bring join the list.
+        plugins::init(&ws, cx);
         let theme = ws.read(cx).settings.appearance.theme;
         apply_theme(theme, None, cx);
         system::init(ws.clone(), cx);

@@ -30,6 +30,7 @@ pub mod open_in;
 pub mod orchestrate;
 pub mod paths;
 pub mod permission_rules;
+pub mod plugins;
 pub mod pricing;
 pub mod procs;
 pub mod registry;
