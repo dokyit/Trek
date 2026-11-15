@@ -62,6 +62,7 @@ use trek_phone::mirror::{self, Settle, State as MirrorState};
 use trek_phone::route::{self, Facts, Route, Tone};
 use trek_phone::{device, files};
 
+mod lists;
 mod touch;
 
 /// Frames for the panel are at most this wide, and come this often at most.
@@ -289,6 +290,8 @@ pub struct PhonePanel {
     /// Made-up for design review: the driver's signing left, and a stalled picture.
     demo_left: Option<i64>,
     demo_stalled: bool,
+    /// Apps and Files beside the screen.
+    lists: lists::Lists,
     _tasks: Vec<Task<()>>,
 }
 
@@ -441,6 +444,7 @@ impl PhonePanel {
             stalled_shown: false,
             demo_left: None,
             demo_stalled: false,
+            lists: lists::Lists::default(),
             _tasks: vec![frames, tick],
         }
     }
@@ -1598,6 +1602,7 @@ impl PhonePanel {
         self.phone_error = None;
         self.demo_left = None;
         self.demo_stalled = false;
+        self.lists = lists::Lists::default();
         self.give_keys_back(window, cx);
         // Only the touch states have a picture (a made-up Home Screen).
         if let Some(old) = self.frame.take() {
@@ -1684,6 +1689,9 @@ impl PhonePanel {
                 self.mirror = Some(MirrorState::Says("Welcome to iPhone Mirroring".into()));
             }
             "camera-denied" => self.status.camera = "denied".into(),
+            // Apps and Files beside the screen, made up.
+            "apps" => self.demo_lists(lists::Tab::Apps),
+            "files" => self.demo_lists(lists::Tab::Files),
             // usbmuxd didn't answer.
             "no-usbmuxd" => {
                 self.phone = None;
@@ -1757,7 +1765,7 @@ impl PhonePanel {
                 }
             }
             other => anyhow::bail!(
-                "phone: unknown state {other:?} (usb|view-only|lock|locked|unreachable|mirroring|mirroring-setup|pair|choose|bluetooth|none|no-usbmuxd|untrusted|camera-denied|how|driver|driver-starting|driver-install|driver-installing|driver-install-failed|driver-needs-xcode|driver-needs-apple-id|driver-needs-source|driver-expired|driver-expiring|driver-stalled|driver-how|wifi|wifi-starting|wifi-locked|wifi-how|touch|hold|typing)"
+                "phone: unknown state {other:?} (usb|view-only|lock|locked|unreachable|mirroring|mirroring-setup|pair|choose|bluetooth|none|no-usbmuxd|untrusted|camera-denied|apps|files|how|driver|driver-starting|driver-install|driver-installing|driver-install-failed|driver-needs-xcode|driver-needs-apple-id|driver-needs-source|driver-expired|driver-expiring|driver-stalled|driver-how|wifi|wifi-starting|wifi-locked|wifi-how|touch|hold|typing)"
             ),
         }
         cx.notify();
@@ -2289,6 +2297,13 @@ impl Render for PhonePanel {
         let notice = self.notice.clone();
         let strip = self.facts().strip();
         let typing = self.typing(window);
+        // Apps and Files need a phone that trusts this Mac; else the screen's state says why.
+        let lists_shown = self.phone.is_some() && !self.untrusted;
+        let tab = if lists_shown {
+            self.lists.tab
+        } else {
+            lists::Tab::Screen
+        };
         v_flex()
             .size_full()
             // A click outside the tool gives the keys back to Trek.
@@ -2327,7 +2342,12 @@ impl Render for PhonePanel {
                         ),
                 )
             })
-            .child(self.mirror(window, cx))
+            .when(lists_shown, |el| el.child(self.tabs(cx)))
+            .child(match tab {
+                lists::Tab::Apps => self.apps_list(cx),
+                lists::Tab::Files => self.files_list(cx),
+                lists::Tab::Screen => self.mirror(window, cx),
+            })
     }
 }
 

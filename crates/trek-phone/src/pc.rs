@@ -394,13 +394,13 @@ mod tests {
         let quiet = Phone {
             name: String::new(),
             ios: String::new(),
-            model: "iPhone18,1".into(),
+            model: "iPhone99,1".into(),
             usb: false,
             ..phone()
         };
         assert_eq!(
             describe(&quiet),
-            ("iPhone".to_string(), "Wi-Fi · iPhone18,1".to_string())
+            ("iPhone".to_string(), "Wi-Fi · iPhone99,1".to_string())
         );
     }
 

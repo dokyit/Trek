@@ -1355,6 +1355,10 @@ mod tests {
         assert!(mirrors("", "tobyj’s iPhone", "iPhone17,2"));
         assert!(!mirrors("iPhone 15", "Work phone", "iPhone17,2"));
         assert!(mirrors("iPhone 15", "Work phone", "iPhone99,1"));
+        // The iPhone 17 family and Air by name.
+        assert!(mirrors("iPhone 17 Pro", "Work phone", "iPhone18,1"));
+        assert!(mirrors("iPhone Air", "Work phone", "iPhone18,4"));
+        assert!(!mirrors("iPhone 16", "Work phone", "iPhone18,3"));
     }
 
     #[test]
