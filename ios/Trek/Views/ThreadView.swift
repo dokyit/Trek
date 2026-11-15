@@ -122,6 +122,8 @@ private struct ThreadScreen: View {
     @State private var stripHeight: CGFloat = 0
     /// The Mac has said its list and this thread isn't in it any more.
     @State private var gone = false
+    /// Its row has been in the Mac's list while this screen was up.
+    @State private var sawRow = false
     @Environment(\.dismiss) private var dismiss
 
     private var threadID: String { store.id }
@@ -175,12 +177,19 @@ private struct ThreadScreen: View {
                 if gone { MissingThread(machine: model.link(for: threadID)?.name) { dismiss() } }
             }
             .task(id: t == nil) {
-                guard side == nil, t == nil else { gone = false; return }
-                // The list may not have come yet (a notification opened this first): wait for it.
+                guard side == nil, t == nil else {
+                    gone = false
+                    sawRow = t != nil || sawRow
+                    return
+                }
+                // It was listed and isn't now: deleted or archived.
+                if sawRow { gone = true; return }
+                // Never seen: the list may not have come yet (a notification opened this first), or
+                // the thread is one the Mac no longer has and sends nothing for.
                 for _ in 0..<15 {
                     try? await Task.sleep(for: .seconds(1))
                     if Task.isCancelled || thread != nil { return }
-                    if model.link(for: threadID)?.listed == true { gone = true; return }
+                    if model.link(for: threadID)?.listed == true, !store.loaded { gone = true; return }
                 }
             }
             .navigationTitle(t?.title ?? "Thread")
