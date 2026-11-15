@@ -1981,7 +1981,7 @@ impl Composer {
         });
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
     pub fn text(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
     }

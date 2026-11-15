@@ -432,7 +432,8 @@ mod platform {
 
     /// The capture build's `artifacts lose-keys`: the window takes the keys itself, as AppKit
     /// leaves them when a view that had them goes; `artifacts press-trek`: a press on GPUI's own
-    /// view where the composer is, delivered as AppKit delivers one (`mouseDown:`, `mouseUp:`).
+    /// view where the composer is, delivered as AppKit delivers one (`mouseDown:`, `mouseUp:`);
+    /// `type-native`: a key (`a`) handed to the window as AppKit hands one.
     #[cfg(feature = "shots")]
     pub fn shots_keys(window: &gpui_kit::Window, what: &str) -> Result<(), String> {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -470,6 +471,21 @@ mod platform {
                         } else {
                             let _: () = msg_send![view, mouseUp: event];
                         }
+                    }
+                }
+                "type-native" => {
+                    // `a`, down and up, to the window as AppKit hands it a key: to its first
+                    // responder, or the window itself when no view has the keys.
+                    let chars = objc2_foundation::NSString::from_str("a");
+                    let number: isize = msg_send![ns_window, windowNumber];
+                    let context: *mut AnyObject = std::ptr::null_mut();
+                    let class = objc2::class!(NSEvent);
+                    for kind in [10usize, 11] {
+                        let event: *mut AnyObject = msg_send![class, keyEventWithType: kind, location: NSPoint::new(0., 0.), modifierFlags: 0usize, timestamp: 0f64, windowNumber: number, context: context, characters: &*chars, charactersIgnoringModifiers: &*chars, isARepeat: false, keyCode: 0u16];
+                        if event.is_null() {
+                            return Err("AppKit made no event".into());
+                        }
+                        let _: () = msg_send![ns_window, sendEvent: event];
                     }
                 }
                 other => return Err(format!("{other}?")),

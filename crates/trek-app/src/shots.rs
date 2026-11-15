@@ -1121,11 +1121,12 @@ async fn editor_snap(
 /// title, whether it has a web view and shows it live, its height, its frame and the transcript's
 /// visible area (window px), plus the window's frame on screen (for `screencapture -R`: the views
 /// are native, so `shot` doesn't show them).
-/// `artifacts [take-keys|lose-keys|press-trek]`: the cards in the main window, and who has the
-/// keys there (`artifacts.json`). First, `take-keys` gives them to the first live card's page, as
+/// `artifacts [take-keys|lose-keys|press-trek|type-native]`: the cards in the main window, who has
+/// the keys there and what the composer holds (`artifacts.json`). First, `take-keys` gives them to the first live card's page, as
 /// a click in it does; on a Mac, `lose-keys` leaves them with the window itself, as AppKit does
 /// when a view that had them goes, and `press-trek` presses GPUI's own view where the composer is,
-/// as AppKit delivers a click.
+/// as AppKit delivers a click, and `type-native` hands the window a key (`a`) as AppKit does,
+/// without bringing Trek to the front.
 async fn artifacts(
     ws: &Entity<Workspace>,
     dir: &Path,
@@ -1149,14 +1150,16 @@ async fn artifacts(
                 .timer(Duration::from_millis(300))
                 .await;
         }
-        what @ ("lose-keys" | "press-trek") => {
+        what @ ("lose-keys" | "press-trek" | "type-native") => {
             main.update(cx, |_, window, _| crate::artifact::shots_keys(window, what))??;
             cx.background_executor()
                 .timer(Duration::from_millis(300))
                 .await;
         }
         other => {
-            anyhow::bail!("artifacts: {other:?}? (artifacts [take-keys|lose-keys|press-trek])")
+            anyhow::bail!(
+                "artifacts: {other:?}? (artifacts [take-keys|lose-keys|press-trek|type-native])"
+            )
         }
     }
     let state = main.update(cx, |_, window, cx| {
@@ -1178,7 +1181,13 @@ async fn artifacts(
                 })
             })
             .collect();
-        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "keys": crate::artifact::keys_holder(window) })
+        // What the composer holds, so a run can see whether keys sent the native way landed.
+        let composer = window
+            .root::<gpui_kit::component::Root>()
+            .flatten()
+            .and_then(|r| r.read(cx).view().clone().downcast::<crate::root::TrekWindow>().ok())
+            .map(|t| t.read(cx).composer.read(cx).text(cx));
+        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "keys": crate::artifact::keys_holder(window), "composer": composer })
     })?;
     std::fs::write(
         dir.join("artifacts.json"),

@@ -449,7 +449,17 @@ live = ["route project:{project}", "tools terminal", "wait 1500", "count termina
 how = { macos = "A PTY and WebKit.", windows = "ConPTY and WebView2 (artifacts InPrivate)." }
 note = "On Windows a live inline artifact's clipping window ignores round_bottom, so its square bottom corners cover the card's rounded ones, and every web-view failure there says the WebView2 runtime is needed, dropping the real reason the Mac shows (artifact/native.rs, artifact/mod.rs)."
 code = ["crates/trek-app/src/panels/terminal.rs", "crates/trek-app/src/artifact/native.rs", "crates/trek-app/src/artifact/mod.rs"]
-tests = ["crates/trek-app/tests/ide.rs", "crates/trek-app/tests/terminal.rs"]
+tests = ["crates/trek-app/tests/ide.rs", "crates/trek-app/tests/terminal.rs", "crates/trek-app/tests/artifacts.rs"]
+
+[[feature.promise]]
+what = "An inline page or player that had the keys gives them back to Trek before its view hides or goes, so typing reaches the composer again"
+macos = "crates/trek-app/tests/artifacts.rs::a_page_with_the_keys_gives_them_back_before_its_card_hides_or_goes"
+windows = "crates/trek-app/tests/artifacts.rs::a_page_with_the_keys_gives_them_back_before_its_card_hides_or_goes"
+
+[[feature.promise]]
+what = "A page that had the keys and scrolled far up, past the views a window keeps, leaves the keys with Trek"
+macos = "crates/trek-app/tests/artifacts.rs::keys_come_back_when_a_page_that_had_them_scrolls_away_and_its_view_is_let_go"
+windows = "crates/trek-app/tests/artifacts.rs::keys_come_back_when_a_page_that_had_them_scrolls_away_and_its_view_is_let_go"
 
 # ---------- Agent tools ----------
 
