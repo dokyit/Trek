@@ -3647,6 +3647,7 @@ impl ThreadView {
             (Row::Error { ix }, Item::Error { text }) => {
                 let turn =
                     live.is_some_and(|l| trek_core::rewind::turn_start(&l.items, ix).is_some());
+                let copy_text = text.clone();
                 column(
                     v_flex()
                         .group("turn-end")
@@ -3654,6 +3655,11 @@ impl ThreadView {
                         .gap(px(2.))
                         .child(
                             div()
+                                .id(("error-text", ix))
+                                .test_support()
+                                // A long error (a provider's JSON, a stack) scrolls in its box.
+                                .max_h(px(ERROR_MAX))
+                                .overflow_y_scroll()
                                 .px_3()
                                 .py_2()
                                 .rounded(px(fluent::surface(theme.radius.as_f32())))
@@ -3667,7 +3673,25 @@ impl ThreadView {
                                 .text_size(to_rems(text::LABEL))
                                 .child(text),
                         )
-                        .when(turn, |el| el.child(turn_actions(ix))),
+                        .child(
+                            h_flex()
+                                .gap(px(2.))
+                                .child(
+                                    Button::new(("copy-error", ix))
+                                        .ghost()
+                                        .xsmall()
+                                        .map(control_button)
+                                        .icon(Icon::new(IconName::Copy).text_color(muted))
+                                        .tooltip("Copy error")
+                                        .on_click(move |_, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_text.to_string(),
+                                            ));
+                                            crate::toast::push(window, "Copied", cx);
+                                        }),
+                                )
+                                .when(turn, |el| el.child(turn_actions(ix))),
+                        ),
                 )
                 .into_any_element()
             }
@@ -5091,6 +5115,8 @@ fn thought_after(items: &[Item], reasoning: Option<usize>, members: &[usize]) ->
     .then_some(thought)
 }
 
+/// The tallest a failed turn's error grows before it scrolls.
+const ERROR_MAX: f32 = 160.;
 /// The tallest an approval card's command grows before it scrolls.
 const PERMISSION_DETAIL_MAX: f32 = 160.;
 /// How strong a row's chevron is: on Windows' opaque window the Mac's falls under 3:1 on Paper.

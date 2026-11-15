@@ -960,6 +960,45 @@ fn stopping_a_turn_returns_queued_follow_ups_to_the_composer() {
     });
 }
 
+/// A failed turn's error can be copied, and a long one scrolls in its box.
+#[test]
+fn a_failed_turn_s_error_can_be_copied_and_stays_short() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.send(cx, "mock:error");
+        trek.wait_done(cx, &id, RunState::Failed).await;
+        let ix = trek.item_ix(cx, &id, |i| matches!(i, Item::Error { .. }));
+        trek.render(cx);
+        trek.click(cx, ("copy-error", ix));
+        let copied = cx.read_from_clipboard().and_then(|c| c.text());
+        assert!(
+            copied
+                .as_deref()
+                .is_some_and(|t| t.contains("the build failed")),
+            "the error's words are on the clipboard: {copied:?}"
+        );
+        // A provider's long answer: the box stops short and scrolls.
+        let long = (1..=60)
+            .map(|n| format!("line {n} of the provider's reply"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        trek.update(cx, |ws, cx| {
+            ws.apply_events(&id, vec![AgentEvent::Error(long)], cx)
+        });
+        trek.render(cx);
+        let last = trek.item_ix(cx, &id, |i| {
+            matches!(i, Item::Error { text } if text.contains("line 60"))
+        });
+        let area = trek
+            .bounds(cx, ("error-text", last))
+            .expect("the error's box");
+        assert!(
+            area.size.height <= gpui_kit::px(160.5),
+            "the error's box stops at its limit: {area:?}"
+        );
+    });
+}
+
 #[test]
 fn a_failed_turn_needs_the_user() {
     run(async |cx| {
