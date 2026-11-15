@@ -275,6 +275,8 @@ pub struct NotesView {
     adding: usize,
     /// The note's text changed and isn't saved yet.
     dirty: bool,
+    /// Typing with no note open couldn't start one, and the user has been told.
+    told_no_note: bool,
     /// Undo and redo for the note on screen.
     history: History,
     /// The workspace's `notes_epoch` the list was read at.
@@ -351,6 +353,7 @@ impl NotesView {
             preview_width: Default::default(),
             adding: 0,
             dirty: false,
+            told_no_note: false,
             history: History::default(),
             epoch,
             _save: None,
@@ -546,10 +549,22 @@ impl NotesView {
             }
             match notes::create_in(&notes::notes_dir()) {
                 Ok(note) => {
+                    self.told_no_note = false;
                     self.current = Some(note.id.clone());
                     self.notes.insert(0, note);
                 }
-                Err(_) => return,
+                // Said once, not at every key: the text stays in the box meanwhile.
+                Err(e) => {
+                    if !std::mem::replace(&mut self.told_no_note, true) {
+                        self.workspace.update(cx, |_, cx| {
+                            cx.emit(crate::workspace::WorkspaceEvent::Toast {
+                                message: format!("Couldn't make a note: {e}"),
+                                undo: None,
+                            })
+                        });
+                    }
+                    return;
+                }
             }
         }
         let Some(note) = self

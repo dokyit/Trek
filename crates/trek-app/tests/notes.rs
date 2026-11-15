@@ -503,3 +503,31 @@ fn the_list_narrows_to_the_notes_that_have_the_words_typed() {
         assert!(trek.visible(cx, "note-search-empty"));
     });
 }
+
+/// Typing with no note open, where a note can't be made, says so once rather than losing the
+/// text without a word.
+#[test]
+fn typing_where_no_note_can_be_made_says_so_once() {
+    run(async |cx| {
+        let trek = open(cx);
+        let toasts = common::toasts(&trek, cx);
+        // The notes folder is a plain file, so no note can be created in it.
+        let dir = trek_core::notes::notes_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::write(&dir, "in the way").unwrap();
+        trek.click(cx, "open-notes");
+        trek.render(cx);
+        let notes = notes_view(&trek, cx);
+        for text in ["a", "ab", "abc"] {
+            trek.window(cx, |window, cx| {
+                notes.update(cx, |n, cx| n.set_text(text.into(), window, cx))
+            });
+        }
+        let said = toasts
+            .borrow()
+            .iter()
+            .filter(|(m, _)| m.starts_with("Couldn't make a note"))
+            .count();
+        assert_eq!(said, 1, "{:?}", toasts.borrow());
+    });
+}
