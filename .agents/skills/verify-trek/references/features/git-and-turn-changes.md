@@ -6,7 +6,7 @@ Shows repository status and diffs beside the thread, including the exact file ch
 
 ## Reach it as a user
 
-Open the right panel with ⌘J and select **Source Control**. Select files/hunks to inspect; use the footer actions for commit/push/PR. Open a completed turn’s changes from its transcript control.
+Open the right panel with ⌘J and select **Git** (the Editor's own side bar calls its version **Source Control**, with staging). Select files/hunks to inspect; use the footer actions: Commit all, Push (Publish branch for a branch the remote hasn't seen, off with no remote), Pull when behind, and for a worktree thread Create pull request (off, with the reason under it, without the GitHub CLI, a GitHub origin or a login) and Merge. Failures come as one plain line in a toast that stays twelve seconds; a click shows everything git said (`failure_text` in `panels/git.rs`). **New branch…** is in the branch chip's menu and the overview's branch list. Open a completed turn’s changes from its transcript control.
 
 ## Reach it with the CLI
 

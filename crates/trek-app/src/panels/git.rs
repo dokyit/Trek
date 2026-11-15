@@ -62,8 +62,19 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
         .current_dir(cwd)
         .env("PATH", trek_core::detect::login_path())
         .env("GIT_OPTIONAL_LOCKS", "0")
+        // Never wait on a prompt nobody can see (a login for a push, an editor for a merge
+        // message): the action fails and says so instead of the button spinning for good.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            // No git to run is the user's to fix, and says how.
+            if trek_core::git::git_binary().is_err() {
+                trek_core::git::GitMissing::MESSAGE.to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     } else {
@@ -585,8 +596,18 @@ fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
             Err(why) => why.into(),
         }
     } else {
-        let diff = git_read(&top, &["diff", "HEAD", "--", &file.path])
-            .or_else(|_| git_read(&top, &["diff", "--", &file.path]))
+        // With only the new path in the pathspec git can't see a rename: the whole file reads as
+        // added. Both paths, and it says what moved.
+        let paths: Vec<String> = match renamed_from(&top, &file.path) {
+            Some(old) => vec![old, file.path.clone()],
+            None => vec![file.path.clone()],
+        };
+        let mut args = vec!["diff", "HEAD", "-M", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let mut plain = vec!["diff", "-M", "--"];
+        plain.extend(paths.iter().map(String::as_str));
+        let diff = git_read(&top, &args)
+            .or_else(|_| git_read(&top, &plain))
             .unwrap_or_default();
         // A tracked binary is git's one line about it: said as the other paths say it.
         if diff.lines().any(|l| l.starts_with("Binary files ")) {
@@ -597,6 +618,23 @@ fn file_diff(cwd: &Path, file: &FileChange) -> Vec<(LineKind, String)> {
     };
     // An untracked file's lines are all added ones, with no header: a `++i` is `+++i`.
     diff_body(&text, file.status == "??")
+}
+
+/// Where `path` was before, when this working tree renamed or copied it (`git mv`).
+fn renamed_from(top: &Path, path: &str) -> Option<String> {
+    let out = git_read(top, &["diff", "HEAD", "-M", "--name-status", "-z"]).ok()?;
+    let mut entries = out.split('\0');
+    while let Some(status) = entries.next() {
+        if status.starts_with(['R', 'C']) {
+            let (old, new) = (entries.next()?, entries.next()?);
+            if new == path {
+                return Some(old.to_string());
+            }
+        } else {
+            entries.next();
+        }
+    }
+    None
 }
 
 /// What a changed file's diff says as this panel reads it, for its viewed mark
@@ -1511,7 +1549,7 @@ impl GitPanel {
                     .truncate()
                     .font_medium()
                     .child(if self.snap.branch.is_empty() {
-                        "detached".to_string()
+                        "Detached HEAD".to_string()
                     } else {
                         self.snap.branch.clone()
                     }),
@@ -2776,6 +2814,9 @@ impl Render for GitPanel {
         if let Some(t) = self.target.clone() {
             return self.render_review(t, window, cx);
         }
+        if !self.snap.is_repo && !self.loading && trek_core::git::git_binary().is_err() {
+            return super::empty(trek_core::git::GitMissing::MESSAGE, cx).into_any_element();
+        }
         if !self.snap.is_repo && !self.loading {
             return v_flex()
                 .size_full()
@@ -2807,6 +2848,10 @@ impl Render for GitPanel {
         let files = self.file_list(summary, cx);
         let diff = self.diff_view("No changes. The working tree is clean.", window, cx);
 
+        let chat = self
+            .cwd
+            .as_deref()
+            .is_some_and(trek_core::paths::is_chat_dir);
         let push = push_state(&self.snap);
         let behind = self.snap.upstream.map_or(0, |(behind, _)| behind);
         let commit = v_flex()
@@ -2872,7 +2917,8 @@ impl Render for GitPanel {
                     .border_color(theme.border)
                     .child(diff),
             )
-            .child(commit)
+            // A chat without a project has Trek's own scratch repository: nothing to commit or push.
+            .when(!chat, |el| el.child(commit))
             .into_any_element()
     }
 }
@@ -3078,6 +3124,50 @@ mod tests {
             diff.iter().any(|(_, l)| l == "+two"),
             "no added line in the diff of résumé.md ({} lines)",
             diff.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_renamed_files_diff_says_it_was_renamed_instead_of_adding_every_line() {
+        let dir = std::env::temp_dir().join(format!("trek-git-rename-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run =
+            |args: &[&str]| assert!(crate::panels::git::git(&dir, args).is_ok(), "git {args:?}");
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("old.txt"), "a\nb\nc\nd\ne\nf\ng\nh\n").unwrap();
+        run(&["add", "."]);
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "first",
+        ]);
+        run(&["mv", "old.txt", "new.txt"]);
+        let snap = super::snapshot(&dir);
+        let file = snap.files.iter().find(|f| f.path == "new.txt").unwrap();
+        let diff = super::file_diff(&dir, file);
+        assert!(
+            diff.iter().any(|(_, l)| l == "rename from old.txt"),
+            "a rename says so: {diff:?}"
+        );
+        assert!(
+            !diff.iter().any(|(k, _)| *k == LineKind::Add),
+            "no line of a pure rename is 'added': {diff:?}"
+        );
+        // The runner never waits for an editor or a prompt.
+        assert_eq!(
+            crate::panels::git::git(&dir, &["var", "GIT_EDITOR"])
+                .unwrap()
+                .trim(),
+            "true"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
