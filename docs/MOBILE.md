@@ -1361,8 +1361,59 @@ at most. So (`trek_remote::web`):
 - **Browsers.**
   - **Supported:** Chrome, Edge and Samsung Internet on Android (and on a computer).
   - **Not supported:** a browser without WebTransport, or without `serverCertificateHashes`.
-    Firefox's support varies, and Safari on iPhone has neither yet. The page says so instead of
-    failing.
+    Firefox's support varies. The page says so instead of failing.
+  - **Safari on iPhone:** WebTransport shipped in Safari 26.4, and `serverCertificateHashes` is
+    listed as supported from the same release. It hasn't been tried on a real iPhone yet.
+
+### Notifications (Web Push)
+
+The computer sends the web remote's notifications itself, through the phone browser's own push
+service. There is no account, no key from anyone and no server of Trek's (`trek_remote::webpush`,
+`crates/trek-app/src/push.rs`).
+
+- **The key.** Each install makes a P-256 key pair (VAPID, RFC 8292) the first time it's needed.
+  It's kept in `<data>/mobile/push-key.json`, readable by the user alone. A key file that doesn't
+  read is replaced, and the phones then subscribe again.
+- **Subscribing.** The page's Settings has "This phone's notifications" (`features/notify.js`).
+  - `web_push` (feature `web_push`, over WebTransport alone) answers
+    `{key, subscribed, enabled}`.
+  - The switch asks for permission from its tap, as browsers require, and subscribes with
+    `userVisibleOnly` and the computer's key.
+  - Then it sends `web_push {subscribe: {endpoint, p256dh, auth}}`. `web_push {unsubscribe: true}`
+    takes it back.
+  - The server checks the subscription: an https endpoint, a 65-byte P-256 key and a 16-byte
+    secret.
+  - It's kept with that device in `devices.json` (`DeviceRecord.push`). Pairing the device again
+    or unpairing it drops it.
+  - The app hears `ServerNotice::PushChanged`, and turns phone notifications on when a phone asks
+    for them.
+- **Sending.** On each alert the phone would get (needs you, finished, failed, Continue on your
+  phone, a test), the computer does the following for every subscribed device:
+  - It encrypts the note (`aes128gcm`, RFC 8291) with a fresh key pair and salt.
+  - It signs `Authorization: vapid t=<JWT>, k=<key>`, with `aud` set to the push service's origin,
+    `exp` 12 hours ahead and `sub` set to `https://trekdesktop.com`.
+  - It POSTs the note with `TTL: 86400`. `Urgency` is `high` for what needs the user and `normal`
+    for the rest.
+  - A 404 or 410 drops the subscription. A 429 or 5xx is tried again (4 s, 20 s). Anything else
+    is logged.
+  - The note is `{title, body, thread, host, tag}`, at most 3993 bytes. It holds the words the
+    ntfy note would have, so with names off it doesn't say which thread.
+  - The push service sees only the ciphertext, its size and when it was sent.
+- **Showing.** `sw.js` shows every push, because a browser drops the permission of a page whose
+  push showed nothing. The `tag` is `<host>:<thread>`, so a newer note replaces an older one.
+  - Tapping a notification brings an open remote to the front and goes to the thread (a
+    `postMessage`).
+  - When no remote is open, it opens `/remote/#t=<thread>&h=<host>`.
+- **iPhone and iPad.** Only a Home Screen web app gets push (iOS 16.4+). Its storage is its own,
+  apart from Safari's.
+  - So in Safari the section says to add Trek to the Home Screen first.
+  - The pairing screen there offers Copy link, and the first screen takes a pasted pairing link.
+- **One computer per browser.** A browser keeps one subscription, made with one key. Turning
+  notifications on for one computer replaces another's, and the page says so when more than one
+  is paired.
+- **ntfy** stays as an optional second route (Settings › Phone & Machines › Also through the ntfy
+  app). The iPhone app still uses it: Apple's push service would need the paid developer program
+  and a relay holding its key.
 
 ## iPhone app: `ios/`
 
