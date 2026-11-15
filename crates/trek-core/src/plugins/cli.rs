@@ -30,8 +30,17 @@ pub fn from_args() -> Option<i32> {
     if args.first().map(String::as_str) != Some("plugin") {
         return None;
     }
-    let mut out = std::io::stdout();
-    Some(run(&args[1..], &dir(), &mut out))
+    // On Windows a release Trek has no output of its own when typed at a console: it writes to
+    // the console it was started from (`procs::parent_console`).
+    Some(match crate::procs::parent_console() {
+        Some(mut console) => {
+            use std::io::Write as _;
+            // The prompt is back already: start on a line of its own.
+            let _ = writeln!(console);
+            run(&args[1..], &dir(), &mut console)
+        }
+        None => run(&args[1..], &dir(), &mut std::io::stdout()),
+    })
 }
 
 /// Run `args` (after `plugin`) against the plugins folder `dir`, writing to `out`.
@@ -190,12 +199,7 @@ fn install_folder(folder: &Path, dir: &Path, out: &mut dyn std::io::Write) -> Re
     }
     let _ = std::fs::remove_dir_all(&old);
     let mut state = State::read(dir);
-    let was_on = state.choice(&id).on;
-    let on = if was_on && state.missing(&manifest).is_empty() {
-        true
-    } else {
-        state.ask_on(&manifest)
-    };
+    state.ask_on(&manifest);
     state.write(dir).map_err(|e| e.to_string())?;
     let _ = writeln!(
         out,
@@ -208,13 +212,30 @@ fn install_folder(folder: &Path, dir: &Path, out: &mut dyn std::io::Write) -> Re
             format!(": {}", manifest.summary())
         }
     );
-    say_on(&manifest, on, &state, out);
+    let plugin = Plugin {
+        hash: grant::content_hash(&dest),
+        manifest,
+        dir: dest,
+        origin: Origin::Installed,
+    };
+    say_on(&plugin, &state, out);
     let _ = std::fs::write(dir.join(RELOAD_FILE), "");
     Ok(())
 }
 
-fn say_on(m: &Manifest, on: bool, state: &State, out: &mut dyn std::io::Write) {
-    if on {
+/// `state` as Trek will take it: every grant whose seal doesn't verify for its plugin as it is
+/// now counts for nothing (`State::verify`). A view to report from; the file keeps what it has.
+fn as_trek_sees(state: &State, plugins: &[Plugin]) -> State {
+    let mut seen = state.clone();
+    seen.verify(plugins, grant::key().as_ref());
+    seen
+}
+
+/// Say whether `plugin` runs, or what it waits for the user to allow.
+fn say_on(plugin: &Plugin, state: &State, out: &mut dyn std::io::Write) {
+    let m = &plugin.manifest;
+    let seen = as_trek_sees(state, std::slice::from_ref(plugin));
+    if seen.running(m) {
         let _ = writeln!(out, "{} is on", m.id);
     } else {
         let _ = writeln!(
@@ -222,7 +243,7 @@ fn say_on(m: &Manifest, on: bool, state: &State, out: &mut dyn std::io::Write) {
             "{} is waiting for you to allow it in Trek › Settings › Plugins:",
             m.id
         );
-        for p in state.missing(m) {
+        for p in seen.missing(m) {
             let _ = writeln!(out, "  - {}", p.words());
         }
     }
@@ -241,7 +262,7 @@ fn find(id: &str, dir: &Path) -> Result<Plugin, String> {
 
 fn list(dir: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
     let s = scan(dir);
-    let state = State::read(dir);
+    let state = as_trek_sees(&State::read(dir), &s.plugins);
     if s.plugins.is_empty() && s.problems.is_empty() {
         let _ = writeln!(
             out,
@@ -278,9 +299,9 @@ fn list(dir: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
 fn enable(id: &str, dir: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
     let p = find(id, dir)?;
     let mut state = State::read(dir);
-    let on = state.ask_on(&p.manifest);
+    state.ask_on(&p.manifest);
     state.write(dir).map_err(|e| e.to_string())?;
-    say_on(&p.manifest, on, &state, out);
+    say_on(&p, &state, out);
     Ok(())
 }
 
@@ -347,9 +368,15 @@ fn dev(src: &str, once: bool, dir: &Path, out: &mut dyn std::io::Write) -> Resul
         let now = read(&folder, &id).map(|m| {
             let mut state = State::read(dir);
             if !state.choice(&id).on && !state.choice(&id).waiting {
-                let on = state.ask_on(&m);
+                state.ask_on(&m);
                 let _ = state.write(dir);
-                say_on(&m, on, &state, out);
+                let plugin = Plugin {
+                    hash: grant::content_hash(&folder),
+                    manifest: m,
+                    dir: folder.clone(),
+                    origin: Origin::Linked,
+                };
+                say_on(&plugin, &state, out);
             }
         });
         if last.as_ref() != Some(&now) {
@@ -477,12 +504,31 @@ mod tests {
         assert!(plugins.join(RELOAD_FILE).exists());
         let (_, text) = run_in(&plugins, &["list"]);
         assert!(text.contains("meter  1.0.0  waiting"), "{text}");
-        // The user allows it in Trek; an update with the same permissions stays on.
+        // The user allows it in Trek; the same plugin installed again stays on.
         let mut st = State::read(&plugins);
-        st.turn_on_allowing(&find("meter", &plugins).unwrap().manifest);
+        assert!(st.turn_on_allowing(&find("meter", &plugins).unwrap(), grant::key().as_ref()));
         st.write(&plugins).unwrap();
         let (_, text) = run_in(&plugins, &["install", src.to_str().unwrap()]);
         assert!(text.contains("meter is on"), "{text}");
+        let (_, text) = run_in(&plugins, &["list"]);
+        assert!(text.contains("meter  1.0.0  on"), "{text}");
+        // An update is another plugin as far as its grant goes: it asks again.
+        std::fs::write(src.join("main.js"), "// new code").unwrap();
+        let (_, text) = run_in(&plugins, &["install", src.to_str().unwrap()]);
+        assert!(
+            text.contains("waiting") && !text.contains("meter is on"),
+            "{text}"
+        );
+        // And a grant written into the file by hand is no grant.
+        let forged = "[plugins.meter]\non = true\ngranted = [\"usage:read\"]\nseal = \"00\"\n";
+        std::fs::write(plugins.join(STATE_FILE), forged).unwrap();
+        let (_, text) = run_in(&plugins, &["list"]);
+        assert!(text.contains("meter  1.0.0  waiting"), "{text}");
+        let (_, text) = run_in(&plugins, &["enable", "meter"]);
+        assert!(
+            text.contains("waiting") && text.contains("tokens"),
+            "{text}"
+        );
         let (_, text) = run_in(&plugins, &["disable", "meter"]);
         assert!(text.contains("off"), "{text}");
         let (code, _) = run_in(&plugins, &["remove", "meter"]);

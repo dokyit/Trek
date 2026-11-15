@@ -162,6 +162,59 @@ fn a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops() 
 }
 
 #[test]
+fn a_grant_written_into_the_file_is_ignored_and_an_edited_plugin_asks_again() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    run(async |cx| {
+        let trek = start(cx);
+        install("trail-board", &trek, cx);
+        let dir = trek_core::plugins::dir();
+        let running =
+            |cx: &mut TestAppContext| cx.update(|cx| trek_app::plugins::running("trail-board", cx));
+        let waiting = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.global::<trek_app::plugins::Plugins>()
+                    .state
+                    .choice("trail-board")
+                    .waiting
+            })
+        };
+        // An agent writes the grant into state.toml itself: Trek doesn't take it.
+        std::fs::write(
+            dir.join(trek_core::plugins::STATE_FILE),
+            "[plugins.trail-board]\non = true\ngranted = [\"threads:read\", \"threads:open\"]\nseal = \"0123abcd\"\n\n[replace]\nthread-list = \"trail-board\"\n",
+        )
+        .unwrap();
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.run_until_parked();
+        assert!(!running(cx), "a hand-written grant is no grant");
+        assert!(waiting(cx), "it waits for the user");
+        draft(&trek, cx);
+        assert!(!trek.visible(cx, "plugin-surface-thread-list"));
+
+        // The user allows it in Settings: it runs, and the seal Trek wrote is good at the next
+        // read of the folder.
+        cx.update(|cx| trek_app::plugins::set_on("trail-board", true, &trek.ws, cx));
+        assert!(running(cx));
+        let kept = std::fs::read_to_string(dir.join(trek_core::plugins::STATE_FILE)).unwrap();
+        assert!(kept.contains("seal = "), "{kept}");
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.run_until_parked();
+        assert!(running(cx), "sealed, it stays on");
+
+        // Its files change (an update, or another plugin put in its place): it asks again.
+        let board = dir.join("trail-board/ui/board.json");
+        let text = std::fs::read_to_string(&board).unwrap();
+        std::fs::write(&board, text.replace("Needs you", "Needs you now")).unwrap();
+        cx.update(|cx| trek_app::plugins::reread(&trek.ws, cx));
+        cx.run_until_parked();
+        assert!(!running(cx), "the grant was for the plugin the user saw");
+        assert!(waiting(cx));
+        draft(&trek, cx);
+        assert!(!trek.visible(cx, "plugin-surface-thread-list"));
+    });
+}
+
+#[test]
 fn a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     run(async |cx| {

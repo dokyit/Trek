@@ -208,10 +208,27 @@ Everything else is out of reach: there's no file system, shell or network beyond
 plugin's own storage is always there (its own, 1 MB). Trek's style surfaces, slots drawn from the
 plugin's own state and pages that read nothing need no permission at all.
 
-What the gate is against: the CLI (`trek plugin enable` turns on only what asks for nothing) and
-a plugin's own code, which has no way to reach `state.toml`. It is not against a program that
-can already write Trek's data folder: an agent with the user's file access could write a grant
-there, as it could edit any other setting. The skill tells agents never to.
+**Grants can't be forged from the file system.** `state.toml` is a file an agent with file
+access can write, and agents are the likeliest authors of plugins. So a grant counts only with
+its seal (`trek_core::plugins::grant`): an HMAC-SHA256 over the plugin's id, the hash of every
+file in its folder, and the permissions allowed, under a key this install keeps in the system's
+secret store (the Keychain, Windows Credential Manager; `trek_core::keychain`, where API keys
+are). Trek makes the seal when the user allows the plugin in Settings, and checks it every time
+it reads the folder:
+
+- a grant written into the file by hand has no seal that verifies: it counts for nothing, and
+  the plugin shows as waiting in Settings;
+- a seal is for the plugin as it was when the user allowed it: change its manifest's
+  permissions or any of its files (an update, or another plugin put in its folder) and it asks
+  again, so an allowed plugin can't be swapped for another;
+- a `state.toml` copied from another computer verifies nothing there, and neither does anything
+  while the secret store can't be read.
+
+The CLI never grants (`trek plugin enable` turns on only what asks for nothing), and a plugin's
+own code has no way to reach `state.toml` or the key. What this doesn't stop is what nothing on
+disk can: a program that can read the user's secret store can read the key, as it can read
+their API keys. A plugin being worked on (`trek plugin dev`) that asks for permissions asks
+again after each edit; one that asks for none is unaffected.
 
 ## Safety
 
@@ -253,8 +270,11 @@ from when plugins landed (below).
 - A composer replacement can wrap Trek's composer (`trek:composer`) but can't supply an input
   of its own; a declarative tree has no text field.
 - Web content inside a slot: web views are for pages and panels.
-- On Windows a release `trek.exe` is a GUI program, so `trek plugin …` typed at a console prints
-  nothing (a pipe, as an agent's, gets its output). The folder is the interface either way.
+- On Windows a release `trek.exe` is a GUI program with no output of its own, so `trek plugin …`
+  typed at a console attaches to that console to print (`procs::parent_console`; the prompt
+  comes back first, as for any GUI program), and through a pipe, as an agent runs it, its
+  output goes to the pipe. Written without a PC to run it on: if a console shows nothing, pipe
+  it (`trek plugin list | more`), or work on the folder, which is the interface either way.
 - Plugins' own fonts and icons: a look uses Trek's three families, a tree Trek's Lucide set.
 
 ## Phones

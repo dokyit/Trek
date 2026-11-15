@@ -11,6 +11,7 @@
 pub mod cli;
 pub mod data;
 pub mod examples;
+pub mod grant;
 pub mod page;
 pub mod ui;
 
@@ -919,6 +920,9 @@ pub struct Plugin {
     /// The folder its files are in.
     pub dir: PathBuf,
     pub origin: Origin,
+    /// The hash of every file in its folder (`grant::content_hash`): what a grant is sealed
+    /// over, so an allowed plugin can't be edited or swapped and keep what it was allowed.
+    pub hash: Option<String>,
 }
 
 /// A plugin Trek couldn't use, and why.
@@ -981,6 +985,7 @@ pub fn scan(dir: &Path) -> Scan {
         match read(&folder, &id) {
             Ok(manifest) => out.plugins.push(Plugin {
                 manifest,
+                hash: grant::content_hash(&folder),
                 dir: folder,
                 origin,
             }),
@@ -1073,9 +1078,14 @@ pub struct Choice {
     /// Turned on.
     #[serde(default)]
     pub on: bool,
-    /// The permissions the user allowed, by key.
+    /// The permissions the user allowed, by key. They count only with `seal`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted: Vec<String>,
+    /// The seal on that grant (`grant::seal`): made by Trek when the user allows the plugin, with
+    /// a key kept in the system's secret store. A grant written into this file by hand has none
+    /// that verifies, and counts for nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<String>,
     /// Asked to be turned on (by the CLI, or an update that asks for more) and waiting for the
     /// user to allow what it asks for.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1136,14 +1146,71 @@ impl State {
         c.on && c.stopped.is_none() && self.missing(m).is_empty()
     }
 
-    /// Turn `m` on as the user (who sees what it asks for, and so allows it).
-    pub fn turn_on_allowing(&mut self, m: &Manifest) {
+    /// Take away every grant that isn't sealed for its plugin as it is now: one written into the
+    /// file by hand, one for a plugin whose files or permissions changed since the user allowed
+    /// it, or any at all when the key can't be read. Such a plugin is off and waiting for the
+    /// user. The ids of the plugins whose grants went.
+    pub fn verify(&mut self, plugins: &[Plugin], key: Option<&grant::Key>) -> Vec<String> {
+        let mut voided = Vec::new();
+        for p in plugins {
+            let m = &p.manifest;
+            if m.permissions.is_empty() {
+                continue;
+            }
+            let Some(c) = self.plugins.get_mut(&m.id) else {
+                continue;
+            };
+            if c.granted.is_empty() && c.seal.is_none() {
+                continue;
+            }
+            let all = m
+                .permissions
+                .iter()
+                .all(|perm| c.granted.contains(&perm.key()));
+            let sealed = match (key, &p.hash, &c.seal) {
+                (Some(key), Some(hash), Some(seal)) => {
+                    grant::verify(key, &m.id, hash, &m.permissions, seal)
+                }
+                _ => false,
+            };
+            if all && sealed {
+                continue;
+            }
+            c.granted.clear();
+            c.seal = None;
+            if c.on {
+                c.on = false;
+                c.waiting = true;
+            }
+            voided.push(m.id.clone());
+        }
+        voided
+    }
+
+    /// Turn `plugin` on as the user (who sees what it asks for, and so allows it): what it asks
+    /// for is granted and sealed with `key` for the plugin as it is now. Without a key or a hash
+    /// to seal with, a plugin that asks for permissions can't be allowed: it waits. Whether it's
+    /// on.
+    pub fn turn_on_allowing(&mut self, plugin: &Plugin, key: Option<&grant::Key>) -> bool {
+        let m = &plugin.manifest;
+        let seal = match (key, &plugin.hash) {
+            _ if m.permissions.is_empty() => None,
+            (Some(key), Some(hash)) => Some(grant::seal(key, &m.id, hash, &m.permissions)),
+            _ => {
+                let c = self.plugins.entry(m.id.clone()).or_default();
+                c.on = false;
+                c.waiting = true;
+                return false;
+            }
+        };
         let c = self.plugins.entry(m.id.clone()).or_default();
         c.on = true;
         c.waiting = false;
         c.stopped = None;
         c.granted = m.permissions.iter().map(Permission::key).collect();
+        c.seal = seal;
         self.replace_unclaimed(m);
+        true
     }
 
     /// A surface `m` replaces that nothing else was chosen for goes up with it: Settings puts
@@ -1156,19 +1223,22 @@ impl State {
         }
     }
 
-    /// Turn `m` on from the CLI (an agent may be the one asking): on if it needs nothing it
-    /// hasn't been allowed; else it waits for the user. Whether it's on.
+    /// Turn `m` on from the CLI (an agent may be the one asking): on if it asks for no
+    /// permissions. One that asks for some is left as it is (on, if the user allowed it before
+    /// and Trek finds its seal good) or marked as waiting for the user: the CLI allows nothing.
+    /// Whether this turned it on.
     pub fn ask_on(&mut self, m: &Manifest) -> bool {
-        let missing = self.missing(m);
         let c = self.plugins.entry(m.id.clone()).or_default();
         c.stopped = None;
-        if missing.is_empty() {
+        if m.permissions.is_empty() {
             c.on = true;
             c.waiting = false;
             self.replace_unclaimed(m);
             true
         } else {
-            c.waiting = true;
+            if !c.on {
+                c.waiting = true;
+            }
             false
         }
     }
@@ -1526,35 +1596,140 @@ run = "reset"
             "nosy",
             "name = \"Nosy\"\npermissions = [\"threads:read\"]\n",
         );
+        let key = [3u8; 32];
         let s = scan(&root);
-        let quiet = &s
-            .plugins
-            .iter()
-            .find(|p| p.manifest.id == "quiet")
-            .unwrap()
-            .manifest;
-        let nosy = &s
-            .plugins
-            .iter()
-            .find(|p| p.manifest.id == "nosy")
-            .unwrap()
-            .manifest;
+        let find = |s: &Scan, id: &str| {
+            s.plugins
+                .iter()
+                .find(|p| p.manifest.id == id)
+                .cloned()
+                .unwrap()
+        };
+        let (quiet, nosy) = (find(&s, "quiet"), find(&s, "nosy"));
         let mut st = State::default();
-        assert!(st.ask_on(quiet), "a plugin that asks for nothing goes on");
-        assert!(!st.ask_on(nosy), "one that asks waits for the user");
-        assert!(st.choice("nosy").waiting && !st.running(nosy));
-        st.turn_on_allowing(nosy);
-        assert!(st.running(nosy));
-        // An update that asks for more stops it until allowed again.
-        let mut more = nosy.clone();
-        more.permissions.push(Permission::ThreadsSend);
-        assert!(!st.running(&more));
+        assert!(
+            st.ask_on(&quiet.manifest),
+            "a plugin that asks for nothing goes on"
+        );
+        assert!(
+            !st.ask_on(&nosy.manifest),
+            "one that asks waits for the user"
+        );
+        assert!(st.choice("nosy").waiting && !st.running(&nosy.manifest));
+        // The user allows it in Trek: granted, and sealed for the plugin as it is.
+        assert!(st.turn_on_allowing(&nosy, Some(&key)));
+        assert!(st.running(&nosy.manifest));
+        assert!(
+            st.verify(&s.plugins, Some(&key)).is_empty(),
+            "its seal is good"
+        );
+        assert!(st.running(&nosy.manifest));
+        // Without a key nothing can be sealed, so nothing that asks can be allowed.
+        let mut keyless = State::default();
+        assert!(!keyless.turn_on_allowing(&nosy, None));
+        assert!(keyless.choice("nosy").waiting && !keyless.running(&nosy.manifest));
         // Stopped by Trek: off until turned on again, its replacement given back.
-        st.replace.insert(Surface::ThreadList, "nosy".into());
-        st.stop("nosy", "TypeError: x is undefined");
-        assert!(!st.running(nosy) && st.replace.is_empty());
+        let mut stopped = st.clone();
+        stopped.replace.insert(Surface::ThreadList, "nosy".into());
+        stopped.stop("nosy", "TypeError: x is undefined");
+        assert!(!stopped.running(&nosy.manifest) && stopped.replace.is_empty());
+        stopped.write(&root).unwrap();
+        assert_eq!(State::read(&root), stopped);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_grant_written_by_hand_is_ignored_and_an_edited_plugin_asks_again() {
+        let root = scratch("forged");
+        let dir = plugin(
+            &root,
+            "nosy",
+            "name = \"Nosy\"\npermissions = [\"threads:read\", \"threads:send\"]\nmain = \"main.js\"\n",
+        );
+        std::fs::write(dir.join("main.js"), "// reads").unwrap();
+        let key = [5u8; 32];
+        let s = scan(&root);
+        let nosy = s.plugins[0].clone();
+        assert!(nosy.hash.is_some());
+
+        // An agent writes the grant into state.toml itself, with no seal, a made-up one, and a
+        // real one copied from another plugin: none counts, and the plugin waits for the user.
+        let other = grant::seal(
+            &key,
+            "other",
+            nosy.hash.as_deref().unwrap(),
+            &nosy.manifest.permissions,
+        );
+        for seal in [
+            "",
+            "seal = \"deadbeef\"\n",
+            &format!("seal = \"{other}\"\n"),
+        ] {
+            std::fs::write(
+                root.join(STATE_FILE),
+                format!(
+                    "[plugins.nosy]\non = true\ngranted = [\"threads:read\", \"threads:send\"]\n{seal}"
+                ),
+            )
+            .unwrap();
+            let mut st = State::read(&root);
+            assert!(
+                st.running(&nosy.manifest),
+                "as the file reads, before Trek checks it"
+            );
+            assert_eq!(st.verify(&s.plugins, Some(&key)), ["nosy"]);
+            assert!(!st.running(&nosy.manifest), "a forged grant: {seal:?}");
+            let c = st.choice("nosy");
+            assert!(c.waiting && !c.on && c.granted.is_empty() && c.seal.is_none());
+            assert_eq!(
+                st.missing(&nosy.manifest).len(),
+                2,
+                "it asks for both again"
+            );
+        }
+
+        // The user allows it: a real seal, kept in the file, good at the next read.
+        let mut st = State::default();
+        assert!(st.turn_on_allowing(&nosy, Some(&key)));
         st.write(&root).unwrap();
-        assert_eq!(State::read(&root), st);
+        let mut read = State::read(&root);
+        assert!(read.verify(&s.plugins, Some(&key)).is_empty());
+        assert!(read.running(&nosy.manifest));
+        // Another install's key (the file copied to another computer) doesn't verify it.
+        let mut elsewhere = State::read(&root);
+        assert_eq!(elsewhere.verify(&s.plugins, Some(&[6u8; 32])), ["nosy"]);
+        // Nor does no key at all (a secret store that can't be read).
+        let mut locked = State::read(&root);
+        assert_eq!(locked.verify(&s.plugins, None), ["nosy"]);
+
+        // The plugin's code changes (an update, or another plugin put in its folder): the
+        // grant was for what the user saw, so it asks again.
+        std::fs::write(dir.join("main.js"), "// reads, and now sends").unwrap();
+        let edited = scan(&root);
+        assert_ne!(edited.plugins[0].hash, nosy.hash);
+        let mut st = State::read(&root);
+        assert_eq!(st.verify(&edited.plugins, Some(&key)), ["nosy"]);
+        assert!(!st.running(&edited.plugins[0].manifest) && st.choice("nosy").waiting);
+
+        // So does a manifest that asks for more, or for less.
+        std::fs::write(dir.join("main.js"), "// reads").unwrap();
+        for permissions in [
+            "\"threads:read\", \"threads:send\", \"usage:read\"",
+            "\"threads:read\"",
+        ] {
+            std::fs::write(
+                dir.join(MANIFEST),
+                format!("name = \"Nosy\"\npermissions = [{permissions}]\nmain = \"main.js\"\n"),
+            )
+            .unwrap();
+            let changed = scan(&root);
+            let mut st = State::read(&root);
+            assert_eq!(
+                st.verify(&changed.plugins, Some(&key)),
+                ["nosy"],
+                "{permissions}"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

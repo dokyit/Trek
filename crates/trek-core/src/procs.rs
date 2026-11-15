@@ -68,6 +68,40 @@ pub fn live() -> Vec<i32> {
 /// where with `CREATE_NO_WINDOW` they all share its one hidden console. Nor does it touch the
 /// child's stdio, so pipes and nulls behave as on macOS. A caller that sets more flags (a new
 /// process group, say) sets `CREATE_NO_WINDOW` with them: `creation_flags` replaces.
+/// The console this process was started from, to write to, when it has no output of its own.
+///
+/// A release `trek.exe` is a GUI program (no console window behind the app), so Windows starts
+/// it with no standard output: `trek plugin list` typed at a prompt would print nothing. When
+/// there is no output handle (a pipe or a file given as stdout is one, and is left alone) this
+/// attaches to the parent's console, if it has one, and opens it. The prompt has come back by
+/// then, as it does for any GUI program, so what's written follows it.
+#[cfg(windows)]
+pub fn parent_console() -> Option<std::fs::File> {
+    use std::os::windows::io::AsRawHandle as _;
+    let out = std::io::stdout().as_raw_handle();
+    if !out.is_null() && out as isize != -1 {
+        return None;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(process: u32) -> i32;
+    }
+    /// The process that started this one.
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    // SAFETY: a call that takes a process id and no pointers; it fails (0) when the parent has
+    // no console or this process already has one.
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
+        return None;
+    }
+    std::fs::OpenOptions::new().write(true).open("CONOUT$").ok()
+}
+
+/// Elsewhere a program started from a terminal has the terminal as its output.
+#[cfg(not(windows))]
+pub fn parent_console() -> Option<std::fs::File> {
+    None
+}
+
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program); // spawn: the helper
     quiet(&mut command);

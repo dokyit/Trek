@@ -210,12 +210,45 @@ pub fn running_manifests(cx: &App) -> Vec<Manifest> {
         .collect()
 }
 
+/// This install's key for sealing grants (`trek_core::plugins::grant`), read from the system's
+/// secret store the first time a plugin that asks for permissions is there, and kept. `None`
+/// while the store can't be read.
+fn grant_key() -> Option<core::grant::Key> {
+    static KEY: std::sync::OnceLock<core::grant::Key> = std::sync::OnceLock::new();
+    if let Some(key) = KEY.get() {
+        return Some(*key);
+    }
+    let key = core::grant::key()?;
+    Some(*KEY.get_or_init(|| key))
+}
+
+/// The user's choices as read from `dir`, less every grant that isn't sealed for its plugin as
+/// it is now: one written into the file by hand, or one for a plugin whose files or permissions
+/// changed since the user allowed it. Those plugins wait in Settings. The secret store is read
+/// only when some plugin asks for permissions.
+fn checked_state(dir: &std::path::Path, scan: &core::Scan) -> State {
+    let mut state = State::read(dir);
+    if scan
+        .plugins
+        .iter()
+        .any(|p| !p.manifest.permissions.is_empty())
+    {
+        for id in state.verify(&scan.plugins, grant_key().as_ref()) {
+            core::log(
+                &id,
+                "its permissions aren't sealed for it as it is now (its files changed, or the grant wasn't made in Settings): it waits to be allowed",
+            );
+        }
+    }
+    state
+}
+
 /// Read the folder, index what's running, and watch it. Before any window opens.
 pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
     let dir = core::dir();
     let fingerprint = core::fingerprint(&dir);
     let scan = core::scan(&dir);
-    let state = core::State::read(&dir);
+    let state = checked_state(&dir, &scan);
     let _ = core::take_reload(&dir);
     if !scan.problems.is_empty() || dir.join(core::PROBLEMS_FILE).exists() {
         core::write_problems(&dir, &scan.problems);
@@ -263,7 +296,11 @@ pub fn looked(print: core::Fingerprint, asked: bool, ws: &Entity<Workspace>, cx:
     let ws = ws.downgrade();
     cx.spawn(async move |cx| {
         let (scan, state) = cx
-            .background_spawn(async move { (core::scan(&dir), core::State::read(&dir)) })
+            .background_spawn(async move {
+                let scan = core::scan(&dir);
+                let state = checked_state(&dir, &scan);
+                (scan, state)
+            })
             .await;
         cx.update(|cx| {
             if let Some(ws) = ws.upgrade() {
@@ -557,20 +594,36 @@ pub fn update_state(ws: &Entity<Workspace>, cx: &mut App, f: impl FnOnce(&mut St
 
 /// Turn plugin `id` on (the user, in Settings: they've seen and allow what it asks for) or off.
 pub fn set_on(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
-    let Some(m) = cx
-        .try_global::<Plugins>()
-        .and_then(|p| p.find(id))
-        .map(|p| p.manifest.clone())
-    else {
+    let Some(plugin) = cx.try_global::<Plugins>().and_then(|p| p.find(id)).cloned() else {
         return;
     };
+    // What it asks for is sealed with this install's key, for the plugin as it is now.
+    let key = if on && !plugin.manifest.permissions.is_empty() {
+        grant_key()
+    } else {
+        None
+    };
+    let mut allowed = true;
     update_state(ws, cx, |s| {
         if on {
-            s.turn_on_allowing(&m);
+            allowed = s.turn_on_allowing(&plugin, key.as_ref());
         } else {
-            s.turn_off(&m.id);
+            s.turn_off(&plugin.manifest.id);
         }
     });
+    if !allowed {
+        let name = plugin.manifest.name.clone();
+        ws.update(cx, |_, cx| {
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!(
+                    "{name} can't be allowed: Trek couldn't read its key in {}",
+                    crate::words::words().your_credential_store
+                ),
+                undo: None,
+            })
+        });
+        return;
+    }
     core::log(
         id,
         if on {
@@ -657,7 +710,9 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
         return;
     };
     let print = core::fingerprint(&dir);
-    apply_scan(core::scan(&dir), State::read(&dir), print, ws, cx);
+    let scan = core::scan(&dir);
+    let state = checked_state(&dir, &scan);
+    apply_scan(scan, state, print, ws, cx);
 }
 
 /// Merge `patch` (an object) into plugin `id`'s state, and draw what reads it.

@@ -28,8 +28,10 @@ letters, digits and dashes.
    ```
    A plugin that asks for **no permissions** runs at once. One that asks for some needs the user:
    write `waiting = true` instead of `on = true`, and tell them to allow it in Settings ›
-   Plugins, where what it asks is shown in words. Permissions are the user's to give: never
-   write a `granted` list yourself.
+   Plugins, where what it asks is shown in words. Permissions are the user's to give: Trek
+   seals each grant with a key of its own, so a `granted` list written into the file counts for
+   nothing. The grant is for the plugin as the user saw it: edit any of its files afterwards and
+   it waits to be allowed again (say so when you change one).
    A `[[replace]]` shows once it's chosen: add `thread-list = "<id>"` (or `composer`,
    `new-thread`) under `[replace]` in the same file, or let the user pick it in Settings.
 4. Tell the user what you made, where it shows, and that Settings › Plugins turns it off or
