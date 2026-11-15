@@ -188,7 +188,7 @@ export function PairScreen() {
       ${status === 'connecting' ? html`<${Spinner} /> Connecting…` : 'Connect'}
     </button>
     <p class="muted" style=${{ marginTop: '14px', fontSize: '13px' }}>Addresses: ${pairing.routes.join(', ')}</p>
-    ${pairing.link && environment().ios && !environment().standalone &&
+    ${pairing.link && pairing.push && environment().ios && !environment().standalone &&
     html`<div class="banner" id="pair-home-screen" style=${{ margin: '16px 0 0' }}><${Icon} name="bell" /><span class="grow">For notifications on this iPhone, pair from the Home Screen app instead: it keeps a pairing of its own. Copy the link, then tap Share › Add to Home Screen, open Trek from there and paste it.</span>
       <button class="btn small" type="button" onClick=${() => copy(pairing.link, app.toast)}>Copy link</button></div>`}
   </div></div></div>`;

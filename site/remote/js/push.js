@@ -102,3 +102,24 @@ export function openTarget(hash) {
   const thread = params.get('t');
   return thread ? { thread, host: params.get('h') || null } : null;
 }
+
+/** Whether the page asks the computer about notifications: only one that offers them (`web_push`). */
+export function asksComputer({ online, features }) {
+  return !!online && !!features?.has?.('web_push');
+}
+
+/**
+ * Which row Settings shows for this phone's notifications, or `null` for none: a computer that
+ * doesn't offer them (a Trek from before them) gets no row at all, so the page is as it was.
+ * `push` is the computer's answer to `web_push` (`null` until it comes); `here`, whether this
+ * browser still holds the subscription.
+ */
+export function notifyRow({ served, support, online, push, here }) {
+  if (!served) return null;
+  if (support === 'install' || support === 'unsupported') return support;
+  if (!push) return online ? 'asking' : 'offline';
+  if (support === 'denied') return 'denied';
+  const on = !!push.subscribed && !!here;
+  if (on && !push.enabled) return 'off-there';
+  return on ? 'on' : 'off';
+}

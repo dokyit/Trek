@@ -118,7 +118,7 @@ const HASH_B = toBase64(new Uint8Array(32).fill(2));
 
 test('a pairing link reads as Trek writes it (trek_remote::web::pairing_link)', () => {
   const read = parsePairing(link({ v: 1, code: 'K7Q2-9XMV', name: 'Toby’s PC', hid: '7f3c', routes: ['192.168.1.20:7420', '[fd7a:115c::1]:7420'], certs: [HASH_A, HASH_B] }));
-  assert.deepEqual(read, { code: 'K7Q2-9XMV', name: 'Toby’s PC', hostId: '7f3c', routes: ['192.168.1.20:7420', '[fd7a:115c::1]:7420'], certs: [{ hash: HASH_A }, { hash: HASH_B }] });
+  assert.deepEqual(read, { code: 'K7Q2-9XMV', name: 'Toby’s PC', hostId: '7f3c', routes: ['192.168.1.20:7420', '[fd7a:115c::1]:7420'], certs: [{ hash: HASH_A }, { hash: HASH_B }], push: false });
 });
 
 test('anything else isn’t a pairing link', () => {

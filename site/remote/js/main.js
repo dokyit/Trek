@@ -63,7 +63,7 @@ async function start() {
   if (pairing) {
     // The link itself too: an iPhone's Safari copies it into the Home Screen app, which keeps a
     // pairing of its own (`PairScreen`).
-    app.state.pairing = { hostId: pairing.hostId, name: pairing.name, routes: pairing.routes, certs: pairing.certs, pairing: { code: pairing.code }, link: location.origin + location.pathname + hash };
+    app.state.pairing = { hostId: pairing.hostId, name: pairing.name, routes: pairing.routes, certs: pairing.certs, pairing: { code: pairing.code }, push: pairing.push, link: location.origin + location.pathname + hash };
     app.go({ screen: 'pair' }, { replace: true });
     // A browser that already lets the page on the network pairs at once; otherwise Connect asks.
     if ((await localNetworkPermission()) === 'granted') app.use(app.state.pairing);

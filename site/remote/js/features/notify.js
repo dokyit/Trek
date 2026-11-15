@@ -7,7 +7,7 @@ import { useEffect, useState } from '../../vendor/hooks.mjs';
 import { html, Icon, Spinner, Switch } from '../ui.js';
 import * as app from '../model.js';
 import { registerSettingsSection } from '../routes.js';
-import { environment, madeWith, pushSupport, serverKey, subscriptionFor } from '../push.js';
+import { asksComputer, environment, madeWith, notifyRow, pushSupport, serverKey, subscriptionFor } from '../push.js';
 
 async function registration() {
   return navigator.serviceWorker.ready;
@@ -61,7 +61,7 @@ export function NotificationsSection() {
   const [support, setSupport] = useState(() => pushSupport(environment()));
 
   useEffect(() => {
-    if (!online || !served) return undefined;
+    if (!asksComputer({ online, features: state.features })) return undefined;
     let live = true;
     app
       .ask({ type: 'web_push' })
@@ -96,31 +96,31 @@ export function NotificationsSection() {
     }
   };
 
-  let body;
-  if (support === 'install') {
-    body = html`<div class="item" id="notify-install"><${Icon} name="bell" /><div class="grow">Add Trek to your Home Screen first<div class="sub">On an iPhone or iPad only a Home Screen app gets notifications (iOS 16.4 or later). In Safari, tap Share, then Add to Home Screen, open Trek from there and pair it again: it keeps its own pairing.</div></div></div>`;
-  } else if (support === 'unsupported') {
-    body = html`<div class="item" id="notify-unsupported"><${Icon} name="bell" /><div class="grow">Not in this browser<div class="sub">It can’t show notifications from a page. Chrome, Edge and Samsung Internet can.</div></div></div>`;
-  } else if (!served) {
-    body = html`<div class="item" id="notify-old"><${Icon} name="bell" /><div class="grow">Not from this computer yet<div class="sub">${online ? `Update Trek on ${name} to get notifications on this phone.` : `Connect to ${name} to turn them on.`}</div></div></div>`;
-  } else {
-    const sub =
-      support === 'denied'
-        ? 'Blocked for this site. Allow notifications in the browser’s site settings, then come back.'
-        : on && push && !push.enabled
-          ? `Off on ${name} for now: turn on “Tell my phone when a thread needs me” in its Settings › Phone & Machines.`
-          : on
-            ? `When a thread needs you, finishes or fails, and you’re away from ${name} (as its settings say).`
-            : `${name} sends them itself, straight to this phone’s browser: no account, no other app.`;
-    body = html`<div class="item" id="notify-row">
-      <${Icon} name="bell" />
-      <div class="grow">Notifications<div class="sub">${sub}</div></div>
-      ${busy ? html`<${Spinner} />` : html`<${Switch} id="notify-switch" on=${on} label="Notifications on this phone" onChange=${(v) => (support === 'denied' || !online ? null : toggle(v))} />`}
-    </div>`;
-  }
+  const row = notifyRow({ served, support, online, push, here });
+  // A Trek from before notifications on the phone: nothing here, as before.
+  if (!row) return null;
+  const words = {
+    install: ['Add Trek to your Home Screen first', 'On an iPhone or iPad only a Home Screen app gets notifications. In Safari, tap Share, then Add to Home Screen, open Trek from there and pair it again: it keeps its own pairing.'],
+    unsupported: ['Not in this browser', 'It can’t show notifications from a page. Chrome, Edge and Samsung Internet can.'],
+    asking: ['Notifications', `Asking ${name}…`],
+    offline: ['Notifications', `Connect to ${name} to turn them on.`],
+    denied: ['Notifications', 'Blocked for this site. Allow notifications in the browser’s site settings, then come back.'],
+    'off-there': ['Notifications', `Off on ${name} for now: turn on “Tell my phone when a thread needs me” in its Settings › Phone & Machines.`],
+    on: ['Notifications', `When a thread needs you, finishes or fails, and you’re away from ${name} (as its settings say).`],
+    off: ['Notifications', `${name} sends them itself, straight to this phone’s browser: no account, no other app.`],
+  }[row];
+  const control = ['on', 'off', 'off-there'].includes(row)
+    ? busy
+      ? html`<${Spinner} />`
+      : html`<${Switch} id="notify-switch" on=${on} label="Notifications on this phone" onChange=${(v) => (online ? toggle(v) : null)} />`
+    : row === 'asking'
+      ? html`<${Spinner} />`
+      : null;
   return html`<h2 class="group-title">This phone’s notifications</h2>
-    <div class="group">${body}</div>
-    ${support === 'ready' && served && state.machines.length > 1 && html`<p class="mac-foot">A browser takes notifications from one computer at a time: turning them on here stops them from the others.</p>`}`;
+    <div class="group">
+      <div class="item" id=${`notify-${row}`}><${Icon} name="bell" /><div class="grow">${words[0]}<div class="sub">${words[1]}</div></div>${control}</div>
+    </div>
+    ${support === 'ready' && state.machines.length > 1 && html`<p class="mac-foot">A browser takes notifications from one computer at a time: turning them on here stops them from the others.</p>`}`;
 }
 
 registerSettingsSection(NotificationsSection);

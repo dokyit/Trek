@@ -50,6 +50,8 @@ export function parsePairing(fragment) {
     hostId: typeof json.hid === 'string' ? json.hid : '',
     routes,
     certs,
+    // The computer sends notifications to the page (a Trek from before them doesn't say so).
+    push: json.push === true,
   };
 }
 

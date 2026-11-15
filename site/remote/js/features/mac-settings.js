@@ -204,16 +204,19 @@ function Push({ push, change }) {
   const save = () => {
     if (edited && ok) change({ push_server: value });
   };
-  const test = () => change({ push_test: true }, () => app.toast('Sent. It should arrive in a moment.'));
+  // A Trek that sends notifications to this page itself (`web_push`); one from before them sends
+  // them through ntfy alone, and is worded as it was.
+  const direct = app.has('web_push');
+  const test = () => change({ push_test: true }, () => app.toast(direct ? 'Sent. It should arrive in a moment.' : 'Sent. It should arrive through ntfy in a moment.'));
   return html`<h2 class="group-title">Notifications on this phone</h2>
     <div class="group">
-      <${Toggle} label="Tell my phone when a thread needs me" sub="Also when one finishes or fails. This phone gets them once its own Notifications are on, in Settings." on=${push.enabled} onChange=${(v) => change({ push: v })} />
+      <${Toggle} label="Tell my phone when a thread needs me" sub=${direct ? 'Also when one finishes or fails. This phone gets them once its own Notifications are on, in Settings.' : 'Also when one finishes or fails, through the free ntfy app'} on=${push.enabled} onChange=${(v) => change({ push: v })} />
       ${push.enabled && html`<${Choice} label="Send them" value=${push.when} options=${WHEN} onChange=${(v) => change({ push_when: v })} />`}
     </div>
     ${push.enabled && html`<${Foot}>Away means no keyboard or mouse on your computer for two minutes, or its screen locked.<//>`}
     ${push.enabled &&
     push.topic &&
-    html`<h2 class="group-title">Also through the ntfy app (optional)</h2>
+    html`<h2 class="group-title">${direct ? 'Also through the ntfy app (optional)' : 'Set up ntfy'}</h2>
       <div class="group">
         <div class="item mac-stack">
           <span class="muted mac-small">Topic</span>

@@ -7,7 +7,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { madeWith, notificationFor, openTarget, openUrl, pushSupport, serverKey, subscriptionFor } from '../../../site/remote/js/push.js';
+import { asksComputer, madeWith, notificationFor, notifyRow, openTarget, openUrl, pushSupport, serverKey, subscriptionFor } from '../../../site/remote/js/push.js';
+import { parsePairing, toBase64 } from '../../../site/remote/js/link.js';
 import { ROOT } from '../serve.mjs';
 
 // RFC 8291's example keys (section 5): a sender's public key and a receiver's.
@@ -75,4 +76,65 @@ test('the service worker shows every push and opens its thread, as push.js reads
   assert.match(sw, /addEventListener\('notificationclick'/);
   assert.match(sw, /openWindow\(url\)/);
   assert.match(sw, /\/remote\/#\$\{hash\}/, 'the same address as openUrl');
+});
+
+// ---------------------------------------------------------------------------------------------
+// A new page and an older Trek on the computer: the site deploys before the app is released, so a
+// page talking to Trek 0.4.54 must behave as it did before notifications.
+
+/** What Trek 0.4.54 says in `welcome` and `paired`: `features` as its `feature::ALL` had them. */
+const TREK_0_4_54 = {
+  protocol: 1,
+  host: { id: 'host-1', name: 'Studio', version: '0.4.54' },
+  features: ['search', 'sub_agents', 'snooze', 'mark_unread', 'delete', 'regenerate_title', 'use_reset', 'queue_action', 'attachment', 'background', 'icon', 'basecamp_v2', 'note_images', 'machines', 'note_files', 'card_actions', 'update_phone', 'media', 'limit_actions', 'context_card', 'turn_preview', 'consult', 'resume_interrupted', 'uploads', 'side_chat', 'sub_agent_view', 'failed_checks', 'rules', 'continue_on_account', 'compact_offer', 'switch_preview', 'diff_viewed'],
+};
+
+test('a page talking to Trek 0.4.54 never asks about notifications and shows nothing of them', () => {
+  const features = new Set(TREK_0_4_54.features);
+  assert.equal(asksComputer({ online: true, features }), false, 'it would never answer web_push');
+  for (const support of ['ready', 'install', 'unsupported', 'denied']) {
+    assert.equal(notifyRow({ served: features.has('web_push'), support, online: true, push: null, here: false }), null, support);
+  }
+  // A Trek that offers them: asked once online, the switch once it answers.
+  const newer = new Set([...TREK_0_4_54.features, 'web_push']);
+  assert.equal(asksComputer({ online: false, features: newer }), false);
+  assert.equal(asksComputer({ online: true, features: newer }), true);
+  const row = (support, push, here = false) => notifyRow({ served: true, support, online: true, push, here });
+  assert.equal(row('ready', null), 'asking');
+  assert.equal(row('ready', { key: KEY, subscribed: false, enabled: false }), 'off');
+  assert.equal(row('ready', { key: KEY, subscribed: true, enabled: true }, true), 'on');
+  assert.equal(row('ready', { key: KEY, subscribed: true, enabled: false }, true), 'off-there');
+  assert.equal(row('ready', { key: KEY, subscribed: true, enabled: true }, false), 'off', 'this browser lost it');
+  assert.equal(row('install', null), 'install');
+  assert.equal(row('denied', { key: KEY, subscribed: false, enabled: true }), 'denied');
+});
+
+test('the page speaks the protocol 0.4.54 speaks, so it never says they are different versions', async () => {
+  const { PROTOCOL } = await import('../../../site/remote/js/client.js');
+  assert.equal(PROTOCOL, TREK_0_4_54.protocol);
+});
+
+test('a pairing link from 0.4.54 reads as before and says nothing of notifications', () => {
+  const link = (extra) => '#p=' + toBase64(new TextEncoder().encode(JSON.stringify({ v: 1, code: 'K7Q2-9XMV', name: 'Studio', hid: 'host-1', routes: ['192.168.1.20:7420'], certs: [toBase64(new Uint8Array(32).fill(7))], ...extra })));
+  const old = parsePairing(link({}));
+  assert.equal(old.code, 'K7Q2-9XMV');
+  assert.equal(old.push, false, 'no Copy link for notifications on an iPhone');
+  assert.equal(parsePairing(link({ push: true })).push, true);
+  assert.equal(parsePairing(link({ push: 'yes' })).push, false);
+});
+
+test('the demo computer offers no notifications, so its Settings has none', async () => {
+  const { DemoClient } = await import('../../../site/remote/js/demo.js');
+  const demo = new DemoClient({});
+  assert.equal(asksComputer({ online: true, features: demo.features }), false);
+});
+
+test('the service worker still keeps the shell and answers offline, whatever the computer', () => {
+  const sw = readFileSync(join(ROOT, 'remote', 'sw.js'), 'utf8');
+  assert.match(sw, /addEventListener\('install'/);
+  assert.match(sw, /addEventListener\('fetch'/);
+  assert.match(sw, /caches\.match\('\/remote\/'\)/, 'a navigation offline opens the remote');
+  // Notifications come from the browser's push service alone: nothing of them in the fetch path.
+  const fetching = sw.slice(sw.indexOf("addEventListener('fetch'"), sw.indexOf("addEventListener('push'"));
+  assert.doesNotMatch(fetching, /push|notification/i);
 });
