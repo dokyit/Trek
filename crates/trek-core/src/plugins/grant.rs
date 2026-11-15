@@ -61,14 +61,16 @@ fn hmac(key: &[u8], message: &[u8]) -> [u8; 32] {
     outer.finalize().into()
 }
 
-/// The hash of everything in plugin folder `dir`: each file's path and bytes, in path order
-/// (hidden files and folders left out, as the folder's watch leaves them out). A plugin with
-/// more than [`MAX_FILES`] files, or one that can't be read, has no hash: its grant can't be
-/// sealed or verified.
+/// The hash of everything in plugin folder `dir`: each file's path and bytes, in path order, at
+/// any depth, a link counted as what it points to. Hidden files and folders and `node_modules`
+/// are left out, as the folder's watch leaves them out: Trek loads nothing from them (`inside`,
+/// `page::resolve`), so whatever a plugin runs or shows is in the hash. A plugin with more than
+/// [`MAX_FILES`] files, a link that loops, or a file that can't be read has no hash: its grant
+/// can't be sealed or verified.
 pub fn content_hash(dir: &Path) -> Option<String> {
     let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
     for e in walkdir::WalkDir::new(dir)
-        .max_depth(6)
+        .follow_links(true)
         .into_iter()
         .filter_entry(|e| {
             let n = e.file_name().to_string_lossy();
@@ -205,7 +207,49 @@ mod tests {
         let before = content_hash(&dir).unwrap();
         std::fs::write(dir.join(".DS_Store"), "x").unwrap();
         assert_eq!(content_hash(&dir).unwrap(), before);
+        // A file however deep is in it.
+        let deep = dir.join("a/b/c/d/e/f/g");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("page.js"), "1").unwrap();
+        let with_deep = content_hash(&dir).unwrap();
+        std::fs::write(deep.join("page.js"), "2").unwrap();
+        assert_ne!(content_hash(&dir).unwrap(), with_deep, "a deep file edited");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A link is hashed as what it points to: an allowed plugin whose `main.js` is a link to a
+    /// file elsewhere asks again when that file changes.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_file_is_hashed_as_what_it_points_to() {
+        let root = std::env::temp_dir().join(format!(
+            "trek-grant-link-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (dir, outside) = (root.join("p"), root.join("elsewhere"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("plugin.toml"), "name = \"X\"\n").unwrap();
+        std::fs::write(outside.join("real.js"), "trek.on('turn.end', () => {})").unwrap();
+        std::os::unix::fs::symlink(outside.join("real.js"), dir.join("main.js")).unwrap();
+        let first = content_hash(&dir).unwrap();
+        std::fs::write(outside.join("real.js"), "trek.send('t', 'hi')").unwrap();
+        assert_ne!(
+            content_hash(&dir).unwrap(),
+            first,
+            "the file it points to changed"
+        );
+        // A folder linked in is walked too.
+        std::os::unix::fs::symlink(&outside, dir.join("lib")).unwrap();
+        let linked = content_hash(&dir).unwrap();
+        std::fs::write(outside.join("more.js"), "").unwrap();
+        assert_ne!(content_hash(&dir).unwrap(), linked);
+        // A link that loops back has no hash, so nothing can be sealed over it.
+        std::os::unix::fs::symlink(&dir, outside.join("back")).unwrap();
+        assert_eq!(content_hash(&dir), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

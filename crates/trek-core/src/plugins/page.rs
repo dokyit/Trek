@@ -95,7 +95,7 @@ pub fn resolve(dir: &Path, path: &str) -> Option<PathBuf> {
         || rel.contains(':')
         || rel
             .split('/')
-            .any(|p| p.is_empty() || p == ".." || p.starts_with('.'))
+            .any(|p| p.is_empty() || p.starts_with('.') || p == "node_modules")
     {
         return None;
     }
@@ -410,6 +410,10 @@ mod tests {
         assert!(!ok("/../outside.txt"));
         assert!(!ok("/pages/%2e%2e/%2e%2e/outside.txt"));
         assert!(!ok("/.secret"));
+        // node_modules isn't in the grant's hash, so nothing is served from it.
+        std::fs::create_dir_all(dir.join("node_modules/lib")).unwrap();
+        std::fs::write(dir.join("node_modules/lib/x.js"), "1").unwrap();
+        assert!(!ok("/node_modules/lib/x.js"));
         assert!(!ok("/pages/log/gone.js"));
         assert!(!ok("/C:/Windows/win.ini"));
         // A link out of the folder isn't followed out.

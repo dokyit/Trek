@@ -475,7 +475,9 @@ pub fn id_ok(id: &str) -> bool {
         && !id.ends_with('-')
 }
 
-/// A path inside the plugin's folder: relative, forward slashes, no `..`.
+/// A path inside the plugin's folder: relative, forward slashes, no `..`, and nothing hidden or
+/// in `node_modules`, which the grant's hash (`grant::content_hash`) and the folder's watch
+/// leave out: what Trek loads is always what the user allowed.
 fn inside(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
@@ -484,7 +486,7 @@ fn inside(path: &str) -> bool {
         && !path.contains('\\')
         && path
             .split('/')
-            .all(|p| !p.is_empty() && p != ".." && p != ".")
+            .all(|p| !p.is_empty() && !p.starts_with('.') && p != "node_modules")
 }
 
 /// Read a plugin from its folder `dir`, whose name is `folder_id`.
@@ -560,7 +562,7 @@ pub fn parse(text: &str, dir: &Path, folder_id: &str) -> Result<Manifest, String
     let file_in = |key: &str, rel: &str| -> Result<PathBuf, String> {
         if !inside(rel) {
             return Err(format!(
-                "{key} = \"{rel}\": a path inside the plugin's folder, with / between parts"
+                "{key} = \"{rel}\": a path inside the plugin's folder, with / between parts (not in a hidden folder or node_modules)"
             ));
         }
         let p = dir.join(rel);
@@ -1435,6 +1437,17 @@ run = "reset"
         assert!(bad("name = \"X\"\ntrek = \">=99.0.0\"\n").contains("needs Trek"));
         assert!(bad("name = \"X\"\nmain = \"../../etc/passwd\"\n").contains("inside"));
         assert!(bad("name = \"X\"\nmain = \"gone.js\"\n").contains("no such file"));
+        // What the grant's hash leaves out, a plugin can't load from: its code would change
+        // without asking again.
+        std::fs::create_dir_all(root.join("x1/.logic")).unwrap();
+        std::fs::create_dir_all(root.join("x1/node_modules")).unwrap();
+        std::fs::write(root.join("x1/.logic/main.js"), "").unwrap();
+        std::fs::write(root.join("x1/node_modules/main.js"), "").unwrap();
+        for main in [".logic/main.js", "node_modules/main.js"] {
+            let m = format!("name = \"X\"\nmain = \"{main}\"\n");
+            let e = parse(&m, &root.join("x1"), "x1").unwrap_err();
+            assert!(e.contains("hidden folder"), "{main}: {e}");
+        }
         assert!(
             bad("name = \"X\"\n[[slot]]\nat = \"title\"\nui = { type = \"spacer\" }\n")
                 .contains("composer.actions")
