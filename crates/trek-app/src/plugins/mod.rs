@@ -567,11 +567,6 @@ pub fn set_on(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
     update_state(ws, cx, |s| {
         if on {
             s.turn_on_allowing(&m);
-            // A surface it replaces that nothing else does goes up with it; Settings puts
-            // Trek's own back.
-            for r in &m.replacements {
-                s.replace.entry(r.surface).or_insert_with(|| m.id.clone());
-            }
         } else {
             s.turn_off(&m.id);
         }

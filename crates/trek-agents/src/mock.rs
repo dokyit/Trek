@@ -306,6 +306,8 @@ enum Script {
     Sandbox,
     /// Add a note to a file in the session's folder: `NOTES.md`, or the file named after it.
     Write(Option<String>),
+    /// Write a small Trek plugin into the plugins folder (`mock:plugin`).
+    Plugin,
     /// `gh run watch <id>` run for real, as an agent's command call (Trek's run card).
     WatchRun(String),
     /// Edit lines of a file in place, as Trek's ⌘K inline edit asks (`trek_core::inline_edit`).
@@ -485,6 +487,9 @@ impl Script {
                     }
                     _ => return None,
                 },
+                // A plugin written into Trek's plugins folder, as the trek-plugin skill has an agent
+                // do it: only by its full name.
+                "plugin" if w.starts_with("mock:") => Script::Plugin,
                 // The one script that changes files: only when asked for by its full name.
                 "write" if w.starts_with("mock:") => Script::Write(
                     raw.get(i + 1)
@@ -638,6 +643,7 @@ pub fn title(request: &str) -> String {
         Script::Error => "Fix the failing build",
         Script::Sandbox => "Run the tests",
         Script::Write(_) => "Add a note",
+        Script::Plugin => "Make a trail notes plugin",
         Script::WatchRun(_) => "Watch the CI run",
         Script::InlineEdit { .. } => "Edit the selection",
         Script::Compact => "Compacted the conversation",
@@ -1394,6 +1400,7 @@ impl Session {
             Script::Explore(total) => self.explore(total).await?,
             Script::History(rounds) => self.history(rounds).await?,
             Script::Write(file) => self.write(file.as_deref().unwrap_or("NOTES.md")).await?,
+            Script::Plugin => self.plugin().await?,
             Script::WatchRun(id) => {
                 self.say("Watching the CI run.").await?;
                 let ok = self
@@ -2596,6 +2603,42 @@ impl Session {
         })
         .await?;
         self.say(&format!("Added note {n} to `{file}`.")).await
+    }
+
+    /// Make a small Trek plugin, as an agent following the `trek-plugin` skill does: its folder
+    /// in Trek's plugins folder with a manifest and a page, which the running Trek reads within
+    /// a couple of seconds (it asks for no permissions, so it's on at once).
+    async fn plugin(&mut self) -> Step {
+        let dir = trek_core::plugins::dir().join(PLUGIN_ID);
+        let files = [
+            ("plugin.toml", PLUGIN_MANIFEST),
+            ("pages/trail-notes/index.html", PLUGIN_PAGE),
+        ];
+        for (rel, text) in files {
+            let id = self.id("tool");
+            self.tool_start(&id, "Write", &format!("plugins/{PLUGIN_ID}/{rel}"))
+                .await?;
+            self.pause(paced(150)).await?;
+            let path = dir.join(rel);
+            let wrote = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&path, text));
+            let (output, ok) = match wrote {
+                Ok(()) => (format!("Wrote {rel}"), true),
+                Err(e) => (format!("Couldn't write {rel}: {e}"), false),
+            };
+            self.emit(AgentEvent::ToolFinished { id, output, ok })
+                .await?;
+        }
+        // Turned on as `trek plugin enable` does it: it asks for nothing, so nothing waits.
+        let plugins = trek_core::plugins::dir();
+        let mut out = Vec::new();
+        trek_core::plugins::cli::run(&["enable".into(), PLUGIN_ID.into()], &plugins, &mut out);
+        self.say(
+            "I made a plugin, **Trail notes**: a page in the sidebar's Pages group for jotting waypoints, kept between launches, and a chip in each thread's header. It asks for no permissions, so it's on. Turn it off or remove it in Settings › Plugins.",
+        )
+        .await
     }
 
     /// Edit `lines` (1-based, inclusive) of `path` in place, as ⌘K asks: each line gets a
@@ -4251,6 +4294,55 @@ const MAIN_RS: &str =
     "mod cli;\n\nfn main() {\n    let cfg = cli::parse_args();\n    app::run(cfg);\n}";
 
 const TEST_OUTPUT: &str = "running 14 tests\n..............\ntest result: ok. 14 passed; 0 failed; 0 ignored; finished in 0.42s";
+
+/// What `mock:plugin` makes.
+const PLUGIN_ID: &str = "trail-notes";
+const PLUGIN_MANIFEST: &str = r#"id = "trail-notes"
+name = "Trail notes"
+version = "0.1.0"
+description = "A page for jotting waypoints, kept between launches."
+author = "Mock agent"
+
+[[page]]
+id = "trail-notes"
+title = "Trail notes"
+icon = "notebook-pen"
+
+[[slot]]
+at = "thread.header"
+ui = { type = "chip", text = "Trail notes", on = "page:trail-notes", tooltip = "Open the Trail notes page" }
+"#;
+const PLUGIN_PAGE: &str = r#"<!doctype html>
+<html>
+<head>
+<title>Trail notes</title>
+<style>
+  body { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  p { color: var(--trek-muted); margin: 0 0 18px; }
+  textarea { width: 100%; height: 50vh; box-sizing: border-box; resize: none; padding: 12px 14px;
+    font: inherit; color: var(--trek-fg); background: var(--trek-surface);
+    border: 1px solid var(--trek-border); border-radius: var(--trek-radius); outline: none; }
+  textarea:focus { border-color: var(--trek-accent); }
+</style>
+</head>
+<body>
+<h1>Trail notes</h1>
+<p id="said">Waypoints for later. Trek keeps them for this plugin.</p>
+<textarea id="notes" placeholder="Left at the fork after the stream…"></textarea>
+<script>
+  const notes = document.getElementById("notes"), said = document.getElementById("said");
+  trek.storage.get().then((kept) => { notes.value = (kept && kept.text) || ""; });
+  let timer;
+  notes.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => trek.storage.set({ text: notes.value })
+      .then(() => { said.textContent = "Saved."; }), 400);
+  });
+</script>
+</body>
+</html>
+"#;
 
 #[cfg(test)]
 mod tests {

@@ -418,7 +418,7 @@ fn known_art(scan: core::Scan) -> core::Scan {
             out.problems.push(core::Problem {
                 file,
                 message: format!(
-                    "[{table}.kit] \"{key}\" isn't one of the kit's colours (the trek-plugin skill lists them)"
+                    "[{table}.kit] \"{key}\" isn't one of the kit's colours (the trek-theme skill lists them)"
                 ),
             });
             continue;
@@ -1473,6 +1473,31 @@ mod tests {
             problems: vec![],
         });
         assert!(checked.problems[0].message.contains("titlebar.background"));
+    }
+
+    /// Every kit colour the theme skill names for `[dark.kit]` is one the kit has.
+    #[test]
+    fn the_theme_skill_names_real_kit_colours() {
+        let (_, skill) = trek_core::skills::SHIPPED
+            .iter()
+            .find(|(n, _)| *n == core::SKILL)
+            .unwrap();
+        let section = skill
+            .split("### The kit's colours")
+            .nth(1)
+            .and_then(|s| s.split("\n## ").next())
+            .expect("the section");
+        let keys = super::kit_keys(true);
+        let named: Vec<&str> = section
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|k| !k.starts_with('['))
+            .collect();
+        assert!(named.len() > 40, "{}", named.len());
+        for k in named {
+            assert!(keys.iter().any(|have| have == k), "the skill names {k}");
+        }
     }
 
     #[test]

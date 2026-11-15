@@ -10,8 +10,9 @@ themes folder, watches it, and lists each theme in Settings › Appearance › T
 command palette ("Use … theme"). You make one by writing a file there, then ask Trek to switch to
 it by writing its name to one more file. Trek cross-fades to it.
 
-What a theme can't do: change the layout, add views or widgets, load fonts other than the three
-below, or run code. Say so if the user asks for those; the look is what you can change.
+A theme is a look and nothing else, with fonts from the three below. To add things to Trek or
+change how it works (buttons, chips and meters, pages and panels, a board in place of the thread
+list, commands, logic), make a plugin: the `trek-plugin` skill. A plugin can carry a theme too.
 
 ## Where it goes
 
@@ -71,6 +72,25 @@ tint = 0.6                             # 0.2 clear to 0.95 frosted
 [motion]
 style = "brisk"                        # "still" (nothing moves), "brisk", "standard" or "calm"
 
+[lines]                                # leave out for Trek's own
+pills = "like-corners"                 # pills and circles take the corners too; "round" is Trek's
+borders = 1                            # every border's weight: 0 none, 1 Trek's, 3 at most
+shadows = 0                            # 0 flat, 1 Trek's
+
+[messages]
+user = "line"                          # the user's words flush with the answers; "bubble" is Trek's
+user_mark = "›"                        # a mark before them, in the accent (1-3 characters)
+
+[composer]
+prompt = "›"                           # a mark before what's typed (1-3 characters)
+
+[hiker]
+show = true                            # the hiker on the working trail
+pack = "#FFB000"                       # its pack's colour
+
+[marks]
+agents = "letter"                      # agents drawn by "logo" (Trek's), "letter" or "none"
+
 [dark]                                 # colours when Trek is dark; [light] when it's light
 accent = "#6BDB9A"                     # buttons, links, selection, the working beacon
 on_accent = "#06140C"                  # text and icons on an accent fill
@@ -81,6 +101,9 @@ raised = "#121615"                     # menus, popovers, cards
 text = "#D4DDD7"
 muted = "#7C8A82"                      # secondary text: times, hints, labels
 border = "#222A26"
+
+[dark.kit]                             # any one of the kit's own colours, by its key (below)
+"title_bar.background" = "#0B0D0C"
 ```
 
 Colours are `"#RRGGBB"` or `"#RRGGBBAA"`. Give both `[dark]` and `[light]` when you can: the user
@@ -106,6 +129,26 @@ Placements: `chat` lays the art across the whole chat pane (the new-thread scree
 and the composer) under a scrim Trek works out from your `window` and `text` colours so the text
 keeps 4.5:1; `sidebar` puts it behind the sidebar and title bar with the chat plain;
 `new-thread` behind the new-thread composer only.
+
+### The kit's colours
+
+The nine colours above set everything; `[dark.kit]` and `[light.kit]` set one of the kit's own
+when a look needs it. Its keys: `accent.background`, `accent.foreground`, `accordion.background`,
+`accordion.hover.background`, `background`, `border`, `caret`, `chart.1` to `chart.5`,
+`danger.background`, `danger.foreground`, `drag.border`, `drop_target.background`, `foreground`,
+`group_box.background`, `info.background`, `input.border`, `link`, `link.hover`,
+`list.active.background`, `list.active.border`, `list.background`, `list.even.background`,
+`list.head.background`, `list.hover.background`, `muted.background`, `muted.foreground`,
+`overlay`, `popover.background`, `popover.foreground`, `primary.background`,
+`primary.foreground`, `primary.hover.background`, `progress.bar.background`, `ring`,
+`scrollbar.thumb.background`, `secondary.background`, `secondary.foreground`,
+`secondary.hover.background`, `selection.background`, `sidebar.accent.background`,
+`sidebar.background`, `sidebar.border`, `sidebar.foreground`, `skeleton.background`,
+`slider.background`, `success.background`, `switch.background`, `tab.active.background`,
+`tab.active.foreground`, `tab.background`, `tab.foreground`, `tab_bar.background`,
+`table.background`, `table.head.background`, `table.row.border`, `title_bar.background`,
+`title_bar.border`, `warning.background`, `window.border`. A key that isn't the kit's is a
+problem.
 
 ## Rules
 

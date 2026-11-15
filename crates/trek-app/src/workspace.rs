@@ -11491,7 +11491,7 @@ pub(crate) fn agent_notes(
     let transcript = format!(
         "{} {}",
         trek_core::session_log::AGENT_NOTE,
-        trek_core::themes::AGENT_NOTE
+        trek_core::plugins::AGENT_NOTE
     );
     let notes: Vec<String> =
         std::iter::once(trek_core::visualization::AGENT_INSTRUCTIONS.to_string())

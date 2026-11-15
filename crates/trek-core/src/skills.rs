@@ -116,7 +116,7 @@ pub const STUDY: &str = "study";
 pub const TREK_HTML: &str = "trek-html";
 
 /// Skills Trek ships: (folder name, SKILL.md).
-pub const SHIPPED: [(&str, &str); 8] = [
+pub const SHIPPED: [(&str, &str); 9] = [
     (
         CREATE_VERIFICATION,
         include_str!("../skills/create-verification-skill/SKILL.md"),
@@ -136,6 +136,10 @@ pub const SHIPPED: [(&str, &str); 8] = [
     ),
     (STUDY, include_str!("../skills/study/SKILL.md")),
     (TREK_HTML, include_str!("../skills/trek-html/SKILL.md")),
+    (
+        crate::plugins::SKILL,
+        include_str!("../skills/trek-plugin/SKILL.md"),
+    ),
     (
         crate::themes::SKILL,
         include_str!("../skills/trek-theme/SKILL.md"),
@@ -971,6 +975,7 @@ mod tests {
                 PULL_REQUEST_CARD,
                 STUDY,
                 TREK_HTML,
+                crate::plugins::SKILL,
                 crate::themes::SKILL
             ]
         );

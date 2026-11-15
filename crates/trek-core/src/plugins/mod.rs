@@ -37,7 +37,7 @@ pub const RELOAD_FILE: &str = "reload";
 /// The built-in skill that tells an agent how to make one.
 pub const SKILL: &str = "trek-plugin";
 /// What every agent is told, so "make Trek…" finds the skill.
-pub const AGENT_NOTE: &str = "To restyle or extend Trek itself (themes, mods, plugins: new buttons, pages, panels, a look of your own), follow Trek's built-in skill trek-plugin.";
+pub const AGENT_NOTE: &str = "To restyle Trek itself (a Trek theme), follow Trek's built-in skill trek-theme; to add to Trek or change how it works (buttons, pages, panels, a board, commands: a plugin), trek-plugin.";
 /// A plugin's own storage, at most.
 pub const STORAGE_LIMIT: usize = 1 << 20;
 /// A plugin's log is cut back to half of this when it grows past it.
@@ -1143,6 +1143,17 @@ impl State {
         c.waiting = false;
         c.stopped = None;
         c.granted = m.permissions.iter().map(Permission::key).collect();
+        self.replace_unclaimed(m);
+    }
+
+    /// A surface `m` replaces that nothing else was chosen for goes up with it: Settings puts
+    /// Trek's own back.
+    fn replace_unclaimed(&mut self, m: &Manifest) {
+        for r in &m.replacements {
+            self.replace
+                .entry(r.surface)
+                .or_insert_with(|| m.id.clone());
+        }
     }
 
     /// Turn `m` on from the CLI (an agent may be the one asking): on if it needs nothing it
@@ -1154,6 +1165,7 @@ impl State {
         if missing.is_empty() {
             c.on = true;
             c.waiting = false;
+            self.replace_unclaimed(m);
             true
         } else {
             c.waiting = true;
@@ -1412,6 +1424,97 @@ run = "reset"
         assert_eq!(scan(&root.join("nope")), Scan::default());
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(dev);
+    }
+
+    /// The skill's own examples are plugins Trek takes, and it names every slot, event, kind of
+    /// data, permission and example Trek has.
+    #[test]
+    fn the_skill_shows_plugins_trek_reads() {
+        let (_, skill) = crate::skills::SHIPPED
+            .iter()
+            .find(|(n, _)| *n == SKILL)
+            .expect("shipped");
+        let block = |lang: &str, n: usize| -> &str {
+            let after = skill
+                .split(&format!("```{lang}\n"))
+                .nth(n + 1)
+                .unwrap_or_else(|| panic!("no {lang} block {n}"));
+            &after[..after.find("```").unwrap()]
+        };
+        let root = scratch("skill");
+        let write = |dir: &Path, rel: &str, text: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        // The reference manifest, with the files it names.
+        let burn = root.join("burn");
+        write(&burn, "main.js", block("js", 0));
+        write(&burn, "ui/meter.json", block("json", 0));
+        write(
+            &burn,
+            "ui/board.json",
+            r#"{"type":"column","children":[{"type":"trek:thread-list"}]}"#,
+        );
+        write(&burn, "pages/burn/index.html", "<h1>Burn</h1>");
+        write(&burn, "pad/index.html", "<h1>Pad</h1>");
+        write(&burn, "look.toml", "name = \"Look\"\n");
+        let m = parse(block("toml", 0), &burn, "burn").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            (
+                m.slots.len(),
+                m.commands.len(),
+                m.pages.len(),
+                m.panels.len(),
+                m.replacements.len(),
+                m.effects.len(),
+                m.themes.len()
+            ),
+            (1, 1, 1, 1, 1, 1, 1)
+        );
+        assert_eq!(m.hooks, ["turn.end"]);
+        // Its last example, which asks for nothing.
+        let count = root.join("turn-count");
+        write(&count, "main.js", block("js", 1));
+        let m = parse(block("toml", 1), &count, "turn-count").unwrap_or_else(|e| panic!("{e}"));
+        assert!(m.permissions.is_empty() && m.main.is_some());
+        // Everything Trek has is named.
+        for s in Slot::ALL {
+            assert!(
+                skill.contains(&format!("`{}`", s.name())),
+                "slot {}",
+                s.name()
+            );
+        }
+        for s in Surface::ALL {
+            assert!(skill.contains(s.name()), "surface {}", s.name());
+        }
+        for e in EVENTS {
+            assert!(skill.contains(&format!("`{e}`")), "event {e}");
+        }
+        for (name, perm) in page::DATA {
+            assert!(skill.contains(&format!("\"{name}\"")), "data {name}");
+            assert!(
+                skill.contains(&format!("`{}`", perm.key())),
+                "permission {}",
+                perm.key()
+            );
+        }
+        for p in ["threads:open", "threads:send", "network:<host>"] {
+            assert!(skill.contains(&format!("`{p}`")), "permission {p}");
+        }
+        for c in ui::Component::ALL {
+            assert!(
+                skill.contains(&format!("`trek:{}`", c.name())),
+                "trek:{}",
+                c.name()
+            );
+        }
+        for (name, _) in examples::ALL {
+            assert!(skill.contains(name), "example {name}");
+        }
+        assert!(AGENT_NOTE.contains(SKILL) && AGENT_NOTE.contains(crate::themes::SKILL));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
