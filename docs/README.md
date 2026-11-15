@@ -8,6 +8,7 @@ Start with the [README](../README.md) for what Trek is and how to install it.
 | --- | --- |
 | [CONTRIBUTING](../CONTRIBUTING.md) | Setting up, the mock agent, the verify driver, tests, commit style |
 | [iPhone app](../ios/README.md) | Building Trek for iPhone, demo mode, pairing with a Mac |
+| [Privacy](PRIVACY.md) | What Trek sends, when, and what it never sends: every usage event and its properties |
 | [Capture manifests](../media/README.md) | Making the screenshots and clips in these docs, deterministically |
 
 ## Design notes
@@ -24,7 +25,6 @@ Start with the [README](../README.md) for what Trek is and how to install it.
 | [Performance](PERFORMANCE.md) | Launch, memory and CPU on a Mac, measured, with the command to run it again |
 | [Performance on Windows](PERF.md) | Frame times and long streams on Windows: the numbers, and what changed |
 | [Prompt budget](PROMPT_BUDGET.md) | What Trek adds to every request of a vendor agent, measured, and the tests that bound it |
-| [Next wave](NEXT-WAVE.md) | Work planned next: voice, media, a video watcher, generative UI |
 
 ## Maintainers
 

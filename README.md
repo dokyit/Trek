@@ -13,7 +13,7 @@ Claude Code, Codex, OpenCode, Cursor, Copilot, API and local models. On macOS an
   <a href="https://github.com/dokyit/Trek/releases/latest"><img src="https://img.shields.io/github/v/release/dokyit/Trek?label=release&color=F4692B" alt="Latest release"></a>
   <a href="https://github.com/dokyit/Trek/actions/workflows/ci.yml"><img src="https://github.com/dokyit/Trek/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
-  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20iOS-555" alt="Platforms: macOS, Windows, iOS">
+  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows-555" alt="Platforms: macOS, Windows">
 </p>
 
 <p>
@@ -244,7 +244,7 @@ Trek drives each vendor's own CLI, so your subscriptions work as they do in the 
 
 - A tray icon and taskbar badge instead of the menu bar icon and Dock badge.
 - No menu bar: every command is in the palette (Ctrl+K), Settings or a context menu. Shortcuts use Ctrl where the Mac uses ⌘.
-- Dictation uses Windows' online speech recognition (Settings › Privacy & security › Speech); where Windows lacks it, the mic points to Win+H. Snapshots go through Snipping Tool.
+- Dictation runs on the PC with an on-device speech model (141 MB, downloaded the first time you click the mic); what you say never leaves the PC. Where it can't run, the mic points to Win+H. Snapshots go through Snipping Tool.
 - Closing the window while agents are working asks first: they can carry on with the window closed, and Trek quits once they're done (opening Trek, or its tray icon, brings the window back).
 - The iPhone tool works through Apple Devices (from the Microsoft Store): the phone's apps, files and AssistiveTouch, for you and agents. Its live screen and taps need Trek on a Mac.
 - No iOS Simulator tool.
@@ -288,7 +288,8 @@ On Xcode 26+, a missing Metal compiler is one command away: `xcodebuild -downloa
 
 Trek is **0.x**: used every day, moving fast. Expect rough edges.
 Mac (Apple silicon and Intel) and Windows x64 only (no Linux yet). History import covers Claude Code, Codex and OpenCode.
-See [open issues](https://github.com/dokyit/Trek/issues) and [what's next](docs/NEXT-WAVE.md).
+Trek asks once before sharing anonymous usage data, and sends nothing without a yes. What is sent is in [docs/PRIVACY.md](docs/PRIVACY.md).
+See [open issues](https://github.com/dokyit/Trek/issues).
 
 ## Contributing
 
