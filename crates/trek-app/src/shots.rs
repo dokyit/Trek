@@ -3844,6 +3844,60 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
         cx.refresh_windows();
         return Ok(());
     }
+    // Plugins: `plugin install <folder | example:<name>>` (as `trek plugin install`, then read at
+    // once), `plugin on|off <id>` (as Settings' switch: on allows what it asks for), `plugin
+    // reread`, `plugin focus start|pause|stop|at <seconds>` (the focus timer, `at` as if it had
+    // started that long ago), and checks: `plugin running <id>`, `plugin problems <n>`.
+    if verb == "plugin" {
+        let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+        let rest = rest.trim();
+        match what {
+            "install" => {
+                let dir = trek_core::plugins::dir();
+                let mut out = Vec::new();
+                let code = trek_core::plugins::cli::run(
+                    &["install".into(), rest.to_string()],
+                    &dir,
+                    &mut out,
+                );
+                anyhow::ensure!(
+                    code == 0,
+                    "plugin install {rest}: {}",
+                    String::from_utf8_lossy(&out)
+                );
+                crate::plugins::reread(&ws, cx);
+            }
+            "on" => crate::plugins::set_on(rest, true, &ws, cx),
+            "off" => crate::plugins::set_on(rest, false, &ws, cx),
+            "reread" => crate::plugins::reread(&ws, cx),
+            "running" => anyhow::ensure!(
+                crate::plugins::running(rest, cx),
+                "plugin running {rest}: it isn't"
+            ),
+            "problems" => {
+                let n = cx
+                    .try_global::<crate::plugins::Plugins>()
+                    .map_or(0, |p| p.problems.len());
+                anyhow::ensure!(
+                    rest.parse::<usize>().ok() == Some(n),
+                    "plugin problems {rest}: there are {n}"
+                );
+            }
+            "focus" => match rest.strip_prefix("at ") {
+                Some(secs) => crate::plugins::focus::jump(
+                    secs.trim()
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("plugin focus at <seconds>"))?,
+                    &ws,
+                    cx,
+                ),
+                None => crate::plugins::focus::control(rest, &ws, cx),
+            },
+            _ => anyhow::bail!("plugin: install, on, off, reread, running, problems or focus"),
+        }
+        cx.refresh_windows();
+        return Ok(());
+    }
     // A Trek theme, as the palette's "Use … theme" switches to it (`look <id>`), and the themes
     // folder read again now rather than on its next look (`look reread`).
     if verb == "look" {

@@ -1,0 +1,28 @@
+id = "focus-timer"
+name = "Focus timer"
+version = "1.0.0"
+description = "The hiker walks round the composer as a focus session passes. Back at the chip, time's up."
+author = "Trek"
+trek = ">=0.4.54"
+
+# Trek's own component on the composer's edge: the hiker, the trail it has walked, and a chip
+# on the top edge to start, pause and stop. It reads nothing of yours.
+[[slot]]
+at = "composer.border"
+ui = { type = "trek:focus-timer", minutes = 25 }
+
+[[command]]
+id = "start"
+title = "Start a focus session"
+key = "cmd-alt-f"
+action = "trek:focus-timer.start"
+
+[[command]]
+id = "pause"
+title = "Pause or carry on the focus session"
+action = "trek:focus-timer.pause"
+
+[[command]]
+id = "stop"
+title = "Stop the focus session"
+action = "trek:focus-timer.stop"

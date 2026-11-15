@@ -9,6 +9,7 @@
 //! (`examples`). trek-app draws plugins and runs their logic.
 
 pub mod cli;
+pub mod data;
 pub mod examples;
 pub mod ui;
 

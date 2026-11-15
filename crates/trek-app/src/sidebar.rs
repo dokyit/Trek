@@ -448,8 +448,30 @@ impl Sidebar {
                     .pb_1()
                     .child(basecamp)
                     .child(notes)
-                    .child(study),
+                    .child(study)
+                    .children(crate::plugins::render::slot(
+                        trek_core::plugins::Slot::SidebarTop,
+                        &self.plugin_place(cx),
+                        cx,
+                    ))
+                    .children(crate::plugins::sidebar_pages(&self.workspace, cx)),
             )
+    }
+
+    /// What plugins in the sidebar are drawn for: the main window's thread and project.
+    fn plugin_place(&self, cx: &App) -> crate::plugins::render::Place {
+        let ws = self.workspace.read(cx);
+        let thread = ws.focused_thread().map(str::to_string);
+        let project = thread
+            .as_deref()
+            .and_then(|id| ws.thread(id))
+            .and_then(|t| t.cwd.clone());
+        crate::plugins::render::Place {
+            ws: self.workspace.clone(),
+            thread,
+            project,
+            threads: None,
+        }
     }
 
     fn project_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -2055,10 +2077,16 @@ impl Sidebar {
                 .content(move |_, _, cx| crate::agent_updates::card(&ws, cx))
         });
         let interrupted = self.interrupted_notice(cx);
+        let plugin_foot = crate::plugins::render::slot(
+            trek_core::plugins::Slot::SidebarFoot,
+            &self.plugin_place(cx),
+            cx,
+        );
         v_flex()
             .px_3()
             .pb_2()
             .gap(px(6.))
+            .children(plugin_foot)
             .children(interrupted)
             .children(updater.map(|u| div().pt_1().child(u)))
             .child(

@@ -16,7 +16,7 @@ pub struct ThreadSpend {
 }
 
 impl ThreadSpend {
-    fn usd(&self) -> f64 {
+    pub fn usd(&self) -> f64 {
         self.own.usd() + self.subs.usd()
     }
 
@@ -24,7 +24,7 @@ impl ThreadSpend {
         self.own.priced() || self.subs.priced()
     }
 
-    fn tokens(&self) -> u64 {
+    pub fn tokens(&self) -> u64 {
         self.own.tokens() + self.subs.tokens()
     }
 

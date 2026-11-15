@@ -5,9 +5,14 @@
 //! What a running plugin brings is indexed here once, when the folder is read, so a frame asks a
 //! map and draws: with no plugins every slot's list is empty, and nothing else is made.
 
+pub mod focus;
+pub mod render;
+pub mod trail;
+
 use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::*;
-use std::collections::BTreeMap;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -37,6 +42,8 @@ pub struct Plugins {
     /// The plugin whose log Settings shows, and its last lines (read when it's opened or the
     /// folder changes, never while drawing).
     pub log: Option<(String, Vec<String>)>,
+    /// Each plugin's state, as its logic or its `set:` actions left it: what `{state.…}` reads.
+    pub states: HashMap<String, Value>,
 }
 
 impl Global for Plugins {}
@@ -135,6 +142,7 @@ pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
         fingerprint,
         slots: BTreeMap::new(),
         log: None,
+        states: HashMap::new(),
     };
     plugins.index();
     cx.set_global(plugins);
@@ -258,8 +266,32 @@ fn apply_scan(
     contributions_changed(ws, cx);
 }
 
+/// Whether a running plugin places Trek's component `c` anywhere.
+fn places(c: trek_core::plugins::ui::Component, cx: &App) -> bool {
+    cx.try_global::<Plugins>().is_some_and(|p| {
+        p.slots
+            .values()
+            .flatten()
+            .any(|placed| placed.tree.components().contains(&c))
+            || p.plugins.iter().any(|pl| {
+                p.state.running(&pl.manifest)
+                    && pl
+                        .manifest
+                        .replacements
+                        .iter()
+                        .any(|r| r.tree.components().contains(&c))
+            })
+    })
+}
+
 /// The running plugins' contributions changed: the themes they bring, and every view.
 fn contributions_changed(ws: &Entity<Workspace>, cx: &mut App) {
+    // The commit trail's reader, the first time a plugin places one.
+    if !cx.has_global::<trail::Trails>()
+        && places(trek_core::plugins::ui::Component::CommitTrail, cx)
+    {
+        trail::init(cx);
+    }
     let themes: Vec<(String, PathBuf)> = cx
         .try_global::<Plugins>()
         .map(|p| {
@@ -399,6 +431,147 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
     };
     let print = core::fingerprint(&dir);
     apply_scan(core::scan(&dir), State::read(&dir), print, ws, cx);
+}
+
+/// Merge `patch` (an object) into plugin `id`'s state, and draw what reads it.
+pub fn set_state(id: &str, patch: Value, ws: &Entity<Workspace>, cx: &mut App) {
+    if !cx.has_global::<Plugins>() {
+        return;
+    }
+    let states = &mut cx.global_mut::<Plugins>().states;
+    let state = states
+        .entry(id.to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if let (Value::Object(into), Value::Object(from)) = (state, patch) {
+        for (k, v) in from {
+            into.insert(k, v);
+        }
+    }
+    ws.update(cx, |_, cx| cx.notify());
+    cx.refresh_windows();
+}
+
+/// Run plugin `plugin`'s command `id`: its action, or its logic's function.
+pub fn run_command(
+    plugin: &str,
+    id: &str,
+    ws: &Entity<Workspace>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !running(plugin, cx) {
+        return;
+    }
+    match render::command_action(plugin, id, cx) {
+        Some(trek_core::plugins::CommandRun::Action(a)) => {
+            let place = render::Place {
+                ws: ws.clone(),
+                thread: ws.read(cx).focused_thread().map(str::to_string),
+                project: None,
+                threads: None,
+            };
+            render::run(plugin, &render::resolve_plain(&a), &place, window, cx)
+        }
+        Some(trek_core::plugins::CommandRun::Logic(f)) => {
+            core::log(plugin, &format!("{f}(): plugins' logic isn't run yet"));
+        }
+        None => {}
+    }
+}
+
+/// Open plugin `plugin`'s page `page`.
+pub fn open_page(plugin: &str, page: &str, ws: &Entity<Workspace>, cx: &mut App) {
+    let _ = (plugin, page, ws, cx);
+}
+
+/// The sidebar's Pages group: each running plugin's pages, a row apiece (none, and nothing drawn,
+/// without them).
+pub fn sidebar_pages(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
+    use gpui_kit::component::{ActiveTheme as _, Icon};
+    let Some(p) = cx.try_global::<Plugins>() else {
+        return Vec::new();
+    };
+    let pages: Vec<(String, trek_core::plugins::Page)> = p
+        .plugins
+        .iter()
+        .filter(|pl| p.state.running(&pl.manifest))
+        .flat_map(|pl| {
+            pl.manifest
+                .pages
+                .iter()
+                .map(|page| (pl.manifest.id.clone(), page.clone()))
+        })
+        .collect();
+    if pages.is_empty() {
+        return Vec::new();
+    }
+    let open = open_page_of(ws, cx);
+    let theme = cx.theme();
+    let mut out = vec![
+        div()
+            .pt(px(10.))
+            .pb(px(2.))
+            .px(px(10.))
+            .text_size(crate::scale::to_rems(crate::scale::text::META))
+            .text_color(theme.muted_foreground)
+            .child("Pages")
+            .into_any_element(),
+    ];
+    for (plugin, page) in pages {
+        let selected = open.as_ref() == Some(&(plugin.clone(), page.id.clone()));
+        let ws = ws.clone();
+        let (pl, pg) = (plugin.clone(), page.id.clone());
+        out.push(
+            crate::ui::nav_row(
+                SharedString::from(format!("page-{plugin}-{}", page.id)),
+                Icon::empty().path(icon_path(&page.icon)),
+                page.title.clone(),
+                None,
+                selected,
+                cx,
+            )
+            .on_click(move |_, _, cx| open_page(&pl, &pg, &ws, cx))
+            .into_any_element(),
+        );
+    }
+    out
+}
+
+/// The page the main window shows, as (plugin, page), if it shows one.
+pub fn open_page_of(ws: &Entity<Workspace>, cx: &App) -> Option<(String, String)> {
+    let _ = (ws, cx);
+    None
+}
+
+/// Trek's own surface for a replacement to embed.
+pub fn original(
+    _c: trek_core::plugins::ui::Component,
+    _place: &render::Place,
+    _cx: &App,
+) -> AnyElement {
+    div().into_any_element()
+}
+
+/// The asset path of Lucide icon `name` (`flame`), or the puzzle piece when Trek doesn't carry it:
+/// an icon that isn't there would draw nothing and log on every frame.
+pub fn icon_path(name: &str) -> SharedString {
+    static HAVE: std::sync::OnceLock<std::collections::HashSet<String>> =
+        std::sync::OnceLock::new();
+    let have = HAVE.get_or_init(|| {
+        use gpui_kit::AssetSource as _;
+        crate::assets::Assets
+            .list("icons/")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.to_string())
+            .collect()
+    });
+    let path = format!("icons/{name}.svg");
+    if have.contains(&path) {
+        path.into()
+    } else {
+        "icons/puzzle.svg".into()
+    }
 }
 
 /// Show plugin `id`'s log in Settings (`None`: none), its lines read now.

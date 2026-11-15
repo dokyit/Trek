@@ -383,9 +383,9 @@ pub fn icon_button(
 
 /// A plain sidebar row: icon, label, optional shortcut hint.
 pub fn nav_row(
-    id: &'static str,
+    id: impl Into<ElementId>,
     icon: Icon,
-    label: &'static str,
+    label: impl Into<SharedString>,
     hint: Option<&'static str>,
     active: bool,
     cx: &App,
@@ -416,7 +416,7 @@ pub fn nav_row(
         } else {
             theme.muted_foreground
         }))
-        .child(div().flex_1().child(label))
+        .child(div().flex_1().min_w_0().truncate().child(label.into()))
         .when_some(hint, |el, h| {
             el.child(
                 div()

@@ -677,6 +677,18 @@ pub fn set_plugin_themes(files: Vec<(String, PathBuf)>, ws: &Entity<Workspace>, 
     }
     themes.plugin_files = files;
     reread(ws, cx);
+    // The theme the settings name may be a plugin's, which wasn't there when the themes were
+    // first read (plugins are read after them): it goes up now, with no switch to watch.
+    let wanted = ws.read(cx).settings.appearance.trek_theme.clone();
+    if wanted != shown_id(cx)
+        && !switching(cx)
+        && let Some(theme) = find(&wanted, cx)
+    {
+        cx.global_mut::<Themes>().shown = theme.clone();
+        show(&theme, cx);
+        let choice = ws.read(cx).settings.appearance.theme;
+        crate::apply_theme(choice, None, cx);
+    }
 }
 
 fn stem(path: &std::path::Path) -> String {

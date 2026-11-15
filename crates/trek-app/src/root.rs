@@ -1111,6 +1111,20 @@ impl Render for WindowTitle {
         // A narrow window keeps what the bar does and drops what repeats: the wordmark and the
         // project's name beside its badge.
         let narrow = window.viewport_size().width < px(TITLE_NARROW);
+        // What plugins put in a thread's header (after its title) and at the bar's right end.
+        let place = crate::plugins::render::Place {
+            ws: self.workspace.clone(),
+            thread: thread.as_ref().map(|t| t.id.clone()),
+            project: root.clone(),
+            threads: None,
+        };
+        let plugin_header = if thread.is_some() {
+            crate::plugins::render::slot(trek_core::plugins::Slot::ThreadHeader, &place, cx)
+        } else {
+            Vec::new()
+        };
+        let plugin_status =
+            crate::plugins::render::slot(trek_core::plugins::Slot::Status, &place, cx);
         crate::chrome::title_bar(transparent, cx)
             .child(
                 h_flex()
@@ -1184,8 +1198,20 @@ impl Render for WindowTitle {
                             )
                             .when_some(worktree, |el, wt| {
                                 el.child(crate::worktree_ui::branch_chip("title-branch", &wt, cx))
+                            })
+                            .when(!plugin_header.is_empty(), |el| {
+                                el.child(crate::chrome::no_drag(
+                                    "plugin-header",
+                                    h_flex().gap_2().children(plugin_header),
+                                ))
                             }),
                     )
+                    .when(!plugin_status.is_empty(), |el| {
+                        el.child(crate::chrome::no_drag(
+                            "plugin-status",
+                            h_flex().gap_2().children(plugin_status),
+                        ))
+                    })
                     .children(settle_first)
                     .when_some(thread.as_ref().map(|t| t.id.clone()), |el, id| {
                         el.child(crate::chrome::no_drag(
@@ -1858,6 +1884,30 @@ fn go_or_say(workspace: &Entity<Workspace>, target: Result<String, &'static str>
             })
         }),
     }
+}
+
+/// What plugins draw behind the chat (`background`), filling it, under everything else in it.
+fn plugin_background(
+    ws: &Entity<Workspace>,
+    thread: Option<String>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let place = crate::plugins::render::Place {
+        ws: ws.clone(),
+        thread,
+        project: None,
+        threads: None,
+    };
+    let layers = crate::plugins::render::slot(trek_core::plugins::Slot::Background, &place, cx);
+    (!layers.is_empty()).then(|| {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .children(layers)
+            .into_any_element()
+    })
 }
 
 /// Sit `window`'s toasts `bottom` above its bottom edge, clear of the composer: they rise from
@@ -2545,6 +2595,56 @@ impl TrekWindow {
             ),
             _ => None,
         };
+        // What plugins put over and under the new-thread composer, in its column.
+        let (draft_above, draft_below) = match &route {
+            Route::Draft { project } => {
+                let place = crate::plugins::render::Place {
+                    ws: self.workspace.clone(),
+                    thread: None,
+                    project: project.clone(),
+                    threads: None,
+                };
+                let column = self.workspace.read(cx).column();
+                let band = |items: Vec<AnyElement>, below: bool| {
+                    (!items.is_empty()).then(|| {
+                        h_flex()
+                            .w_full()
+                            .justify_center()
+                            .px_6()
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .max_w(column)
+                                    .px(px(4.))
+                                    .gap(px(16.))
+                                    .when(below, |el| el.pt(px(28.)))
+                                    .when(!below, |el| el.pb(px(28.)))
+                                    .children(items),
+                            )
+                            .into_any_element()
+                    })
+                };
+                (
+                    band(
+                        crate::plugins::render::slot(
+                            trek_core::plugins::Slot::NewThreadAbove,
+                            &place,
+                            cx,
+                        ),
+                        false,
+                    ),
+                    band(
+                        crate::plugins::render::slot(
+                            trek_core::plugins::Slot::NewThreadBelow,
+                            &place,
+                            cx,
+                        ),
+                        true,
+                    ),
+                )
+            }
+            _ => (None, None),
+        };
         let content = {
             match route {
                 Route::Settings(_) => self.settings.clone().into_any_element(),
@@ -2630,6 +2730,7 @@ impl TrekWindow {
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
+                                    .children(plugin_background(&self.workspace, None, cx))
                                     .child(
                                         div()
                                             .absolute()
@@ -2646,11 +2747,13 @@ impl TrekWindow {
                                             .size_full()
                                             .justify_center()
                                             .pb(px(40.))
+                                            .children(draft_above)
                                             .child(Composer::element(
                                                 &self.composer,
                                                 &mut self.composer_changed,
                                                 cx,
-                                            )),
+                                            ))
+                                            .children(draft_below),
                                     ),
                             )
                             .children(hub_col),
@@ -2677,9 +2780,18 @@ impl TrekWindow {
                             .min_h_0()
                             .child(
                                 v_flex()
+                                    .relative()
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
+                                    .children(plugin_background(
+                                        &self.workspace,
+                                        self.workspace
+                                            .read(cx)
+                                            .focused_thread()
+                                            .map(str::to_string),
+                                        cx,
+                                    ))
                                     .child(
                                         div()
                                             .flex_1()

@@ -4325,6 +4325,7 @@ impl Render for Composer {
         // message to send: the parent is free to take it.
         let running = own_turn || (children_working && empty);
         let thread_id = thread.as_ref().map(|t| t.id.clone());
+        let plugin_thread = thread_id.clone();
         let context = thread
             .as_ref()
             .and_then(|t| ws.live.get(&t.id))
@@ -4632,6 +4633,36 @@ impl Render for Composer {
         .top_0()
         .left_0()
         .size_full();
+        // What plugins put in and on the composer (nothing, and free, with none): only the main
+        // window's composer takes them.
+        let plugged = self.scope == crate::workspace::Scope::Main;
+        let place = crate::plugins::render::Place {
+            ws: self.workspace.clone(),
+            thread: plugin_thread,
+            project: {
+                let ws = self.workspace.read(cx);
+                thread
+                    .as_ref()
+                    .and_then(|t| t.cwd.clone())
+                    .or_else(|| ws.draft_project_in(&self.scope))
+            },
+            threads: None,
+        };
+        let slot = |s: trek_core::plugins::Slot, cx: &App| {
+            if plugged {
+                crate::plugins::render::slot(s, &place, cx)
+            } else {
+                Vec::new()
+            }
+        };
+        let plugin_actions = slot(trek_core::plugins::Slot::ComposerActions, cx);
+        let plugin_banners = slot(trek_core::plugins::Slot::ComposerBanner, cx);
+        let plugin_chips = slot(trek_core::plugins::Slot::ComposerTop, cx);
+        let focus_ring = if plugged {
+            crate::plugins::focus::ring(&self.workspace, cx)
+        } else {
+            None
+        };
         // Under liquid glass the card is a frosted pane too, a touch firmer than the panel it sits on.
         let glass = self.workspace.read(cx).glass().is_some();
         let card = v_flex()
@@ -4671,6 +4702,9 @@ impl Render for Composer {
                         })
                         .child(div().flex_1())
                 )
+            })
+            .when(!plugin_banners.is_empty(), |el| {
+                el.child(v_flex().px(px(look::PAD)).pt(px(look::PAD - 4.)).gap(px(6.)).children(plugin_banners))
             })
             .when(study, |el| el.child(self.study_kind_row(cx)))
             .when_some(missing, |el, (wt, id)| el.child(self.missing_worktree(&wt, id, cx)))
@@ -4730,6 +4764,7 @@ impl Render for Composer {
                             .when(!narrow, |p| p.child(div().id("plan-pill-label").test_support().when(plan, |el| el.text_color(theme.foreground).font_medium()).child("Plan")))
                             .on_click(cx.listener(|this, _, _, cx| pickers::update_prefs(this, cx, |p| p.plan = !p.plan))),
                     ))
+                    .children(plugin_actions)
                     .child(div().flex_1().min_w(px(4.)))
                     .when_some(
                         context.filter(|_| ring_out),
@@ -4748,6 +4783,20 @@ impl Render for Composer {
                     .children(mic)
                     .child(send),
             ));
+        // A plugin's focus timer walks the card's edge; its chips sit on the top edge, at the right.
+        let ringed = focus_ring.is_some();
+        let card = card
+            .children(focus_ring)
+            .when(!plugin_chips.is_empty(), |el| {
+                el.child(
+                    h_flex()
+                        .absolute()
+                        .top(px(-11.))
+                        .right(px(look::PAD + 4.))
+                        .gap(px(6.))
+                        .children(plugin_chips),
+                )
+            });
 
         self.bars_drawn = 0;
         let limit_bar = thread
@@ -5016,7 +5065,14 @@ impl Render for Composer {
                     .w_full()
                     .max_w(self.workspace.read(cx).column())
                     .children(chips)
+                    // Room for the hiker to walk the card's edge, above it and below.
+                    .when(ringed, |el| {
+                        el.child(div().h(px(crate::plugins::focus::CLEARANCE)).flex_none())
+                    })
                     .child(card)
+                    .when(ringed, |el| {
+                        el.child(div().h(px(crate::plugins::focus::CLEARANCE)).flex_none())
+                    })
                     // On Study the agent shows in the model pill; the strip would float alone.
                     .when(!study, |el| el.children(status)),
             )
