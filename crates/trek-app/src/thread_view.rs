@@ -473,6 +473,8 @@ pub struct ThreadView {
     /// The live group last opened from the working bar (`Workspace::open_live_group`), once its
     /// row here is open.
     opened: Option<crate::activity::Opened>,
+    /// The sub-agent row last asked to be shown (`Workspace::reveal_sub_agent`), and when.
+    sub_revealed: Option<(String, u64)>,
     /// Where the transcript's last row ends on screen, as last laid out (`None` when it's out of
     /// view): the working bar sits just under it when the transcript doesn't reach the bar.
     pub tail: std::rc::Rc<std::cell::Cell<Option<Pixels>>>,
@@ -759,6 +761,7 @@ impl ThreadView {
             rows_cache: Default::default(),
             end: None,
             opened: None,
+            sub_revealed: None,
             tail: Default::default(),
             room: Default::default(),
             expanded_gen: 0,
@@ -901,6 +904,15 @@ impl ThreadView {
         let live = id.as_ref().and_then(|id| ws.live.get(id));
         let revision = live.map_or(0, |l| l.revision);
         let opened = live.and_then(|l| l.opened.clone());
+        // A sub-agent's row asked for (from the working bar's list, the hub): where it is.
+        let revealed = live.and_then(|l| l.revealed.clone());
+        let revealed_at = revealed.as_ref().zip(live).and_then(|((row, _), l)| {
+            let ix = l
+                .items
+                .iter()
+                .rposition(|i| matches!(i, Item::Tool { id, .. } if id == row))?;
+            Some((ix, l.item_ids().get(ix)?.clone()))
+        });
         let shown = Shown {
             thread: id.clone(),
             draft: ws.is_draft_in(&self.scope),
@@ -1049,6 +1061,18 @@ impl ThreadView {
         if self.shown.as_ref() != Some(&shown) {
             self.shown = Some(shown);
             if !quiet {
+                cx.notify();
+            }
+        }
+        if revealed != self.sub_revealed {
+            self.sub_revealed = revealed;
+            // Opened, with what it's doing or its answer, and scrolled to.
+            if let Some((ix, key)) = revealed_at {
+                self.expanded.insert(key);
+                self.expanded_gen += 1;
+                if let Some(row) = self.rows(cx).row_of(ix) {
+                    self.scroll_to_row(row, cx);
+                }
                 cx.notify();
             }
         }
@@ -3267,8 +3291,10 @@ impl ThreadView {
                     })
                 });
                 let stoppable = sub.state.live()
+                    && sub.continued.is_none()
                     && (sub.child.is_some() || session && (control.stop || in_background));
                 let messageable = sub.child.is_none()
+                    && sub.continued.is_none()
                     && sub.state == TaskState::Running
                     && session
                     && control.message;
@@ -3319,6 +3345,20 @@ impl ThreadView {
                             .map(|(_, _, f, _)| f.clone())
                     })
                     .filter(|_| messageable);
+                // An earlier run's row takes the user to where it works now.
+                let onward = sub.continued.clone().map(|row| {
+                    let (ws, thread) = (at.workspace.clone(), at.thread.clone());
+                    Button::new(("subagent-onward", ix))
+                        .ghost()
+                        .xsmall()
+                        .map(control_button)
+                        .icon(Icon::new(crate::assets::Lucide::ArrowDown).text_color(muted))
+                        .tooltip("Go to where it works now")
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            ws.update(cx, |ws, cx| ws.reveal_sub_agent(&thread, &row, cx));
+                        })
+                });
                 let opener = sub.child.clone().map(|child| {
                     let ws = at.workspace.clone();
                     Button::new(("subagent-open", ix))
@@ -3398,6 +3438,7 @@ impl ThreadView {
                                 })
                                 .children(stop)
                                 .children(message)
+                                .children(onward)
                                 .children(opener)
                                 .children(chevron),
                         )
@@ -5060,6 +5101,9 @@ pub struct SubAgentRow {
     pub child: Option<String>,
     /// What it's doing, while it works: its latest calls, as the working bar shows its parent's.
     pub activity: Option<crate::working_bar::Group>,
+    /// The row it works on now, for an earlier run of one of the agent's own woken again since
+    /// (`SendMessage`): this row says so, and takes the user there.
+    pub continued: Option<String>,
 }
 
 impl SubAgentRow {
@@ -5101,6 +5145,7 @@ impl SubAgentRow {
                     elapsed: None,
                     child: None,
                     activity: None,
+                    continued: None,
                 };
             };
             let state = ws.task_state(child);
@@ -5139,17 +5184,60 @@ impl SubAgentRow {
                     .live()
                     .then(|| crate::working_bar::child_group(ws, child))
                     .flatten(),
+                continued: None,
             };
         }
         // One of the agent's own.
-        let task = ws
-            .live
-            .get(thread)
-            .and_then(|l| l.tasks.iter().find(|t| t.id == row_id));
+        let live = ws.live.get(thread);
+        let task = live.and_then(|l| l.tasks.iter().find(|t| t.id == row_id));
+        let of_done = |done: Option<bool>| match done {
+            None => TaskState::Running,
+            Some(true) => TaskState::Done,
+            Some(false) => TaskState::Failed,
+        };
+        // Woken again since: where it stands is its latest run's, on the row that run has.
+        let latest = task.filter(|t| t.resumed_by.is_some()).and_then(|t| {
+            let l = live?;
+            let mut at = t;
+            for _ in 0..64 {
+                match at
+                    .resumed_by
+                    .as_deref()
+                    .and_then(|n| l.tasks.iter().find(|k| k.id == n))
+                {
+                    Some(next) => at = next,
+                    None => break,
+                }
+            }
+            (at.id != t.id).then_some(at)
+        });
+        if let (Some(t), Some(now)) = (task, latest) {
+            let state = of_done(now.done);
+            return SubAgentRow {
+                agent: Some(agent.clone()),
+                label: if detail.trim().is_empty() {
+                    "Sub-agent".into()
+                } else {
+                    detail.to_string()
+                },
+                detail: if state.live() {
+                    "Working again further down".to_string()
+                } else {
+                    format!("Woken again further down · {}", state.label())
+                },
+                state,
+                elapsed: Some(
+                    t.ended
+                        .unwrap_or_else(std::time::Instant::now)
+                        .saturating_duration_since(t.started),
+                ),
+                child: None,
+                activity: None,
+                continued: Some(now.id.clone()),
+            };
+        }
         let state = match task.map(|t| t.done) {
-            Some(None) => TaskState::Running,
-            Some(Some(true)) => TaskState::Done,
-            Some(Some(false)) => TaskState::Failed,
+            Some(done) => of_done(done),
             None => by_status,
         };
         let steps = |n: u64| {
@@ -5190,6 +5278,7 @@ impl SubAgentRow {
                     cwd.as_deref(),
                 )
             }),
+            continued: None,
         }
     }
 }
@@ -5592,6 +5681,38 @@ impl ThreadView {
             }
         }
         out
+    }
+
+    /// The sub-agents the transcript shows at work, by the row each stands for (the call it works
+    /// under, or `orchestrate::task_row` of Trek's): its live rows, an earlier run's row of one
+    /// woken since (which points onward) aside. What `Workspace::sub_agents_at_work` lists.
+    pub fn working_sub_agent_rows(&self, cx: &App) -> Vec<String> {
+        let ws = self.workspace.read(cx);
+        let thread = self.current.clone().unwrap_or_default();
+        let (Some(live), Some(t)) = (ws.live.get(&thread), ws.thread(&thread)) else {
+            return vec![];
+        };
+        self.rows(cx)
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::SubAgent { ix, .. } => match live.items.get(*ix) {
+                    Some(Item::Tool {
+                        id,
+                        detail,
+                        output,
+                        status,
+                        ..
+                    }) => {
+                        let sub =
+                            SubAgentRow::read(ws, &thread, &t.agent, id, detail, output, *status);
+                        (sub.state.live() && sub.continued.is_none()).then(|| id.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
     }
 
     /// The rows as text: "user", "assistant", "group: Ran 1 command" (with "  tool: Read" lines

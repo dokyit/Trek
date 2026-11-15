@@ -2102,55 +2102,40 @@ impl Workspace {
     /// background, by title.
     fn remote_at_work(&self, t: &Thread) -> (Vec<tr::SubAgent>, Vec<String>) {
         use crate::workspace::TaskState;
-        let mut kids: Vec<tr::SubAgent> = self
-            .running_children(&t.id)
+        // One list of what's at work, as the Mac's sidebar, working bar and transcript show it.
+        let kids = self
+            .sub_agents_at_work(&t.id)
             .into_iter()
-            .map(|c| tr::SubAgent {
-                agent: agent_ref(&c.agent),
-                model: Some(self.model_label(c)),
-                title: c.title.clone(),
-                state: match self.task_state(&c.id) {
-                    TaskState::Running => tr::SubAgentState::Running,
-                    TaskState::NeedsYou => tr::SubAgentState::NeedsYou,
-                    TaskState::Done => tr::SubAgentState::Done,
-                    TaskState::Failed => tr::SubAgentState::Failed,
-                    TaskState::Cancelled => tr::SubAgentState::Stopped,
+            .map(|a| tr::SubAgent {
+                agent: agent_ref(&a.agent),
+                title: match (&a.child, &a.model) {
+                    // Trek's own: its thread's title (the phone shows the model beside it).
+                    (Some(c), Some(_)) => self
+                        .thread(c)
+                        .map_or_else(|| a.name.clone(), |c| c.title.clone()),
+                    _ => a.name.clone(),
                 },
-                // Rounded: what it's worked for is time paused at a limit aside, so this can
-                // drift by the odd millisecond between ticks.
-                since: Some((now_ms() - self.task_elapsed(&c.id).as_millis() as i64) / 1000 * 1000),
-                thread_id: Some(c.id.clone()),
-                call_id: None,
+                model: a.model.clone(),
+                state: match a.child.as_deref().map(|c| self.task_state(c)) {
+                    Some(TaskState::NeedsYou) => tr::SubAgentState::NeedsYou,
+                    _ => tr::SubAgentState::Running,
+                },
+                since: Some(match a.child {
+                    // Rounded: what it's worked for is time paused at a limit aside, so this can
+                    // drift by the odd millisecond between ticks.
+                    Some(_) => (now_ms() - a.elapsed.as_millis() as i64) / 1000 * 1000,
+                    None => instant_ms(a.started),
+                }),
+                thread_id: a.child.clone(),
+                call_id: a.child.is_none().then(|| a.row.clone()),
             })
             .collect();
-        let Some(l) = self.live.get(&t.id) else {
-            return (kids, vec![]);
-        };
-        let own = |title: &str, started: std::time::Instant, call: Option<&str>| tr::SubAgent {
-            agent: agent_ref(&t.agent),
-            model: None,
-            title: title.to_string(),
-            state: tr::SubAgentState::Running,
-            since: Some(instant_ms(started)),
-            thread_id: None,
-            call_id: call.map(str::to_string),
-        };
-        let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
-        kids.extend(
-            l.tasks
-                .iter()
-                .filter(|k| k.done.is_none())
-                .map(|k| own(&k.description, k.started, Some(&k.id))),
-        );
-        kids.extend(
-            l.background_agents()
-                .filter(|b| !b.task.call.as_deref().is_some_and(out))
-                .map(|b| own(&b.task.title, b.started, b.task.call.as_deref())),
-        );
-        (
-            kids,
-            l.background_work().map(|b| b.task.title.clone()).collect(),
-        )
+        let background = self
+            .live
+            .get(&t.id)
+            .map(|l| l.background_work().map(|b| b.task.title.clone()).collect())
+            .unwrap_or_default();
+        (kids, background)
     }
 
     /// The threads a phone lists: the sidebar's, without side chats and sub-agents, and only the

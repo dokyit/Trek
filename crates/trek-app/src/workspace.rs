@@ -28,6 +28,7 @@ pub mod resume;
 mod review;
 pub mod split;
 mod study;
+pub mod sub_agents;
 pub mod switching;
 mod turn_changes;
 pub mod unsent;
@@ -277,6 +278,9 @@ pub struct LiveThread {
     /// Sub-agents launched this turn (and those still out from earlier ones), keyed by the tool
     /// call that started them.
     pub tasks: Vec<SubTask>,
+    /// A sub-agent's row the transcript is to open and scroll to (`reveal_sub_agent`), with a
+    /// count that tells one ask from the next.
+    pub revealed: Option<(String, u64)>,
     /// What its agent's own sub-agents have done, as the agent reported it, by the call that
     /// started each; kept with the thread, and read back with its transcript.
     pub sub_logs: HashMap<String, SubLog>,
@@ -814,6 +818,31 @@ pub struct SubTask {
     pub ended: Option<Instant>,
     /// It was taken to be over because its turn ended, not because its agent said so.
     pub closed_with_turn: bool,
+    /// The call of its earlier run, when it's one of the agent's own woken again (`SendMessage`):
+    /// the row that run had says it works on here.
+    pub resumes: Option<String>,
+    /// The call of its later run, once it was woken again: this run's row points there.
+    pub resumed_by: Option<String>,
+}
+
+impl SubTask {
+    /// One that starts now, under call `id`, sent to do `description`.
+    pub fn new(id: &str, description: &str) -> SubTask {
+        SubTask {
+            id: id.to_string(),
+            description: description.to_string(),
+            activity: String::new(),
+            steps: vec![],
+            stepped: 0,
+            tool_uses: 0,
+            done: None,
+            started: Instant::now(),
+            ended: None,
+            closed_with_turn: false,
+            resumes: None,
+            resumed_by: None,
+        }
+    }
 }
 
 impl LiveThread {
@@ -885,8 +914,212 @@ impl LiveThread {
         self.background.iter().filter(|b| !b.is_agent())
     }
 
+    /// One of the agent's own sub-agents woke again under call `id` (`AgentEvent::TaskResumed`),
+    /// after it last worked under `of`. Its new run has a row of its own where that happened (the
+    /// call that woke it stands for it from now on, here and in the store), and its earlier run's
+    /// row points there. Under the call that first launched it, that run is simply open again.
+    pub fn resume_task(&mut self, id: &str, of: Option<String>) {
+        let again = of.as_deref() == Some(id)
+            || (of.is_none() && self.tasks.iter().any(|t| t.id == id && t.resumes.is_none())
+                && !self.items.iter().any(|i| matches!(i, Item::Tool { id: r, title, .. } if r == id && title != "Subagent")));
+        if again {
+            if let Some(t) = self.tasks.iter_mut().find(|t| t.id == id) {
+                t.done = None;
+                t.ended = None;
+                t.closed_with_turn = false;
+                t.resumed_by = None;
+            }
+            if let Some(Item::Tool { status, .. }) = self
+                .items
+                .rfind_mut(|i| matches!(i, Item::Tool { id: r, .. } if r == id))
+            {
+                *status = ToolStatus::Running;
+            }
+            return;
+        }
+        let named = self
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.description.clone())
+            .filter(|d| !d.trim().is_empty() && d != "(resumed)");
+        // The run before: as the agent said, or (a session started since doesn't know) the
+        // latest earlier row for a sub-agent sent to do the same.
+        let row_detail = |items: &trek_core::transcript::Transcript, call: &str| {
+            items.iter().rev().find_map(|i| match i {
+                Item::Tool {
+                    id: r,
+                    title,
+                    detail,
+                    ..
+                } if r == call && title == "Subagent" => Some(detail.clone()),
+                _ => None,
+            })
+        };
+        let earlier = of
+            .filter(|o| o != id)
+            .filter(|o| {
+                self.tasks.iter().any(|t| t.id == *o) || row_detail(&self.items, o).is_some()
+            })
+            .or_else(|| {
+                let named = named.as_deref()?;
+                self.items.iter().rev().find_map(|i| match i {
+                    Item::Tool {
+                        id: r,
+                        title,
+                        detail,
+                        ..
+                    } if r != id && title == "Subagent" && detail == named => Some(r.clone()),
+                    _ => None,
+                })
+            });
+        let before = earlier.as_deref().and_then(|e| {
+            self.tasks
+                .iter()
+                .find(|t| t.id == e)
+                .map(|t| t.description.clone())
+                .or_else(|| row_detail(&self.items, e))
+        });
+        let description = named.or(before).unwrap_or_else(|| "Sub-agent".to_string());
+        match self.tasks.iter_mut().find(|t| t.id == id) {
+            Some(t) => {
+                t.description = description.clone();
+                t.done = None;
+                t.ended = None;
+                t.closed_with_turn = false;
+            }
+            None => self.tasks.push(SubTask::new(id, &description)),
+        }
+        if let Some(e) = &earlier {
+            self.link_runs(e, id);
+        }
+        self.sub_agent_row(id, &description);
+    }
+
+    /// Run `later` of one of the agent's own sub-agents continues run `earlier`: the earlier
+    /// row points to the later one. An earlier run Trek has no task for (the thread was read back
+    /// from the store since) gets one, settled as its row was.
+    fn link_runs(&mut self, earlier: &str, later: &str) {
+        if !self.tasks.iter().any(|t| t.id == earlier) {
+            let Some((detail, status)) = self.items.iter().rev().find_map(|i| match i {
+                Item::Tool {
+                    id, detail, status, ..
+                } if id == earlier => Some((detail.clone(), *status)),
+                _ => None,
+            }) else {
+                return;
+            };
+            let mut t = SubTask::new(earlier, &detail);
+            t.done = Some(!matches!(status, ToolStatus::Failed | ToolStatus::Denied));
+            t.ended = Some(t.started);
+            self.tasks.push(t);
+        }
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == earlier) {
+            t.resumed_by = Some(later.to_string());
+        }
+        if let Some(t) = self.tasks.iter_mut().find(|t| t.id == later) {
+            t.resumes = Some(earlier.to_string());
+        }
+    }
+
+    /// Just read back from the store with sub-agents of its own at work (its session reported
+    /// them while it loaded): each continues the earlier run whose row the store had.
+    fn relink_runs(&mut self) {
+        let open: Vec<(String, String)> = self
+            .tasks
+            .iter()
+            .filter(|t| t.done.is_none() && t.resumes.is_none())
+            .map(|t| (t.id.clone(), t.description.clone()))
+            .collect();
+        for (id, description) in open {
+            if let Some(earlier) = self.earlier_run(&id, &description) {
+                self.link_runs(&earlier, &id);
+            }
+        }
+    }
+
+    /// The latest row before `call`'s for a sub-agent of the agent's own sent to do `description`
+    /// that no later run continues yet: the run one Trek lost track of continues.
+    fn earlier_run(&self, call: &str, description: &str) -> Option<String> {
+        let at = self
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Tool { id, .. } if id == call))
+            .unwrap_or(self.items.len());
+        self.items[..at].iter().rev().find_map(|i| match i {
+            Item::Tool {
+                id, title, detail, ..
+            } if title == "Subagent"
+                && detail == description
+                && !self
+                    .tasks
+                    .iter()
+                    .any(|t| t.id == *id && (t.resumed_by.is_some() || t.done.is_none())) =>
+            {
+                Some(id.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// The row for one of the agent's own sub-agents at work under call `id`: the call's own,
+    /// made a sub-agent's (a `SendMessage` that woke one), or a new one at the end when the
+    /// transcript has no row for it.
+    fn sub_agent_row(&mut self, id: &str, description: &str) {
+        match self
+            .items
+            .rfind_mut(|i| matches!(i, Item::Tool { id: r, .. } if r == id))
+        {
+            Some(Item::Tool {
+                title,
+                detail,
+                status,
+                ..
+            }) => {
+                *title = "Subagent".to_string();
+                *detail = description.to_string();
+                *status = ToolStatus::Running;
+            }
+            _ => {
+                self.streaming = None;
+                self.items.push(Item::Tool {
+                    id: id.to_string(),
+                    title: "Subagent".to_string(),
+                    detail: description.to_string(),
+                    output: String::new(),
+                    status: ToolStatus::Running,
+                });
+            }
+        }
+    }
+
     /// Take in the agent's report of what it has running in the background (the whole set).
     fn set_background(&mut self, tasks: Vec<trek_agents::BackgroundTask>) {
+        // Every sub-agent of its own it lists by its call is one Trek follows, with a row: one
+        // it never saw start (its call isn't in this transcript) gets one at the end, so what the
+        // sidebar counts is always in the thread. One listed before the agent says its call
+        // (`task_started` comes a moment later) waits for it.
+        for t in tasks
+            .iter()
+            .filter(|t| t.kind == trek_agents::BackgroundKind::Agent)
+        {
+            let Some(call) = t.call.clone() else {
+                continue;
+            };
+            if !self.tasks.iter().any(|k| k.id == call) {
+                self.tasks.push(SubTask::new(&call, &t.title));
+                let has_row = self.items.iter().any(|i| {
+                    matches!(i, Item::Tool { id, title, .. } if *id == call && title == "Subagent")
+                });
+                if !has_row {
+                    self.sub_agent_row(&call, &t.title);
+                }
+                // An earlier run of it (one woken since Trek last followed it) points here.
+                if let Some(earlier) = self.earlier_run(&call, &t.title) {
+                    self.link_runs(&earlier, &call);
+                }
+            }
+        }
         // A sub-agent of its own listed as out after the turn that sent it ended (which closed
         // it with the turn) is still at work.
         for call in tasks
@@ -3913,6 +4146,7 @@ impl Workspace {
                 live.reasoning = live.reasoning.map(|i| i + n);
                 live.loaded = true;
                 live.revision += 1;
+                live.relink_runs();
                 if live.end_orphaned_calls() || !arrived.is_empty() {
                     this.persist_items(&id, cx);
                 }
@@ -3964,6 +4198,7 @@ impl Workspace {
             }
             live.loaded = true;
             live.revision += 1;
+            live.relink_runs();
             if live.end_orphaned_calls() {
                 self.persist_items(id, cx);
             }
@@ -5787,18 +6022,7 @@ impl Workspace {
                         let ix = match (known, &description) {
                             (Some(ix), _) => Some(ix),
                             (None, Some(d)) => {
-                                live.tasks.push(SubTask {
-                                    id: tid.clone(),
-                                    description: d.clone(),
-                                    activity: String::new(),
-                                    steps: vec![],
-                                    stepped: 0,
-                                    tool_uses: 0,
-                                    done: None,
-                                    started: Instant::now(),
-                                    ended: None,
-                                    closed_with_turn: false,
-                                });
+                                live.tasks.push(SubTask::new(&tid, d));
                                 Some(live.tasks.len() - 1)
                             }
                             // Progress for something we never saw start (a shell command): ignore.
@@ -5833,6 +6057,7 @@ impl Workspace {
                             }
                         }
                     }
+                    AgentEvent::TaskResumed { id: tid, of } => live.resume_task(&tid, of),
                     AgentEvent::TaskStep {
                         task,
                         title,
@@ -7207,6 +7432,12 @@ impl Workspace {
     /// status and output) and removed rows. Cheap enough to run mid-turn. A big first save (an
     /// imported thread's history) is indexed for search in the background. Nothing is saved while
     /// the history is still being read: it has to be written first (`ensure_loaded`).
+    /// Save thread `id`'s transcript now, as its timer would (tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn persist_now(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.persist_items(id, cx);
+    }
+
     fn persist_items(&mut self, id: &str, cx: &mut Context<Self>) {
         if crate::machines::is_remote(id) {
             return;

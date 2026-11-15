@@ -20,6 +20,7 @@ mod tests_cmd_args;
 mod tests_stop;
 
 pub use acp::{AcpInfo, acp_authenticate, acp_probe};
+pub use claude::Replay as ClaudeReplay;
 /// What a Codex thread on Windows is told when its sandbox needs its one-time setup: the thread
 /// view offers to run codex in Trek's terminal beside it.
 pub use codex::SANDBOX_SETUP_NOTICE as CODEX_SANDBOX_SETUP_NOTICE;
@@ -726,6 +727,16 @@ pub enum AgentEvent {
         activity: Option<String>,
         tool_uses: Option<u64>,
         done: Option<bool>,
+    },
+    /// A sub-agent of the agent's own that had finished works again, under call `id`: a message
+    /// sent to it woke it (Claude's `SendMessage`), or it took one queued for it under the call
+    /// that first launched it (`id` is then that call). `of`: the call it last worked under, when
+    /// the agent's session saw it (a session resumed since starts with none). Sent after the
+    /// `Task` for `id`, which says what it was sent to do. From then on its steps, progress and
+    /// end come keyed by `id`.
+    TaskResumed {
+        id: String,
+        of: Option<String>,
     },
     /// A tool call a sub-agent made (keyed by the call that launched the sub-agent), for its
     /// row's live activity.

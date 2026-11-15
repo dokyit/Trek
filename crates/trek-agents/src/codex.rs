@@ -2022,6 +2022,8 @@ impl Session {
             Some("started" | "interacted") if self.agents.get(thread).is_none_or(|a| a.done) => {
                 let name = agent_name(item["agentPath"].as_str().unwrap_or_default());
                 let runs = self.agents.get(thread).map_or(0, |a| a.runs) + 1;
+                // Its earlier run's row, to point here.
+                let before = self.agents.get(thread).map(|a| a.row.clone());
                 let row = if runs == 1 {
                     thread.to_string()
                 } else {
@@ -2051,12 +2053,18 @@ impl Session {
                     detail: name.clone(),
                 });
                 out.events.push(AgentEvent::Task {
-                    id: row,
+                    id: row.clone(),
                     description: Some(name),
                     activity: None,
                     tool_uses: None,
                     done: None,
                 });
+                if before.is_some() {
+                    out.events.push(AgentEvent::TaskResumed {
+                        id: row,
+                        of: before,
+                    });
+                }
             }
             Some("completed") => self.finish_agent(thread, true, out),
             Some("interrupted") => self.finish_agent(thread, false, out),
@@ -4609,6 +4617,11 @@ mod tests {
                     activity: None,
                     tool_uses: None,
                     done: None
+                },
+                // Its earlier run's row points here.
+                AgentEvent::TaskResumed {
+                    id: "kid-2".into(),
+                    of: Some("kid".into())
                 },
             ]
         );

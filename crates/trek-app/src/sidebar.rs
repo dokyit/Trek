@@ -860,39 +860,18 @@ impl Sidebar {
         if crate::machines::is_remote(&t.id) {
             return ws.machines.at_work(&t.id);
         }
-        let children = if self.graph.parents.contains(&t.id) {
-            ws.running_children(&t.id)
-        } else {
-            vec![]
-        };
-        let mut kids: Vec<(trek_core::AgentId, String)> = children
+        // One list of what's at work, as the thread, the working bar and the phone show it.
+        let kids = ws
+            .sub_agents_of(&t.id, self.graph.parents.contains(&t.id))
             .into_iter()
-            .map(|c| {
-                (
-                    c.agent.clone(),
-                    format!("{}: {}", ws.model_label(c), c.title),
-                )
-            })
+            .map(|a| (a.agent, a.name))
             .collect();
-        let Some(l) = ws.live.get(&t.id) else {
-            return (kids, vec![]);
-        };
-        let out = |id: &str| l.tasks.iter().any(|k| k.id == id && k.done.is_none());
-        kids.extend(
-            l.tasks
-                .iter()
-                .filter(|k| k.done.is_none())
-                .map(|k| (t.agent.clone(), k.description.clone())),
-        );
-        kids.extend(
-            l.background_agents()
-                .filter(|b| !b.task.call.as_deref().is_some_and(out))
-                .map(|b| (t.agent.clone(), b.task.title.clone())),
-        );
-        (
-            kids,
-            l.background_work().map(|b| b.task.title.clone()).collect(),
-        )
+        let background = ws
+            .live
+            .get(&t.id)
+            .map(|l| l.background_work().map(|b| b.task.title.clone()).collect())
+            .unwrap_or_default();
+        (kids, background)
     }
 
     /// A row's tooltip: who runs it ("Claude Code · Opus 5.5"; a machine's thread as the machine

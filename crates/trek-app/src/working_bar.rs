@@ -16,7 +16,10 @@ use crate::fluent;
 use crate::scale::{radius, text, to_rems};
 use crate::thinking_timeline as timeline;
 use crate::workspace::{Scope, Workspace, WorkspaceEvent};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::popover::Popover;
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Selectable, Sizable as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
@@ -68,6 +71,9 @@ pub struct WorkingBar {
     /// The ticker and the frame interval it runs at.
     _ticker: Option<(Duration, Task<()>)>,
     _subscriptions: Vec<Subscription>,
+    /// The list of its sub-agents at work is open (the header's "Waiting on 2 sub-agents" or
+    /// "· 2 sub-agents" opens it).
+    list_open: bool,
 }
 
 /// The bar's inputs besides the clock.
@@ -385,6 +391,7 @@ impl WorkingBar {
             settled_len: 0,
             _ticker: None,
             _subscriptions: subscriptions,
+            list_open: false,
         };
         this.sync(cx);
         this
@@ -431,7 +438,7 @@ impl WorkingBar {
             } else {
                 live.turn_started
             },
-            agents: live.active_tasks().max(live.background_agents().count()),
+            agents: ws.sub_agents_at_work(id).len(),
             waiting,
             behind: {
                 let b = ws.background_use.read(cx);
@@ -1440,6 +1447,7 @@ impl Render for WorkingBar {
             .map(|t| t.elapsed());
         let clock = elapsed.map(|d| d.as_secs_f32()).unwrap_or(0.);
         let still = shown.still;
+        let (entity, list_open) = (cx.entity(), self.list_open);
         // The live rows past the settled ones (running, or sliding in).
         let rows = shown.group.as_ref().map(|g| {
             let settled = self.settled_len.min(g.rows.len());
@@ -1526,6 +1534,36 @@ impl Render for WorkingBar {
                         })
                         .into_any_element(),
                 };
+            // Its sub-agents at work open a list: each goes to its row in the transcript.
+            let who = if h.agents > 0 {
+                let entity = entity.clone();
+                Popover::new("sub-agents-list")
+                    .anchor(Anchor::BottomLeft)
+                    .appearance(false)
+                    .open(list_open)
+                    .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                        this.list_open = *open;
+                        cx.notify();
+                    }))
+                    .trigger(ListTrigger {
+                        open: list_open,
+                        el: div()
+                            .id("sub-agents-at-work")
+                            .test_support()
+                            .min_w_0()
+                            .px(px(4.))
+                            .mx(px(-4.))
+                            .rounded(px(fluent::control(radius::CONTROL)))
+                            .cursor_pointer()
+                            .hover(|el| el.bg(theme.foreground.opacity(0.06)))
+                            .child(who)
+                            .into_any_element(),
+                    })
+                    .content(move |_, _, cx| entity.update(cx, |this, cx| this.sub_agents_list(cx)))
+                    .into_any_element()
+            } else {
+                who
+            };
             // Working or waiting on its sub-agents, the hiker walks the whole trail on the bar's
             // own clock: it paces while it waits (`mascot::PACE`), strolls while it works — and a
             // change between them moves its pace, never its place.
@@ -1570,6 +1608,77 @@ impl Render for WorkingBar {
             .children(rows)
             .children(header)
             .into_any_element()
+    }
+}
+
+impl WorkingBar {
+    /// The thread's sub-agents at work, as the sidebar and the transcript have them: each with
+    /// its logo, what it's doing and for how long; a click goes to its row and opens it.
+    fn sub_agents_list(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(thread) = self.shown.as_ref().map(|s| s.thread.clone()) else {
+            return div().into_any_element();
+        };
+        let at_work = self.workspace.read(cx).sub_agents_at_work(&thread);
+        let theme = cx.theme().clone();
+        let muted = theme.muted_foreground;
+        let workspace = self.workspace.clone();
+        crate::ui::menu_surface(cx)
+            .id("sub-agents-list-card")
+            .test_support()
+            .w(px(380.))
+            .p(px(6.))
+            .gap(px(2.))
+            .children(at_work.into_iter().enumerate().map(|(i, a)| {
+                let (ws, thread, row) = (workspace.clone(), thread.clone(), a.row.clone());
+                h_flex()
+                    .id(("sub-agent-entry", i))
+                    .test_support()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(fluent::control(radius::BUTTON)))
+                    .text_size(px(text::BODY))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.foreground.opacity(0.06)))
+                    .child(crate::ui::agent_logo(&a.agent, px(16.), cx))
+                    .child(div().flex_1().min_w_0().truncate().child(a.name.clone()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(to_rems(text::META))
+                            .text_color(muted)
+                            .child(crate::time::elapsed(a.elapsed)),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.list_open = false;
+                        ws.update(cx, |ws, cx| ws.reveal_sub_agent(&thread, &row, cx));
+                        cx.notify();
+                    }))
+            }))
+            .into_any_element()
+    }
+}
+
+/// What opens the list of sub-agents: the header's words for them.
+#[derive(IntoElement)]
+struct ListTrigger {
+    open: bool,
+    el: AnyElement,
+}
+
+impl Selectable for ListTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+    fn is_selected(&self) -> bool {
+        self.open
+    }
+}
+
+impl RenderOnce for ListTrigger {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        self.el
     }
 }
 

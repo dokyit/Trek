@@ -264,10 +264,21 @@ struct Model {
     changes: Option<String>,
     context: Option<(u64, u64)>,
     usage: Option<(AgentId, UsageLimit)>,
-    agents: Vec<(String, String, TaskState)>,
+    agents: Vec<HubAgent>,
     sources: Rc<[Source]>,
     lineage: Vec<Lineage>,
     thread: Option<String>,
+}
+
+/// One of the thread's sub-agents, as the hub lists it.
+#[derive(Clone, PartialEq)]
+struct HubAgent {
+    /// Its thread, for one Trek runs (it opens there).
+    thread: Option<String>,
+    /// Its row in the thread (it opens there, for the agent's own).
+    row: String,
+    title: String,
+    state: TaskState,
 }
 
 fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
@@ -336,13 +347,37 @@ fn model(ws: &Workspace, scope: &Scope) -> Option<Model> {
     let usage = thread
         .as_ref()
         .and_then(|t| ws.usage_focus_on(t.agent.clone(), t.model.clone(), t.account.as_deref()));
+    // Trek's, each by its thread; then its agent's own, each by its latest run (one woken again
+    // is one sub-agent, on the row it works on now).
     let agents = thread
         .as_ref()
         .map(|t| {
-            ws.children(&t.id)
+            let mut out: Vec<HubAgent> = ws
+                .children(&t.id)
                 .into_iter()
-                .map(|c| (c.id.clone(), c.title.clone(), ws.task_state(&c.id)))
-                .collect()
+                .map(|c| HubAgent {
+                    thread: Some(c.id.clone()),
+                    row: trek_core::orchestrate::task_row(&c.id),
+                    title: c.title.clone(),
+                    state: ws.task_state(&c.id),
+                })
+                .collect();
+            out.extend(live.into_iter().flat_map(|l| {
+                l.tasks
+                    .iter()
+                    .filter(|k| k.resumed_by.is_none())
+                    .map(|k| HubAgent {
+                        thread: None,
+                        row: k.id.clone(),
+                        title: k.description.clone(),
+                        state: match k.done {
+                            None => TaskState::Running,
+                            Some(true) => TaskState::Done,
+                            Some(false) => TaskState::Failed,
+                        },
+                    })
+            }));
+            out
         })
         .unwrap_or_default();
     let sources = match (&thread, live) {
@@ -1374,7 +1409,7 @@ fn card(
         }
         if !m.agents.is_empty() {
             rows += 1;
-            let count = |s: fn(TaskState) -> bool| m.agents.iter().filter(|a| s(a.2)).count();
+            let count = |s: fn(TaskState) -> bool| m.agents.iter().filter(|a| s(a.state)).count();
             let running = count(|s| s == TaskState::Running);
             let waiting = count(|s| s == TaskState::NeedsYou);
             let done = count(|s| s == TaskState::Done);
@@ -1399,17 +1434,22 @@ fn card(
                     .on_click(toggle(ui, |u| u.agents = !u.agents)),
             );
             if agents_open {
-                for (i, (id, title, state)) in m.agents.iter().enumerate() {
-                    let (ws, pop, id) = (ws.clone(), pop.clone(), id.clone());
+                for (i, a) in m.agents.iter().enumerate() {
+                    let (ws, pop, a2) = (ws.clone(), pop.clone(), a.clone());
+                    let parent = m.thread.clone();
                     this = this.child(
                         sub_row(("hub-subagent", i), false, cx)
                             .test_support()
-                            .child(label(title.clone()))
-                            .child(trailing(state.label(), cx))
+                            .child(label(a.title.clone()))
+                            .child(trailing(a.state.label(), cx))
                             .on_click(move |_, window, cx| {
                                 close(&pop, window, cx);
-                                let id = id.clone();
-                                ws.update(cx, |ws, cx| LineageRow::go(ws, &id, from_window, cx));
+                                // Trek's opens its thread; the agent's own, its row here.
+                                ws.update(cx, |ws, cx| match (&a2.thread, &parent) {
+                                    (Some(id), _) => LineageRow::go(ws, id, from_window, cx),
+                                    (None, Some(p)) => ws.reveal_sub_agent(p, &a2.row, cx),
+                                    (None, None) => {}
+                                });
                             }),
                     );
                 }

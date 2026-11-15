@@ -749,6 +749,22 @@ impl Cli {
     }
 }
 
+/// Claude Code's stream-json lines read as a session reads them, one at a time, into the
+/// events Trek takes in: for replays of a session's shapes in tests (`trek-app/tests`).
+#[derive(Default)]
+pub struct Replay {
+    turns: Turns,
+    pending: HashMap<String, Value>,
+    streamed: bool,
+}
+
+impl Replay {
+    /// The events for one line of the CLI's output.
+    pub fn line(&mut self, line: &Value) -> Vec<AgentEvent> {
+        self.turns.step(line, &mut self.pending, &mut self.streamed)
+    }
+}
+
 /// Which `result` ends the turn the app sees. A message sent while a turn runs joins that turn
 /// (Claude takes it in at its next step), or runs after it as a turn of its own with its own
 /// `result` when the turn was already ending. Claude echoes each message as it takes it in
@@ -796,6 +812,17 @@ struct BackgroundTasks {
     started: HashMap<String, (String, bool)>,
     /// `Monitor` calls, by id.
     monitors: HashSet<String>,
+    /// Each sub-agent's latest call, by task id: the one it works under now, or last did. Kept
+    /// after it ends, for a message that wakes it again (`SendMessage`) to say which it was.
+    runs: HashMap<String, String>,
+    /// Sub-agent calls by the task they started, the earlier runs of one woken since included:
+    /// its steps still keyed by an earlier call go to its latest (`latest_call`).
+    calls: HashMap<String, String>,
+    /// Sub-agents whose end was reported (`task_notification`), until they work again.
+    ended: HashSet<String>,
+    /// What the agent's `SendMessage` calls said, by call, until the call is over: one that wakes
+    /// a sub-agent starts its new run with it.
+    sends: HashMap<String, String>,
 }
 
 impl BackgroundTasks {
@@ -834,6 +861,50 @@ impl BackgroundTasks {
             ),
         );
         self.live.iter().any(|(t, ..)| t == id)
+    }
+
+    /// A sub-agent's task started, by call `call`: what to say about it beyond `Task`. One that
+    /// worked before (it ended and works again, or a `SendMessage` woke it) is a run of it
+    /// resumed, with its call's message as what it was told; its answer comes in its notification.
+    fn agent_started(&mut self, v: &Value) -> Vec<AgentEvent> {
+        let (Some(task), Some(call)) = (v["task_id"].as_str(), v["tool_use_id"].as_str()) else {
+            return vec![];
+        };
+        if v["task_type"] != "local_agent" || v["owned_by_subagent"] == true {
+            return vec![];
+        }
+        let message = self.sends.remove(call);
+        let before = self.runs.insert(task.to_string(), call.to_string());
+        self.calls.insert(call.to_string(), task.to_string());
+        let ended = self.ended.remove(task);
+        let woken = message.is_some() || (before.is_some() && ended);
+        if !woken {
+            return vec![];
+        }
+        if let Some((_, detached)) = self.started.get_mut(task) {
+            *detached = true;
+        }
+        let mut out = vec![];
+        if let Some(text) = message.filter(|_| before.as_deref() != Some(call)) {
+            out.push(AgentEvent::TaskLog {
+                task: call.to_string(),
+                entry: TaskEntry::Prompt(text),
+            });
+        }
+        out.push(AgentEvent::TaskResumed {
+            id: call.to_string(),
+            of: before,
+        });
+        out
+    }
+
+    /// The call a sub-agent's step keyed by `call` belongs to now: its latest, when a message
+    /// woke it under another.
+    fn latest_call<'a>(&'a self, call: &'a str) -> &'a str {
+        self.calls
+            .get(call)
+            .and_then(|task| self.runs.get(task))
+            .map_or(call, String::as_str)
     }
 
     /// The task call `call` started (a sub-agent, by the `Agent` call that sent it out).
@@ -1058,6 +1129,7 @@ impl Turns {
         if v["type"] == "assistant"
             && let Some(task) = v["parent_tool_use_id"].as_str()
         {
+            let task = self.background.latest_call(task);
             let log = |entry| AgentEvent::TaskLog {
                 task: task.to_string(),
                 entry,
@@ -1094,6 +1166,7 @@ impl Turns {
         if v["type"] == "user"
             && let Some(task) = v["parent_tool_use_id"].as_str()
         {
+            let task = self.background.latest_call(task);
             return v["message"]["content"]
                 .as_array()
                 .into_iter()
@@ -1114,19 +1187,60 @@ impl Turns {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|b| b["type"] == "tool_use" && b["name"] == "Monitor")
+                .filter(|b| b["type"] == "tool_use")
             {
-                self.background
-                    .monitors
-                    .insert(b["id"].as_str().unwrap_or_default().to_string());
+                let id = b["id"].as_str().unwrap_or_default().to_string();
+                match b["name"].as_str() {
+                    Some("Monitor") => _ = self.background.monitors.insert(id),
+                    // A message for one of its sub-agents may wake it: its new run starts with it.
+                    Some("SendMessage") => {
+                        let text = b["input"]["message"].as_str().unwrap_or_default();
+                        self.background.sends.insert(id, text.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // A message's call is over: it woke its sub-agent by now, or didn't.
+        if v["type"] == "user" {
+            for b in v["message"]["content"].as_array().into_iter().flatten() {
+                if let Some(call) = b["tool_use_id"].as_str() {
+                    self.background.sends.remove(call);
+                }
             }
         }
         let mut out = translate(v, pending, streamed_text);
-        if v["type"] == "system" && v["subtype"] == "task_started" && self.background.started(v) {
-            out.push(AgentEvent::Background(self.background.list()));
+        // A sub-agent's progress keyed by an earlier call of one woken since: its latest's.
+        for ev in out.iter_mut() {
+            if let AgentEvent::Task {
+                id,
+                description: None,
+                done: None,
+                ..
+            } = ev
+            {
+                *id = self.background.latest_call(id).to_string();
+            }
+        }
+        if v["type"] == "system" && v["subtype"] == "task_started" {
+            let listed = self.background.started(v);
+            out.extend(self.background.agent_started(v));
+            if listed {
+                out.push(AgentEvent::Background(self.background.list()));
+            }
         }
         // A sub-agent that ran detached answers in its notification: that's its row's output.
-        if v["type"] == "system" && v["subtype"] == "task_notification" {
+        // One for an earlier run of a sub-agent woken again since ends that run alone (its
+        // `Task` above): the new run works on.
+        let stale = v["type"] == "system"
+            && v["subtype"] == "task_notification"
+            && v["tool_use_id"].as_str().is_some_and(|call| {
+                self.background
+                    .runs
+                    .get(v["task_id"].as_str().unwrap_or_default())
+                    .is_some_and(|latest| latest != call)
+            });
+        if v["type"] == "system" && v["subtype"] == "task_notification" && !stale {
             let task = v["task_id"].as_str().unwrap_or_default();
             if let Some(call) = self.background.detached_agent(task).map(str::to_string) {
                 out.push(AgentEvent::ToolFinished {
@@ -1137,6 +1251,9 @@ impl Turns {
             }
             if let Some((call, _)) = self.background.started.remove(task) {
                 self.background.monitors.remove(&call);
+            }
+            if self.background.runs.contains_key(task) {
+                self.background.ended.insert(task.to_string());
             }
             // Over, whether or not a new live set follows: a task that's still listed after its
             // notification would show (and hold an update) as running for good.
@@ -3981,6 +4098,132 @@ mod tests {
             left,
             ["sh1"],
             "the finished agent is gone; the shell still runs"
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_woken_by_a_message_works_under_the_messages_call() {
+        // As Claude Code 2.1.312 sends it: a sub-agent launched in the background (its call
+        // returns at once), its end in a notification, then `SendMessage` wakes it, registered
+        // again under the message's call, which its notification names from then on.
+        let mut turns = Turns::default();
+        let mut step = |v: Value| turns.step(&v, &mut Default::default(), &mut Default::default());
+        let started = |call: &str| json!({"type":"system","subtype":"task_started","task_id":"a382","tool_use_id":call,"description":"Launch video research","subagent_type":"general-purpose","is_backgrounded":true,"task_type":"local_agent"});
+        let ended = |call: &str, status: &str, summary: &str| json!({"type":"system","subtype":"task_notification","task_id":"a382","tool_use_id":call,"status":status,"output_file":"/tmp/a382.output","summary":summary});
+        let message = |call: &str, text: &str| json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":call,"name":"SendMessage","input":{"to":"a382","summary":"Another round","message":text}}]}});
+        let resumed = |call: &str| json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":call,"content":[{"type":"text","text":"{\"success\":true,\"message\":\"Resuming agent a382\",\"resumedAgentId\":\"a382\"}"}]}]}});
+        step(
+            json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Agent","input":{"description":"Launch video research","prompt":"Research the launch video.","run_in_background":true}}]}}),
+        );
+        let ev = step(started("toolu_a"));
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, AgentEvent::TaskResumed { .. })),
+            "a first launch is no resume: {ev:?}"
+        );
+        step(
+            json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: a382"}]}]}}),
+        );
+        let ev = step(ended("toolu_a", "completed", "Round one is cut."));
+        assert!(ev.contains(&AgentEvent::ToolFinished {
+            id: "toolu_a".into(),
+            output: "Round one is cut.".into(),
+            ok: true
+        }));
+        // Woken, hours later.
+        assert!(step(message("toolu_s", "Cut round two.")).iter().any(
+            |e| matches!(e, AgentEvent::ToolStarted { id, title, .. } if id == "toolu_s" && title == "SendMessage")
+        ));
+        let ev = step(started("toolu_s"));
+        assert!(ev.iter().any(|e| matches!(e, AgentEvent::Task { id, description: Some(_), .. } if id == "toolu_s")), "{ev:?}");
+        assert!(ev.contains(&AgentEvent::TaskLog {
+            task: "toolu_s".into(),
+            entry: TaskEntry::Prompt("Cut round two.".into())
+        }));
+        assert_eq!(
+            ev.last(),
+            Some(&AgentEvent::TaskResumed {
+                id: "toolu_s".into(),
+                of: Some("toolu_a".into())
+            })
+        );
+        step(resumed("toolu_s"));
+        // Steps still keyed by its first call are its new run's.
+        let ev = step(
+            json!({"type":"assistant","parent_tool_use_id":"toolu_a","message":{"content":[{"type":"tool_use","id":"toolu_k","name":"Bash","input":{"command":"ffmpeg -i cut.mov"}}]}}),
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, AgentEvent::TaskStep { task, .. } if task == "toolu_s")),
+            "{ev:?}"
+        );
+        let ev = step(
+            json!({"type":"system","subtype":"task_progress","task_id":"a382","tool_use_id":"toolu_a","description":"Rendering","usage":{"tool_uses":3}}),
+        );
+        assert!(
+            ev.iter().any(
+                |e| matches!(e, AgentEvent::Task { id, activity: Some(_), .. } if id == "toolu_s")
+            ),
+            "{ev:?}"
+        );
+        // Its end comes under the message's call, with its answer.
+        let ev = step(ended("toolu_s", "completed", "Round two is cut."));
+        assert!(ev.contains(&AgentEvent::ToolFinished {
+            id: "toolu_s".into(),
+            output: "Round two is cut.".into(),
+            ok: true
+        }));
+        // Woken a second time: it continues the second run, and fails.
+        step(message("toolu_t", "Once more."));
+        let ev = step(started("toolu_t"));
+        assert_eq!(
+            ev.last(),
+            Some(&AgentEvent::TaskResumed {
+                id: "toolu_t".into(),
+                of: Some("toolu_s".into())
+            })
+        );
+        // A late word for an earlier run ends that run alone.
+        let ev = step(ended("toolu_s", "completed", "stale"));
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, AgentEvent::ToolFinished { .. })),
+            "{ev:?}"
+        );
+        let ev = step(ended("toolu_t", "failed", "It broke."));
+        assert!(ev.contains(&AgentEvent::ToolFinished {
+            id: "toolu_t".into(),
+            output: "It broke.".into(),
+            ok: false
+        }));
+        // A message to one still at work wakes nothing: no new run.
+        step(message("toolu_u", "Queued."));
+        step(resumed("toolu_u"));
+        let ev = step(ended("toolu_t", "completed", "again"));
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, AgentEvent::TaskResumed { .. }))
+        );
+    }
+
+    #[test]
+    fn a_sub_agent_that_takes_a_queued_message_works_again_under_its_first_call() {
+        // A message queued for it reached it as it finished: Claude Code woke it under the call
+        // that first launched it.
+        let mut turns = Turns::default();
+        let mut step = |v: Value| turns.step(&v, &mut Default::default(), &mut Default::default());
+        let started = json!({"type":"system","subtype":"task_started","task_id":"ae3e","tool_use_id":"toolu_a","description":"Trek themes","is_backgrounded":true,"task_type":"local_agent"});
+        step(started.clone());
+        step(
+            json!({"type":"system","subtype":"task_notification","task_id":"ae3e","tool_use_id":"toolu_a","status":"completed","summary":"held"}),
+        );
+        let ev = step(started);
+        assert_eq!(
+            ev.last(),
+            Some(&AgentEvent::TaskResumed {
+                id: "toolu_a".into(),
+                of: Some("toolu_a".into())
+            })
         );
     }
 }

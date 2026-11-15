@@ -269,6 +269,8 @@ enum Script {
     Study(Tutor),
     Tools,
     Agents(Option<Duration>),
+    /// A finished sub-agent of its own woken again by a message, beside a fresh one.
+    Resume(Option<Duration>),
     /// A sub-agent of its own that the turn waits on, working for a while.
     Task(Duration),
     Permission,
@@ -538,6 +540,7 @@ impl Script {
                 "question" | "questions" => Script::Questions,
                 "plan" => Script::Plan,
                 "agents" | "subagents" | "sub-agents" => Script::Agents(duration_after(i)),
+                "resume" | "resumed" => Script::Resume(duration_after(i)),
                 "tools" => Script::Tools,
                 "recall" => Script::Recall,
                 "transcript" if w.starts_with("mock:") => {
@@ -616,6 +619,7 @@ pub fn title(request: &str) -> String {
         Script::Study(_) => "Study the transformer",
         Script::Tools => "Add a verbose flag",
         Script::Agents(_) => "Scout the routes and error handling",
+        Script::Resume(_) => "Another round of the launch video",
         Script::Task(_) => "Survey the test suite",
         Script::Permission => "Apply the schema migrations",
         Script::Questions => "Choose a database",
@@ -1334,6 +1338,7 @@ impl Session {
             }
             Script::Tools => self.tools().await?,
             Script::Agents(after) => return self.agents(after).await,
+            Script::Resume(after) => return self.resumed_agents(after).await,
             Script::Task(total) => self.task(total).await?,
             Script::Permission => self.permission(text).await?,
             Script::Questions => self.questions(text).await?,
@@ -2773,6 +2778,186 @@ impl Session {
                     send(AgentEvent::ToolFinished {
                         id,
                         output: "Found what it was sent for.".into(),
+                        ok: true,
+                    });
+                }
+            }
+            if back > 0 {
+                let _ = note.send(Note::Scouts).await;
+            }
+        });
+        Ok(())
+    }
+
+    /// `mock:resume [after]`: as Claude Code does it, a sub-agent of its own that had finished
+    /// (its earlier run is in the transcript) woken again by a message (`SendMessage`), which it
+    /// works under from then on, beside one launched fresh in the background. The fresh one
+    /// reports after `after`, the woken one after twice that.
+    async fn resumed_agents(&mut self, after: Option<Duration>) -> Step {
+        let after = after.unwrap_or_else(|| paced(20_000));
+        let first = "Launch video research and production";
+        // Its earlier run, long done.
+        let earlier = self.id("agent");
+        self.tool_start(&earlier, "Subagent", first).await?;
+        self.emit(AgentEvent::Task {
+            id: earlier.clone(),
+            description: Some(first.into()),
+            activity: None,
+            tool_uses: None,
+            done: None,
+        })
+        .await?;
+        self.emit(AgentEvent::Task {
+            id: earlier.clone(),
+            description: None,
+            activity: None,
+            tool_uses: Some(14),
+            done: Some(true),
+        })
+        .await?;
+        self.emit(AgentEvent::ToolFinished {
+            id: earlier.clone(),
+            output: "Round one is cut: two takes, 38 s each.".into(),
+            ok: true,
+        })
+        .await?;
+        self.say("Round one is in. Now a theme scout, and round two for the video.")
+            .await?;
+        // One launched fresh, in the background.
+        let fresh = self.id("agent");
+        let second = "Trek themes: widgets and pages";
+        self.tool_start(&fresh, "Subagent", second).await?;
+        self.emit(AgentEvent::Task {
+            id: fresh.clone(),
+            description: Some(second.into()),
+            activity: None,
+            tool_uses: None,
+            done: None,
+        })
+        .await?;
+        self.emit(AgentEvent::TaskLog {
+            task: fresh.clone(),
+            entry: TaskEntry::Prompt("Theme the widgets and pages.".into()),
+        })
+        .await?;
+        self.background.add(BackgroundTask {
+            id: format!("{fresh}-task"),
+            kind: BackgroundKind::Agent,
+            title: second.into(),
+            call: Some(fresh.clone()),
+            readable: false,
+            stoppable: true,
+        });
+        self.emit(AgentEvent::ToolFinished {
+            id: fresh.clone(),
+            output: "Async agent launched successfully.".into(),
+            ok: true,
+        })
+        .await?;
+        // The earlier one woken by a message, under the message's call.
+        let woken = self.id("message");
+        self.tool_start(&woken, "SendMessage", "Round two from six references")
+            .await?;
+        self.emit(AgentEvent::Task {
+            id: woken.clone(),
+            description: Some(first.into()),
+            activity: None,
+            tool_uses: None,
+            done: None,
+        })
+        .await?;
+        self.emit(AgentEvent::TaskLog {
+            task: woken.clone(),
+            entry: TaskEntry::Prompt("Cut round two from the six references.".into()),
+        })
+        .await?;
+        self.emit(AgentEvent::TaskResumed {
+            id: woken.clone(),
+            of: Some(earlier),
+        })
+        .await?;
+        self.background.add(BackgroundTask {
+            id: format!("{woken}-task"),
+            kind: BackgroundKind::Agent,
+            title: first.into(),
+            call: Some(woken.clone()),
+            readable: false,
+            stoppable: true,
+        });
+        self.emit(self.background.event()).await?;
+        self.emit(AgentEvent::ToolFinished {
+            id: woken.clone(),
+            output: r#"{"success":true,"message":"Resuming agent"}"#.into(),
+            ok: true,
+        })
+        .await?;
+        self.say("Both are at work. I'll pull it together when they report back.")
+            .await?;
+        self.finish().await?;
+        let (jobs, events, note) = (
+            self.background.clone(),
+            self.events.clone(),
+            self.note.clone(),
+        );
+        tokio::spawn(async move {
+            let send = |ev: AgentEvent| events.try_send(ev).is_ok();
+            let steps = [
+                (
+                    &fresh,
+                    ("Read", "crates/trek-app/src/themes.rs"),
+                    "Reading themes.rs",
+                ),
+                (
+                    &woken,
+                    ("Run command", "ffmpeg -i round2.mov"),
+                    "Rendering round two",
+                ),
+            ];
+            for (n, (id, (title, detail), activity)) in steps.into_iter().enumerate() {
+                tokio::time::sleep(after / 4).await;
+                if jobs.running(&format!("{id}-task")) {
+                    send(AgentEvent::TaskStep {
+                        task: id.clone(),
+                        title: title.into(),
+                        detail: detail.into(),
+                    });
+                    send(AgentEvent::TaskLog {
+                        task: id.clone(),
+                        entry: TaskEntry::Call {
+                            id: format!("{id}-step"),
+                            title: title.into(),
+                            detail: detail.into(),
+                        },
+                    });
+                    send(AgentEvent::Task {
+                        id: id.clone(),
+                        description: None,
+                        activity: Some(activity.into()),
+                        tool_uses: Some(3 + n as u64),
+                        done: None,
+                    });
+                }
+            }
+            let mut back = 0;
+            for (id, wait, answer) in [
+                (fresh, after / 2, "The widgets and pages follow the theme."),
+                (woken, after, "Round two is cut."),
+            ] {
+                tokio::time::sleep(wait).await;
+                let done = jobs.remove(&format!("{id}-task"));
+                send(AgentEvent::Task {
+                    id: id.clone(),
+                    description: None,
+                    activity: None,
+                    tool_uses: None,
+                    done: Some(done),
+                });
+                if done {
+                    back += 1;
+                    send(jobs.event());
+                    send(AgentEvent::ToolFinished {
+                        id,
+                        output: answer.into(),
                         ok: true,
                     });
                 }

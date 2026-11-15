@@ -1740,11 +1740,13 @@ impl Workspace {
             })
             .collect();
         if !turn {
-            out.extend(live.background_agents().map(|b| Waited {
-                agent: t.agent.clone(),
-                name: b.task.title.clone(),
+            // Between turns, every one of its agent's own still at work is out in the background
+            // (the turn's end closed the rest): as the sidebar and the transcript have them.
+            out.extend(live.own_at_work(&t.agent).into_iter().map(|a| Waited {
+                agent: a.agent,
+                name: a.name,
                 model: None,
-                elapsed: b.started.elapsed(),
+                elapsed: a.elapsed,
             }));
         } else if out.is_empty() {
             // Mid-turn, blocked on its agent's own: the calls still running are all sub-agents.
@@ -1784,7 +1786,10 @@ impl Workspace {
         maybe.extend(
             self.live
                 .iter()
-                .filter(|(_, l)| l.background_agents().next().is_some())
+                .filter(|(_, l)| {
+                    l.background_agents().next().is_some()
+                        || l.tasks.iter().any(|t| t.done.is_none())
+                })
                 .map(|(id, _)| id.as_str()),
         );
         maybe.extend(
