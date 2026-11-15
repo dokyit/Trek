@@ -102,6 +102,18 @@ impl Workspace {
                 "Study asks its questions in cards. Turn on Interactive artifacts in Settings › General to start a session.".to_string(),
             );
         }
+        // A session reads the learner's files, which needs an agent that is signed in and works
+        // with a folder: without one it would open a thread that fails on its first turn, and be
+        // listed as a session that never ran.
+        if !self.study_agent_ready() {
+            return back(
+                cx,
+                &text,
+                &images,
+                "Study needs an agent that can read files. Sign in to one in Settings › Agents."
+                    .to_string(),
+            );
+        }
         let guide = study::ensure(&dir)
             .map_err(anyhow::Error::from)
             .and_then(|_| skills::shipped(skills::STUDY));
@@ -188,12 +200,24 @@ impl Workspace {
         self.send_to(&id, first, images, cx);
     }
 
+    /// Whether a session can start: the agent it would use is signed in and can work with files.
+    /// With none (nothing signed in, or only providers that run no tools), Study says so instead.
+    pub fn study_agent_ready(&self) -> bool {
+        let agent = self.study_prefs().agent;
+        // `ready_agents` always offers Claude Code, signed in or not, so a CLI agent has to be
+        // found ready by detection too.
+        let detected = matches!(agent, AgentId::Direct(_))
+            || self.agents.iter().any(|a| {
+                a.agent == agent && a.availability == trek_core::detect::Availability::Ready
+            });
+        detected && self.ready_agents().contains(&agent) && study_agent_works(&agent)
+    }
+
     /// The draft's agent and model, if it can work with files (the session reads the learner's
     /// sources and keeps their maps); else the user's default agent, or the first that can. Never
     /// in a worktree or plan mode.
     fn study_prefs(&self) -> super::Prefs {
-        let works =
-            |a: &AgentId| !matches!(a, AgentId::Direct(p) if !trek_core::catalog::is_mock(p));
+        let works = study_agent_works;
         let ready = self.ready_agents();
         let mut p = self.draft_prefs.clone();
         if !(ready.contains(&p.agent) && works(&p.agent)) {
@@ -210,4 +234,10 @@ impl Workspace {
         p.plan = false;
         p
     }
+}
+
+/// Whether `agent` can work with the learner's folder: a provider that runs no tools can't (the
+/// mock stands in for a real agent in tests).
+fn study_agent_works(agent: &AgentId) -> bool {
+    !matches!(agent, AgentId::Direct(p) if !trek_core::catalog::is_mock(p))
 }

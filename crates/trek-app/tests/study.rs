@@ -112,6 +112,41 @@ fn with_cards_off_study_says_so_and_does_not_start_a_session() {
     });
 }
 
+/// Nothing signed in: Study says so, with a way to Settings, and a message doesn't open a thread
+/// that would fail or leave a session that never ran.
+#[test]
+fn with_no_agent_signed_in_study_says_so_and_starts_nothing() {
+    run(async |cx| {
+        let trek = open(cx);
+        let toasts = common::toasts(&trek, cx);
+        trek.update(cx, |ws, _| {
+            ws.mock_agent = false;
+            ws.agents.clear();
+        });
+        trek.update(cx, |ws, cx| ws.navigate(Route::Study, cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "study-no-agent"));
+        trek.type_text(cx, "the transformer architecture");
+        trek.press(cx, "enter");
+        trek.render(cx);
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Study);
+        assert!(study::sessions(&study::dir()).is_empty());
+        assert!(
+            toasts
+                .borrow()
+                .iter()
+                .any(|(m, _)| m.contains("Settings › Agents")),
+            "{:?}",
+            toasts.borrow()
+        );
+        trek.click(cx, "study-agents-settings");
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Settings(trek_app::workspace::SettingsPage::Agents)
+        );
+    });
+}
+
 #[test]
 fn practice_is_a_choice_beside_the_composer() {
     run(async |cx| {

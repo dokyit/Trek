@@ -807,6 +807,33 @@ impl Render for StudyView {
                     )
                     .into_any_element()
             });
+        // A session reads files: with no signed-in agent that can, it can't start either.
+        let no_agent = (!self.workspace.read(cx).study_agent_ready()).then(|| {
+            let workspace = self.workspace.clone();
+            h_flex()
+                .id("study-no-agent")
+                .test_support()
+                .gap_2()
+                .items_center()
+                .text_size(px(text::LABEL))
+                .text_color(crate::palette::amber(cx))
+                .child("Study needs an agent that can read files, and none is signed in.")
+                .child(
+                    Button::new("study-agents-settings")
+                        .ghost()
+                        .small()
+                        .label("Open Agents settings")
+                        .on_click(move |_, _, cx| {
+                            workspace.update(cx, |ws, cx| {
+                                ws.navigate(
+                                    Route::Settings(crate::workspace::SettingsPage::Agents),
+                                    cx,
+                                )
+                            })
+                        }),
+                )
+                .into_any_element()
+        });
         let composer = Composer::element(&self.composer, &mut self.composer_changed, cx);
         // Bias the column above the middle: more room under it than over it, so with little in
         // it the composer sits in the page's upper third.
@@ -840,6 +867,7 @@ impl Render for StudyView {
                                     .gap(px(16.))
                                     .child(inset(self.header()))
                                     .children(cards_off.map(inset))
+                                    .children(no_agent.map(inset))
                                     .child(composer)
                                     .child(inset(context)),
                             )
