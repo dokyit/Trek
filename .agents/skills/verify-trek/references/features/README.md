@@ -31,6 +31,7 @@ Start the isolated app before using a CLI route. Each page below describes the u
 - [Onboarding](onboarding.md) — the first-run intro and setup steps (appearance, macOS permissions, agent scan, API keys, local models, phone), shown again from Settings or ⌘K.
 - [Agents, models, and permissions](agents-models-and-permissions.md) — configure CLI agents, API/local models, effort, hand-holding, and approval policy.
 - [Skills, MCP, and computer use](skills-mcp-and-computer-use.md) — discover skills and configure agent tools and MCP servers; background computer use and its picture-in-picture window.
+- [Plugins](plugins.md) — install, turn on and check plugins: looks, slots, replacements, pages and panels, commands, logic.
 - [Appearance, notifications, and snapshots](appearance-notifications-and-snapshots.md) — theme Trek, choose alerts, and attach app screenshots.
 - [Phone companion](phone-companion.md) — pair an iPhone, follow threads, and answer agents remotely.
 - [Machines](machines.md) — pair another computer running Trek, start threads on it from the composer's machine chip, clone a project there, and follow its threads here; the isolated app pairs with itself as machine B.

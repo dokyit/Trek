@@ -272,6 +272,11 @@ Measured with `./bin/agent-cli perf launch idle --threads 0,10 --runs 3 --cold-r
 
 | | before plugins | with plugins (none installed) |
 |---|---|---|
-| warm launch, 0 threads | 197 ms | — |
-| idle, 0 threads | RSS 122 MB, footprint 76 MB, CPU 0.03% | — |
-| idle, 10 threads | RSS 125 MB, footprint 78 MB, CPU 0.03% | — |
+| warm launch, 0 / 10 threads | 197 / 194 ms | 187 / 169 ms |
+| idle, 0 threads | RSS 122 MB, footprint 76 MB, CPU 0.03%, 8.6 context switches/s | RSS 123 MB, footprint 76 MB, CPU 0.03%, 8.1 context switches/s |
+| idle, 10 threads | RSS 125 MB, footprint 78 MB, CPU 0.03%, 8.3 context switches/s | RSS 122 MB, footprint 78 MB, CPU 0.03%, 8.1 context switches/s |
+
+The first cut gave the plugins folder a watch of its own, and idle context switches rose to 10.1
+a second; looking at it on the themes folder's tick brought them back. Not measured: a session
+with plugins running (the focus timer redraws the composer about once a second while a session
+is under way and it's on screen; a page is a web view's process while it's open).
