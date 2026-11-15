@@ -360,6 +360,10 @@ pub struct DeviceRecord {
     /// Cleared when the registry loads: a server starting has no connections.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub connected: bool,
+    /// Where its notifications go, when it's the web remote and asked for them (`web_push`).
+    /// Pairing it again, unpairing it, or its push service saying it's gone drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<crate::webpush::PushSubscription>,
 }
 
 /// A paired device, as the app lists it (no token hash).
@@ -472,6 +476,7 @@ impl DeviceRegistry {
             app_version: None,
             platform: None,
             connected: false,
+            push: None,
         };
         let before = self.devices.clone();
         match self.devices.iter_mut().find(|d| d.device_id == device_id) {
@@ -540,6 +545,51 @@ impl DeviceRegistry {
             self.save_logged();
         }
         removed
+    }
+
+    /// Send the device's notifications to `push` from now on (`None`: none). Returns whether it's
+    /// paired.
+    pub fn set_push(
+        &mut self,
+        device_id: &str,
+        push: Option<crate::webpush::PushSubscription>,
+    ) -> bool {
+        let Some(d) = self.devices.iter_mut().find(|d| d.device_id == device_id) else {
+            return false;
+        };
+        if d.push != push {
+            d.push = push;
+            self.save_logged();
+        }
+        true
+    }
+
+    /// Whether the device has asked for notifications.
+    pub fn has_push(&self, device_id: &str) -> bool {
+        self.devices
+            .iter()
+            .any(|d| d.device_id == device_id && d.push.is_some())
+    }
+
+    /// Each device that asked for notifications, with where they go.
+    pub fn push_targets(&self) -> Vec<(String, crate::webpush::PushSubscription)> {
+        self.devices
+            .iter()
+            .filter_map(|d| Some((d.device_id.clone(), d.push.clone()?)))
+            .collect()
+    }
+
+    /// The push service said `endpoint` is gone: forget it, unless the device has subscribed
+    /// again meanwhile (a new endpoint).
+    pub fn drop_push(&mut self, device_id: &str, endpoint: &str) {
+        if let Some(d) = self
+            .devices
+            .iter_mut()
+            .find(|d| d.device_id == device_id && d.push.as_ref().is_some_and(|p| p.endpoint == endpoint))
+        {
+            d.push = None;
+            self.save_logged();
+        }
     }
 
     pub fn get(&self, device_id: &str) -> Option<DeviceInfo> {
@@ -874,5 +924,44 @@ mod tests {
         );
         assert!(pinned.ends_with("&hid=7f3c&fp=ab12"), "{pinned}");
         assert_eq!(percent_encode("a&b=c/d?", b""), "a%26b%3Dc%2Fd%3F");
+    }
+
+    #[test]
+    fn a_device_s_notifications_go_with_its_pairing() {
+        let dir = std::env::temp_dir().join(format!("trek-push-devices-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("devices.json");
+        let sub = |endpoint: &str| crate::webpush::PushSubscription {
+            endpoint: endpoint.into(),
+            p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4".into(),
+            auth: "BTBZMqHH6r4Tts7J_aSIgg".into(),
+        };
+        let mut reg = DeviceRegistry::load(&path).unwrap();
+        reg.register("web-1", "Pixel", 1).unwrap();
+        reg.register("ios-1", "iPhone", 1).unwrap();
+        assert!(!reg.set_push("nobody", Some(sub("https://a.example/1"))));
+        assert!(reg.set_push("web-1", Some(sub("https://a.example/1"))));
+        assert!(reg.has_push("web-1") && !reg.has_push("ios-1"));
+        // Kept across a restart.
+        let mut reg = DeviceRegistry::load(&path).unwrap();
+        assert_eq!(
+            reg.push_targets(),
+            vec![("web-1".to_string(), sub("https://a.example/1"))]
+        );
+        // A 410 for an endpoint it has since replaced leaves the new one.
+        reg.set_push("web-1", Some(sub("https://a.example/2")));
+        reg.drop_push("web-1", "https://a.example/1");
+        assert!(reg.has_push("web-1"));
+        reg.drop_push("web-1", "https://a.example/2");
+        assert!(reg.push_targets().is_empty());
+        // Pairing again starts without; unpairing takes it away.
+        reg.set_push("web-1", Some(sub("https://a.example/3")));
+        reg.register("web-1", "Pixel", 2).unwrap();
+        assert!(!reg.has_push("web-1"));
+        reg.set_push("web-1", Some(sub("https://a.example/4")));
+        assert!(reg.revoke("web-1"));
+        assert!(reg.push_targets().is_empty());
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("a.example"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

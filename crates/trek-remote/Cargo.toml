@@ -29,6 +29,8 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "crypt
 time = "0.3"
 # The web remote (src/web.rs): WebTransport over HTTP/3, ring as above.
 wtransport = { version = "0.7", default-features = false, features = ["ring", "quinn"] }
+# Web Push to the web remote (src/webpush.rs): P-256, HKDF and AES-GCM, from the ring the above use.
+ring = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 # The TLS key file's ACL (src/tls.rs): the user's alone, as 0600 makes it on a Mac.

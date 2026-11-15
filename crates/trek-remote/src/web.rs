@@ -56,6 +56,9 @@ pub struct WebConfig {
     pub origins: Vec<String>,
     /// Where the web remote is served: the pairing link opens it ([`REMOTE_URL`]).
     pub page: String,
+    /// This computer's public key for Web Push (`crate::webpush::VapidKey::public_key`): pages
+    /// may ask for notifications (`web_push`) when it's set.
+    pub push_key: Option<String>,
 }
 
 impl WebConfig {
@@ -64,7 +67,14 @@ impl WebConfig {
             certs_path,
             origins: ORIGINS.iter().map(|o| o.to_string()).collect(),
             page: REMOTE_URL.to_string(),
+            push_key: None,
         }
+    }
+
+    /// Pages may ask for notifications, subscribing with `key` (base64url).
+    pub fn with_push_key(mut self, key: String) -> Self {
+        self.push_key = Some(key);
+        self
     }
 
     /// The web remote served from `page` instead, its origin the one let in: a copy run on this

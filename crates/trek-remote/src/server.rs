@@ -8,7 +8,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
@@ -32,7 +32,7 @@ use crate::pairing::{
 use crate::protocol::{
     ClientEnvelope, ClientMessage, ErrorCode, HostInfo, Item, MAX_PAGE, MAX_UPLOADS_IN_FLIGHT,
     PROTOCOL_VERSION, ServerEnvelope, ServerMessage, Snapshot, ThreadAction, ThreadActionRequest,
-    Transcript,
+    Transcript, WebPushRequest, WebPushState,
 };
 use crate::web::{self, WebCerts, WebConfig};
 
@@ -216,6 +216,8 @@ pub enum ServerNotice {
     Connected { device_id: String },
     /// A paired device disconnected.
     Disconnected { device_id: String },
+    /// A paired device asked for notifications (`on`) or stopped them (`web_push`).
+    PushChanged { device_id: String, on: bool },
 }
 
 /// `addr`, listening. An IPv6 address takes IPv4 too (`[::]` serves `127.0.0.1`): macOS and
@@ -296,6 +298,7 @@ impl RemoteServer {
             notices,
             shutdown,
             pre_auth: PreAuthSlots::new(PRE_AUTH_TOTAL, PRE_AUTH_PER_ADDRESS),
+            push_enabled: AtomicBool::new(false),
             watchers: Watchers {
                 counts: Mutex::new(HashMap::new()),
                 unwatch,
@@ -467,6 +470,21 @@ impl RemoteHandle {
         revoked
     }
 
+    /// Each paired device that asked for notifications, with where they go (`web_push`).
+    pub fn push_targets(&self) -> Vec<(String, crate::webpush::PushSubscription)> {
+        self.inner.lock().registry.push_targets()
+    }
+
+    /// Whether the computer sends phone notifications (its setting), for `web_push`'s answer.
+    pub fn set_push_enabled(&self, on: bool) {
+        self.inner.push_enabled.store(on, Ordering::Relaxed);
+    }
+
+    /// The push service said `endpoint` is gone (404, 410): forget it for `device_id`.
+    pub fn drop_push(&self, device_id: &str, endpoint: &str) {
+        self.inner.lock().registry.drop_push(device_id, endpoint);
+    }
+
     /// Ids of the devices connected right now.
     pub fn connected_devices(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.inner.lock().connections.keys().cloned().collect();
@@ -504,6 +522,8 @@ struct Inner {
     pre_auth: PreAuthSlots,
     watchers: Watchers,
     state: Mutex<State>,
+    /// Whether the computer sends phone notifications at all, as `web_push` tells the page.
+    push_enabled: AtomicBool,
 }
 
 /// How many sessions have each thread open, across every phone: the host hears when a thread's
@@ -1173,6 +1193,62 @@ struct Authenticated {
     device_id: String,
     conn_id: u64,
     kick: oneshot::Receiver<Kick>,
+    /// Over WebTransport: the web remote.
+    web: bool,
+}
+
+/// The computer's Web Push key, when it serves the web remote with one.
+fn push_key(config: &ServerConfig) -> Option<&str> {
+    config.web.as_ref()?.push_key.as_deref()
+}
+
+/// `web_push` from `device_id`: take its subscription (or drop it), and say what's set now.
+fn web_push(
+    inner: &Inner,
+    device_id: &str,
+    web: bool,
+    re: Option<String>,
+    req: WebPushRequest,
+) -> ServerEnvelope {
+    let Some(key) = push_key(&inner.config).filter(|_| web) else {
+        return error(
+            re,
+            ErrorCode::BadRequest,
+            "Notifications through the browser are for the web remote",
+        );
+    };
+    if let Some(sub) = &req.subscribe
+        && let Err(why) = sub.check()
+    {
+        return error(re, ErrorCode::BadRequest, why);
+    }
+    let change = if req.unsubscribe {
+        Some(None)
+    } else {
+        req.subscribe.map(Some)
+    };
+    let mut state = inner.lock();
+    let before = state.registry.has_push(device_id);
+    if let Some(push) = change {
+        state.registry.set_push(device_id, push);
+    }
+    let subscribed = state.registry.has_push(device_id);
+    drop(state);
+    if subscribed != before || (subscribed && req.subscribe.is_some()) {
+        tracing::info!(device_id, subscribed, "phone notifications through the browser");
+        inner.notice(ServerNotice::PushChanged {
+            device_id: device_id.to_string(),
+            on: subscribed,
+        });
+    }
+    ServerEnvelope::reply(
+        re,
+        ServerMessage::WebPush(WebPushState {
+            key: key.to_string(),
+            subscribed,
+            enabled: inner.push_enabled.load(Ordering::Relaxed),
+        }),
+    )
 }
 
 /// Wait for `pair` or `hello`; anything else (or nothing before `deadline`) closes the socket.
@@ -1270,11 +1346,16 @@ async fn authenticate(
         }
 
         let (kick_tx, kick) = oneshot::channel();
-        let (host, features, routes) = (
+        let (host, mut features, routes) = (
             inner.config.host.clone(),
             inner.config.features.clone(),
             inner.lock().routes.clone(),
         );
+        // Notifications through the browser's push service: for the web remote, when the
+        // computer has a key to send them with.
+        if web && push_key(&inner.config).is_some() {
+            features.push(crate::protocol::feature::WEB_PUSH.to_string());
+        }
         // The web remote is told every certificate of the series, to pin the ones it will meet.
         let web_certs = match (&inner.web, web) {
             (Some(w), true) => w.certs().hashes(),
@@ -1330,6 +1411,7 @@ async fn authenticate(
                             device_id,
                             conn_id,
                             kick,
+                            web,
                         })
                     }
                     Err(err) => {
@@ -1368,6 +1450,7 @@ async fn authenticate(
                             device_id,
                             conn_id,
                             kick,
+                            web,
                         })
                     }
                     None => {
@@ -1435,63 +1518,6 @@ impl BadMessage {
     }
 }
 
-const CLIENT_TYPES: &[&str] = &[
-    "pair",
-    "hello",
-    "subscribe",
-    "unsubscribe",
-    "transcript_before",
-    "turn_action",
-    "send",
-    "new_thread",
-    "answer",
-    "interrupt",
-    "mark_seen",
-    "set_prefs",
-    "thread_action",
-    "usage",
-    "basecamp",
-    "notes",
-    "note",
-    "create_note",
-    "save_note",
-    "delete_note",
-    "git_status",
-    "git_diff",
-    "git_commit",
-    "git_push",
-    "git_branches",
-    "git_switch",
-    "worktree_merge",
-    "worktree_remove",
-    "commands",
-    "settings",
-    "set_settings",
-    "ping",
-    "search",
-    "use_reset",
-    "queue_action",
-    "attachment",
-    "background_output",
-    "stop_background",
-    "icon",
-    "note_asset",
-    "add_note_image",
-    "note_file",
-    "machine_info",
-    "clone_project",
-    "put_files",
-    "card_action",
-    "update_phone",
-    "media",
-    "context_card",
-    "turn_preview",
-    "upload_part",
-    "side_chat",
-    "sub_agent",
-    "sub_agent_action",
-];
-
 /// Parse a text frame: its `id` (for the reply's `re`, even when the rest is bad) and message.
 fn parse_client(text: &str) -> (Option<String>, Result<ClientMessage, BadMessage>) {
     let value: serde_json::Value = match serde_json::from_str(text) {
@@ -1532,20 +1558,15 @@ fn parse_client(text: &str) -> (Option<String>, Result<ClientMessage, BadMessage
             }),
         );
     };
-    if !CLIENT_TYPES.contains(&kind.as_str()) {
-        let message = format!("Unknown message type \"{kind}\"");
-        return (
-            re,
-            Err(BadMessage {
-                kind: Some(kind),
-                message,
-            }),
-        );
-    }
     match serde_json::from_value::<ClientEnvelope>(value) {
         Ok(envelope) => (re, Ok(envelope.msg)),
         Err(err) => {
-            let message = format!("Bad \"{kind}\": {err}");
+            // The tag itself unknown, rather than a field of a known message.
+            let message = if err.to_string().starts_with(&format!("unknown variant `{kind}`")) {
+                format!("Unknown message type \"{kind}\"")
+            } else {
+                format!("Bad \"{kind}\": {err}")
+            };
             (
                 re,
                 Err(BadMessage {
@@ -2289,6 +2310,7 @@ async fn session_loop<H: RemoteHost>(
     let Authenticated {
         device_id,
         mut kick,
+        web,
         ..
     } = auth;
     let watchers = &inner.watchers;
@@ -2313,6 +2335,8 @@ async fn session_loop<H: RemoteHost>(
                 match frame {
                     None | Some(Err(_)) | Some(Ok(Message::Close(_))) => return,
                     Some(Ok(Message::Text(text))) => match parse_client(&text) {
+                        // The device's own notifications: kept with its pairing, here.
+                        (re, Ok(ClientMessage::WebPush(req))) => vec![web_push(inner, &device_id, web, re, req)],
                         (re, Ok(msg)) => {
                             tracing::trace!(device_id, kind = msg.kind(), "request");
                             session.on_request(re, msg, &jobs, watchers)
@@ -2370,6 +2394,27 @@ async fn session_loop<H: RemoteHost>(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// Every message the protocol has is read, newer ones too (a list kept by hand once refused
+    /// `rules`, `switch_preview` and `set_viewed`); an unknown type and a bad field say which.
+    #[test]
+    fn every_message_type_is_read_and_unknown_ones_are_named() {
+        for text in [
+            r#"{"type":"rules","id":"1"}"#,
+            r#"{"type":"switch_preview","thread_id":"t1"}"#,
+            r#"{"type":"rule_test","kind":"command","text":"ls"}"#,
+            r#"{"type":"web_push"}"#,
+            r#"{"type":"web_push","unsubscribe":true}"#,
+        ] {
+            let (_, parsed) = parse_client(text);
+            assert!(parsed.is_ok(), "{text}: {:?}", parsed.err().map(|b| b.message));
+        }
+        let (re, bad) = parse_client(r#"{"type":"teleport","id":"9"}"#);
+        assert_eq!(re.as_deref(), Some("9"));
+        assert_eq!(bad.unwrap_err().message, "Unknown message type \"teleport\"");
+        let (_, bad) = parse_client(r#"{"type":"switch_preview"}"#);
+        assert!(bad.unwrap_err().message.starts_with("Bad \"switch_preview\""));
+    }
 
     #[test]
     fn pre_auth_places_are_capped_per_address() {

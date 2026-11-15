@@ -9710,6 +9710,7 @@ dependencies = [
  "futures-util",
  "rand 0.9.5",
  "rcgen",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -281,6 +281,32 @@ pub enum ClientMessage {
     /// Mark a changed file viewed, or not (answered with its folder's status; feature
     /// `diff_viewed`).
     SetViewed(SetViewedRequest),
+    /// The web remote's notifications: this computer's key to subscribe with, and handing over
+    /// (or taking back) the browser's subscription (answered with `web_push`; feature `web_push`).
+    WebPush(WebPushRequest),
+}
+
+/// `web_push`. Neither field: only what's set now.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WebPushRequest {
+    /// Send this device's notifications here from now on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribe: Option<crate::webpush::PushSubscription>,
+    /// Stop sending this device notifications.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsubscribe: bool,
+}
+
+/// The reply to `web_push`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebPushState {
+    /// This computer's public key (VAPID, base64url): `applicationServerKey` for
+    /// `pushManager.subscribe`.
+    pub key: String,
+    /// Whether this device's notifications have somewhere to go.
+    pub subscribed: bool,
+    /// Whether the computer sends phone notifications at all (Settings › Phone & Machines).
+    pub enabled: bool,
 }
 
 impl ClientMessage {
@@ -347,6 +373,7 @@ impl ClientMessage {
             Self::RuleTest(_) => "rule_test",
             Self::AlwaysAllow(_) => "always_allow",
             Self::SetViewed(_) => "set_viewed",
+            Self::WebPush(_) => "web_push",
         }
     }
 }
@@ -703,6 +730,9 @@ pub mod feature {
     pub const SWITCH_PREVIEW: &str = "switch_preview";
     /// `GitStatus::viewed` and `set_viewed`: files marked viewed in review (`viewed.rs`).
     pub const DIFF_VIEWED: &str = "diff_viewed";
+    /// `web_push`: notifications to the web remote through its browser's push service
+    /// (`crate::webpush`). Served over WebTransport alone.
+    pub const WEB_PUSH: &str = "web_push";
 
     /// Every feature above, for a Mac that serves them all.
     pub const ALL: &[&str] = &[
@@ -1128,6 +1158,8 @@ pub enum ServerMessage {
     Rules(RulesList),
     /// The reply to `rule_test`.
     RuleTest(RuleTest),
+    /// The reply to `web_push`.
+    WebPush(WebPushState),
 }
 
 /// The reply to `search`: title matches first (best first), then message matches.

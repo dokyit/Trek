@@ -2906,6 +2906,7 @@ async fn main() -> std::io::Result<()> {
                         }
                         Ok(ServerNotice::Connected { device_id }) => println!("  connected: {device_id}"),
                         Ok(ServerNotice::Disconnected { device_id }) => println!("  disconnected: {device_id}"),
+                        Ok(ServerNotice::PushChanged { device_id, on }) => println!("  notifications {}: {device_id}", if on { "on" } else { "off" }),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(_) => break,
                     },
