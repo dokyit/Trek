@@ -61,6 +61,12 @@ enum Action {
     PluginSwitch(String, bool),
     HandHolding(HandHolding),
     Settle(String),
+    /// Pin the thread, or take its pin off.
+    Pin(String),
+    Rename(String),
+    /// Out of the inbox until tomorrow morning.
+    Snooze(String),
+    MarkUnread(String),
     Fork(String),
     CheckForUpdates,
     /// Help › Send Feedback….
@@ -1216,6 +1222,47 @@ impl CommandPalette {
                 ),
                 "branch copy duplicate conversation",
             );
+            let pinned = t.pinned_at.is_some();
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(if pinned {
+                        crate::assets::Lucide::PinOff
+                    } else {
+                        crate::assets::Lucide::Pin
+                    })),
+                    if pinned { "Unpin thread" } else { "Pin thread" },
+                    Action::Pin(t.id.clone()),
+                ),
+                "favorite keep top",
+            );
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(crate::assets::Lucide::Pencil)),
+                    "Rename thread",
+                    Action::Rename(t.id.clone()),
+                ),
+                "title name",
+            );
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(crate::assets::Lucide::Clock)),
+                    "Snooze thread until tomorrow morning",
+                    Action::Snooze(t.id.clone()),
+                ),
+                "later remind hide wake",
+            );
+            add(
+                Entry::new(
+                    c,
+                    icon(Icon::new(crate::assets::Lucide::CircleDashed)),
+                    "Mark thread unread",
+                    Action::MarkUnread(t.id.clone()),
+                ),
+                "inbox unseen",
+            );
         }
         // Hand-holding applies to the thread on screen, or to the next new thread.
         if ws.ide() || matches!(ws.route, Route::Thread(_) | Route::Draft { .. }) {
@@ -1636,6 +1683,14 @@ impl CommandPalette {
                 }
             }),
             Action::Settle(id) => ws.update(cx, |ws, cx| ws.settle(&id, cx)),
+            Action::Pin(id) => ws.update(cx, |ws, cx| ws.toggle_pin(&id, cx)),
+            Action::Snooze(id) => ws.update(cx, |ws, cx| ws.snooze_until_morning(&id, 1, cx)),
+            Action::MarkUnread(id) => ws.update(cx, |ws, cx| ws.mark_unread(&id, cx)),
+            Action::Rename(id) => {
+                if let Some(title) = ws.read(cx).thread(&id).map(|t| t.title.clone()) {
+                    crate::thread_menu::open_rename_dialog(ws.clone(), id, title, window, cx);
+                }
+            }
             Action::Fork(id) => ws.update(cx, |ws, cx| {
                 let scope = ws.focused_scope();
                 _ = ws.fork_thread(&id, crate::workspace::ForkAt::End, &scope, cx)

@@ -46,6 +46,13 @@ pub struct Facts {
     pub archive_note: Option<String>,
     /// It lives on another machine (`machines`).
     pub remote: bool,
+    /// It's settled, or snoozed till later (a snooze that's run out doesn't count).
+    pub settled: bool,
+    pub snoozed: bool,
+    /// An agent's own session Trek brought in: deleting it leaves the original alone.
+    pub imported: bool,
+    /// What deleting does to its sub-agents (`None`: it has none).
+    pub delete_note: Option<String>,
 }
 
 impl Facts {
@@ -61,6 +68,12 @@ impl Facts {
             in_worktree: t.worktree.is_some() && ws.worktree_owner(&t.id).is_none(),
             archive_note: ws.sub_agents_note(&t.id, "archived"),
             remote: crate::machines::is_remote(&t.id),
+            settled: t.settled_at.is_some(),
+            snoozed: t
+                .snoozed_until
+                .is_some_and(|u| u > trek_core::store::now_ms()),
+            imported: t.source != trek_core::ThreadSource::Trek,
+            delete_note: ws.sub_agents_note(&t.id, "deleted"),
         })
     }
 }
@@ -334,6 +347,138 @@ pub fn archive(ws: &WeakEntity<Workspace>, f: &Facts) -> PopupMenuItem {
     }
 }
 
+/// Settle it, or for a settled one bring it back to the inbox.
+pub fn settle(ws: &WeakEntity<Workspace>, f: &Facts) -> PopupMenuItem {
+    let (ws, id) = (ws.clone(), f.id.clone());
+    if f.settled {
+        entry("thread-unsettle", "Move to inbox", None)
+            .icon(crate::assets::Lucide::Inbox)
+            .on_click(move |_, _, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.unsettle(&id, cx));
+            })
+    } else {
+        entry("thread-settle", "Settle thread", Some(Id::SettleThread))
+            .icon(IconName::Check)
+            .on_click(move |_, _, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.settle(&id, cx));
+            })
+    }
+}
+
+/// The Snooze submenu: out of the inbox until then ("Wake now" for one that's snoozed).
+pub fn snooze_submenu(
+    menu: PopupMenu,
+    ws: &WeakEntity<Workspace>,
+    f: &Facts,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let (ws, id, snoozed) = (ws.clone(), f.id.clone(), f.snoozed);
+    menu.submenu_with_icon(
+        Some(gpui_kit::component::Icon::new(crate::assets::Lucide::Clock)),
+        "Snooze",
+        window,
+        cx,
+        move |menu, _, _| {
+            let item = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
+                let (ws, id) = (ws.clone(), id.clone());
+                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    let _ = ws.update(cx, |ws, cx| f(ws, &id, cx));
+                })
+            };
+            let menu = menu
+                .item(item("For 1 hour", |ws, id, cx| ws.snooze(id, 1, cx)))
+                .item(item("For 3 hours", |ws, id, cx| ws.snooze(id, 3, cx)))
+                .item(item("Until tomorrow morning", |ws, id, cx| {
+                    ws.snooze_until_morning(id, 1, cx)
+                }))
+                .item(item("Until next week", |ws, id, cx| {
+                    ws.snooze_until_morning(id, 7, cx)
+                }));
+            if snoozed {
+                menu.separator()
+                    .item(item("Wake now", |ws, id, cx| ws.unsnooze(id, cx)))
+            } else {
+                menu
+            }
+        },
+    )
+}
+
+/// Pin, settle, snooze, rename, a new title, mark unread: what can be done to a thread's place in
+/// the lists. The same block in the title bar's menu and the sidebar's.
+pub fn state_items(
+    menu: PopupMenu,
+    ws: &WeakEntity<Workspace>,
+    f: &Facts,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let regenerate = {
+        let (ws, id) = (ws.clone(), f.id.clone());
+        entry("thread-regenerate-title", "Regenerate title", None)
+            .icon(crate::assets::Lucide::RefreshCw)
+            .on_click(move |_, _, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.regenerate_title(&id, true, cx));
+            })
+    };
+    let unread = {
+        let (ws, id) = (ws.clone(), f.id.clone());
+        entry("thread-mark-unread", "Mark unread", None)
+            .icon(crate::assets::Lucide::CircleDashed)
+            .on_click(move |_, _, cx| {
+                let _ = ws.update(cx, |ws, cx| ws.mark_unread(&id, cx));
+            })
+    };
+    let menu = menu.item(pin(ws, f)).item(settle(ws, f));
+    snooze_submenu(menu, ws, f, window, cx)
+        .item(rename(ws, f))
+        .item(regenerate)
+        .item(unread)
+}
+
+/// Delete, after asking: a thread in a worktree asks whether its worktree goes too, and one with
+/// sub-agents says they go with it.
+pub fn delete(ws: &WeakEntity<Workspace>, f: &Facts) -> PopupMenuItem {
+    let (ws, id, title) = (ws.clone(), f.id.clone(), f.title.clone());
+    if f.in_worktree {
+        return entry("thread-delete", "Delete…", None)
+            .icon(crate::assets::Lucide::Trash)
+            .on_click(move |_, window, cx| {
+                if let Some(ws) = ws.upgrade() {
+                    crate::worktree_ui::confirm_leave(ws, id.clone(), Leave::Delete, window, cx);
+                }
+            });
+    }
+    let (imported, note) = (f.imported, f.delete_note.clone());
+    entry("thread-delete", "Delete…", None)
+        .icon(crate::assets::Lucide::Trash)
+        .on_click(move |_, window, cx| {
+            let (ws, id, title, note) = (ws.clone(), id.clone(), title.clone(), note.clone());
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let (ws, id) = (ws.clone(), id.clone());
+                let base = if imported {
+                    "It leaves Trek for good. The original stays in the agent's own history."
+                } else {
+                    "The thread and its transcript are deleted from Trek. This can't be undone."
+                };
+                alert
+                    .title(format!("Delete “{title}”?"))
+                    .description(match &note {
+                        Some(note) => format!("{base} {note}"),
+                        None => base.to_string(),
+                    })
+                    .confirm()
+                    .ok_text("Delete")
+                    .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                    .on_ok(move |_, _, cx| {
+                        let _ = ws.update(cx, |ws, cx| ws.delete_thread(&id, cx));
+                        true
+                    })
+            });
+        })
+}
+
 /// The Copy submenu.
 pub fn copy_submenu(
     menu: PopupMenu,
@@ -581,11 +726,8 @@ fn build(
                 }),
         );
     }
-    menu.separator()
-        .item(fork(weak, &f.id))
-        .item(rename(weak, &f))
-        .item(pin(weak, &f))
-        .item(archive(weak, &f))
+    let menu = state_items(menu.separator().item(fork(weak, &f.id)), weak, &f, window, cx);
+    menu.separator().item(archive(weak, &f)).item(delete(weak, &f))
 }
 
 /// A machine's reachability dot as a menu icon, so it sits in the icons' column: green while

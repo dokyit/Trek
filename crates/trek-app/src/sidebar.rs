@@ -18,12 +18,11 @@ use crate::scale::{radius, text, to_rems};
 use crate::time;
 use crate::ui;
 use crate::workspace::attention::Why;
-use crate::workspace::{ItemRef, Route, SettingsPage, UpdateStatus, Workspace};
-use crate::worktree_ui::Leave;
+use crate::workspace::{ItemRef, Route, SettingsPage, UpdateStatus, Workspace, WorkspaceEvent};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
@@ -36,13 +35,12 @@ use gpui_kit::*;
 use look::{Mark, TEXT_INSET};
 use std::collections::{HashMap, HashSet};
 use trek_core::store::{SearchHit, Section, Thread};
-use trek_core::{RunState, ThreadSource};
+use trek_core::RunState;
 
 pub struct Sidebar {
     workspace: Entity<Workspace>,
     search: Entity<InputState>,
     project_search: Entity<InputState>,
-    clone_input: Entity<InputState>,
     /// The window is frontmost; spinners hold still when it isn't.
     active: bool,
     open_projects: HashSet<String>,
@@ -52,6 +50,8 @@ pub struct Sidebar {
     /// Live and settled project groups the user folded away (session state, like the open sets).
     collapsed_live: HashSet<String>,
     collapsed_settled: HashSet<String>,
+    /// The Archived list at the foot is open (session state).
+    archived_open: bool,
     filter_open: bool,
     usage_open: bool,
     /// The Usage card lists every provider to pick the ones it shows.
@@ -171,7 +171,6 @@ impl Sidebar {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let project_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search projects…"));
-        let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
         let subscriptions = vec![
             cx.observe(&workspace, |this, _, cx| {
                 this.sync_clock(cx);
@@ -201,12 +200,12 @@ impl Sidebar {
             workspace,
             search,
             project_search,
-            clone_input,
             active: window.is_window_active(),
             open_projects: Default::default(),
             open_live_projects: Default::default(),
             collapsed_live: Default::default(),
             collapsed_settled: Default::default(),
+            archived_open: false,
             filter_open: false,
             // TREK_OPEN_USAGE=1 opens the Usage card at launch, for design review.
             usage_open: std::env::var_os("TREK_OPEN_USAGE").is_some(),
@@ -230,6 +229,72 @@ impl Sidebar {
         };
         this.sync_clock(cx);
         this
+    }
+
+    /// While the list is narrowed to one project (or to the chats with none), a line that says so
+    /// and lets go of it.
+    fn filter_note(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ws = self.workspace.read(cx);
+        let filter = ws.project_filter.clone()?;
+        let name = if filter == crate::workspace::NO_PROJECT {
+            "chats without a project".to_string()
+        } else {
+            ws.project(&filter)?.name.clone()
+        };
+        let theme = cx.theme().clone();
+        Some(
+            h_flex()
+                .id("filter-note")
+                .test_support()
+                .mx_2()
+                .mb_1()
+                .pl(px(ROW_INSET))
+                .pr(px(4.))
+                .h(px(24.))
+                .gap(px(4.))
+                .rounded(px(fluent::control(look::ROW_RADIUS)))
+                .bg(theme.foreground.opacity(0.05))
+                .text_size(px(look::META_SIZE))
+                .text_color(theme.muted_foreground)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("Only {name}")),
+                )
+                .child(
+                    ui::icon_button("filter-clear", IconName::Close, "Show every project")
+                        .xsmall()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.project_filter = None;
+                                cx.notify();
+                            });
+                            this.thaw(cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Clear the search and give the keys back to the main area.
+    fn end_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.search.read(cx).value().is_empty() {
+            self.search
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            // Setting the text isn't a change the field reports.
+            self.workspace
+                .update(cx, |ws, cx| ws.set_search(String::new(), cx));
+        }
+        self.workspace
+            .update(cx, |_, cx| cx.emit(WorkspaceEvent::FocusComposer));
+    }
+
+    /// Put the keys in the search field, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// The pointer came onto the sidebar or left it. Leaving shows what changed while it was there.
@@ -327,7 +392,8 @@ impl Sidebar {
                         PopupMenuItem::new("Clone from GitHub…")
                             .icon(IconName::Github)
                             .on_click(move |_, window, cx| {
-                                sb.update(cx, |s, cx| s.open_clone_dialog(window, cx))
+                                let ws = sb.read(cx).workspace.clone();
+                                crate::clone_dialog::open(ws, window, cx)
                             }),
                     )
                     .separator()
@@ -421,13 +487,26 @@ impl Sidebar {
                     .pb_2()
                     .gap(px(2.))
                     .child(
-                        div().flex_1().min_w_0().child(
-                            Input::new(&self.search).small().appearance(false).prefix(
-                                Icon::new(IconName::Search)
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            // Escape ends a search: the text goes and the keys go back to the
+                            // composer (or whatever the main area takes them with).
+                            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                                cx.stop_propagation();
+                                this.end_search(window, cx);
+                            }))
+                            .child(
+                                Input::new(&self.search)
                                     .small()
-                                    .text_color(theme.muted_foreground),
+                                    .appearance(false)
+                                    .cleanable(true)
+                                    .prefix(
+                                        Icon::new(IconName::Search)
+                                            .small()
+                                            .text_color(theme.muted_foreground),
+                                    ),
                             ),
-                        ),
                     )
                     .child(filter)
                     .child(add)
@@ -615,45 +694,6 @@ impl Sidebar {
                     })),
             )
             .into_any_element()
-    }
-
-    fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self.clone_input.clone();
-        let ws = self.workspace.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let input2 = input.clone();
-            let ws = ws.clone();
-            dialog
-                .title("Clone from GitHub")
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child("Uses your GitHub CLI login. Clones into ~/Developer.")
-                        .child(Input::new(&input)),
-                )
-                .footer(
-                    gpui_kit::component::dialog::DialogFooter::new()
-                        .gap_2()
-                        .child(
-                            gpui_kit::component::dialog::DialogClose::new().child(
-                                gpui_kit::component::button::Button::new("cancel-clone")
-                                    .outline()
-                                    .label("Cancel"),
-                            ),
-                        )
-                        .child(
-                            gpui_kit::component::dialog::DialogAction::new().child(
-                                gpui_kit::component::button::Button::new("do-clone")
-                                    .primary()
-                                    .label("Clone")
-                                    .on_click(move |_, _, cx| {
-                                        let spec = input2.read(cx).value().to_string();
-                                        ws.update(cx, |ws, cx| ws.clone_repo(spec, cx));
-                                    }),
-                            ),
-                        ),
-                )
-        });
     }
 
     /// Why a thread is in the Inbox, for its row's second line: the words its alert used, in its
@@ -852,6 +892,12 @@ impl Sidebar {
 
     /// Open a thread from the list; a thread found by its messages opens at the match.
     fn open(&mut self, id: String, hit: Option<SearchHit>, cx: &mut Context<Self>) {
+        // A thread with a window of its own: that window comes forward, rather than the thread
+        // opening a second time in this one.
+        if hit.is_none() && self.workspace.read(cx).thread_windows.contains_key(&id) {
+            crate::thread_window::open(self.workspace.clone(), &id, cx);
+            return;
+        }
         self.workspace
             .update(cx, |ws, cx| match hit.as_ref().and_then(ItemRef::of_hit) {
                 Some(at) => ws.open_thread_at(&id, at, cx),
@@ -1562,13 +1608,7 @@ impl Sidebar {
         use crate::thread_menu;
         let ws = self.workspace.downgrade();
         let tid = t.id.clone();
-        let title = t.title.clone();
-        let settled = t.settled_at.is_some();
-        let snoozed = t
-            .snoozed_until
-            .is_some_and(|u| u > trek_core::store::now_ms());
         let never_settle = t.never_settle;
-        let imported = t.source != ThreadSource::Trek;
         let project = t.project_id.clone().and_then(|pid| {
             self.workspace
                 .read(cx)
@@ -1583,40 +1623,14 @@ impl Sidebar {
             else {
                 return menu;
             };
-            let item = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
-                let ws = ws.clone();
-                let tid = tid.clone();
-                PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                    let _ = ws.update(cx, |ws, cx| f(ws, &tid, cx));
-                })
-            };
-            let mut menu = menu
+            let menu = menu
                 .min_w(px(210.))
                 .item(thread_menu::open_in_new_window(&ws, &tid))
                 .item(thread_menu::open_beside(&ws, &tid))
                 .item(thread_menu::fork(&ws, &tid))
-                .separator()
-                .item(thread_menu::pin(&ws, &f))
-                .item(if settled { item("Move to inbox", |ws, id, cx| ws.unsettle(id, cx)) } else { item("Settle thread", |ws, id, cx| ws.settle(id, cx)) });
-            menu = menu.submenu("Snooze", window, cx, {
-                let (ws, tid) = (ws.clone(), tid.clone());
-                move |menu, _, _| {
-                    let snooze = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
-                        let (ws, tid) = (ws.clone(), tid.clone());
-                        PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                            let _ = ws.update(cx, |ws, cx| f(ws, &tid, cx));
-                        })
-                    };
-                    let menu = menu
-                        .item(snooze("For 1 hour", |ws, id, cx| ws.snooze(id, 1, cx)))
-                        .item(snooze("For 3 hours", |ws, id, cx| ws.snooze(id, 3, cx)))
-                        .item(snooze("Until tomorrow morning", |ws, id, cx| ws.snooze_until_morning(id, 1, cx)))
-                        .item(snooze("Until next week", |ws, id, cx| ws.snooze_until_morning(id, 7, cx)));
-                    if snoozed { menu.separator().item(snooze("Wake now", |ws, id, cx| ws.unsnooze(id, cx))) } else { menu }
-                }
-            });
-            menu = menu.separator().item(thread_menu::rename(&ws, &f));
-            menu = menu.item(item("Regenerate title", |ws, id, cx| ws.regenerate_title(id, true, cx))).item(item("Mark unread", |ws, id, cx| ws.mark_unread(id, cx)));
+                .separator();
+            // The same block as the title bar's menu: pin, settle, snooze, rename, mark unread.
+            let mut menu = thread_menu::state_items(menu, &ws, &f, window, cx);
             if let Some((pid, name)) = project.clone() {
                 let ws = ws.clone();
                 menu = menu.item(PopupMenuItem::new(format!("Filter by {name}")).on_click(move |_, _, cx| {
@@ -1651,45 +1665,7 @@ impl Sidebar {
                     let _ = ws.update(cx, |ws, cx| ws.open_project_settings(Some(pid), cx));
                 }));
             }
-            menu = menu.separator().item(thread_menu::archive(&ws, &f));
-            // A thread in a worktree asks whether its worktree goes too.
-            if f.in_worktree {
-                let (ws, tid) = (ws.clone(), tid.clone());
-                return menu.item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click(move |_, window, cx| {
-                    if let Some(ws) = ws.upgrade() {
-                        crate::worktree_ui::confirm_leave(ws, tid.clone(), Leave::Delete, window, cx);
-                    }
-                }));
-            }
-            // A thread with sub-agents says they go with it.
-            let delete_note = ws.upgrade().and_then(|ws| ws.read(cx).sub_agents_note(&tid, "deleted"));
-            menu.item(PopupMenuItem::new("Delete…").icon(crate::assets::Lucide::Trash).on_click({
-                let (ws, tid, title) = (ws.clone(), tid.clone(), title.clone());
-                move |_, window, cx| {
-                    let (ws, tid, title, delete_note) = (ws.clone(), tid.clone(), title.clone(), delete_note.clone());
-                    window.open_alert_dialog(cx, move |alert, _, _| {
-                        let (ws, tid) = (ws.clone(), tid.clone());
-                        let base = if imported {
-                            "It leaves Trek for good. The original stays in the agent's own history."
-                        } else {
-                            "The thread and its transcript are deleted from Trek. This can't be undone."
-                        };
-                        alert
-                            .title(format!("Delete “{title}”?"))
-                            .description(match &delete_note {
-                                Some(note) => format!("{base} {note}"),
-                                None => base.to_string(),
-                            })
-                            .confirm()
-                            .ok_text("Delete")
-                            .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
-                            .on_ok(move |_, _, cx| {
-                                let _ = ws.update(cx, |ws, cx| ws.delete_thread(&tid, cx));
-                                true
-                            })
-                    });
-                }
-            }))
+            menu.separator().item(thread_menu::archive(&ws, &f)).item(thread_menu::delete(&ws, &f))
         })
     }
 
@@ -1729,7 +1705,7 @@ impl Sidebar {
                         let (ws, id) = (ws.clone(), id.clone());
                         alert
                             .title(format!("Remove “{name}” from Trek?"))
-                            .description("Its threads are archived and it leaves the sidebar. Files on disk and your agents' own history are not touched.")
+                            .description("Its threads are archived (the sidebar's Archived list brings them back) and it leaves the sidebar. Files on disk and your agents' own history are not touched.")
                             .confirm()
                             .ok_text("Remove project")
                             .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
@@ -1826,6 +1802,121 @@ impl Sidebar {
                     cx.notify();
                 })
             }))
+    }
+
+    /// The Archived row under Settled: what the user archived, to bring back. How many sit in the
+    /// right-hand column.
+    fn archived_row(&self, count: usize, open: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .id("archived-toggle")
+            .test_support()
+            .mx_2()
+            .px(px(ROW_INSET))
+            .h(px(look::LINE_H))
+            .gap(px(look::MARK_GAP))
+            .rounded(px(fluent::control(look::ROW_RADIUS)))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.list_hover))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .w(px(look::MARK_W))
+                    .h(px(look::MARK_H))
+                    .justify_center()
+                    .child(
+                        Icon::new(crate::assets::Lucide::Undo2)
+                            .size(px(14.))
+                            .text_color(theme.muted_foreground),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(look::TITLE_SIZE))
+                            .text_color(theme.muted_foreground)
+                            .child("Archived"),
+                    )
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                    ),
+            )
+            .child(look::trailing(
+                Some("archived-count".into()),
+                count.to_string(),
+                theme.muted_foreground,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.archived_open = !this.archived_open;
+                cx.notify();
+            }))
+    }
+
+    /// An archived thread: its title, and when it was archived at the right, which the pointer
+    /// turns into "Restore". A click brings it back and opens it.
+    fn archived_line(&self, t: &Thread, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let id = t.id.clone();
+        let group = SharedString::from(format!("archived-group-{}", t.id));
+        h_flex()
+            .id(SharedString::from(format!("archived-{}", t.id)))
+            .test_support()
+            .group(group.clone())
+            .relative()
+            .mx_2()
+            .px(px(ROW_INSET))
+            .h(px(look::LINE_H))
+            .gap(px(look::MARK_GAP))
+            .rounded(px(fluent::control(look::ROW_RADIUS)))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.list_hover))
+            .text_size(px(look::TITLE_SIZE))
+            .child(div().flex_none().w(px(look::MARK_W)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.foreground.opacity(look::SETTLED))
+                    .child(t.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(look::LABEL_SIZE))
+                    .text_color(theme.muted_foreground.opacity(0.8))
+                    .group_hover(group.clone(), |s| s.invisible())
+                    .child(time::relative(t.archived_at.unwrap_or(t.updated_at))),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(ROW_INSET))
+                    .flex()
+                    .items_center()
+                    .invisible()
+                    .group_hover(group, |s| s.visible())
+                    .text_size(px(look::LABEL_SIZE))
+                    .text_color(theme.foreground)
+                    .child("Restore"),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.workspace
+                    .update(cx, |ws, cx| ws.restore_archived(&id, cx))
+            }))
+            .into_any_element()
     }
 
     fn footer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2825,6 +2916,7 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-support", feature = "shots"))]
         crate::test_support::rendered("Sidebar");
+        let filter_note = self.filter_note(cx);
         let ws = self.workspace.read(cx);
         self.graph = Graph {
             parents: ws
@@ -2954,7 +3046,7 @@ impl Render for Sidebar {
         };
 
         // Air at the end is the history's (under Settled), so the gap above Settled is a section's.
-        let mut list = v_flex().pt_1();
+        let mut list = v_flex().pt_1().children(filter_note);
         // Every live thread is in its project (Study's sessions in Study), at a line's height:
         // pinned ones first, what's at work, then the quiet rest capped at three (an unread row
         // and the open one stay out). A project counts the threads it has in the Inbox too.
@@ -2974,6 +3066,23 @@ impl Render for Sidebar {
                     groups.len() - 1
                 });
                 groups[ix].2.push(t);
+            }
+            // A folder the user added has its header from the start, with or without threads: one
+            // just added, or whose threads are all settled, is still in the list, with its menu
+            // and "New thread here". (Folders only found in the agents' histories wait for a
+            // live thread.)
+            if !searching {
+                for p in ws.workspace_projects() {
+                    let added = ws
+                        .settings
+                        .user_projects
+                        .iter()
+                        .any(|u| std::path::Path::new(u) == p.path);
+                    let kept = ws.project_filter.as_deref().is_none_or(|f| f == p.id);
+                    if added && kept && !groups.iter().any(|g| g.0 == p.id) {
+                        groups.push((p.id.clone(), p.name.clone(), vec![]));
+                    }
+                }
             }
             // Groups with something to say first, then unread, then their newest activity.
             groups.sort_by(|a, b| {
@@ -3107,6 +3216,8 @@ impl Render for Sidebar {
         };
         self.shown = Some(layout.clone());
         let live_shown = !layout.is_empty();
+        // A project with no thread to list (just added) has its header and no rows.
+        let rows_shown = layout.iter().any(|g| !g.rows.is_empty());
         // Live rows whose thread went from every list drawn (archived, deleted; settled with the
         // history folded) fade where they were.
         if animate && let Some(before) = before {
@@ -3162,9 +3273,10 @@ impl Render for Sidebar {
         let mut last_rows: HashMap<String, (Thread, String, bool)> = HashMap::new();
         // Each group's header and rows move as one (`flip_stack`).
         let mut live_groups: Vec<(SharedString, AnyElement)> = vec![];
+        // Chats with no project sit among them but aren't one: the count leaves them out.
         let projects_shown = layout
             .iter()
-            .filter(|g| ![INBOX, STUDY].contains(&g.pid.as_str()))
+            .filter(|g| ![INBOX, STUDY, ""].contains(&g.pid.as_str()))
             .count();
         let mut first_project = true;
         for g in layout {
@@ -3175,7 +3287,8 @@ impl Render for Sidebar {
             if is_project && first_project {
                 live_groups.push((
                     PROJECTS_LABEL.into(),
-                    look::section_label("Projects", Some(projects_shown), cx).into_any_element(),
+                    look::section_label("Projects", Some(projects_shown).filter(|n| *n > 0), cx)
+                        .into_any_element(),
                 ));
                 first_project = false;
             }
@@ -3337,22 +3450,32 @@ impl Render for Sidebar {
                     .into_any_element(),
             ));
         }
+        // Nothing live: the list says so, quietly, on the titles' line, where the Inbox would be
+        // (above the projects, which may be there with no threads in them).
+        if !rows_shown && !searching {
+            let filtered = self.workspace.read(cx).project_filter.is_some();
+            list = list.child(if filtered {
+                look::empty_note(
+                    "filter-empty",
+                    "Nothing here yet",
+                    "Threads that start in this project will show up here.",
+                    cx,
+                )
+            } else {
+                look::empty_note(
+                    "inbox-zero",
+                    if importing {
+                        "Finding your threads…"
+                    } else {
+                        "Inbox zero"
+                    },
+                    "Running agents and anything that needs you will show up here.",
+                    cx,
+                )
+            });
+        }
         list = list.child(crate::motion::flip_stack(&flip, live_groups, now));
         self.last_rows = last_rows;
-        // Nothing live: the list says so, quietly, on the titles' line (before the devices, whose
-        // threads live elsewhere).
-        if !live_shown && !searching {
-            list = list.child(look::empty_note(
-                "inbox-zero",
-                if importing {
-                    "Finding your threads…"
-                } else {
-                    "Inbox zero"
-                },
-                "Running agents and anything that needs you will show up here.",
-                cx,
-            ));
-        }
         // Threads living on other machines, under each machine's name (`machines`), as a project's
         // are under its own: what's at work there with its clock, the quiet rest capped at three,
         // what needs the user in the Inbox. One that can't be reached says since when, and why when
@@ -3643,6 +3766,38 @@ impl Render for Sidebar {
                         .push((format!("settled-g-{pid}").into(), group.into_any_element()));
                 }
                 history = history.child(crate::motion::flip_stack(&flip, settled_groups, now));
+            }
+        }
+        // What the user archived, after Settled, to bring back. Out of a search, which doesn't
+        // look there.
+        let archived: Vec<Thread> = if searching {
+            vec![]
+        } else {
+            self.workspace.read(cx).archived.clone()
+        };
+        if !archived.is_empty() {
+            history = history.child(crate::motion::flip_row(
+                &flip,
+                "archived-toggle",
+                div()
+                    .when(settled_count == 0, |el| {
+                        el.pt(px(look::SECTION_GAP - look::GROUP_GAP))
+                    })
+                    .pb(px(look::GROUP_GAP))
+                    .child(self.archived_row(archived.len(), self.archived_open, cx)),
+                now,
+                window,
+            ));
+            if self.archived_open {
+                for t in &archived {
+                    history = history.child(crate::motion::flip_row(
+                        &flip,
+                        format!("archived-{}", t.id),
+                        self.archived_line(t, cx),
+                        now,
+                        window,
+                    ));
+                }
             }
         }
         // A search that finds nothing says so, in place of an empty list.

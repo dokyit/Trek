@@ -14,6 +14,7 @@ pub use trek_brand as brand;
 pub mod budget;
 pub mod changes_card;
 pub mod chrome;
+pub mod clone_dialog;
 pub mod command_palette;
 pub mod composer;
 pub mod context_popover;

@@ -77,6 +77,8 @@ use trek_core::{AgentId, Effort, HandHolding, RunState, ThreadSource};
 
 /// The project filter that keeps the threads without a project.
 pub const NO_PROJECT: &str = "";
+/// How many archived threads the sidebar's Archived list can show.
+pub const ARCHIVED_SHOWN: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Route {
@@ -1746,6 +1748,12 @@ pub enum WorkspaceEvent {
 pub enum UndoAction {
     Unsettle(String),
     Unarchive(String),
+    /// Put a thread's snooze and its settling back as they were before it was snoozed.
+    Unsnooze {
+        thread: String,
+        snoozed_until: Option<i64>,
+        settled_at: Option<i64>,
+    },
     /// Put a follow-up removed from the queue back where it was.
     Requeue {
         thread: String,
@@ -2087,6 +2095,9 @@ pub struct Workspace {
     /// Counts the changes to `threads` (one added, gone, or changed through `mutate_thread`):
     /// what's built from all of them is built again only when this has moved.
     pub threads_gen: u64,
+    /// What the sidebar's Archived list shows: the threads the user archived, newest first (up to
+    /// `ARCHIVED_SHOWN`). Read again when something is archived or brought back.
+    pub archived: Vec<Thread>,
     /// When Devin was last asked for its plan and quota (`refresh_devin_usage`).
     devin_status_at: i64,
     /// Devin's plan and quota are being read.
@@ -2608,6 +2619,7 @@ impl Workspace {
             agent_commands: HashMap::new(),
             status_fetched_at: 0,
             threads_gen: 0,
+            archived: vec![],
             devin_status_at: 0,
             devin_loading: false,
             acp_info: HashMap::new(),
@@ -2747,8 +2759,17 @@ impl Workspace {
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.threads = self.store.threads().unwrap_or_default();
         self.threads_gen += 1;
+        self.refresh_archived();
         self.projects = self.store.projects().unwrap_or_default();
         cx.notify();
+    }
+
+    /// Read the Archived list again.
+    fn refresh_archived(&mut self) {
+        self.archived = self
+            .store
+            .archived_threads(ARCHIVED_SHOWN)
+            .unwrap_or_default();
     }
 
     /// Show a session the import left out after all; later imports leave it in the sidebar.
@@ -8767,18 +8788,8 @@ impl Workspace {
 
     /// Out of the inbox until then; when it wakes it's back in the inbox, settled or not before.
     pub fn snooze(&mut self, id: &str, hours: i64, cx: &mut Context<Self>) {
-        if self.machine_refuses(id, cx) {
-            return;
-        }
-        self.mutate_thread(id, cx, |t| {
-            t.snoozed_until = Some(now_ms() + hours * 3_600_000);
-            t.settled_at = None;
-            t.branch = None;
-        });
-        cx.emit(WorkspaceEvent::Toast {
-            message: format!("Snoozed for {hours} h"),
-            undo: None,
-        });
+        let said = format!("Snoozed for {hours} h");
+        self.snooze_at(id, now_ms() + hours * 3_600_000, Some(said), cx);
     }
 
     /// Wake it now, as if its snooze had just run out: auto-settle gives it the full wait again.
@@ -8856,6 +8867,7 @@ impl Workspace {
         self.chats_moved();
         self.threads.retain(|t| t.archived_at.is_none());
         self.threads_gen += 1;
+        self.refresh_archived();
         if matches!(&self.route, Route::Thread(open) if sub_agents.contains(open)) {
             self.new_thread(cx);
         }
@@ -8863,6 +8875,39 @@ impl Workspace {
             message: "Archived".into(),
             undo: Some(UndoAction::Unarchive(id.into())),
         });
+    }
+
+    /// Bring an archived thread back into the lists (with its sub-agents), and its project when
+    /// that was taken out of Trek since.
+    pub fn unarchive(&mut self, id: &str, cx: &mut Context<Self>) {
+        let _ = self.store.update_thread(id, |t| t.archived_at = None);
+        self.unarchive_children(id);
+        let project = self
+            .store
+            .thread(id)
+            .ok()
+            .flatten()
+            .and_then(|t| t.project_id)
+            .and_then(|pid| self.store.projects().ok()?.into_iter().find(|p| p.id == pid));
+        if let Some(project) = project {
+            let key = project.path.display().to_string();
+            if self.settings.hidden_projects.contains(&key) {
+                self.settings.hidden_projects.retain(|h| *h != key);
+                if !self.settings.user_projects.contains(&key) {
+                    self.settings.user_projects.push(key);
+                }
+                self.save_settings(cx);
+            }
+        }
+        self.reload(cx);
+    }
+
+    /// The Archived list's row: the thread comes back and opens.
+    pub fn restore_archived(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.unarchive(id, cx);
+        if self.thread(id).is_some() {
+            self.navigate(Route::Thread(id.to_string()), cx);
+        }
     }
 
     pub fn rename(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
@@ -8883,23 +8928,48 @@ impl Workspace {
         self.snooze_until(id, at.timestamp_millis(), cx);
     }
 
-    /// Snooze until `at` (ms), as `snooze` does.
+    /// Snooze until `at` (ms), as `snooze` does. The toast says until when, and its Undo puts the
+    /// thread back as it was (a settled thread is un-settled by snoozing, and says so).
     pub fn snooze_until(&mut self, id: &str, at: i64, cx: &mut Context<Self>) {
+        self.snooze_at(id, at, None, cx);
+    }
+
+    /// `snooze_until`, with what the toast says (none: until when).
+    fn snooze_at(&mut self, id: &str, at: i64, said: Option<String>, cx: &mut Context<Self>) {
+        if self.machine_refuses(id, cx) {
+            return;
+        }
+        let Some(before) = self
+            .thread(id)
+            .map(|t| (t.snoozed_until, t.settled_at))
+        else {
+            return;
+        };
         self.mutate_thread(id, cx, |t| {
             t.snoozed_until = Some(at);
             t.settled_at = None;
             t.branch = None;
         });
         let when = chrono::DateTime::from_timestamp_millis(at)
+            .map(|t| t.with_timezone(&chrono::Local))
             .map(|t| {
-                t.with_timezone(&chrono::Local)
-                    .format("%a %-I:%M %p")
+                let today = t.date_naive() == chrono::Local::now().date_naive();
+                t.format(if today { "%-I:%M %p" } else { "%a %-I:%M %p" })
                     .to_string()
             })
             .unwrap_or_default();
+        let said = said.unwrap_or_else(|| format!("Snoozed until {when}"));
+        let message = match before.1 {
+            Some(_) => format!("{said}. It's out of Settled."),
+            None => said,
+        };
         cx.emit(WorkspaceEvent::Toast {
-            message: format!("Snoozed until {when}"),
-            undo: None,
+            message,
+            undo: Some(UndoAction::Unsnooze {
+                thread: id.to_string(),
+                snoozed_until: before.0,
+                settled_at: before.1,
+            }),
         });
     }
 
@@ -9213,17 +9283,21 @@ impl Workspace {
     pub fn undo(&mut self, action: UndoAction, cx: &mut Context<Self>) {
         match action {
             UndoAction::Unsettle(id) => self.unsettle(&id, cx),
+            UndoAction::Unsnooze {
+                thread,
+                snoozed_until,
+                settled_at,
+            } => self.mutate_thread(&thread, cx, |t| {
+                t.snoozed_until = snoozed_until;
+                t.settled_at = settled_at;
+            }),
             UndoAction::Requeue {
                 thread,
                 ix,
                 text,
                 images,
             } => self.queue_put(&thread, ix, text, images, cx),
-            UndoAction::Unarchive(id) => {
-                let _ = self.store.update_thread(&id, |t| t.archived_at = None);
-                self.unarchive_children(&id);
-                self.reload(cx);
-            }
+            UndoAction::Unarchive(id) => self.unarchive(&id, cx),
             // Not under a running turn: the agent's edits since would be lost under it.
             UndoAction::Unrestore { thread, .. } if self.turn_running(&thread) => {
                 cx.emit(WorkspaceEvent::Toast {
@@ -9548,10 +9622,26 @@ impl Workspace {
             .unwrap_or("repo")
             .to_string();
         let dest = trek_core::paths::home().join("Developer").join(&name);
+        // Cloned before: it's there already, so it opens as it is rather than failing.
+        if dest.join(".git").exists() {
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("{name} is already in ~/Developer. Opened it."),
+                undo: None,
+            });
+            return self.add_project(dest, cx);
+        }
+        if dest.exists() {
+            cx.emit(WorkspaceEvent::Toast {
+                message: format!("~/Developer/{name} is already there and isn't a Git folder."),
+                undo: None,
+            });
+            return;
+        }
         cx.emit(WorkspaceEvent::Toast {
-            message: format!("Cloning {spec}…"),
+            message: format!("Cloning {spec} into ~/Developer. It opens when it's done."),
             undo: None,
         });
+        let spec_shown = spec.clone();
         let task = cx.spawn(async move |this, cx| {
             let dest2 = dest.clone();
             let result = cx
@@ -9586,9 +9676,15 @@ impl Workspace {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => this.add_project(dest, cx),
+                Ok(()) => {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message: format!("Cloned {name}"),
+                        undo: None,
+                    });
+                    this.add_project(dest, cx)
+                }
                 Err(e) => cx.emit(WorkspaceEvent::Toast {
-                    message: format!("Clone failed: {e}"),
+                    message: format!("Couldn't clone {spec_shown}: {}", clone_failure(&e)),
                     undo: None,
                 }),
             });
@@ -11270,6 +11366,27 @@ fn shown_in(id: &str, main: Option<Scope>, own_window: bool, main_open: bool) ->
     }
 }
 
+/// What a failed clone says: the last line of what git or gh wrote (it names the cause), without
+/// its "fatal:", and for a repository it couldn't see, what to check.
+fn clone_failure(stderr: &str) -> String {
+    let last = stderr
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|l| !l.is_empty())
+        .unwrap_or("it didn't say why");
+    let last = last
+        .trim_start_matches("fatal: ")
+        .trim_start_matches("error: ");
+    let lower = last.to_lowercase();
+    if lower.contains("not found") || lower.contains("could not read username") {
+        "check the name, and that you can see it (for a private one, sign in with gh auth login)"
+            .to_string()
+    } else {
+        last.to_string()
+    }
+}
+
 /// Drop `id`'s window from the registry if it's still `handle` (a newer window for the same
 /// thread may have replaced it). Returns whether anything changed.
 fn forget_window<W: PartialEq>(windows: &mut HashMap<String, W>, id: &str, handle: W) -> bool {
@@ -11625,6 +11742,19 @@ pub fn settles_on_merge(t: &Thread, now: i64) -> bool {
 mod tests {
     use super::*;
     use trek_agents::Question;
+
+    #[test]
+    fn a_failed_clone_says_why_in_a_line() {
+        assert_eq!(
+            clone_failure("Cloning into 'x'...\nremote: Repository not found.\nfatal: repository 'https://github.com/a/x.git/' not found\n"),
+            "check the name, and that you can see it (for a private one, sign in with gh auth login)"
+        );
+        assert_eq!(
+            clone_failure("fatal: unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com\n"),
+            "unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com"
+        );
+        assert_eq!(clone_failure(""), "it didn't say why");
+    }
 
     fn q(text: &str, secret: bool) -> Question {
         Question {

@@ -15,14 +15,13 @@ use crate::workspace::permission_requests::ReplyNote;
 use crate::workspace::{Route, Scope, Workspace, WorkspaceEvent};
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MoveUp, Textarea,
-    TextareaState,
+    Enter, Escape, IndentInline, InputEvent, MoveDown, MoveUp, Textarea, TextareaState,
 };
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
-    WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -49,7 +48,6 @@ pub struct Composer {
     /// The main window's composer follows its route; a thread window's is bound to one thread.
     scope: Scope,
     input: Entity<TextareaState>,
-    clone_input: Entity<InputState>,
     /// The model and access menus, and the `/`, `@` and `$` picker (shared with the editor's AI
     /// input, `pickers`).
     pickers: Pickers,
@@ -307,7 +305,6 @@ impl Composer {
                 .placeholder(placeholder(None, Prompt::Plain).to_string())
         });
         let pickers = Pickers::new(window, cx);
-        let clone_input = cx.new(|cx| InputState::new(window, cx).placeholder("owner/repo or URL"));
         let subscriptions = vec![
             cx.subscribe_in(
                 &input,
@@ -416,7 +413,6 @@ impl Composer {
             workspace,
             scope,
             input,
-            clone_input,
             pickers,
             outbox: Outbox::default(),
             snapshotting: false,
@@ -2793,7 +2789,11 @@ impl Composer {
     /// Enter reaches us before the textarea: it picks a row while a picker is open, and sends on
     /// ⌘↩ in "send with ⌘↩" mode (the textarea would otherwise insert a newline first).
     fn on_enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pickers.trigger.is_some() && !action.shift && !action.secondary {
+        // The model menu open takes ↩ too, when its search has the keyboard (`pickers::model_key`).
+        if (self.pickers.trigger.is_some() || self.pickers.model_open)
+            && !action.shift
+            && !action.secondary
+        {
             self.picker_action("enter", window, cx);
         } else if self.cmd_enter && action.secondary && !action.shift {
             cx.stop_propagation();
@@ -3820,7 +3820,8 @@ impl Composer {
                     PopupMenuItem::new("Clone from GitHub…")
                         .icon(IconName::Github)
                         .on_click(move |_, window, cx| {
-                            c.update(cx, |c, cx| c.open_clone_dialog(window, cx))
+                            let ws = c.read(cx).workspace.clone();
+                            crate::clone_dialog::open(ws, window, cx)
                         }),
                 )
         })
@@ -4203,45 +4204,6 @@ impl Composer {
                 ws2.update(cx, |ws, cx| ws.run_in_project_folder(&id, cx))
             }))
             .into_any_element()
-    }
-
-    fn open_clone_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self.clone_input.clone();
-        let ws = self.workspace.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
-            let input2 = input.clone();
-            let ws = ws.clone();
-            dialog
-                .title("Clone from GitHub")
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child("Uses your GitHub CLI login. Clones into ~/Developer.")
-                        .child(Input::new(&input)),
-                )
-                .footer(
-                    gpui_kit::component::dialog::DialogFooter::new()
-                        .gap_2()
-                        .child(
-                            gpui_kit::component::dialog::DialogClose::new().child(
-                                gpui_kit::component::button::Button::new("cancel-clone")
-                                    .outline()
-                                    .label("Cancel"),
-                            ),
-                        )
-                        .child(
-                            gpui_kit::component::dialog::DialogAction::new().child(
-                                gpui_kit::component::button::Button::new("do-clone")
-                                    .primary()
-                                    .label("Clone")
-                                    .on_click(move |_, _, cx| {
-                                        let spec = input2.read(cx).value().to_string();
-                                        ws.update(cx, |ws, cx| ws.clone_repo(spec, cx));
-                                    }),
-                            ),
-                        ),
-                )
-        });
     }
 }
 

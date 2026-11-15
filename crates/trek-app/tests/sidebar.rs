@@ -676,6 +676,254 @@ fn a_paired_phone_is_a_device_that_opens_its_settings() {
 }
 
 #[test]
+fn a_folder_just_added_has_its_header_before_it_has_a_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let pid = trek.read(cx, |ws, _| {
+            ws.projects
+                .iter()
+                .find(|p| p.path == trek.project)
+                .map(|p| p.id.clone())
+                .expect("the project")
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
+        assert!(trek.visible(cx, "section-projects"));
+        assert!(trek.visible(cx, "inbox-zero"), "no thread needs anything");
+        // A folder only the agents' histories know of waits for a live thread.
+        let known_only = trek.update(cx, |ws, cx| {
+            let other = common::new_project("seen-in-history");
+            let p = ws.store.ensure_project(&other).unwrap();
+            ws.reload(cx);
+            p.id
+        });
+        trek.render(cx);
+        assert!(!trek.visible(cx, format!("live-proj-head-{known_only}")));
+        // Removing it takes its header away.
+        trek.update(cx, |ws, cx| ws.remove_project(&pid, cx));
+        trek.render(cx);
+        assert!(!trek.visible(cx, format!("live-proj-head-{pid}")));
+    });
+}
+
+#[test]
+fn an_archived_thread_is_listed_under_archived_and_comes_back_with_a_click() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = quiet(&trek, cx, "An idea set aside", 60_000);
+        trek.render(cx);
+        assert!(!trek.visible(cx, "archived-toggle"), "nothing archived yet");
+        trek.update(cx, |ws, cx| ws.archive(&id, cx));
+        trek.render(cx);
+        assert!(!trek.visible(cx, format!("line-{id}")));
+        assert!(trek.visible(cx, "archived-toggle"));
+        assert!(
+            !trek.visible(cx, format!("archived-{id}")),
+            "folded until it's opened"
+        );
+        trek.click(cx, "archived-toggle");
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("archived-{id}")));
+        trek.click(cx, format!("archived-{id}"));
+        trek.render(cx);
+        trek.read(cx, |ws, _| {
+            assert!(ws.thread(&id).is_some(), "back in the lists");
+            assert_eq!(ws.route, Route::Thread(id.clone()), "and open");
+            assert!(ws.archived.is_empty());
+        });
+        assert!(!trek.visible(cx, "archived-toggle"));
+    });
+}
+
+#[test]
+fn a_removed_projects_threads_are_in_archived_and_bring_the_project_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = quiet(&trek, cx, "Left in the removed project", 60_000);
+        let pid = project_of(&trek, cx, &id);
+        trek.update(cx, |ws, cx| ws.remove_project(&pid, cx));
+        trek.render(cx);
+        assert!(!trek.visible(cx, format!("live-proj-head-{pid}")));
+        assert!(trek.read(cx, |ws, _| ws.archived.iter().any(|t| t.id == id)));
+        trek.update(cx, |ws, cx| ws.restore_archived(&id, cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, format!("live-proj-head-{pid}")));
+        assert!(trek.visible(cx, format!("live-line-{id}")));
+        assert!(trek.read(cx, |ws, _| {
+            ws.workspace_projects().iter().any(|p| p.id == pid)
+        }));
+    });
+}
+
+#[test]
+fn a_narrowed_list_says_so_and_the_x_lets_go_of_it() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = quiet(&trek, cx, "In the project", 60_000);
+        trek.render(cx);
+        assert!(!trek.visible(cx, "filter-note"));
+        // Only the chats with no project: there are none.
+        trek.update(cx, |ws, cx| {
+            ws.project_filter = Some(trek_app::workspace::NO_PROJECT.to_string());
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "filter-note"));
+        assert!(trek.visible(cx, "filter-empty"));
+        assert!(!trek.visible(cx, "inbox-zero"), "that isn't the inbox being empty");
+        assert!(!trek.visible(cx, format!("live-line-{id}")));
+        trek.click(cx, "filter-clear");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "filter-note"));
+        assert!(trek.visible(cx, format!("live-line-{id}")));
+    });
+}
+
+#[test]
+fn the_clone_dialog_takes_typing_and_says_what_an_empty_field_lacks() {
+    run(async |cx| {
+        let trek = open(cx);
+        let ws = trek.ws.clone();
+        trek.window(cx, |window, cx| {
+            trek_app::clone_dialog::open(ws, window, cx)
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "do-clone"));
+        assert!(!trek.visible(cx, "clone-error"));
+        // Clone with nothing typed: the dialog stays, and says what it wants.
+        trek.click(cx, "do-clone");
+        trek.render(cx);
+        assert!(trek.visible(cx, "do-clone"));
+        assert!(trek.visible(cx, "clone-error"));
+        // The cursor was in the field: typing goes there, and clears the message.
+        trek.type_text(cx, " ");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "clone-error"));
+        trek.click(cx, "cancel-clone");
+        trek.render(cx);
+        assert!(!trek.visible(cx, "do-clone"));
+    });
+}
+
+#[test]
+fn with_the_sidebar_hidden_its_toggle_says_when_something_needs_you() {
+    run(async |cx| {
+        let trek = open(cx);
+        let asking = quiet(&trek, cx, "Asking", 60_000);
+        trek.render(cx);
+        assert!(!trek.visible(cx, "toggle-sidebar-needs-you"));
+        set_state(&trek, cx, &asking, RunState::NeedsYou, false);
+        trek.update(cx, |ws, cx| {
+            ws.sidebar_collapsed = true;
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(trek.visible(cx, "toggle-sidebar-needs-you"));
+        // With the sidebar showing, the Inbox says it.
+        trek.update(cx, |ws, cx| {
+            ws.sidebar_collapsed = false;
+            cx.notify();
+        });
+        trek.render(cx);
+        assert!(!trek.visible(cx, "toggle-sidebar-needs-you"));
+        assert!(trek.visible(cx, format!("inbox-{asking}")));
+    });
+}
+
+#[test]
+fn the_palette_and_the_thread_menu_reach_what_the_sidebar_menu_does() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = quiet(&trek, cx, "Pin me", 60_000);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Thread(id.clone()), cx));
+        trek.render(cx);
+        // The palette's thread commands: pin, snooze, mark unread.
+        trek.press(cx, "secondary-k");
+        trek.type_text(cx, "pin thread");
+        trek.render(cx);
+        trek.press(cx, "enter");
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().pinned_at.is_some()));
+        trek.press(cx, "secondary-k");
+        trek.type_text(cx, "snooze thread");
+        trek.render(cx);
+        trek.press(cx, "enter");
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().snoozed_until.is_some()));
+        trek.press(cx, "secondary-k");
+        trek.type_text(cx, "mark thread unread");
+        trek.render(cx);
+        trek.press(cx, "enter");
+        assert!(trek.read(cx, |ws, _| ws.thread(&id).unwrap().is_unseen()));
+    });
+}
+
+#[test]
+fn a_row_whose_thread_has_a_window_of_its_own_brings_that_window_forward() {
+    run(async |cx| {
+        let trek = open(cx);
+        let id = trek.quiet_thread(cx);
+        trek.open_thread_window(cx, &id);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Draft { project: None }, cx));
+        trek.render(cx);
+        trek.click(cx, format!("live-line-{id}"));
+        trek.render(cx);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Draft { project: None },
+            "the main window stays where it was"
+        );
+    });
+}
+
+#[test]
+fn a_snooze_can_be_undone_and_says_when_it_took_a_thread_out_of_settled() {
+    run(async |cx| {
+        let trek = open(cx);
+        let toasts = common::toasts(&trek, cx);
+        let id = quiet(&trek, cx, "Settled once", 60_000);
+        trek.update(cx, |ws, cx| ws.settle(&id, cx));
+        toasts.borrow_mut().clear();
+        trek.update(cx, |ws, cx| ws.snooze(&id, 3, cx));
+        let (message, undo) = toasts.borrow().last().cloned().expect("a toast");
+        assert_eq!(message, "Snoozed for 3 h. It's out of Settled.");
+        assert!(trek.read(cx, |ws, _| {
+            let t = ws.thread(&id).unwrap();
+            t.snoozed_until.is_some() && t.settled_at.is_none()
+        }));
+        trek.update(cx, |ws, cx| ws.undo(undo.expect("an Undo"), cx));
+        trek.read(cx, |ws, _| {
+            let t = ws.thread(&id).unwrap();
+            assert!(t.snoozed_until.is_none(), "not snoozed any more");
+            assert!(t.settled_at.is_some(), "settled again");
+        });
+        // Till morning names the time, and has its Undo too.
+        trek.update(cx, |ws, cx| ws.snooze_until_morning(&id, 1, cx));
+        let (message, undo) = toasts.borrow().last().cloned().expect("a toast");
+        assert!(message.starts_with("Snoozed until "), "{message}");
+        assert!(undo.is_some());
+    });
+}
+
+#[test]
+fn escape_ends_a_search_and_gives_the_keys_back() {
+    run(async |cx| {
+        let trek = open(cx);
+        quiet(&trek, cx, "Profile the sidebar", 60_000);
+        trek.render(cx);
+        let sidebar = trek.root.read_with(cx, |root, _| root.sidebar.clone());
+        trek.window(cx, |window, cx| {
+            sidebar.update(cx, |s, cx| s.focus_search(window, cx))
+        });
+        trek.type_text(cx, "profile");
+        assert_eq!(trek.read(cx, |ws, _| ws.search.clone()), "profile");
+        trek.press(cx, "escape");
+        assert_eq!(trek.read(cx, |ws, _| ws.search.clone()), "");
+        // The keys are back in the composer: typing there leaves the search alone.
+        trek.type_text(cx, "hello");
+        assert_eq!(trek.read(cx, |ws, _| ws.search.clone()), "");
+    });
+}
+
+#[test]
 fn an_empty_inbox_and_an_empty_search_each_say_so() {
     run(async |cx| {
         let trek = open(cx);

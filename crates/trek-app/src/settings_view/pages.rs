@@ -2422,7 +2422,7 @@ impl SettingsView {
                     .py(px(24.))
                     .text_size(px(text::BODY))
                     .text_color(theme.muted_foreground)
-                    .child("No projects yet. Add one from the sidebar's folder button.")
+                    .child("No projects yet. Add one with Add project, at the top of the sidebar.")
                     .into_any_element(),
             ];
         };
@@ -2884,7 +2884,7 @@ impl SettingsView {
                 let (view, pid) = (view.clone(), pid.clone());
                 alert
                     .title(format!("Remove “{name}” from Trek?"))
-                    .description("Its threads are archived and the project leaves the sidebar. Files on disk and your agents' own history are not touched. Open the folder again to bring it back.")
+                    .description("Its threads are archived (the sidebar's Archived list brings them back) and the project leaves the sidebar. Files on disk and your agents' own history are not touched. Open the folder again to bring it back.")
                     .confirm()
                     .ok_text("Remove project")
                     .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)

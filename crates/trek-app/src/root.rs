@@ -1039,6 +1039,8 @@ impl Render for WindowTitle {
             crate::motion::now(cx),
             window,
         );
+        // The Inbox is out of sight: the toggle says when something in it needs the user.
+        let needs_you = if collapsed { ws.needs_you_count() } else { 0 };
         let theme = cx.theme().clone();
         let thread = ws.current_thread().cloned();
         // A study session's folder is Study, wherever the data folder puts it.
@@ -1192,6 +1194,22 @@ impl Render for WindowTitle {
                             let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
                             toggle_sidebar(&ws, &panel, window, cx)
                         }));
+                        let toggle = div()
+                            .relative()
+                            .child(toggle)
+                            .when(needs_you > 0, |el| {
+                                el.child(
+                                    div()
+                                        .id("toggle-sidebar-needs-you")
+                                        .test_support()
+                                        .absolute()
+                                        .top(px(3.))
+                                        .right(px(3.))
+                                        .size(px(7.))
+                                        .rounded_full()
+                                        .bg(crate::palette::needs_you(cx)),
+                                )
+                            });
                         self.left_cluster(Some(toggle.into_any_element()), !narrow, shown, cx)
                     })
                     .child(crate::chrome::no_drag(

@@ -827,6 +827,22 @@ impl Store {
         })
     }
 
+    /// What the user archived, or archived with its project, newest first. Not what an import set
+    /// aside (a helper session, one whose history is gone), nor sub-agents and side or editor
+    /// chats, which have no row of their own to come back to.
+    pub fn archived_threads(&self, limit: usize) -> Result<Vec<Thread>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM threads WHERE archived_at IS NOT NULL AND import_hidden IS NULL
+                   AND parent_id IS NULL AND side_of IS NULL AND editor_chat = 0
+                 ORDER BY archived_at DESC LIMIT ?1",
+                Self::THREAD_COLS
+            ))?;
+            let rows = st.query_map([limit as i64], Self::row_to_thread)?;
+            rows.collect()
+        })
+    }
+
     /// The sub-agents `parent` started, archived ones too, oldest first.
     pub fn sub_agents(&self, parent: &str) -> Result<Vec<Thread>> {
         self.with(|c| {
@@ -1993,6 +2009,38 @@ mod tests {
             HandHolding::Auto,
         )
         .unwrap()
+    }
+
+    /// The archived list is what the user archived, newest first: not what an import set aside,
+    /// nor a sub-agent or a side chat.
+    #[test]
+    fn the_archived_list_holds_what_the_user_archived_and_nothing_else() {
+        let s = Store::in_memory().unwrap();
+        let make = |title: &str, at: Option<i64>, f: fn(&mut Thread)| {
+            let mut t = s
+                .create_thread(None, AgentId::Codex, None, Effort::High, HandHolding::Auto)
+                .unwrap();
+            t.title = title.into();
+            t.archived_at = at;
+            f(&mut t);
+            s.save_thread(&t).unwrap();
+        };
+        make("kept", None, |_| {});
+        make("old", Some(10), |_| {});
+        make("new", Some(20), |_| {});
+        make("hidden by an import", Some(30), |t| {
+            t.import_hidden = Some("temp-dir".into())
+        });
+        make("a sub-agent", Some(40), |t| t.parent_id = Some("p".into()));
+        make("a side chat", Some(50), |t| t.side_of = Some("p".into()));
+        let titles: Vec<String> = s
+            .archived_threads(10)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        assert_eq!(titles, ["new", "old"]);
+        assert_eq!(s.archived_threads(1).unwrap().len(), 1);
     }
 
     /// A thread keeps its account, and a removed account's threads go back to the normal login

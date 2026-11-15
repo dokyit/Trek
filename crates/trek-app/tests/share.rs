@@ -99,7 +99,11 @@ fn the_menu_has_share_copy_places_and_actions() {
             "thread-fork",
             "thread-rename",
             "thread-pin",
+            "thread-settle",
+            "thread-mark-unread",
+            "thread-regenerate-title",
             "thread-archive",
+            "thread-delete",
         ] {
             assert!(trek.visible(cx, id), "{id} is in the menu");
         }
