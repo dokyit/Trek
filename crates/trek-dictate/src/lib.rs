@@ -71,6 +71,12 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
     DATA.get().map(|dir| dir())
 }
 
+/// What asking for dictation says when macOS has the microphone, or Speech Recognition, turned
+/// off for Trek, however it was refused (before, or at the system's prompt). The composer puts
+/// a button for the matching Privacy pane beside them.
+pub const MIC_REFUSED: &str = "Trek needs microphone access to dictate.";
+pub const SPEECH_REFUSED: &str = "Trek needs speech recognition to dictate.";
+
 /// Dictation's one-time setup while it's under way (Windows' on-device engine downloading its
 /// speech model, which the first ask waits for): how far it has got. `None` when there's nothing
 /// to wait for.
@@ -429,10 +435,7 @@ mod imp {
             match AVAudioApplication::sharedInstance().recordPermission() {
                 p if p == AVAudioApplicationRecordPermission::Granted => speech_permission(reply),
                 p if p == AVAudioApplicationRecordPermission::Denied => {
-                    let _ = reply.try_send(Err(
-                        "Trek has no microphone access — allow it in System Settings › Privacy."
-                            .into(),
-                    ));
+                    let _ = reply.try_send(Err(super::MIC_REFUSED.into()));
                 }
                 _ => {
                     let again = reply.clone();
@@ -440,8 +443,7 @@ mod imp {
                         if granted.as_bool() {
                             speech_permission(again.clone());
                         } else {
-                            let _ =
-                                again.try_send(Err("Trek needs the microphone to dictate.".into()));
+                            let _ = again.try_send(Err(super::MIC_REFUSED.into()));
                         }
                     });
                     AVAudioApplication::requestRecordPermissionWithCompletionHandler(&block);
@@ -506,13 +508,13 @@ mod imp {
                         let _ = reply.try_send(if status == SFSpeechRecognizerAuthorizationStatus::Authorized {
                             Ok(())
                         } else {
-                            Err("Speech recognition is off for Trek — allow it in System Settings › Privacy.".into())
+                            Err(super::SPEECH_REFUSED.into())
                         });
                     });
                     SFSpeechRecognizer::requestAuthorization(&block);
                 }
                 _ => {
-                    let _ = reply.try_send(Err("Speech recognition is off for Trek — allow it in System Settings › Privacy.".into()));
+                    let _ = reply.try_send(Err(super::SPEECH_REFUSED.into()));
                 }
             }
         }

@@ -1754,3 +1754,36 @@ fn a_local_model_has_no_effort_to_pick() {
         assert!(!trek.visible(cx, "mm-effort"));
     });
 }
+
+/// A microphone or Speech Recognition that's turned off for Trek is said once, in the same words
+/// however it was refused, with a button that opens the system's pane for it.
+#[test]
+fn a_refused_microphone_offers_the_privacy_pane() {
+    use trek_app::dictate::fake;
+    use trek_app::permissions::Permission;
+    use trek_app::workspace::UndoAction;
+    run(async |cx| {
+        let dictation = fake::install();
+        dictation.refuse(trek_app::dictate::MIC_REFUSED);
+        let trek = open(cx);
+        let toasts = toasts(&trek, cx);
+        trek.click(cx, "dictate");
+        let (message, undo) = toasts.borrow().last().cloned().unwrap();
+        assert_eq!(message, "Trek needs microphone access to dictate.");
+        assert!(matches!(undo, Some(UndoAction::OpenPrivacy(Permission::Microphone))));
+        trek.update(cx, |ws, cx| ws.undo(undo.unwrap(), cx));
+        assert_eq!(
+            trek_app::permissions::fake::opened().last(),
+            Some(&Permission::Microphone)
+        );
+        // Speech Recognition has its own pane.
+        let dictation = fake::install();
+        dictation.refuse(trek_app::dictate::SPEECH_REFUSED);
+        trek.click(cx, "dictate");
+        let (_, undo) = toasts.borrow().last().cloned().unwrap();
+        assert!(matches!(
+            undo,
+            Some(UndoAction::OpenPrivacy(Permission::SpeechRecognition))
+        ));
+    });
+}

@@ -2153,7 +2153,20 @@ impl Composer {
             }
         }
         if let Some(message) = effect.toast {
-            self.toast(message, cx);
+            let pane = match message.as_str() {
+                dictate::MIC_REFUSED => Some(crate::permissions::Permission::Microphone),
+                dictate::SPEECH_REFUSED => Some(crate::permissions::Permission::SpeechRecognition),
+                _ => None,
+            };
+            match pane {
+                Some(permission) => self.workspace.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::Toast {
+                        message,
+                        undo: Some(crate::workspace::UndoAction::OpenPrivacy(permission)),
+                    })
+                }),
+                None => self.toast(message, cx),
+            }
         }
         cx.notify();
     }

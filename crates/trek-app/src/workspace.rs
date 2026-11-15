@@ -1803,6 +1803,8 @@ pub enum UndoAction {
     OpenThread(String),
     /// Not an undo: show a file in Finder (File Explorer), a download that just landed.
     RevealFile(PathBuf),
+    /// Not an undo: open the system's pane where `Permission` is turned on for Trek.
+    OpenPrivacy(crate::permissions::Permission),
     /// Not an undo: restart into the update that's staged (`Workspace::restart_to_update`).
     RestartToUpdate,
     /// Not an undo: chats are running, so the same restart, once they finish.
@@ -9471,6 +9473,7 @@ impl Workspace {
             }
             UndoAction::OpenThread(_) => {}
             UndoAction::RevealFile(path) => cx.reveal_path(&path),
+            UndoAction::OpenPrivacy(permission) => crate::permissions::open_pane(permission, cx),
             UndoAction::RestartToUpdate | UndoAction::InstallWhenFree => {
                 self.updater.later = None;
                 self.restart_to_update(cx)
