@@ -413,3 +413,37 @@ fn trek_opens_on_a_thread_in_no_project() {
         );
     });
 }
+
+#[test]
+fn close_other_tabs_keeps_the_one_asked_about_and_every_thread() {
+    run(async |cx| {
+        let trek = open(cx);
+        let mut ids = vec![];
+        for text in ["first", "second", "third"] {
+            let project = trek.project.clone();
+            trek.update(cx, |ws, cx| {
+                ws.navigate(
+                    Route::Draft {
+                        project: Some(project),
+                    },
+                    cx,
+                )
+            });
+            let id = trek.send(cx, text);
+            trek.wait_done(cx, &id, RunState::Idle).await;
+            ids.push(id);
+        }
+        assert_eq!(tab_ids(&trek, cx), ids);
+        let keep = ids[1].clone();
+        trek.update(cx, |ws, cx| ws.close_other_tabs(&keep, cx));
+        assert_eq!(tab_ids(&trek, cx), [keep.clone()]);
+        assert_eq!(
+            trek.read(cx, |ws, _| ws.route.clone()),
+            Route::Thread(keep)
+        );
+        assert!(
+            trek.read(cx, |ws, _| ids.iter().all(|id| ws.thread(id).is_some())),
+            "closing a tab leaves its thread alone"
+        );
+    });
+}

@@ -6,7 +6,7 @@ use crate::fluent;
 use crate::palette;
 use crate::scale::{radius, text};
 use crate::workspace::{Route, Workspace};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -159,6 +159,8 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
         let (ws_open, ws_close, ws_drop) =
             (workspace.clone(), workspace.clone(), workspace.clone());
         let (open_id, close_id, drop_to) = (id.clone(), id.clone(), ix);
+        let (ws_menu, menu_id, middle_id, ws_middle) =
+            (workspace.downgrade(), id.clone(), id.clone(), workspace.clone());
         let dragged = DraggedTab {
             id: id.clone(),
             title: title.clone(),
@@ -241,11 +243,49 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
                 let id = open_id.clone();
                 ws_open.update(cx, |ws, cx| ws.navigate(Route::Thread(id), cx));
             })
+            // A middle click closes it, as in a browser.
+            .on_mouse_up(MouseButton::Middle, move |_, _, cx| {
+                let id = middle_id.clone();
+                ws_middle.update(cx, |ws, cx| ws.close_tab(&id, cx));
+            })
             .on_drag(dragged, |d: &DraggedTab, _, _, cx| cx.new(|_| d.clone()))
             .drag_over::<DraggedTab>(move |s, _, _, cx| s.bg(cx.theme().foreground.opacity(0.08)))
             .on_drop(move |d: &DraggedTab, _, cx| {
                 let id = d.id.clone();
                 ws_drop.update(cx, |ws, cx| ws.move_tab(&id, drop_to, cx));
+            })
+            // The row's menu, with closing first.
+            .context_menu(move |menu, window, cx| {
+                use crate::thread_menu;
+                let Some(f) = ws_menu
+                    .upgrade()
+                    .and_then(|ws| thread_menu::Facts::read(ws.read(cx), &menu_id))
+                else {
+                    return menu;
+                };
+                let close = {
+                    let (ws, id) = (ws_menu.clone(), menu_id.clone());
+                    PopupMenuItem::new("Close tab").on_click(move |_, _, cx| {
+                        let _ = ws.update(cx, |ws, cx| ws.close_tab(&id, cx));
+                    })
+                };
+                let close_others = {
+                    let (ws, id) = (ws_menu.clone(), menu_id.clone());
+                    PopupMenuItem::new("Close other tabs")
+                        .disabled(count < 2)
+                        .on_click(move |_, _, cx| {
+                            let _ = ws.update(cx, |ws, cx| ws.close_other_tabs(&id, cx));
+                        })
+                };
+                let menu = menu
+                    .min_w(px(210.))
+                    .item(close)
+                    .item(close_others)
+                    .separator()
+                    .item(thread_menu::open_in_new_window(&ws_menu, &menu_id))
+                    .item(thread_menu::open_beside(&ws_menu, &menu_id))
+                    .separator();
+                thread_menu::state_items(menu, &ws_menu, &f, window, cx)
             });
         row = row.child(tab);
     }

@@ -154,6 +154,25 @@ impl Workspace {
         }
     }
 
+    /// Close every tab in `id`'s strip but its own, which comes to the front. Their threads go on
+    /// as they were.
+    pub fn close_other_tabs(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(group) = self.thread(id).map(Self::tab_group) else {
+            return;
+        };
+        let others: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|t| t.as_str() != id)
+            .filter(|t| self.thread(t).is_some_and(|x| Self::tab_group(x) == group))
+            .cloned()
+            .collect();
+        self.navigate(Route::Thread(id.to_string()), cx);
+        for other in others {
+            self.close_tab(&other, cx);
+        }
+    }
+
     /// Bring the tab `step` places along (−1 back, 1 on) to the front, round the strip.
     pub fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
         let strip: Vec<String> = self.tabs_here().into_iter().map(|t| t.id.clone()).collect();
