@@ -92,6 +92,16 @@ impl Workspace {
                 cx.emit(WorkspaceEvent::AttachImage(image.clone()));
             }
         };
+        // The tutor asks in cards: with them off the learner would see their HTML and couldn't
+        // answer, so nothing starts, and what was typed stays.
+        if !self.settings.general.interactive_artifacts {
+            return back(
+                cx,
+                &text,
+                &images,
+                "Study asks its questions in cards. Turn on Interactive artifacts in Settings › General to start a session.".to_string(),
+            );
+        }
         let guide = study::ensure(&dir)
             .map_err(anyhow::Error::from)
             .and_then(|_| skills::shipped(skills::STUDY));

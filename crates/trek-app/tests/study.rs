@@ -88,6 +88,30 @@ fn study_opens_from_the_sidebar_and_its_composer_starts_a_session_in_the_study_f
     });
 }
 
+/// The tutor asks in cards: with Interactive artifacts off the page says so, nothing starts, and
+/// what was typed is kept.
+#[test]
+fn with_cards_off_study_says_so_and_does_not_start_a_session() {
+    run(async |cx| {
+        let trek = common::open_with(cx, |s| s.general.interactive_artifacts = false);
+        let toasts = common::toasts(&trek, cx);
+        trek.update(cx, |ws, cx| ws.navigate(Route::Study, cx));
+        trek.render(cx);
+        assert!(trek.visible(cx, "study-cards-off"));
+        trek.type_text(cx, "the transformer architecture");
+        trek.press(cx, "enter");
+        trek.render(cx);
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Study);
+        assert!(study::sessions(&study::dir()).is_empty());
+        let seen = toasts.borrow();
+        assert!(
+            seen.iter()
+                .any(|(m, _)| m.contains("Turn on Interactive artifacts")),
+            "{seen:?}"
+        );
+    });
+}
+
 #[test]
 fn practice_is_a_choice_beside_the_composer() {
     run(async |cx| {

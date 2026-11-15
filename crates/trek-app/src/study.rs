@@ -774,6 +774,39 @@ impl Render for StudyView {
         let maps = (!self.topics.is_empty()).then(|| self.maps(&picked, cx));
         let earlier = self.earlier(&sessions, cx);
         let how = first_time.then(|| self.first_time(cx));
+        // Its questions are cards: with them off, a session can't start.
+        let cards_off = (!self
+            .workspace
+            .read(cx)
+            .settings
+            .general
+            .interactive_artifacts)
+            .then(|| {
+                let workspace = self.workspace.clone();
+                h_flex()
+                    .id("study-cards-off")
+                    .test_support()
+                    .gap_2()
+                    .items_center()
+                    .text_size(px(text::LABEL))
+                    .text_color(crate::palette::amber(cx))
+                    .child("Study asks its questions in cards, and cards are off.")
+                    .child(
+                        Button::new("study-cards-settings")
+                            .ghost()
+                            .small()
+                            .label("Turn on Interactive artifacts")
+                            .on_click(move |_, _, cx| {
+                                workspace.update(cx, |ws, cx| {
+                                    ws.navigate(
+                                        Route::Settings(crate::workspace::SettingsPage::General),
+                                        cx,
+                                    )
+                                })
+                            }),
+                    )
+                    .into_any_element()
+            });
         let composer = Composer::element(&self.composer, &mut self.composer_changed, cx);
         // Bias the column above the middle: more room under it than over it, so with little in
         // it the composer sits in the page's upper third.
@@ -806,6 +839,7 @@ impl Render for StudyView {
                                     .w_full()
                                     .gap(px(16.))
                                     .child(inset(self.header()))
+                                    .children(cards_off.map(inset))
                                     .child(composer)
                                     .child(inset(context)),
                             )
