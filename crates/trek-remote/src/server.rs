@@ -1236,6 +1236,11 @@ fn web_push(
     }
     let subscribed = state.registry.has_push(device_id);
     drop(state);
+    // A phone that asks for notifications turns them on: the app does so when it hears
+    // `PushChanged`, and the answer says so now rather than after.
+    if asked && subscribed {
+        inner.push_enabled.store(true, Ordering::Relaxed);
+    }
     if subscribed != before || (subscribed && asked) {
         tracing::info!(device_id, subscribed, "phone notifications through the browser");
         inner.notice(ServerNotice::PushChanged {

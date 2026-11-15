@@ -234,3 +234,91 @@ async fn a_certificate_not_in_the_link_isnt_trusted() {
     );
     handle.shutdown();
 }
+
+/// A page asks for notifications: the computer's key comes with its feature, the subscription is
+/// kept with the page's pairing (and turns notifications on at once), a bad one is refused, and
+/// unsubscribing or unpairing lets it go.
+#[tokio::test]
+async fn a_page_hands_over_its_push_subscription() {
+    let mut config = ServerConfig::new(host_info());
+    config.bind = "127.0.0.1:0".parse().unwrap();
+    let (key, _) = webpush::VapidKey::generate().unwrap();
+    config.web = Some(
+        WebConfig::new(None)
+            .serving_from(PAGE)
+            .with_push_key(key.public_key()),
+    );
+    let handle = RemoteServer::start(config, Arc::new(Host)).await.unwrap();
+    let mut notices = handle.notices();
+    let offer = handle.pairing_offer_with_code("K7Q2-9XMV");
+    let link = link_payload(offer.web_url.as_deref().unwrap());
+    let pinned: Vec<String> = link["certs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    let (_conn, mut page) = open(&handle, &pinned, Some(ORIGIN), "/trek").await.unwrap();
+    say(
+        &mut page,
+        json!({"type":"pair","id":"1","protocol":1,"code":"K7Q2-9XMV","device_id":"web-1","device_name":"Pixel 9","platform":"web"}),
+    )
+    .await;
+    let paired = hear(&mut page).await;
+    assert!(
+        paired["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "web_push"),
+        "{paired}"
+    );
+    assert_eq!(hear(&mut page).await["type"], "snapshot");
+
+    say(&mut page, json!({"type":"web_push","id":"2"})).await;
+    let state = hear(&mut page).await;
+    assert_eq!(state["type"], "web_push", "{state}");
+    assert_eq!(state["key"], key.public_key().as_str());
+    assert_eq!(
+        (state["subscribed"].as_bool(), state["enabled"].as_bool()),
+        (Some(false), Some(false))
+    );
+
+    // Not an https endpoint: refused, nothing kept.
+    say(
+        &mut page,
+        json!({"type":"web_push","id":"3","subscribe":{"endpoint":"http://push.example/x","p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}),
+    )
+    .await;
+    assert_eq!(hear(&mut page).await["code"], "bad_request");
+    assert!(handle.push_targets().is_empty());
+
+    let sub = json!({"endpoint":"https://fcm.googleapis.com/fcm/send/abc","p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"});
+    say(&mut page, json!({"type":"web_push","id":"4","subscribe":sub})).await;
+    let on = hear(&mut page).await;
+    assert_eq!(on["subscribed"], true, "{on}");
+    assert_eq!(
+        on["enabled"], true,
+        "asking for them turns them on, in this answer already"
+    );
+    let targets = handle.push_targets();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].0, "web-1");
+    assert_eq!(targets[0].1.endpoint, "https://fcm.googleapis.com/fcm/send/abc");
+    let heard = loop {
+        if let ServerNotice::PushChanged { device_id, on } = notices.recv().await.unwrap() {
+            break (device_id, on);
+        }
+    };
+    assert_eq!(heard, ("web-1".to_string(), true));
+
+    say(&mut page, json!({"type":"web_push","id":"5","unsubscribe":true})).await;
+    assert_eq!(hear(&mut page).await["subscribed"], false);
+    assert!(handle.push_targets().is_empty());
+
+    say(&mut page, json!({"type":"web_push","id":"6","subscribe":sub})).await;
+    assert_eq!(hear(&mut page).await["subscribed"], true);
+    assert!(handle.revoke("web-1"));
+    assert!(handle.push_targets().is_empty(), "unpairing lets it go");
+    handle.shutdown();
+}
