@@ -28,6 +28,7 @@ pub const ALL: &[(&str, &[File])] = &[
         "pages/summit-log/style.css",
         "pages/summit-log/app.js",
     ),
+    example!("trail-board": "plugin.toml", "ui/board.json"),
     example!("terminal-look": "plugin.toml", "terminal.toml"),
 ];
 

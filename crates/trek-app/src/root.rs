@@ -1135,7 +1135,7 @@ impl Render for WindowTitle {
             ws: self.workspace.clone(),
             thread: thread.as_ref().map(|t| t.id.clone()),
             project: root.clone(),
-            threads: None,
+            ..crate::plugins::render::Place::of(&self.workspace)
         };
         let plugin_header = if thread.is_some() {
             crate::plugins::render::slot(trek_core::plugins::Slot::ThreadHeader, &place, cx)
@@ -1912,10 +1912,8 @@ fn plugin_background(
     cx: &App,
 ) -> Option<AnyElement> {
     let place = crate::plugins::render::Place {
-        ws: ws.clone(),
         thread,
-        project: None,
-        threads: None,
+        ..crate::plugins::render::Place::of(ws)
     };
     let layers = crate::plugins::render::slot(trek_core::plugins::Slot::Background, &place, cx);
     (!layers.is_empty()).then(|| {
@@ -2615,13 +2613,15 @@ impl TrekWindow {
             _ => None,
         };
         // What plugins put over and under the new-thread composer, in its column.
+        let draft_project = match &route {
+            Route::Draft { project } => project.clone(),
+            _ => None,
+        };
         let (draft_above, draft_below) = match &route {
             Route::Draft { project } => {
                 let place = crate::plugins::render::Place {
-                    ws: self.workspace.clone(),
-                    thread: None,
                     project: project.clone(),
-                    threads: None,
+                    ..crate::plugins::render::Place::of(&self.workspace)
                 };
                 let column = self.workspace.read(cx).column();
                 let band = |items: Vec<AnyElement>, below: bool| {
@@ -2767,13 +2767,29 @@ impl TrekWindow {
                                             .size_full()
                                             .justify_center()
                                             .pb(px(40.))
-                                            .children(draft_above)
-                                            .child(Composer::element(
-                                                &self.composer,
-                                                &mut self.composer_changed,
+                                            // The new-thread screen: Trek's own (the composer,
+                                            // with what plugins put over and under it), or a
+                                            // plugin's in its place.
+                                            .child(crate::plugins::render::surface(
+                                                trek_core::plugins::Surface::NewThread,
+                                                v_flex()
+                                                    .w_full()
+                                                    .children(draft_above)
+                                                    .child(Composer::element(
+                                                        &self.composer,
+                                                        &mut self.composer_changed,
+                                                        cx,
+                                                    ))
+                                                    .children(draft_below)
+                                                    .into_any_element(),
+                                                crate::plugins::render::Place {
+                                                    project: draft_project.clone(),
+                                                    ..crate::plugins::render::Place::of(
+                                                        &self.workspace,
+                                                    )
+                                                },
                                                 cx,
-                                            ))
-                                            .children(draft_below),
+                                            )),
                                     ),
                             )
                             .children(hub_col),
@@ -2827,9 +2843,22 @@ impl TrekWindow {
                                         &self.background_strip,
                                         cx,
                                     ))
-                                    .child(Composer::element(
-                                        &self.composer,
-                                        &mut self.composer_changed,
+                                    // The composer: Trek's own, or a plugin's around it.
+                                    .child(crate::plugins::render::surface(
+                                        trek_core::plugins::Surface::Composer,
+                                        Composer::element(
+                                            &self.composer,
+                                            &mut self.composer_changed,
+                                            cx,
+                                        ),
+                                        crate::plugins::render::Place {
+                                            thread: self
+                                                .workspace
+                                                .read(cx)
+                                                .focused_thread()
+                                                .map(str::to_string),
+                                            ..crate::plugins::render::Place::of(&self.workspace)
+                                        },
                                         cx,
                                     )),
                             )

@@ -4647,6 +4647,7 @@ impl Render for Composer {
                     .or_else(|| ws.draft_project_in(&self.scope))
             },
             threads: None,
+            original: Default::default(),
         };
         let slot = |s: trek_core::plugins::Slot, cx: &App| {
             if plugged {

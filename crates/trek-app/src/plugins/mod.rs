@@ -37,6 +37,8 @@ pub struct Plugins {
     fingerprint: core::Fingerprint,
     /// Each slot's trees, from the running plugins, in order.
     slots: BTreeMap<Slot, Vec<Placed>>,
+    /// The surfaces a running plugin replaces, as the user chose (`State::replace`).
+    replacements: BTreeMap<trek_core::plugins::Surface, Placed>,
     /// The plugin whose log Settings shows, and its last lines (read when it's opened or the
     /// folder changes, never while drawing).
     pub log: Option<(String, Vec<String>)>,
@@ -51,6 +53,30 @@ impl Global for Plugins {}
 impl Plugins {
     fn index(&mut self) {
         self.slots.clear();
+        self.replacements.clear();
+        for (surface, id) in &self.state.replace {
+            let Some(p) = self.plugins.iter().find(|p| &p.manifest.id == id) else {
+                continue;
+            };
+            if !self.state.running(&p.manifest) {
+                continue;
+            }
+            if let Some(r) = p
+                .manifest
+                .replacements
+                .iter()
+                .find(|r| r.surface == *surface)
+            {
+                self.replacements.insert(
+                    *surface,
+                    Placed {
+                        plugin: id.as_str().into(),
+                        tree: Rc::new(r.tree.clone()),
+                        dir: Rc::new(p.dir.clone()),
+                    },
+                );
+            }
+        }
         for p in &self.plugins {
             if !self.state.running(&p.manifest) {
                 continue;
@@ -105,6 +131,49 @@ pub fn slot(slot: Slot, cx: &App) -> &[Placed] {
         .unwrap_or(&[])
 }
 
+/// The running plugin's surface the user chose in place of Trek's `surface`, if any.
+pub fn replacement(surface: trek_core::plugins::Surface, cx: &App) -> Option<Placed> {
+    cx.try_global::<Plugins>()?
+        .replacements
+        .get(&surface)
+        .cloned()
+}
+
+/// The running plugins that offer a replacement for `surface`: (id, the replacement's title).
+pub fn replacements_for(surface: trek_core::plugins::Surface, cx: &App) -> Vec<(String, String)> {
+    let Some(p) = cx.try_global::<Plugins>() else {
+        return Vec::new();
+    };
+    p.plugins
+        .iter()
+        .filter(|pl| p.state.running(&pl.manifest))
+        .filter_map(|pl| {
+            pl.manifest
+                .replacements
+                .iter()
+                .find(|r| r.surface == surface)
+                .map(|r| (pl.manifest.id.clone(), r.title.clone()))
+        })
+        .collect()
+}
+
+/// Show plugin `plugin`'s replacement for `surface` (`None`: Trek's own).
+pub fn choose_replacement(
+    surface: trek_core::plugins::Surface,
+    plugin: Option<&str>,
+    ws: &Entity<Workspace>,
+    cx: &mut App,
+) {
+    update_state(ws, cx, |s| match plugin {
+        Some(id) => {
+            s.replace.insert(surface, id.to_string());
+        }
+        None => {
+            s.replace.remove(&surface);
+        }
+    });
+}
+
 /// Whether plugin `id` is running.
 pub fn running(id: &str, cx: &App) -> bool {
     cx.try_global::<Plugins>()
@@ -141,6 +210,7 @@ pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
         state,
         fingerprint,
         slots: BTreeMap::new(),
+        replacements: BTreeMap::new(),
         log: None,
         states: HashMap::new(),
         generation: 0,
@@ -327,6 +397,11 @@ pub fn set_on(id: &str, on: bool, ws: &Entity<Workspace>, cx: &mut App) {
     update_state(ws, cx, |s| {
         if on {
             s.turn_on_allowing(&m);
+            // A surface it replaces that nothing else does goes up with it; Settings puts
+            // Trek's own back.
+            for r in &m.replacements {
+                s.replace.entry(r.surface).or_insert_with(|| m.id.clone());
+            }
         } else {
             s.turn_off(&m.id);
         }
@@ -452,10 +527,8 @@ pub fn run_command(
     match render::command_action(plugin, id, cx) {
         Some(trek_core::plugins::CommandRun::Action(a)) => {
             let place = render::Place {
-                ws: ws.clone(),
                 thread: ws.read(cx).focused_thread().map(str::to_string),
-                project: None,
-                threads: None,
+                ..render::Place::of(ws)
             };
             render::run(plugin, &render::resolve_plain(&a), &place, window, cx)
         }
@@ -567,13 +640,17 @@ pub fn open_page_of(ws: &Entity<Workspace>, cx: &App) -> Option<(String, String)
     }
 }
 
-/// Trek's own surface for a replacement to embed.
+/// Trek's own surface, for the replacement drawn in its place to embed (once: it's one element).
 pub fn original(
     _c: trek_core::plugins::ui::Component,
-    _place: &render::Place,
+    place: &render::Place,
     _cx: &App,
 ) -> AnyElement {
-    div().into_any_element()
+    place
+        .original
+        .borrow_mut()
+        .take()
+        .unwrap_or_else(|| div().into_any_element())
 }
 
 /// The asset path of Lucide icon `name` (`flame`), or the puzzle piece when Trek doesn't carry it:

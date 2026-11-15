@@ -467,10 +467,9 @@ impl Sidebar {
             .and_then(|id| ws.thread(id))
             .and_then(|t| t.cwd.clone());
         crate::plugins::render::Place {
-            ws: self.workspace.clone(),
             thread,
             project,
-            threads: None,
+            ..crate::plugins::render::Place::of(&self.workspace)
         }
     }
 
@@ -3683,8 +3682,16 @@ impl Render for Sidebar {
                         &flip,
                         v_flex()
                             .w_full()
-                            .child(list)
-                            .child(history)
+                            .child(crate::plugins::render::surface(
+                                trek_core::plugins::Surface::ThreadList,
+                                v_flex()
+                                    .w_full()
+                                    .child(list)
+                                    .child(history)
+                                    .into_any_element(),
+                                self.plugin_place(cx),
+                                cx,
+                            ))
                             // Over ASCII art: a backing under the rows so their grey text keeps
                             // 3:1, fading out below them, where the art shows clear.
                             .when_some(backing, |el, a| el.bg(theme.sidebar.opacity(a))),

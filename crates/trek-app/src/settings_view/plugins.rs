@@ -94,6 +94,63 @@ impl SettingsView {
             out.push(ui::group(rows, cx));
         }
 
+        // Each surface a running plugin offers to replace: Trek's own, or a plugin's.
+        let surfaces: Vec<(core::Surface, Vec<(String, String)>)> = core::Surface::ALL
+            .into_iter()
+            .map(|s| (s, plugins::replacements_for(s, cx)))
+            .filter(|(_, offers)| !offers.is_empty())
+            .collect();
+        if !surfaces.is_empty() {
+            out.push(Self::heading("In place of Trek's own", cx));
+            let rows = surfaces
+                .into_iter()
+                .map(|(surface, offers)| {
+                    let chosen = state.replace.get(&surface).cloned();
+                    let current = chosen
+                        .as_ref()
+                        .and_then(|id| offers.iter().find(|(pid, _)| pid == id))
+                        .map(|(_, title)| title.clone())
+                        .unwrap_or_else(|| "Trek's own".to_string());
+                    let ws = self.workspace.clone();
+                    let pick = Button::new(SharedString::from(format!(
+                        "plugin-surface-{}",
+                        surface.name()
+                    )))
+                    .small()
+                    .outline()
+                    .label(current)
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                        let ws0 = ws.clone();
+                        let mut menu = menu.min_w(px(180.)).item(
+                            PopupMenuItem::new("Trek's own")
+                                .checked(chosen.is_none())
+                                .on_click(move |_, _, cx| {
+                                    plugins::choose_replacement(surface, None, &ws0, cx)
+                                }),
+                        );
+                        for (id, title) in &offers {
+                            let (ws, id2) = (ws.clone(), id.clone());
+                            menu = menu.item(
+                                PopupMenuItem::new(title.clone())
+                                    .checked(chosen.as_deref() == Some(id.as_str()))
+                                    .on_click(move |_, _, cx| {
+                                        plugins::choose_replacement(surface, Some(&id2), &ws, cx)
+                                    }),
+                            );
+                        }
+                        menu
+                    });
+                    Self::row(
+                        surface.title(),
+                        "Trek's own, or a plugin's in its place. A plugin that stops gives it back.",
+                        pick,
+                        cx,
+                    )
+                })
+                .collect();
+            out.push(ui::group(rows, cx));
+        }
+
         let examples: Vec<&(&str, &[core::examples::File])> = core::examples::ALL
             .iter()
             .filter(|(name, _)| !installed.iter().any(|pl| pl.manifest.id == *name))

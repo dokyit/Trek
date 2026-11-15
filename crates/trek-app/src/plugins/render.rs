@@ -29,6 +29,72 @@ pub struct Place {
     pub project: Option<PathBuf>,
     /// The list a replacement's `threads` reads, when it's drawn for one.
     pub threads: Option<Rc<Value>>,
+    /// Trek's own surface, while a replacement is drawn in its place: `trek:thread-list` or
+    /// `trek:composer` embeds it.
+    pub original: Rc<std::cell::RefCell<Option<AnyElement>>>,
+}
+
+impl Place {
+    /// A place in `ws`'s window with nothing more to it.
+    pub fn of(ws: &Entity<Workspace>) -> Place {
+        Place {
+            ws: ws.clone(),
+            thread: None,
+            project: None,
+            threads: None,
+            original: Default::default(),
+        }
+    }
+}
+
+/// `surface`, as the user has it: the plugin's replacement they chose (which may embed
+/// `original`), or `original`, Trek's own. A replacement whose plugin stopped is no longer chosen
+/// (`State::stop`), so Trek's own comes back at the next frame.
+pub fn surface(
+    surface: trek_core::plugins::Surface,
+    original: AnyElement,
+    mut place: Place,
+    cx: &App,
+) -> AnyElement {
+    let Some(placed) = super::replacement(surface, cx) else {
+        return original;
+    };
+    if surface == trek_core::plugins::Surface::ThreadList && place.threads.is_none() {
+        place.threads = Some(Rc::new(threads_value(&placed.plugin, &place.ws, cx)));
+    }
+    place.original = Rc::new(std::cell::RefCell::new(Some(original)));
+    div()
+        .id(SharedString::from(format!(
+            "plugin-surface-{}",
+            surface.name()
+        )))
+        .test_support()
+        .w_full()
+        .child(tree(&placed, &place, surface.name(), cx))
+        .into_any_element()
+}
+
+/// The user's threads as plugin `plugin` may know them (it has `threads:read`: a thread list's
+/// replacement must), newest first, without the archived.
+fn threads_value(plugin: &str, ws: &Entity<Workspace>, cx: &App) -> Value {
+    let usage = cx
+        .try_global::<Plugins>()
+        .and_then(|p| p.find(plugin))
+        .is_some_and(|p| p.manifest.wants(&Permission::UsageRead));
+    let ws = ws.read(cx);
+    let mut threads: Vec<&trek_core::store::Thread> = ws
+        .threads
+        .iter()
+        .filter(|t| t.archived_at.is_none() && t.side_of.is_none() && !t.editor_chat)
+        .collect();
+    threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+    Value::Array(
+        threads
+            .into_iter()
+            .take(500)
+            .map(|t| thread_value(t, ws, true, usage))
+            .collect(),
+    )
 }
 
 /// Every tree a slot shows, drawn for `place`. Empty, and free, with no plugins.
