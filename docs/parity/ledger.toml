@@ -266,10 +266,10 @@ area = "Threads"
 what = "Every sub-agent at work shows in its thread with its state, as the sidebar counts it, and its row stops it (and sends one of the agent's own a message where its agent takes one)"
 macos = "yes"
 windows = "yes"
-live = ["route project:{project}", "pace 1", "send mock:task 8s", "wait 2500", "count subagent#* 1", "count subagent-stop#* 1", "count subagent-message#* 1", "click stop", "pace 0"]
-how = { macos = "The same on both: a row per sub-agent, Trek's own after its delegate_task call (or within moments when its call never shows in the transcript, as when a sub-agent of the agent's own made it), the agent's own on its call.", windows = "The same on both." }
-code = ["crates/trek-app/src/workspace.rs", "crates/trek-app/src/workspace/orchestrate.rs", "crates/trek-app/src/thread_view.rs", "crates/trek-agents/src/lib.rs"]
-tests = ["crates/trek-app/tests/orchestrate.rs", "crates/trek-agents/src/codex.rs", "crates/trek-agents/src/claude.rs"]
+live = ["route project:{project}", "pace 1", "send mock:task 8s", "wait 2500", "count subagent#* 1", "count subagent-stop#* 1", "count subagent-message#* 1", "click stop", "pace 0", "send mock:resume 30s", "wait 2500", "count subagent-onward#* 1", "count sub-agents-at-work 1"]
+how = { macos = "The same on both: a row per sub-agent, Trek's own after its delegate_task call (or within moments when its call never shows in the transcript, as when a sub-agent of the agent's own made it), the agent's own on its call, and one woken again (Claude Code's SendMessage) on the call that woke it, its earlier row pointing there. The sidebar, the working bar and its list, the hub and the phone read one list (Workspace::sub_agents_at_work).", windows = "The same on both." }
+code = ["crates/trek-app/src/workspace.rs", "crates/trek-app/src/workspace/sub_agents.rs", "crates/trek-app/src/workspace/orchestrate.rs", "crates/trek-app/src/thread_view.rs", "crates/trek-app/src/working_bar.rs", "crates/trek-app/src/sidebar.rs", "crates/trek-agents/src/lib.rs", "crates/trek-agents/src/claude.rs"]
+tests = ["crates/trek-app/tests/orchestrate.rs", "crates/trek-app/tests/sub_agents.rs", "crates/trek-agents/src/codex.rs", "crates/trek-agents/src/claude.rs"]
 
 [[feature.promise]]
 what = "Every sub-agent the sidebar counts shows in the thread while its turn runs, Trek's own after its call, even when a sub-agent of the agent's own started it"
@@ -285,6 +285,26 @@ windows = "crates/trek-app/tests/orchestrate.rs::a_row_with_no_call_in_an_earlie
 what = "A sub-agent of the agent's own still out in the background after its turn shows at work"
 macos = "crates/trek-app/tests/orchestrate.rs::a_background_sub_agent_listed_after_its_turn_shows_at_work"
 windows = "crates/trek-app/tests/orchestrate.rs::a_background_sub_agent_listed_after_its_turn_shows_at_work"
+
+[[feature.promise]]
+what = "A sub-agent woken again by a message works on a row where it was woken, Done only on its notification, its earlier row pointing there; after every line of the session, the transcript's working rows are what the sidebar counts"
+macos = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_by_a_message_works_on_a_row_where_it_was_woken"
+windows = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_by_a_message_works_on_a_row_where_it_was_woken"
+
+[[feature.promise]]
+what = "A sub-agent woken twice ends on its latest row, failed or stopped, never Done"
+macos = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_twice_ends_on_its_latest_row_failed_or_stopped"
+windows = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_twice_ends_on_its_latest_row_failed_or_stopped"
+
+[[feature.promise]]
+what = "A thread read back from the store mid-run keeps its woken sub-agent at work; once Trek starts again it isn't at work anywhere"
+macos = "crates/trek-app/tests/sub_agents.rs::a_thread_loaded_again_mid_run_keeps_its_woken_sub_agent_at_work"
+windows = "crates/trek-app/tests/sub_agents.rs::a_thread_loaded_again_mid_run_keeps_its_woken_sub_agent_at_work"
+
+[[feature.promise]]
+what = "A sub-agent woken in a session started since (after the idle reap) still finds its earlier row"
+macos = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_in_a_session_started_since_still_finds_its_earlier_row"
+windows = "crates/trek-app/tests/sub_agents.rs::a_sub_agent_woken_in_a_session_started_since_still_finds_its_earlier_row"
 
 [[feature]]
 id = "share-sheet"
@@ -618,12 +638,17 @@ windows = "yes"
 live_skip = "The sub-agent's sheet is the iPhone app's: the isolated app can't show it. What the Mac sends (the rows' links, `sub_agent` and `sub_agent_action`) is driven over the phone protocol in crates/trek-app/tests/remote.rs, and the sheet in ios/TrekTests on the simulator."
 how = { macos = "The same on both: the phone server's `sub_agent_view` feature.", windows = "The same on both." }
 code = ["crates/trek-app/src/remote/sub_agent_view.rs", "crates/trek-remote/src/protocol/sub_agent_view.rs", "crates/trek-core/src/store/sub_logs.rs"]
-tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs", "crates/trek-app/tests/orchestrate.rs", "crates/trek-core/src/store/sub_logs.rs"]
+tests = ["crates/trek-app/tests/remote.rs", "crates/trek-remote/tests/protocol.rs", "crates/trek-app/tests/orchestrate.rs", "crates/trek-app/tests/sub_agents.rs", "crates/trek-core/src/store/sub_logs.rs"]
 
 [[feature.promise]]
 what = "The agent's own sub-agent reads as a transcript of its own on the phone, and takes Stop and a message there"
 macos = "crates/trek-app/tests/remote.rs::a_phone_opens_a_sub_agent_from_its_row_and_steers_it"
 windows = "crates/trek-app/tests/remote.rs::a_phone_opens_a_sub_agent_from_its_row_and_steers_it"
+
+[[feature.promise]]
+what = "A sub-agent woken again by a message is in the phone's group and opens from its row there: the message that woke it, and its steps since"
+macos = "crates/trek-app/tests/sub_agents.rs::the_phone_opens_a_woken_sub_agent_from_its_row"
+windows = "crates/trek-app/tests/sub_agents.rs::the_phone_opens_a_woken_sub_agent_from_its_row"
 
 [[feature.promise]]
 what = "One of Trek's own sub-agents at work tells the phone when its clock started, so its row counts up there as on the Mac"
