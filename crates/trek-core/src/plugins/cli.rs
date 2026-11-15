@@ -172,10 +172,23 @@ fn install_folder(folder: &Path, dir: &Path, out: &mut dyn std::io::Write) -> Re
     };
     let dest = dir.join(&id);
     let _ = std::fs::remove_file(dir.join(format!("{id}.{LINK_EXT}")));
-    if dest.exists() {
-        std::fs::remove_dir_all(&dest).map_err(|e| format!("the old {id} stays: {e}"))?;
+    // The old copy steps aside and the new one takes its place, two renames apart: a running
+    // Trek that looks at the folder meanwhile doesn't find the plugin gone (and turn its theme
+    // or its page off) for as long as a delete would take. Folders that start with a dot aren't
+    // plugins.
+    let old = scratch(dir, &format!("{id}-old"));
+    let _ = std::fs::remove_dir_all(&old);
+    let had = dest.exists();
+    if had {
+        std::fs::rename(&dest, &old).map_err(|e| format!("the old {id} stays: {e}"))?;
     }
-    std::fs::rename(&staged, &dest).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&staged, &dest) {
+        if had {
+            let _ = std::fs::rename(&old, &dest);
+        }
+        return Err(e.to_string());
+    }
+    let _ = std::fs::remove_dir_all(&old);
     let mut state = State::read(dir);
     let was_on = state.choice(&id).on;
     let on = if was_on && state.missing(&manifest).is_empty() {

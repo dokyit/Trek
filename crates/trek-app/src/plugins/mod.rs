@@ -5,7 +5,9 @@
 //! What a running plugin brings is indexed here once, when the folder is read, so a frame asks a
 //! map and draws: with no plugins every slot's list is empty, and nothing else is made.
 
+pub mod data;
 pub mod focus;
+pub mod page;
 pub mod render;
 pub mod trail;
 
@@ -15,11 +17,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
 use trek_core::plugins::{self as core, Manifest, Plugin, Problem, Slot, State};
-
-/// How often the folder is looked at.
-const WATCH_EVERY: Duration = Duration::from_millis(1500);
 
 /// A running plugin's slot tree, with whose it is.
 #[derive(Clone)]
@@ -44,6 +42,8 @@ pub struct Plugins {
     pub log: Option<(String, Vec<String>)>,
     /// Each plugin's state, as its logic or its `set:` actions left it: what `{state.…}` reads.
     pub states: HashMap<String, Value>,
+    /// How many times the folder has been read again: an open page reloads when it changes.
+    pub generation: u64,
 }
 
 impl Global for Plugins {}
@@ -143,59 +143,45 @@ pub fn init(ws: &Entity<Workspace>, cx: &mut App) {
         slots: BTreeMap::new(),
         log: None,
         states: HashMap::new(),
+        generation: 0,
     };
     plugins.index();
     cx.set_global(plugins);
     contributions_changed(ws, cx);
-    watch(ws.downgrade(), cx);
 }
 
-fn watch(ws: WeakEntity<Workspace>, cx: &mut App) {
+/// The plugins folder, for the themes folder's watch to look at on its own tick (one timer for
+/// both folders: plugins add no wake-ups of their own).
+pub fn watched_dir(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<Plugins>().map(|p| p.dir.clone())
+}
+
+/// What a look at `dir` found, off the UI thread: its fingerprint, and whether a reload was
+/// asked for.
+pub fn look(dir: &std::path::Path) -> (core::Fingerprint, bool) {
+    (core::fingerprint(dir), core::take_reload(dir))
+}
+
+/// Take a look (`look`): when the folder changed, or a reload was asked for, it's read again off
+/// the UI thread and what's running is indexed again.
+pub fn looked(print: core::Fingerprint, asked: bool, ws: &Entity<Workspace>, cx: &mut App) {
+    let Some(p) = cx.try_global::<Plugins>() else {
+        return;
+    };
+    if p.fingerprint == print && !asked {
+        return;
+    }
+    let dir = p.dir.clone();
+    let ws = ws.downgrade();
     cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor().timer(WATCH_EVERY).await;
-            let Some(dir) = cx.update(|cx| cx.try_global::<Plugins>().map(|p| p.dir.clone()))
-            else {
-                break;
-            };
-            // Looked at, and read when it changed, off the UI thread.
-            let read = cx
-                .background_spawn({
-                    let dir = dir.clone();
-                    async move {
-                        let print = core::fingerprint(&dir);
-                        let asked = core::take_reload(&dir);
-                        (print, asked)
-                    }
-                })
-                .await;
-            let (print, asked) = read;
-            let due = cx.update(|cx| {
-                cx.try_global::<Plugins>()
-                    .is_some_and(|p| p.fingerprint != print)
-                    || asked
-            });
-            if due {
-                let scan = cx
-                    .background_spawn({
-                        let dir = dir.clone();
-                        async move { (core::scan(&dir), core::State::read(&dir)) }
-                    })
-                    .await;
-                let gone = cx.update(|cx| match ws.upgrade() {
-                    Some(ws) => {
-                        apply_scan(scan.0, scan.1, print, &ws, cx);
-                        false
-                    }
-                    None => true,
-                });
-                if gone {
-                    break;
-                }
-            } else if ws.upgrade().is_none() {
-                break;
+        let (scan, state) = cx
+            .background_spawn(async move { (core::scan(&dir), core::State::read(&dir)) })
+            .await;
+        cx.update(|cx| {
+            if let Some(ws) = ws.upgrade() {
+                apply_scan(scan, state, print, &ws, cx);
             }
-        }
+        });
     })
     .detach();
 }
@@ -230,6 +216,7 @@ fn apply_scan(
     core::write_problems(&dir, &scan.problems);
     {
         let p = cx.global_mut::<Plugins>();
+        p.generation += 1;
         p.plugins = scan.plugins;
         p.problems = scan.problems;
         p.state = state;
@@ -479,9 +466,44 @@ pub fn run_command(
     }
 }
 
-/// Open plugin `plugin`'s page `page`.
+/// Open plugin `plugin`'s page `page` in the main pane.
 pub fn open_page(plugin: &str, page: &str, ws: &Entity<Workspace>, cx: &mut App) {
-    let _ = (plugin, page, ws, cx);
+    if page::page_of(plugin, page, cx).is_none() {
+        return;
+    }
+    let route = crate::workspace::Route::Page {
+        plugin: plugin.to_string(),
+        page: page.to_string(),
+    };
+    ws.update(cx, |ws, cx| ws.navigate(route, cx));
+}
+
+/// Send `text` to thread `thread` as plugin `plugin` (which was given `threads:send`): to the
+/// thread's agent, as if the user had typed it there. Said in the plugin's log.
+pub fn send_to_thread(
+    plugin: &str,
+    thread: &str,
+    text: &str,
+    ws: &Entity<Workspace>,
+    cx: &mut App,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("there's nothing to send".into());
+    }
+    if ws.read(cx).thread(thread).is_none() {
+        return Err("there's no such thread".into());
+    }
+    core::log(
+        plugin,
+        &format!(
+            "sent to thread {thread}: {}",
+            text.chars().take(120).collect::<String>()
+        ),
+    );
+    let (id, text) = (thread.to_string(), text.to_string());
+    ws.update(cx, |ws, cx| ws.send_to(&id, text, Vec::new(), cx));
+    Ok(())
 }
 
 /// The sidebar's Pages group: each running plugin's pages, a row apiece (none, and nothing drawn,
@@ -539,8 +561,10 @@ pub fn sidebar_pages(ws: &Entity<Workspace>, cx: &App) -> Vec<AnyElement> {
 
 /// The page the main window shows, as (plugin, page), if it shows one.
 pub fn open_page_of(ws: &Entity<Workspace>, cx: &App) -> Option<(String, String)> {
-    let _ = (ws, cx);
-    None
+    match &ws.read(cx).route {
+        crate::workspace::Route::Page { plugin, page } => Some((plugin.clone(), page.clone())),
+        _ => None,
+    }
 }
 
 /// Trek's own surface for a replacement to embed.

@@ -22,27 +22,44 @@ macro_rules! font {
     };
 }
 
-/// Every embedded face: the weights the interface uses (regular, medium, semibold, bold) and the
-/// italic. DirectWrite reads these straight from the binary's memory, so they're borrowed for the
-/// process's life.
+macro_rules! faces {
+    ($($name:literal),* $(,)?) => {
+        &[$(($name, include_bytes!(concat!("../assets/fonts/", $name)) as &'static [u8])),*]
+    };
+}
+
+/// The text faces, by their file's name: the interface's, the code's, and the serif a Trek theme
+/// may set its text in (`trek_core::themes::Font::Serif`), each in the weights the interface
+/// uses (regular, medium, semibold, bold) and the italic.
+const TEXT: &[(&str, &[u8])] = faces![
+    "Inter-Regular.ttf",
+    "Inter-Italic.ttf",
+    "Inter-Medium.ttf",
+    "Inter-SemiBold.ttf",
+    "Inter-Bold.ttf",
+    "JetBrainsMonoNL-Regular.ttf",
+    "JetBrainsMonoNL-Italic.ttf",
+    "JetBrainsMonoNL-Medium.ttf",
+    "JetBrainsMonoNL-SemiBold.ttf",
+    "JetBrainsMonoNL-Bold.ttf",
+    "Spectral-Regular.ttf",
+    "Spectral-Italic.ttf",
+    "Spectral-Medium.ttf",
+    "Spectral-SemiBold.ttf",
+    "Spectral-Bold.ttf",
+];
+
+/// A text face by its file's name (`Inter-Medium.ttf`): what a plugin's page is served, so its
+/// type is the app's.
+pub fn face(file: &str) -> Option<&'static [u8]> {
+    TEXT.iter().find(|(name, _)| *name == file).map(|(_, b)| *b)
+}
+
+/// Every embedded face. DirectWrite reads these straight from the binary's memory, so they're
+/// borrowed for the process's life.
 pub fn files() -> Vec<Cow<'static, [u8]>> {
-    vec![
-        font!("Inter-Regular.ttf"),
-        font!("Inter-Italic.ttf"),
-        font!("Inter-Medium.ttf"),
-        font!("Inter-SemiBold.ttf"),
-        font!("Inter-Bold.ttf"),
-        font!("JetBrainsMonoNL-Regular.ttf"),
-        font!("JetBrainsMonoNL-Italic.ttf"),
-        font!("JetBrainsMonoNL-Medium.ttf"),
-        font!("JetBrainsMonoNL-SemiBold.ttf"),
-        font!("JetBrainsMonoNL-Bold.ttf"),
-        // The serif a Trek theme may set its text in (`trek_core::themes::Font::Serif`).
-        font!("Spectral-Regular.ttf"),
-        font!("Spectral-Italic.ttf"),
-        font!("Spectral-Medium.ttf"),
-        font!("Spectral-SemiBold.ttf"),
-        font!("Spectral-Bold.ttf"),
+    let mut all: Vec<Cow<'static, [u8]>> = TEXT.iter().map(|(_, b)| Cow::Borrowed(*b)).collect();
+    all.extend([
         // Math in answers (`crate::math`): the KaTeX fonts, Computer Modern's look. GPUI won't
         // load a font without an `m`, so the faces that have none are given one and renamed
         // TrekMath, as their licence asks (`script/math-fonts.py`).
@@ -62,7 +79,8 @@ pub fn files() -> Vec<Cow<'static, [u8]>> {
         font!("TrekMath_Size2-Regular.ttf"),
         font!("TrekMath_Size3-Regular.ttf"),
         font!("TrekMath_Size4-Regular.ttf"),
-    ]
+    ]);
+    all
 }
 
 /// Hand the faces to the app's text system. Before the theme is applied and before any window

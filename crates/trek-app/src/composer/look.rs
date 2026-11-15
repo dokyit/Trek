@@ -28,12 +28,13 @@ pub const INPUT_INSET: f32 = 10.;
 /// Room a Trek theme's prompt mark takes before the text (`[composer] prompt`).
 pub const PROMPT: f32 = 16.;
 
-/// A Trek theme's prompt mark, in the accent, where the first line of text is.
-pub fn prompt_mark(mark: String, cx: &App) -> AnyElement {
+/// A Trek theme's prompt mark, in the accent, where the first line of text is: `above` is the
+/// room the composer leaves over its textarea, whose own text starts a little under its top.
+pub fn prompt_mark(mark: String, above: f32, cx: &App) -> AnyElement {
     div()
         .absolute()
         .left(px(PAD - 1.))
-        .top(px(6.))
+        .top(px(above + 4.5))
         .text_color(cx.theme().primary)
         .font_weight(FontWeight::SEMIBOLD)
         .child(mark)

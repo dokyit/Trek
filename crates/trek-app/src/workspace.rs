@@ -96,6 +96,11 @@ pub enum Route {
     Editor {
         path: PathBuf,
     },
+    /// A plugin's page (`crate::plugins::page`), by its plugin and its own id.
+    Page {
+        plugin: String,
+        page: String,
+    },
     Onboarding,
 }
 
@@ -3560,6 +3565,7 @@ impl Workspace {
                     | Route::Basecamp
                     | Route::Notes
                     | Route::Study
+                    | Route::Page { .. }
                     | Route::Onboarding
             )
         {
@@ -3990,6 +3996,7 @@ impl Workspace {
                 | Route::Basecamp
                 | Route::Notes
                 | Route::Study
+                | Route::Page { .. }
                 | Route::Settings(_)),
             ) => self.navigate(route, cx),
             _ => self.new_thread(cx),

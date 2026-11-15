@@ -548,13 +548,23 @@ fn watch(ws: WeakEntity<Workspace>, cx: &mut App) {
             let Some(dir) = cx.update(|cx| cx.try_global::<Themes>().map(|t| t.dir.clone())) else {
                 break;
             };
-            let now = cx
-                .background_spawn(async move { core::fingerprint(&dir) })
+            // The plugins folder is looked at on the same tick: one timer for both.
+            let plugins_dir = cx.update(|cx| crate::plugins::watched_dir(cx));
+            let (now, plugins) = cx
+                .background_spawn(async move {
+                    (
+                        core::fingerprint(&dir),
+                        plugins_dir.map(|d| crate::plugins::look(&d)),
+                    )
+                })
                 .await;
             let gone = cx.update(|cx| {
                 let Some(ws) = ws.upgrade() else {
                     return true;
                 };
+                if let Some((print, asked)) = plugins {
+                    crate::plugins::looked(print, asked, &ws, cx);
+                }
                 if cx
                     .try_global::<Themes>()
                     .is_some_and(|t| t.fingerprint != now)
@@ -665,14 +675,17 @@ pub fn reread(ws: &Entity<Workspace>, cx: &mut App) {
     ws.update(cx, |_, cx| cx.notify());
 }
 
-/// The themes running plugins bring changed: (id, file) each. The list is read again, and a
-/// plugin's theme on screen whose plugin went is Trek's own again.
+/// The themes running plugins bring, (id, file) each, as the plugins folder was just read: the
+/// list is read again (a plugin's theme file may have been edited, which the themes folder's
+/// own watch doesn't see), the one on screen takes what its file changed, and a plugin's theme
+/// on screen whose plugin went is Trek's own again. Nothing is read when no plugin brings a
+/// theme, before or now.
 pub fn set_plugin_themes(files: Vec<(String, PathBuf)>, ws: &Entity<Workspace>, cx: &mut App) {
     if !cx.has_global::<Themes>() {
         return;
     }
     let themes = cx.global_mut::<Themes>();
-    if themes.plugin_files == files {
+    if themes.plugin_files.is_empty() && files.is_empty() {
         return;
     }
     themes.plugin_files = files;

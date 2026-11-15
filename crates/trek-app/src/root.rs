@@ -48,6 +48,8 @@ pub struct TrekWindow {
     pub basecamp: Entity<Basecamp>,
     pub notes: Entity<crate::notes::NotesView>,
     pub study: Entity<crate::study::StudyView>,
+    /// The plugin page the main pane shows: its web view exists only while one is open.
+    pub page_host: Entity<crate::plugins::page::PageHost>,
     pub right_panel: Entity<RightPanel>,
     /// The terminal docked under the chat (⌃`).
     pub terminal_dock: Entity<crate::terminal_dock::TerminalDock>,
@@ -190,6 +192,8 @@ impl TrekWindow {
         let study = cx.new(|cx| {
             crate::study::StudyView::new(workspace.clone(), composer.clone(), window, cx)
         });
+        let page_host =
+            cx.new(|cx| crate::plugins::page::PageHost::new(workspace.clone(), window, cx));
         let ide = cx.new(|cx| crate::ide::IdeWorkbench::new(workspace.clone(), window, cx));
         let saved_width = workspace.read(cx).settings.layout.right_panel_width;
         let right_panel = cx.new(|_| {
@@ -579,6 +583,7 @@ impl TrekWindow {
                     .update(cx, |c, cx| c.focus(window, cx)),
                 Route::Basecamp => this.basecamp.read(cx).focus_handle().focus(window, cx),
                 Route::Notes => this.notes.read(cx).focus_handle(cx).focus(window, cx),
+                Route::Page { .. } => this.page_host.read(cx).focus_handle(cx).focus(window, cx),
                 Route::Editor { .. } => {
                     if let Some(ev) = this.editor(cx) {
                         ev.update(cx, |e, cx| e.focus(window, cx));
@@ -612,6 +617,7 @@ impl TrekWindow {
             basecamp,
             notes,
             study,
+            page_host,
             right_panel,
             terminal_dock,
             working_bar,
@@ -1042,6 +1048,19 @@ impl Render for WindowTitle {
                 Route::Basecamp => (None, "Basecamp".into(), None),
                 Route::Notes => (None, "Notes".into(), None),
                 Route::Study => (None, "Study".into(), None),
+                Route::Page { plugin, page } => (
+                    None,
+                    crate::plugins::page::page_of(plugin, page, cx)
+                        .and_then(|(m, _, _)| {
+                            m.pages
+                                .iter()
+                                .find(|p| &p.id == page)
+                                .map(|p| p.title.clone())
+                        })
+                        .unwrap_or_else(|| "Page".into())
+                        .into(),
+                    None,
+                ),
                 Route::Editor { path } => {
                     let project = path.parent().map(|d| trek_core::store::project_root(d));
                     let name = path
@@ -2651,6 +2670,7 @@ impl TrekWindow {
                 Route::Basecamp => self.basecamp.clone().cached(fill()).into_any_element(),
                 Route::Notes => self.notes.clone().into_any_element(),
                 Route::Study => self.study.clone().into_any_element(),
+                Route::Page { .. } => self.page_host.clone().into_any_element(),
                 Route::Editor { path } => {
                     let ev = self
                         .ide

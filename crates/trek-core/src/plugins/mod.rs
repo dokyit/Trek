@@ -11,6 +11,7 @@
 pub mod cli;
 pub mod data;
 pub mod examples;
+pub mod page;
 pub mod ui;
 
 use serde::{Deserialize, Serialize};
