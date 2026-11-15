@@ -159,7 +159,7 @@ impl Workspace {
             None => {
                 if !self.split_fits() {
                     cx.emit(WorkspaceEvent::Toast {
-                        message: "Not enough room for two threads. Widen the window or close the tools panel.".into(),
+                        message: "Not enough room for two threads. Widen the window, hide the sidebar or close the tools panel.".into(),
                         undo: None,
                     });
                     return;

@@ -563,6 +563,10 @@ impl TrekWindow {
                         .child(label),
                 )
         };
+        // Nothing to drop on while there's no room for two threads and no split to put one in.
+        if ws.split_live().is_none() && !crate::workspace::split::fits(room) {
+            return vec![];
+        }
         match ws
             .split_live()
             .filter(|_| crate::workspace::split::fits(panes))
