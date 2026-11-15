@@ -8,7 +8,7 @@ use crate::assets::Lucide;
 use crate::fluent;
 use crate::scale::{radius, text, to_rems};
 use crate::ui;
-use crate::workspace::{Workspace, WorkspaceEvent};
+use crate::workspace::{UndoAction, Workspace, WorkspaceEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
@@ -781,6 +781,8 @@ enum Msg {
     },
     Downloaded {
         url: String,
+        /// Where the file landed, when the view says.
+        path: Option<PathBuf>,
         ok: bool,
     },
     /// Whether tab `tab`'s page is drawn dark (`None`: can't tell); see `check_drawn_scheme`.
@@ -1048,8 +1050,8 @@ pub struct BrowserPanel {
     prompt: Option<(u64, Entity<InputState>, Subscription)>,
     /// The page area, as last laid out (a popup's sheet is sized to fit it).
     area: Rc<std::cell::Cell<Bounds<Pixels>>>,
-    /// Downloads under way: where each is saved, by its URL.
-    downloads: HashMap<String, PathBuf>,
+    /// Downloads under way: where each is saved, by its URL (the same file twice: in order).
+    downloads: HashMap<String, std::collections::VecDeque<PathBuf>>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -1710,8 +1712,8 @@ impl BrowserPanel {
                         });
                         true
                     })
-                    .with_download_completed_handler(move |url, _, ok| {
-                        let _ = t6.try_send(Msg::Downloaded { url, ok });
+                    .with_download_completed_handler(move |url, path, ok| {
+                        let _ = t6.try_send(Msg::Downloaded { url, path, ok });
                     })
             };
             // WKWebView takes its scheme from its appearance, which is set once it's made: so it
@@ -2321,7 +2323,7 @@ impl BrowserPanel {
             }
             Msg::Download { tab: id, url, path } => {
                 let name = asks::file_name(&path);
-                self.downloads.insert(url, path);
+                self.downloads.entry(url).or_default().push_back(path);
                 let mut close = false;
                 if let Some(tab) = self.tab_mut(id) {
                     // The load that became the download didn't fail; a tab opened only for it
@@ -2336,20 +2338,14 @@ impl BrowserPanel {
                 }
                 self.toast(format!("Downloading {name}…"), cx);
             }
-            Msg::Downloaded { url, ok } => {
-                let name = self
-                    .downloads
-                    .remove(&url)
-                    .map(|p| asks::file_name(&p))
-                    .unwrap_or_else(|| "the file".into());
-                self.toast(
-                    if ok {
-                        format!("Downloaded {name} to Downloads")
-                    } else {
-                        format!("Couldn’t download {name}")
-                    },
-                    cx,
-                );
+            Msg::Downloaded { url, path, ok } => {
+                let started = self.downloads.get_mut(&url).and_then(|q| q.pop_front());
+                if self.downloads.get(&url).is_some_and(|q| q.is_empty()) {
+                    self.downloads.remove(&url);
+                }
+                let (message, undo) = downloaded(path.or(started), ok);
+                self.workspace
+                    .update(cx, |_, cx| cx.emit(WorkspaceEvent::Toast { message, undo }));
             }
             Msg::Ipc { tab, origin, body } => {
                 self.handle_ipc(tab, from_view(origin), body, window, cx)
@@ -2373,6 +2369,38 @@ impl BrowserPanel {
             } => self.open_popup(opener, from_view(url), size, from, made, window, cx),
         }
         cx.notify();
+    }
+
+    /// Simulate a download's start and end, as the web view reports them (a test has no view).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn download_for_test(
+        &mut self,
+        url: &str,
+        path: PathBuf,
+        ok: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.active_tab().map(|t| t.id).unwrap_or_default();
+        let url = url.to_string();
+        self.handle(
+            Msg::Download {
+                tab,
+                url: url.clone(),
+                path: path.clone(),
+            },
+            window,
+            cx,
+        );
+        self.handle(
+            Msg::Downloaded {
+                url,
+                path: Some(path),
+                ok,
+            },
+            window,
+            cx,
+        );
     }
 
     fn toast(&self, message: String, cx: &mut Context<Self>) {
@@ -3608,10 +3636,18 @@ impl BrowserPanel {
         }
         let address = tab.map(|t| t.page.address()).unwrap_or_default();
         let content: AnyElement = if address.is_empty() {
+            // Cut with an ellipsis in a narrow panel, not mid-letter.
             h_flex()
+                .min_w_0()
                 .gap(px(6.))
                 .child(Icon::new(Lucide::Search).xsmall().text_color(muted))
-                .child(div().text_color(muted).child("Search or enter address"))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(muted)
+                        .child("Search or enter address"),
+                )
                 .into_any_element()
         } else {
             let secure = address.starts_with("https://");
@@ -3688,6 +3724,34 @@ impl BrowserPanel {
             .on_click(cx.listener(|this, _, window, cx| this.start_editing(window, cx)))
             .into_any_element()
     }
+}
+
+/// What a download that ended says (to `path`, when known), and the toast's button: the file
+/// shown in Finder (or File Explorer) once it's there.
+pub fn downloaded(path: Option<PathBuf>, ok: bool) -> (String, Option<UndoAction>) {
+    let name = path
+        .as_deref()
+        .map(asks::file_name)
+        .unwrap_or_else(|| "the file".into());
+    match path {
+        Some(path) if ok => (
+            format!("Downloaded {name} to {}", folder_name(&path)),
+            Some(UndoAction::RevealFile(path)),
+        ),
+        _ if ok => (format!("Downloaded {name}"), None),
+        _ => (
+            format!("Couldn’t download {name}. Try the link again."),
+            None,
+        ),
+    }
+}
+
+/// The folder `path` is in, by name (Downloads).
+fn folder_name(path: &std::path::Path) -> String {
+    path.parent()
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Downloads".into())
 }
 
 /// The shots harness's `browser` command (see `shots.rs`): the tool driven without a pointer,

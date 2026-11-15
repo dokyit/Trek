@@ -1774,6 +1774,8 @@ pub enum UndoAction {
     RemoveOldCopy(PathBuf),
     /// Not an undo: open a thread (one an agent started or handed off to).
     OpenThread(String),
+    /// Not an undo: show a file in Finder (File Explorer), a download that just landed.
+    RevealFile(PathBuf),
     /// Not an undo: restart into the update that's staged (`Workspace::restart_to_update`).
     RestartToUpdate,
     /// Not an undo: chats are running, so the same restart, once they finish.
@@ -9243,6 +9245,7 @@ impl Workspace {
                 cx.emit(WorkspaceEvent::ActivateMain);
             }
             UndoAction::OpenThread(_) => {}
+            UndoAction::RevealFile(path) => cx.reveal_path(&path),
             UndoAction::RestartToUpdate | UndoAction::InstallWhenFree => {
                 self.updater.later = None;
                 self.restart_to_update(cx)

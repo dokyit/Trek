@@ -79,3 +79,50 @@ fn a_draft_with_a_command_or_a_mention_leaves_the_page_on_show() {
         assert!(!covered(&trek, cx));
     });
 }
+
+/// A download that lands says where, with a button to show the file; the same file downloaded
+/// twice is said twice, each by its own name; one that fails says so.
+#[test]
+fn a_finished_download_offers_to_show_the_file() {
+    use trek_app::workspace::UndoAction;
+    run(async |cx| {
+        let trek = open(cx);
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Browser, window, cx))
+        });
+        trek.render(cx);
+        let browser = cx
+            .read(|cx| panel.read(cx).browser())
+            .expect("the Browser tool");
+        let seen = common::toasts(&trek, cx);
+        let downloads = trek.project.join("Downloads");
+        let file = downloads.join("report.pdf");
+        let again = downloads.join("report (1).pdf");
+        for (path, ok) in [(&file, true), (&again, true), (&file, false)] {
+            trek.window(cx, |window, cx| {
+                browser.update(cx, |b, cx| {
+                    let url = "https://example.com/report.pdf";
+                    b.download_for_test(url, path.clone(), ok, window, cx)
+                })
+            });
+        }
+        let seen = seen.borrow();
+        let done: Vec<&(String, Option<UndoAction>)> = seen
+            .iter()
+            .filter(|(m, _)| !m.starts_with("Downloading"))
+            .collect();
+        assert_eq!(done[0].0, "Downloaded report.pdf to Downloads");
+        assert!(matches!(&done[0].1, Some(UndoAction::RevealFile(p)) if *p == file));
+        assert_eq!(done[1].0, "Downloaded report (1).pdf to Downloads");
+        assert_eq!(
+            done[2].0,
+            "Couldn’t download report.pdf. Try the link again."
+        );
+        assert!(done[2].1.is_none());
+        assert_eq!(
+            trek_app::root::toast_button_label(done[0].1.as_ref().unwrap()),
+            trek_app::words::words().show_in_file_manager
+        );
+    });
+}
