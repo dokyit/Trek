@@ -1222,6 +1222,7 @@ fn web_push(
     {
         return error(re, ErrorCode::BadRequest, why);
     }
+    let asked = req.subscribe.is_some();
     let change = if req.unsubscribe {
         Some(None)
     } else {
@@ -1234,7 +1235,7 @@ fn web_push(
     }
     let subscribed = state.registry.has_push(device_id);
     drop(state);
-    if subscribed != before || (subscribed && req.subscribe.is_some()) {
+    if subscribed != before || (subscribed && asked) {
         tracing::info!(device_id, subscribed, "phone notifications through the browser");
         inner.notice(ServerNotice::PushChanged {
             device_id: device_id.to_string(),
