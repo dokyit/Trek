@@ -23,8 +23,25 @@ use std::path::{Path, PathBuf};
 /// Never listed, ignored or not.
 const HIDDEN: &[&str] = &[".git", ".DS_Store"];
 
-/// Rows drawn at most: a tree opened that far is beyond reading anyway.
+/// Rows drawn at most: a tree opened that far is beyond reading anyway. A last row says so.
 const MAX_ROWS: usize = 4000;
+
+/// A line of the tree: a file or folder, or a note in a folder (it's empty, it couldn't be read,
+/// the tree stops here), at its depth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Row {
+    Entry(PathBuf, bool, usize),
+    Note(String, usize),
+}
+
+/// Why `dir` can't be listed, in a line (`None`: it can).
+fn unreadable(dir: &Path) -> Option<String> {
+    std::fs::read_dir(dir).err().map(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => "This folder isn't there any more.".to_string(),
+        std::io::ErrorKind::PermissionDenied => "Trek isn't allowed to read this folder.".into(),
+        _ => format!("Couldn't read this folder: {e}"),
+    })
+}
 
 /// How long the folder watcher gathers changes before the tree reads again.
 const GATHER: std::time::Duration = std::time::Duration::from_millis(150);
@@ -288,6 +305,8 @@ pub struct ExplorerPanel {
     files_seen: u64,
     /// Each folder's entries as last read, for the root and the folders open under it.
     entries: HashMap<PathBuf, Vec<(PathBuf, bool)>>,
+    /// The folders shown that couldn't be read, and why.
+    unreadable: HashMap<PathBuf, String>,
     /// The editor's tree: compact rows, git marks, a single click opens a preview tab.
     ide: bool,
     git: HashMap<PathBuf, GitMark>,
@@ -360,6 +379,7 @@ impl ExplorerPanel {
             selected: None,
             files_seen,
             entries: HashMap::new(),
+            unreadable: HashMap::new(),
             ide,
             git: HashMap::new(),
             git_dirs: HashSet::new(),
@@ -490,11 +510,12 @@ impl ExplorerPanel {
             let (read, git) = cx
                 .background_executor()
                 .spawn(async move {
-                    let read: Vec<(PathBuf, Vec<(PathBuf, bool)>)> = dirs
+                    let read: Vec<(PathBuf, Vec<(PathBuf, bool)>, Option<String>)> = dirs
                         .into_iter()
                         .map(|d| {
+                            let why = unreadable(&d);
                             let c = children(&d, dots);
-                            (d, c)
+                            (d, c, why)
                         })
                         .collect();
                     (read, git_root.map(|r| git_marks(&r)))
@@ -509,7 +530,13 @@ impl ExplorerPanel {
                     this.entries
                         .retain(|d, _| root.as_ref() == Some(d) || expanded.contains(d));
                 }
-                this.entries.extend(read);
+                for (dir, entries, why) in read {
+                    match why {
+                        Some(why) => this.unreadable.insert(dir.clone(), why),
+                        None => this.unreadable.remove(&dir),
+                    };
+                    this.entries.insert(dir, entries);
+                }
                 if let Some(git) = git {
                     let root = this.root.clone().unwrap_or_default();
                     this.git_dirs = git
@@ -540,18 +567,65 @@ impl ExplorerPanel {
         self.git.get(path).copied()
     }
 
-    fn rows(&self, dir: &Path, depth: usize, out: &mut Vec<(PathBuf, bool, usize)>) {
-        for (path, is_dir) in self.entries.get(dir).into_iter().flatten() {
+    /// The tree's lines under `root`: what's in it and in each folder open, a note in a folder
+    /// that's empty or couldn't be read, and a last one where the tree stops at `MAX_ROWS`.
+    pub fn rows(&self, root: &Path) -> Vec<Row> {
+        let mut out = vec![];
+        if !self.rows_in(root, 0, &mut out) {
+            out.push(Row::Note(
+                format!("Showing the first {MAX_ROWS} items. Close a folder to see the rest."),
+                0,
+            ));
+        }
+        out
+    }
+
+    /// `rows` from `dir` down; `false` once the cap is reached.
+    fn rows_in(&self, dir: &Path, depth: usize, out: &mut Vec<Row>) -> bool {
+        if let Some(why) = self.unreadable.get(dir) {
+            out.push(Row::Note(why.clone(), depth));
+            return true;
+        }
+        let Some(entries) = self.entries.get(dir) else {
+            return true;
+        };
+        if entries.is_empty() {
+            let empty = if depth == 0 {
+                "This folder is empty."
+            } else {
+                "Empty"
+            };
+            out.push(Row::Note(empty.into(), depth));
+        }
+        for (path, is_dir) in entries {
             if out.len() >= MAX_ROWS {
-                return;
+                return false;
             }
             // Open once its entries are in: never an open folder with nothing under it.
             let open = *is_dir && self.expanded.contains(path) && self.entries.contains_key(path);
-            out.push((path.clone(), *is_dir, depth));
-            if open {
-                self.rows(path, depth + 1, out);
+            out.push(Row::Entry(path.clone(), *is_dir, depth));
+            if open && !self.rows_in(path, depth + 1, out) {
+                return false;
             }
         }
+        true
+    }
+
+    /// A note's line in the tree, indented to its folder's entries.
+    fn note_row(&self, text: String, depth: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let step = if self.ide { 12. } else { 14. };
+        div()
+            .id(SharedString::from(format!("explorer-note-{depth}-{text}")))
+            .test_support()
+            .when(!self.ide, |el| el.mx_1().text_size(to_rems(text::LABEL)))
+            .when(self.ide, |el| el.text_size(px(text::BODY)))
+            .py(px(4.))
+            .pl(px(8. + depth as f32 * step + 18.))
+            .pr_2()
+            .text_color(theme.muted_foreground)
+            .child(text)
+            .into_any_element()
     }
 
     /// Who's told when a file or folder moves or goes (the editor, for its tabs).
@@ -922,8 +996,7 @@ impl Render for ExplorerPanel {
         let Some(root) = self.root.clone() else {
             return super::empty(self.empty_hint, cx).into_any_element();
         };
-        let mut rows = Vec::new();
-        self.rows(&root, 0, &mut rows);
+        let rows = self.rows(&root);
         let selected = self.selected.clone();
         let ide = self.ide;
         // A name being typed: a new entry's row first in its folder, a rename in place.
@@ -937,7 +1010,17 @@ impl Render for ExplorerPanel {
             lead.extend(self.edit_row(0, cx));
         }
         let mut elements: Vec<AnyElement> = vec![];
-        for (path, is_dir, depth) in rows {
+        for row in rows {
+            let (path, is_dir, depth) = match row {
+                Row::Entry(path, is_dir, depth) => (path, is_dir, depth),
+                Row::Note(text, depth) => {
+                    // A new entry being named in an empty folder stands for its note.
+                    if new_in.is_none() || depth > 0 {
+                        elements.push(self.note_row(text, depth, cx));
+                    }
+                    continue;
+                }
+            };
             if renaming.as_ref() == Some(&path) {
                 elements.extend(self.edit_row(depth, cx));
                 continue;

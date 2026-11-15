@@ -428,6 +428,15 @@ impl RightPanel {
 
     /// The Browser tool, if it's open (the shots harness's `browser` command).
     #[cfg(any(test, feature = "test-support", feature = "shots"))]
+    /// The Explorer tool, if it's open (the tests').
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn explorer(&self) -> Option<Entity<explorer::ExplorerPanel>> {
+        self.tabs.iter().find_map(|t| match &t.view {
+            View::Explorer(e) => Some(e.clone()),
+            _ => None,
+        })
+    }
+
     pub fn browser(&self) -> Option<Entity<browser::BrowserPanel>> {
         self.tabs.iter().find_map(|t| match &t.view {
             View::Browser(b) => Some(b.clone()),

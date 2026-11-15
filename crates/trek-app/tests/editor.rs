@@ -286,6 +286,61 @@ fn the_tools_panels_explorer_refreshes_makes_files_and_collapses() {
     });
 }
 
+/// The Explorer's empty and cut-off states say so: an empty project, an empty folder opened, and
+/// a tree past its row limit each get a line rather than nothing.
+#[test]
+fn the_explorer_says_when_a_folder_is_empty_and_when_it_stops() {
+    use trek_app::panels::explorer::Row;
+    run(async |cx| {
+        let trek = open(cx);
+        let panel = cx.read(|cx| trek.root.read(cx).right_panel.clone());
+        trek.window(cx, |window, cx| {
+            panel.update(cx, |p, cx| p.open_tool(PanelTool::Explorer, window, cx))
+        });
+        trek.render(cx);
+        trek.render(cx);
+        assert!(trek.visible(cx, "explorer-note-0-This folder is empty."));
+
+        let empty = trek.project.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        trek.click(cx, "explorer-refresh");
+        trek.render(cx);
+        trek.render(cx);
+        assert!(!trek.visible(cx, "explorer-note-0-This folder is empty."));
+        trek.click(cx, empty.display().to_string());
+        trek.render(cx);
+        trek.render(cx);
+        assert!(
+            trek.visible(cx, "explorer-note-1-Empty"),
+            "an empty folder opened"
+        );
+
+        // Past the limit: the tree stops, and its last line says so.
+        let many = trek.project.join("many");
+        std::fs::create_dir_all(&many).unwrap();
+        for i in 0..4005 {
+            std::fs::write(many.join(format!("f{i:04}.txt")), "").unwrap();
+        }
+        trek.click(cx, "explorer-refresh");
+        trek.render(cx);
+        trek.render(cx);
+        trek.click(cx, many.display().to_string());
+        trek.render(cx);
+        trek.render(cx);
+        let explorer = panel
+            .read_with(cx, |p, _| p.explorer())
+            .expect("the Explorer tool");
+        let rows = explorer.read_with(cx, |e, _| e.rows(&trek.project));
+        assert_eq!(
+            rows.last(),
+            Some(&Row::Note(
+                "Showing the first 4000 items. Close a folder to see the rest.".into(),
+                0
+            ))
+        );
+    });
+}
+
 /// A file deep in a folder clicked in the Explorer: the tree stays rooted where it was with its
 /// folders open, rather than starting again at the file's folder.
 #[test]
