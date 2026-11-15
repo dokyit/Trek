@@ -22,6 +22,12 @@ macro_rules! example {
 pub const ALL: &[(&str, &[File])] = &[
     example!("focus-timer": "plugin.toml"),
     example!("commit-graph": "plugin.toml"),
+    example!(
+        "summit-log": "plugin.toml",
+        "pages/summit-log/index.html",
+        "pages/summit-log/style.css",
+        "pages/summit-log/app.js",
+    ),
     example!("terminal-look": "plugin.toml", "terminal.toml"),
 ];
 

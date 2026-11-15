@@ -1,0 +1,51 @@
+/* Everything is Trek's: its colours, fonts, text size and corners come as --trek-* variables,
+   and change in place when the theme does. */
+body { max-width: 860px; margin: 0 auto; }
+h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+.sub { margin: 0 0 26px; color: var(--trek-muted); }
+
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+.tile, .card {
+  border: 1px solid var(--trek-border);
+  border-radius: var(--trek-radius);
+  background: var(--trek-surface);
+}
+.tile { padding: 14px 16px; }
+.tile .n { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.15; }
+.tile .l { color: var(--trek-muted); font-size: 12px; margin-top: 2px; }
+.tile.quiet .n { font-size: 15px; font-weight: 500; padding: 7px 0 5px; }
+
+.card { padding: 16px 18px 12px; }
+.bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.range { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--trek-radius);
+  background: color-mix(in srgb, var(--trek-fg) 6%, transparent); }
+.range button {
+  font: inherit; font-size: 12px; color: var(--trek-muted); background: none; border: 0;
+  padding: 4px 10px; border-radius: calc(var(--trek-radius) - 2px); cursor: pointer;
+}
+.range button[aria-selected="true"] { background: var(--trek-bg); color: var(--trek-fg); }
+.best { color: var(--trek-muted); font-size: 12px; }
+
+/* A cairn a day: stones stacked from the ground up, today's in the accent. */
+.cairns { display: flex; align-items: flex-end; gap: 3px; height: 132px;
+  border-bottom: 1px solid var(--trek-border); padding-bottom: 3px; }
+.day { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column-reverse;
+  align-items: center; gap: 2px; height: 100%; position: relative; }
+.day.monday { margin-left: 5px; }
+.stone { width: 100%; max-width: 18px; height: 9px; border-radius: 5px;
+  background: color-mix(in srgb, var(--trek-accent) 46%, var(--trek-bg)); }
+.stone:nth-child(2n) { width: 82%; }
+.stone:nth-child(3n) { width: 66%; }
+.day.today .stone { background: var(--trek-accent); }
+.day.none::after { content: ""; width: 3px; height: 3px; border-radius: 50%;
+  background: color-mix(in srgb, var(--trek-fg) 18%, transparent); }
+.more { font-size: 10px; color: var(--trek-muted); font-family: var(--trek-mono); }
+.day:hover::before {
+  content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); white-space: nowrap;
+  font-size: 11px; padding: 3px 7px; border-radius: 5px; z-index: 1;
+  background: var(--trek-fg); color: var(--trek-bg);
+}
+.months { position: relative; height: 18px; margin-top: 6px; font-size: 11px; color: var(--trek-muted); }
+.months span { position: absolute; }
+.empty { color: var(--trek-muted); margin: 14px 0 6px; }
+.foot { color: var(--trek-muted); font-size: 12px; margin-top: 14px; }

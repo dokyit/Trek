@@ -144,11 +144,19 @@ pub fn element(project: &Path, mine: bool, dots_only: bool, cx: &App) -> AnyElem
                 day(year.start + i as i64 * 7 * 86_400)
             )))
         });
-    let heights = ridge(&year.weeks);
+    // A project younger than the year: the trail starts a week before its first commit rather
+    // than twelve months back, so the climb fills the width (eight weeks at least).
+    let from = year
+        .weeks
+        .iter()
+        .position(|n| *n > 0)
+        .map_or(0, |first| first.saturating_sub(1).min(WEEKS - 8));
+    let span = WEEKS - from;
+    let heights = ridge(&year.weeks[from..]);
     let accent = theme.primary;
     let ink = theme.foreground;
     let dark = theme.mode.is_dark();
-    let peak = busiest.map(|(i, _)| i);
+    let peak = busiest.map(|(i, _)| i.saturating_sub(from));
     let climb = div().w_full().h(px(HEIGHT)).child(
         canvas(
             |_, _, _| {},
@@ -160,12 +168,12 @@ pub fn element(project: &Path, mine: bool, dots_only: bool, cx: &App) -> AnyElem
     // little room for them.
     let mut months = Vec::new();
     let mut last = "";
-    for w in 0..WEEKS {
+    for w in from..WEEKS {
         let m = month(year.start + w as i64 * 7 * 86_400);
         if m != last {
             // Not the first week (a month already under way), nor so near the end that its name
             // would run past the edge.
-            if w > 0 && w < WEEKS - 2 {
+            if w > from && w < WEEKS - 2 {
                 months.push((w, m));
             }
             last = m;
@@ -178,7 +186,7 @@ pub fn element(project: &Path, mine: bool, dots_only: bool, cx: &App) -> AnyElem
         .children(months.into_iter().map(|(w, m)| {
             div()
                 .absolute()
-                .left(relative(w as f32 / (WEEKS - 1) as f32))
+                .left(relative((w - from) as f32 / (span - 1) as f32))
                 .text_size(px(crate::scale::text::META))
                 .text_color(muted.opacity(0.75))
                 .child(m)

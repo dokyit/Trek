@@ -88,6 +88,7 @@ mod cloud_files;
 mod computer_use;
 #[cfg(any(windows, target_os = "macos"))]
 mod dns_sd;
+mod plugin_keys;
 
 pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
     let Some(dir) = std::env::var_os("TREK_SHOT_DIR").map(PathBuf::from) else {
@@ -150,6 +151,8 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "record" => record(&workspace, &dir, arg, &mut recording, cx).await,
                     "perf" => perf(&workspace, arg, cx).await,
                     "second-launch" => second_launch(arg, cx).await,
+                    "plugin-keys" if arg == "hold" => plugin_keys::hold(&workspace, cx),
+                    "plugin-keys" => plugin_keys::check(&workspace, cx).await,
                     #[cfg(target_os = "macos")]
                     "windows" => cx.update(|cx| windows(&workspace, &dir, cx)),
                     "quit" => quit(cx),
@@ -3866,6 +3869,34 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     String::from_utf8_lossy(&out)
                 );
                 crate::plugins::reread(&ws, cx);
+            }
+            // `plugin page <plugin> <page>` opens a page; `plugin page-view <0|1>` checks whether
+            // a page's web view exists (it should only while a page is open).
+            "page" => {
+                let (plugin, page) = rest.split_once(' ').unwrap_or((rest, rest));
+                anyhow::ensure!(
+                    crate::plugins::page::page_of(plugin, page.trim(), cx).is_some(),
+                    "plugin page {rest}: no such page of a running plugin"
+                );
+                crate::plugins::open_page(plugin, page.trim(), &ws, cx);
+            }
+            "page-view" => {
+                let main = ws
+                    .read(cx)
+                    .main_window
+                    .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+                let has = main.update(cx, |root, _, cx| {
+                    root.downcast::<gpui_kit::component::Root>()
+                        .ok()
+                        .map(|r| r.read(cx).view().clone())
+                        .and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())
+                        .is_some_and(|trek| trek.read(cx).page_host.read(cx).has_view())
+                })?;
+                anyhow::ensure!(
+                    rest == if has { "1" } else { "0" },
+                    "plugin page-view {rest}: a page's web view {}",
+                    if has { "exists" } else { "doesn't exist" }
+                );
             }
             "on" => crate::plugins::set_on(rest, true, &ws, cx),
             "off" => crate::plugins::set_on(rest, false, &ws, cx),
