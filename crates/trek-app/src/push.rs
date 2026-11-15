@@ -353,9 +353,7 @@ pub fn send_web_push(
 }
 
 /// Which phones' browsers get a note: each device that asked for notifications (`web_push`).
-fn web_targets(
-    remote: Option<&crate::remote::Remote>,
-) -> Vec<(String, webpush::PushSubscription)> {
+fn web_targets(remote: Option<&crate::remote::Remote>) -> Vec<(String, webpush::PushSubscription)> {
     remote.map_or_else(Vec::new, |r| r.handle.push_targets())
 }
 
@@ -609,13 +607,26 @@ mod tests {
             ("Trek · api", "Needs your approval: Fix the bug", true)
         );
         assert_eq!((w.tag.as_str(), w.thread.as_deref()), ("m1:t1", Some("t1")));
-        let done = note_for("", "Finished: Fix the bug", Some("t1"), Some("api"), false, "m1");
+        let done = note_for(
+            "",
+            "Finished: Fix the bug",
+            Some("t1"),
+            Some("api"),
+            false,
+            "m1",
+        );
         let (w, urgent) = web_note(&done, Some("t1"), "m1");
-        assert_eq!((w.title.as_str(), w.body.as_str(), urgent), ("Trek", "A thread finished", false));
+        assert_eq!(
+            (w.title.as_str(), w.body.as_str(), urgent),
+            ("Trek", "A thread finished", false)
+        );
         let sent = String::from_utf8(w.to_bytes()).unwrap();
         assert!(!sent.contains("Fix") && !sent.contains("api"), "{sent}");
         let (test, _) = web_note(&done, None, "m1");
-        assert_eq!(test.tag, "m1", "a note about no thread has the computer's tag");
+        assert_eq!(
+            test.tag, "m1",
+            "a note about no thread has the computer's tag"
+        );
     }
 
     #[test]

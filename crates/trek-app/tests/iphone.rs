@@ -569,10 +569,7 @@ fn settings_say_what_the_iphone_tools_do_here() {
                 mobile.iter().any(|s| s.contains("in its browser")),
                 "{mobile:?}"
             );
-            assert!(
-                mobile.iter().all(|s| !s.contains("ios/")),
-                "{mobile:?}"
-            );
+            assert!(mobile.iter().all(|s| !s.contains("ios/")), "{mobile:?}");
         }
         let _mac = pretend(false);
         let tools = said(&trek, cx, SettingsPage::Tools);

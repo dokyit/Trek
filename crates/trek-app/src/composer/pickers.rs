@@ -380,28 +380,28 @@ fn model_menu<H: PickerHost>(host: &mut H, cx: &mut Context<H>) -> AnyElement {
         })
         .when(has_effort, |el| {
             el.child(
-            look::row("mm-effort", sub == Some(Sub::Effort), cx)
-                .test_support()
-                .child(
-                    div()
-                        .w(px(16.))
-                        .flex()
-                        .justify_center()
-                        .child(look::effort_bars(prefs.effort, cx)),
-                )
-                .child(div().flex_1().child("Effort"))
-                .child(div().text_color(muted).child(prefs.effort.label()))
-                .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
-                .on_hover(cx.listener(|this: &mut H, hovered: &bool, _, cx| {
-                    if *hovered {
+                look::row("mm-effort", sub == Some(Sub::Effort), cx)
+                    .test_support()
+                    .child(
+                        div()
+                            .w(px(16.))
+                            .flex()
+                            .justify_center()
+                            .child(look::effort_bars(prefs.effort, cx)),
+                    )
+                    .child(div().flex_1().child("Effort"))
+                    .child(div().text_color(muted).child(prefs.effort.label()))
+                    .child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted))
+                    .on_hover(cx.listener(|this: &mut H, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.pickers().sub = Some(Sub::Effort);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(|this: &mut H, _, _, cx| {
                         this.pickers().sub = Some(Sub::Effort);
                         cx.notify();
-                    }
-                }))
-                .on_click(cx.listener(|this: &mut H, _, _, cx| {
-                    this.pickers().sub = Some(Sub::Effort);
-                    cx.notify();
-                })),
+                    })),
             )
         })
         .child(
@@ -867,19 +867,17 @@ fn model_panel<H: PickerHost>(
     }
     // Agents that can't run now: dimmed, and the panel says why.
     for (a, name, why) in &unready {
-        rail_col = rail_col.child(
-            rail_button(
-                SharedString::from(format!("rail-{}", a.key())),
-                rail == Rail::Unready(a.clone()),
-                div()
-                    .opacity(0.45)
-                    .child(ui::agent_glyph(a, cx))
-                    .into_any_element(),
-                why.says(name).into(),
-                Rail::Unready(a.clone()),
-                cx,
-            ),
-        );
+        rail_col = rail_col.child(rail_button(
+            SharedString::from(format!("rail-{}", a.key())),
+            rail == Rail::Unready(a.clone()),
+            div()
+                .opacity(0.45)
+                .child(ui::agent_glyph(a, cx))
+                .into_any_element(),
+            why.says(name).into(),
+            Rail::Unready(a.clone()),
+            cx,
+        ));
     }
 
     let rows = list.into_iter().enumerate().map(|(i, (agent, m))| {
@@ -943,7 +941,10 @@ fn model_panel<H: PickerHost>(
             ("Loading models…".into(), None)
         } else {
             match &rail {
-                Rail::Favorites => ("Hover a model and press the star to keep it here.".into(), None),
+                Rail::Favorites => (
+                    "Hover a model and press the star to keep it here.".into(),
+                    None,
+                ),
                 Rail::Unready(_) => (
                     unready_note.clone().unwrap_or_default(),
                     Some(SettingsPage::Agents),
@@ -963,7 +964,10 @@ fn model_panel<H: PickerHost>(
                         )
                     }
                 }
-                Rail::Agent(agent) => (format!("{} hasn't listed its models yet.", agent.display_name()), None),
+                Rail::Agent(agent) => (
+                    format!("{} hasn't listed its models yet.", agent.display_name()),
+                    None,
+                ),
             }
         }
     };
@@ -972,69 +976,87 @@ fn model_panel<H: PickerHost>(
         .p_0()
         .w(px(360.))
         .child(
-            h_flex()
-                .items_start()
-                .child(rail_col)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            v_flex()
-                                .px(px(9.))
-                                .pt(px(8.))
-                                .pb(px(if unready_panel { 8. } else { 4. }))
-                                .gap(px(4.))
-                                .border_b_1()
-                                .border_color(look::hairline(cx))
-                                .child(div().id("model-source").test_support().text_size(px(text::LABEL)).text_color(theme.muted_foreground).child(source))
-                                .when(!unready_panel, |el| el.child(Input::new(&search).small().appearance(false).prefix(Icon::new(IconName::Search).small().text_color(theme.muted_foreground)))),
-                        )
-                        .child(
-                            v_flex()
-                                .id("model-list")
-                                .p(px(4.))
-                                .max_h(px(360.))
-                                .overflow_y_scroll()
-                                .children(rows)
-                                .when_some(custom_row, |el, row| el.child(row))
-                                .when(empty, |el| {
-                                    el.child(
-                                        v_flex()
-                                            .id("model-empty")
-                                            .test_support()
-                                            .p_3()
-                                            .gap(px(8.))
-                                            .text_size(to_rems(text::LABEL))
-                                            .text_color(theme.muted_foreground)
-                                            .child(empty_text)
-                                            .when_some(fix, |el, page| {
-                                                el.child(
-                                                    div()
-                                                        .id("model-fix")
-                                                        .test_support()
-                                                        .cursor_pointer()
-                                                        .text_color(theme.foreground)
-                                                        .hover(|s| s.underline())
-                                                        .child(format!("Open {}", page.label()))
-                                                        .on_click(cx.listener(move |this: &mut H, _, _, cx| {
+            h_flex().items_start().child(rail_col).child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        v_flex()
+                            .px(px(9.))
+                            .pt(px(8.))
+                            .pb(px(if unready_panel { 8. } else { 4. }))
+                            .gap(px(4.))
+                            .border_b_1()
+                            .border_color(look::hairline(cx))
+                            .child(
+                                div()
+                                    .id("model-source")
+                                    .test_support()
+                                    .text_size(px(text::LABEL))
+                                    .text_color(theme.muted_foreground)
+                                    .child(source),
+                            )
+                            .when(!unready_panel, |el| {
+                                el.child(
+                                    Input::new(&search).small().appearance(false).prefix(
+                                        Icon::new(IconName::Search)
+                                            .small()
+                                            .text_color(theme.muted_foreground),
+                                    ),
+                                )
+                            }),
+                    )
+                    .child(
+                        v_flex()
+                            .id("model-list")
+                            .p(px(4.))
+                            .max_h(px(360.))
+                            .overflow_y_scroll()
+                            .children(rows)
+                            .when_some(custom_row, |el, row| el.child(row))
+                            .when(empty, |el| {
+                                el.child(
+                                    v_flex()
+                                        .id("model-empty")
+                                        .test_support()
+                                        .p_3()
+                                        .gap(px(8.))
+                                        .text_size(to_rems(text::LABEL))
+                                        .text_color(theme.muted_foreground)
+                                        .child(empty_text)
+                                        .when_some(fix, |el, page| {
+                                            el.child(
+                                                div()
+                                                    .id("model-fix")
+                                                    .test_support()
+                                                    .cursor_pointer()
+                                                    .text_color(theme.foreground)
+                                                    .hover(|s| s.underline())
+                                                    .child(format!("Open {}", page.label()))
+                                                    .on_click(cx.listener(
+                                                        move |this: &mut H, _, _, cx| {
                                                             let route = Route::Settings(page);
-                                                            let main = this.scope().in_main_window();
-                                                            this.workspace().update(cx, |ws, cx| {
-                                                                if main {
-                                                                    ws.navigate(route, cx)
-                                                                } else {
-                                                                    ws.show_in_main(route, cx)
-                                                                }
-                                                            });
+                                                            let main =
+                                                                this.scope().in_main_window();
+                                                            this.workspace().update(
+                                                                cx,
+                                                                |ws, cx| {
+                                                                    if main {
+                                                                        ws.navigate(route, cx)
+                                                                    } else {
+                                                                        ws.show_in_main(route, cx)
+                                                                    }
+                                                                },
+                                                            );
                                                             close_model_menu(this, cx);
-                                                        })),
-                                                )
-                                            }),
-                                    )
-                                }),
-                        ),
-                ),
+                                                        },
+                                                    )),
+                                            )
+                                        }),
+                                )
+                            }),
+                    ),
+            ),
         )
         .into_any_element()
 }
@@ -1567,7 +1589,10 @@ pub fn picker_key<H: PickerHost>(
         }
         if !ks.modifiers.secondary() && !ks.modifiers.alt && !ks.modifiers.control {
             host.pickers().model_cursor = 0;
-            if let Some(typed) = ks.key_char.as_deref().filter(|c| c.chars().all(|c| !c.is_control()))
+            if let Some(typed) = ks
+                .key_char
+                .as_deref()
+                .filter(|c| c.chars().all(|c| !c.is_control()))
                 && host.pickers_ref().sub != Some(Sub::Model)
             {
                 show_model_panel(host, window, cx);

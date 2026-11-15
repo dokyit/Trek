@@ -2,10 +2,11 @@
 //! chip. It starts empty with the cursor in its field, Enter clones, and an empty field says what
 //! it wants instead of closing.
 
+use crate::scale::{text, to_rems};
 use crate::workspace::Workspace;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -76,7 +77,7 @@ impl Render for CloneForm {
                     div()
                         .id("clone-error")
                         .test_support()
-                        .text_sm()
+                        .text_size(to_rems(text::LABEL))
                         .text_color(theme.danger)
                         .child(error),
                 )

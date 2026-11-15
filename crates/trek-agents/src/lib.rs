@@ -193,7 +193,10 @@ impl McpServer {
 pub(crate) fn not_installed(name: &str, key: &str) -> String {
     let at = "Settings › Agents & Subscriptions";
     match trek_core::catalog::install_hint(key) {
-        Some(hint) => format!("{name} isn't installed. Install it in {at}, or run: {}", hint.here()),
+        Some(hint) => format!(
+            "{name} isn't installed. Install it in {at}, or run: {}",
+            hint.here()
+        ),
         None => format!("{name} isn't installed. Install it in {at}."),
     }
 }
@@ -1822,8 +1825,17 @@ mod tests {
     #[test]
     fn a_missing_agent_is_told_the_install_line_trek_uses() {
         let said = not_installed("Claude Code", "claude-code");
-        assert!(said.starts_with("Claude Code isn't installed. Install it in Settings"), "{said}");
-        assert!(said.contains(trek_core::catalog::install_hint("claude-code").unwrap().here()));
+        assert!(
+            said.starts_with("Claude Code isn't installed. Install it in Settings"),
+            "{said}"
+        );
+        assert!(
+            said.contains(
+                trek_core::catalog::install_hint("claude-code")
+                    .unwrap()
+                    .here()
+            )
+        );
         assert!(!said.contains("npm i -g @anthropic-ai"), "{said}");
         // One with no install line of its own just points at Settings.
         assert_eq!(

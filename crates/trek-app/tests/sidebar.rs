@@ -770,7 +770,10 @@ fn a_narrowed_list_says_so_and_the_x_lets_go_of_it() {
         trek.render(cx);
         assert!(trek.visible(cx, "filter-note"));
         assert!(trek.visible(cx, "filter-empty"));
-        assert!(!trek.visible(cx, "inbox-zero"), "that isn't the inbox being empty");
+        assert!(
+            !trek.visible(cx, "inbox-zero"),
+            "that isn't the inbox being empty"
+        );
         assert!(!trek.visible(cx, format!("live-line-{id}")));
         trek.click(cx, "filter-clear");
         trek.render(cx);

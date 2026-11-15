@@ -1726,7 +1726,10 @@ fn a_local_model_has_no_effort_to_pick() {
         trek.render(cx);
         trek.click(cx, "model-pill");
         trek.render(cx);
-        assert!(trek.visible(cx, "mm-effort"), "the mock's models have levels");
+        assert!(
+            trek.visible(cx, "mm-effort"),
+            "the mock's models have levels"
+        );
         trek.press(cx, "escape");
         trek.update(cx, |ws, cx| {
             ws.direct_models.insert(
@@ -1770,7 +1773,10 @@ fn a_refused_microphone_offers_the_privacy_pane() {
         trek.click(cx, "dictate");
         let (message, undo) = toasts.borrow().last().cloned().unwrap();
         assert_eq!(message, "Trek needs microphone access to dictate.");
-        assert!(matches!(undo, Some(UndoAction::OpenPrivacy(Permission::Microphone))));
+        assert!(matches!(
+            undo,
+            Some(UndoAction::OpenPrivacy(Permission::Microphone))
+        ));
         trek.update(cx, |ws, cx| ws.undo(undo.unwrap(), cx));
         assert_eq!(
             trek_app::permissions::fake::opened().last(),

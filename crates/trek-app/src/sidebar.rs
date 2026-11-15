@@ -34,8 +34,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use look::{Mark, TEXT_INSET};
 use std::collections::{HashMap, HashSet};
-use trek_core::store::{SearchHit, Section, Thread};
 use trek_core::RunState;
+use trek_core::store::{SearchHit, Section, Thread};
 
 pub struct Sidebar {
     workspace: Entity<Workspace>,
@@ -1639,39 +1639,52 @@ impl Sidebar {
             let mut menu = thread_menu::state_items(menu, &ws, &f, window, cx);
             if let Some((pid, name)) = project.clone() {
                 let ws = ws.clone();
-                menu = menu.item(PopupMenuItem::new(format!("Filter by {name}")).on_click(move |_, _, cx| {
-                    let pid = pid.clone();
-                    let _ = ws.update(cx, |ws, cx| {
-                        ws.project_filter = Some(pid);
-                        cx.notify();
-                    });
-                }));
+                menu = menu.item(PopupMenuItem::new(format!("Filter by {name}")).on_click(
+                    move |_, _, cx| {
+                        let pid = pid.clone();
+                        let _ = ws.update(cx, |ws, cx| {
+                            ws.project_filter = Some(pid);
+                            cx.notify();
+                        });
+                    },
+                ));
             }
             menu = menu.submenu("Auto-settle behavior", window, cx, {
                 let (ws, tid) = (ws.clone(), tid.clone());
                 move |menu, _, _| {
                     let set = |label: &'static str, never: bool| {
                         let (ws, tid) = (ws.clone(), tid.clone());
-                        PopupMenuItem::new(label).checked(never_settle == never).on_click(move |_, _, cx| {
-                            let _ = ws.update(cx, |ws, cx| ws.set_never_settle(&tid, never, cx));
-                        })
+                        PopupMenuItem::new(label)
+                            .checked(never_settle == never)
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    ws.update(cx, |ws, cx| ws.set_never_settle(&tid, never, cx));
+                            })
                     };
-                    menu.item(set("Follow Trek's setting", false)).item(set("Never settle this thread", true))
+                    menu.item(set("Follow Trek's setting", false))
+                        .item(set("Never settle this thread", true))
                 }
             });
             menu = menu.separator();
             menu = thread_menu::copy_submenu(menu, &ws, &f, window, cx);
             if let Some(dir) = f.cwd.clone() {
-                menu = menu.item(PopupMenuItem::new(crate::words::words().show_folder_in_file_manager).on_click(move |_, _, cx| cx.reveal_path(&dir)));
+                menu = menu.item(
+                    PopupMenuItem::new(crate::words::words().show_folder_in_file_manager)
+                        .on_click(move |_, _, cx| cx.reveal_path(&dir)),
+                );
             }
             if let Some((pid, _)) = project.clone() {
                 let ws = ws.clone();
-                menu = menu.item(PopupMenuItem::new("Project settings").on_click(move |_, _, cx| {
-                    let pid = pid.clone();
-                    let _ = ws.update(cx, |ws, cx| ws.open_project_settings(Some(pid), cx));
-                }));
+                menu = menu.item(PopupMenuItem::new("Project settings").on_click(
+                    move |_, _, cx| {
+                        let pid = pid.clone();
+                        let _ = ws.update(cx, |ws, cx| ws.open_project_settings(Some(pid), cx));
+                    },
+                ));
             }
-            menu.separator().item(thread_menu::archive(&ws, &f)).item(thread_menu::delete(&ws, &f))
+            menu.separator()
+                .item(thread_menu::archive(&ws, &f))
+                .item(thread_menu::delete(&ws, &f))
         })
     }
 

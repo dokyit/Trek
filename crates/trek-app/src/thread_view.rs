@@ -1538,12 +1538,13 @@ impl ThreadView {
                     let live_thought = thought_after(&live.items, live.reasoning, &members);
                     let mut kinds = Vec::with_capacity(members.len());
                     let mut running = false;
-                    let trouble = crate::activity::trouble(members.iter().filter_map(|&m| {
-                        match &live.items[m] {
-                            Item::Tool { status, .. } => Some(*status),
-                            _ => None,
-                        }
-                    }));
+                    let trouble =
+                        crate::activity::trouble(members.iter().filter_map(
+                            |&m| match &live.items[m] {
+                                Item::Tool { status, .. } => Some(*status),
+                                _ => None,
+                            },
+                        ));
                     let tools: Vec<Row> = members
                         .into_iter()
                         .map(|ix| {

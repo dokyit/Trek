@@ -845,8 +845,14 @@ mod tests_paths {
         assert_eq!(at(Some("gpu-box:8080")), "http://gpu-box:8080/v1");
         assert_eq!(at(Some(":9000")), "http://127.0.0.1:9000/v1");
         assert_eq!(at(Some("0.0.0.0:11500")), "http://127.0.0.1:11500/v1");
-        assert_eq!(at(Some("http://10.0.0.5:11434/")), "http://10.0.0.5:11434/v1");
-        assert_eq!(at(Some("https://ollama.example.com")), "https://ollama.example.com:443/v1");
+        assert_eq!(
+            at(Some("http://10.0.0.5:11434/")),
+            "http://10.0.0.5:11434/v1"
+        );
+        assert_eq!(
+            at(Some("https://ollama.example.com")),
+            "https://ollama.example.com:443/v1"
+        );
         assert_eq!(at(Some("[::1]:11434")), "http://[::1]:11434/v1");
         assert_eq!(at(Some("http://host:1/api")), "http://host:1/api/v1");
     }

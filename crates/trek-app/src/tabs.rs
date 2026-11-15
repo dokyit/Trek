@@ -159,8 +159,12 @@ pub fn strip(workspace: &Entity<Workspace>, glass: bool, cx: &App) -> Option<Any
         let (ws_open, ws_close, ws_drop) =
             (workspace.clone(), workspace.clone(), workspace.clone());
         let (open_id, close_id, drop_to) = (id.clone(), id.clone(), ix);
-        let (ws_menu, menu_id, middle_id, ws_middle) =
-            (workspace.downgrade(), id.clone(), id.clone(), workspace.clone());
+        let (ws_menu, menu_id, middle_id, ws_middle) = (
+            workspace.downgrade(),
+            id.clone(),
+            id.clone(),
+            workspace.clone(),
+        );
         let dragged = DraggedTab {
             id: id.clone(),
             title: title.clone(),

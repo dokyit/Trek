@@ -1100,7 +1100,12 @@ impl Onboarding {
     }
 
     /// Save the key typed for `id` (in the platform's secret store, as Settings › API Keys does).
-    pub(super) fn save_key(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn save_key(
+        &mut self,
+        id: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(input) = self.key_inputs.get(id).cloned() else {
             return;
         };
@@ -1385,32 +1390,32 @@ impl Onboarding {
                 let browser = self.pair_in_browser && offer.web_url.is_some();
                 let chooser = offer.web_url.is_some().then(|| {
                     let view = cx.entity().downgrade();
-                    h_flex()
-                        .px(px(16.))
-                        .pt(px(14.))
-                        .child(ui::segmented(
-                            "ob-pair-for",
-                            vec![(false, "Trek on iPhone"), (true, "A phone's browser")],
-                            browser,
-                            move |v, _, cx| {
-                                let _ = view.update(cx, |this, cx| {
-                                    this.pair_in_browser = v;
-                                    cx.notify();
-                                });
-                            },
-                            cx,
-                        ))
+                    h_flex().px(px(16.)).pt(px(14.)).child(ui::segmented(
+                        "ob-pair-for",
+                        vec![(false, "Trek on iPhone"), (true, "A phone's browser")],
+                        browser,
+                        move |v, _, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.pair_in_browser = v;
+                                cx.notify();
+                            });
+                        },
+                        cx,
+                    ))
                 });
                 let (title, how, code) = if browser {
                     (
                         "Scan this with your phone's camera",
-                        format!("It opens Trek's web remote in the phone's browser, which pairs with {this}. When the browser asks to look for devices on your network, allow it. No camera? Open this link on the phone (it holds the code, so send it only to yourself):"),
+                        format!(
+                            "It opens Trek's web remote in the phone's browser, which pairs with {this}. When the browser asks to look for devices on your network, allow it. No camera? Open this link on the phone (it holds the code, so send it only to yourself):"
+                        ),
                         offer.web_url.clone().unwrap_or_default(),
                     )
                 } else {
                     (
                         "Scan this with Trek on your iPhone",
-                        "No camera? Choose “Enter address and code” on the phone and type:".to_string(),
+                        "No camera? Choose “Enter address and code” on the phone and type:"
+                            .to_string(),
                         offer.code.clone(),
                     )
                 };
@@ -1436,8 +1441,18 @@ impl Onboarding {
                                         .gap(px(8.))
                                         .flex_1()
                                         .min_w_0()
-                                        .child(div().text_size(px(text::TITLE)).font_medium().child(title))
-                                        .child(div().text_size(px(text::BODY)).text_color(theme.muted_foreground).child(how))
+                                        .child(
+                                            div()
+                                                .text_size(px(text::TITLE))
+                                                .font_medium()
+                                                .child(title),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(text::BODY))
+                                                .text_color(theme.muted_foreground)
+                                                .child(how),
+                                        )
                                         .child(if browser {
                                             div()
                                                 .id("ob-pair-web-link")
@@ -1460,7 +1475,9 @@ impl Onboarding {
                                                 .small()
                                                 .ghost()
                                                 .label("Cancel")
-                                                .on_click(move |_, _, cx| ws.update(cx, |ws, cx| ws.cancel_pairing(cx))),
+                                                .on_click(move |_, _, cx| {
+                                                    ws.update(cx, |ws, cx| ws.cancel_pairing(cx))
+                                                }),
                                         ),
                                 ),
                         )

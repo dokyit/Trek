@@ -782,7 +782,9 @@ impl ExplorerPanel {
                             this.selected = None;
                         }
                     }
-                    Err(e) => this.failure(format!("Couldn't move “{name}” to the Trash: {e:#}"), cx),
+                    Err(e) => {
+                        this.failure(format!("Couldn't move “{name}” to the Trash: {e:#}"), cx)
+                    }
                 }
                 this.refresh(cx);
             });

@@ -1243,7 +1243,11 @@ fn web_push(
         inner.push_enabled.store(true, Ordering::Relaxed);
     }
     if subscribed != before || (subscribed && asked) {
-        tracing::info!(device_id, subscribed, "phone notifications through the browser");
+        tracing::info!(
+            device_id,
+            subscribed,
+            "phone notifications through the browser"
+        );
         inner.notice(ServerNotice::PushChanged {
             device_id: device_id.to_string(),
             on: subscribed,
@@ -1570,7 +1574,10 @@ fn parse_client(text: &str) -> (Option<String>, Result<ClientMessage, BadMessage
         Ok(envelope) => (re, Ok(envelope.msg)),
         Err(err) => {
             // The tag itself unknown, rather than a field of a known message.
-            let message = if err.to_string().starts_with(&format!("unknown variant `{kind}`")) {
+            let message = if err
+                .to_string()
+                .starts_with(&format!("unknown variant `{kind}`"))
+            {
                 format!("Unknown message type \"{kind}\"")
             } else {
                 format!("Bad \"{kind}\": {err}")
@@ -2415,13 +2422,24 @@ mod tests {
             r#"{"type":"web_push","unsubscribe":true}"#,
         ] {
             let (_, parsed) = parse_client(text);
-            assert!(parsed.is_ok(), "{text}: {:?}", parsed.err().map(|b| b.message));
+            assert!(
+                parsed.is_ok(),
+                "{text}: {:?}",
+                parsed.err().map(|b| b.message)
+            );
         }
         let (re, bad) = parse_client(r#"{"type":"teleport","id":"9"}"#);
         assert_eq!(re.as_deref(), Some("9"));
-        assert_eq!(bad.unwrap_err().message, "Unknown message type \"teleport\"");
+        assert_eq!(
+            bad.unwrap_err().message,
+            "Unknown message type \"teleport\""
+        );
         let (_, bad) = parse_client(r#"{"type":"switch_preview"}"#);
-        assert!(bad.unwrap_err().message.starts_with("Bad \"switch_preview\""));
+        assert!(
+            bad.unwrap_err()
+                .message
+                .starts_with("Bad \"switch_preview\"")
+        );
     }
 
     #[test]

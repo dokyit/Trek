@@ -1658,7 +1658,9 @@ pub enum WorkspaceEvent {
         undo: Option<UndoAction>,
     },
     /// Something went wrong: a toast with the error face, kept up a little longer.
-    Failure { message: String },
+    Failure {
+        message: String,
+    },
     /// A thread needs the user or finished: an in-app toast when it's off screen, plus a system
     /// banner / sound per the notification settings.
     Attention {
@@ -2830,7 +2832,9 @@ impl Workspace {
                     undo: None,
                 });
             }
-            Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't show it: {e}") }),
+            Err(e) => cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't show it: {e}"),
+            }),
         }
         self.reload(cx);
         // Its messages become searchable like the rest of the import's.
@@ -3181,11 +3185,13 @@ impl Workspace {
                 tracing::warn!("update while closed: {e:#}");
                 let _ = this.update(cx, |ws, cx| {
                     ws.update_task = None;
-                    cx.emit(WorkspaceEvent::Failure { message: format!(
+                    cx.emit(WorkspaceEvent::Failure {
+                        message: format!(
                             "Couldn't {} the update while Trek is closed: {e}",
                             if want { "set up" } else { "stop" }
                         )
-                        .into() })
+                        .into(),
+                    })
                 });
             }
         })
@@ -3593,10 +3599,12 @@ impl Workspace {
                 this.switching.remove(&root);
                 match out {
                     Ok(o) if o.status.success() => this.files_epoch += 1,
-                    Ok(o) => cx.emit(WorkspaceEvent::Failure { message: git_error(
+                    Ok(o) => cx.emit(WorkspaceEvent::Failure {
+                        message: git_error(
                             &String::from_utf8_lossy(&o.stderr),
                             "git switch failed",
-                        ) }),
+                        ),
+                    }),
                     Err(e) => cx.emit(WorkspaceEvent::Toast {
                         message: format!("git: {e}"),
                         undo: None,
@@ -3986,7 +3994,9 @@ impl Workspace {
             return;
         }
         if let Err(e) = self.store.rename_project(id, name) {
-            cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't rename: {e}") });
+            cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't rename: {e}"),
+            });
         }
         self.reload(cx);
     }
@@ -4852,7 +4862,9 @@ impl Workspace {
                 self.settings.appearance.background = Some(dest.display().to_string());
                 self.save_settings(cx);
             }
-            Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't use that image: {e}") }),
+            Err(e) => cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't use that image: {e}"),
+            }),
         }
     }
 
@@ -4979,7 +4991,9 @@ impl Workspace {
         let (tx, rx) = async_channel::bounded(1);
         let asked = id.clone();
         trek_core::runtime().spawn(async move {
-            let _ = tx.send(trek_agents::check_api_key(&asked, &key).await).await;
+            let _ = tx
+                .send(trek_agents::check_api_key(&asked, &key).await)
+                .await;
         });
         let task = cx.spawn(async move |this, cx| {
             if let Ok(found) = rx.recv().await {
@@ -4991,18 +5005,17 @@ impl Workspace {
     }
 
     /// The provider answered about `id`'s key. Ignored if the key was removed meanwhile.
-    pub fn key_checked(
-        &mut self,
-        id: &str,
-        found: trek_agents::KeyCheck,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn key_checked(&mut self, id: &str, found: trek_agents::KeyCheck, cx: &mut Context<Self>) {
         if !self.key_checks.contains_key(id) {
             return;
         }
         if let trek_agents::KeyCheck::Refused(_) = found {
             let name = catalog::direct_provider(id).map_or(id, |p| p.name);
-            cx.emit(WorkspaceEvent::Failure { message: format!("{name} says this key isn't valid. It's saved; paste another to replace it.") });
+            cx.emit(WorkspaceEvent::Failure {
+                message: format!(
+                    "{name} says this key isn't valid. It's saved; paste another to replace it."
+                ),
+            });
         }
         self.key_checks.insert(id.to_string(), Some(found));
         cx.notify();
@@ -5089,7 +5102,8 @@ impl Workspace {
     /// composer before a message goes, not after (`None`: it has one, or isn't known not to).
     pub fn plan_unavailable(&self, agent: &AgentId) -> Option<String> {
         let reported = self.acp_info.get(&agent.key())?.as_ref().ok()?;
-        (reported.plan == Some(false)).then(|| format!("{} has no plan mode.", agent.display_name()))
+        (reported.plan == Some(false))
+            .then(|| format!("{} has no plan mode.", agent.display_name()))
     }
 
     /// Agents the model menu can't offer, and why, so it can say so and point at Settings: signed
@@ -8223,7 +8237,9 @@ impl Workspace {
                 live.checkpoint_failed.insert(item, format!("{e:#}"));
                 live.revision += 1;
                 if first {
-                    cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't checkpoint the files: {e:#}") });
+                    cx.emit(WorkspaceEvent::Failure {
+                        message: format!("Couldn't checkpoint the files: {e:#}"),
+                    });
                 }
             }
             (GitJob::FindPoint { session, item, .. }, Ok(GitDone::Point(Some(at)))) => {
@@ -8781,7 +8797,9 @@ impl Workspace {
         ) {
             Ok(t) => t,
             Err(e) => {
-                cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't fork: {e}") });
+                cx.emit(WorkspaceEvent::Failure {
+                    message: format!("Couldn't fork: {e}"),
+                });
                 return None;
             }
         };
@@ -9014,7 +9032,13 @@ impl Workspace {
             .ok()
             .flatten()
             .and_then(|t| t.project_id)
-            .and_then(|pid| self.store.projects().ok()?.into_iter().find(|p| p.id == pid));
+            .and_then(|pid| {
+                self.store
+                    .projects()
+                    .ok()?
+                    .into_iter()
+                    .find(|p| p.id == pid)
+            });
         if let Some(project) = project {
             let key = project.path.display().to_string();
             if self.settings.hidden_projects.contains(&key) {
@@ -9065,10 +9089,7 @@ impl Workspace {
         if self.machine_refuses(id, cx) {
             return;
         }
-        let Some(before) = self
-            .thread(id)
-            .map(|t| (t.snoozed_until, t.settled_at))
-        else {
+        let Some(before) = self.thread(id).map(|t| (t.snoozed_until, t.settled_at)) else {
             return;
         };
         self.mutate_thread(id, cx, |t| {
@@ -9238,7 +9259,9 @@ impl Workspace {
                 })
         };
         if let Err(e) = result {
-            cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't delete: {e}") });
+            cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't delete: {e}"),
+            });
         }
         // The main window may be on the thread, a side chat or a sub-agent that went with it.
         let was_open = matches!(
@@ -9346,7 +9369,9 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| match result {
                 Ok(_) if !announce && this.thread(&id).map(|t| t.title.clone()) != asked_over => {}
                 Ok(title) => this.rename(&id, title, cx),
-                Err(e) if announce => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't write a title: {e}") }),
+                Err(e) if announce => cx.emit(WorkspaceEvent::Failure {
+                    message: format!("Couldn't write a title: {e}"),
+                }),
                 Err(e) => tracing::warn!("auto title: {e}"),
             });
         });
@@ -9465,7 +9490,9 @@ impl Workspace {
                     self.notes_epoch += 1;
                     cx.notify();
                 }
-                Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't bring the note back: {e}") }),
+                Err(e) => cx.emit(WorkspaceEvent::Failure {
+                    message: format!("Couldn't bring the note back: {e}"),
+                }),
             },
             UndoAction::RestoreComments { key, drafts } => self.restore_comments(&key, drafts, cx),
             UndoAction::CancelRestart => {
@@ -9731,7 +9758,9 @@ impl Workspace {
                     cx,
                 );
             }
-            Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't open folder: {e}") }),
+            Err(e) => cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't open folder: {e}"),
+            }),
         }
     }
 
@@ -9757,7 +9786,9 @@ impl Workspace {
             return self.add_project(dest, cx);
         }
         if dest.exists() {
-            cx.emit(WorkspaceEvent::Failure { message: format!("~/Developer/{name} is already there and isn't a Git folder.") });
+            cx.emit(WorkspaceEvent::Failure {
+                message: format!("~/Developer/{name} is already there and isn't a Git folder."),
+            });
             return;
         }
         cx.emit(WorkspaceEvent::Toast {
@@ -9806,7 +9837,9 @@ impl Workspace {
                     });
                     this.add_project(dest, cx)
                 }
-                Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't clone {spec_shown}: {}", clone_failure(&e)) }),
+                Err(e) => cx.emit(WorkspaceEvent::Failure {
+                    message: format!("Couldn't clone {spec_shown}: {}", clone_failure(&e)),
+                }),
             });
         });
         self.keep(task);
@@ -9993,7 +10026,9 @@ impl Workspace {
                             undo: None,
                         });
                     }
-                    Err(e) => cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't use the reset: {e:#}") }),
+                    Err(e) => cx.emit(WorkspaceEvent::Failure {
+                        message: format!("Couldn't use the reset: {e:#}"),
+                    }),
                 }
                 done(res.map_err(|e| format!("Couldn't use the reset: {e:#}")));
             });
@@ -10111,11 +10146,13 @@ impl Workspace {
                             });
                         }
                         Err(e) => {
-                            cx.emit(WorkspaceEvent::Failure { message: format!(
+                            cx.emit(WorkspaceEvent::Failure {
+                                message: format!(
                                     "Couldn't sign in to {}: {}",
                                     trek_core::catalog::acp_display_name(&probe_id),
                                     e.lines().next().unwrap_or("it didn't answer")
-                                ) });
+                                ),
+                            });
                         }
                     }
                     cx.notify();
@@ -11062,7 +11099,9 @@ impl Workspace {
     fn restart_now(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = trek_core::update::restart(crate::system::app_is_active()) {
             tracing::warn!("restart failed: {e:#}");
-            cx.emit(WorkspaceEvent::Failure { message: format!("Couldn't restart Trek: {e:#}") });
+            cx.emit(WorkspaceEvent::Failure {
+                message: format!("Couldn't restart Trek: {e:#}"),
+            });
             return;
         }
         self.shutdown_sessions();
@@ -11907,11 +11946,15 @@ mod tests {
     #[test]
     fn a_failed_clone_says_why_in_a_line() {
         assert_eq!(
-            clone_failure("Cloning into 'x'...\nremote: Repository not found.\nfatal: repository 'https://github.com/a/x.git/' not found\n"),
+            clone_failure(
+                "Cloning into 'x'...\nremote: Repository not found.\nfatal: repository 'https://github.com/a/x.git/' not found\n"
+            ),
             "check the name, and that you can see it (for a private one, sign in with gh auth login)"
         );
         assert_eq!(
-            clone_failure("fatal: unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com\n"),
+            clone_failure(
+                "fatal: unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com\n"
+            ),
             "unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com"
         );
         assert_eq!(clone_failure(""), "it didn't say why");

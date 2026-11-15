@@ -505,11 +505,13 @@ mod imp {
                 }
                 s if s == SFSpeechRecognizerAuthorizationStatus::NotDetermined => {
                     let block = RcBlock::new(move |status| {
-                        let _ = reply.try_send(if status == SFSpeechRecognizerAuthorizationStatus::Authorized {
-                            Ok(())
-                        } else {
-                            Err(super::SPEECH_REFUSED.into())
-                        });
+                        let _ = reply.try_send(
+                            if status == SFSpeechRecognizerAuthorizationStatus::Authorized {
+                                Ok(())
+                            } else {
+                                Err(super::SPEECH_REFUSED.into())
+                            },
+                        );
                     });
                     SFSpeechRecognizer::requestAuthorization(&block);
                 }

@@ -437,10 +437,7 @@ fn close_other_tabs_keeps_the_one_asked_about_and_every_thread() {
         let keep = ids[1].clone();
         trek.update(cx, |ws, cx| ws.close_other_tabs(&keep, cx));
         assert_eq!(tab_ids(&trek, cx), [keep.clone()]);
-        assert_eq!(
-            trek.read(cx, |ws, _| ws.route.clone()),
-            Route::Thread(keep)
-        );
+        assert_eq!(trek.read(cx, |ws, _| ws.route.clone()), Route::Thread(keep));
         assert!(
             trek.read(cx, |ws, _| ids.iter().all(|id| ws.thread(id).is_some())),
             "closing a tab leaves its thread alone"

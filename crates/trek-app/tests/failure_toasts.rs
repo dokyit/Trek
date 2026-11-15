@@ -34,10 +34,7 @@ fn a_failure_toast_has_the_error_face_and_outlasts_an_info_one() {
         });
         settled_in(&trek, cx);
         assert_eq!(toasts(&trek, cx), 1);
-        assert!(
-            !trek.visible(cx, "toast-error"),
-            "a note has no error icon"
-        );
+        assert!(!trek.visible(cx, "toast-error"), "a note has no error icon");
 
         trek.update(cx, |_, cx| {
             cx.emit(WorkspaceEvent::Failure {

@@ -4248,7 +4248,10 @@ mod tests {
             vec![model("b")]
         );
         // And says whether the agent has a plan mode.
-        assert_eq!(ProbeCache::load(&dir, &agent, &bin).unwrap().plan, Some(true));
+        assert_eq!(
+            ProbeCache::load(&dir, &agent, &bin).unwrap().plan,
+            Some(true)
+        );
         ProbeCache::session_opened(&dir, &agent, &bin, &[], vec![], Some(true));
         assert_eq!(
             ProbeCache::load(&dir, &agent, &bin).unwrap().models,

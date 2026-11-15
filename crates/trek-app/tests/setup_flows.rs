@@ -76,19 +76,30 @@ fn a_local_server_switched_off_can_be_switched_back_on_in_settings() {
         // Running: its models, a switch, and a way to look again even though one is up.
         assert!(trek.visible(cx, "local-ollama-on"));
         assert!(trek.visible(cx, "rescan-local"));
-        assert!(trek_app::settings_view::shown::take().iter().any(|t| t == "qwen3-coder"));
+        assert!(
+            trek_app::settings_view::shown::take()
+                .iter()
+                .any(|t| t == "qwen3-coder")
+        );
         trek.click(cx, "local-ollama-on");
         trek.render(cx);
-        assert!(trek.read(cx, |ws, _| ws.settings.disabled_agents.contains(&ollama.key())));
+        assert!(trek.read(cx, |ws, _| {
+            ws.settings.disabled_agents.contains(&ollama.key())
+        }));
         // Off, and then not found running: the switch is still there to bring it back.
         trek.update(cx, |ws, _| {
             ws.agents = vec![detected(ollama.clone(), Availability::Offline)];
         });
         trek.render(cx);
-        assert!(trek.visible(cx, "local-ollama-on"), "still offered while it is off");
+        assert!(
+            trek.visible(cx, "local-ollama-on"),
+            "still offered while it is off"
+        );
         trek.click(cx, "local-ollama-on");
         trek.render(cx);
-        assert!(!trek.read(cx, |ws, _| ws.settings.disabled_agents.contains(&ollama.key())));
+        assert!(!trek.read(cx, |ws, _| {
+            ws.settings.disabled_agents.contains(&ollama.key())
+        }));
         // A server that isn't installed says where to get it.
         assert!(trek.visible(cx, "local-lmstudio-get") || trek.visible(cx, "local-lmstudio-start"));
     });
@@ -114,13 +125,22 @@ fn the_phone_step_offers_a_phones_browser_and_never_a_repo_path() {
         });
         trek.render(cx);
         assert!(trek.visible(cx, "ob-pairing"));
-        assert!(trek.visible(cx, ("ob-pair-for", 0usize)), "iPhone or a phone's browser");
+        assert!(
+            trek.visible(cx, ("ob-pair-for", 0usize)),
+            "iPhone or a phone's browser"
+        );
         if !cfg!(windows) {
-            assert!(!trek.visible(cx, "ob-pair-web-link"), "the iPhone's code first on a Mac");
+            assert!(
+                !trek.visible(cx, "ob-pair-web-link"),
+                "the iPhone's code first on a Mac"
+            );
         }
         trek.click(cx, ("ob-pair-for", 1usize));
         trek.render(cx);
-        assert!(trek.visible(cx, "ob-pair-web-link"), "the web remote's link");
+        assert!(
+            trek.visible(cx, "ob-pair-web-link"),
+            "the web remote's link"
+        );
     });
 }
 

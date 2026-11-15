@@ -20,8 +20,7 @@ use gpui_kit::component::input::{
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -532,7 +531,9 @@ impl Composer {
         {
             let ws = self.workspace.read(cx);
             let prefs = ws.chosen_prefs_in(&self.scope);
-            if prefs.plan && let Some(why) = ws.plan_unavailable(&prefs.agent) {
+            if prefs.plan
+                && let Some(why) = ws.plan_unavailable(&prefs.agent)
+            {
                 self.toast(format!("{why} Turn Plan off to send this."), cx);
                 return;
             }
@@ -3027,18 +3028,20 @@ impl Composer {
                                     div()
                                         .text_size(to_rems(text::META))
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("The agent says back what you asked before it starts"),
+                                        .child(
+                                            "The agent says back what you asked before it starts",
+                                        ),
                                 )
                         })
-                            .icon(crate::assets::Lucide::MessageSquareQuote)
-                            .checked(restate)
-                            .on_click(move |_, window, cx| {
-                                h.update(cx, |c, cx| {
-                                    c.restate = !c.restate;
-                                    c.focus(window, cx);
-                                    cx.notify();
-                                })
-                            }),
+                        .icon(crate::assets::Lucide::MessageSquareQuote)
+                        .checked(restate)
+                        .on_click(move |_, window, cx| {
+                            h.update(cx, |c, cx| {
+                                c.restate = !c.restate;
+                                c.focus(window, cx);
+                                cx.notify();
+                            })
+                        }),
                     )
                     .map(|mut menu| {
                         if !plugin_items.is_empty() {
@@ -5157,7 +5160,9 @@ impl Render for Composer {
                 if ws.is_study_in(&this.scope) || ws.is_study_session_in(&this.scope) {
                     return;
                 }
-                let unavailable = ws.plan_unavailable(&ws.prefs_in(&this.scope).agent).is_some();
+                let unavailable = ws
+                    .plan_unavailable(&ws.prefs_in(&this.scope).agent)
+                    .is_some();
                 pickers::update_prefs(this, cx, |p| p.plan = !p.plan && !unavailable)
             }))
             .child(

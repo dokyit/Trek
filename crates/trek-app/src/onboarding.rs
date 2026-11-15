@@ -499,7 +499,10 @@ impl Onboarding {
                       event: &gpui_kit::component::input::InputEvent,
                       window,
                       cx| {
-                    if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
+                    if matches!(
+                        event,
+                        gpui_kit::component::input::InputEvent::PressEnter { .. }
+                    ) {
                         this.save_key(id, window, cx);
                     }
                 },

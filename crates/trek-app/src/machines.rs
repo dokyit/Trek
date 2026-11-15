@@ -2342,10 +2342,10 @@ fn uploads(images: &[PathBuf]) -> (Vec<tr::ImageUpload>, Vec<String>) {
     for path in images {
         match upload_of(path) {
             Some(upload) => sent.push(upload),
-            None => left_out.push(
-                path.file_name()
-                    .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string()),
-            ),
+            None => left_out.push(path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().to_string(),
+            )),
         }
     }
     (sent, left_out)

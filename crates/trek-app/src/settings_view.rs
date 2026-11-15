@@ -521,8 +521,15 @@ impl SettingsView {
             subs.push(cx.subscribe_in(
                 input,
                 window,
-                move |this: &mut Self, _, event: &gpui_kit::component::input::InputEvent, window, cx| {
-                    if matches!(event, gpui_kit::component::input::InputEvent::PressEnter { .. }) {
+                move |this: &mut Self,
+                      _,
+                      event: &gpui_kit::component::input::InputEvent,
+                      window,
+                      cx| {
+                    if matches!(
+                        event,
+                        gpui_kit::component::input::InputEvent::PressEnter { .. }
+                    ) {
                         this.save_key(id, window, cx);
                     }
                 },

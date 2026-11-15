@@ -582,11 +582,9 @@ impl DeviceRegistry {
     /// The push service said `endpoint` is gone: forget it, unless the device has subscribed
     /// again meanwhile (a new endpoint).
     pub fn drop_push(&mut self, device_id: &str, endpoint: &str) {
-        if let Some(d) = self
-            .devices
-            .iter_mut()
-            .find(|d| d.device_id == device_id && d.push.as_ref().is_some_and(|p| p.endpoint == endpoint))
-        {
+        if let Some(d) = self.devices.iter_mut().find(|d| {
+            d.device_id == device_id && d.push.as_ref().is_some_and(|p| p.endpoint == endpoint)
+        }) {
             d.push = None;
             self.save_logged();
         }
@@ -931,10 +929,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("trek-push-devices-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("devices.json");
-        let sub = |endpoint: &str| crate::webpush::PushSubscription {
+        let sub = |endpoint: &str| {
+            crate::webpush::PushSubscription {
             endpoint: endpoint.into(),
             p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4".into(),
             auth: "BTBZMqHH6r4Tts7J_aSIgg".into(),
+        }
         };
         let mut reg = DeviceRegistry::load(&path).unwrap();
         reg.register("web-1", "Pixel", 1).unwrap();
@@ -961,7 +961,11 @@ mod tests {
         reg.set_push("web-1", Some(sub("https://a.example/4")));
         assert!(reg.revoke("web-1"));
         assert!(reg.push_targets().is_empty());
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("a.example"));
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("a.example")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

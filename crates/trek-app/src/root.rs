@@ -1195,22 +1195,19 @@ impl Render for WindowTitle {
                             let (ws, panel) = (this.workspace.clone(), this.right_panel.clone());
                             toggle_sidebar(&ws, &panel, window, cx)
                         }));
-                        let toggle = div()
-                            .relative()
-                            .child(toggle)
-                            .when(needs_you > 0, |el| {
-                                el.child(
-                                    div()
-                                        .id("toggle-sidebar-needs-you")
-                                        .test_support()
-                                        .absolute()
-                                        .top(px(3.))
-                                        .right(px(3.))
-                                        .size(px(7.))
-                                        .rounded_full()
-                                        .bg(crate::palette::needs_you(cx)),
-                                )
-                            });
+                        let toggle = div().relative().child(toggle).when(needs_you > 0, |el| {
+                            el.child(
+                                div()
+                                    .id("toggle-sidebar-needs-you")
+                                    .test_support()
+                                    .absolute()
+                                    .top(px(3.))
+                                    .right(px(3.))
+                                    .size(px(7.))
+                                    .rounded_full()
+                                    .bg(crate::palette::needs_you(cx)),
+                            )
+                        });
                         self.left_cluster(Some(toggle.into_any_element()), !narrow, shown, cx)
                     })
                     .child(crate::chrome::no_drag(

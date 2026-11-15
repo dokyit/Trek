@@ -372,7 +372,11 @@ fn encoded_jpeg(img: &image::DynamicImage) -> Result<Vec<u8>> {
     for (x, y, p) in rgba.enumerate_pixels() {
         let a = u32::from(p[3]);
         let on_white = |c: u8| ((u32::from(c) * a + 255 * (255 - a)) / 255) as u8;
-        rgb.put_pixel(x, y, image::Rgb([on_white(p[0]), on_white(p[1]), on_white(p[2])]));
+        rgb.put_pixel(
+            x,
+            y,
+            image::Rgb([on_white(p[0]), on_white(p[1]), on_white(p[2])]),
+        );
     }
     let mut out = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
@@ -765,10 +769,9 @@ pub fn attach_files<T: Attaching>(
     window: &mut Window,
     cx: &mut Context<T>,
 ) {
-    let (convert, ready): (Vec<PathBuf>, Vec<PathBuf>) =
-        images
-            .into_iter()
-            .partition(|p| needs_conversion(p) || needs_fit(p));
+    let (convert, ready): (Vec<PathBuf>, Vec<PathBuf>) = images
+        .into_iter()
+        .partition(|p| needs_conversion(p) || needs_fit(p));
     this.outbox().add(ready);
     save(
         this,
@@ -1641,7 +1644,12 @@ mod tests {
             saving: 4,
             ..Default::default()
         };
-        let fail = |name: &str| (name.to_string(), Err(anyhow::anyhow!("it isn't downloaded.")));
+        let fail = |name: &str| {
+            (
+                name.to_string(),
+                Err(anyhow::anyhow!("it isn't downloaded.")),
+            )
+        };
         let (failed, _) = outbox.landed(
             4,
             vec![
@@ -1653,7 +1661,9 @@ mod tests {
         );
         assert_eq!(
             failed.as_deref(),
-            Some("Couldn't attach 3 pictures (IMG_1.HEIC, IMG_2.HEIC and 1 more): it isn't downloaded.")
+            Some(
+                "Couldn't attach 3 pictures (IMG_1.HEIC, IMG_2.HEIC and 1 more): it isn't downloaded."
+            )
         );
         assert_eq!(outbox.paths, vec![PathBuf::from("/s/ok.png")]);
         let (two, _) = outbox.landed(0, vec![fail("A"), fail("B")]);

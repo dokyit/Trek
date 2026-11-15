@@ -153,7 +153,9 @@ async fn start_on_b(trek: &Trek, cx: &mut TestAppContext, text: &str) -> (String
     let seen = toasts.clone();
     let _sub = trek.update(cx, |_, cx| {
         cx.subscribe_self(move |_, e: &trek_app::workspace::WorkspaceEvent, _| {
-            if let trek_app::workspace::WorkspaceEvent::Toast { message, .. } | trek_app::workspace::WorkspaceEvent::Failure { message } = e {
+            if let trek_app::workspace::WorkspaceEvent::Toast { message, .. }
+            | trek_app::workspace::WorkspaceEvent::Failure { message } = e
+            {
                 seen.lock().unwrap().push(message.clone());
             }
         })
@@ -248,11 +250,17 @@ fn a_file_tile_keeps_the_message_from_going_to_another_machine() {
         trek.render(cx);
         assert!(trek.read(cx, |ws, _| matches!(ws.route, Route::Draft { .. })));
         assert_eq!(trek.composer_text(cx), "please read this");
-        assert_eq!(cx.read(|cx| composer.read(cx).attached_files()), [pdf.clone()]);
+        assert_eq!(
+            cx.read(|cx| composer.read(cx).attached_files()),
+            [pdf.clone()]
+        );
         {
             let heard = heard.lock().unwrap();
             assert!(
-                heard.toasts.iter().any(|t| t.contains("Files can't go to Machine B")),
+                heard
+                    .toasts
+                    .iter()
+                    .any(|t| t.contains("Files can't go to Machine B")),
                 "{:?}",
                 heard.toasts
             );
@@ -1238,7 +1246,9 @@ fn listen(trek: &Trek, cx: &mut TestAppContext) -> (Arc<Mutex<Heard>>, gpui_kit:
         cx.subscribe_self(move |_, e: &WorkspaceEvent, _| {
             let mut heard = seen.lock().unwrap();
             match e {
-                WorkspaceEvent::Toast { message, .. } | WorkspaceEvent::Failure { message } => heard.toasts.push(message.clone()),
+                WorkspaceEvent::Toast { message, .. } | WorkspaceEvent::Failure { message } => {
+                    heard.toasts.push(message.clone())
+                }
                 WorkspaceEvent::InsertIntoComposer(text) => heard.given_back.push(text.clone()),
                 WorkspaceEvent::AttachImage(path) => heard.attached.push(path.clone()),
                 WorkspaceEvent::SendDraft => heard.sent_draft += 1,

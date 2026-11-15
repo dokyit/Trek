@@ -294,7 +294,11 @@ async fn a_page_hands_over_its_push_subscription() {
     assert!(handle.push_targets().is_empty());
 
     let sub = json!({"endpoint":"https://fcm.googleapis.com/fcm/send/abc","p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"});
-    say(&mut page, json!({"type":"web_push","id":"4","subscribe":sub})).await;
+    say(
+        &mut page,
+        json!({"type":"web_push","id":"4","subscribe":sub}),
+    )
+    .await;
     let on = hear(&mut page).await;
     assert_eq!(on["subscribed"], true, "{on}");
     assert_eq!(
@@ -304,7 +308,10 @@ async fn a_page_hands_over_its_push_subscription() {
     let targets = handle.push_targets();
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].0, "web-1");
-    assert_eq!(targets[0].1.endpoint, "https://fcm.googleapis.com/fcm/send/abc");
+    assert_eq!(
+        targets[0].1.endpoint,
+        "https://fcm.googleapis.com/fcm/send/abc"
+    );
     let heard = loop {
         if let ServerNotice::PushChanged { device_id, on } = notices.recv().await.unwrap() {
             break (device_id, on);
@@ -312,11 +319,19 @@ async fn a_page_hands_over_its_push_subscription() {
     };
     assert_eq!(heard, ("web-1".to_string(), true));
 
-    say(&mut page, json!({"type":"web_push","id":"5","unsubscribe":true})).await;
+    say(
+        &mut page,
+        json!({"type":"web_push","id":"5","unsubscribe":true}),
+    )
+    .await;
     assert_eq!(hear(&mut page).await["subscribed"], false);
     assert!(handle.push_targets().is_empty());
 
-    say(&mut page, json!({"type":"web_push","id":"6","subscribe":sub})).await;
+    say(
+        &mut page,
+        json!({"type":"web_push","id":"6","subscribe":sub}),
+    )
+    .await;
     assert_eq!(hear(&mut page).await["subscribed"], true);
     assert!(handle.revoke("web-1"));
     assert!(handle.push_targets().is_empty(), "unpairing lets it go");

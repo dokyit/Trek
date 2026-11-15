@@ -490,14 +490,24 @@ mod tests {
         assert_eq!(json["certs"].as_array().unwrap().len(), 2);
         assert_eq!(json["certs"][0], series.current(NOW).unwrap().hash());
         assert_eq!(json["push"], true, "it sends notifications");
-        let without = pairing_link(REMOTE_URL, "K7Q2-9XMV", "Toby's PC", "7f3c", &[], &[], false);
-        assert!(!String::from_utf8(
-            URL_SAFE_NO_PAD
-                .decode(without.split_once("#p=").unwrap().1)
-                .unwrap()
-        )
-        .unwrap()
-        .contains("push"));
+        let without = pairing_link(
+            REMOTE_URL,
+            "K7Q2-9XMV",
+            "Toby's PC",
+            "7f3c",
+            &[],
+            &[],
+            false,
+        );
+        assert!(
+            !String::from_utf8(
+                URL_SAFE_NO_PAD
+                    .decode(without.split_once("#p=").unwrap().1)
+                    .unwrap()
+            )
+            .unwrap()
+            .contains("push")
+        );
         assert!(
             link.len() < 420,
             "a plain QR code: {} characters",

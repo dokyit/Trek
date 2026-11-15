@@ -945,11 +945,7 @@ impl SettingsView {
                 .filter(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
             let id = p.id;
             // What asking the provider about a key just saved found.
-            let check = self
-                .workspace
-                .read(cx)
-                .key_check_note(id)
-                .filter(|_| saved);
+            let check = self.workspace.read(cx).key_check_note(id).filter(|_| saved);
             let status: SharedString = match (state, from_env) {
                 // Where to find it: Keychain Access lists it by its service name, not "Trek".
                 (SavedKey::Saved, _) if cfg!(target_os = "macos") => format!(
@@ -994,18 +990,16 @@ impl SettingsView {
                             h_flex()
                                 .gap(px(10.))
                                 .child(div().text_size(px(text::TITLE)).font_medium().child(p.name))
-                                .children(
-                                    crate::onboarding::key_page(id)
-                                        .filter(|_| !saved)
-                                        .map(|url| {
-                                            ui::web_link(
-                                                SharedString::from(format!("key-page-{id}")),
-                                                "Get a key",
-                                                url.to_string(),
-                                                cx,
-                                            )
-                                        }),
-                                ),
+                                .children(crate::onboarding::key_page(id).filter(|_| !saved).map(
+                                    |url| {
+                                        ui::web_link(
+                                            SharedString::from(format!("key-page-{id}")),
+                                            "Get a key",
+                                            url.to_string(),
+                                            cx,
+                                        )
+                                    },
+                                )),
                         )
                         .child(
                             div()
@@ -1134,7 +1128,12 @@ impl SettingsView {
 
     /// Save the key typed for `id` (Save, or Return in the field): into the platform's secret
     /// store, then the provider is asked whether it is valid (`Workspace::save_api_key`).
-    pub(super) fn save_key(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn save_key(
+        &mut self,
+        id: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(input) = self.key_inputs.get(id).cloned() else {
             return;
         };

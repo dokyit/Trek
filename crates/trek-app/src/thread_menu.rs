@@ -380,12 +380,13 @@ pub fn snooze_submenu(
         window,
         cx,
         move |menu, _, _| {
-            let item = |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
-                let (ws, id) = (ws.clone(), id.clone());
-                PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                    let _ = ws.update(cx, |ws, cx| f(ws, &id, cx));
-                })
-            };
+            let item =
+                |label: &'static str, f: fn(&mut Workspace, &str, &mut Context<Workspace>)| {
+                    let (ws, id) = (ws.clone(), id.clone());
+                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                        let _ = ws.update(cx, |ws, cx| f(ws, &id, cx));
+                    })
+                };
             let menu = menu
                 .item(item("For 1 hour", |ws, id, cx| ws.snooze(id, 1, cx)))
                 .item(item("For 3 hours", |ws, id, cx| ws.snooze(id, 3, cx)))
@@ -726,8 +727,16 @@ fn build(
                 }),
         );
     }
-    let menu = state_items(menu.separator().item(fork(weak, &f.id)), weak, &f, window, cx);
-    menu.separator().item(archive(weak, &f)).item(delete(weak, &f))
+    let menu = state_items(
+        menu.separator().item(fork(weak, &f.id)),
+        weak,
+        &f,
+        window,
+        cx,
+    );
+    menu.separator()
+        .item(archive(weak, &f))
+        .item(delete(weak, &f))
 }
 
 /// A machine's reachability dot as a menu icon, so it sits in the icons' column: green while

@@ -68,7 +68,10 @@ impl PushSubscription {
         let host = rest.split('/').next().unwrap_or_default();
         if host.is_empty()
             || self.endpoint.len() > MAX_ENDPOINT
-            || self.endpoint.chars().any(|c| c.is_whitespace() || c.is_control())
+            || self
+                .endpoint
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
         {
             return Err("That isn't a push endpoint");
         }
@@ -153,9 +156,12 @@ impl VapidKey {
     }
 
     pub fn from_pkcs8(pkcs8: &[u8]) -> io::Result<Self> {
-        let pair =
-            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8, &SystemRandom::new())
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let pair = EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_FIXED_SIGNING,
+            pkcs8,
+            &SystemRandom::new(),
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         Ok(Self { pair })
     }
 
@@ -432,8 +438,7 @@ mod tests {
         )
         .unwrap();
         let (cek, nonce) = derive(&secret, &auth, &phone_public, &sender, &salt).unwrap();
-        let key =
-            aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &cek).unwrap());
+        let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_128_GCM, &cek).unwrap());
         let mut record = body[86..].to_vec();
         let opened = key
             .open_in_place(
@@ -446,14 +451,21 @@ mod tests {
         let read: PushNote = serde_json::from_slice(&opened[..opened.len() - 1]).unwrap();
         assert_eq!(read, note);
         // Each note has its own salt and key: two of the same say nothing about each other.
-        assert_ne!(encrypt(&sub, b"same").unwrap(), encrypt(&sub, b"same").unwrap());
+        assert_ne!(
+            encrypt(&sub, b"same").unwrap(),
+            encrypt(&sub, b"same").unwrap()
+        );
     }
 
     #[test]
     fn the_signed_header_names_the_push_service_and_verifies() {
         let (key, pkcs8) = VapidKey::generate().unwrap();
         let again = VapidKey::from_pkcs8(&pkcs8).unwrap();
-        assert_eq!(key.public_key(), again.public_key(), "kept, it's the same key");
+        assert_eq!(
+            key.public_key(),
+            again.public_key(),
+            "kept, it's the same key"
+        );
         assert_eq!(b64(&key.public_key()).len(), 65);
         let sub = PushSubscription {
             endpoint: "https://fcm.googleapis.com/fcm/send/abc:def".into(),
@@ -520,7 +532,11 @@ mod tests {
         assert_eq!(Outcome::of(410), Outcome::Gone);
         assert_eq!(Outcome::of(429), Outcome::Retry);
         assert_eq!(Outcome::of(503), Outcome::Retry);
-        assert_eq!(Outcome::of(403), Outcome::Gone, "made with a key this computer lost");
+        assert_eq!(
+            Outcome::of(403),
+            Outcome::Gone,
+            "made with a key this computer lost"
+        );
         assert_eq!(Outcome::of(400), Outcome::Refused);
         assert_eq!(Outcome::of(413), Outcome::Refused);
     }

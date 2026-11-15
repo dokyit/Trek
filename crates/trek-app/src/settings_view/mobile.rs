@@ -9,7 +9,9 @@ use crate::palette;
 use crate::scale::{radius, text, to_rems};
 use crate::ui;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use trek_core::settings::{Reach, Settings};
@@ -215,8 +217,17 @@ impl SettingsView {
                         .flex_1()
                         .min_w_0()
                         .text_size(px(text::BODY))
-                        .child(div().text_size(px(text::TITLE)).font_semibold().child("Subscribe in ntfy"))
-                        .child(div().text_color(muted).child("In the ntfy app, tap + and subscribe to this topic:"))
+                        .child(
+                            div()
+                                .text_size(px(text::TITLE))
+                                .font_semibold()
+                                .child("Subscribe in ntfy"),
+                        )
+                        .child(
+                            div()
+                                .text_color(muted)
+                                .child("In the ntfy app, tap + and subscribe to this topic:"),
+                        )
                         .child(
                             div()
                                 .px(px(10.))
@@ -227,22 +238,44 @@ impl SettingsView {
                                 .text_size(px(text::LABEL))
                                 .child(topic.clone()),
                         )
-                        .child(div().text_color(muted).child("Keep the topic to yourself: anyone who has it can read what's sent."))
+                        .child(div().text_color(muted).child(
+                            "Keep the topic to yourself: anyone who has it can read what's sent.",
+                        ))
                         .child(
                             h_flex()
                                 .gap(px(8.))
-                                .child(Button::new("push-copy").small().ghost().label("Copy topic").on_click(move |_, window, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy_topic.clone()));
-                                    crate::toast::push(window, "Copied", cx);
-                                }))
-                                .child(Button::new("push-new-topic").small().ghost().label("New topic").on_click(move |_, _, cx| {
-                                    fresh.update(cx, |ws, cx| {
-                                        ws.settings.mobile.push_topic = crate::push::new_topic();
-                                        ws.save_settings(cx);
-                                    })
-                                })),
+                                .child(
+                                    Button::new("push-copy")
+                                        .small()
+                                        .ghost()
+                                        .label("Copy topic")
+                                        .on_click(move |_, window, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_topic.clone(),
+                                            ));
+                                            crate::toast::push(window, "Copied", cx);
+                                        }),
+                                )
+                                .child(
+                                    Button::new("push-new-topic")
+                                        .small()
+                                        .ghost()
+                                        .label("New topic")
+                                        .on_click(move |_, _, cx| {
+                                            fresh.update(cx, |ws, cx| {
+                                                ws.settings.mobile.push_topic =
+                                                    crate::push::new_topic();
+                                                ws.save_settings(cx);
+                                            })
+                                        }),
+                                ),
                         )
-                        .child(div().text_size(to_rems(text::META)).text_color(muted).child(format!("Through {}", m.push_server))),
+                        .child(
+                            div()
+                                .text_size(to_rems(text::META))
+                                .text_color(muted)
+                                .child(format!("Through {}", m.push_server)),
+                        ),
                 )
                 .into_any_element(),
         );
