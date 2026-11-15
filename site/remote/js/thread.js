@@ -79,7 +79,7 @@ export function ThreadScreen({ threadId }) {
       <${IconButton} icon="more" label="Thread menu" onClick=${() => setMenu(true)} />
     </header>
     <${ConnectionBanner} />
-    <div class="scroll" ref=${scroller} onScroll=${onScroll}>
+    <div class="scroll" role="main" ref=${scroller} onScroll=${onScroll}>
       <div class="transcript">
         ${t?.more && html`<button class="btn small ghost load-older" type="button" onClick=${() => app.loadOlder(threadId)} disabled=${t.olderLoading}>${t.olderLoading ? 'Loading…' : 'Show earlier'}</button>`}
         ${t?.loading && items.length === 0 && html`<div class="empty"><${Spinner} /></div>`}
@@ -364,6 +364,8 @@ export function ConnectionBanner() {
       return html`<div class="banner bad"><${Icon} name="alert" /><span class="grow">${name} doesn’t know this phone any more. Pair it again from Trek’s Settings › Phone.</span></div>`;
     case 'unsupported':
       return html`<div class="banner bad"><${Icon} name="alert" /><span class="grow">This browser can’t make the connection Trek needs (WebTransport). Open this page in Chrome, Edge or Samsung Internet.</span></div>`;
+    case 'unsupported_protocol':
+      return html`<div class="banner bad"><${Icon} name="alert" /><span class="grow">This page and Trek on ${name} are different versions. Update Trek, then reload this page.</span></div>`;
     default:
       return html`<div class="banner bad"><${Icon} name="wifi" /><span class="grow">Can’t reach ${name}${state.detail ? ` (${state.detail})` : ''}. Is Trek open, and this phone on the same Wi-Fi or tailnet?</span><button class="btn small" type="button" onClick=${() => app.reconnect({ gesture: true })}>Retry</button></div>`;
   }

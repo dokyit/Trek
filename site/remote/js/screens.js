@@ -70,7 +70,7 @@ export function ThreadsScreen() {
             <input class="input" style=${{ flex: 1, minHeight: '38px' }} type="search" placeholder="Search threads" value=${query} onInput=${(e) => setQuery(e.target.value)} autofocus />`}
     </header>
     <${ConnectionBanner} />
-    <div class="scroll" style=${{ paddingBottom: '96px' }}>
+    <div class="scroll" role="main" style=${{ paddingBottom: '96px' }}>
       ${!state.haveSnapshot && state.status !== 'online' && state.threads.size === 0
         ? html`<div class="empty">${state.status === 'connecting' ? html`<${Spinner} />` : 'Nothing here until Trek answers.'}</div>`
         : groups.length === 0
@@ -116,7 +116,7 @@ function statusWords(state) {
 // Nothing paired, and pairing from a link
 
 export function WelcomeScreen() {
-  return html`<div class="screen"><div class="scroll"><div class="hero">
+  return html`<div class="screen"><div class="scroll" role="main"><div class="hero">
     <img class="mark" src="/favicon.svg" alt="" />
     <h1>Trek, from your phone</h1>
     <p>Follow every thread on your computer, answer approvals, questions and plans, and start new work while your agents keep running there.</p>
@@ -177,8 +177,9 @@ export function PairScreen() {
     offline: `Couldn’t reach ${pairing.name}${state.detail ? ` (${state.detail})` : ''}. Is this phone on the same Wi-Fi as it, or on the same tailnet?`,
     permission: state.detail === 'denied' ? 'This browser is blocking the page from your local network. Allow “Local network access” for this site in the browser’s site settings, then try again.' : null,
     unsupported: 'This browser can’t make the connection Trek needs (WebTransport). Open the link in Chrome, Edge or Samsung Internet.',
+    unsupported_protocol: `This page and Trek on ${pairing.name} are different versions. Update Trek, then reload this page.`,
   }[status];
-  return html`<div class="screen"><div class="scroll"><div class="hero">
+  return html`<div class="screen"><div class="scroll" role="main"><div class="hero">
     <img class="mark" src="/favicon.svg" alt="" />
     <h1>Pair with ${pairing.name}</h1>
     <p>This phone will connect straight to Trek on ${pairing.name}, on your network. The browser may ask to look for devices on your local network: allow it.</p>
@@ -277,7 +278,7 @@ export function NewThreadScreen({ projectId }) {
       <button class="btn small primary" type="button" style=${{ marginRight: '8px' }} aria-label=${after ? 'Starting once its files are in' : 'Start'} disabled=${(!said && attachments.length === 0) || busy || !!after || !online} onClick=${tapStart}>${busy || after ? html`<${Spinner} />` : 'Start'}</button>
     </header>
     <${ConnectionBanner} />
-    <div class="scroll"><div class="pad">
+    <div class="scroll" role="main"><div class="pad">
       <label class="field"><span>Project</span>
         <select class="input" value=${project} onChange=${(e) => setProject(e.target.value)}>
           ${projects.map((p) => html`<option value=${p.id}>${p.name}${p.branch ? ` (${p.branch})` : ''}</option>`)}
@@ -320,7 +321,7 @@ export function MachinesScreen() {
   const [menu, setMenu] = useState(null);
   return html`<div class="screen">
     <header class="bar"><${IconButton} icon="back" label="Back" onClick=${() => app.back()} /><div class="bar-title"><h1>Machines</h1></div></header>
-    <div class="scroll">
+    <div class="scroll" role="main">
       <h2 class="group-title">Paired with this phone</h2>
       <div class="group">
         ${state.machines.map((m) => {
@@ -363,7 +364,7 @@ export function SettingsScreen() {
   const [look, setLook] = useState(scheme());
   return html`<div class="screen">
     <header class="bar"><${IconButton} icon="back" label="Back" onClick=${() => app.back()} /><div class="bar-title"><h1>Settings</h1></div></header>
-    <div class="scroll">
+    <div class="scroll" role="main">
       <h2 class="group-title">Appearance</h2>
       <div class="group"><div class="item"><div class="grow">Theme</div>
         <${Segmented} label="Theme" options=${[['system', 'System'], ['dark', 'Night'], ['light', 'Paper']]} value=${look} onChange=${(v) => {
@@ -374,7 +375,7 @@ export function SettingsScreen() {
       ${settingsSections.map((Section, i) => html`<${Section} key=${i} />`)}
       <h2 class="group-title">This phone</h2>
       <div class="group">
-        <div class="item"><div class="grow">Connected to<div class="sub">${state.machine ? `${state.machine.name}${state.route ? ` at ${state.machine.routes?.[0] || ''}` : ''}` : 'Nothing'}</div></div></div>
+        <div class="item"><div class="grow">Connected to<div class="sub">${state.machine ? `${state.machine.name}${state.route && !state.machine.demo ? ` at ${state.machine.routes?.[0] || ''}` : ''}` : 'Nothing'}</div></div></div>
         <div class="item"><div class="grow">Add to the home screen<div class="sub">In the browser’s menu, choose Add to Home screen (or Install app): Trek opens like an app, full screen.</div></div></div>
       </div>
       <h2 class="group-title">About</h2>
