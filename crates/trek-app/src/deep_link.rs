@@ -16,8 +16,28 @@ use crate::workspace::{self, Route, Workspace, WorkspaceEvent};
 /// folder) opens straight away; anything else asks first, as opening it runs git there and may
 /// start a language server, which a folder's own config can turn into running its code.
 pub fn open(url: &str, cx: &mut App) {
-    let Some(link) = parse(url) else { return };
+    let Some(link) = parse(url) else {
+        return refuse(
+            "That trek:// link doesn't name anything Trek can open.".into(),
+            cx,
+        );
+    };
     open_link(link, cx);
+}
+
+/// A link Trek can't follow: Trek comes forward and says why, rather than doing nothing.
+fn refuse(why: String, cx: &mut App) {
+    if !cx.has_global::<workspace::GlobalWorkspace>() {
+        return;
+    }
+    let ws = workspace::workspace_global(cx);
+    crate::root::show_main(ws.clone(), cx);
+    ws.update(cx, |_, cx| {
+        cx.emit(WorkspaceEvent::Toast {
+            message: why,
+            undo: None,
+        })
+    });
 }
 
 /// A file a launch was given (`trek.exe <path>` on Windows): opened in the editor as a
@@ -33,10 +53,23 @@ fn open_link(link: Link, cx: &mut App) {
     }
     // Relative to what? Trek's own working folder isn't anything the user meant.
     if !link.path().is_absolute() {
-        return;
+        return refuse(
+            format!(
+                "That link names {}, not a full path, so Trek can't tell which file it means.",
+                link.path().display()
+            ),
+            cx,
+        );
     }
     if !cx.has_global::<workspace::GlobalWorkspace>() {
         return;
+    }
+    // Gone since the link was made (or never there): said, not opened as an empty editor.
+    if !link.path().exists() {
+        return refuse(
+            format!("There's no file at {} any more.", link.path().display()),
+            cx,
+        );
     }
     let ws = workspace::workspace_global(cx);
     if trusted(ws.read(cx), link.path()) {

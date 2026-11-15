@@ -106,6 +106,38 @@ fn a_link_that_climbs_out_of_a_project_asks_too() {
     });
 }
 
+/// A link Trek can't follow says why: a relative path, a file that's gone, or a link that names
+/// nothing Trek knows. Nothing opens, and nothing asks.
+#[test]
+fn a_link_that_cant_be_followed_says_why() {
+    run(async |cx| {
+        let trek = open(cx);
+        let seen = common::toasts(&trek, cx);
+        let gone = trek.project.join("gone.rs");
+        for url in [
+            "trek://edit?path=src/main.rs".to_string(),
+            format!("trek://edit?path={}", gone.display()),
+            "trek://nope".to_string(),
+            "trek://edit".to_string(),
+        ] {
+            cx.update(|cx| trek_app::deep_link::open(&url, cx));
+            trek.render(cx);
+            assert!(!cx.has_pending_prompt(), "{url}");
+        }
+        assert!(!trek.read(cx, |ws, _| editing(&gone)(&ws.route)));
+        let said: Vec<String> = seen.borrow().iter().map(|(m, _)| m.clone()).collect();
+        assert_eq!(
+            said,
+            [
+                "That link names src/main.rs, not a full path, so Trek can't tell which file it means.".to_string(),
+                format!("There's no file at {} any more.", gone.display()),
+                "That trek:// link doesn't name anything Trek can open.".to_string(),
+                "That trek:// link doesn't name anything Trek can open.".to_string(),
+            ]
+        );
+    });
+}
+
 #[test]
 fn a_link_into_a_project_opens_without_asking() {
     run(async |cx| {
