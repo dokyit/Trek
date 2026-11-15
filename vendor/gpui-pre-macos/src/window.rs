@@ -491,6 +491,16 @@ unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const C
 
         decl.add_method(sel!(close), close_window as extern "C" fn(&Object, Sel));
 
+        // Trek: keys that reach the window itself go back to GPUI's view (`window_key_event`).
+        decl.add_method(
+            sel!(keyDown:),
+            window_key_event as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(keyUp:),
+            window_key_event as extern "C" fn(&Object, Sel, id),
+        );
+
         decl.add_method(
             sel!(draggingEntered:),
             dragging_entered as extern "C" fn(&Object, Sel, id) -> NSDragOperation,
@@ -2905,7 +2915,85 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
     }
 }
 
+/// Trek: a press on GPUI's own view takes the keys back to it, as a click does in any AppKit view
+/// that types. GPUI's view doesn't say it accepts first responder, so AppKit never gives it the
+/// keys on a click: once a native view inside it (a web view) was hidden or taken out of the window
+/// while it had them, the window itself had them, every key beeped, and clicking the composer
+/// didn't help (GPUI's focus moved there, the keys didn't). A press that reaches GPUI's view missed
+/// every native view in it, so none of them is clicked into.
+unsafe fn take_keys_back(this: &Object) {
+    unsafe {
+        let window: id = msg_send![this, window];
+        if window == nil {
+            return;
+        }
+        let responder: id = msg_send![window, firstResponder];
+        let this_id = this as *const Object as id;
+        if responder != this_id {
+            let _: BOOL = msg_send![window, makeFirstResponder: this_id];
+        }
+    }
+}
+
+/// Trek: whether the keys are stranded in `window`: no view of the window has them (the window
+/// itself does, as AppKit leaves them when the view that had them is hidden or removed; or
+/// nothing, or a view that's no longer in the window). A native view in the window that has them
+/// (a web view passing a key it didn't use up the chain) keeps them.
+unsafe fn keys_stranded(window: id) -> bool {
+    unsafe {
+        let responder: id = msg_send![window, firstResponder];
+        if responder == nil || responder == window {
+            return true;
+        }
+        let is_view: BOOL = msg_send![responder, isKindOfClass: class!(NSView)];
+        if is_view == NO {
+            return false;
+        }
+        let its_window: id = msg_send![responder, window];
+        its_window != window
+    }
+}
+
+/// Trek: a key reached the window itself (`keyDown:`, `keyUp:` of its class), which is where
+/// AppKit sends keys when no view has them. GPUI's view takes them back and gets this one, so a
+/// native view that went while it had the keys can't leave every key beeping until a click.
+extern "C" fn window_key_event(this: &Object, sel: Sel, native_event: id) {
+    unsafe {
+        let window = this as *const Object as id;
+        if keys_stranded(window) {
+            let view = get_window_state(this).lock().native_view.as_ptr() as id;
+            let _: BOOL = msg_send![window, makeFirstResponder: view];
+            let taken: id = msg_send![window, firstResponder];
+            if taken == view {
+                if sel == sel!(keyDown:) {
+                    let _: () = msg_send![view, keyDown: native_event];
+                } else {
+                    let _: () = msg_send![view, keyUp: native_event];
+                }
+                return;
+            }
+        }
+        // Not stranded (or GPUI's view couldn't take them): as AppKit would.
+        let superclass = this.class().superclass().unwrap_or(class!(NSWindow));
+        if sel == sel!(keyDown:) {
+            let _: () = msg_send![super(this, superclass), keyDown: native_event];
+        } else {
+            let _: () = msg_send![super(this, superclass), keyUp: native_event];
+        }
+    }
+}
+
 extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
+    // Trek: see `take_keys_back`. Before the window's state is locked: AppKit may tell the view
+    // that had the keys, and that can come back here.
+    if matches!(
+        unsafe { native_event.eventType() },
+        NSEventType::NSLeftMouseDown
+            | NSEventType::NSRightMouseDown
+            | NSEventType::NSOtherMouseDown
+    ) {
+        unsafe { take_keys_back(this) };
+    }
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Arc::downgrade(&window_state);
     let mut lock = window_state.as_ref().lock();

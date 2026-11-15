@@ -490,6 +490,15 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> Option<isize> {
         unsafe { SetCapture(handle) };
+        // Trek: a press on GPUI's own window takes the keys back to it, as on a Mac. A child
+        // window (a web view) hidden or destroyed while it had them leaves them with nothing, and
+        // a click on the parent doesn't move them; a press that reaches this window missed every
+        // child, so none of them is clicked into.
+        unsafe {
+            if GetFocus() != handle {
+                SetFocus(Some(handle)).ok();
+            }
+        }
 
         let Some(mut func) = self.state.callbacks.input.take() else {
             return Some(1);

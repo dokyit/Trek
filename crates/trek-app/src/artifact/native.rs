@@ -211,8 +211,13 @@ impl Surface for NativeSurface {
         platform::snapshot(&self.web)
     }
 
-    fn release_keys(&self, _window: &Window) {
+    fn release_keys(&self) {
         self.clip.release_keys();
+    }
+
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
+    fn take_keys(&self) {
+        let _ = self.web.focus();
     }
 
     fn set_background(&self, rgb: (u8, u8, u8)) {
@@ -256,6 +261,9 @@ impl raw_window_handle::HasWindowHandle for Parent {
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
     }
 }
+
+#[cfg(feature = "shots")]
+pub use platform::{keys_holder, shots_keys};
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -345,6 +353,7 @@ mod platform {
 
         pub fn hide(&self) {
             if !self.view.isHidden() {
+                self.give_back_held_keys();
                 self.view.setHidden(true);
             }
         }
@@ -355,12 +364,118 @@ mod platform {
                 window.makeFirstResponder(Some(&self.host));
             }
         }
+
+        /// The keys back to GPUI's view if the page (or anything else in the container) has
+        /// them, whatever the card thought: AppKit leaves a hidden or removed first responder's
+        /// keys with the window itself, which beeps at every key, and GPUI's view doesn't take
+        /// them back when it's clicked.
+        fn give_back_held_keys(&self) {
+            let Some(window) = self.host.window() else {
+                return;
+            };
+            // SAFETY: plain AppKit getters on the main thread; the responder is the window's
+            // own, alive for the call.
+            let inside = unsafe {
+                let responder: *mut AnyObject = msg_send![&*window, firstResponder];
+                match responder.as_ref() {
+                    Some(r) => {
+                        let is_view: bool = msg_send![r, isKindOfClass: objc2::class!(NSView)];
+                        is_view && {
+                            let inside: bool = msg_send![r, isDescendantOf: &*self.view];
+                            inside
+                        }
+                    }
+                    None => false,
+                }
+            };
+            if inside {
+                window.makeFirstResponder(Some(&self.host));
+            }
+        }
     }
 
     impl Drop for Clip {
         fn drop(&mut self) {
+            self.give_back_held_keys();
             self.view.removeFromSuperview();
         }
+    }
+
+    /// Who has the keys in `window`: `trek` (GPUI's view), the class of a native view inside it
+    /// (`WKWebView`), the class of anything else (the window itself), or `nothing`.
+    #[cfg(feature = "shots")]
+    pub fn keys_holder(window: &gpui_kit::Window) -> String {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return "nothing".into();
+        };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+            return "nothing".into();
+        };
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        // SAFETY: GPUI's live view and its window; plain AppKit getters on the main thread.
+        unsafe {
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            if ns_window.is_null() {
+                return "nothing".into();
+            }
+            let responder: *mut AnyObject = msg_send![ns_window, firstResponder];
+            if responder.is_null() {
+                return "nothing".into();
+            }
+            if responder == view {
+                return "trek".into();
+            }
+            (*responder).class().name().to_string_lossy().into_owned()
+        }
+    }
+
+    /// The capture build's `artifacts lose-keys`: the window takes the keys itself, as AppKit
+    /// leaves them when a view that had them goes; `artifacts press-trek`: a press on GPUI's own
+    /// view where the composer is, delivered as AppKit delivers one (`mouseDown:`, `mouseUp:`).
+    #[cfg(feature = "shots")]
+    pub fn shots_keys(window: &gpui_kit::Window, what: &str) -> Result<(), String> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+            return Err("not an AppKit window".into());
+        };
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        // SAFETY: GPUI's live view and its window, on the main thread; the events are made with
+        // AppKit's own constructor and handed to the view as AppKit hands them.
+        unsafe {
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            if ns_window.is_null() {
+                return Err("no window".into());
+            }
+            match what {
+                "lose-keys" => {
+                    let none: *mut AnyObject = std::ptr::null_mut();
+                    let _: bool = msg_send![ns_window, makeFirstResponder: none];
+                }
+                "press-trek" => {
+                    let frame: NSRect = msg_send![view, frame];
+                    // The composer's text, a little above the window's bottom edge.
+                    let at = NSPoint::new(frame.size.width / 2., 110.);
+                    let number: isize = msg_send![ns_window, windowNumber];
+                    let context: *mut AnyObject = std::ptr::null_mut();
+                    let class = objc2::class!(NSEvent);
+                    for kind in [1usize, 2] {
+                        let event: *mut AnyObject = msg_send![class, mouseEventWithType: kind, location: at, modifierFlags: 0usize, timestamp: 0f64, windowNumber: number, context: context, eventNumber: 0isize, clickCount: 1isize, pressure: 1f32];
+                        if event.is_null() {
+                            return Err("AppKit made no event".into());
+                        }
+                        if kind == 1 {
+                            let _: () = msg_send![view, mouseDown: event];
+                        } else {
+                            let _: () = msg_send![view, mouseUp: event];
+                        }
+                    }
+                }
+                other => return Err(format!("{other}?")),
+            }
+        }
+        Ok(())
     }
 
     /// The page as WebKit draws it: a TIFF.
@@ -391,9 +506,9 @@ mod platform {
     use std::num::NonZeroIsize;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GetParent, HWND_TOP, IsWindowVisible, SW_HIDE,
+        CreateWindowExW, DestroyWindow, GetParent, HWND_TOP, IsChild, IsWindowVisible, SW_HIDE,
         SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WS_CHILD, WS_CLIPCHILDREN,
         WS_CLIPSIBLINGS,
     };
@@ -464,7 +579,21 @@ mod platform {
             // SAFETY: our own child window.
             unsafe {
                 if IsWindowVisible(self.hwnd) != 0 {
+                    self.give_back_held_keys();
                     ShowWindow(self.hwnd, SW_HIDE);
+                }
+            }
+        }
+
+        /// The keys back to GPUI's window if the page (or anything else in the container) has
+        /// them, whatever the card thought: a hidden window keeps the keys, and a destroyed one
+        /// leaves them with no window at all, so nothing types until something takes them.
+        fn give_back_held_keys(&self) {
+            // SAFETY: plain queries of our own child window and the thread's focus.
+            unsafe {
+                let focus = GetFocus();
+                if !focus.is_null() && (focus == self.hwnd || IsChild(self.hwnd, focus) != 0) {
+                    self.release_keys();
                 }
             }
         }
@@ -483,9 +612,42 @@ mod platform {
 
     impl Drop for Clip {
         fn drop(&mut self) {
+            self.give_back_held_keys();
             // SAFETY: our own child window; the web view in it went first.
             unsafe { DestroyWindow(self.hwnd) };
         }
+    }
+
+    /// Who has the keys in `window`: `trek` (GPUI's window), `child` (a window inside it, a
+    /// page), `other`, or `nothing`.
+    #[cfg(feature = "shots")]
+    pub fn keys_holder(window: &gpui_kit::Window) -> String {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return "nothing".into();
+        };
+        let RawWindowHandle::Win32(h) = handle.as_raw() else {
+            return "nothing".into();
+        };
+        let hwnd = h.hwnd.get() as HWND;
+        // SAFETY: queries of the thread's focus and GPUI's own window.
+        unsafe {
+            let focus = GetFocus();
+            if focus.is_null() {
+                "nothing".into()
+            } else if focus == hwnd {
+                "trek".into()
+            } else if IsChild(hwnd, focus) != 0 {
+                "child".into()
+            } else {
+                "other".into()
+            }
+        }
+    }
+
+    #[cfg(feature = "shots")]
+    pub fn shots_keys(_: &gpui_kit::Window, what: &str) -> Result<(), String> {
+        Err(format!("{what}: macOS only"))
     }
 
     /// The page as WebView2 draws it (CapturePreview): a PNG.
@@ -512,6 +674,16 @@ mod platform {
         pub fn place(&self, _: &Placement, _: f32) {}
         pub fn hide(&self) {}
         pub fn release_keys(&self) {}
+    }
+
+    #[cfg(feature = "shots")]
+    pub fn keys_holder(_: &gpui_kit::Window) -> String {
+        "trek".into()
+    }
+
+    #[cfg(feature = "shots")]
+    pub fn shots_keys(_: &gpui_kit::Window, what: &str) -> Result<(), String> {
+        Err(format!("{what}: macOS only"))
     }
 
     pub fn snapshot(_: &wry::WebView) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {

@@ -132,7 +132,7 @@ pub fn init(workspace: Entity<Workspace>, cx: &mut App) {
                     "wait" => wait(&workspace, arg, cx).await,
                     "shot" => shot(&workspace, &dir, arg, cx).await,
                     "browser" => browser(&workspace, &dir, arg, cx).await,
-                    "artifacts" => artifacts(&workspace, &dir, cx).await,
+                    "artifacts" => artifacts(&workspace, &dir, arg, cx).await,
                     "editor" if arg.starts_with("snap ") => {
                         editor_snap(&workspace, &dir, arg["snap ".len()..].trim(), cx).await
                     }
@@ -1121,7 +1121,17 @@ async fn editor_snap(
 /// title, whether it has a web view and shows it live, its height, its frame and the transcript's
 /// visible area (window px), plus the window's frame on screen (for `screencapture -R`: the views
 /// are native, so `shot` doesn't show them).
-async fn artifacts(ws: &Entity<Workspace>, dir: &Path, cx: &mut AsyncApp) -> anyhow::Result<()> {
+/// `artifacts [take-keys|lose-keys|press-trek]`: the cards in the main window, and who has the
+/// keys there (`artifacts.json`). First, `take-keys` gives them to the first live card's page, as
+/// a click in it does; on a Mac, `lose-keys` leaves them with the window itself, as AppKit does
+/// when a view that had them goes, and `press-trek` presses GPUI's own view where the composer is,
+/// as AppKit delivers a click.
+async fn artifacts(
+    ws: &Entity<Workspace>,
+    dir: &Path,
+    arg: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
     // A beat for the last command's layout to reach the native views.
     cx.background_executor()
         .timer(Duration::from_millis(400))
@@ -1129,6 +1139,26 @@ async fn artifacts(ws: &Entity<Workspace>, dir: &Path, cx: &mut AsyncApp) -> any
     let main = cx
         .update(|cx| ws.read(cx).main_window)
         .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+    match arg.trim() {
+        "" => {}
+        "take-keys" => {
+            main.update(cx, |_, window, cx| {
+                crate::artifact::page_takes_keys(window, cx)
+            })??;
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+        }
+        what @ ("lose-keys" | "press-trek") => {
+            main.update(cx, |_, window, _| crate::artifact::shots_keys(window, what))??;
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+        }
+        other => {
+            anyhow::bail!("artifacts: {other:?}? (artifacts [take-keys|lose-keys|press-trek])")
+        }
+    }
     let state = main.update(cx, |_, window, cx| {
         let rect = |b: Bounds<Pixels>| serde_json::json!({ "x": f32::from(b.origin.x), "y": f32::from(b.origin.y), "w": f32::from(b.size.width), "h": f32::from(b.size.height) });
         let cards: Vec<serde_json::Value> = crate::artifact::placements(window, cx)
@@ -1148,7 +1178,7 @@ async fn artifacts(ws: &Entity<Workspace>, dir: &Path, cx: &mut AsyncApp) -> any
                 })
             })
             .collect();
-        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards })
+        serde_json::json!({ "window": rect(window.bounds()), "scale": window.scale_factor(), "artifacts": cards, "keys": crate::artifact::keys_holder(window) })
     })?;
     std::fs::write(
         dir.join("artifacts.json"),
@@ -4979,6 +5009,12 @@ fn type_text(root: AnyView, window: &mut Window, text: &str, cx: &mut App) -> an
     if typed {
         return Ok(());
     }
+    // Typing the platform's way reached nothing (no focus, or no text field took the key): said
+    // in the log, so a run checking that keys land isn't fooled by the fallback below.
+    tracing::warn!(
+        "shots type: no text input took the keys (anything focused: {}); put into the composer directly",
+        window.focused(cx).is_some()
+    );
     let view = root
         .downcast::<gpui_kit::component::Root>()
         .ok()

@@ -204,6 +204,125 @@ fn trek_overlays_and_other_threads_hide_the_view() {
     });
 }
 
+/// The composer has the keyboard.
+fn composer_focused(trek: &Trek, cx: &mut TestAppContext) -> bool {
+    let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+    trek.window(cx, |window, cx| composer.read(cx).is_focused(window, cx))
+}
+
+#[test]
+fn a_page_with_the_keys_gives_them_back_before_its_card_hides_or_goes() {
+    // A page clicked into (a watched video played) had the keys. Its view hidden or gone while it
+    // still had them, the owner's Mac left them with the window: every key beeped, the composer
+    // took no text even when clicked, and only dictation could write a message.
+    run(async |cx| {
+        let log = fake_web(true).unwrap();
+        let trek = open(cx);
+        answered(&trek, cx, &answer(PAGE), true);
+        assert!(one(&trek, cx).live);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        trek.window(cx, |window, cx| {
+            composer.update(cx, |c, cx| c.focus(window, cx))
+        });
+        let take = |trek: &Trek, cx: &mut TestAppContext| {
+            trek.window(cx, |window, cx| {
+                trek_app::artifact::page_takes_keys(window, cx)
+            })
+            .expect("a live page");
+            settle(trek, cx);
+            assert!(log.borrow().page_has_keys && one(trek, cx).has_keys);
+        };
+        take(&trek, cx);
+        assert!(!composer_focused(&trek, cx), "the card has GPUI's focus");
+        // Hidden while it has them (a Trek surface over it; covered, or scrolled out of view).
+        trek.update(cx, |ws, cx| {
+            ws.overlay_open = true;
+            cx.notify();
+        });
+        settle(&trek, cx);
+        assert!(!one(&trek, cx).live);
+        assert_eq!(log.borrow().hidden_with_keys, 0, "hidden with the keys");
+        assert!(!log.borrow().page_has_keys && !one(&trek, cx).has_keys);
+        assert!(composer_focused(&trek, cx), "back where they were");
+        trek.update(cx, |ws, cx| {
+            ws.overlay_open = false;
+            cx.notify();
+        });
+        settle(&trek, cx);
+        assert!(one(&trek, cx).live);
+        // Gone while it has them: another thread on screen, and the card with its view goes.
+        take(&trek, cx);
+        trek.quiet_thread(cx);
+        settle(&trek, cx);
+        assert!(cards(&trek, cx).is_empty());
+        assert_eq!(log.borrow().gone_with_keys, 0, "went with the keys");
+        assert!(!log.borrow().page_has_keys);
+        assert!(log.borrow().keys_back >= 2);
+        // What's typed next reaches the composer.
+        assert!(composer_focused(&trek, cx), "back where they were");
+        trek.type_text(cx, "typed again");
+        assert_eq!(trek.composer_text(cx), "typed again");
+    });
+}
+
+#[test]
+fn keys_come_back_when_a_page_that_had_them_scrolls_away_and_its_view_is_let_go() {
+    // The owner's case: he played a video inline, the thread went on, and the player scrolled far
+    // up while it still had the keys. Its view was hidden, then let go once more cards came than
+    // are kept live; the keys stayed with the window and every key beeped.
+    run(async |cx| {
+        let log = fake_web(true).unwrap();
+        let trek = open(cx);
+        cx.simulate_window_resize(trek.window, size(px(900.), px(560.)));
+        let id = answered(&trek, cx, &answer(PAGE), true);
+        let composer = cx.read(|cx| trek.root.read(cx).composer.clone());
+        trek.window(cx, |window, cx| {
+            composer.update(cx, |c, cx| c.focus(window, cx))
+        });
+        trek.window(cx, |window, cx| {
+            trek_app::artifact::page_takes_keys(window, cx)
+        })
+        .expect("a live page");
+        settle(&trek, cx);
+        assert!(log.borrow().page_has_keys && one(&trek, cx).has_keys);
+        // More answers, each with a page of its own, push it up and out of view, then past the
+        // views a window keeps.
+        for n in 0..6 {
+            let text = answer(&PAGE.replace("Desk", &format!("Desk {n}")));
+            trek.update(cx, |ws, cx| {
+                ws.apply_events(
+                    &id,
+                    vec![
+                        AgentEvent::TextDelta(text.clone()),
+                        AgentEvent::TextDone(text),
+                        AgentEvent::TurnComplete { error: None },
+                    ],
+                    cx,
+                )
+            });
+            settle(&trek, cx);
+        }
+        let all = cards(&trek, cx);
+        assert!(
+            !all.iter()
+                .any(|c| c.live && c.title.as_deref() == Some("Desk & clamp")),
+            "the first card scrolled away: {all:?}"
+        );
+        assert!(!all.iter().any(|c| c.has_keys), "{all:?}");
+        let log = log.borrow();
+        assert_eq!(log.hidden_with_keys, 0, "hidden with the keys");
+        assert_eq!(log.gone_with_keys, 0, "let go with the keys");
+        assert!(!log.page_has_keys && log.keys_back >= 1);
+        drop(log);
+        // Clicked into, the composer takes what's typed (the keys are Trek's again).
+        trek.window(cx, |window, cx| {
+            composer.update(cx, |c, cx| c.focus(window, cx))
+        });
+        trek.type_text(cx, "still typing");
+        assert_eq!(trek.composer_text(cx), "still typing");
+    });
+}
+
 #[test]
 fn a_theme_switch_reaches_the_running_page() {
     run(async |cx| {

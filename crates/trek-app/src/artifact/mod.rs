@@ -895,12 +895,17 @@ pub struct ArtifactState {
     _events: Option<Task<()>>,
     /// The view being made, outside any update (see `make`).
     making: Option<Task<()>>,
+    /// Gives the keys back if the card goes while its page has them (`let_go_of_keys`).
+    _release: Subscription,
 }
 
 impl ArtifactState {
     fn new(doc: Arc<Doc>, mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let id = window.window_handle().window_id();
         let me = cx.weak_entity();
+        let handle = window.window_handle();
+        let _release =
+            cx.on_release(move |this: &mut Self, cx: &mut App| this.let_go_of_keys(handle, cx));
         let registry = cx.default_global::<Registry>();
         registry.windows.entry(id).or_default().states.push(me);
         let height = registry
@@ -934,6 +939,32 @@ impl ArtifactState {
             pending_seek: None,
             _events: None,
             making: None,
+            _release,
+        }
+    }
+
+    /// The card is going (no longer drawn: another thread, its rows scrolled away) while its
+    /// page has the keys. Its view goes with it, and a native view hidden or taken out of the
+    /// window while it has the keys leaves them with nothing that types: on a Mac the window
+    /// itself, which beeps at every key, and a click in Trek doesn't take them back (GPUI's view
+    /// never asks for them). So they go back to Trek first, and GPUI's focus to where it was
+    /// before the page took it, once the window is free.
+    fn let_go_of_keys(&mut self, window: AnyWindowHandle, cx: &mut App) {
+        if !std::mem::take(&mut self.has_keys) {
+            return;
+        }
+        if let Some(surface) = &self.surface {
+            surface.release_keys();
+        }
+        let (card, had) = (self.focus.clone(), self.had_focus.take());
+        if let Some(had) = had {
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| {
+                    if card.is_focused(window) || window.focused(cx).is_none() {
+                        window.focus(&had, cx);
+                    }
+                });
+            });
         }
     }
 
@@ -1072,9 +1103,13 @@ impl ArtifactState {
 
     /// Let go of the view (far off screen, or past `MAX_LIVE`); its snapshot stays.
     fn drop_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The keys back first, while there's a view to take them from: the view goes next, and
+        // one that goes with them leaves them with the window (see `let_go_of_keys`).
+        if self.surface.is_some() {
+            self.release_keys(window, cx);
+        }
         if let Some(mut surface) = self.surface.take() {
             surface.place(None, window);
-            self.release_keys(window, cx);
             self._events = None;
             self.loaded = false;
             if self.live {
@@ -1222,7 +1257,7 @@ impl ArtifactState {
         }
         self.has_keys = false;
         if let Some(surface) = &self.surface {
-            surface.release_keys(window);
+            surface.release_keys();
         }
         if let Some(had) = self.had_focus.take() {
             window.focus(&had, cx);
@@ -1335,7 +1370,8 @@ impl ArtifactState {
             && self.making.is_none()
             && self.unavailable.is_none()
             && gap <= viewport
-            && window.is_window_active()
+            // A capture run's window, kept behind the user's, counts as in front.
+            && (window.is_window_active() || crate::mascot::force_active())
         {
             self.make(window, cx);
         }
@@ -1366,6 +1402,11 @@ impl ArtifactState {
     }
 
     fn show(&mut self, placement: Option<Placement>, window: &mut Window, cx: &mut Context<Self>) {
+        // Hidden (covered, an overlay, scrolled out of the transcript) while its page has the
+        // keys: they come back to Trek first, as for a card that goes (`let_go_of_keys`).
+        if placement.is_none() && self.has_keys {
+            self.release_keys(window, cx);
+        }
         let live = placement.is_some() && self.surface.is_some();
         if self.live && !live {
             // Pictured as it goes: the snapshot is what stands in for it.
@@ -1798,6 +1839,16 @@ pub struct FakeLog {
     pub reloads: usize,
     /// The bootstrap each view was made with.
     pub bootstraps: Vec<String>,
+    /// A page has the keys, as the platform has it (a click in it gave them; giving them back
+    /// takes them away).
+    pub page_has_keys: bool,
+    /// Times the keys were given back to Trek.
+    pub keys_back: usize,
+    /// Times a view was hidden, or went, while its page still had the keys: on a Mac the window
+    /// is left with them (every key beeps, and a click in Trek doesn't take them back); on
+    /// Windows they're left with a hidden window, or none.
+    pub hidden_with_keys: usize,
+    pub gone_with_keys: usize,
 }
 
 /// Tests on this thread get stand-in views, which log to what this returns (`None`: no views at
@@ -1820,6 +1871,9 @@ struct FakeSurface {
 #[cfg(any(test, feature = "test-support"))]
 impl Surface for FakeSurface {
     fn place(&mut self, at: Option<Placement>, _: &Window) {
+        if at.is_none() && self.placed.is_some() && self.log.borrow().page_has_keys {
+            self.log.borrow_mut().hidden_with_keys += 1;
+        }
         self.placed = at;
     }
     fn eval(&self, js: &str) {
@@ -1831,11 +1885,65 @@ impl Surface for FakeSurface {
     fn snapshot(&self) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>> {
         None
     }
-    fn release_keys(&self, _: &Window) {}
+    fn release_keys(&self) {
+        let mut log = self.log.borrow_mut();
+        log.page_has_keys = false;
+        log.keys_back += 1;
+    }
     fn set_background(&self, _: (u8, u8, u8)) {}
     fn placed(&self) -> Option<Placement> {
         self.placed
     }
+    fn take_keys(&self) {
+        self.log.borrow_mut().page_has_keys = true;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for FakeSurface {
+    fn drop(&mut self) {
+        let mut log = self.log.borrow_mut();
+        if log.page_has_keys {
+            log.gone_with_keys += 1;
+        }
+    }
+}
+
+/// The first live card's page in `window` takes the keys, as a click in it does: the platform
+/// gives its view the keys, and the page says so (its bootstrap's `focus`).
+#[cfg(any(test, feature = "test-support", feature = "shots"))]
+pub fn page_takes_keys(window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+    let state = cx
+        .try_global::<Registry>()
+        .and_then(|r| r.windows.get(&window.window_handle().window_id()))
+        .and_then(|entry| {
+            entry
+                .states
+                .iter()
+                .filter_map(|s| s.upgrade())
+                .find(|s| s.read(cx).live && s.read(cx).surface.is_some())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no card's page is on screen"))?;
+    state.update(cx, |s, cx| {
+        if let Some(surface) = &s.surface {
+            surface.take_keys();
+        }
+        let message = format!(r#"{{"n":"{}","t":"focus"}}"#, s.nonce);
+        s.on_event(native::Event::Message(message), window, cx);
+    });
+    Ok(())
+}
+
+/// Who has the keys in `window`, as the platform has it (`native::keys_holder`).
+#[cfg(feature = "shots")]
+pub fn keys_holder(window: &Window) -> String {
+    native::keys_holder(window)
+}
+
+/// The capture build's `artifacts lose-keys` and `artifacts press-trek` (`native::shots_keys`).
+#[cfg(feature = "shots")]
+pub fn shots_keys(window: &Window, what: &str) -> anyhow::Result<()> {
+    native::shots_keys(window, what).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// The cards in `window` as the layer last placed them: whether each is live, and where.

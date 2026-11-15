@@ -35,11 +35,16 @@ pub trait Surface {
     /// (TIFF or PNG, `native::decode`) at the device's pixels, delivered later. `None` when the
     /// platform can't.
     fn snapshot(&self) -> Option<async_channel::Receiver<Result<Vec<u8>, String>>>;
-    /// Give the keyboard back to Trek (the page had it).
-    fn release_keys(&self, window: &Window);
+    /// Give the keyboard back to Trek (the page had it). Needs no window: a card going away gives
+    /// them back as it goes.
+    fn release_keys(&self);
     /// The card's colour changed (a theme switch): what shows where the page draws nothing, on
     /// Windows (WebView2 can't be see-through over GPUI; WKWebView is).
     fn set_background(&self, rgb: (u8, u8, u8));
+    /// The page takes the keys, as a click in it does (tests, and the capture build's
+    /// `artifacts take-keys`).
+    #[cfg(any(test, feature = "test-support", feature = "shots"))]
+    fn take_keys(&self) {}
     #[cfg(any(test, feature = "test-support"))]
     fn placed(&self) -> Option<Placement> {
         None
