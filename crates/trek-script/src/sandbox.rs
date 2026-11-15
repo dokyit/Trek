@@ -625,7 +625,7 @@ fn show<'js>(ctx: &Ctx<'js>, v: Value<'js>) -> String {
 
 /// An error from QuickJS as text: the pending exception's name, message and stack where there is
 /// one (a syntax error, an interrupt), else the error itself.
-fn describe(ctx: &Ctx<'_>, e: rquickjs::Error) -> String {
+pub(crate) fn describe(ctx: &Ctx<'_>, e: rquickjs::Error) -> String {
     if !matches!(e, rquickjs::Error::Exception) {
         return e.to_string();
     }

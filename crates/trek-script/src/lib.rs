@@ -11,6 +11,7 @@
 mod definition;
 mod fit;
 mod output;
+pub mod plugin;
 mod sandbox;
 
 pub use async_trait::async_trait;
