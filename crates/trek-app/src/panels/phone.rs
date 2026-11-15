@@ -32,8 +32,8 @@
 use crate::assets::Lucide;
 use crate::fluent;
 use crate::scale::{text, to_rems};
-use crate::workspace::Workspace;
 use crate::workspace::phone_use::PhoneCall;
+use crate::workspace::{Workspace, WorkspaceEvent};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
@@ -105,6 +105,9 @@ const DRIVER_JPEG: u8 = 70;
 /// While the user is touching or typing (and a little after), the picture is asked for as often
 /// as the phone gives it: what they did shows as it happens, not a third of a second later.
 const DRIVER_FRAME_BUSY: Duration = Duration::from_millis(110);
+/// How long the driver's picture may bring nothing, not even its keep-alive (about once a
+/// second), before it's shown as reconnecting rather than live.
+const STALLED: Duration = Duration::from_secs(3);
 const BUSY_FOR: Duration = Duration::from_secs(3);
 /// `phone_elements`: the most elements asked of the driver, and how long it may take reading
 /// them.
@@ -112,6 +115,8 @@ const ELEMENTS_MAX: u32 = 400;
 const ELEMENTS_LIMIT: Duration = Duration::from_secs(5);
 /// What a command to iPhone Mirroring that got no answer says.
 const MIRROR_LATE: &str = "iPhone Mirroring didn't answer in time.";
+/// Xcode in the Mac App Store, for a Mac without it.
+const XCODE_IN_APP_STORE: &str = "macappstore://apps.apple.com/app/xcode/id497799835";
 
 /// A tap or key that went to the helper (`who`) and got no answer in time: it may have
 /// happened all the same, so it's said to be unknown rather than failed.
@@ -268,6 +273,22 @@ pub struct PhonePanel {
     /// A made-up phone for design review (`control phone <state>`): nothing real is touched.
     demo: bool,
     notice: Option<SharedString>,
+    /// Installing Trek Driver from the tool's button: what this Mac lacks, then the phone
+    /// updater's steps.
+    setup: route::Setup,
+    /// The phone updater runs and the tool shows its steps (started here, or elsewhere while
+    /// nothing else was on show).
+    setup_following: bool,
+    /// The phone on the cable hasn't trusted this Mac (`device::probe`).
+    untrusted: bool,
+    /// When the driver's picture last brought anything, a frame or its keep-alive (milliseconds
+    /// on `busy_clock`).
+    last_heard: Arc<std::sync::atomic::AtomicU64>,
+    /// Whether the strip last showed the driver's picture as stalled.
+    stalled_shown: bool,
+    /// Made-up for design review: the driver's signing left, and a stalled picture.
+    demo_left: Option<i64>,
+    demo_stalled: bool,
     _tasks: Vec<Task<()>>,
 }
 
@@ -413,6 +434,13 @@ impl PhonePanel {
             // An isolated capture run never reaches for the user's real phone.
             demo: cfg!(feature = "shots") && std::env::var_os("TREK_SHOT_DIR").is_some(),
             notice: None,
+            setup: route::Setup::Idle,
+            setup_following: false,
+            untrusted: false,
+            last_heard: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            stalled_shown: false,
+            demo_left: None,
+            demo_stalled: false,
             _tasks: vec![frames, tick],
         }
     }
@@ -440,7 +468,36 @@ impl PhonePanel {
             blocker: self.blocker.clone(),
             wifi: self.on_wifi(),
             passcode: self.passcode.filter(|_| self.on_wifi()),
+            setup: self.setup.clone(),
+            driver_left: self.driver_left(),
+            untrusted: self.untrusted,
+            mux_error: self.phone_error.clone().filter(|_| self.phone.is_none()),
+            stalled: self.stalled(),
         }
+    }
+
+    /// Seconds until the installed driver's free signing runs out, when that's known.
+    fn driver_left(&self) -> Option<i64> {
+        if self.demo {
+            return self.demo_left;
+        }
+        let expires = self.driver_install.as_ref()?.expires?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        Some(expires - now)
+    }
+
+    /// The driver's picture is on show but nothing (not even its keep-alive) has come for a
+    /// while: what's shown is the last frame, not the screen now.
+    fn stalled(&self) -> bool {
+        if self.demo {
+            return self.demo_stalled;
+        }
+        let heard = self.last_heard.load(Ordering::Relaxed);
+        self.driver_frames
+            && heard > 0
+            && self.busy_clock.elapsed().as_millis() as u64 > heard + STALLED.as_millis() as u64
     }
 
     /// Whether usbmuxd sees the phone over Wi-Fi only (no cable).
@@ -598,6 +655,12 @@ impl PhonePanel {
         }
         if !self.demo {
             self.manage_driver_frames(cx);
+            self.follow_setup(cx);
+        }
+        let stalled = self.stalled();
+        if stalled != self.stalled_shown {
+            self.stalled_shown = stalled;
+            cx.notify();
         }
         let wanted = self.visible || self.busy() || self.lease.holder(Instant::now()).is_some();
         if !wanted || self.demo {
@@ -751,10 +814,19 @@ impl PhonePanel {
                 let clock = first.and_then(|p| device::clock(Some(&p.udid)).ok());
                 let built_here = first.is_some_and(|p| driver::built_here(&p.udid));
                 let install = driver::Install::read(&driver::dir());
-                (phones, assistive.flatten(), (clock, built_here, install))
+                // A phone that hasn't trusted this Mac doesn't say its name: ask lockdown why.
+                let untrusted = first.is_some_and(|p| {
+                    p.name.is_empty() && matches!(device::probe(), device::Seen::Untrusted(_))
+                });
+                (
+                    phones,
+                    assistive.flatten(),
+                    (clock, built_here, install, untrusted),
+                )
             },
-            |this, (phones, assistive, (clock, built_here, install)), _, cx| {
+            |this, (phones, assistive, (clock, built_here, install, untrusted)), _, cx| {
                 this.clock = clock.or(this.clock);
+                this.untrusted = untrusted;
                 this.driver_built_here = built_here;
                 this.driver_install = install;
                 // Gone, or unplugged while it ran for the cable (it serves the phone's loopback
@@ -1005,8 +1077,14 @@ impl PhonePanel {
             let last = last_input.load(Ordering::Relaxed);
             last > 0 && clock.elapsed().as_millis() as u64 <= last + BUSY_FOR.as_millis() as u64
         };
+        // When anything last came from the driver (a frame, or its keep-alive on a still screen).
+        let (heard, clock) = (self.last_heard.clone(), self.busy_clock);
+        let hear = move || heard.store(clock.elapsed().as_millis() as u64, Ordering::Relaxed);
+        hear();
+        let heard_still = hear.clone();
         // The newest frame waits for the decoder; while the tool is hidden it only waits.
         let show = move |jpeg: Vec<u8>| {
+            hear();
             *slot.lock().unwrap() = Some(Undecoded::driver(jpeg));
             if shown.load(Ordering::Relaxed) {
                 let _ = wake.try_send(());
@@ -1037,9 +1115,13 @@ impl PhonePanel {
                     // Blocks until it ends; `live` is looked at with each frame, and five times
                     // a second while none comes.
                     let end = d.watch(&options, &mut |picture| {
-                        if let driver::Picture::Frame(jpeg) = picture {
-                            frames += 1;
-                            show(jpeg);
+                        match picture {
+                            driver::Picture::Frame(jpeg) => {
+                                frames += 1;
+                                show(jpeg);
+                            }
+                            driver::Picture::Still => heard_still(),
+                            driver::Picture::Tick => {}
                         }
                         live.load(Ordering::Relaxed)
                     });
@@ -1269,6 +1351,105 @@ impl PhonePanel {
         cx.notify();
     }
 
+    /// Ask usbmuxd for the phone again, and start the helper again if it stopped.
+    fn look_again(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refreshed = None;
+        self.link_retry = None;
+        self.notice = None;
+        self.refresh_device(window, cx);
+        self.manage_link(window, cx);
+    }
+
+    /// The action line's button: the next step, taken.
+    fn take_fix(&mut self, fix: route::Fix, window: &mut Window, cx: &mut Context<Self>) {
+        use route::Fix;
+        if self.demo {
+            return;
+        }
+        // What this Mac lacked is being seen to: the install button comes back for after.
+        if matches!(self.setup, route::Setup::Missing(_)) {
+            self.setup = route::Setup::Idle;
+        }
+        match fix {
+            Fix::CheckAgain => self.check_again(cx),
+            Fix::LookAgain => self.look_again(window, cx),
+            Fix::InstallDriver
+            | Fix::RenewDriver
+            | Fix::UpdateDriver
+            | Fix::ReinstallDriver
+            | Fix::TryAgain => self.install_driver(window, cx),
+            Fix::GetXcode => cx.open_url(XCODE_IN_APP_STORE),
+            Fix::OpenXcode => open_app("Xcode"),
+            Fix::GetSource => {
+                let command = crate::remote::phone_update::get_source_command();
+                self.workspace.update(cx, |_, cx| {
+                    cx.emit(WorkspaceEvent::RunInTerminal { command, cwd: None })
+                });
+            }
+            Fix::Settings(pane) => cx.open_url(pane.url()),
+            Fix::OpenMirroring => {
+                // The user asked: it comes to the front, to set up or to show the phone.
+                open_app("iPhone Mirroring");
+                self.mirror_looked = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Build Trek's iPhone app with the driver inside and install it (the phone updater, as
+    /// Settings › Phone & Machines runs it), after checking this Mac has what that takes.
+    fn install_driver(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.setup.busy() {
+            return;
+        }
+        self.setup = route::Setup::Checking;
+        cx.notify();
+        self.background(
+            window,
+            cx,
+            crate::remote::phone_update::missing,
+            |this, missing, _, cx| {
+                if let Some(missing) = missing {
+                    this.setup = route::Setup::Missing(missing);
+                } else {
+                    match this
+                        .workspace
+                        .update(cx, |ws, cx| ws.update_phone(None, cx))
+                    {
+                        Ok(()) => this.setup_following = true,
+                        Err(e) => this.setup = route::Setup::Failed(e),
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// The phone updater's run, as the strip shows it: started from the button here, or from
+    /// Settings or the iPhone.
+    fn follow_setup(&mut self, cx: &mut Context<Self>) {
+        let (running, now) = {
+            let run = &self.workspace.read(cx).phone_update;
+            (run.running, run.now.clone())
+        };
+        if !self.setup_following {
+            if !running {
+                return;
+            }
+            self.setup_following = true;
+        }
+        let setup = crate::remote::phone_update::setup_of(running, now.as_ref());
+        if !running {
+            self.setup_following = false;
+            // Installed (or not): the driver is read again at once.
+            self.refreshed = None;
+        }
+        if setup != self.setup {
+            self.setup = setup;
+            cx.notify();
+        }
+    }
+
     // MARK: agents
 
     /// An agent's tool call: run after those before it.
@@ -1411,16 +1592,26 @@ impl PhonePanel {
         self.demo_driver = None;
         self.blocker = None;
         self.passcode = None;
+        self.setup = route::Setup::Idle;
+        self.setup_following = false;
+        self.untrusted = false;
+        self.phone_error = None;
+        self.demo_left = None;
+        self.demo_stalled = false;
         self.give_keys_back(window, cx);
         // Only the touch states have a picture (a made-up Home Screen).
         if let Some(old) = self.frame.take() {
             self.stale.push(old.image);
         }
         self.demo_touch(state, window, cx);
+        let install = |why: &str| driver::Avail::Install(why.into());
         match state {
-            "usb" => {}
-            // The user's own touch on the driver's picture: a drag, a long press, typing.
-            "touch" | "hold" | "typing" => {
+            // Unlocked, no driver: the picture is view-only, and the strip says so.
+            "usb" | "view-only" => {}
+            // The user's own touch on the driver's picture: a drag, a long press, typing; or
+            // that picture stalled, dimmed while it reconnects.
+            "touch" | "hold" | "typing" | "driver-stalled" => {
+                self.demo_stalled = state == "driver-stalled";
                 self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
                 self.driver_frames = true;
                 *self.decode_slot.lock().unwrap() = Some(Undecoded {
@@ -1446,6 +1637,62 @@ impl PhonePanel {
                 self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
                 self.driver_frames = true;
             }
+            // Installing the driver from the tool's button: each step, and what a Mac lacks.
+            "driver-installing" => {
+                self.demo_driver = Some((install("it isn't installed yet"), driver::State::Off));
+                self.setup = route::Setup::Building;
+            }
+            "driver-install-failed" => {
+                self.demo_driver = Some((install("it isn't installed yet"), driver::State::Off));
+                self.setup = route::Setup::Failed(
+                    "Your Mac is busy with another Xcode build; try again in a few minutes".into(),
+                );
+            }
+            "driver-needs-xcode" | "driver-needs-apple-id" | "driver-needs-source" => {
+                self.demo_driver = Some((install("it isn't installed yet"), driver::State::Off));
+                self.setup = route::Setup::Missing(match state {
+                    "driver-needs-xcode" => route::Missing::Xcode,
+                    "driver-needs-apple-id" => route::Missing::AppleId,
+                    _ => route::Missing::Source,
+                });
+            }
+            "driver-expired" => {
+                self.demo_driver = Some((install("its 7-day signing lapsed"), driver::State::Off));
+            }
+            // Hours from the end of its free signing: Renew.
+            "driver-expiring" => {
+                self.demo_driver = Some((driver::Avail::Ready, driver::State::Off));
+                self.demo_left = Some(5 * 3600 + 60);
+            }
+            // Plugged in, not trusted yet: no name, no picture, Trust.
+            "untrusted" => {
+                if let Some(p) = &mut self.phone {
+                    p.name.clear();
+                }
+                self.status.screen.clear();
+                self.status.frames = 0;
+                self.untrusted = true;
+            }
+            // iPhone Mirroring on this Mac but no phone shown in it yet: both ways offered.
+            "choose" => {
+                self.mirroring_seen = None;
+                self.mirror = Some(MirrorState::Closed);
+            }
+            // Locked, iPhone Mirroring showing its first-run setup.
+            "mirroring-setup" => {
+                self.status.dark = true;
+                self.mirror = Some(MirrorState::Says("Welcome to iPhone Mirroring".into()));
+            }
+            "camera-denied" => self.status.camera = "denied".into(),
+            // usbmuxd didn't answer.
+            "no-usbmuxd" => {
+                self.phone = None;
+                self.status = Status::default();
+                self.phone_error = Some(
+                    "Couldn't reach usbmuxd (Apple Mobile Device service): Connection refused"
+                        .into(),
+                );
+            }
             "driver-how" => {
                 self.demo_driver = Some((driver::Avail::Ready, driver::State::Ready));
                 self.explain_open = true;
@@ -1466,9 +1713,10 @@ impl PhonePanel {
                 self.mirror = Some(MirrorState::Live);
                 self.mirror_frames = true;
             }
+            // No iPhone Mirroring on this Mac: Bluetooth's one step.
             "pair" => {
                 self.mirroring_seen = None;
-                self.mirror = Some(MirrorState::Closed);
+                self.mirror = Some(MirrorState::Missing);
             }
             "bluetooth" => {
                 self.mirroring_seen = None;
@@ -1509,7 +1757,7 @@ impl PhonePanel {
                 }
             }
             other => anyhow::bail!(
-                "phone: unknown state {other:?} (usb|lock|locked|unreachable|mirroring|pair|bluetooth|none|how|driver|driver-starting|driver-install|driver-how|wifi|wifi-starting|wifi-locked|wifi-how|touch|hold|typing)"
+                "phone: unknown state {other:?} (usb|view-only|lock|locked|unreachable|mirroring|mirroring-setup|pair|choose|bluetooth|none|no-usbmuxd|untrusted|camera-denied|how|driver|driver-starting|driver-install|driver-installing|driver-install-failed|driver-needs-xcode|driver-needs-apple-id|driver-needs-source|driver-expired|driver-expiring|driver-stalled|driver-how|wifi|wifi-starting|wifi-locked|wifi-how|touch|hold|typing)"
             ),
         }
         cx.notify();
@@ -1585,13 +1833,7 @@ impl PhonePanel {
                     "Look for the iPhone again",
                 )
                 .xsmall()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.refreshed = None;
-                    this.link_retry = None;
-                    this.notice = None;
-                    this.refresh_device(window, cx);
-                    this.manage_link(window, cx);
-                })),
+                .on_click(cx.listener(|this, _, window, cx| this.look_again(window, cx))),
             )
             .into_any_element()
     }
@@ -1617,6 +1859,7 @@ impl PhonePanel {
         };
         let route = strip.route;
         let wifi = self.on_wifi();
+        let driver_offered = self.driver_avail() != driver::Avail::None;
         let explain = Popover::new("phone-how")
             .anchor(Anchor::TopRight)
             .appearance(false)
@@ -1643,7 +1886,7 @@ impl PhonePanel {
                             .child("How this works"),
                     )
                     .children(
-                        route::explainer(route, wifi)
+                        route::explainer(route, wifi, driver_offered)
                             .into_iter()
                             .map(|(title, body)| {
                                 v_flex()
@@ -1653,8 +1896,12 @@ impl PhonePanel {
                             }),
                     )
             });
-        let recheck = strip.recheck;
-        let checking = self.diagnosing;
+        let fix = strip.fix;
+        let waiting = match fix {
+            Some(route::Fix::CheckAgain) => self.diagnosing,
+            Some(f) if f.installs() => self.setup.busy(),
+            _ => false,
+        };
         let action = strip.action.clone().map(|line| {
             h_flex()
                 .gap(px(6.))
@@ -1665,20 +1912,32 @@ impl PhonePanel {
                         .text_color(crate::palette::amber(cx)),
                 )
                 .child(div().flex_1().min_w_0().child(line))
-                .when(recheck, |row| {
+                .when_some(fix, |row, fix| {
                     row.child(
-                        Button::new("phone-check-again")
+                        Button::new("phone-fix")
                             .xsmall()
-                            .ghost()
-                            .label(if checking {
-                                "Checking…"
-                            } else {
-                                "Check again"
-                            })
-                            .disabled(checking)
-                            .on_click(cx.listener(|this, _, _, cx| this.check_again(cx))),
+                            .outline()
+                            .label(if waiting { "Checking…" } else { fix.label() })
+                            .disabled(waiting)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.take_fix(fix, window, cx)
+                            })),
                     )
                 })
+        });
+        let busy = self.setup.busy();
+        let note = strip.note.clone().map(|line| {
+            h_flex()
+                .id("phone-note")
+                .test_support()
+                .gap(px(6.))
+                .text_color(theme.muted_foreground)
+                .child(if busy {
+                    Spinner::new().xsmall().into_any_element()
+                } else {
+                    Icon::new(IconName::Info).xsmall().into_any_element()
+                })
+                .child(div().flex_1().min_w_0().child(line))
         });
         v_flex()
             .id("phone-strip")
@@ -1705,6 +1964,7 @@ impl PhonePanel {
                     .child(explain),
             )
             .children(action)
+            .children(note)
             .when(typing, |el| {
                 el.child(
                     h_flex()
@@ -1837,6 +2097,7 @@ impl PhonePanel {
             .filter(|_| !self.mirror_frames);
         self.clock_shown = bar.map(|_| phone_time(self.clock, chrono::Utc::now()));
         let clock = bar.zip(self.clock_shown.clone());
+        let stalled = self.stalled();
         let waiting = match &self.helper {
             _ if self.demo => None,
             Some(Err(e)) => Some(e.clone()),
@@ -1931,7 +2192,9 @@ impl PhonePanel {
                         .top(s.origin.y)
                         .w(s.size.width)
                         .h(s.size.height)
-                        .rounded(radius),
+                        .rounded(radius)
+                        // The last frame while the driver's picture reconnects: not the screen now.
+                        .when(stalled, |el| el.opacity(0.45)),
                 )
                 // The home bar, where the phone's home indicator is: a click on it goes Home
                 // (`gesture::on_home_bar`), a drag up from it is the phone's own swipe.
@@ -2253,6 +2516,16 @@ fn starting(method: &str) -> &'static str {
 }
 
 /// The file name of a path, for approvals.
+/// Open a Mac app by name, in front: the user asked for it.
+fn open_app(name: &str) {
+    if let Err(e) = trek_core::procs::command("/usr/bin/open")
+        .args(["-a", name])
+        .spawn()
+    {
+        tracing::warn!("couldn't open {name}: {e}");
+    }
+}
+
 fn file_name(path: &str) -> String {
     Path::new(path)
         .file_name()

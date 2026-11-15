@@ -52,8 +52,9 @@ pub const OLDEST: u64 = 1;
 pub const START_LIMIT: Duration = Duration::from_secs(120);
 /// The driver stops itself after this long without a request (Trek gone, or forgot it).
 const PHONE_IDLE_SECS: u64 = 15 * 60;
-/// The script that builds and installs it, as the user runs it.
-pub const INSTALL: &str = "ios/scripts/install-device.sh";
+/// What a message ends with when the driver on the phone must be built and installed again: the
+/// iPhone tool offers to (Reinstall driver).
+pub const REINSTALL: &str = "reinstall the driver";
 
 /// Where `install-device.sh` leaves the driver: with the phone updater's state. (On Windows
 /// nothing builds it yet, which needs Xcode: the folder is where one would go, and stays empty,
@@ -356,7 +357,7 @@ pub fn why(log: &str) -> String {
     } else if has("UI Automation") || has("UI automation") {
         "Turn on Enable UI Automation on the iPhone (Settings › Developer), then try again.".into()
     } else if has("profile has expired") || has("provisioning profile") && has("expired") {
-        format!("Trek Driver's 7-day signing lapsed: run {INSTALL} again.")
+        format!("Trek Driver's free signing ran out after 7 days: {REINSTALL}.")
     } else if has("not been explicitly trusted")
         || has("Untrusted Developer")
         || has("invalid code signature")
@@ -657,7 +658,7 @@ impl Driver {
             device::Link::Usb => None,
             device::Link::Network(_) if !install.wifi => {
                 return Err(self.fail(format!(
-                    "Trek Driver on the iPhone works over the cable only: run {INSTALL} again to tap over Wi-Fi."
+                    "Trek Driver on the iPhone works over the cable only: {REINSTALL} to tap over Wi-Fi."
                 )));
             }
             device::Link::Network(ip) => match device::local_address_toward(ip) {
@@ -677,7 +678,7 @@ impl Driver {
             && app.build != install.build
         {
             return Err(self.fail(format!(
-                "Trek's iPhone app is build {} but Trek Driver was built with {}: run {INSTALL} again.",
+                "Trek's iPhone app is build {} but Trek Driver was built with {}: {REINSTALL}.",
                 app.build, install.build
             )));
         }
@@ -775,7 +776,7 @@ impl Driver {
         let v = self.send("GET", "/status", None, Duration::from_secs(5))?;
         if v["version"].as_u64().is_none_or(|n| n < OLDEST) {
             return Err(format!(
-                "The iPhone has another Trek Driver (version {}): run {INSTALL} again.",
+                "The iPhone has another Trek Driver (version {}): {REINSTALL}.",
                 v["version"]
             ));
         }
@@ -879,8 +880,8 @@ impl Driver {
     }
 
     /// `GET /stream`: the screen as the driver pushes it, each frame a JPEG handed to `on` as it
-    /// comes (and [`Picture::Still`] about once a second while the screen doesn't change, or
-    /// more often while nothing comes at all), until `on` returns false. Blocks for as long;
+    /// comes (and [`Picture::Still`] about once a second while the screen doesn't change, and
+    /// [`Picture::Tick`] more often while nothing comes at all), until `on` returns false. Blocks for as long;
     /// says how it ended. A driver without `stream` is [`StreamEnd::Refused`] at once.
     pub fn watch(&self, options: &StreamOptions, on: &mut dyn FnMut(Picture) -> bool) -> StreamEnd {
         if !self.takes("stream") {
@@ -1120,9 +1121,12 @@ pub fn stream_rest(times: u32) -> Duration {
 pub enum Picture {
     /// The screen changed: a JPEG of it.
     Frame(Vec<u8>),
-    /// Nothing new: the screen is as the last frame showed it (or nothing has come for a
-    /// moment).
+    /// Nothing new: the driver says the screen is as the last frame showed it (its keep-alive,
+    /// about once a second).
     Still,
+    /// Nothing has come for a moment: a dead connection and a still screen look alike here
+    /// until the keep-alive is late.
+    Tick,
 }
 
 /// How a stream ended.
@@ -1246,7 +1250,7 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 /// Read a stream: `pieces` runs the connection, handing each piece it reads to the sink it's
 /// given (as [`device::stream`] does) until the sink returns false; each frame goes to `on`,
 /// which returns whether to go on. A piece without bytes is a tick: `on` hears
-/// [`Picture::Still`], so it can stop a stream that brings nothing.
+/// [`Picture::Tick`], so it can stop a stream that brings nothing.
 pub fn read_stream(
     pieces: impl FnOnce(&mut dyn FnMut(&[u8]) -> bool) -> Result<(), String>,
     on: &mut dyn FnMut(Picture) -> bool,
@@ -1255,7 +1259,7 @@ pub fn read_stream(
     let mut end = None;
     let ran = pieces(&mut |bytes| {
         if bytes.is_empty() {
-            if !on(Picture::Still) {
+            if !on(Picture::Tick) {
                 end = Some(StreamEnd::Stopped);
             }
             return end.is_none();
@@ -1488,6 +1492,28 @@ mod tests {
         let mut parser = Mjpeg::new();
         let half = STREAM_HEAD.len() + part(&a).len() - 10;
         assert_eq!(parser.push(&answer[..half]).unwrap(), []);
+    }
+
+    #[test]
+    fn a_keep_alive_and_a_quiet_moment_are_told_apart() {
+        // The driver's keep-alive says the screen is still; a read that brought nothing says
+        // only that nothing came (the connection may be dead).
+        let mut answer = STREAM_HEAD.to_vec();
+        answer.extend_from_slice(STILL);
+        let mut got = vec![];
+        let end = read_stream(
+            |sink| {
+                sink(&answer);
+                sink(&[]);
+                Ok(())
+            },
+            &mut |picture| {
+                got.push(picture);
+                true
+            },
+        );
+        assert_eq!(got, [Picture::Still, Picture::Tick]);
+        assert_eq!(end, StreamEnd::Stopped);
     }
 
     #[test]

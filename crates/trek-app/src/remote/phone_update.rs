@@ -180,6 +180,85 @@ pub fn refresh_agent_copy() {
     }
 }
 
+/// Where the phone updater builds from: the LaunchAgent's `TREK_REPO`, else the script's own
+/// default.
+pub fn source_dir() -> PathBuf {
+    agent_repo()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| trek_core::paths::home().join("Developer/Trek"))
+}
+
+/// The command that gets Trek's source where the phone updater looks for it.
+pub fn get_source_command() -> String {
+    format!(
+        "git clone https://github.com/dokyit/Trek.git '{}'",
+        source_dir().display().to_string().replace('\'', r"'\''")
+    )
+}
+
+/// What this Mac lacks to build Trek's iPhone app, the first of Xcode, an Apple ID in Xcode and
+/// Trek's source, as the phone updater would find out a few minutes in. Blocking (a couple of
+/// quick processes). Nothing that could ask to install anything is run: `xcrun` without the
+/// command line tools would.
+pub fn missing() -> Option<trek_phone::route::Missing> {
+    let developer = std::process::Command::new("/usr/bin/xcode-select")
+        .arg("-p")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let xcode = developer.ends_with(".app/Contents/Developer")
+        && std::path::Path::new(&developer)
+            .join("usr/bin/xcodebuild")
+            .exists();
+    // The team the script signs with, read the way it reads it.
+    let team = std::process::Command::new("/usr/bin/defaults")
+        .args([
+            "read",
+            "com.apple.dt.Xcode",
+            "IDEProvisioningTeamByIdentifier",
+        ])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("teamID = "));
+    let source = source_dir().join(".git").exists();
+    first_missing(xcode, team, source)
+}
+
+fn first_missing(xcode: bool, team: bool, source: bool) -> Option<trek_phone::route::Missing> {
+    use trek_phone::route::Missing;
+    if !xcode {
+        Some(Missing::Xcode)
+    } else if !team {
+        Some(Missing::AppleId)
+    } else if !source {
+        Some(Missing::Source)
+    } else {
+        None
+    }
+}
+
+/// Where an install the iPhone tool follows stands, from the run's steps (`running`, and the
+/// step it last said).
+pub fn setup_of(running: bool, now: Option<&tr::PhoneUpdate>) -> trek_phone::route::Setup {
+    use trek_phone::route::Setup;
+    match now {
+        Some(step) => match step.state {
+            tr::PhoneUpdateState::Building => Setup::Building,
+            tr::PhoneUpdateState::Installing => Setup::Installing,
+            tr::PhoneUpdateState::Installed => Setup::Installed,
+            tr::PhoneUpdateState::Failed => Setup::Failed(
+                step.message
+                    .clone()
+                    .unwrap_or_else(|| "The install stopped before it finished.".into()),
+            ),
+        },
+        // Started, nothing said yet: it's looking for the phone and what's on it.
+        None if running => Setup::Checking,
+        None => Setup::Idle,
+    }
+}
+
 /// Run the script for someone who asked, sending each line it prints to `lines`. Blocking.
 fn run(target: Option<String>, lines: async_channel::Sender<String>) -> std::io::Result<()> {
     use std::io::BufRead as _;
@@ -363,6 +442,54 @@ mod tests {
             Some(false)
         );
         assert_eq!(parse_attempt("result=ok\n"), None, "no time");
+    }
+
+    #[test]
+    fn the_first_thing_this_mac_lacks_is_named() {
+        use trek_phone::route::Missing;
+        assert_eq!(first_missing(false, false, false), Some(Missing::Xcode));
+        assert_eq!(first_missing(true, false, false), Some(Missing::AppleId));
+        assert_eq!(first_missing(true, true, false), Some(Missing::Source));
+        assert_eq!(first_missing(true, true, true), None);
+        assert!(get_source_command().starts_with("git clone https://github.com/dokyit/Trek.git '"));
+    }
+
+    #[test]
+    fn an_install_from_the_tool_follows_the_runs_steps() {
+        use trek_phone::route::Setup;
+        let step = |state, message: Option<&str>| tr::PhoneUpdate {
+            state,
+            version: None,
+            message: message.map(str::to_string),
+        };
+        assert_eq!(setup_of(false, None), Setup::Idle);
+        assert_eq!(setup_of(true, None), Setup::Checking);
+        assert_eq!(
+            setup_of(true, Some(&step(tr::PhoneUpdateState::Building, None))),
+            Setup::Building
+        );
+        assert_eq!(
+            setup_of(true, Some(&step(tr::PhoneUpdateState::Installing, None))),
+            Setup::Installing
+        );
+        assert_eq!(
+            setup_of(false, Some(&step(tr::PhoneUpdateState::Installed, None))),
+            Setup::Installed
+        );
+        assert_eq!(
+            setup_of(
+                false,
+                Some(&step(
+                    tr::PhoneUpdateState::Failed,
+                    Some("The iPhone didn't answer: unlock it and keep it near your Mac")
+                ))
+            ),
+            Setup::Failed("The iPhone didn't answer: unlock it and keep it near your Mac".into())
+        );
+        assert!(matches!(
+            setup_of(false, Some(&step(tr::PhoneUpdateState::Failed, None))),
+            Setup::Failed(why) if !why.is_empty()
+        ));
     }
 
     #[test]
