@@ -54,6 +54,10 @@ enum Action {
     Theme(ThemeChoice),
     /// Switch to a Trek theme, by its id.
     TrekTheme(String),
+    /// A plugin's command, a plugin's page, or a plugin turned on or off.
+    PluginCommand(String, String),
+    PluginPage(String, String),
+    PluginSwitch(String, bool),
     HandHolding(HandHolding),
     Settle(String),
     Fork(String),
@@ -1302,6 +1306,49 @@ impl CommandPalette {
                 ),
             );
         }
+        // Plugins: their commands and pages, and each one's switch.
+        for entry in crate::plugins::palette_entries(cx) {
+            use crate::plugins::PaletteEntry;
+            match entry {
+                PaletteEntry::Command {
+                    plugin,
+                    command,
+                    title,
+                    ..
+                } => add(
+                    Entry::new(
+                        c,
+                        icon(Icon::new(crate::assets::Lucide::Puzzle)),
+                        title,
+                        Action::PluginCommand(plugin.clone(), command),
+                    ),
+                    &format!("plugin mod {plugin}"),
+                ),
+                PaletteEntry::Page {
+                    plugin,
+                    page,
+                    title,
+                    icon: name,
+                } => add(
+                    Entry::new(
+                        c,
+                        icon(Icon::empty().path(crate::plugins::icon_path(&name))),
+                        format!("Open {title}"),
+                        Action::PluginPage(plugin.clone(), page),
+                    ),
+                    &format!("page plugin mod {plugin}"),
+                ),
+                PaletteEntry::Switch { plugin, name, on } => add(
+                    Entry::new(
+                        c,
+                        icon(Icon::new(crate::assets::Lucide::Puzzle)),
+                        format!("Turn {} {name}", if on { "off" } else { "on" }),
+                        Action::PluginSwitch(plugin.clone(), !on),
+                    ),
+                    &format!("plugin mod widget enable disable {plugin}"),
+                ),
+            }
+        }
         for page in crate::settings_view::pages() {
             let mut e = Entry::new(
                 c,
@@ -1556,6 +1603,11 @@ impl CommandPalette {
                 crate::set_theme(choice, window, cx);
             }
             Action::TrekTheme(id) => crate::themes::switch_to(&id, &ws, cx),
+            Action::PluginCommand(plugin, command) => {
+                crate::plugins::run_command(&plugin, &command, &ws, window, cx)
+            }
+            Action::PluginPage(plugin, page) => crate::plugins::open_page(&plugin, &page, &ws, cx),
+            Action::PluginSwitch(plugin, on) => crate::plugins::set_on(&plugin, on, &ws, cx),
             Action::HandHolding(level) => ws.update(cx, |ws, cx| {
                 let id = ws.focused_thread().map(str::to_string);
                 if let Err(message) = ws.set_hand_holding(id.as_deref(), level, cx) {

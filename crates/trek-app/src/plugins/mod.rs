@@ -7,6 +7,7 @@
 
 pub mod data;
 pub mod focus;
+pub mod logic;
 pub mod page;
 pub mod render;
 pub mod trail;
@@ -365,8 +366,146 @@ fn contributions_changed(ws: &Entity<Workspace>, cx: &mut App) {
         })
         .unwrap_or_default();
     crate::themes::set_plugin_themes(themes, ws, cx);
+    logic::hooks_changed(ws, cx);
+    bind_keys(cx);
     ws.update(cx, |_, cx| cx.notify());
     cx.refresh_windows();
+}
+
+/// The running plugins' commands that have a key: (the key, plugin, command).
+struct Keys {
+    table: Vec<(Keystroke, String, String)>,
+    _heard: Subscription,
+}
+
+impl Global for Keys {}
+
+/// A manifest's key (`cmd-alt-f`) as this platform has it: `cmd` is Ctrl off the Mac.
+fn keystroke(key: &str) -> Option<Keystroke> {
+    let key = if crate::keys::is_mac() {
+        key.to_string()
+    } else {
+        key.split('-')
+            .map(|part| if part == "cmd" { "ctrl" } else { part })
+            .collect::<Vec<_>>()
+            .join("-")
+    };
+    Keystroke::parse(&key).ok()
+}
+
+/// Hear the keys the running plugins' commands name: nothing is heard while none has a key.
+fn bind_keys(cx: &mut App) {
+    let table: Vec<(Keystroke, String, String)> = cx
+        .try_global::<Plugins>()
+        .map(|p| {
+            p.plugins
+                .iter()
+                .filter(|pl| p.state.running(&pl.manifest))
+                .flat_map(|pl| {
+                    pl.manifest.commands.iter().filter_map(|c| {
+                        Some((
+                            keystroke(c.key.as_deref()?)?,
+                            pl.manifest.id.clone(),
+                            c.id.clone(),
+                        ))
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if table.is_empty() {
+        if cx.has_global::<Keys>() {
+            cx.remove_global::<Keys>();
+        }
+        return;
+    }
+    if cx.has_global::<Keys>() {
+        cx.global_mut::<Keys>().table = table;
+        return;
+    }
+    let heard = cx.observe_keystrokes(|event, window, cx| {
+        let Some((plugin, command)) = cx.try_global::<Keys>().and_then(|k| {
+            k.table
+                .iter()
+                .find(|(key, _, _)| {
+                    key.key == event.keystroke.key && key.modifiers == event.keystroke.modifiers
+                })
+                .map(|(_, p, c)| (p.clone(), c.clone()))
+        }) else {
+            return;
+        };
+        if let Some(ws) = cx
+            .try_global::<crate::workspace::GlobalWorkspace>()
+            .map(|g| g.0.clone())
+        {
+            run_command(&plugin, &command, &ws, window, cx);
+        }
+    });
+    cx.set_global(Keys {
+        table,
+        _heard: heard,
+    });
+}
+
+/// What the palette offers for plugins: each running plugin's commands and pages, and a switch
+/// for every plugin that can be turned on without being asked anything.
+pub enum PaletteEntry {
+    Command {
+        plugin: String,
+        command: String,
+        title: String,
+        key: Option<String>,
+    },
+    Page {
+        plugin: String,
+        page: String,
+        title: String,
+        icon: String,
+    },
+    Switch {
+        plugin: String,
+        name: String,
+        on: bool,
+    },
+}
+
+pub fn palette_entries(cx: &App) -> Vec<PaletteEntry> {
+    let Some(p) = cx.try_global::<Plugins>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for pl in &p.plugins {
+        let m = &pl.manifest;
+        let running = p.state.running(m);
+        if running {
+            for c in &m.commands {
+                out.push(PaletteEntry::Command {
+                    plugin: m.id.clone(),
+                    command: c.id.clone(),
+                    title: c.title.clone(),
+                    key: c.key.clone(),
+                });
+            }
+            for page in &m.pages {
+                out.push(PaletteEntry::Page {
+                    plugin: m.id.clone(),
+                    page: page.id.clone(),
+                    title: page.title.clone(),
+                    icon: page.icon.clone(),
+                });
+            }
+        }
+        // Turning one on from the palette allows nothing new: a plugin that asks for more than
+        // it has been allowed is turned on in Settings, where what it asks is shown.
+        if running || p.state.missing(m).is_empty() {
+            out.push(PaletteEntry::Switch {
+                plugin: m.id.clone(),
+                name: m.name.clone(),
+                on: running,
+            });
+        }
+    }
+    out
 }
 
 /// Change the user's choices with `f`, keep them, and take them at once.
@@ -533,7 +672,14 @@ pub fn run_command(
             render::run(plugin, &render::resolve_plain(&a), &place, window, cx)
         }
         Some(trek_core::plugins::CommandRun::Logic(f)) => {
-            core::log(plugin, &format!("{f}(): plugins' logic isn't run yet"));
+            let thread = ws.read(cx).focused_thread().map(str::to_string);
+            logic::call(
+                plugin,
+                trek_script::plugin::Handler::Command(f),
+                serde_json::json!({ "command": id, "thread": thread }),
+                ws,
+                cx,
+            );
         }
         None => {}
     }

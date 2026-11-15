@@ -32,6 +32,8 @@ trek-words = { path = "../trek-words" }
 trek-window-place = { path = "../trek-window-place" }
 trek-logging = { path = "../trek-logging" }
 trek-mascot = { path = "../trek-mascot" }
+# Plugins' logic: `main.js` in the QuickJS the `script` tool already ships.
+trek-script = { path = "../trek-script" }
 trek-languages = { path = "../trek-languages" }
 trek-time = { path = "../trek-time" }
 trek-mentions = { path = "../trek-mentions" }

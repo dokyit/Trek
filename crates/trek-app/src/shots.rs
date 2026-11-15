@@ -3898,6 +3898,38 @@ fn run(ws: &Entity<Workspace>, verb: &str, arg: &str, cx: &mut App) -> anyhow::R
                     if has { "exists" } else { "doesn't exist" }
                 );
             }
+            // `plugin state <id> <key>=<value>` sets a key of a plugin's state, as its `set:`
+            // actions do; `plugin state-is <id> <key>=<value>` checks one; `plugin command <id>
+            // <command>` runs a command as the palette does.
+            "state" | "state-is" => {
+                let (id, pair) = rest.split_once(' ').unwrap_or((rest, ""));
+                let (key, value) = pair
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("plugin {what} <id> <key>=<value>"))?;
+                if what == "state" {
+                    crate::plugins::set_state(id, serde_json::json!({ key: value }), &ws, cx);
+                } else {
+                    let got = cx
+                        .try_global::<crate::plugins::Plugins>()
+                        .and_then(|p| p.states.get(id))
+                        .and_then(|s| s.get(key))
+                        .map(trek_core::plugins::ui::display)
+                        .unwrap_or_default();
+                    anyhow::ensure!(got == value, "plugin state-is {rest}: it's {got:?}");
+                }
+            }
+            "command" => {
+                let (id, command) = rest.split_once(' ').unwrap_or((rest, ""));
+                let main = ws
+                    .read(cx)
+                    .main_window
+                    .ok_or_else(|| anyhow::anyhow!("no main window"))?;
+                let ws2 = ws.clone();
+                let (id, command) = (id.to_string(), command.trim().to_string());
+                main.update(cx, |_, window, cx| {
+                    crate::plugins::run_command(&id, &command, &ws2, window, cx)
+                })?;
+            }
             "on" => crate::plugins::set_on(rest, true, &ws, cx),
             "off" => crate::plugins::set_on(rest, false, &ws, cx),
             "reread" => crate::plugins::reread(&ws, cx),

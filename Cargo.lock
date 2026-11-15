@@ -9401,6 +9401,7 @@ dependencies = [
  "trek-private",
  "trek-remote",
  "trek-screenclip",
+ "trek-script",
  "trek-shortcuts",
  "trek-telemetry",
  "trek-test-fixtures",

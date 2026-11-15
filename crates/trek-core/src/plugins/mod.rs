@@ -821,10 +821,12 @@ fn key_ok(k: &str) -> bool {
     let Some((key, mods)) = parts.split_last() else {
         return false;
     };
+    // A key of a plugin's has cmd, ctrl or alt in it: a bare letter is for typing.
     !key.is_empty()
+        && mods.iter().any(|m| matches!(*m, "cmd" | "ctrl" | "alt"))
         && mods
             .iter()
-            .all(|m| matches!(*m, "cmd" | "ctrl" | "alt" | "shift" | "secondary"))
+            .all(|m| matches!(*m, "cmd" | "ctrl" | "alt" | "shift"))
         && (key.len() == 1
             || matches!(
                 *key,
