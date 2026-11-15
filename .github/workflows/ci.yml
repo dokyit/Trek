@@ -44,7 +44,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # Seconds each, with no toolchain, cache or ~1 GB Metal download in front of them.
       - name: Scripts parse
@@ -63,7 +63,7 @@ jobs:
           zsh script/capture.sh check
           node script/site/test/run.mjs
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
         with:
           toolchain: '1.99.0'
           components: rustfmt
@@ -83,7 +83,7 @@ jobs:
         id: key
         run: python3 script/ci-cache.py key test-workspace
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         with:
           path: |
@@ -129,7 +129,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         run: python3 script/ci-cache.py prune
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -151,9 +151,9 @@ jobs:
       matrix:
         shard: [1, 2, 3]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
         with:
           toolchain: '1.99.0'
 
@@ -161,7 +161,7 @@ jobs:
         id: key
         run: python3 script/ci-cache.py key test-app
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         with:
           path: |
@@ -194,7 +194,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
         run: python3 script/ci-cache.py prune
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: github.ref == 'refs/heads/main' && matrix.shard == 1 && steps.cache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -219,7 +219,7 @@ jobs:
       - name: Long paths
         run: git config --system core.longpaths true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # The PowerShell twin of the Mac's `zsh -n` over the shell scripts - seconds, before the
       # toolchain install and cache restore.
@@ -241,7 +241,7 @@ jobs:
           script\capture.ps1 check
           node script/site/test/run.mjs
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
         with:
           toolchain: '1.99.0'
 
@@ -252,7 +252,7 @@ jobs:
         id: key
         run: python script/ci-cache.py key test-workspace
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         with:
           path: |
@@ -284,7 +284,7 @@ jobs:
         if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'
         run: python script/ci-cache.py prune
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && steps.cache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -310,9 +310,9 @@ jobs:
       - name: Long paths
         run: git config --system core.longpaths true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
         with:
           toolchain: '1.99.0'
 
@@ -320,7 +320,7 @@ jobs:
         id: key
         run: python script/ci-cache.py key test-app
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         with:
           path: |
@@ -356,7 +356,7 @@ jobs:
         if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && matrix.shard == '1' && steps.cache.outputs.cache-hit != 'true'
         run: python script/ci-cache.py prune
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/windows-port') && matrix.shard == '1' && steps.cache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -375,9 +375,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
         with:
           toolchain: '1.99.0'
           components: clippy
@@ -387,7 +387,7 @@ jobs:
         id: key
         run: python3 script/ci-cache.py key clippy
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         with:
           path: |
@@ -435,7 +435,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         run: python3 script/ci-cache.py prune
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         with:
           path: |
@@ -458,9 +458,9 @@ jobs:
       - name: Long paths
         run: git config --system core.longpaths true
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
         with:
           toolchain: '1.99.0'
           components: clippy
@@ -469,7 +469,7 @@ jobs:
         id: key
         run: python script/ci-cache.py key clippy
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: cache
         with:
           path: |
@@ -498,7 +498,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         run: python script/ci-cache.py prune
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
         with:
           path: |

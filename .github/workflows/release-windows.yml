@@ -86,15 +86,15 @@ jobs:
           "channel=$channel" >> $env:GITHUB_OUTPUT
           "ref=$ref" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ steps.resolve.outputs.ref }}
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, November 2026
         with:
           toolchain: '1.99.0'
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # The release-profile cache warm-release.yml keeps hot; this run only reads it.
           shared-key: release
