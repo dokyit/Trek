@@ -109,7 +109,7 @@ windows = "yes"
 live = ["plugin install example:focus-timer", "plugin install example:commit-graph", "plugin on commit-graph", "plugin install example:trail-board", "plugin on trail-board", "plugin install example:terminal-look", "plugin problems 0", "route settings:plugins", "wait 300", "reveal plugin-row-focus-timer", "count plugin-row-focus-timer 1", "plugin running focus-timer", "route project:{project}", "new", "wait shown commit-trail 10000", "count focus-chip 1", "plugin focus at 300", "wait 300", "count plugin-surface-thread-list 1", "look terminal-look", "wait 1500", "look is terminal-look", "look trek", "wait 1500", "look is trek", "plugin off trail-board", "wait 300", "count plugin-surface-thread-list 0", "plugin focus stop", "plugin off focus-timer", "plugin off commit-graph", "wait 300", "count focus-chip 0"]
 how = { macos = "Shared code: the manifest, the folder, the CLI and the element trees' format in trek_core::plugins; drawing with GPUI, the registry and Settings in trek-app's plugins; logic in the QuickJS trek-script already ships; line weight, shadows and square pills as scales in GPUI's quad painting. `cmd` in a plugin's key is Cmd.", windows = "The same code. `cmd` in a plugin's key is Ctrl (keys::is_mac, a runtime value). `trek plugin` run from a console prints nothing in a release build, which is a GUI program: an agent's pipe gets its output, and the plugins folder is the same either way." }
 code = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-core/src/plugins/data.rs", "crates/trek-core/src/plugins/examples.rs", "crates/trek-app/src/plugins/mod.rs", "crates/trek-app/src/plugins/render.rs", "crates/trek-app/src/plugins/logic.rs", "crates/trek-app/src/plugins/focus.rs", "crates/trek-app/src/plugins/trail.rs", "crates/trek-app/src/settings_view/plugins.rs", "crates/trek-script/src/plugin.rs", "vendor/gpui-pre/src/corner_scale.rs"]
-tests = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-script/src/plugin.rs"]
+tests = ["crates/trek-core/src/plugins/mod.rs", "crates/trek-core/src/plugins/ui.rs", "crates/trek-core/src/plugins/cli.rs", "crates/trek-script/src/plugin.rs", "crates/trek-app/tests/plugins.rs"]
 
 [[feature.promise]]
 what = "A plugin that asks for permissions waits for the user: the CLI turns on only what asks for nothing"
@@ -120,6 +120,16 @@ windows = "crates/trek-core/src/plugins/mod.rs::an_agent_cant_grant_itself_permi
 what = "A plugin's logic that throws, runs away or hogs memory fails that call alone, within its budget, and reaches nothing of the machine"
 macos = "crates/trek-script/src/plugin.rs::an_exception_a_runaway_and_a_hog_fail_the_call_alone"
 windows = "crates/trek-script/src/plugin.rs::an_exception_a_runaway_and_a_hog_fail_the_call_alone"
+
+[[feature.promise]]
+what = "With no plugins nothing is drawn or replaced, and a plugin draws only while it's on"
+macos = "crates/trek-app/tests/plugins.rs::no_plugins_nothing_drawn_and_a_plugin_draws_only_while_its_on"
+windows = "crates/trek-app/tests/plugins.rs::no_plugins_nothing_drawn_and_a_plugin_draws_only_while_its_on"
+
+[[feature.promise]]
+what = "A replacement gives the surface back to Trek's own when its plugin stops or the user says so"
+macos = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops"
+windows = "crates/trek-app/tests/plugins.rs::a_plugin_that_asks_waits_and_a_replacement_gives_way_when_its_plugin_stops"
 
 [[feature.promise]]
 what = "A wrong plugin says what's wrong and where, and isn't loaded"
@@ -135,7 +145,7 @@ windows = "yes"
 live = ["plugin install example:summit-log", "plugin on summit-log", "route project:{project}", "new", "plugin page-view 0", "plugin page summit-log summit-log", "wait 5000", "count plugin-page 1", "plugin page-view 1", "plugin-keys hold", "route project:{project}", "wait 500", "plugin page-view 0", "plugin-keys", "plugin off summit-log"]
 how = { macos = "WKWebView through wry, served under the plugin's own scheme (trek-plugin://<id>/) with its own files and no network it wasn't allowed; made when the page opens and dropped when it closes. Before it's hidden or dropped the keys go back to GPUI's view.", windows = "WebView2 through wry, in the profile artifacts use (WebView2-pages), served as http://trek-plugin.<id>/ (WebView2 can't load a custom scheme) with the same policy; made without focus, so it never takes the keys from Trek by itself." }
 code = ["crates/trek-core/src/plugins/page.rs", "crates/trek-app/src/plugins/page.rs", "crates/trek-app/src/plugins/data.rs", "crates/trek-app/src/shots/plugin_keys.rs"]
-tests = ["crates/trek-core/src/plugins/page.rs"]
+tests = ["crates/trek-core/src/plugins/page.rs", "crates/trek-app/tests/plugins.rs"]
 
 [[feature.promise]]
 what = "A page is served its plugin's own files and nothing else: nothing above its folder, nothing through a link out of it"
@@ -148,8 +158,9 @@ macos = "crates/trek-core/src/plugins/page.rs::a_page_reaches_no_network_unless_
 windows = "crates/trek-core/src/plugins/page.rs::a_page_reaches_no_network_unless_a_host_was_allowed"
 
 [[feature.promise]]
-what = "The keyboard is Trek's again after a page that held it closes"
-untested = { macos = "Checked live at the window, not by a test (a test has no native window): `plugin-keys hold` makes the page's web view the window's first responder, the page closes, and `plugin-keys` checks the first responder is GPUI's view and hands the window real key-downs that must reach the composer (crates/trek-app/src/shots/plugin_keys.rs).", windows = "WebView2 is made without focus and hidden through wry, which hands focus to its parent; the live check asserts the composer has GPUI's focus after a page closes. Nothing delivers real key events to the window on Windows." }
+what = "A page's web view exists only while the page is open, gives the keys back before it's hidden or dropped, and the composer takes what's typed after the page closes (the live check asks the window itself on a Mac: `plugin-keys` hands it real key-downs after a page that held the keyboard has closed)"
+macos = "crates/trek-app/tests/plugins.rs::a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes"
+windows = "crates/trek-app/tests/plugins.rs::a_page_s_view_lives_while_its_open_and_gives_the_keys_back_before_it_goes"
 
 [[feature]]
 id = "backgrounds"

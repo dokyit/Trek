@@ -34,9 +34,9 @@ key = "cmd-alt-f"
 ```
 
 Besides `[[slot]]` and `[[command]]` it may have `[[theme]]` (a look), `[[page]]` (a sidebar
-page), `[[panel]]` (a tool beside a thread), `[[replace]]` (a surface of its own in place of
-Trek's) and `hooks` (Trek events its logic hears). Everything is optional: a theme alone is a
-plugin, and so is one button.
+page), `[[panel]]` (a tab beside a thread), `[[replace]]` (a surface of its own in place of
+Trek's), `[[effect]]` (words marked in the composer's draft) and `hooks` (Trek events its logic
+hears). Everything is optional: a theme alone is a plugin, and so is one button.
 
 Plugins live in `<data>/plugins/<id>/`, where `<data>` is Trek's data folder. Trek reads the
 folder at launch and again whenever anything in it changes (every 1.5 s it compares names, sizes
@@ -129,9 +129,11 @@ screen has no process.
 ### 3. Logic in QuickJS
 
 `main.js` runs in QuickJS, the engine Trek already ships for its `script` tool (`trek-script`,
-built from source on both platforms). Every plugin with logic gets a context of its own on one
-plugin thread, made the first time it's needed. A call (a hook, a command, a button) has a time
-budget (250 ms) and the context a memory cap (32 MB); over either, the plugin is stopped.
+built from source on both platforms). Each call (a hook, a command) evaluates the file in a
+fresh context on a background thread and calls the handler: nothing lives between calls but the
+plugin's state, so a plugin can't leak, keep a timer, or be left half-broken by an error. A call
+has a time budget (250 ms) and a memory cap (32 MB); over either, or on an exception, the plugin
+is stopped. Calls are queued, one at a time.
 
 ```js
 trek.on("turn.end", (e) => trek.state.set({ last: e.thread.title }));
@@ -140,7 +142,9 @@ trek.command("start", () => trek.state.set({ running: true }));
 
 The logic never runs on the UI thread and is never asked anything while a frame draws: it sets
 `state`, which the element trees read from memory. What it may read and do is its permissions'
-(`trek.threads()`, `trek.git.log()`, `trek.send()`, `trek.toast()`, `trek.storage`).
+(`trek.threads()`, `trek.send()`, `trek.open()`, `trek.toast()`, `trek.storage`): what it asks
+for comes back as data, and Trek does it or refuses it. Simple state needs no logic at all: an
+element's `set:key=value` action sets it.
 
 ## What a plugin can contribute
 
@@ -174,9 +178,16 @@ plugin's for each. The plugin's tree may embed Trek's original (`trek:thread-lis
 fails (its tree can't be read, its logic stops) falls back to Trek's at once, with a notice.
 
 **Commands and hooks.** `[[command]]` puts an entry in the palette (`run` names a function of the
-logic, or is an action) and, with `key`, a keybinding. `hooks = ["turn.end", …]` are the events
-its logic hears: `turn.start`, `turn.end`, `thread.needs-you`, `file.changed`, `theme.changed`.
-Trek sends a plugin only the events it named.
+logic, or `action` is one of the element actions) and, with `key`, a keybinding (it needs cmd,
+ctrl or alt; `cmd` is Ctrl on Windows). The palette also opens each plugin's pages and panels and
+turns plugins on and off. `hooks = ["turn.end", …]` are the events its logic hears: `turn.start`,
+`turn.end`, `thread.needs-you`, `file.changed` (a turn changed files), `theme.changed`,
+`app.start`. Trek watches for them only while some running plugin names one, by looking over
+the threads' states a quarter of a second after the workspace changes, never per frame.
+
+**Text effects.** `[[effect]] match = "TODO"` washes or underlines its words wherever they
+appear in the composer's draft, painted over the text from the textarea's own layout: it
+changes nothing of what's typed or sent.
 
 ## Permissions
 
@@ -197,6 +208,11 @@ Everything else is out of reach: there's no file system, shell or network beyond
 plugin's own storage is always there (its own, 1 MB). Trek's style surfaces, slots drawn from the
 plugin's own state and pages that read nothing need no permission at all.
 
+What the gate is against: the CLI (`trek plugin enable` turns on only what asks for nothing) and
+a plugin's own code, which has no way to reach `state.toml`. It is not against a program that
+can already write Trek's data folder: an agent with the user's file access could write a grant
+there, as it could edit any other setting. The skill tells agents never to.
+
 ## Safety
 
 - Plugins are third-party code, so nothing runs until the user has turned it on and allowed what
@@ -205,15 +221,21 @@ plugin's own state and pages that read nothing need no permission at all.
 - A failure stops only that plugin: an exception, a call over its time budget, or a context over
   its memory turns it off, says so in a notice, and keeps the reason in its log. A replacement
   that stops gives the surface back to Trek's own.
-- Each plugin has a log (`<data>/plugins/logs/<id>.log`, kept short), shown in Settings ›
-  Plugins: what it printed (`console.log`), what failed, when it was stopped.
+- Each plugin has a log (`<data>/plugin-data/<id>/log.txt`, kept short, beside its storage and
+  outside the plugins folder so writing it isn't an edit to a plugin), shown in Settings ›
+  Plugins: what it printed (`console.log`), files its pages asked for that aren't there, what was
+  refused, and why it was stopped.
+- A page's web view hands the keyboard back to Trek's own view before it's hidden or dropped: a
+  native view that held the keys and then went would leave the window with nothing to type
+  into. The capture build checks it at the window on a Mac (`plugin-keys`).
 
 ## Performance
 
 Trek is first on ADEMark's speed and weight tests, and plugins must not change that.
 
-- **No plugins, no cost.** With an empty folder Trek reads it once and watches it; nothing else
-  is made: no thread, no QuickJS, no web view. Each slot's check is an empty list.
+- **No plugins, no cost.** With an empty folder Trek reads it once at launch and looks at it on
+  the themes folder's own tick (one timer for both, off the UI thread); nothing else is made: no
+  thread, no QuickJS, no web view, no key or event listener. Each slot's check is an empty list.
 - **Off screen, no cost.** A slot draws only when its place is on screen. A page's web view
   exists only while the page is open. Trek's animated components (the focus timer) tick only
   while visible, at the hiker's 16 fps clock or slower, stop while the window is covered, and
@@ -224,6 +246,16 @@ Trek is first on ADEMark's speed and weight tests, and plugins must not change t
 
 `./bin/agent-cli perf launch idle` measures launch and idle; `docs/PLUGINS.md` keeps the numbers
 from when plugins landed (below).
+
+## Not built yet
+
+- Logic on a timer, and `fetch` from logic (pages have `network:<host>`).
+- A composer replacement can wrap Trek's composer (`trek:composer`) but can't supply an input
+  of its own; a declarative tree has no text field.
+- Web content inside a slot: web views are for pages and panels.
+- On Windows a release `trek.exe` is a GUI program, so `trek plugin …` typed at a console prints
+  nothing (a pipe, as an agent's, gets its output). The folder is the interface either way.
+- Plugins' own fonts and icons: a look uses Trek's three families, a tree Trek's Lucide set.
 
 ## Phones
 

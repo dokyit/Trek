@@ -260,13 +260,14 @@ impl PageHost {
         self.show_or_hide(cx);
     }
 
-    /// Close the page: the keys go back to Trek's view first, then the view goes.
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Close the page: the native view gives the keys back to the window's own view first,
+    /// then it goes. Which of Trek's views has the focus is the navigation's to say (it has
+    /// already focused the composer, or whatever the new route shows): taking it here would
+    /// leave typing going nowhere.
+    fn close(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if let Web::Made(web) = &self.web {
             web.release_keys(cx);
             web.set_shown(false, cx);
-            // Trek's own view takes the keys (the route's view focuses itself right after).
-            self.focus.focus(window, cx);
         }
         self.web = Web::None;
         self.open = None;

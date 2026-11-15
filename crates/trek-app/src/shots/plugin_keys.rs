@@ -11,7 +11,8 @@
 use crate::workspace::Workspace;
 use gpui_kit::*;
 
-/// The main window's composer, focused as a navigation leaves it.
+/// The main window's composer, as the last navigation left it (the check doesn't focus it: that
+/// it has the focus is what's being checked).
 fn composer(
     ws: &Entity<Workspace>,
     cx: &mut AsyncApp,
@@ -26,7 +27,6 @@ fn composer(
             .map(|r| r.read(cx).view().clone())
             .and_then(|v| v.downcast::<crate::root::TrekWindow>().ok())?;
         let composer = trek.read(cx).composer.clone();
-        composer.update(cx, |c, cx| c.focus(window, cx));
         Some((composer, native_view(window)))
     })?;
     let (composer, view) = found.ok_or_else(|| anyhow::anyhow!("no Trek window"))?;
