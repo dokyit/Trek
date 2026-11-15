@@ -686,6 +686,33 @@ impl GitOp {
     }
 }
 
+/// What the Git section's Pull row is for this checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PullRow {
+    /// No remote to pull from or push to: a quiet note, nothing to press.
+    NoRemote,
+    /// On no branch: there's no upstream to speak of.
+    Detached,
+    /// A remote, but this branch isn't on it yet: push it to start tracking.
+    Publish,
+    Op(GitOp),
+}
+
+fn pull_row(g: &crate::workspace::GitInfo, in_worktree: bool) -> PullRow {
+    if !g.has_remote {
+        PullRow::NoRemote
+    } else if g.branch.is_none() && !in_worktree {
+        PullRow::Detached
+    } else if !g.has_upstream && !in_worktree {
+        PullRow::Publish
+    } else if in_worktree && g.behind == 0 {
+        // A worktree's branch has no upstream to pull from until it's pushed: Push is the row.
+        PullRow::Op(GitOp::Push)
+    } else {
+        PullRow::Op(GitOp::Pull)
+    }
+}
+
 /// Run `op` in `cwd`, the row spinning meanwhile; say how it went, then read the branch again.
 fn start_git(
     op: GitOp,
@@ -697,6 +724,15 @@ fn start_git(
     cx: &mut App,
 ) {
     if ui.read(cx).busy.is_some() {
+        return;
+    }
+    // A pull rewrites files as a branch switch does: not under a working agent.
+    if op == GitOp::Pull && ws.read(cx).working_in_checkout(&cwd, "").is_some() {
+        crate::toast::push(
+            window,
+            "A thread is working in this folder: pull once it's done.",
+            cx,
+        );
         return;
     }
     ui.update(cx, |u, cx| {
@@ -717,7 +753,11 @@ fn start_git(
                 });
                 match result {
                     Ok(()) => crate::toast::push(window, format!("{} done", op.label()), cx),
-                    Err(e) => crate::toast::push(window, crate::toast::Toast::error(e), cx),
+                    Err(e) => crate::toast::push(
+                        window,
+                        crate::panels::git::failure_toast(&e, &format!("{} failed", op.label())),
+                        cx,
+                    ),
                 }
                 ws.update(cx, |ws, cx| ws.refresh_checkout(cwd, cx));
             });
@@ -1195,64 +1235,84 @@ fn card(
                 )
             }
         };
-        // A worktree's branch has no upstream to pull from until it's pushed: Push is the row.
-        let main_op = if m.worktree.is_some() && g.behind == 0 {
-            GitOp::Push
-        } else {
-            GitOp::Pull
-        };
-        let main = look::row("hub-pull", false, cx)
-            .test_support()
-            .child(match busy {
-                Some(_) => Icon::new(Lucide::LoaderCircle)
-                    .size(px(ICON))
+        let row = pull_row(&g, m.worktree.is_some());
+        if let PullRow::NoRemote | PullRow::Detached = row {
+            let none = row == PullRow::NoRemote;
+            git = git.child(
+                plain_row("hub-pull")
+                    .test_support()
+                    .child(icon(Lucide::ArrowDown, cx))
+                    .child(label(if none { "No remote" } else { "Not on a branch" }))
                     .text_color(theme.muted_foreground)
-                    .with_animation(
-                        "hub-git-busy",
-                        Animation::new(std::time::Duration::from_secs(1)).repeat(),
-                        |i, t| i.transform(Transformation::rotate(percentage(t))),
+                    .child(trailing(
+                        if none {
+                            "pull and push need one"
+                        } else {
+                            "switch to one to pull"
+                        },
+                        cx,
+                    )),
+            );
+        } else {
+            let main_op = match row {
+                PullRow::Op(op) => op,
+                _ => GitOp::Push,
+            };
+            let main = look::row("hub-pull", false, cx)
+                .test_support()
+                .child(match busy {
+                    Some(_) => Icon::new(Lucide::LoaderCircle)
+                        .size(px(ICON))
+                        .text_color(theme.muted_foreground)
+                        .with_animation(
+                            "hub-git-busy",
+                            Animation::new(std::time::Duration::from_secs(1)).repeat(),
+                            |i, t| i.transform(Transformation::rotate(percentage(t))),
+                        )
+                        .into_any_element(),
+                    None => icon(
+                        if main_op == GitOp::Push {
+                            Lucide::ArrowUp
+                        } else {
+                            Lucide::ArrowDown
+                        },
+                        cx,
                     )
                     .into_any_element(),
-                None => icon(
-                    if main_op == GitOp::Push {
-                        Lucide::ArrowUp
-                    } else {
-                        Lucide::ArrowDown
-                    },
-                    cx,
-                )
-                .into_any_element(),
-            })
-            .child(label(match busy {
-                Some(op) => format!("{}…", op.label()),
-                None => main_op.label().to_string(),
-            }))
-            .child(counts)
-            .when(!pull_busy, |el| el.on_click(git_op(main_op)));
-        git = git.child(split(
-            main,
-            caret("hub-pull-more", pull_open, cx)
-                .test_support()
-                .on_click(toggle(ui, |u| u.pull = !u.pull)),
-            cx,
-        ));
-        if pull_open {
-            // The rest: what the row itself does isn't listed again under it.
-            for (id, op) in [
-                ("hub-git-pull", GitOp::Pull),
-                ("hub-git-push", GitOp::Push),
-                ("hub-git-fetch", GitOp::Fetch),
-            ]
-            .into_iter()
-            .filter(|(_, op)| *op != main_op)
-            {
-                git = git.child(
-                    sub_row(id, false, cx)
-                        .test_support()
-                        .when(pull_busy, |el| el.opacity(0.5).cursor_default())
-                        .child(label(op.label()))
-                        .when(!pull_busy, |el| el.on_click(git_op(op))),
-                );
+                })
+                .child(label(match (busy, row) {
+                    (Some(op), _) => format!("{}…", op.label()),
+                    (None, PullRow::Publish) => "Publish branch".to_string(),
+                    (None, _) => main_op.label().to_string(),
+                }))
+                .child(counts)
+                .when(!pull_busy, |el| el.on_click(git_op(main_op)));
+            git = git.child(split(
+                main,
+                caret("hub-pull-more", pull_open, cx)
+                    .test_support()
+                    .on_click(toggle(ui, |u| u.pull = !u.pull)),
+                cx,
+            ));
+            if pull_open {
+                // The rest: what the row itself does isn't listed again under it; a pull needs an
+                // upstream to pull from.
+                for (id, op) in [
+                    ("hub-git-pull", GitOp::Pull),
+                    ("hub-git-push", GitOp::Push),
+                    ("hub-git-fetch", GitOp::Fetch),
+                ]
+                .into_iter()
+                .filter(|(_, op)| *op != main_op && (*op != GitOp::Pull || g.has_upstream))
+                {
+                    git = git.child(
+                        sub_row(id, false, cx)
+                            .test_support()
+                            .when(pull_busy, |el| el.opacity(0.5).cursor_default())
+                            .child(label(op.label()))
+                            .when(!pull_busy, |el| el.on_click(git_op(op))),
+                    );
+                }
             }
         }
     }
@@ -1622,10 +1682,54 @@ fn open_source(s: &Source, window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Source, kept_sources, sources};
+    use super::{GitOp, PullRow, Source, kept_sources, pull_row, sources};
+    use crate::workspace::GitInfo;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use trek_core::store::{Item, ToolStatus};
+
+    #[test]
+    fn the_pull_row_says_what_the_branch_can_do() {
+        let git = |remote, upstream, branch: Option<&str>, behind| GitInfo {
+            is_repo: true,
+            has_remote: remote,
+            has_upstream: upstream,
+            branch: branch.map(str::to_string),
+            behind,
+            ..Default::default()
+        };
+        // Nothing to pull from or push to: a note, not a button that fails.
+        assert_eq!(
+            pull_row(&git(false, false, Some("main"), 0), false),
+            PullRow::NoRemote
+        );
+        assert_eq!(
+            pull_row(&git(false, false, Some("trek/x"), 0), true),
+            PullRow::NoRemote
+        );
+        // A remote the branch isn't on yet: publish it.
+        assert_eq!(
+            pull_row(&git(true, false, Some("feat"), 0), false),
+            PullRow::Publish
+        );
+        assert_eq!(
+            pull_row(&git(true, false, None, 0), false),
+            PullRow::Detached
+        );
+        assert_eq!(
+            pull_row(&git(true, true, Some("main"), 2), false),
+            PullRow::Op(GitOp::Pull)
+        );
+        // A worktree's branch pushes until its base has something to pull.
+        assert_eq!(
+            pull_row(&git(true, false, Some("trek/x"), 0), true),
+            PullRow::Op(GitOp::Push)
+        );
+        assert_eq!(
+            pull_row(&git(true, true, Some("trek/x"), 1), true),
+            PullRow::Op(GitOp::Pull)
+        );
+    }
 
     fn tool(title: &str, detail: &str, status: ToolStatus) -> Item {
         Item::Tool {

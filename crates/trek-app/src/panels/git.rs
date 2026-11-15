@@ -81,6 +81,44 @@ pub fn git_read(cwd: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// How long a failed git action's toast stays up: a sentence to read, and a click for the rest.
+const FAILURE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// What a failed git or gh action says, in one plain line, and what git itself printed when that's
+/// more (`None` when the line is all of it).
+pub(crate) fn failure_text(raw: &str, fallback: &str) -> (String, Option<String>) {
+    let raw = raw.trim();
+    let line = trek_core::git::explain_failure(raw)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::workspace::git_error(raw, fallback));
+    let detail = (!raw.is_empty() && raw != line).then(|| {
+        // The end is what matters (git prints its verdict last); long hook output is cut.
+        const MAX: usize = 1_500;
+        match raw.char_indices().rev().nth(MAX) {
+            Some((at, _)) => format!("…{}", &raw[at..]),
+            None => raw.to_string(),
+        }
+    });
+    (line, detail)
+}
+
+/// The toast for a failed git or gh action: the plain line, kept long enough to read, and a click
+/// shows everything git said.
+pub(crate) fn failure_toast(raw: &str, fallback: &str) -> crate::toast::Toast {
+    let (line, detail) = failure_text(raw, fallback);
+    let Some(detail) = detail else {
+        return crate::toast::Toast::error(line).lifetime(FAILURE_LIFETIME);
+    };
+    crate::toast::Toast::error(format!("{line} Click for what git said."))
+        .lifetime(FAILURE_LIFETIME)
+        .on_click(move |_, window, cx| {
+            let detail = detail.clone();
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                alert.title("What git said").description(detail.clone())
+            });
+        })
+}
+
 /// The top of the repository holding `cwd`: `git status` and `git diff` name paths from it, and
 /// `cwd` can be a folder inside the repository. `cwd` itself when git doesn't say.
 fn repo_top(cwd: &Path) -> PathBuf {
@@ -1006,9 +1044,11 @@ impl GitPanel {
                         crate::toast::push(window, format!("{label} done"), cx);
                         done(this, v, window, cx);
                     }
-                    Err(e) => {
-                        crate::toast::push(window, crate::toast::Toast::error(format!("{e:#}")), cx)
-                    }
+                    Err(e) => crate::toast::push(
+                        window,
+                        failure_toast(&format!("{e:#}"), &format!("{label} failed")),
+                        cx,
+                    ),
                 }
                 this.refresh(cx);
                 // The branch chip, the changed count and the IDE's status bar read the same
@@ -2591,9 +2631,37 @@ impl Render for GitPanel {
 #[cfg(test)]
 mod tests {
     use super::{
-        LineKind, Nav, diff_lines, hunk_starts, line_nav, parse_numstat, parse_status, pr_body,
-        pr_label,
+        LineKind, Nav, diff_lines, failure_text, hunk_starts, line_nav, parse_numstat,
+        parse_status, pr_body, pr_label,
     };
+
+    #[test]
+    fn a_failed_git_action_is_one_plain_line_with_what_git_said_kept_for_a_click() {
+        let raw = "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.";
+        let (line, detail) = failure_text(raw, "Push failed");
+        assert!(line.starts_with("This project has no remote"), "{line}");
+        assert!(!line.contains('\n'));
+        assert_eq!(detail.as_deref(), Some(raw));
+        // Something git says in one line needs no second reading.
+        let (line, detail) = failure_text("fatal: pathspec 'x' did not match", "Push failed");
+        assert_eq!(line, "Pathspec 'x' did not match");
+        assert!(detail.is_some());
+        let (line, detail) = failure_text(
+            "This repository has no origin remote to push to.",
+            "Push failed",
+        );
+        assert_eq!(line, "This repository has no origin remote to push to.");
+        assert_eq!(detail, None);
+        // Nothing said at all falls back to the action's own words; a long log keeps its end.
+        assert_eq!(
+            failure_text("", "Pull failed"),
+            ("Pull failed".into(), None)
+        );
+        let long = format!("{}\nthe verdict", "x".repeat(5_000));
+        let (_, detail) = failure_text(&long, "Commit failed");
+        let detail = detail.unwrap();
+        assert!(detail.ends_with("the verdict") && detail.chars().count() < 1_600);
+    }
 
     #[test]
     fn a_diffs_lines_are_numbered_from_their_hunks() {

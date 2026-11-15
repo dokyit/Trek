@@ -234,9 +234,152 @@ pub fn branch_state(cwd: &Path, branch: &str) -> BranchState {
     }
 }
 
+/// What a failed `git` (or `gh`) said, as one plain sentence the user can act on, for the failures
+/// people meet most: no remote, a login that was turned down, a push the remote has moved past, a
+/// pull that would need a merge, a hook, conflicts, no identity. `None` for anything else (the
+/// caller then shows git's own `fatal:` line). The full text stays reachable from the toast.
+pub fn explain_failure(stderr: &str) -> Option<&'static str> {
+    let s = stderr.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| s.contains(w));
+    // Hooks first: a hook's own output can say anything, but git names the hook it ran.
+    if has(&[
+        "pre-commit hook",
+        "commit-msg hook",
+        "pre-push hook",
+        "hook declined",
+        "hook failed",
+    ]) || s.contains("husky")
+    {
+        Some("A hook turned it down.")
+    } else if has(&[
+        "gh auth login",
+        "not logged in to any github hosts",
+        "authentication required",
+    ]) {
+        Some("The GitHub CLI isn't signed in. Run gh auth login in a terminal, then try again.")
+    } else if has(&[
+        "could not read username",
+        "could not read password",
+        "authentication failed",
+        "permission denied (publickey)",
+        "terminal prompts disabled",
+        "invalid username or password",
+        "repository not found",
+        "access denied",
+    ]) {
+        Some(
+            "The remote turned your login down. Sign in with a credential helper or an SSH key, then try again.",
+        )
+    } else if has(&[
+        "does not appear to be a git repository",
+        "no configured push destination",
+        "no such remote",
+        "no remote repository specified",
+    ]) {
+        Some("This project has no remote to push to. Add one with git remote add origin <url>.")
+    } else if has(&[
+        "non-fast-forward",
+        "fetch first",
+        "tip of your current branch is behind",
+    ]) {
+        Some("The remote has commits you don't have. Pull first, then push again.")
+    } else if has(&[
+        "not possible to fast-forward",
+        "diverging branches",
+        "need to specify how to reconcile",
+    ]) {
+        Some(
+            "Your branch and its upstream have both moved, so pulling needs a merge. Ask the agent to merge, or do it in a terminal.",
+        )
+    } else if has(&[
+        "no tracking information",
+        "has no upstream branch",
+        "no upstream configured",
+    ]) {
+        Some("This branch isn't tracking a remote branch yet. Push it first.")
+    } else if has(&[
+        "automatic merge failed",
+        "unmerged files",
+        "fix conflicts",
+        "conflict (",
+    ]) {
+        Some("There are merge conflicts. Resolve them first.")
+    } else if has(&[
+        "author identity unknown",
+        "please tell me who you are",
+        "empty ident name",
+    ]) {
+        Some("Git doesn't know who you are. Set user.name and user.email, then commit again.")
+    } else if s.contains("not currently on a branch") {
+        Some("The folder isn't on a branch (detached HEAD). Switch to a branch first.")
+    } else if has(&["index.lock", "another git process"]) {
+        Some("Another git command is running in this folder. Try again in a moment.")
+    } else if has(&["nothing to commit", "no changes added to commit"]) {
+        Some("There's nothing to commit.")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_failures_people_meet_are_said_in_one_plain_sentence() {
+        let cases: [(&str, &str); 9] = [
+            (
+                "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.",
+                "no remote",
+            ),
+            (
+                "fatal: No configured push destination.\nEither specify the URL from the command-line or configure a remote repository using",
+                "no remote",
+            ),
+            (
+                "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+                "login",
+            ),
+            (
+                "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.",
+                "login",
+            ),
+            (
+                "! [rejected]        main -> main (fetch first)\nerror: failed to push some refs",
+                "Pull first",
+            ),
+            (
+                "hint: Diverging branches can't be fast-forwarded, you need to either:\nfatal: Not possible to fast-forward, aborting.",
+                "merge",
+            ),
+            (
+                "fatal: There is no tracking information for the current branch.",
+                "tracking",
+            ),
+            (
+                "To get started with GitHub CLI, please run:  gh auth login",
+                "GitHub CLI",
+            ),
+            (
+                "Author identity unknown\n\n*** Please tell me who you are.",
+                "who you are",
+            ),
+        ];
+        for (said, word) in cases {
+            let plain = explain_failure(said).unwrap_or_else(|| panic!("no sentence for {said}"));
+            assert!(plain.contains(word), "{said:?} -> {plain}");
+            assert!(!plain.contains('\n'));
+        }
+        // A hook's refusal points at its output; plain git failures it doesn't know stay with git's line.
+        assert!(
+            explain_failure("husky - pre-commit hook exited with code 1")
+                .unwrap()
+                .contains("hook")
+        );
+        assert!(
+            explain_failure("error: pathspec 'x' did not match any file(s) known to git").is_none()
+        );
+    }
 
     #[test]
     fn no_git_is_one_clear_message() {
